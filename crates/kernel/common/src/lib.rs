@@ -10,6 +10,24 @@ mod names_tests;
 #[cfg(test)]
 mod net_tests;
 
+/// The three desktop platforms the data root and services are defined for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    MacOs,
+    Linux,
+    Windows,
+}
+
+impl Platform {
+    pub const CURRENT: Self = if cfg!(target_os = "macos") {
+        Self::MacOs
+    } else if cfg!(windows) {
+        Self::Windows
+    } else {
+        Self::Linux
+    };
+}
+
 /// Hashes bytes with SHA-256, the digest the engine keys socket names, profile references
 /// and stored records by. Input: the bytes. Output: the digest as 64 lowercase hex digits.
 pub fn hash(bytes: &[u8]) -> String {
@@ -18,8 +36,39 @@ pub fn hash(bytes: &[u8]) -> String {
     digest
 }
 
+const WINDOWS_DEVICE_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
+/// COM1 to COM9 or LPT1 to LPT9 in any case, alone, before an extension or before one
+/// trailing colon, with or without spaces before the dot. Input: one path component.
+/// Output: whether it is reserved on Windows.
+pub fn windows_device(name: &str) -> bool {
+    let name = name.strip_suffix(':').unwrap_or(name);
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .trim_end_matches(' ');
+    WINDOWS_DEVICE_NAMES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn platform_current_matches_this_build() {
+        #[cfg(target_os = "macos")]
+        let expected = super::Platform::MacOs;
+        #[cfg(target_os = "windows")]
+        let expected = super::Platform::Windows;
+        #[cfg(target_os = "linux")]
+        let expected = super::Platform::Linux;
+        assert_eq!(super::Platform::CURRENT, expected);
+    }
+
     #[test]
     fn hash_is_the_lowercase_hex_sha256() {
         assert_eq!(

@@ -56,7 +56,7 @@ enum Job {
     Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
     Reconnect {
-        engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
+        engine: Option<Box<(crate::paths::Layout, kernel_processes::service::Service)>>,
         start: bool,
     },
     Conversation(Box<ConversationJob>),
@@ -241,7 +241,7 @@ pub(super) struct Connection {
     pending: Option<Pending>,
     client_id: ClientId,
     sequence: u64,
-    engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
+    engine: Option<Box<(crate::paths::Layout, kernel_processes::service::Service)>>,
     watch: watch::Watch,
 }
 
@@ -264,7 +264,7 @@ impl Connection {
     /// only reconnects. Output: the connection.
     pub fn connect_starting(
         client: Client,
-        engine: Option<(crate::paths::Layout, crate::service::Service)>,
+        engine: Option<(crate::paths::Layout, kernel_processes::service::Service)>,
     ) -> Result<Self, String> {
         let mut connection = Self::connect_paired(client)?;
         connection.engine = engine.map(Box::new);
@@ -2433,7 +2433,7 @@ fn report_loss(
 /// the default layout and service and the stop flag. Output: Ok once the engine answers,
 /// else `git_safe_unavailable` (#598 sec N1), `engine_backup_failed` or `engine_start_failed`.
 async fn start_engine(
-    engine: &(crate::paths::Layout, crate::service::Service),
+    engine: &(crate::paths::Layout, kernel_processes::service::Service),
     stopped: &AtomicBool,
 ) -> Result<(), String> {
     let (layout, service) = engine;
@@ -2443,7 +2443,7 @@ async fn start_engine(
         service,
         &service.executable,
         path.as_deref(),
-        crate::service::READY_TIMEOUT,
+        kernel_processes::service::READY_TIMEOUT,
     );
     let stop = async {
         while !stopped.load(Ordering::Relaxed) {
@@ -2466,7 +2466,7 @@ async fn start_engine(
 /// Output: the event to show.
 fn restore_held(
     event: OwnerEvent,
-    engine: Option<&(crate::paths::Layout, crate::service::Service)>,
+    engine: Option<&(crate::paths::Layout, kernel_processes::service::Service)>,
 ) -> OwnerEvent {
     match (event, engine) {
         (

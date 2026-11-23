@@ -1,4 +1,4 @@
-use crate::qualification::Outcome;
+use kernel_sandbox::qualification::Outcome;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;

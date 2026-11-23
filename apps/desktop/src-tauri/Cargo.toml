@@ -31,6 +31,7 @@ tauri-build = { version = "=2.7.3", features = [] }
 
 [dependencies]
 crazyagent = { path = "../../../crates/crazyagent" }
+crazyagent-kernel-common = { path = "../../../crates/kernel/common" }
 crazyagent-kernel-processes = { path = "../../../crates/kernel/processes" }
 crazyagent-kernel-security = { path = "../../../crates/kernel/security" }
 getrandom = "=0.4.3"
@@ -84,6 +85,8 @@ windows-sys = { version = "=0.61.2", features = [
 ] }
 
 [dev-dependencies]
+base64 = "=0.22.1"
+minisign = "=0.10.0"
 tauri = { version = "=2.12.4", features = ["test"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["backup"] }
 tempfile = "=3.27.0"

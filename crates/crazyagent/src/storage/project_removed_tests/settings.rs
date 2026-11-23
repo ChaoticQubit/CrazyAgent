@@ -25,7 +25,7 @@ fn a_removal_tombstones_its_project_s_settings_and_their_replay_brings_none_back
     settings_log::initialize(&s.db).unwrap();
     let engine = || fence::Fence::Engine(s.started.host.clone());
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     for project in [REMOVED, OTHER] {
         let project = ProjectId::new(project).unwrap();
         let instruction = Event::Instruction(ProjectSaved {
@@ -42,7 +42,7 @@ fn a_removal_tombstones_its_project_s_settings_and_their_replay_brings_none_back
     drop(appender);
     tx.commit().unwrap();
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     settings_log::snapshot(&mut appender, 2).unwrap();
     drop(appender);
     tx.commit().unwrap();
@@ -61,8 +61,8 @@ fn a_removal_tombstones_its_project_s_settings_and_their_replay_brings_none_back
         .map(|(_, _, _, _, body)| body)
         .collect();
     assert_eq!(saved.len(), 4);
-    assert_eq!(saved[0].as_slice(), crate::state_log::TOMBSTONE);
-    assert_eq!(saved[1].as_slice(), crate::state_log::TOMBSTONE);
+    assert_eq!(saved[0].as_slice(), kernel_storage::state_log::TOMBSTONE);
+    assert_eq!(saved[1].as_slice(), kernel_storage::state_log::TOMBSTONE);
     assert!(String::from_utf8_lossy(saved[2]).contains("\"other\""));
     assert!(String::from_utf8_lossy(saved[3]).contains("\"other\""));
 

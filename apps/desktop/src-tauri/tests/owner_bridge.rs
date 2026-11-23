@@ -588,8 +588,9 @@ async fn revoked_pending_fixture(
 
 #[tokio::test]
 async fn without_the_socket_variable_the_bridge_finds_the_engine_at_the_default_root() {
-    use crazyagent::paths::{Platform, RootEnvironment, data_root};
+    use crazyagent::paths::{RootEnvironment, data_root};
     use crazyagent_desktop::desktop_socket;
+    use kernel_common::Platform;
 
     let home = tempfile::Builder::new()
         .prefix("ca-dhome-")

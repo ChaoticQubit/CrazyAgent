@@ -12,6 +12,7 @@ members = [
     "crates/kernel/processes",
     "crates/kernel/common",
     "crates/kernel/security",
+    "crates/kernel/sandbox",
     "crates/kernel/plugin_host",
     "crates/sdk/plugin_check",
     "plugins/t2/agent-quit",

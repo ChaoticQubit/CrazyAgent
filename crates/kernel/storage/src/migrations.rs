@@ -66,7 +66,7 @@ pub const DATABASE: &str = "engine.db";
 
 /// The schema rows of engine.db, sorted, used to see whether a failed upgrade left
 /// the database changed. Input: the connection. Output: one line per schema row.
-pub fn schema(db: &Connection) -> Result<Vec<String>, StorageError> {
+pub(crate) fn schema(db: &Connection) -> Result<Vec<String>, StorageError> {
     let mut statement = db
         .prepare(
             "SELECT type || ' ' || name || ' ' || tbl_name || ' ' || coalesce(sql, '') \
@@ -223,13 +223,16 @@ fn count(db: &Connection, table: &str) -> Result<i64, StorageError> {
 }
 
 /// Records that a backup copy passed its check and makes the record durable: the `checked`
-/// file, then the backup folder and the backups folder synced, so a crash after this point
-/// still finds the backup checked; on Windows each folder is flushed through W1's
+/// file, holding the sha256 of the checked engine.db so a restore can tell the copy has not
+/// changed since, then the backup folder and the backups folder synced, so a crash after
+/// this point still finds the backup checked; on Windows each folder is flushed through W1's
 /// `sync_folder`, as a plain open refuses a folder there. Inputs: the backups folder and the
 /// new backup. Output: Ok once synced.
-pub fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
+pub(crate) fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
     assert!(target.starts_with(folder));
-    private_file(&target.join(CHECKED), b"")?;
+    let digest = file_digest(&target.join(DATABASE))?;
+    assert_eq!(digest.len(), DIGEST_HEX_BYTES);
+    private_file(&target.join(CHECKED), digest.as_bytes())?;
     for synced in [target, folder] {
         #[cfg(unix)]
         std::fs::File::open(synced)
@@ -241,12 +244,25 @@ pub fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// How many hex characters a sha256 digest in a `checked` marker holds.
+pub(crate) const DIGEST_HEX_BYTES: usize = 64;
+
+/// The sha256 of a file's bytes, read in a stream so a large engine.db is never held in
+/// memory. Input: the path. Output: the lowercase hex digest, or the read's failure.
+pub(crate) fn file_digest(path: &Path) -> Result<String, StorageError> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).map_err(backup_failed)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(backup_failed)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Creates `<root>/backups` when missing, or makes a folder of this user there private
 /// again when an older build or a copy left it open to others (F36), and checks it. A link,
 /// a file or a folder of another user is refused. Input: the engine root. Output: the
 /// backups folder path.
 #[cfg(unix)]
-pub fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
+pub(crate) fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
     let folder = root.join(BACKUPS);
     match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
         Ok(()) => {}
@@ -283,7 +299,7 @@ pub fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
 /// a copy left it open to others (F36, DESIGN-0256 D5). A link, a file or a folder of another
 /// user is refused as unsafe. Input: the engine root. Output: the backups folder path.
 #[cfg(windows)]
-pub fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
+pub(crate) fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
     let folder = root.join(BACKUPS);
     match private::dir(&folder) {
         Ok(_) => Ok(folder),
@@ -416,7 +432,7 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
 /// crazyagent calls it until Task 7c moves that restore here.
 /// Inputs: the connection, the folder and the settings texts. Output: Ok once every copy is
 /// on disk; a text name that is not one plain file name fails the assert.
-pub fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(), StorageError> {
+pub(crate) fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(), StorageError> {
     let file = target.join(DATABASE);
     private_file(&file, b"")?;
     db.backup(rusqlite::MAIN_DB, &file, None)
@@ -442,7 +458,7 @@ fn plain_name(name: &str) -> bool {
 
 /// Creates a new file readable only by this user and writes it to disk.
 /// Inputs: the path, which must not exist, and the bytes. Output: Ok once synced.
-pub fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
     #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)

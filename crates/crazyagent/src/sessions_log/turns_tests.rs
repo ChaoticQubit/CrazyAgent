@@ -3,10 +3,12 @@ use super::tests::{
 };
 use super::*;
 use crate::master_session::SESSION_DELETED;
+use crate::state_log::Aggregate;
 use crate::state_log::fence::engine;
-use crate::state_log::replay::{Logged, redact_matching};
-use crate::state_log::{Aggregate, Appender, Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE};
+use crate::state_log::redact_matching;
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::replay::Logged;
+use kernel_storage::state_log::{Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE};
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -107,7 +109,7 @@ fn every_marked_turn_table_write_closes_into_events_whose_replay_equals_the_live
     let tx = db.transaction().unwrap();
     session_with_turn(&tx);
     mark_session(&tx, "p1", "s1").unwrap();
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     assert_eq!(close(&mut log).unwrap(), 5);
     drop(log);
     tx.commit().unwrap();
@@ -163,7 +165,7 @@ fn every_marked_turn_table_write_closes_into_events_whose_replay_equals_the_live
     )
     .unwrap();
     put_profile(&tx, "reg-2", "s1", "cred-1");
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     assert_eq!(close(&mut log).unwrap(), 4);
     drop(log);
     tx.commit().unwrap();
@@ -200,7 +202,7 @@ fn a_delete_replays_to_no_turn_or_preparation_and_keeps_the_resolve_and_receipt(
     let mut db = store();
     let tx = db.transaction().unwrap();
     session_with_turn(&tx);
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     assert_eq!(close(&mut log).unwrap(), 4);
     let run = snapshot(&mut log, 9).unwrap();
     drop(log);
@@ -217,11 +219,11 @@ fn a_delete_replays_to_no_turn_or_preparation_and_keeps_the_resolve_and_receipt(
         .unwrap();
     tx.execute("DELETE FROM master_turns WHERE session='s1'", [])
         .unwrap();
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     let deleted = serde_json::to_vec(&json!({"project": "p1", "session": "s1"})).unwrap();
     let seq = log
         .append(&Draft {
-            aggregate: Aggregate::Sessions,
+            aggregate: Aggregate::Sessions.into(),
             kind: SESSION_DELETED,
             schema: 1,
             at_ms: 1,
@@ -283,7 +285,7 @@ fn rows_of_no_stored_session_are_neither_marked_nor_snapshotted() {
     put_profile(&tx, "reg-9", "ghost", "cred-9");
     mark_profiles(&tx).unwrap();
     assert_eq!(left_marks(&tx), 4, "the stored session's four rows only");
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     snapshot(&mut log, 9).unwrap();
     drop(log);
     tx.commit().unwrap();
@@ -355,7 +357,7 @@ fn replay_refuses_a_turns_event_it_does_not_know() {
     let sessions = |kind: &str, body: serde_json::Value| Logged {
         seq: 1,
         revision: 1,
-        aggregate: Aggregate::Sessions,
+        aggregate: Aggregate::Sessions.into(),
         kind: kind.into(),
         schema: 1,
         at_ms: 1,

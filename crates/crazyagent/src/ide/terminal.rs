@@ -1,6 +1,6 @@
 use crate::engine::EngineError;
-use crate::paths::Platform;
 use crate::sandbox::policy::AgentAccess;
+use kernel_common::Platform;
 use serde_json::{Map, Value, json};
 use std::path::Path;
 

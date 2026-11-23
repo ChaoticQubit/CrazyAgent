@@ -244,7 +244,7 @@ impl Mac {
             .unwrap();
         let run = temp.path().canonicalize().unwrap();
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
-        if let Some(entry) = crazyagent::service::changeable_by_others(&run) {
+        if let Some(entry) = kernel_processes::service::changeable_by_others(&run) {
             panic!(
                 "{REFUSED}: other users can change {}, so the engine passes over every stand-in in {}; set TMPDIR to a folder only you can change",
                 entry.display(),
@@ -379,7 +379,7 @@ impl Mac {
     /// mapped into the system root, and the user basics launchd adds. Nothing else is
     /// inherited. Output: the variables.
     fn environment(&self) -> Vec<(OsString, OsString)> {
-        let path = crazyagent::service::service_path(
+        let path = kernel_processes::service::service_path(
             Some(OsStr::new(FINDER_PATH)),
             Some(&self.home),
             None,
@@ -1015,8 +1015,8 @@ fn the_gate_starts_the_engine_with_the_login_service_arguments_and_environment()
     let root = tempfile::tempdir().unwrap();
     let root = root.path().canonicalize().unwrap();
     let layout = crazyagent::paths::Layout::new(root.clone()).unwrap();
-    let service = crazyagent::service::Service::current_user(
-        crazyagent::paths::Platform::MacOs,
+    let service = crazyagent::service::current_user(
+        kernel_common::Platform::MacOs,
         PathBuf::from(ENGINE),
         &layout,
     )

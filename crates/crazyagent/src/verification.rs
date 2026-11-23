@@ -611,7 +611,7 @@ fn prune(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(db_error)?;
     written.extend(ids.into_iter().map(|id| (table, id, true)));
-    assert!(written.len() <= crate::state_log::TRANSACTION_EVENTS_MAX);
+    assert!(written.len() <= kernel_storage::state_log::TRANSACTION_EVENTS_MAX);
     Ok(())
 }
 
