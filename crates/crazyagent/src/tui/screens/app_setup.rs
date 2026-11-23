@@ -375,23 +375,6 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-fn kind_word(kind: PackKind) -> &'static str {
-    match kind {
-        PackKind::Skill => "Skill",
-        PackKind::McpServer => "MCP server",
-    }
-}
-
-fn pack_word(state: &PackState) -> &'static str {
-    match state {
-        PackState::Available => "Not installed",
-        PackState::Installing => "Installing",
-        PackState::On => "Installed",
-        PackState::Off => "Turned off",
-        PackState::Failed { .. } => "Failed",
-    }
-}
-
 /// What a refused tool's row offers to fix it: the fix key and the folder it changes, or
 /// the command to run when the setting asks for the command only. Inputs: the fix and the
 /// setting. Output: the sentence.
@@ -406,32 +389,6 @@ fn fix_offer(fix: &ToolFix, choice: RefusedTool) -> String {
             "To fix it, run in Terminal: {}",
             printable(fix.command.clone())
         ),
-    }
-}
-
-fn tool_word(state: &DependencyState) -> String {
-    match state {
-        DependencyState::Checking => "Checking".into(),
-        DependencyState::Missing { .. } => "Not installed".into(),
-        DependencyState::Refused { .. } => "Found, not used".into(),
-        DependencyState::Found { version } => format!("Found {}", version.as_str()),
-        DependencyState::Bundled { version } => {
-            format!("Bundled with CrazyAgent {}", version.as_str())
-        }
-        DependencyState::System { version, .. } => format!("Found {}", version.as_str()),
-        DependencyState::Installing => "Installing".into(),
-        DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
-        DependencyState::Failed { .. } => "Failed".into(),
-        DependencyState::Unsupported => "Not supported".into(),
-    }
-}
-
-fn method_words(method: GitHubMethod) -> &'static str {
-    match method {
-        GitHubMethod::Device => "with GitHub sign-in",
-        GitHubMethod::Token => "with a pasted token",
-        GitHubMethod::Cli => "through the gh command",
-        GitHubMethod::None => "",
     }
 }
 
@@ -2991,3 +2948,8 @@ impl Screen for AppSetup {
 /// same words as the desktop Settings.
 mod master_limits;
 use master_limits::{frame_size_words, step_limit_words, time_limit_words};
+
+/// The words a setup row shows for a pack's kind and state, a tool's state and the GitHub
+/// sign-in method. Inputs: the kind, state or method. Outputs: the words.
+mod status_words;
+use status_words::{kind_word, method_words, pack_word, tool_word};
