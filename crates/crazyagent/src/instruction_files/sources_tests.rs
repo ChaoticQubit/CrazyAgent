@@ -1,6 +1,5 @@
 use super::{Source, read, read_between, sources};
 use crate::harnesses::registry::Registry;
-use crate::tools::Places;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -166,7 +165,7 @@ fn a_harness_home_instruction_file_is_offered_only_when_its_manifest_names_one_a
 fn a_source_is_read_like_a_picked_file_and_never_written() {
     let (_directory, home, dotfiles) = owner_home();
     let registry = registry();
-    let places = Places::new(Vec::new(), Some(home.clone()));
+    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
     let before = listing(&home);
     let linked_before = listing(&dotfiles);
 
@@ -214,7 +213,7 @@ fn a_source_is_read_like_a_picked_file_and_never_written() {
 fn a_source_that_leads_into_a_place_agents_can_write_is_refused() {
     let (_directory, home, dotfiles) = owner_home();
     let registry = registry();
-    let places = Places::new(Vec::new(), Some(home.clone()));
+    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
     let project = dotfiles.parent().unwrap().join("project");
     fs::create_dir_all(project.join(".crazyagent")).unwrap();
     write(&project.join("rules/RULES.md"), "AGENT-WRITTEN\n");
@@ -268,7 +267,7 @@ fn the_file_read_is_the_file_checked_when_a_link_is_swapped_between_the_two() {
     let registry = registry();
 
     let (_directory, home, dotfiles) = owner_home();
-    let places = Places::new(Vec::new(), Some(home.clone()));
+    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
     let key = secret(&home);
     let project = dotfiles.parent().unwrap().join("project");
     fs::create_dir_all(project.join(".crazyagent")).unwrap();
@@ -292,7 +291,7 @@ fn the_file_read_is_the_file_checked_when_a_link_is_swapped_between_the_two() {
     );
 
     let (_directory, home, dotfiles) = owner_home();
-    let places = Places::new(Vec::new(), Some(home.clone()));
+    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
     let key = secret(&home);
     let rules = dotfiles.join("RULES.md");
     let mut swapped = false;
@@ -311,7 +310,7 @@ fn the_file_read_is_the_file_checked_when_a_link_is_swapped_between_the_two() {
     );
 
     let (_directory, home, _dotfiles) = owner_home();
-    let places = Places::new(Vec::new(), Some(home.clone()));
+    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
     let key = secret(&home);
     let gone = home.join(".gone/AGENTS.md");
 
@@ -353,7 +352,7 @@ fn the_bundled_harnesses_offer_no_home_instruction_file_until_the_owner_says_yes
     write(&home.join(".claude/CLAUDE.md"), "OWNER-GLOBAL\n");
     write(&home.join(".codex/AGENTS.md"), "OWNER-GLOBAL\n");
     assert_eq!(sources(&home, bundled), Vec::new());
-    let places = Places::new(Vec::new(), Some(home.clone()));
+    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
     for harness in ["claude-code", "codex"] {
         assert_eq!(
             read(&home, bundled, &places, harness).unwrap_err().0,

@@ -306,7 +306,7 @@ mod unix {
 mod windows {
     use super::{Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, Tail, waited};
     use crate::harnesses::update::{ARGS_MAX, TOOL_UNSAFE};
-    use crate::tools::INTERPRETER_DEPTH_MAX;
+    use kernel_processes::finding::INTERPRETER_DEPTH_MAX;
     use std::ffi::OsString;
     use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};

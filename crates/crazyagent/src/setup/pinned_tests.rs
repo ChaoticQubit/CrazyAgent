@@ -17,21 +17,24 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
     let home = root.path().join("home");
     let local = home.join(".local/bin");
     std::fs::create_dir_all(&local).unwrap();
-    let places = crate::tools::Places::new(
+    let places = crate::tools::tools_new(
         vec![root.path().join("setup/bin"), local.clone()],
         Some(home),
     );
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
     let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
-    assert_eq!(missing, crate::tools::resolve("tmux", &places).unwrap_err());
-    assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+    assert_eq!(
+        missing,
+        kernel_processes::finding::resolve("tmux", &places).unwrap_err()
+    );
+    assert_eq!(missing.line(), kernel_processes::finding::TMUX_MISSING);
     let script = |name: &str, text: &str| {
         let file = local.join(name);
         std::fs::write(&file, text).unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
     };
     script("tmux", "#!/bin/sh\necho 'tmux 3.7a'\n");
-    let launch = crate::tools::resolve("tmux", &places).unwrap();
+    let launch = kernel_processes::finding::resolve("tmux", &places).unwrap();
     assert_eq!(
         installer.locate(Dependency::Tmux),
         Some((launch.entry, Version::parse("3.7a").unwrap()))
@@ -49,10 +52,13 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
         "#!/usr/bin/env crazyagent-test-missing-python\nprint('graphify 0.9.9')\n",
     );
     let needs = installer.lookup(Dependency::Graphify).unwrap().unwrap_err();
-    assert_eq!(needs.reason, crate::tools::Reason::NeedsInterpreter);
+    assert_eq!(
+        needs.reason,
+        kernel_processes::finding::Reason::NeedsInterpreter
+    );
     assert_eq!(
         needs,
-        crate::tools::resolve("graphify", &places).unwrap_err()
+        kernel_processes::finding::resolve("graphify", &places).unwrap_err()
     );
 }
 
@@ -67,7 +73,7 @@ fn setup_marks_the_tmux_the_app_ships_beside_the_engine_as_bundled() {
     let sidecar = app.join("crazyagent-tmux");
     std::fs::write(&sidecar, "#!/bin/sh\necho 'tmux 3.8'\n").unwrap();
     std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let places = crate::tools::Places::engine(
+    let places = crate::tools::tools_engine(
         None,
         Some(&app),
         Some(root.path().join("home")),
@@ -102,8 +108,10 @@ fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() 
     let tmux = system.join("tmux");
     std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let places = crate::tools::Places::new(vec![system], Some(root.path().join("home")))
-        .with_app_folder(app.clone());
+    let places = kernel_processes::finding::test_support::with_app_folder(
+        crate::tools::tools_new(vec![system], Some(root.path().join("home"))),
+        app.clone(),
+    );
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
     for (number, broken) in ["#!/bin/sh\nexit 1\n", "#!/bin/sh\necho 'tmux 3.1'\n"]
         .into_iter()
@@ -118,7 +126,7 @@ fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() 
             Ok(crate::setup::Located {
                 version: Version::parse("3.7a").unwrap(),
                 bundled: false,
-                note: Some(crate::tools::BundleNote::CannotRun),
+                note: Some(kernel_processes::finding::BundleNote::CannotRun),
             }),
             "{broken}"
         );
@@ -165,7 +173,7 @@ fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
         std::fs::write(&tmux, text).unwrap();
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let places = crate::tools::Places::new(vec![first, later], None);
+    let places = crate::tools::tools_new(vec![first, later], None);
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places);
     let unreadable = InstallError("setup_version_unreadable");
     assert_eq!(installer.lookup(Dependency::Tmux), Err(unreadable));
@@ -175,7 +183,7 @@ fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
         checked: Some(crate::setup::progress::Checked {
             at: std::time::Instant::now(),
             found: vec![(Dependency::Tmux, installer.lookup(Dependency::Tmux))],
-            probe: crate::tools::probe::Mark {
+            probe: kernel_processes::finding::probe::Mark {
                 generation: 1,
                 first_run_pending: false,
             },
@@ -202,7 +210,7 @@ fn a_tmux_only_on_the_login_path_is_the_one_setup_shows_and_the_terminal_starts(
     let tmux = login.join("tmux");
     std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let before = crate::tools::Places::new(Vec::new(), None);
+    let before = crate::tools::tools_new(Vec::new(), None);
     assert_eq!(crate::terminal::tmux::installed_at(&before), None);
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), before.clone());
     assert_eq!(installer.locate(Dependency::Tmux), None);
@@ -318,7 +326,7 @@ fn on_the_engines_places_the_programs_setup_starts_never_get_a_temp_folder_on_th
     let root = private_root();
     let planted = root.path().join("tmp/bin");
     std::fs::create_dir_all(&planted).unwrap();
-    let places = crate::tools::Places::engine(Some(root.path()), None, None, None);
+    let places = crate::tools::tools_engine(Some(root.path()), None, None, None);
     let installer = PinnedInstaller::with_places(
         root.path(),
         vec![planted, PathBuf::from("/usr/bin")],
@@ -677,14 +685,14 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o777)).unwrap();
     let root = scratch.path().join("engine");
-    let places = crate::tools::Places::new(vec![local_bin.clone()], Some(home.clone()));
+    let places = crate::tools::tools_new(vec![local_bin.clone()], Some(home.clone()));
     let installer = PinnedInstaller::with_places(&root, vec![local_bin], places);
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
 
     let Ok(Err(missing)) = installer.lookup(Dependency::Graphify) else {
         panic!("graphify should be found and refused");
     };
-    assert_eq!(missing.reason, crate::tools::Reason::Refused);
+    assert_eq!(missing.reason, kernel_processes::finding::Reason::Refused);
     assert_eq!(installer.lookup_program("graphify"), Err(missing.clone()));
     assert_eq!(installer.program("graphify"), None);
     let target = installer.fix_target(&missing).unwrap();
@@ -693,7 +701,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
 
     assert_eq!(
         installer.fix_permissions(Dependency::Graphify, &elsewhere.display().to_string(), true),
-        Err(crate::tools::permission_fix::TOOL_FIX_CHANGED)
+        Err(kernel_processes::finding::permission_fix::TOOL_FIX_CHANGED)
     );
     assert_eq!(mode(&python), OPEN);
     assert_eq!(mode(&elsewhere), 0o777);
@@ -701,7 +709,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
     let confirmed = target.path.display().to_string();
     assert_eq!(
         installer.fix_permissions(Dependency::Graphify, &confirmed, false),
-        Err(crate::tools::permission_fix::TOOL_FIX_CHANGED),
+        Err(kernel_processes::finding::permission_fix::TOOL_FIX_CHANGED),
         "a confirmed single folder never runs as the whole tree"
     );
     for path in [&python, &prefix.join("bin"), &prefix] {
@@ -715,7 +723,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
         assert_eq!(mode(path), 0o755, "{}", path.display());
     }
     assert_eq!(mode(&elsewhere), 0o777);
-    assert!(crate::tools::resolve("graphify", &installer.places).is_ok());
+    assert!(kernel_processes::finding::resolve("graphify", &installer.places).is_ok());
     assert_eq!(
         installer.lookup_program("graphify").ok(),
         installer.program("graphify")
@@ -723,7 +731,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
     assert!(installer.program("graphify").is_some());
     assert_eq!(
         installer.fix_permissions(Dependency::Graphify, &confirmed, true),
-        Err(crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED)
+        Err(kernel_processes::finding::permission_fix::TOOL_FIX_NOT_NEEDED)
     );
 }
 
@@ -819,10 +827,13 @@ fn a_tmux_older_than_agent_terminals_support_shows_as_too_old() {
     let tmux = system.join("tmux");
     std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.2a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let places = crate::tools::Places::new(vec![system], None);
+    let places = crate::tools::tools_new(vec![system], None);
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places);
     let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
-    assert_eq!(missing.reason, crate::tools::Reason::WrongVersion);
+    assert_eq!(
+        missing.reason,
+        kernel_processes::finding::Reason::WrongVersion
+    );
     assert_eq!(
         missing.line(),
         "tmux 3.2a is too old for CrazyAgent; it needs 3.7 or newer. Update it, then try again."

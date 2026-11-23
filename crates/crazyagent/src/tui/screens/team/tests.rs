@@ -5543,7 +5543,7 @@ fn master_shell(screen: super::Team, width: u16, height: u16) -> Shell {
 }
 
 /// The start of the owner line where the live master's terminal can't open: tmux missing on
-/// Unix, no terminal program on Windows ([`crate::tools::TMUX_MISSING`]).
+/// Unix, no terminal program on Windows ([`kernel_processes::finding::TMUX_MISSING`]).
 #[cfg(unix)]
 const TERMINAL_MISSING_START: &str = "tmux is missing, so the live master's";
 #[cfg(not(unix))]

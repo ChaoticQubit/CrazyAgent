@@ -179,6 +179,60 @@ fn shim_file_text(file: &Path) -> Option<String> {
 #[cfg(any(test, all(windows, feature = "test-support")))]
 pub const CODEX: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n";
 
+#[cfg(windows)]
+use crate::finding::{INTERPRETER_DEPTH_MAX, Kind, Missing, Places, Refusal, Resolved, entry_at};
+
+/// How a batch file the resolver found runs on Windows, where std would start it through
+/// cmd.exe: an npm cmd-shim as the target it names, which is then its program and pin;
+/// npm's own `npx.cmd` as the `node.exe` and `npx-cli.js` beside it, read by where they sit
+/// and never by its text (leader 04:09); any other `.cmd` or `.bat` refused. A shim's
+/// target and npx's files pass every check an entry passes ([`entry_at`]), one level
+/// deeper, so a batch file leading to another stays bounded; `npx-cli.js` looks its `node`
+/// up beside npx.cmd only, so npx runs off the engine's PATH too (#341). Inputs: the entry,
+/// its checked real file, the places, the depth and how a refusal reads. Output: none when
+/// the real file is no batch file, else the tool or why it cannot run.
+#[cfg(windows)]
+pub(crate) fn entry(
+    entry: &Path,
+    program: &Path,
+    places: &Places,
+    depth: usize,
+    refused: impl Fn(&Path, Refusal) -> Missing,
+) -> Option<Result<Resolved, Missing>> {
+    if !crate::batch::batch_file(program) {
+        return None;
+    }
+    let refuse = || Some(Err(refused(program, Refusal::Batch)));
+    let Some(folder) = program.parent().filter(|_| depth < INTERPRETER_DEPTH_MAX) else {
+        return refuse();
+    };
+    if let Some((node, cli)) = crate::batch::npx_layout(program, folder) {
+        let node = match entry_at(&node, places, depth + 1) {
+            Ok(node) if node.kind == Kind::Native => node,
+            Ok(_) => return refuse(),
+            Err(missing) => return Some(Err(missing)),
+        };
+        let beside = places.only_in(folder);
+        return Some(entry_at(&cli, &beside, depth + 1).map(|script| Resolved {
+            entry: entry.to_path_buf(),
+            program: script.program,
+            kind: Kind::Script {
+                interpreter: Box::new(node),
+                arguments: Vec::new(),
+                by_name: false,
+            },
+        }));
+    }
+    let Some(target) = crate::batch::shim_target(program) else {
+        return refuse();
+    };
+    Some(entry_at(&target, places, depth + 1).map(|target| Resolved {
+        entry: entry.to_path_buf(),
+        program: target.program,
+        kind: target.kind,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
