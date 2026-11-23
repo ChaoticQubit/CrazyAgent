@@ -200,7 +200,7 @@ impl Store for OneToken {
             .map(|(_, value)| value.clone());
         value.map_or_else(
             || Err(StoreError::code("credential_missing")),
-            |value| SecretString::new(value.into_bytes()),
+            |value| SecretString::stored(value.into_bytes()),
         )
     }
 
