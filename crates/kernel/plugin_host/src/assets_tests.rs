@@ -40,18 +40,21 @@ fn store() -> Connection {
     db
 }
 
+#[cfg(unix)]
 /// Compares file identities exactly, standing in for the engine's renumber rule.
 /// Inputs: pinned and live pairs. Output: whether they are equal.
 fn same(pinned: &[(u64, u64)], live: &[(u64, u64)]) -> bool {
     pinned == live
 }
 
+#[cfg(unix)]
 const ADMIT: AdmitFacts = AdmitFacts {
     project_exists: true,
     asset_bytes_max: 1024,
     asset_sources_max: 8,
 };
 
+#[cfg(unix)]
 /// Snapshot facts for one project and config, with room for every fixture. Inputs: the
 /// project and config ids. Output: the facts.
 fn taken<'a>(project_id: &'a str, config_id: &'a str) -> SnapshotFacts<'a> {
@@ -158,7 +161,13 @@ fn admit_pins_the_file_identity_and_refuses_a_native_plugin() {
     assert_eq!((pinned.device, pinned.inode), (live.dev(), live.ino()));
     assert_eq!(pinned.source, rules);
 
-    let native = source("n", "native", Scope::Global, Kind::NativePlugin, path.clone());
+    let native = source(
+        "n",
+        "native",
+        Scope::Global,
+        Kind::NativePlugin,
+        path.clone(),
+    );
     assert_eq!(
         admit(&tx, &ADMIT, &native),
         Err(Failure::Refused("native_plugin_unavailable".into()))
@@ -167,7 +176,13 @@ fn admit_pins_the_file_identity_and_refuses_a_native_plugin() {
         project_exists: false,
         ..ADMIT
     };
-    let project = source("q", "q", Scope::Project("p".into()), Kind::Rules, path.clone());
+    let project = source(
+        "q",
+        "q",
+        Scope::Project("p".into()),
+        Kind::Rules,
+        path.clone(),
+    );
     assert_eq!(
         admit(&tx, &missing, &project),
         Err(Failure::Refused("project_missing".into()))
@@ -196,27 +211,63 @@ fn a_snapshot_hash_covers_project_config_and_assets() {
     let tx = db.transaction().unwrap();
     for admitted in [
         source("g-rules", "rules", Scope::Global, Kind::Rules, global),
-        source("p-rules", "rules", Scope::Project("p".into()), Kind::Rules, project.clone()),
+        source(
+            "p-rules",
+            "rules",
+            Scope::Project("p".into()),
+            Kind::Rules,
+            project.clone(),
+        ),
         source("g-skill", "skill", Scope::Global, Kind::Skill, skill),
-        source("q-rules", "rules", Scope::Project("q".into()), Kind::Rules, project.clone()),
+        source(
+            "q-rules",
+            "rules",
+            Scope::Project("q".into()),
+            Kind::Rules,
+            project.clone(),
+        ),
     ] {
         assert_eq!(admit(&tx, &ADMIT, &admitted), Ok(()));
     }
     assert_eq!(snapshot(&tx, &taken("p", "c"), "s1"), Ok(()));
-    let first = read(&tx, &ReadFacts { project_id: "p", task_config_id: "c" }, "s1").unwrap();
+    let first = read(
+        &tx,
+        &ReadFacts {
+            project_id: "p",
+            task_config_id: "c",
+        },
+        "s1",
+    )
+    .unwrap();
     let ids: Vec<&str> = first.assets.iter().map(|a| a.source.id.as_str()).collect();
     assert_eq!(ids, ["p-rules", "g-skill"]);
     assert_eq!(first.content_hash, snapshot_hash("p", "c", &first.assets));
     assert_eq!(first.assets[0].bytes, b"project text");
 
     assert_eq!(snapshot(&tx, &taken("p", "c2"), "s2"), Ok(()));
-    let other = read(&tx, &ReadFacts { project_id: "p", task_config_id: "c2" }, "s2").unwrap();
+    let other = read(
+        &tx,
+        &ReadFacts {
+            project_id: "p",
+            task_config_id: "c2",
+        },
+        "s2",
+    )
+    .unwrap();
     assert_eq!(other.assets, first.assets);
     assert_ne!(other.content_hash, first.content_hash);
 
     std::fs::write(&project, "new text").unwrap();
     assert_eq!(snapshot(&tx, &taken("p", "c"), "s3"), Ok(()));
-    let changed = read(&tx, &ReadFacts { project_id: "p", task_config_id: "c" }, "s3").unwrap();
+    let changed = read(
+        &tx,
+        &ReadFacts {
+            project_id: "p",
+            task_config_id: "c",
+        },
+        "s3",
+    )
+    .unwrap();
     assert_ne!(changed.content_hash, first.content_hash);
     assert_eq!(changed.assets[0].content_hash, hash(b"new text"));
 }
