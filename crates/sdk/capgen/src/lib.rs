@@ -43,6 +43,15 @@ pub fn ts(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> 
     ts::files(files)
 }
 
+/// Writes the WIT SDK, one `sdk.wit` of package `crazyagent:sdk`, after every check the Rust
+/// SDK runs. A handle is `type h = u64`, not a `resource`, which in a record would move the
+/// handle away on every call; the kernel checks every handle against its caller, so a
+/// forged id gets nothing. Input: stems with parsed files, any order. Output: the one
+/// file, or the first refusal (`capgen_wit_name`, `capgen_wit_cycle`, ...).
+pub fn wit(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
+    wit::files(files)
+}
+
 /// Writes one `.cap` file as a single test module with its own `Host` trait, laid out by
 /// rustfmt, for the SDK's tests to compile every emitter. Inputs: the stem and the parsed
 /// file. Output: the module text, or the first refusal.
@@ -191,3 +200,6 @@ mod tests;
 mod ts;
 #[cfg(test)]
 mod ts_tests;
+mod wit;
+#[cfg(test)]
+mod wit_tests;
