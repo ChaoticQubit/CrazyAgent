@@ -220,9 +220,8 @@ impl Host for ConptyHost {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_too_long"));
         }
-        let mut panes = lock(&self.panes);
-        let pane = live(&mut panes, agent)?;
-        let mut writer = lock(&pane.writer);
+        let writer = Arc::clone(&live(&mut lock(&self.panes), agent)?.writer);
+        let mut writer = lock(&writer);
         writer
             .write_all(bytes)
             .and_then(|()| writer.flush())
