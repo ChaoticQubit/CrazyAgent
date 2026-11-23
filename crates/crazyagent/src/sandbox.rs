@@ -894,6 +894,7 @@ pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
     reply_suffix: crate::team::tool::REPLY_SUFFIX,
     answer_part_suffix: crate::team::tool::ANSWER_PART_SUFFIX,
     key_folders: &crate::storage::accounts::KEY_FOLDERS,
+    engine_secret_folders: ENGINE_SECRET_FOLDERS,
 };
 
 /// Tells whether a folder holds no sign-in's record, as a listed master session's slot home
@@ -4029,7 +4030,7 @@ fn engine_secrets_in(hooks: &ProfileHooks, runtime: &Path) -> Result<Vec<PathBuf
     let mut secrets: Vec<PathBuf> = ENGINE_SECRET_FILES
         .iter()
         .chain(hooks.key_folders)
-        .chain(ENGINE_SECRET_FOLDERS)
+        .chain(hooks.engine_secret_folders)
         .map(|name| runtime.join(name))
         .collect();
     for entry in bounded_entries(runtime)? {
