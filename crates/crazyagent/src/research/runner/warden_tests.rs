@@ -1,5 +1,5 @@
 use super::*;
-use crate::sandbox::warden::fixture::{detached_survivors, processes_naming};
+use kernel_sandbox::profile::warden::fixture::{detached_survivors, processes_naming};
 use std::os::unix::fs::PermissionsExt;
 
 const READ_ONLY_ENGINE_BASE: &str = "CRAZYAGENT_TEST_READ_ONLY_ENGINE_BASE";
@@ -203,7 +203,7 @@ fn a_read_only_run_whose_warden_was_killed_fails_with_its_cleanup_uncertain_and_
     let ending = std::thread::scope(|scope| {
         let run = scope.spawn(|| read_only_run(base.path(), &|| stopping.load(Ordering::Relaxed)));
         running_naming(&marker, 2);
-        let killed = crate::sandbox::warden::fixture::kill_wardens_of(&needle);
+        let killed = kernel_sandbox::profile::warden::fixture::kill_wardens_of(&needle);
         assert_eq!(killed.len(), 1, "one warden per run");
         stopping.store(true, Ordering::Relaxed);
         run.join().unwrap()

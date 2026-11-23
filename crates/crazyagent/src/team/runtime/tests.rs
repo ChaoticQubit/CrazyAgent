@@ -469,7 +469,7 @@ fn an_agent_whose_stop_outlives_the_join_wait_is_not_recorded_plainly_stopped() 
         (
             AgentStatus::Stopped,
             Some(with_code(
-                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
                 Some(crate::harnesses::leftovers::UNCERTAIN)
             ))
         )
@@ -25151,7 +25151,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let uncertain = with_code(
-        crate::sandbox::warden::CLEANUP_UNCERTAIN,
+        kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
         Some(crate::harnesses::leftovers::UNCERTAIN),
     );
     for (first, expected) in [

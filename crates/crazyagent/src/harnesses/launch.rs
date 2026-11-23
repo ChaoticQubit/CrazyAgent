@@ -2087,7 +2087,7 @@ impl Driver {
 /// engine's lifeline, so its group ends with the engine (b6 r2 F1), released once stopped.
 pub struct Session {
     child: Child,
-    warden: Option<crate::sandbox::warden::Warden>,
+    warden: Option<kernel_sandbox::profile::warden::Warden>,
     uncertain: bool,
     follower: Option<Follower>,
     stdin: Option<File>,
@@ -2243,7 +2243,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
-                (child, warden) = crate::sandbox::warden::spawn(&mut command)
+                (child, warden) = kernel_sandbox::profile::warden::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 stdin = child.stdin.take().map(stdin_file);
                 let stdout = child
@@ -2528,7 +2528,7 @@ impl Session {
             lifeline.release();
         }
         self.uncertain =
-            crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
+            kernel_sandbox::profile::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());
         assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))

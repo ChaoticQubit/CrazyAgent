@@ -130,14 +130,15 @@ pub fn check_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let (mut child, warden) = crate::sandbox::warden::spawn(&mut process).map_err(start_refused)?;
+    let (mut child, warden) =
+        kernel_sandbox::profile::warden::spawn(&mut process).map_err(start_refused)?;
     let pid = child.id();
     let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
         (Some(stdin), Some(stdout)) => (stdin, stdout),
         _ => {
             stop(pid);
             let _ = child.wait();
-            crate::sandbox::warden::fire_reported(warden, "server_check")
+            kernel_sandbox::profile::warden::fire_reported(warden, "server_check")
                 .map_err(|_| "server_cleanup_uncertain")?;
             return Err("server_cant_start");
         }
@@ -163,7 +164,7 @@ pub fn check_command(
             Err(code)
         }
     };
-    crate::sandbox::warden::fire_reported(warden, "server_check")
+    kernel_sandbox::profile::warden::fire_reported(warden, "server_check")
         .map_err(|_| "server_cleanup_uncertain")?;
     settled?;
     result
@@ -523,7 +524,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_checked_server_in_the_agent_boundary_leaves_nothing_it_detached() {
-        use crate::sandbox::warden::fixture::{DetachingRun, survivors};
+        use kernel_sandbox::profile::warden::fixture::{DetachingRun, survivors};
         let run = DetachingRun::new(&crate::sandbox::PROFILE_HOOKS);
         let (processes, checked) = std::thread::scope(|scope| {
             let check = scope.spawn(|| {

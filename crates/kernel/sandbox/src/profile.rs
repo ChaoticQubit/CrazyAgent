@@ -12,6 +12,15 @@ pub mod env;
 /// the regex strings a profile holds.
 pub mod seatbelt;
 
+/// The test agents rows start under the real project profile: a private project, home,
+/// peer home and engine runtime, and a shell run inside the sandbox.
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub mod test_agent;
+
+/// The warden that stops a confined agent's whole run when its harness ends, and reports
+/// whether it confirmed the sandbox empty.
+pub mod warden;
+
 /// The read, exec, tool, scratch, secret, shared folder and team grants a sandbox takes
 /// after [`ProjectSandbox::new`], its read-only accessors and its Linux network checks.
 /// Each grant checks its input and returns `Invalid` for one the profile cannot hold.

@@ -20,7 +20,6 @@ use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
 use crate::sandbox::InstalledSandbox;
-use crate::sandbox::warden::Warden;
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
@@ -28,6 +27,7 @@ use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
+use kernel_sandbox::profile::warden::Warden;
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
@@ -2420,7 +2420,10 @@ fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
                 .unwrap_or_else(|| "Could not give the agent this project's context".to_owned()),
             attempts_max,
         ),
-        RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
+        RunError::Uncertain(_) => (
+            kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN.to_owned(),
+            1,
+        ),
         RunError::Sandbox(refusal) if kernel_sandbox::lines::model_loopback_windows(refusal) => (
             crate::config::plain_problem(kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
                 .unwrap_or(kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE)
@@ -3834,11 +3837,11 @@ pub(crate) struct AgentProcess {
 
 impl AgentProcess {
     /// Starts an agent command that leads its own process group, with the warden
-    /// [`crate::sandbox::warden::spawn`] gives a sandboxed one, and starts its
+    /// [`kernel_sandbox::profile::warden::spawn`] gives a sandboxed one, and starts its
     /// lifeline. Takes the command. Returns the guard, or the error that kept the
     /// agent or its lifeline from starting, after stopping what had started.
     pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
-        let (child, warden) = crate::sandbox::warden::spawn(command)?;
+        let (child, warden) = kernel_sandbox::profile::warden::spawn(command)?;
         Self::new(child, warden)
     }
 
@@ -3857,7 +3860,7 @@ impl AgentProcess {
                 kill_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
-                let _ = crate::sandbox::warden::fire_reported(warden, "agent");
+                let _ = kernel_sandbox::profile::warden::fire_reported(warden, "agent");
                 return Err(error);
             }
         };
@@ -3882,7 +3885,8 @@ impl AgentProcess {
             kill_group(self.group);
             let _ = self.child.wait();
             await_group_exit(self.group);
-            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.cleanup =
+                kernel_sandbox::profile::warden::fire_reported(self.warden.take(), "agent");
             self.lifeline.release();
             self.stopped = true;
         }
@@ -3897,7 +3901,8 @@ impl AgentProcess {
         if !self.stopped {
             let _ = self.child.kill();
             let _ = self.child.wait();
-            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.cleanup =
+                kernel_sandbox::profile::warden::fire_reported(self.warden.take(), "agent");
             self.stopped = true;
         }
         assert!(self.warden.is_none());

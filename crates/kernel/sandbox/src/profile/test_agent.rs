@@ -1,5 +1,5 @@
-use kernel_sandbox::net::SandboxNetwork;
-use kernel_sandbox::profile::{ProfileHooks, ProjectSandbox};
+use crate::net::SandboxNetwork;
+use crate::profile::{ProfileHooks, ProjectSandbox};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,11 +9,11 @@ use std::process::Stdio;
 /// attacks what the unsandboxed engine reads. One private /tmp root holds the project (read
 /// only to the agent), the agent's writable home and tmp, a peer agent's home, and an engine
 /// runtime whose `github.json` the profile denies.
-pub(crate) struct TestAgent {
+pub struct TestAgent {
     _temp: tempfile::TempDir,
-    pub(crate) project: PathBuf,
-    pub(crate) home: PathBuf,
-    pub(crate) peer: PathBuf,
+    pub project: PathBuf,
+    pub home: PathBuf,
+    pub peer: PathBuf,
     sandbox: ProjectSandbox,
     profile: PathBuf,
 }
@@ -21,20 +21,20 @@ pub(crate) struct TestAgent {
 impl TestAgent {
     /// Makes the folders 0700, the engine secret file and the profile installed under the
     /// given profile hooks. Input: the hooks. Output: the confined agent.
-    pub(crate) fn new(hooks: &'static ProfileHooks) -> Self {
+    pub fn new(hooks: &'static ProfileHooks) -> Self {
         Self::confined(hooks, None, SandboxNetwork::Only(Vec::new()))
     }
 
     /// Like `new`, with the network open, as a tools-on agent with network has it: the
     /// agent may bind and listen on any port its profile does not keep from it. Output: the
     /// confined agent.
-    pub(crate) fn open(hooks: &'static ProfileHooks) -> Self {
+    pub fn open(hooks: &'static ProfileHooks) -> Self {
         Self::confined(hooks, None, SandboxNetwork::Open)
     }
 
     /// Like `new`, with an existing folder as the agent's writable home, as the team runtime
     /// gives each agent a home of its own. Input: the 0700 home. Output: the confined agent.
-    pub(crate) fn with_home(hooks: &'static ProfileHooks, home: &Path) -> Self {
+    pub fn with_home(hooks: &'static ProfileHooks, home: &Path) -> Self {
         Self::confined(
             hooks,
             Some(home.canonicalize().unwrap()),
@@ -82,7 +82,7 @@ impl TestAgent {
 
     /// Runs `script` with `/bin/sh -c` in the sandbox, the way a tools-on agent's shell tool
     /// does. Input: the script. Output: the finished process with its captured output.
-    pub(crate) fn run(&self, script: &str) -> std::process::Output {
+    pub fn run(&self, script: &str) -> std::process::Output {
         let mut command = self.sandbox.command(&self.profile, Path::new("/bin/sh"));
         command
             .args(["-c", script])
@@ -93,7 +93,7 @@ impl TestAgent {
     }
 
     /// Runs `script` in the sandbox and fails the test unless it succeeds.
-    pub(crate) fn shell(&self, script: &str) {
+    pub fn shell(&self, script: &str) {
         let output = self.run(script);
         assert!(
             output.status.success(),

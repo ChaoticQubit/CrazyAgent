@@ -96,8 +96,10 @@ fn keychain_folder_links_are_refused_untouched_and_a_sandboxed_agent_cannot_plan
     let home = root.path().canonicalize().unwrap().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-    let agent =
-        crate::sandbox::test_agent::TestAgent::with_home(&crate::sandbox::PROFILE_HOOKS, &home);
+    let agent = kernel_sandbox::profile::test_agent::TestAgent::with_home(
+        &crate::sandbox::PROFILE_HOOKS,
+        &home,
+    );
     let preferences = agent.peer.join("Preferences");
     let keychains = agent.peer.join("Keychains");
     std::fs::create_dir(&preferences).unwrap();
@@ -370,8 +372,10 @@ fn a_write_naming_no_keychain_lands_in_the_prepared_keychain_the_sandbox_sees_as
     assert!(child.wait().unwrap().success());
     assert_eq!(keychain.find("crazyagent-unnamed-test"), "unnamed");
 
-    let agent =
-        crate::sandbox::test_agent::TestAgent::with_home(&crate::sandbox::PROFILE_HOOKS, &home);
+    let agent = kernel_sandbox::profile::test_agent::TestAgent::with_home(
+        &crate::sandbox::PROFILE_HOOKS,
+        &home,
+    );
     let seen = agent.run("/usr/bin/security default-keychain -d user");
     assert!(seen.status.success());
     assert!(
@@ -391,8 +395,10 @@ fn a_sandboxed_agent_cannot_move_link_or_rewrite_its_keychain_or_search_list() {
     ];
     let plist = home.join("Library/Preferences/com.apple.security.plist");
     let settings = std::fs::read(&plist).ok();
-    let agent =
-        crate::sandbox::test_agent::TestAgent::with_home(&crate::sandbox::PROFILE_HOOKS, &home);
+    let agent = kernel_sandbox::profile::test_agent::TestAgent::with_home(
+        &crate::sandbox::PROFILE_HOOKS,
+        &home,
+    );
     for script in [
         "mv \"$HOME/Library\" \"$HOME/moved\"",
         "mv \"$HOME/Library/Keychains\" \"$HOME/moved\"",

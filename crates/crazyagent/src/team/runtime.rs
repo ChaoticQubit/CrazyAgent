@@ -3151,7 +3151,7 @@ impl TeamRuntime {
             worker.stop_for("engine_stop:shutdown");
         }
         let uncertain = with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
             Some(crate::harnesses::leftovers::UNCERTAIN),
         );
         let mut unconfirmed = BTreeSet::new();
@@ -12111,7 +12111,7 @@ fn settle_stop(
                 std::mem::forget(profile);
             }
             Some(with_code(
-                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
                 Some(crate::harnesses::leftovers::UNCERTAIN),
             ))
         }
@@ -13721,11 +13721,14 @@ fn start_problem(problem: &LaunchError) -> String {
 /// it is (SA vid 10). Inputs: whether the end was confirmed and the reason. Output: the
 /// reason to note.
 fn uncertain_unless(confirmed: bool, reason: String) -> String {
-    let named = reason.ends_with(crate::sandbox::warden::CLEANUP_UNCERTAIN);
+    let named = reason.ends_with(kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN);
     if confirmed || named {
         reason
     } else {
-        format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN)
+        format!(
+            "{reason}. {}",
+            kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN
+        )
     }
 }
 

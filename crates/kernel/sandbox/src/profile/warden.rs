@@ -239,7 +239,7 @@ pub fn fire_reported(warden: Option<Warden>, owner: &str) -> Result<(), &'static
     fired
 }
 
-#[cfg(all(test, target_os = "macos"))]
-pub(crate) mod fixture;
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub mod fixture;
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
