@@ -1,6 +1,5 @@
 use super::*;
 use kernel_processes::update::test_support::{code, response, said, serve};
-use kernel_processes::update::{Channel, read_channel};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -69,7 +68,7 @@ fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
             b"Not Found",
         )
     };
-    let (url, server) = serve(vec![missing(), missing()], Duration::ZERO);
+    let (url, server) = serve(vec![missing(), missing()]);
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -102,14 +101,11 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         "update_manifest_invalid",
         "The release information from the update server can't be read. Try again later.".to_owned(),
     );
-    let (url, server) = serve(
-        vec![
-            answered("500 Internal Server Error", b"curl: (22) oops"),
-            answered("200 OK", b"<html>no</html>"),
-            answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
-        ],
-        Duration::ZERO,
-    );
+    let (url, server) = serve(vec![
+        answered("500 Internal Server Error", b"curl: (22) oops"),
+        answered("200 OK", b"<html>no</html>"),
+        answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
+    ]);
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -255,7 +251,10 @@ fn no_install_path_skips_verification() {
     }
     assert_eq!(desktop.len(), 1, "{desktop:?}");
     let (path, body) = &desktop[0];
-    assert!(path.ends_with("apps/desktop/src-tauri/src/updates.rs"), "{path:?}");
+    assert!(
+        path.ends_with("apps/desktop/src-tauri/src/updates.rs"),
+        "{path:?}"
+    );
     let downloaded = body.find("update.download(").expect(body);
     assert!(Some(downloaded) < body.find(&installs[0]), "{body}");
     let glue = root.join("crates/crazyagent/src/update.rs");

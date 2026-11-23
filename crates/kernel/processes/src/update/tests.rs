@@ -1,4 +1,4 @@
-use super::test_support::{code, response, said, serve};
+use super::test_support::{code, read_request, response, said, serve};
 use super::*;
 
 struct Signer {
@@ -317,30 +317,27 @@ fn the_compiled_in_key_comes_from_the_desktop_updater_config() {
 fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() {
     let body: Vec<u8> = (0..3000_u32).map(|value| (value % 256) as u8).collect();
     let oversize = vec![b'x'; 10_000];
-    let (url, server) = serve(
-        vec![
-            response(
-                &format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                ),
-                &body,
+    let (url, server) = serve(vec![
+        response(
+            &format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
             ),
-            response(
-                &format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    oversize.len()
-                ),
-                &oversize,
+            &body,
+        ),
+        response(
+            &format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                oversize.len()
             ),
-            response("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", &oversize),
-            response(
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                b"",
-            ),
-        ],
-        Duration::ZERO,
-    );
+            &oversize,
+        ),
+        response("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", &oversize),
+        response(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"",
+        ),
+    ]);
     let timeout = Duration::from_secs(30);
     let mut received = Vec::new();
     assert_eq!(download(&url, &mut received, 4096, timeout).unwrap(), 3000);
@@ -371,13 +368,17 @@ fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() {
 
 #[test]
 fn a_slow_server_is_cut_off_at_the_timeout() {
-    let (url, server) = serve(
-        vec![response(
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/release", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+        read_request(&mut stream);
+        std::thread::sleep(Duration::from_secs(4));
+        let _ = stream.write_all(&response(
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n",
             b"ok",
-        )],
-        Duration::from_secs(4),
-    );
+        ));
+    });
     let started = Instant::now();
     let mut received = Vec::new();
     let error = download(&url, &mut received, 4096, Duration::from_secs(1)).unwrap_err();
@@ -557,7 +558,14 @@ fn cli_update_refuses_a_bad_signature_archive() {
     let other = signer();
     let trusted = "timestamp:1761400000\tfile:crazyagent.tar.gz\tversion:0.2.0";
     let sha = sha256_hex(&bytes);
-    verify_file(&archive, &sha, &release.sign(&bytes, trusted), &release.key, "0.2.0").unwrap();
+    verify_file(
+        &archive,
+        &sha,
+        &release.sign(&bytes, trusted),
+        &release.key,
+        "0.2.0",
+    )
+    .unwrap();
     assert_eq!(
         code(verify_file(
             &archive,
