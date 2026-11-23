@@ -908,6 +908,46 @@ fn remove_deletes_a_link_entry_and_leaves_its_target() {
     }
 }
 
+/// A database write that fails during a remove leaves the plugin as it was: its folder,
+/// its trust, its binding and the key the owner entered for it, so it still loads.
+#[test]
+fn a_failed_remove_write_keeps_the_plugin_and_its_key() {
+    let case = case();
+    trusted(&case, ACME);
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-kept-on-fail-01".to_vec(),
+    )
+    .unwrap();
+    let keys = plugin_keys(&case);
+    assert_eq!(keys.len(), 1);
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_remove BEFORE DELETE ON app_plugin_trust
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+
+    case.db.execute_batch("DROP TRIGGER refuse_remove").unwrap();
+    assert!(case.db.is_autocommit());
+    assert_eq!(plugin_keys(&case), keys);
+    assert_eq!(std::fs::read(&keys[0]).unwrap(), b"sk-kept-on-fail-01");
+    assert!(
+        case.root
+            .join(FOLDER)
+            .join("acme")
+            .join(MANIFEST_FILE)
+            .is_file()
+    );
+    let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
+    assert_eq!(loaded.bindings.len(), 1);
+}
+
 #[test]
 fn bundled_plugins_turn_on_and_off_and_unknown_names_are_refused() {
     let case = case();
