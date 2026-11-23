@@ -428,10 +428,11 @@ impl Places {
 
     /// Whether a path lies under an install root, in either of its macOS names
     /// ([`FindingHooks::data_twin`]), or in the app's folder: [`INSTALL_ROOTS`] on Unix and
-    /// [`windows_install_roots`] on Windows. Input: the path. Output: the answer.
+    /// [`windows_install_roots`] on Windows. Below a Homebrew prefix only the folders Homebrew
+    /// fills count ([`homebrew_filled`]). Input: the path. Output: the answer.
     pub(super) fn installed(&self, path: &Path) -> bool {
         let roots: Vec<PathBuf> = if cfg!(windows) {
-            windows_install_roots()
+            windows_install_roots(&self.seed.hooks)
         } else {
             INSTALL_ROOTS.iter().map(PathBuf::from).collect()
         };
@@ -439,7 +440,7 @@ impl Places {
             path.starts_with(root)
                 || (self.seed.hooks.data_twin)(root).is_some_and(|twin| path.starts_with(twin))
         };
-        roots.iter().any(|root| under(root))
+        (roots.iter().any(|root| under(root)) && homebrew_filled(&self.seed.hooks, path))
             || self
                 .app_folder
                 .as_deref()
