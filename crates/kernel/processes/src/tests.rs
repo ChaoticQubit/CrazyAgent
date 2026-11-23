@@ -193,10 +193,7 @@ fn test_support_is_enabled_only_by_crazyagent_dev_dependencies() {
             enabling.push(format!("{place} {table}"));
         }
     }
-    assert_eq!(
-        enabling,
-        ["crates/crazyagent/Cargo.toml dev-dependencies"]
-    );
+    assert_eq!(enabling, ["crates/crazyagent/Cargo.toml dev-dependencies"]);
 }
 
 /// The stub hooks are named only in the kernel's own sources, so no crate outside it can
