@@ -1269,8 +1269,9 @@ fn definition_bytes(text: &str, platform: Platform) -> Vec<u8> {
 }
 
 /// Writes a definition file through a staged copy and a rename, in the bytes its manager
-/// reads ([`definition_bytes`]). Inputs: the file, the definition text and the platform.
-/// Output: Ok, or an error naming the file.
+/// reads ([`definition_bytes`]). The copy gets a name of its own per call, is created new
+/// and never through a link, and is removed when the write fails. Inputs: the file, the
+/// definition text and the platform. Output: Ok, or an error naming the file.
 pub fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
     let fail = |error: std::io::Error| failure(format!("{}: {error}", path.display()));
     let parent = path
@@ -1278,22 +1279,34 @@ pub fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(
         .ok_or_else(|| failure("the service definition has no folder"))?;
     std::fs::create_dir_all(parent).map_err(fail)?;
     let bytes = definition_bytes(text, platform);
+    let unique = std::hash::BuildHasher::hash_one(
+        &std::collections::hash_map::RandomState::new(),
+        std::time::SystemTime::now(),
+    );
     let staged = parent.join(format!(
-        ".{}.staged",
+        ".{}.{}.{unique:016x}.staged",
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        std::process::id()
     ));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let nofollow = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
+            .expect("O_NOFOLLOW fits an open flag");
+        options.mode(0o644).custom_flags(nofollow);
+    }
     let mut file = options.open(&staged).map_err(fail)?;
-    std::io::Write::write_all(&mut file, &bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(fail)?;
+    let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| file.sync_all());
     drop(file);
-    std::fs::rename(&staged, path).map_err(fail)
+    let landed = written.and_then(|()| std::fs::rename(&staged, path));
+    if landed.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    landed.map_err(fail)
 }
 
 /// Runs a service manager query. A manager that is not on this computer, such as `systemctl`
