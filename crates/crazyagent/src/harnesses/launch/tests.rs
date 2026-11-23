@@ -1,6 +1,12 @@
 use super::{AccountBinding, Driver, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest};
+#[cfg(unix)]
+use crate::sandbox::InstalledSandbox;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::Arc;
 
 fn line(value: Value) -> Vec<u8> {
     serde_json::to_vec(&value).unwrap()
@@ -1456,3 +1462,37 @@ mod rate_limits;
 /// managed home, its sandbox predates routing, or the format or key does not fit. Inputs:
 /// the launch fixtures. Output: none; each row asserts.
 mod chatgpt_relay;
+
+/// Builds the Full access boundary a unit row starts in (DEC-102): the project sandbox over
+/// `project`, installed with its home, temp folder and profile in `scratch`, then marked
+/// unconfined, as the integration rows' `full_access` does. Inputs: two canonical, existing
+/// folders. Output: the boundary.
+#[cfg(all(test, unix))]
+pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
+    use crate::sandbox::ProjectSandbox;
+    use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+    let home = scratch.join("full-access-home");
+    let tmp = scratch.join("full-access-tmp");
+    for folder in [&home, &tmp] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        project,
+        &home,
+        &tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap();
+    let installed = InstalledSandbox::install(
+        sandbox,
+        &scratch.join("full-access.sb"),
+        LinuxSupervisor::On,
+        LinuxStrict::Off,
+    )
+    .unwrap();
+    let boundary = LaunchBoundary::Installed(Arc::new(installed.unconfined()));
+    assert!(boundary.is_unconfined());
+    boundary
+}

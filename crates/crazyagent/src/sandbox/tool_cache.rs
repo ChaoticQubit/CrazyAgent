@@ -54,14 +54,16 @@ pub fn grant(
 }
 
 /// Builds the priming process: uv's `tool list`, which makes the cache and its markers and
-/// nothing more, under [`super::priming_profile`], from a cleared environment holding only
+/// nothing more, under [`kernel_sandbox::profile::seatbelt::priming_profile`], from a cleared environment holding only
 /// [`PRIMING_ENV`], in its own process group with no input or output. Inputs: the priming
 /// folder and the canonical uv binary. Output: the unspawned command.
 pub fn priming_command(folder: &Path, uv: &Path) -> Command {
     let mut command = Command::new(super::SANDBOX_EXEC);
     command
         .arg("-p")
-        .arg(super::priming_profile(folder, uv))
+        .arg(kernel_sandbox::profile::seatbelt::priming_profile(
+            folder, uv,
+        ))
         .arg(uv)
         .args(["tool", "list"])
         .env_clear()
