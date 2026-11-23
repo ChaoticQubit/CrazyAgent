@@ -72,6 +72,45 @@ fn the_kernel_names_no_crazyagent_or_sandbox_item() {
     ));
 }
 
+/// The dependency tables of one Cargo.toml that turn on this crate's `test-support`
+/// feature. Input: the manifest's text. Output: each such table's name.
+fn test_support_tables(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut table = String::new();
+    for line in text.lines() {
+        if line.starts_with('[') {
+            table = line.to_owned();
+        }
+        if line.starts_with("crazyagent-kernel-processes") && line.contains("test-support") {
+            found.push(table.clone());
+        }
+    }
+    found
+}
+
+/// A folder that holds a link to a sibling folder gives each file once, never through the
+/// link, so a linked folder never counts a file twice.
+#[cfg(unix)]
+#[test]
+fn files_named_skips_folder_links() {
+    let temporary = tempfile::tempdir().unwrap();
+    let real = temporary.path().canonicalize().unwrap();
+    std::fs::create_dir(real.join("held")).unwrap();
+    std::fs::write(real.join("held").join("one.rs"), "fn one() {}\n").unwrap();
+    std::os::unix::fs::symlink(real.join("held"), real.join("linked")).unwrap();
+    let mut found = Vec::new();
+    files_named(&real, &|_| true, &mut found);
+    assert_eq!(found, vec![real.join("held").join("one.rs")]);
+}
+
+/// A manifest that turns `test-support` on through a dependency table of its own, with the
+/// features on the next line, is caught as plainly as an inline one.
+#[test]
+fn a_dependency_table_turning_test_support_on_is_caught() {
+    let text = "[package]\nname = \"other\"\n\n[dev-dependencies.crazyagent-kernel-processes]\npath = \"../kernel/processes\"\nfeatures = [\"test-support\"]\n";
+    assert_eq!(test_support_tables(text), ["dev-dependencies"]);
+}
+
 /// Only the engine crate's dev-dependencies turn on this crate's `test-support` feature, so
 /// its test helpers never reach a release build. Input: every Cargo.toml in the workspace.
 #[test]
@@ -87,24 +126,18 @@ fn test_support_is_enabled_only_by_crazyagent_dev_dependencies() {
     let mut enabling = Vec::new();
     for manifest in &manifests {
         let text = std::fs::read_to_string(manifest).unwrap();
-        let mut table = String::new();
-        for line in text.lines() {
-            if line.starts_with('[') {
-                table = line.to_owned();
-            }
-            if line.starts_with("crazyagent-kernel-processes") && line.contains("test-support") {
-                let place = manifest
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                enabling.push(format!("{place} {table}"));
-            }
+        for table in test_support_tables(&text) {
+            let place = manifest
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            enabling.push(format!("{place} {table}"));
         }
     }
     assert_eq!(
         enabling,
-        ["crates/crazyagent/Cargo.toml [dev-dependencies]"]
+        ["crates/crazyagent/Cargo.toml dev-dependencies"]
     );
 }
 
