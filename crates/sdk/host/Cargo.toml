@@ -1,0 +1,17 @@
+[package]
+name = "crazyagent-sdk-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sdk_host"
+path = "src/lib.rs"
+
+[dependencies]
+crazyagent-bus-gateway = { path = "../../kernel/bus_gateway" }
+crazyagent-sdk = { path = "../rust" }
+
+[dev-dependencies]
+crazyagent-bus-gateway = { path = "../../kernel/bus_gateway", features = ["test-support"] }
