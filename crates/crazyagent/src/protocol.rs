@@ -1,4 +1,3 @@
-use kernel_common::windows_device;
 use kernel_security::error::StoreError;
 use kernel_security::store::SecretRef;
 use serde::{Deserialize, Serialize};
@@ -22,37 +21,12 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
-/// True when the text is exactly one plain path component that names one child, never
-/// itself, its parent or another root: not empty, `.`, `..`, a separator, a root or a
-/// Windows drive like `c:`, no trailing dot or space, which Windows strips, and no Windows
-/// device name. A colon stays allowed, for identities and as a Unix file name; on Windows
-/// `name:x` is a stream of `name`, so a Windows folder name needs none. Input: the text.
-/// Output: whether it names one child.
-pub(crate) fn single_component(text: &str) -> bool {
-    let mut parts = std::path::Path::new(text).components();
-    matches!(
-        (parts.next(), parts.next()),
-        (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(text)
-    ) && !text.ends_with(['.', ' '])
-        && !windows_device(text)
-}
+pub(crate) use kernel_common::names::single_component;
 
+/// Checks one engine identity with the kernel rule ([`kernel_common::names::validate_identity`]).
+/// Input: the text. Output: Ok, or the protocol error naming the rule.
 fn validate_identity(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty()
-        || value.len() > 128
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
-        || value.contains("..")
-        || !single_component(value)
-    {
-        return Err(ProtocolError(
-            "identity must be 1..128 safe ASCII bytes".into(),
-        ));
-    }
-    assert!(!value.is_empty());
-    assert!(value.len() <= 128);
-    Ok(())
+    kernel_common::names::validate_identity(value).map_err(|refused| ProtocolError(refused.into()))
 }
 
 macro_rules! identity {
@@ -206,7 +180,7 @@ pub enum Command {
     },
     #[serde(skip_deserializing)]
     OwnerSandbox {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     #[serde(skip_deserializing)]
@@ -220,6 +194,10 @@ pub enum Command {
     #[serde(skip_deserializing)]
     OwnerProviderRetry {
         choice: crate::provider_retry::ProviderRetry,
+    },
+    #[serde(skip_deserializing)]
+    OwnerLogCompaction {
+        choice: crate::log_compaction::LogCompaction,
     },
     #[serde(skip_deserializing)]
     OwnerMasterSteps {
@@ -463,6 +441,7 @@ impl Command {
             | Self::OwnerAgentCleanup { .. }
             | Self::OwnerAgentQuit { .. }
             | Self::OwnerProviderRetry { .. }
+            | Self::OwnerLogCompaction { .. }
             | Self::OwnerMasterSteps { .. }
             | Self::OwnerMasterTime { .. }
             | Self::OwnerMasterFrames { .. }
@@ -635,6 +614,7 @@ pub const TEXT_WITHHELD: &str = "engine_text_withheld";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel_common::windows_device;
 
     #[test]
     fn only_plain_codes_reach_an_owner_window() {
@@ -736,11 +716,10 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_drive_prefix_is_not_an_identity() {
-        for text in ["c:", "c:x", "z:"] {
-            assert!(!single_component(text), "{text}");
+        for text in ["c:", "c:x", "z:", "C:x"] {
+            assert_eq!(single_component(text), !cfg!(windows), "{text}");
             assert!(ProjectId::new(text).is_err(), "{text}");
         }
         assert!(ClientId::new("owner:abc").is_ok());
@@ -814,10 +793,7 @@ mod tests {
             kernel(&foreign).unwrap_err(),
             kernel_security::error::StoreError::code("credential_reference_invalid")
         );
-        assert_eq!(
-            CredentialRef::new("a:b:c".to_string()).is_err(),
-            cfg!(windows)
-        );
+        assert!(CredentialRef::new("a:b:c".to_string()).is_err());
     }
 
     #[test]

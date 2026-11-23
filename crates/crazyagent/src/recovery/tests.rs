@@ -9,8 +9,10 @@ use crate::protocol::{CredentialRef, ProjectId};
 use crate::sandbox::policy::AgentAccess;
 use crate::team::runtime::{TeamLimits, TeamRuntime};
 use crate::team::{AgentRole, AgentStatus};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -164,7 +166,12 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(self.tmux.clone()),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn runtime(&self) -> TeamRuntime {
@@ -225,7 +232,12 @@ impl Fixture {
             transcript: Transcript::ClaudeSession { file },
         };
         let since = SystemTime::now();
-        let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
+        let pane = host
+            .spawn(
+                &AgentId::team(id).unwrap(),
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         let record = PaneRecord {
             access: Some(AgentAccess::Sandboxed),
             toolchains: Some(Vec::new()),
@@ -557,7 +569,12 @@ fn a_codex_agent_interrupted_mid_turn_names_its_own_rollout_file() {
             sessions: sessions.clone(),
         },
     };
-    let pane = host.spawn(&AgentId::team(sub).unwrap(), &command).unwrap();
+    let pane = host
+        .spawn(
+            &AgentId::team(sub).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     let record = PaneRecord::new(&command.transcript, &worktree, since, pane.pid, None).unwrap();
     fixture
         .connection

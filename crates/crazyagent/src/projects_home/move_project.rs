@@ -1,10 +1,11 @@
 use super::{
     AddMode, AddOverride, AddPlan, GitLink, LINKED_WORKTREES_MAX, Placed, Registered, Tally,
-    git_link, in_use, linked_worktree_paths, linked_worktrees, one_spelling, plan_add, refused,
+    git_link, in_use, linked_worktree_paths, linked_worktrees, plan_add, refused,
 };
 use crate::engine::EngineError;
 use crate::landing::RepositoryHolds;
 use crate::protocol::ProjectId;
+use kernel_sandbox::paths::one_spelling;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -77,7 +78,9 @@ fn under(column: &str) -> String {
 /// the move was planned. Input: the stored folder. Output: the short name, none otherwise.
 #[cfg(target_os = "macos")]
 fn short_name(origin: &Path) -> Option<PathBuf> {
-    let rest = origin.strip_prefix(super::DATA_VOLUME).ok()?;
+    let rest = origin
+        .strip_prefix(kernel_sandbox::paths::DATA_VOLUME)
+        .ok()?;
     Some(Path::new("/").join(rest))
 }
 

@@ -3,9 +3,10 @@ use crate::project_setup::removed::event as removed;
 use crate::protocol::{Outcome, ProjectId};
 use crate::state_log::Aggregate;
 use crate::state_log::fence::{engine, seed};
-use crate::state_log::replay::{redact, rows};
+use crate::state_log::redact;
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::Draft;
+use kernel_storage::state_log::replay::rows;
 use rusqlite::Connection;
 use rusqlite::types::Value;
 

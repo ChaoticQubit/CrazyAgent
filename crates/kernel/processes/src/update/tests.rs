@@ -152,6 +152,16 @@ fn versions_compare_as_semver_with_dev_builds_below_their_stable() {
     assert_eq!(code(is_newer("latest", "0.2.0")), "update_manifest_invalid");
 }
 
+/// Build metadata carries no precedence in semver, so two releases that differ only in it
+/// are the same release: neither reads as newer than the other.
+#[test]
+fn versions_that_differ_only_in_build_metadata_are_not_newer() {
+    assert!(!is_newer("1.2.3+b", "1.2.3+a").unwrap());
+    assert!(!is_newer("1.2.3+a", "1.2.3+b").unwrap());
+    assert!(!is_newer("1.2.3+build.9", "1.2.3").unwrap());
+    assert!(is_newer("1.2.4+a", "1.2.3+b").unwrap());
+}
+
 #[test]
 fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
     let folder = tempfile::tempdir().unwrap();
@@ -606,4 +616,107 @@ fn the_desktop_config_public_key_is_the_one_read() {
     } else {
         assert_eq!(public_key().unwrap(), configured);
     }
+}
+
+/// A URL holding `[`, `]`, `{` or `}` reaches the server as the URL parser wrote it, in one
+/// request, never expanded by curl as a range or a list.
+#[test]
+fn a_url_with_brackets_and_braces_reaches_the_server_as_written() {
+    use std::io::{Read, Write};
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+            head.push(byte[0]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .unwrap();
+        String::from_utf8(head)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned()
+    });
+    let url = format!("http://127.0.0.1:{port}/release/x[1-2]/y{{a,b}}");
+    let mut received = Vec::new();
+    assert_eq!(
+        download(&url, &mut received, 64, Duration::from_secs(30)).unwrap(),
+        2
+    );
+    assert_eq!(received, b"ok");
+    let path = allowed_url(&url).unwrap().path().to_owned();
+    assert!(path.contains("[1-2]"), "{path}");
+    assert_eq!(server.join().unwrap(), format!("GET {path} HTTP/1.1"));
+}
+
+/// Writers of the update channel at the same moment never clobber each other: each of 8
+/// threads saves stable or dev 50 times and every save succeeds, `update.toml` then reads
+/// as one of the two channels, and no half-written file is left in the folder.
+#[test]
+fn channel_writers_at_the_same_moment_each_save_whole() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().to_path_buf();
+    let writers: Vec<_> = (0..8)
+        .map(|n| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let channel = if n % 2 == 0 {
+                    Channel::Stable
+                } else {
+                    Channel::Dev
+                };
+                (0..50)
+                    .map(|_| write_channel(&root, channel))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    for writer in writers {
+        for saved in writer.join().unwrap() {
+            assert!(saved.is_ok(), "{:?}", saved.err().map(|error| error.code));
+        }
+    }
+    assert!(matches!(
+        read_channel(&root).unwrap(),
+        Channel::Stable | Channel::Dev
+    ));
+    let left: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["update.toml".to_owned()]);
+}
+
+/// A save while another program holds `update.toml` without delete sharing waits a bounded
+/// time, then reports the file busy and leaves no half-written file; once the file is let
+/// go the save goes through.
+#[cfg(windows)]
+#[test]
+fn a_channel_file_another_program_holds_is_busy_and_saves_once_let_go() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path();
+    write_channel(root, Channel::Stable).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(root.join("update.toml"))
+        .unwrap();
+    let started = Instant::now();
+    let busy = write_channel(root, Channel::Dev).unwrap_err();
+    assert_eq!(busy.code, "update_channel_busy", "{}", busy.message);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(held);
+    write_channel(root, Channel::Dev).unwrap();
+    assert_eq!(read_channel(root).unwrap(), Channel::Dev);
+    let left: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["update.toml".to_owned()]);
 }

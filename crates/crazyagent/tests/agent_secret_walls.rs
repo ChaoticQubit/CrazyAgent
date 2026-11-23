@@ -6,9 +6,12 @@ use kernel_security::store::{Store, reference};
 
 use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
-    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED,
-    SandboxError, SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, agent_command, agent_env_refused,
+    agent_variable_allowed,
 };
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::paths::SECRET_ROOT_REFUSED;
 use kernel_security::relay_token::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use kernel_security::secret::SecretString;
 use kernel_security::store::macos::Keychain;

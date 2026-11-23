@@ -3,10 +3,10 @@ use crate::owner_texts::{self, TextDigest};
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{Command, Outcome, ProjectId, RequestId};
 use crate::state_log::Aggregate;
-use crate::state_log::replay::{self, Logged};
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -711,6 +711,7 @@ fn append(
             body: &body,
         })?;
     }
+    crate::state_log::compact_after(appender, Aggregate::Memory, at_ms, chunks)?;
     Ok(last)
 }
 
@@ -829,7 +830,7 @@ fn clear(db: &Connection) -> Result<(), EngineError> {
 /// `memory_log_event_invalid` for a removal body that is not one.
 fn removals(db: &Connection) -> Result<Vec<(u64, removed::ProjectRemoved)>, EngineError> {
     let mut found = Vec::new();
-    replay::replay(db, Aggregate::Projects, 0, |logged| {
+    crate::state_log::replay(db, Aggregate::Projects, 0, |logged| {
         if logged.kind != removed::KIND {
             return Ok(());
         }
@@ -856,7 +857,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<Rebuilt, EngineError> {
     clear(tx)?;
     let mut missing = Vec::new();
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Memory, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Memory, 0, |logged| {
         while let Some((_, removal)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_removed(tx, &removal.project, removal.kept)?;
         }
@@ -954,13 +955,20 @@ fn pack(table: Table, rows: Vec<serde_json::Value>) -> Result<Vec<Chunk>, Engine
 /// and the writer's clock. Output: the `seq` of the run's closing event, or the log's
 /// refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = appender.project(|tx| chunks(tx))?;
+    Ok(appender.snapshot(Aggregate::Memory, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of the 14 tables as they stand, every text kept for its
+/// holder, for [`snapshot`] and for compaction. Input: the transaction. Output: the chunks,
+/// or the first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for table in TABLES {
-        let rows = appender.project(|tx| table_rows(tx, table))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table)?)?);
     }
     assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
-    Ok(appender.snapshot(Aggregate::Memory, at_ms, chunks)?)
+    Ok(chunks)
 }
 
 /// The open-time sweep, run once every memory table exists: makes the touched-key triggers

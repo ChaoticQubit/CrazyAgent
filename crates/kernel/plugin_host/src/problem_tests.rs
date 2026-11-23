@@ -21,7 +21,13 @@ fn every_problem_code_has_one_plain_sentence() {
 
 #[test]
 fn every_code_the_kernel_readers_refuse_with_has_its_plain_sentence() {
-    let sources = [include_str!("manifest.rs"), include_str!("embedding.rs")];
+    let sources = [
+        include_str!("manifest.rs"),
+        include_str!("embedding.rs"),
+        include_str!("registry.rs"),
+        include_str!("trust.rs"),
+        include_str!("store.rs"),
+    ];
     let codes: Vec<&str> = sources
         .iter()
         .flat_map(|source| source.split('"'))
@@ -83,5 +89,17 @@ fn a_problem_round_trips_through_serde() {
     assert_eq!(
         serde_json::from_value::<Problem>(shown).expect("reads back"),
         problem
+    );
+}
+
+#[test]
+fn the_past_cap_sentence_names_the_cap_and_old_plugin_files() {
+    let past = Problem::new("app_plugin_past_cap", None, None);
+    assert_eq!(
+        past.message,
+        format!(
+            "The app reads only the first {} plugins by name, old plugin files included; remove one of them to use this plugin.",
+            crate::registry::USER_PLUGINS_MAX
+        )
     );
 }

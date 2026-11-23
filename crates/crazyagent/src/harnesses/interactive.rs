@@ -118,6 +118,19 @@ pub struct InteractiveCommand {
     pub transcript: Transcript,
 }
 
+impl From<&InteractiveCommand> for kernel_processes::terminal::PaneCommand {
+    /// The fields the terminal host reads, byte-equal: the argument vector, the working
+    /// folder and the environment; the session record stays with the harness. Input: the
+    /// command. Output: the pane command.
+    fn from(command: &InteractiveCommand) -> Self {
+        Self {
+            argv: command.argv.clone(),
+            cwd: command.cwd.clone(),
+            env: command.env.clone(),
+        }
+    }
+}
+
 /// Where a harness writes its own session record, which the engine reads for status,
 /// replies and task blocks instead of reading the screen: a Codex rollout, a Claude Code
 /// transcript, or the record a manifest harness's terminal settings name.
@@ -641,7 +654,7 @@ fn agent_env(
         .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
         .map(|(name, _)| name.as_str())
         .collect();
-    let refused = |_: crate::sandbox::SandboxError| failure("launch_environment_refused");
+    let refused = |_: kernel_sandbox::error::SandboxError| failure("launch_environment_refused");
     let built = match handover {
         Some(handover) => {
             let handed = crate::sandbox::Handed::new(&names, handover.token()).map_err(refused)?;

@@ -579,8 +579,8 @@ fn a_manifest_with_http_and_net_hosts_is_refused() {
         refused_at(&both),
         ("plugin_manifest_invalid".into(), Some(line))
     );
-    let read = crate::manifest::parse(&both).expect_err("the five-key check refuses net too");
-    assert_eq!(read.code, "plugin_manifest_invalid");
+    let read = crate::manifest::parse(&both).expect_err("net without net.request is refused");
+    assert_eq!(read.code, "plugin_net_without_permission");
 }
 
 #[test]
@@ -630,4 +630,183 @@ fn a_body_value_toml_has_and_json_does_not_is_refused() {
     );
     let nan = with("model = \"acme-small\"", "model = nan");
     assert_eq!(refused(&nan).0, "app_plugin_field_invalid");
+}
+
+/// A key outside the plain key rule under `[http]`, its headers or its
+/// body, at any depth, is refused naming only the table it sits in, so no key text reaches
+/// the refusal shown on the trust screen.
+#[test]
+fn a_key_outside_the_plain_rule_is_refused_naming_only_its_table() {
+    let escape = "\"\\u001b[2J\" = 1\n";
+    for (table, code, field) in [
+        ("[http]\n", "app_plugin_field_unknown", "http"),
+        (
+            "[http.headers]\n",
+            "app_plugin_header_invalid",
+            "http.headers",
+        ),
+        ("[http.body]\n", "app_plugin_field_invalid", "http.body"),
+        (
+            "[http.body.options]\n",
+            "app_plugin_field_invalid",
+            "http.body.options",
+        ),
+    ] {
+        let text = with(table, &format!("{table}{escape}"));
+        let problem = parse(&text).expect_err("the key is refused");
+        assert_eq!(
+            (problem.code.as_str(), problem.field.as_deref()),
+            (code, Some(field)),
+            "{table}"
+        );
+        assert!(!problem.message.chars().any(char::is_control), "{table}");
+        assert!(problem.message.len() <= field.len() + 200, "{table}");
+    }
+    let long = format!("[http.body]\n{} = 1\n", "k".repeat(65));
+    assert_eq!(
+        refused(&with("[http.body]\n", &long)),
+        (
+            "app_plugin_field_invalid".to_owned(),
+            Some("http.body".to_owned())
+        )
+    );
+    let plain = with("[http.body]\n", "[http.body]\nk.v-1_x = 1\n");
+    assert!(
+        parse(&plain).is_ok(),
+        "a dotted plain key is a nested table"
+    );
+}
+
+/// The title and description refuse every Unicode mark that reorders or
+/// hides text on the trust screen.
+#[test]
+fn a_title_or_description_with_a_bidi_or_zero_width_mark_is_refused() {
+    let marks = [
+        '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}',
+    ];
+    for mark in marks {
+        for (old, field) in [
+            ("title = \"Acme embeddings\"", "title"),
+            ("description = \"Acme test plugin.\"", "description"),
+        ] {
+            let (key, rest) = old.split_once(" = \"").expect("a key line");
+            let marked = format!("{key} = \"{mark}{rest}");
+            assert_eq!(
+                refused(&with(old, &marked)),
+                (
+                    "app_plugin_field_invalid".to_owned(),
+                    Some(field.to_owned())
+                ),
+                "{field} U+{:04X}",
+                u32::from(mark)
+            );
+        }
+    }
+}
+
+/// Asserts that a title holding any mark of the range is refused on `title`. Input: the
+/// inclusive range of marks.
+fn refuses_title_marks(marks: core::ops::RangeInclusive<char>) {
+    let old = "title = \"Acme embeddings\"";
+    for mark in marks {
+        let marked = format!("title = \"{mark}Acme embeddings\"");
+        assert_eq!(
+            refused(&with(old, &marked)),
+            (
+                "app_plugin_field_invalid".to_owned(),
+                Some("title".to_owned())
+            ),
+            "title U+{:04X}",
+            u32::from(mark)
+        );
+    }
+}
+
+#[test]
+fn a_title_with_a_left_to_right_mark_is_refused() {
+    refuses_title_marks('\u{200E}'..='\u{200E}');
+}
+
+#[test]
+fn a_title_with_a_right_to_left_mark_is_refused() {
+    refuses_title_marks('\u{200F}'..='\u{200F}');
+}
+
+#[test]
+fn a_title_with_an_arabic_letter_mark_is_refused() {
+    refuses_title_marks('\u{061C}'..='\u{061C}');
+}
+
+#[test]
+fn a_title_with_a_line_separator_is_refused() {
+    refuses_title_marks('\u{2028}'..='\u{2028}');
+}
+
+#[test]
+fn a_title_with_a_paragraph_separator_is_refused() {
+    refuses_title_marks('\u{2029}'..='\u{2029}');
+}
+
+#[test]
+fn a_title_with_a_soft_hyphen_is_refused() {
+    refuses_title_marks('\u{00AD}'..='\u{00AD}');
+}
+
+#[test]
+fn a_title_with_a_mongolian_vowel_separator_is_refused() {
+    refuses_title_marks('\u{180E}'..='\u{180E}');
+}
+
+#[test]
+fn a_title_with_an_interlinear_annotation_mark_is_refused() {
+    refuses_title_marks('\u{FFF9}'..='\u{FFFB}');
+}
+
+#[test]
+fn a_title_with_a_tag_character_is_refused() {
+    refuses_title_marks('\u{E0000}'..='\u{E007F}');
+}
+
+/// An embedding plugin asks the kernel for nothing, since the engine's HTTP
+/// runner makes its call, so a permission is refused.
+#[test]
+fn an_embedding_plugin_with_permissions_is_refused() {
+    assert_eq!(
+        refused(&with(
+            "permissions = []",
+            "permissions = [\"net.http.get\"]"
+        )),
+        (
+            "app_plugin_field_invalid".to_owned(),
+            Some("permissions".to_owned())
+        )
+    );
+}
+
+/// An embedding source is T2, so any other tier is refused.
+#[test]
+fn an_embedding_plugin_outside_t2_is_refused() {
+    for tier in ["t1", "t3"] {
+        assert_eq!(
+            refused(&with("tier = \"t2\"", &format!("tier = \"{tier}\""))),
+            (
+                "app_plugin_field_invalid".to_owned(),
+                Some("tier".to_owned())
+            ),
+            "{tier}"
+        );
+    }
+}
+
+/// The declared kind is read from at most `MANIFEST_BYTES_MAX` bytes.
+#[test]
+fn the_declared_kind_of_a_text_over_the_bound_is_none() {
+    let head = "kind = \"embedding\"\n";
+    let fits = format!(
+        "{head}{}",
+        " ".repeat(crate::manifest::MANIFEST_BYTES_MAX - head.len())
+    );
+    assert_eq!(declared_kind(&fits), Some(PluginKind::Embedding));
+    assert_eq!(declared_kind(&format!("{fits} ")), None);
 }

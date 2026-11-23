@@ -11,9 +11,11 @@ use crazyagent::protocol::{
 };
 use crazyagent::setup::{Dependency, DependencyState};
 use crazyagent::team::NodeKind;
-use crazyagent::terminal::tmux::{SOCKET, installed};
-use crazyagent::terminal::{AgentId, FOLDER, TerminalFrame};
+use crazyagent::terminal::tmux::installed;
+use crazyagent::terminal::{FOLDER, TerminalFrame};
 use e2e_support::{ENGINE, Engine, Owner, Survivors, TMUX, hex, scratch, stop_tmux};
+use kernel_processes::terminal::AgentId;
+use kernel_processes::terminal::tmux::SOCKET;
 use std::collections::BTreeSet;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -225,7 +227,12 @@ async fn the_engine_private_tmux_server_runs_a_pane_and_never_touches_the_defaul
     let (host, pane) = {
         let agent = agent.clone();
         tokio::task::spawn_blocking(move || {
-            let pane = host.spawn(&agent, &command).unwrap();
+            let pane = host
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
+                .unwrap();
             (host, pane)
         })
         .await

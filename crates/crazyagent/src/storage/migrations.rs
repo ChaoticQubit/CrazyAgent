@@ -95,6 +95,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 18,
         run: settings_step::session_turns_on_the_log,
     },
+    Step {
+        to: 19,
+        run: plugin_records,
+    },
 ];
 
 /// The widest engine file name step 11 lets `projects_delete_files` hold, kept as that step
@@ -106,12 +110,24 @@ const _: () = assert!(
     "a wider delete record needs a migration step that widens projects_delete_files"
 );
 
+/// Step 19: the plugin namespaces' table, empty on an upgrade, filled only by namespace
+/// events of the Plugins aggregate; a new database gets it when the engine opens it. Input:
+/// the open upgrade transaction. Output: Ok, or the store's refusal.
+fn plugin_records(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    assert_eq!(
+        kernel_storage::state_log::AggregateName::from(crate::state_log::Aggregate::Plugins),
+        kernel_storage::namespace::PLUGINS,
+        "namespace events log under the engine's Plugins aggregate"
+    );
+    kernel_storage::namespace::initialize(tx)
+}
+
 /// Step 12 (V250-H2): the app plugin store's trust records, switches and secret bindings.
 /// An upgrade from 2.4 makes the three empty tables under its pinned backup; a new database
 /// gets them when the engine opens it. Input: the open upgrade transaction. Output: Ok, or
 /// `app_plugins_unavailable`.
 fn app_plugin_store(tx: &Transaction<'_>) -> Result<(), StorageError> {
-    crate::app_plugins::store::initialize(tx)?;
+    crate::app_plugins::initialize(tx)?;
     Ok(())
 }
 
@@ -360,6 +376,22 @@ pub(crate) fn restore_pinned(
 ) -> Result<kernel_storage::restore::Restored, EngineError> {
     with_hooks(settings, |hooks| {
         Ok(kernel_storage::restore::restore_pinned(path, hooks)?)
+    })
+}
+
+/// Finishes a restore that wrote the 2.4 data and stopped before it recorded so, through
+/// [`kernel_storage::restore::recovery::finish`] with this engine's key sweep. Inputs: the
+/// database path and the settings sources. Output: the kept copy's name, or the refusal.
+#[cfg(unix)]
+pub(crate) fn finish_restore(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+) -> Result<String, EngineError> {
+    with_hooks(settings, |hooks| {
+        Ok(kernel_storage::restore::recovery::finish(
+            path,
+            hooks.after_restore,
+        )?)
     })
 }
 

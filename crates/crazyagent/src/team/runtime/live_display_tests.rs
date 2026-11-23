@@ -3,8 +3,10 @@ use super::super::managed_agent::{AGENT, ManagedAgent, SignedIn, claude};
 use super::{TURN, processes_with};
 use crate::coord::settings::TerminalDisplay;
 use crate::team::AgentRole;
-use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::Tmux;
+use kernel_processes::terminal::{AgentId, Host};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -67,7 +69,12 @@ fn watched_turn(display: TerminalDisplay) -> (String, TurnEnd, Option<String>, S
         .unwrap();
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let agent = ManagedAgent::in_pane_with_display(
         "claude-code",
         &claude(),

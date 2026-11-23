@@ -298,7 +298,7 @@ enum Found<'a> {
 /// Matches a harness's real path against its table row, on whole path parts only, in the
 /// order own installer, Homebrew, npm (a formula may wrap an npm package inside its Cellar).
 /// The path is absolute and plain: roots and folder names, after at most a drive prefix such
-/// as `C:`, on Windows as plain drive text ([`crate::sandbox::windows_clean_text`]), never a
+/// as `C:`, on Windows as plain drive text ([`kernel_sandbox::paths::windows_clean_text`]), never a
 /// UNC, verbatim, device or forward-slash path, `.` or `..`.
 /// Inputs: the harness id, the real path and the roots. Output: the match or a refusal code.
 fn found<'a>(id: &str, real: &Path, roots: &'a Roots) -> Result<Found<'a>, &'static str> {
@@ -319,7 +319,7 @@ fn found<'a>(id: &str, real: &Path, roots: &'a Roots) -> Result<Found<'a>, &'sta
     #[cfg(windows)]
     if !real
         .to_str()
-        .is_some_and(crate::sandbox::windows_clean_text)
+        .is_some_and(kernel_sandbox::paths::windows_clean_text)
     {
         return Err(UNKNOWN_INSTALL);
     }
@@ -596,7 +596,7 @@ pub fn update_command(
     match found(id, real, roots)? {
         Found::Own(own) => {
             let folder = entry.parent().ok_or(TOOL_MISSING)?;
-            if crate::sandbox::canonical(entry).ok().as_deref() != Some(real) {
+            if kernel_sandbox::paths::canonical(entry).ok().as_deref() != Some(real) {
                 return Err(UNKNOWN_INSTALL);
             }
             checked(
@@ -1041,7 +1041,7 @@ mod windows_tests {
     #[test]
     fn a_windows_self_updating_install_is_named_and_its_update_stays_refused() {
         let folder = tempfile::tempdir().unwrap();
-        let home = crate::sandbox::canonical(folder.path()).unwrap();
+        let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let installed = home.join(".codex").join("packages").join("standalone");
         std::fs::create_dir_all(&installed).unwrap();
         let entry = installed.join("codex.exe");

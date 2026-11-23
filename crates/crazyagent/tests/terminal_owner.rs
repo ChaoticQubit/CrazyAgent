@@ -9,8 +9,10 @@ use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::team::{AgentStatus, NodeKind};
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host, TerminalFrame};
+use crazyagent::terminal::tmux::installed;
+use crazyagent::terminal::{FOLDER, TerminalFrame};
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -95,8 +97,18 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
         let agent = agent.clone();
         let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crazyagent::sandbox::confinement(),
+                crazyagent::terminal::tmux::tmux_hooks(),
+            );
+            launcher
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
+                .unwrap();
             launcher
         })
         .await
@@ -283,8 +295,18 @@ impl SubAgent {
         let launcher = {
             let agent = agent.clone();
             tokio::task::spawn_blocking(move || {
-                let launcher = Tmux::open(Some(tmux), &folder);
-                launcher.spawn(&agent, &command).unwrap();
+                let launcher = Tmux::open(
+                    Some(tmux),
+                    &folder,
+                    crazyagent::sandbox::confinement(),
+                    crazyagent::terminal::tmux::tmux_hooks(),
+                );
+                launcher
+                    .spawn(
+                        &agent,
+                        &kernel_processes::terminal::PaneCommand::from(&command),
+                    )
+                    .unwrap();
                 launcher
             })
             .await
@@ -346,10 +368,12 @@ impl SubAgent {
             .await
             .unwrap()
             .unwrap();
-        tokio::task::spawn_blocking(move || crazyagent::terminal::quit(terminal.as_ref(), true))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            kernel_processes::terminal::quit(terminal.as_ref(), true)
+        })
+        .await
+        .unwrap()
+        .unwrap();
         assert!(
             gone(&socket).await,
             "a stopped engine with no team agent left ends its tmux server while its folder remains"
@@ -909,7 +933,11 @@ async fn a_finished_sub_agent_opens_its_kept_last_screen_read_only() {
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
             };
-            host.spawn(&finished, &command).unwrap();
+            host.spawn(
+                &finished,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
             let shown = shows(host.as_ref(), &finished, b"kept-screen-42");
             host.kill(&finished).unwrap();
             shown

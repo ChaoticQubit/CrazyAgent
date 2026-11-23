@@ -1,0 +1,4 @@
+enum UpdateChannel { stable, dev }
+capability update.set_channel(channel: UpdateChannel) -> unit
+  tier: kernel
+  needs: update.write

@@ -122,6 +122,62 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     }
 }
 
+/// A program name that starts like a Windows drive, one ASCII letter and `:`, is not
+/// looked up on any OS: on Windows `C:node` joined to a folder replaces that folder, so the
+/// file reached would lie outside every searched folder. Each such name is not found, even
+/// with a file of that name in a searched folder, an `env` line naming one is refused as
+/// [`Refusal::FirstLine`], and a `:` later in a name is still looked up.
+#[test]
+fn a_program_name_starting_with_a_drive_is_refused() {
+    let (_folder, home) = scratch();
+    let places = home_only(&home);
+    for name in ["C:node", "c:tool"] {
+        program(&home.join(".local/bin").join(name), NODE);
+        let missing = resolve(name, &places).unwrap_err();
+        assert_eq!(missing.reason, Reason::NotFound, "{name}");
+        assert!(missing.refused.is_none(), "{name}");
+    }
+    let named = script(&home, "named", b"#!/usr/bin/env C:node\n", 0o755);
+    assert_eq!(
+        refusal_of(&named, &places),
+        Some((named, Refusal::FirstLine))
+    );
+    let later = program(&home.join(".local/bin/node:stream"), NODE);
+    assert_eq!(resolve("node:stream", &places).unwrap().entry, later);
+}
+
+/// Under `env -S` the system splits the arguments itself, honouring quotes, escapes and
+/// `$` expansions, so words split on spaces alone are not the ones that run: an `-S`
+/// argument holding `$`, `\`, `"` or `'` is refused as [`Refusal::FirstLine`], as the
+/// program is, while plain arguments still resolve.
+#[test]
+fn an_env_split_argument_holding_a_quote_escape_or_dollar_is_refused() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let places = home_only(&home);
+    let lines: Vec<(&str, &[u8])> = vec![
+        ("double", b"#!/usr/bin/env -S node --opt \"a b\"\n"),
+        ("single", b"#!/usr/bin/env -S node --opt 'a b'\n"),
+        ("escaped", b"#!/usr/bin/env -S node a\\ b\n"),
+        ("dollar", b"#!/usr/bin/env -S node ${HOME}\n"),
+    ];
+    for (name, line) in lines {
+        let script = script(&home, name, line, 0o755);
+        assert_eq!(
+            refusal_of(&script, &places),
+            Some((script, Refusal::FirstLine)),
+            "{name}"
+        );
+    }
+    let plain = script(
+        &home,
+        "plain",
+        b"#!/usr/bin/env -S node --no-warnings\n",
+        0o755,
+    );
+    assert!(resolve_entry(&plain, &places).is_ok());
+}
+
 /// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
 /// would keep past it are not the ones that run: a line holding `#` anywhere after `#!` is
 /// refused as [`Refusal::FirstLine`], an `env` program named `node#x` with an owner file of
@@ -232,6 +288,41 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
     );
 }
 
+/// However many ordinary folders the PATH and the probes name, the system folders and the
+/// engine's own folders are kept, last and in order, and a tool found only in the engine's
+/// `setup/bin` still resolves: the ordinary folders fill only the room those leave. The
+/// ordinary folders are made up, so none is read.
+#[test]
+fn the_system_and_engine_folders_are_kept_past_a_full_path() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let own = program(&root.join("setup/bin/crazyagent-row-tool"), NODE);
+    let ordinary: Vec<PathBuf> = (0..200)
+        .map(|n| PathBuf::from(format!("/opt/crazyagent-row-{n:03}/bin")))
+        .collect();
+    let path = std::env::join_paths(&ordinary).unwrap();
+    let mut tail: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+    tail.extend(engine_folders(&STUB_HOOKS, &root));
+    let from_path = stub_engine(Some(&root), None, Some(home.clone()), Some(&path));
+    let from_probes = stub_engine(Some(&root), None, Some(home.clone()), Some(OsStr::new("")))
+        .with_probed(ordinary.clone());
+    for (name, places) in [("path", from_path), ("probes", from_probes)] {
+        let folders = places.folders();
+        assert!(folders.len() <= PLACES_MAX, "{name}");
+        assert!(
+            folders.ends_with(&tail),
+            "{name}: {:?}",
+            &folders[folders.len() - tail.len()..]
+        );
+        assert!(folders.contains(&ordinary[0]), "{name}");
+        assert_eq!(
+            resolve("crazyagent-row-tool", &places).unwrap().program,
+            own,
+            "{name}"
+        );
+    }
+}
+
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
 /// that sits in a temp folder, which agents with the temp folder grant and other users
 /// write, is refused. Probed folders meet the same rule on the engine's places (2.4.1 R1).
@@ -327,7 +418,7 @@ fn a_link_from_a_place_outside_temp_into_a_temp_folder_leads_into_temp() {
 
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
 /// can replace a folder this user owns there, so test stand-ins and engines started from a
-/// `/tmp` folder resolve (leader 17:12, L8c).
+/// `/tmp` folder resolve.
 #[test]
 fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
     let folder = tempfile::Builder::new()
@@ -363,7 +454,7 @@ fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
     (places, sidecar, brew)
 }
 
-/// DEC-157, leader 15:41 and 18:31: the engine uses the tmux it ships. The name `tmux` finds
+/// The engine uses the tmux it ships. The name `tmux` finds
 /// `<app folder>/crazyagent-tmux` before Homebrew or anything on PATH, read as any entry is,
 /// and its words and the sandbox grants start from that file, never the Homebrew one.
 #[test]
@@ -667,7 +758,7 @@ fn cellar(path: &Path) -> std::io::Result<PathBuf> {
     })
 }
 
-/// C2-H8: a Homebrew tool, whose one spelling lies in its prefix's `Cellar`, stays usable
+/// A Homebrew tool, whose one spelling lies in its prefix's `Cellar`, stays usable
 /// while the set-up projects cannot be read; a link from a prefix outside the install roots
 /// whose every form lies there is agents' to write.
 #[test]
@@ -678,7 +769,7 @@ fn a_cellar_linked_tool_stays_usable_while_the_projects_cannot_be_read() {
     assert!(places.agent_writable(Path::new("/opt/elsewhere/bin/tmux")));
 }
 
-/// C2-H8: the system's tools stay usable while the set-up projects cannot be read.
+/// The system's tools stay usable while the set-up projects cannot be read.
 #[test]
 fn a_system_tool_stays_usable_while_the_projects_cannot_be_read() {
     let (_folder, home) = scratch();
@@ -693,7 +784,25 @@ fn a_system_tool_stays_usable_while_the_projects_cannot_be_read() {
     }
 }
 
-/// C2-H8: the failed-read fallback never trusts more than a successful read with no project
+/// On a nix-darwin Mac the system profile, the per-user profiles and the default Nix profile
+/// hold the tools the PATH names, so a tool under each stays usable while the set-up
+/// projects cannot be read, in the form the PATH spells it. The names are made up, so no
+/// file on this computer is read.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn a_nix_darwin_profile_tool_stays_usable_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let places = with_canonical(&home, |path| Ok(path.to_path_buf()), None);
+    for tool in [
+        "/run/current-system/sw/bin/crazyagent-row-tool",
+        "/etc/profiles/per-user/someone/bin/crazyagent-row-tool",
+        "/nix/var/nix/profiles/default/bin/crazyagent-row-tool",
+    ] {
+        assert!(!places.agent_writable(Path::new(tool)), "{tool}");
+    }
+}
+
+/// The failed-read fallback never trusts more than a successful read with no project
 /// does: every path agents can write with the projects read is agents' to write without
 /// them, so the fallback only adds refusals.
 #[test]
@@ -725,7 +834,7 @@ fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
 }
 
-/// C2-H8: when the set-up projects cannot be read, a repository the engine may have
+/// When the set-up projects cannot be read, a repository the engine may have
 /// registered outside HOME still counts as agent-writable, so a tool in it is refused, while
 /// a system folder's tool does not.
 #[test]
@@ -748,4 +857,93 @@ fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_can
         Some(Err(Refusal::AgentsCanWrite))
     );
     assert!(!places.agent_writable(Path::new("/bin/sh")));
+}
+
+/// A tool in a folder every user can write, with no sticky bit, is refused as changeable by
+/// others, the folder named: the resolver asks the kernel's own path check, which no seed can
+/// answer for it.
+#[test]
+fn a_tool_in_a_folder_others_can_change_is_refused_by_the_kernel_check() {
+    let (_folder, home) = scratch();
+    let fixture = crate::service::test_support::durable_folder();
+    let open = fixture.path().canonicalize().unwrap().join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let tool = program(&open.join("tool"), "#!/bin/sh\n");
+    let places = stub_new(Vec::new(), Some(home));
+    assert_eq!(
+        check_place(&places, &tool),
+        Some(Err(Refusal::OthersCanChange(open.clone())))
+    );
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(check_place(&places, &tool), Some(Ok(())));
+}
+
+/// A name whose first copy has a first line the resolver refuses resolves to a later copy
+/// that runs, so one unreadable script never hides a working one further along the places.
+#[test]
+fn a_refused_first_copy_resolves_to_the_later_copy_that_runs() {
+    let (_folder, home) = scratch();
+    let first = home.join("first");
+    let later = home.join("later");
+    script_at(&first.join("tool"), b"#!/bin/sh\r\n");
+    let runs = script_at(&later.join("tool"), b"#!/bin/sh\n");
+    let places = stub_new(vec![first, later], Some(home.clone()));
+    let resolved = resolve("tool", &places).unwrap();
+    assert_eq!(resolved.entry, runs);
+}
+
+/// When no copy of a name resolves, the refusal reported is the first copy's, not a later
+/// one's.
+#[test]
+fn the_first_copys_refusal_is_kept_when_no_copy_resolves() {
+    let (_folder, home) = scratch();
+    let first = home.join("first");
+    let later = home.join("later");
+    let refused = script_at(&first.join("tool"), b"#!/bin/sh\r\n");
+    script_at(&later.join("tool"), b"#!node\n");
+    let places = stub_new(vec![first, later], Some(home.clone()));
+    let missing = resolve("tool", &places).unwrap_err();
+    assert_eq!(missing.tool, "tool");
+    let kept = missing.refused.expect("the first copy's refusal");
+    assert_eq!((kept.file, kept.why), (refused, Refusal::FirstLine));
+}
+
+/// Writes an executable script with the given bytes, its folders made first. Inputs: the
+/// file and the bytes. Output: the file.
+fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, bytes).unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    file.to_path_buf()
+}
+
+/// A folder the engine named for agents under an install root still counts as one agents can
+/// write while engine.db cannot be read, when an earlier read of the same data folder named
+/// it: the failed read takes that data folder's last good read, so a tool planted there is
+/// refused, and a data folder with no good read gains nothing from another one's.
+#[test]
+fn a_registered_folder_under_an_install_root_stays_writable_after_a_failed_read() {
+    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let read = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let failed = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| None,
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let named = tempfile::tempdir().unwrap();
+    let root = named.path().canonicalize().unwrap();
+    assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
+    assert!(Places::at_roots(Some(&root), None, failed.clone()).agent_writable(tool));
+    let unread = tempfile::tempdir().unwrap();
+    let other = unread.path().canonicalize().unwrap();
+    assert!(!Places::at_roots(Some(&other), None, failed).agent_writable(tool));
 }

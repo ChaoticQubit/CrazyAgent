@@ -4,10 +4,11 @@ use std::sync::Mutex;
 use bus_gateway::{Gateway, Grants, Refusals};
 use kernel_security::error::StoreError;
 use kernel_security::secret::SecretString;
-use kernel_security::secrets::{Handles, Scopes, Secrets};
+use kernel_security::secrets::{Handles, OwnerEntry, Scopes, Secrets};
 use kernel_security::store::{SecretRef, Store, reference};
 use sdk::secrets::{self, Provide, Secret};
 use sdk::{Capability, Refusal, Tier};
+use sdk_host::{Bound, Providers};
 
 use super::*;
 
@@ -137,7 +138,11 @@ fn a_handle_crosses_the_adapter_as_the_kernel_id() {
         NAMESPACE,
         &scopes,
         &handles,
-        Some(paste),
+        Some(OwnerEntry {
+            plugin: "github",
+            hosts: vec!["api.github.com".to_owned()],
+            value: paste,
+        }),
     ));
     let put = caps.put_from_owner("github", "token".to_owned()).unwrap();
     let found = caps.find("github", "token".to_owned()).unwrap();
@@ -172,9 +177,118 @@ fn the_quit_gateway_never_opens_the_store() {
         Err(absent.clone())
     );
     let grants = Grants::new(&[("github", Tier::T1, &["secrets.find"])]).unwrap();
-    let gateway = Gateway::new(&grants, &Absent, &Absent, &Unreached);
+    let gateway = Gateway::new(&grants, &Unreached);
+    let providers = Providers {
+        net: &Absent,
+        secrets: &Absent,
+        settings: &Absent,
+        service: &Absent,
+        update: &Absent,
+    };
+    let host = Bound::new(gateway.bind("github"), &providers);
     assert_eq!(
-        secrets::find(&gateway.bind("github"), "token".to_owned()).map(|found| found.is_some()),
+        secrets::find(&host, "token".to_owned()).map(|found| found.is_some()),
         Err(absent)
     );
+}
+
+#[test]
+fn a_net_refusal_keeps_its_code_and_kind() {
+    for code in [
+        "net_url_invalid",
+        "net_header_name_invalid",
+        "net_request_invalid",
+        "net_host_refused",
+    ] {
+        assert_eq!(
+            super::refusal(StoreError::code(code)),
+            Refusal::Rejected {
+                code: code.to_owned()
+            }
+        );
+    }
+    for code in [
+        "net_capture_not_json",
+        "credential_secret_invalid",
+        "curl_failed",
+    ] {
+        assert_eq!(
+            super::refusal(StoreError::code(code)),
+            Refusal::Failed {
+                code: code.to_owned()
+            }
+        );
+    }
+    let absent = net::Provide::request(
+        &Absent,
+        "github",
+        net::Request {
+            method: net::Method::Get,
+            url: "https://api.github.com/user".to_owned(),
+            headers: Vec::new(),
+            bearer: None,
+            form: Vec::new(),
+            secret_form: Vec::new(),
+            json: None,
+            reply_headers: Vec::new(),
+            capture: Vec::new(),
+        },
+    );
+    assert!(matches!(
+        absent,
+        Err(Refusal::Failed { code }) if code == "cap_provider_absent"
+    ));
+}
+
+/// The source files under `crates/crazyagent/src`, each with whether it is a test file:
+/// named `tests.rs`, ending `_tests.rs`, or under a `tests` folder. Output: path, flag and
+/// text per file.
+fn crate_sources() -> Vec<(std::path::PathBuf, bool, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut pending = vec![root.clone()];
+    let mut found = Vec::new();
+    while let Some(folder) = pending.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let relative = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let test = name == "tests.rs"
+                    || name.ends_with("_tests.rs")
+                    || relative.split(['/', '\\']).any(|part| part == "tests");
+                found.push((path.clone(), test, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    assert!(found.len() > 100);
+    found
+}
+
+#[test]
+fn nothing_outside_tests_reaches_secrets_for_request_or_secrets_caps() {
+    let sources = crate_sources();
+    let count = |pattern: &str, test: bool| -> usize {
+        sources
+            .iter()
+            .filter(|(_, is_test, _)| *is_test == test)
+            .map(|(_, _, text)| text.matches(pattern).count())
+            .sum()
+    };
+    for pattern in ["for_request(", "SecretsCaps(", "NetCaps("] {
+        let outside: Vec<_> = sources
+            .iter()
+            .filter(|(_, test, text)| !*test && text.contains(pattern))
+            .map(|(path, _, _)| path.display().to_string())
+            .collect();
+        assert!(outside.is_empty(), "{pattern} outside tests: {outside:?}");
+    }
+    assert!(count("for_request(", true) > 0);
+    assert!(count("SecretsCaps(", true) > 0);
+    assert!(count("pub struct NetCaps<'r>(", false) == 1);
 }

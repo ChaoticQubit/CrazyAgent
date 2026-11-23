@@ -2468,3 +2468,29 @@ fn a_teammate_command_written_under_a_narrow_umask_is_a_private_program() {
         "ok 700"
     );
 }
+
+/// The pane command a terminal host runs keeps the interactive command's argument
+/// vector, working folder and environment byte-equal; only the session record stays behind.
+#[test]
+fn pane_command_from_an_interactive_command_keeps_every_field() {
+    let command = InteractiveCommand {
+        argv: vec![
+            "/usr/bin/sandbox-exec".into(),
+            "-f".into(),
+            "/tmp/profile with space.sb".into(),
+            "codex".into(),
+            "--flag=ü".into(),
+        ],
+        cwd: PathBuf::from("/work/project one"),
+        env: vec![
+            ("HOME".into(), "/home/agent".into()),
+            ("CODEX_HOME".into(), String::new()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ],
+        transcript: Transcript::Unavailable,
+    };
+    let pane = kernel_processes::terminal::PaneCommand::from(&command);
+    assert_eq!(pane.argv, command.argv);
+    assert_eq!(pane.cwd, command.cwd);
+    assert_eq!(pane.env, command.env);
+}

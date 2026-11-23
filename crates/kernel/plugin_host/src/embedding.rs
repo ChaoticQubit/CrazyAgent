@@ -51,6 +51,8 @@ const INPUTS: &str = "{{inputs}}";
 const PURPOSE: &str = "{{purpose}}";
 const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "[::1]", "localhost"];
 const EMBEDDING: &str = "embedding";
+const EMBEDDING_TIER: &str = "t2";
+const PLAIN_KEY_BYTES_MAX: usize = 64;
 const HTTP_KEYS: [&str; 8] = [
     "url",
     "hosts",
@@ -61,6 +63,26 @@ const HTTP_KEYS: [&str; 8] = [
     "dimensions",
     "batch",
 ];
+
+/// Whether a mark reorders, hides or breaks text on the trust screen without showing:
+/// bidi embeddings, overrides, isolates and marks, zero-width and invisible characters, line
+/// and paragraph separators, the soft hyphen, interlinear annotation marks and tag
+/// characters. Input: the mark. Output: the answer.
+fn hidden_mark(mark: char) -> bool {
+    matches!(
+        mark,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
 
 /// Whether a request embeds stored text or an agent's search query; `{{purpose}}` becomes
 /// `document` or `query`.
@@ -196,6 +218,8 @@ impl Manifest {
             secrets: self.secrets().to_vec(),
             sha256: self.sha256.clone(),
             replaces,
+            changed: false,
+            grew_hosts: Vec::new(),
         }
     }
 }
@@ -224,6 +248,9 @@ fn syntax_line(text: &str, error: &toml::de::Error) -> usize {
 /// listed on its own kind's page. Input: the text. Output: the kind, or none when `kind` is
 /// not a known word read before any break.
 pub fn declared_kind(text: &str) -> Option<PluginKind> {
+    if text.len() > MANIFEST_BYTES_MAX {
+        return None;
+    }
     let table = match text.parse::<Table>() {
         Ok(table) => table,
         Err(error) => {
@@ -270,6 +297,12 @@ pub fn parse(text: &str) -> Result<Manifest, Problem> {
     assert_eq!(base.kind, EMBEDDING, "the kind was read above");
     if !valid_name(&base.plugin) {
         return Err(problem("app_plugin_name_invalid", "plugin"));
+    }
+    if base.tier != EMBEDDING_TIER {
+        return Err(problem("app_plugin_field_invalid", "tier"));
+    }
+    if !base.permissions.is_empty() {
+        return Err(problem("app_plugin_field_invalid", "permissions"));
     }
     let title = fields.text("title", TITLE_BYTES_MAX)?;
     if title.trim().is_empty() {
@@ -345,12 +378,17 @@ impl<'a> Fields<'a> {
         format!("{}{key}", self.prefix)
     }
 
+    fn parent(&self) -> &str {
+        self.prefix.strip_suffix('.').unwrap_or(&self.prefix)
+    }
+
     fn only(&self, known: &[&str]) -> Result<(), Problem> {
         match self
             .entries
             .keys()
             .find(|key| !known.contains(&key.as_str()))
         {
+            Some(key) if !plain_key(key) => Err(problem("app_plugin_field_unknown", self.parent())),
             Some(key) => Err(problem("app_plugin_field_unknown", &self.path(key))),
             None => Ok(()),
         }
@@ -370,7 +408,9 @@ impl<'a> Fields<'a> {
             Value::String(text)
                 if !text.is_empty()
                     && text.len() <= bytes_max
-                    && !text.chars().any(char::is_control) =>
+                    && !text
+                        .chars()
+                        .any(|mark| mark.is_control() || hidden_mark(mark)) =>
             {
                 Ok(text.clone())
             }
@@ -500,6 +540,19 @@ fn secret_names(fields: &Fields<'_>) -> Result<Vec<String>, Problem> {
     Ok(secrets)
 }
 
+/// Whether a manifest key may be named in a refusal: an ASCII letter or digit first, then
+/// letters, digits, `_`, `.` or `-`, at most 64 bytes, the YAML reader's plain key rule. A
+/// key outside it is refused naming only its table, so no key text reaches a screen.
+/// Input: the key. Output: true when plain.
+fn plain_key(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    key.len() <= PLAIN_KEY_BYTES_MAX
+        && bytes
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
 /// Whether a secret name is 1 to 32 lowercase letters, digits or `_`, starting with a
 /// letter. Input: the name. Output: true when valid.
 pub fn valid_secret(name: &str) -> bool {
@@ -574,6 +627,9 @@ fn headers(fields: &Fields<'_>, secrets: &[String]) -> Result<Vec<Header>, Probl
     let mut headers: Vec<Header> = Vec::with_capacity(entries.len());
     let mut used = vec![false; secrets.len()];
     for (name, value) in entries {
+        if !plain_key(name) {
+            return Err(problem("app_plugin_header_invalid", "http.headers"));
+        }
         let field = format!("http.headers.{name}");
         if !valid_header_name(name)
             || headers
@@ -693,6 +749,9 @@ fn check_body(
         Value::Table(entries) => entries
             .iter()
             .map(|(key, item)| {
+                if !plain_key(key) {
+                    return Err(problem("app_plugin_field_invalid", path));
+                }
                 check_body(item, &format!("{path}.{key}"), in_list, inputs)
                     .map(|json| (key.clone(), json))
             })

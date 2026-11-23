@@ -375,8 +375,10 @@ mod failed {
     use crate::protocol::{CredentialRef, ProjectId};
     use crate::recovery::{self, Interrupted, RunState};
     use crate::team::runtime::{TeamLimits, TeamRuntime};
-    use crate::terminal::tmux::{SOCKET, Tmux, installed};
-    use crate::terminal::{AgentId, FOLDER, Host};
+    use crate::terminal::FOLDER;
+    use crate::terminal::tmux::installed;
+    use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+    use kernel_processes::terminal::{AgentId, Host};
     use rusqlite::{Connection, OptionalExtension, params};
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
@@ -574,7 +576,12 @@ done
         }
 
         fn host(&self) -> Arc<dyn Host> {
-            Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+            Arc::new(Tmux::open(
+                Some(self.tmux.clone()),
+                &self.base.join(FOLDER),
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            ))
         }
 
         fn runtime(&self, host: &Arc<dyn Host>) -> TeamRuntime {
@@ -1247,8 +1254,10 @@ mod live {
         AGENT, ManagedAgent, PROJECT, SignedIn, claude, codex,
     };
     use crate::team::runtime::{Grant, Order, Plan, Report, TurnEnd, TurnRules, per_turn};
-    use crate::terminal::tmux::{Tmux, installed};
-    use crate::terminal::{AgentId, FOLDER, Host};
+    use crate::terminal::FOLDER;
+    use crate::terminal::tmux::installed;
+    use kernel_processes::terminal::tmux::Tmux;
+    use kernel_processes::terminal::{AgentId, Host};
     use rusqlite::{Connection, params};
     use std::path::Path;
     use std::sync::Arc;
@@ -1368,7 +1377,12 @@ mod live {
     ) {
         let agent = ManagedAgent::new(harness, executable);
         let tmux = installed(&agent.base).expect("tmux must be installed on this machine");
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &agent.base.join(FOLDER)));
+        let host: Arc<dyn Host> = Arc::new(Tmux::open(
+            Some(tmux),
+            &agent.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ));
         let counter = agent.working_dir.join("ran.txt");
         let prompt = "Run this exact shell command once with your shell tool and wait for it to finish: printf 'ran\\n' >> ran.txt && sleep 300\nThen reply with the word DONE.".to_owned();
 

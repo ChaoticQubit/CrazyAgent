@@ -213,7 +213,7 @@ pub fn run(
     client: Client,
     stopped: &AtomicBool,
     editor_running: Arc<AtomicBool>,
-    engine: Option<(crate::paths::Layout, crate::service::Service)>,
+    engine: Option<(crate::paths::Layout, kernel_processes::service::Service)>,
 ) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()
@@ -230,7 +230,8 @@ pub fn run(
     ctx.restore_shown = ctx
         .engine_root
         .as_deref()
-        .is_some_and(super::screens::settings::restore::offered_at);
+        .is_some_and(super::screens::settings::restore::offered_at)
+        || crate::log_compaction::this_build_is_dev();
     let mut terminals = Terminals::new(socket.clone(), timeout);
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_starting(client, engine).map_err(TuiError)?;

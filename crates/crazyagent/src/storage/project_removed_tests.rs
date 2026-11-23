@@ -3,8 +3,9 @@ use crate::engine::owner::{OwnerMutation, OwnerOperation, OwnerRequest, OwnerRes
 use crate::project_setup::SetupAction;
 use crate::project_setup::removed::event::{self, ProjectRemoved};
 use crate::protocol::{Command, Cursor, PROTOCOL_VERSION, ProjectId, RequestId};
-use crate::state_log::replay::{replay, rows};
+use crate::state_log::replay;
 use crate::state_log::{Aggregate, fence};
+use kernel_storage::state_log::replay::rows;
 use rusqlite::{Connection, params};
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;

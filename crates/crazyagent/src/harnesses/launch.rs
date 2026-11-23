@@ -14,6 +14,8 @@ use crate::sandbox::InstalledSandbox;
 #[cfg(not(windows))]
 use crate::sandbox::toolchains::{self, ToolHomes};
 use crate::usage::capture::Tokens;
+#[cfg(unix)]
+use kernel_processes::group::Ending;
 use kernel_security::secret::SecretString;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
@@ -337,7 +339,9 @@ impl LaunchBoundary {
 /// folders. Output: the boundary.
 #[cfg(all(test, unix))]
 pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::ProjectSandbox;
+    use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let home = scratch.join("full-access-home");
     let tmp = scratch.join("full-access-tmp");
     for folder in [&home, &tmp] {
@@ -496,73 +500,6 @@ pub(crate) fn kill_group(group: u32) {
     };
     assert!(pid.as_raw_nonzero().get() > 1);
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-}
-
-/// How long a group its holder saw end stays refused to every later claim: past
-/// `GROUP_FRESH` and the keeper's wait, so a session that saw its pane alive just before
-/// another path ended the group finds the number refused and only watches it (CB-2 r1 F1).
-const ENDED_REFUSED: Duration = Duration::from_secs(10);
-
-/// The process groups some path is ending now, with no time, and those a holder saw end,
-/// with the time it saw that, so a pane's stop and the terminal host's close never both
-/// signal one group (CB-2 one signal) and no later path claims a number that may lead a
-/// new group by then (CB-2 r1 F1).
-static ENDING: std::sync::Mutex<std::collections::BTreeMap<u32, Option<Instant>>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// One path's hold on ending a process group: while it lives every other path leaves the
-/// group alone. Dropping it frees the number, or, once its holder saw the group answer
-/// ESRCH, keeps it refused for `ENDED_REFUSED`, as it may lead a new group by then.
-pub(crate) struct Ending {
-    group: u32,
-    gone: bool,
-}
-
-impl Ending {
-    /// Takes the hold on a process group. Input: the group id, a pid above 1. Output: the
-    /// hold, or none while another path holds that group or a holder saw it end within
-    /// `ENDED_REFUSED`.
-    pub(crate) fn claim(group: u32) -> Option<Self> {
-        assert!(group > 1 && i32::try_from(group).is_ok());
-        let mut ending = ENDING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ending.retain(|_, ended| ended.is_none_or(|at| at.elapsed() < ENDED_REFUSED));
-        if ending.contains_key(&group) {
-            return None;
-        }
-        ending.insert(group, None);
-        Some(Self { group, gone: false })
-    }
-
-    /// The group this hold names. Output: its id as a pid.
-    #[cfg(unix)]
-    pub(crate) fn pid(&self) -> rustix::process::Pid {
-        i32::try_from(self.group)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-            .expect("a held group id is a pid above 1")
-    }
-
-    /// Records that the group answered ESRCH, so dropping this hold keeps its number
-    /// refused for `ENDED_REFUSED` instead of freeing it.
-    #[cfg(unix)]
-    pub(crate) fn gone(&mut self) {
-        self.gone = true;
-    }
-}
-
-impl Drop for Ending {
-    fn drop(&mut self) {
-        let mut ending = ENDING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.gone {
-            ending.insert(self.group, Some(Instant::now()));
-        } else {
-            ending.remove(&self.group);
-        }
-    }
 }
 
 /// Ends a pane's process group once its pane is gone, from the one path that holds it
@@ -1124,7 +1061,9 @@ fn bounded<'a>(
             };
         }
         let command = boundary.wrap(&bare).map_err(|error| match error {
-            crate::sandbox::SandboxError::Invalid(_) => failure("launch_environment_refused"),
+            kernel_sandbox::error::SandboxError::Invalid(_) => {
+                failure("launch_environment_refused")
+            }
             error => failure(
                 crate::sandbox::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
             ),
@@ -1572,7 +1511,7 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
 }
 
 /// Checks an account home against a given owner HOME, as [`validate_home`] does with this
-/// process's, comparing both in their [`crate::sandbox::canonical`] spelling, so neither
+/// process's, comparing both in their [`kernel_sandbox::paths::canonical`] spelling, so neither
 /// can pass the other through the macOS data volume's name. Inputs: the home and the
 /// owner's HOME, none when unset. Output: Ok, or a plain `launch_account_home_*` refusal
 /// code.
@@ -1587,12 +1526,15 @@ fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchErro
     {
         return Err(failure("launch_account_home_unsafe"));
     }
-    let canonical =
-        crate::sandbox::canonical(home).map_err(|_| failure("launch_account_home_unavailable"))?;
+    let canonical = kernel_sandbox::paths::canonical(home)
+        .map_err(|_| failure("launch_account_home_unavailable"))?;
     if let Some(owner) = owner {
-        let folders = crate::sandbox::harness_folders().map(|folder| owner.join(folder));
+        let folders = crate::sandbox::harness_folders()
+            .into_iter()
+            .map(|folder| owner.join(folder));
         for forbidden in std::iter::once(owner.to_path_buf()).chain(folders) {
-            if crate::sandbox::canonical(&forbidden).is_ok_and(|forbidden| forbidden == canonical)
+            if kernel_sandbox::paths::canonical(&forbidden)
+                .is_ok_and(|forbidden| forbidden == canonical)
                 || forbidden == home
             {
                 return Err(failure("launch_account_home_forbidden"));
@@ -1663,7 +1605,7 @@ pub(crate) fn validate_held_home(home: &Path, held: &std::fs::File) -> Result<()
 /// Checks a held account home against a given owner profile folder. Its kind, owner, access
 /// list and label are read from the held handle. The profile folder and its `.codex` and
 /// `.claude` are each opened and refused when they are the held folder itself, read from
-/// both handles, and also when their [`crate::sandbox::canonical`] spelling names the home,
+/// both handles, and also when their [`kernel_sandbox::paths::canonical`] spelling names the home,
 /// ignoring letter case. Inputs: the home, the held folder and the profile folder, none
 /// when unknown. Output: Ok, or a plain `launch_account_home_*` refusal code.
 #[cfg(windows)]
@@ -1683,7 +1625,7 @@ fn validate_held_for(
     if !folder || judge_home(&facts, &user).is_err() {
         return Err(failure("launch_account_home_unsafe"));
     }
-    let canonical = crate::sandbox::canonical(home).map_err(unavailable)?;
+    let canonical = kernel_sandbox::paths::canonical(home).map_err(unavailable)?;
     assert!(canonical.is_absolute());
     if let Some(owner) = owner {
         for forbidden in [
@@ -1699,7 +1641,7 @@ fn validate_held_for(
             {
                 return Err(forbidden_home());
             }
-            let named = crate::sandbox::canonical(&forbidden).unwrap_or(forbidden);
+            let named = kernel_sandbox::paths::canonical(&forbidden).unwrap_or(forbidden);
             if named
                 .as_os_str()
                 .eq_ignore_ascii_case(canonical.as_os_str())

@@ -6,8 +6,6 @@ use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
-use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
-use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::{Dependency, DependencyStatus, PackGroup};
 use crate::tui::client::OwnerEvent;
 use crate::tui::glyphs::Status;
@@ -15,6 +13,8 @@ use crate::tui::screens::settings_accounts::tests::{ctx, render};
 use crate::tui::seam::Request;
 use crate::tui::shell::{Shell, targets};
 use kernel_processes::run::Version;
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 

@@ -1,12 +1,13 @@
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::paths::Platform;
-use crate::service::Service;
-use crate::terminal::buffer::Chunk;
-use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{AgentId, Host, TerminalStream, type_into};
+use crate::terminal::tmux::installed;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use kernel_common::Platform;
+use kernel_processes::service::Service;
 use kernel_processes::spawn_gate;
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::tmux::Tmux;
+use kernel_processes::terminal::{AgentId, Host, TerminalStream, type_into};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -69,7 +70,12 @@ impl Fixtures {
         std::fs::create_dir(&folder).unwrap();
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         let tmux = installed(home).expect("tmux is required for the budget row");
-        let host = Tmux::open(Some(tmux.clone()), &folder);
+        let host = Tmux::open(
+            Some(tmux.clone()),
+            &folder,
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        );
         let cat = |agent: &AgentId| {
             let command = InteractiveCommand {
                 argv: vec!["/bin/cat".into()],
@@ -77,7 +83,11 @@ impl Fixtures {
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
             };
-            host.spawn(agent, &command).unwrap();
+            host.spawn(
+                agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         };
         let echo = AgentId::team(1).unwrap();
         #[cfg(target_os = "macos")]

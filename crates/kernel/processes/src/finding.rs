@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// The engine answers program finding needs without naming the engine crate: harness
 /// shims and prefixes, the projects the engine registered, and the folder checks that live
-/// with the sandbox and the service until their own moves. Built once by crazyagent
+/// with the sandbox until its own move. Built once by crazyagent
 /// (crazyagent's `HOOKS`). Inputs: the fields. Output: a value carried on [`Places`].
 #[derive(Clone, Copy)]
 pub struct FindingHooks {
@@ -32,8 +32,6 @@ pub struct FindingHooks {
     pub one_spelling: fn(PathBuf) -> PathBuf,
     pub canonical: fn(&Path) -> std::io::Result<PathBuf>,
     pub in_agent_tmp: fn(&Path) -> bool,
-    pub changeable_past_sticky: fn(&Path) -> Option<PathBuf>,
-    pub changeable_by_others: fn(&Path) -> Option<PathBuf>,
     pub harness_prefix: fn(&Path) -> PathBuf,
     pub gate_root: fn() -> Option<PathBuf>,
 }
@@ -122,10 +120,21 @@ const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 pub const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// The folders whose tools stay usable while the set-up projects cannot be read
 /// ([`Places::agent_writable`]): the system's, the Homebrew prefixes with their `Cellar` and
-/// `opt` folders (`/usr/local` lies under `/usr`), the Nix store, and on Linux Linuxbrew's
-/// prefix and the NixOS profiles. The normal path trusts every one of them too.
+/// `opt` folders (`/usr/local` lies under `/usr`), the Nix store, the system and default Nix
+/// profiles, on macOS the per-user profiles nix-darwin puts on the PATH, and on Linux
+/// Linuxbrew's prefix. Each is listed as the PATH spells it, since the check reads that form
+/// too. The normal path trusts every one of them, and every other check on a found file runs.
 #[cfg(not(target_os = "linux"))]
-const INSTALL_ROOTS: [&str; 5] = ["/usr", "/bin", "/sbin", "/opt/homebrew", "/nix/store"];
+const INSTALL_ROOTS: [&str; 8] = [
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/opt/homebrew",
+    "/nix/store",
+    "/run/current-system/sw",
+    "/etc/profiles/per-user",
+    "/nix/var/nix/profiles/default",
+];
 #[cfg(target_os = "linux")]
 const INSTALL_ROOTS: [&str; 8] = [
     "/usr",
@@ -165,6 +174,18 @@ const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
 /// The data root of the engine this process runs, recorded once at its start
 /// ([`record_engine_root`]).
 static ENGINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The most data folders whose last good read of the set-up projects is kept.
+const LAST_GOOD_ROOTS_MAX: usize = 16;
+
+/// The most folders one read of the set-up projects names: every row engine.db may hold,
+/// in its recorded, real and one-spelling forms ([`FindingHooks::registered_projects`]).
+pub const PROJECT_ROOTS_MAX: usize = 3 * 1024 * (64 + 3);
+
+/// The last good read of the set-up projects per data folder, which a failed read of the
+/// same folder falls back to ([`Places::at_roots`]).
+static LAST_GOOD: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<PathBuf>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Records the data root of the engine this process runs, once, at its start, so a launch
 /// looks in the same places setup does ([`Places::from_environment`]). Only the engine
@@ -216,6 +237,7 @@ pub struct Places {
     refused_temp: Vec<PathBuf>,
     app_folder: Option<PathBuf>,
     projects: Option<Vec<PathBuf>>,
+    last_good: Vec<PathBuf>,
     seed: FindingSeed,
 }
 
@@ -234,6 +256,7 @@ impl PartialEq for Places {
             refused_temp,
             app_folder,
             projects,
+            last_good,
             seed,
         } = self;
         *folders == other.folders
@@ -245,6 +268,7 @@ impl PartialEq for Places {
             && *refused_temp == other.refused_temp
             && *app_folder == other.app_folder
             && *projects == other.projects
+            && *last_good == other.last_good
             && *seed == other.seed
     }
 }
@@ -698,35 +722,42 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
                 why,
             })
         });
-    let found = places
+    let mut unresolved: Option<Missing> = None;
+    let candidates = places
         .bundled(name)
         .into_iter()
-        .chain(places.folders.iter().map(|folder| folder.join(name)))
-        .find(|candidate| match check_candidate(places, candidate) {
-            Some(Ok(())) => true,
+        .chain(places.folders.iter().map(|folder| folder.join(name)));
+    for candidate in candidates {
+        match check_candidate(places, &candidate) {
+            Some(Ok(())) => match entry_at(&candidate, places, depth) {
+                Ok(resolved) => return Ok(resolved),
+                Err(missing) => {
+                    unresolved.get_or_insert(missing);
+                }
+            },
             Some(Err(why)) => {
                 refused.get_or_insert_with(|| Refused {
                     file: candidate.clone(),
                     why,
                 });
-                false
             }
-            None => false,
+            None => {}
+        }
+    }
+    if let Some(missing) = unresolved {
+        return Err(Missing {
+            tool: name.to_owned(),
+            ..missing
         });
-    let Some(found) = found else {
-        probe::missed(|| places.seed.clone());
-        return Err(match refused {
-            Some(refused) => Missing {
-                reason: Reason::Refused,
-                refused: Some(Box::new(refused)),
-                ..not_found()
-            },
-            None => not_found(),
-        });
-    };
-    entry_at(&found, places, depth).map_err(|missing| Missing {
-        tool: name.to_owned(),
-        ..missing
+    }
+    probe::missed(|| places.seed.clone());
+    Err(match refused {
+        Some(refused) => Missing {
+            reason: Reason::Refused,
+            refused: Some(Box::new(refused)),
+            ..not_found()
+        },
+        None => not_found(),
     })
 }
 
@@ -1031,8 +1062,9 @@ struct Unreadable;
 /// and tabs: an absolute interpreter with its words, or `/usr/bin/env`, after one `-S` at
 /// most, with the program it names. An interpreter that is `env` anywhere else is refused
 /// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
-/// it cannot read, which the system still runs, and a line holding `#`, where the system
-/// ends it, are [`Unreadable`] (rv-sec2 B11 r2 F3, F4). Input: the real file. Output: the
+/// it cannot read, which the system still runs, a line holding `#`, where the system
+/// ends it, and an `-S` line with a word holding `$`, `\`, `"` or `'`, which `env` splits
+/// otherwise, are [`Unreadable`] (rv-sec2 B11 r2 F3, F4). Input: the real file. Output: the
 /// line, none for a file that is not a script, or [`Unreadable`] for any other first line.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
@@ -1084,7 +1116,10 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     let (program, arguments) = rest.split_first().ok_or(Unreadable)?;
     let plain = !program.starts_with('-')
         && !program.contains('=')
-        && !(split && program.contains(['$', '\\', '"', '\'']));
+        && !(split
+            && std::iter::once(program)
+                .chain(arguments)
+                .any(|word| word.contains(['$', '\\', '"', '\''])));
     if !plain {
         return Err(Unreadable);
     }
@@ -1266,7 +1301,7 @@ pub fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refus
     let hops = (places.seed.hooks.link_hops)(candidate)?;
     Some(if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
-    } else if let Some(part) = (places.seed.hooks.changeable_past_sticky)(candidate) {
+    } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
     } else if places.temp_refused
         && leads_into_temp(&places.seed.hooks, candidate, &real, &places.temps)
@@ -1279,12 +1314,18 @@ pub fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refus
     })
 }
 
+/// Whether a program name may be looked up in a folder: not empty, bounded, not `.` or `..`,
+/// holding no `/`, `\` or NUL, and not starting like a Windows drive (one ASCII letter then
+/// `:`), which on Windows replaces the folder it is joined to. One rule on every OS; a `:`
+/// later in the name stays. Input: the name. Output: the answer.
 fn valid_name(name: &str) -> bool {
+    let drive = matches!(name.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
     !name.is_empty()
         && name.len() <= NAME_BYTES_MAX
         && name != "."
         && name != ".."
         && !name.contains(['/', '\\', '\0'])
+        && !drive
 }
 
 /// Whether a path may name a place: absolute, bounded, not `/` and plain, with no `.` or

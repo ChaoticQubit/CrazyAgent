@@ -8,7 +8,7 @@ use crate::{CapgenError, load, wit};
 
 /// An in-test copy of `caps/settings.cap`, so a new `.cap` file under `caps/` leaves the
 /// exact-text row unchanged.
-const SETTINGS: &str = "enum OnQuit { keep_running, stop }
+pub(crate) const SETTINGS: &str = "enum OnQuit { keep_running, stop }
 enum LeftRunning { after_hours, never }
 type QuitSettings { on_quit: OnQuit, left_running: LeftRunning, hours: u16 }
 capability settings.save_quit(settings: QuitSettings) -> unit
@@ -49,6 +49,10 @@ interface settings-types {
     on-quit: on-quit,
     left-running: left-running,
     hours: u16,
+  }
+
+  record agent-quit-saved {
+    settings: quit-settings,
   }
 }
 

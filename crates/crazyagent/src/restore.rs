@@ -9,6 +9,13 @@ pub const ENGINE_RESTORING: &str = "engine_restoring";
 /// The code a client gives for an engine it does not start after a restore brought the 2.4
 /// data back.
 pub const ENGINE_RESTORED: &str = "engine_restored";
+/// The code a client gives for an engine it does not start because a restore did not finish:
+/// its rollback failed, or it stopped part way with no process left. The client shows the
+/// recovery screen in place of the start.
+pub const ENGINE_RESTORE_BROKEN: &str = "engine_restore_broken";
+/// The code every recovery action gives while the engine's login service still runs a
+/// process.
+pub const RECOVERY_BUSY: &str = "storage_putback_busy";
 
 /// Set once this engine process admitted the owner's restore of the pinned 2.4 backup. Only
 /// this flag, never a file, makes the process restore as it ends.
@@ -26,8 +33,22 @@ const COPY_PREFIX: &str = "replaced-";
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RestoreState {
     Pending,
+    Restoring { copy: Option<String> },
     Restored { copy: String },
     Failed { code: String },
+    Broken { copy: Option<String> },
+}
+
+/// What the recovery screen offers for a restore that did not finish: carry on with the
+/// unchanged 2.5 data, finish a restore that wrote the 2.4 data, put the named copy back, or
+/// nothing but the backups folder and the code.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Recovery {
+    Continue,
+    Finished { copy: String },
+    PutBack { copy: String },
+    Stuck { code: String },
 }
 
 /// Asks this engine to stop and bring back the pinned 2.4 backup once everything it runs has
@@ -92,18 +113,30 @@ pub fn state(root: &Path) -> Option<RestoreState> {
     }
 }
 
-/// Reads one record line: `pending` or `restoring`, both shown as a restore in progress,
-/// `restored replaced-<time>` with an optional `unverified_pin`, or
-/// `failed storage_restore_<reason>`. Input: the line. Output: the state, or none.
+/// Reads one record line: `pending`; `restoring` with the kept copy's name once there is
+/// one; `restored replaced-<time>` with an optional `unverified_pin`;
+/// `failed storage_restore_rollback_failed` with the copy's name; or
+/// `failed storage_restore_<reason>`. A restoring or rollback-failed line reads as such
+/// whatever follows, as the engine start refuses it, and anything but one copy's name
+/// counts as no name. Input: the line. Output: the state, or none.
 #[cfg(unix)]
 fn parse(line: &str) -> Option<RestoreState> {
     use crate::storage::setup::{
         RECORD_FAILED, RECORD_PENDING, RECORD_RESTORED, RECORD_RESTORING, RECORD_UNVERIFIED_PIN,
     };
+    use kernel_storage::restore::RESTORE_ROLLBACK_FAILED;
     let mut words = line.split(' ');
     let state = match (words.next()?, words.next(), words.next(), words.next()) {
-        (word, None, None, None) if word == RECORD_PENDING || word == RECORD_RESTORING => {
-            RestoreState::Pending
+        (word, None, None, None) if word == RECORD_PENDING => RestoreState::Pending,
+        (word, copy, tail, _) if word == RECORD_RESTORING => RestoreState::Restoring {
+            copy: named(copy, tail),
+        },
+        (word, Some(code), copy, tail)
+            if word == RECORD_FAILED && code == RESTORE_ROLLBACK_FAILED =>
+        {
+            RestoreState::Broken {
+                copy: named(copy, tail),
+            }
         }
         (word, Some(copy), tail, None)
             if word == RECORD_RESTORED && tail.is_none_or(|tail| tail == RECORD_UNVERIFIED_PIN) =>
@@ -130,15 +163,28 @@ fn parse(line: &str) -> Option<RestoreState> {
     Some(state)
 }
 
-/// Why a client must not start the engine at `root` by itself: a restore runs, or brought
-/// the 2.4 data back and one 2.5 start would upgrade it again. A pending record whose engine
-/// process is gone was left by a restore that died, and the start that follows clears it.
-/// Inputs: the engine root and whether its login service still runs a process. Output:
-/// `engine_restoring`, `engine_restored` or none.
+/// The kept copy's name a record line ends with: one word, `replaced-` and a time of letters
+/// and digits, with nothing after it. Inputs: the word and what follows it. Output: the
+/// name, or none.
+#[cfg(unix)]
+fn named(copy: Option<&str>, tail: Option<&str>) -> Option<String> {
+    let copy = copy.filter(|_| tail.is_none())?;
+    let time = copy.strip_prefix(COPY_PREFIX)?;
+    let shaped = !time.is_empty() && time.bytes().all(|b| b.is_ascii_alphanumeric());
+    shaped.then(|| copy.to_owned())
+}
+
+/// Why a client must not start the engine at `root` by itself: a restore runs, brought the
+/// 2.4 data back and one 2.5 start would upgrade it again, or did not finish. A pending record
+/// whose engine process is gone was left by a restore that died, and the start that follows
+/// clears it; a restoring one whose process is gone, or a failed rollback, needs the
+/// recovery screen. Inputs: the engine root and whether its login service still runs a
+/// process. Output: `engine_restoring`, `engine_restored`, `engine_restore_broken` or none.
 pub fn blocks_start(root: &Path, running: bool) -> Option<&'static str> {
     match state(root)? {
-        RestoreState::Pending if running => Some(ENGINE_RESTORING),
+        RestoreState::Pending | RestoreState::Restoring { .. } if running => Some(ENGINE_RESTORING),
         RestoreState::Pending => None,
+        RestoreState::Restoring { .. } | RestoreState::Broken { .. } => Some(ENGINE_RESTORE_BROKEN),
         RestoreState::Restored { .. } => Some(ENGINE_RESTORED),
         RestoreState::Failed { .. } => None,
     }
@@ -157,7 +203,7 @@ pub fn holds_restart(root: &Path, running: bool) -> bool {
 /// Whether the engine's login service still runs a process, as a restore's pending record is
 /// weighed. A status that can't be read counts as running, so a restore that may still copy
 /// is never stopped. Input: the service. Output: the answer.
-pub fn service_running(service: &crate::service::Service) -> bool {
+pub fn service_running(service: &kernel_processes::service::Service) -> bool {
     service.status().map_or(true, |status| status.running)
 }
 
@@ -171,6 +217,92 @@ pub fn restorable_until(root: &Path) -> Option<SystemTime> {
     {
         let _ = root;
         None
+    }
+}
+
+/// What the recovery screen offers for the engine at `root`, read without an engine and
+/// written nowhere. Inputs: the root and whether its login service still runs a process.
+/// Output: the offer, none when the record needs no recovery, or the refusal's text.
+pub fn recovery(root: &Path, running: bool) -> Result<Option<Recovery>, String> {
+    idle(running)?;
+    #[cfg(unix)]
+    {
+        use kernel_storage::restore::recovery::Recovery as Offer;
+        let database = root.join(kernel_storage::migrations::DATABASE);
+        let offer =
+            kernel_storage::restore::recovery::recovery(&database).map_err(|cause| cause.0)?;
+        Ok(offer.map(|offer| match offer {
+            Offer::Continue => Recovery::Continue,
+            Offer::Finished { copy } => Recovery::Finished { copy },
+            Offer::PutBack { copy } => Recovery::PutBack { copy },
+            Offer::Stuck { code } => Recovery::Stuck { code },
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Ok(None)
+    }
+}
+
+/// Puts the copy the restore record names back over engine.db, checked before and after,
+/// and clears the record. Inputs: the root and whether its login service still runs a
+/// process. Output: Ok, or the refusal's text with the record left as it was.
+pub fn put_back(root: &Path, running: bool) -> Result<(), String> {
+    idle(running)?;
+    #[cfg(unix)]
+    return kernel_storage::restore::recovery::put_back(
+        &root.join(kernel_storage::migrations::DATABASE),
+    )
+    .map(|saved| assert!(saved.starts_with(root)))
+    .map_err(|cause| cause.0);
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err("storage_restore_unavailable".into())
+    }
+}
+
+/// Carries on with the 2.5 data after a restore stopped before it changed anything, once
+/// engine.db passes its check again. Inputs: the root and whether its login service still
+/// runs a process. Output: Ok once the record is gone, or the refusal's text.
+pub fn continue_2_5(root: &Path, running: bool) -> Result<(), String> {
+    idle(running)?;
+    #[cfg(unix)]
+    return kernel_storage::restore::recovery::continue_2_5(
+        &root.join(kernel_storage::migrations::DATABASE),
+    )
+    .map_err(|cause| cause.0);
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err("storage_restore_unavailable".into())
+    }
+}
+
+/// Finishes a restore that wrote the 2.4 data and stopped before it recorded so: the key
+/// sweep runs again over the named copy and the record says restored. Inputs: the root,
+/// whether its login service still runs a process and the settings files. Output: Ok, or
+/// the refusal's text.
+pub fn finish(root: &Path, running: bool, global: &Path, project: &Path) -> Result<(), String> {
+    idle(running)?;
+    #[cfg(unix)]
+    return crate::storage::setup::finish_restore(root, global, project)
+        .map(|copy| assert!(!copy.is_empty()))
+        .map_err(|cause| cause.0);
+    #[cfg(not(unix))]
+    {
+        let _ = (root, global, project);
+        Err("storage_restore_unavailable".into())
+    }
+}
+
+/// Refuses a recovery action while the engine's login service still runs a process, which
+/// may hold engine.db. Input: whether it runs. Output: Ok, or `storage_putback_busy`.
+fn idle(running: bool) -> Result<(), String> {
+    match running {
+        true => Err(RECOVERY_BUSY.into()),
+        false => Ok(()),
     }
 }
 

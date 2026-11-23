@@ -14,10 +14,10 @@ mod tests;
 /// transaction's borrow. Input: the transaction. Output: Ok, or the engine's refusal.
 pub type FenceCheck = Box<dyn Fn(&Transaction<'_>) -> Result<(), StorageError>>;
 
-/// The engine's check of an aggregate name before it is written: true only for a name its
-/// replay reads, so the log never holds a row replay refuses. Input:
-/// the name. Output: whether it may be written.
-pub type KnownName = fn(&str) -> bool;
+/// The engine's set of aggregate names, which the writer and replay share: the writer refuses a name outside it and replay reads each stored name through it,
+/// so the log never holds a row replay refuses. Input: the name. Output: the engine's own
+/// name for it, or none for a name outside the set.
+pub type KnownName = fn(&str) -> Option<AggregateName>;
 
 /// The most `events` rows an own write keeps: the top of the engine's `events_retained`
 /// setting (1 to 256), so it never trims a row a client's setting keeps; the next owner
@@ -108,6 +108,13 @@ impl<'a, 'c> Appender<'a, 'c> {
         apply(self.tx)
     }
 
+    /// Tombstones one earlier event of this transaction's writer through
+    /// [`super::replay::redact`], behind the appender's own fence. Input: the seq. Output: Ok,
+    /// or the fence's or redact's refusal.
+    pub(crate) fn redact(&self, seq: u64) -> Result<(), StorageError> {
+        super::replay::redact(self.tx, seq, &self.fence)
+    }
+
     /// Opens the appender at a fenced revision: it must be the `state` revision now and
     /// newer than the last logged one. Inputs: the transaction, the revision, the fence and
     /// the name check. Output: the appender, or `state_log_revision_stale` or
@@ -140,6 +147,12 @@ impl<'a, 'c> Appender<'a, 'c> {
             fence,
             known,
         })
+    }
+
+    /// The transaction the appender writes in, for a kernel step that reads or rewrites the
+    /// log in the same transaction. Output: the transaction.
+    pub(crate) fn tx(&self) -> &'a Transaction<'c> {
+        self.tx
     }
 
     /// The revision this transaction's events carry. Output: the revision.
@@ -195,7 +208,7 @@ impl<'a, 'c> Appender<'a, 'c> {
     /// last possible `seq`. Input: the draft. Output: its `seq`.
     fn push(&mut self, draft: &Draft<'_>) -> Result<u64, StorageError> {
         check(draft)?;
-        if !(self.known)(draft.aggregate.name()) {
+        if (self.known)(draft.aggregate.name()).is_none() {
             return Err(error("state_log_aggregate_unknown"));
         }
         if self.appended >= TRANSACTION_EVENTS_MAX {

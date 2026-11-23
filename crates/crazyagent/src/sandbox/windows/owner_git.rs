@@ -1,8 +1,8 @@
 use super::{WindowsSandbox, container_for};
-use crate::sandbox::{
-    AGENT_HOME_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, canonical,
-    clean_absolute, invalid,
-};
+use crate::sandbox::{AGENT_HOME_ENV, ProjectSandbox, Sandbox};
+use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::paths::{canonical, clean_absolute};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -772,7 +772,7 @@ pub(crate) mod farm {
         let mut version = Command::new(owner.git());
         version
             .arg("--version")
-            .current_dir(crate::sandbox::canonical(project).unwrap())
+            .current_dir(kernel_sandbox::paths::canonical(project).unwrap())
             .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE);
         let mut wrapped = owner.wrap(&version).unwrap_or_else(|refused| {
             panic!(

@@ -25,14 +25,14 @@ fn authority(url: &url::Url) -> Option<String> {
 }
 
 /// The resolved addresses a probe dials, in order: every one but a cloud's metadata or
-/// credential service ([`crate::sandbox::metadata_address`]), so an account's host name
+/// credential service ([`kernel_common::net::metadata_address`]), so an account's host name
 /// cannot steer the engine there. This machine and private networks stay, for local models
 /// and servers on the owner's network (ACCOUNTS-PROBE-MAY-DIAL). Input: the resolved
 /// addresses. Output: the addresses to dial.
 fn dialed(resolved: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr> {
     resolved
         .into_iter()
-        .filter(|address| !crate::sandbox::metadata_address(address.ip()))
+        .filter(|address| !kernel_common::net::metadata_address(address.ip()))
         .collect()
 }
 

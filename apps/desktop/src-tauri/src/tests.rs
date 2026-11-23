@@ -145,7 +145,7 @@ fn a_finished_replacement_is_told_by_one_connect_reply() {
 fn only_an_older_engine_the_login_service_runs_is_replaced_at_launch() {
     let app = "2.4.1-dev.202611161323";
     let older = "2.4.1-dev.202611150900";
-    let service = |installed: bool, running: bool| crazyagent::service::Status {
+    let service = |installed: bool, running: bool| kernel_processes::service::Status {
         installed,
         running,
         pid: running.then_some(4242),
