@@ -4,7 +4,9 @@ use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::any_case;
 use kernel_sandbox::paths::at_or_below;
 use kernel_sandbox::policy::AgentFilesRule;
-use kernel_sandbox::profile::seatbelt::{hfs_ignored_deny, sbpl_overlong, seatbelt_pattern};
+use kernel_sandbox::profile::seatbelt::{
+    hfs_ignored_deny, regranted_denies, sbpl_overlong, seatbelt_pattern,
+};
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use std::fs;
 use std::io::Write;
@@ -53,7 +55,7 @@ pub fn qualified() -> bool {
 /// readable. On top, the whole engine data root is denied, then only the grants are given
 /// back, with the base
 /// write denies in `home` and the writable folders given again after them
-/// ([`crate::sandbox::regranted_denies`]), then every key
+/// ([`regranted_denies`]), then every key
 /// file directly in a folder of the data root (the owner keys) and the engine database are
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
@@ -136,11 +138,7 @@ pub fn profile(
     for folder in std::iter::once(&grants.home).chain(grants.writable.iter()) {
         text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
     }
-    let regranted = crate::sandbox::regranted_denies(
-        &crate::sandbox::PROFILE_HOOKS,
-        grants.home,
-        grants.writable,
-    );
+    let regranted = regranted_denies(&crate::sandbox::PROFILE_HOOKS, grants.home, grants.writable);
     text.push_str(")\n");
     text.push_str(regranted.trim_end());
     if !grants.readable.is_empty() || !grants.read_only.is_empty() {
