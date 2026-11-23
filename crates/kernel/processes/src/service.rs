@@ -1095,13 +1095,16 @@ pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>,
     let _ = std::fs::remove_dir(old);
 }
 
-/// Whether the command line link at `link` leads to the old copy `old`, however it names it:
-/// by an absolute path, by one relative to the link's folder, or through other links, both
-/// read to the file they end at. A link that cannot be followed, or an old copy that is not
-/// there, leads to nothing. Inputs: the link and the old copy. Output: the answer.
+/// Whether the command line link at `link` leads to the old copy `old`: it names `old`
+/// exactly, even when that file is already gone, or it ends at the same file once both are
+/// read through every link, as a path relative to the link's folder or a chain of links
+/// does. Inputs: the link and the old copy. Output: the answer.
 fn names_old_copy(link: &Path, old: &Path) -> bool {
-    std::fs::symlink_metadata(link).is_ok_and(|metadata| metadata.file_type().is_symlink())
-        && matches!(
+    let Ok(named) = std::fs::read_link(link) else {
+        return false;
+    };
+    named == old
+        || matches!(
             (std::fs::canonicalize(link), std::fs::canonicalize(old)),
             (Ok(led), Ok(copy)) if led == copy
         )
