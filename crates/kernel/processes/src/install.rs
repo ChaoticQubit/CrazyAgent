@@ -343,5 +343,10 @@ pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
     }
 }
 
+mod steps;
+#[cfg(unix)]
+pub use steps::run;
+pub use steps::{InstallPaths, SOURCE_BYTES_MAX, Step, steps};
+
 #[cfg(test)]
 mod tests;
