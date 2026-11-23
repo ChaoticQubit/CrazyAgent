@@ -1464,3 +1464,6 @@ pub mod test_seams;
 #[cfg(test)]
 #[path = "tmux/tests.rs"]
 mod tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tmux/reattach_tests.rs"]
+mod reattach_tests;
