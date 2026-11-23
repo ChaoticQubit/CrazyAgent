@@ -28,10 +28,30 @@ export type Wire =
 /** The bus's reply to one call: the output, or the refusal. */
 export type WireReply = { readonly ok: Wire } | { readonly refused: Refusal };
 
-/** The transport the kernel bound to this plugin. Input: the capability name and the input
- * keyed by parameter name. Output: the reply. The plugin never names itself in a call. */
+/** One delivered event record, as the kernel sends it after commit. */
+export type EventRecord = {
+  readonly seq: string;
+  readonly revision: string;
+  readonly aggregate: string;
+  readonly kind: string;
+  readonly schema: number;
+  readonly body: Wire;
+};
+
+/** Stops one subscription. Calling it twice is a no-op. */
+export type Unsubscribe = () => void;
+
+/** The transport the kernel bound to this plugin. `call` takes the capability name and the
+ * input keyed by parameter name and gives the reply; `subscribe` takes the kinds, the last
+ * seq seen as a decimal (or null) and the record callback and gives the stop. The plugin
+ * never names itself; the kernel decides which kinds it may see. */
 export interface Host {
   call(capability: string, input: { readonly [key: string]: Wire }): Promise<WireReply>;
+  subscribe(
+    kinds: readonly string[],
+    after: string | null,
+    onRecord: (record: EventRecord) => void,
+  ): Unsubscribe;
 }
 
 /** The most bytes one `text` value of a capability call may hold. */
@@ -64,6 +84,71 @@ export async function call<T>(
     return { ok: false, refusal: reply.refused };
   }
   return { ok: true, value: decode(reply.ok) };
+}
+
+/** Subscribes to some kinds of one stem and delivers each event once, in seq order.
+ * Inputs: the host, the stem's kinds and decoder, the last seq seen (or null), the handler.
+ * Output: the unsubscribe. A seq at or below the last one seen is skipped (at-least-once
+ * delivery); a body that does not decode reaches the handler as `sdk_event_undecodable`. */
+export function subscribe<E>(
+  host: Host,
+  kinds: readonly string[],
+  decode: (kind: string, body: Wire) => E | null,
+  after: bigint | null,
+  handler: (event: Result<{ readonly seq: bigint; readonly event: E }>) => void,
+): Unsubscribe {
+  if (kinds.length === 0 || kinds.length > LIST_ITEMS_MAX) {
+    throw new RangeError("sdk_subscribe_kinds");
+  }
+  const start = after === null ? null : encodeU64(after);
+  const wanted = new Set(kinds);
+  const undecodable = () =>
+    handler({ ok: false, refusal: { kind: "failed", code: "sdk_event_undecodable" } });
+  let last = after;
+  let open = true;
+  const onRecord = (record: EventRecord): void => {
+    if (!open) {
+      return;
+    }
+    let seq: bigint;
+    try {
+      seq = decodeU64(record.seq);
+    } catch {
+      undecodable();
+      return;
+    }
+    if (last !== null && seq <= last) {
+      return;
+    }
+    last = seq;
+    if (!wanted.has(record.kind)) {
+      return;
+    }
+    let event: E | null;
+    try {
+      event = decode(record.kind, record.body);
+    } catch {
+      undecodable();
+      return;
+    }
+    if (event !== null) {
+      handler({ ok: true, value: { seq, event } });
+    }
+  };
+  let stop: Unsubscribe;
+  try {
+    stop = host.subscribe(kinds, start, onRecord);
+  } catch {
+    open = false;
+    handler({ ok: false, refusal: { kind: "failed", code: "sdk_transport_failed" } });
+    return () => {};
+  }
+  return () => {
+    if (open) {
+      open = false;
+      stop();
+    }
+  };
 }
 
 /** Writes a u64 as its decimal string. Input: a bigint in [0, 2^64). Output: the string. */

@@ -1,6 +1,6 @@
 use super::events::{SCAN_EVERY, Watched, choice};
 use crate::protocol::ProjectId;
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Instant;

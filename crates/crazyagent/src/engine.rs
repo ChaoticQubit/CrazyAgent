@@ -527,7 +527,7 @@ async fn serve_client(mut stream: Stream, engine: std::sync::Arc<Engine>, timeou
 #[cfg(unix)]
 type TerminalHost = (
     Option<std::path::PathBuf>,
-    std::sync::Arc<dyn crate::terminal::Host>,
+    std::sync::Arc<dyn kernel_processes::terminal::Host>,
     u64,
 );
 

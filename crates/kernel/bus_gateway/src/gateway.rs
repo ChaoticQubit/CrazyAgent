@@ -1,3 +1,4 @@
+use sdk::net;
 use sdk::secrets::{self, Secret};
 use sdk::settings::{self, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
@@ -17,22 +18,25 @@ pub struct Gateway<'p> {
     grants: &'p Grants,
     settings: &'p dyn settings::Provide,
     secrets: &'p dyn secrets::Provide,
+    net: &'p dyn net::Provide,
     refusals: &'p dyn Refusals,
 }
 
 impl<'p> Gateway<'p> {
-    /// Builds a gateway. Inputs: the grant table, the settings and secrets providers and
-    /// the refusal sink. Output: the gateway.
+    /// Builds a gateway. Inputs: the grant table, the settings, secrets and net providers
+    /// and the refusal sink. Output: the gateway.
     pub fn new(
         grants: &'p Grants,
         settings: &'p dyn settings::Provide,
         secrets: &'p dyn secrets::Provide,
+        net: &'p dyn net::Provide,
         refusals: &'p dyn Refusals,
     ) -> Self {
         Self {
             grants,
             settings,
             secrets,
+            net,
             refusals,
         }
     }
@@ -144,6 +148,17 @@ impl sdk::Host for Bound<'_, '_> {
             secrets::check_forget_input,
             |secret| self.gateway.secrets.forget(self.plugin, secret),
             secrets::check_forget_output,
+        )
+    }
+
+    fn net_request(&self, request: net::Request) -> Result<net::Reply, Refusal> {
+        self.gateway.call(
+            self.plugin,
+            &net::REQUEST,
+            request,
+            net::check_request_input,
+            |request| self.gateway.net.request(self.plugin, request),
+            net::check_request_output,
         )
     }
 }

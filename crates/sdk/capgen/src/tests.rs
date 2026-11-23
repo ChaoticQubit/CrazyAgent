@@ -50,10 +50,12 @@ fn settings_cap_generates_the_checked_in_files() {
             .collect::<Vec<_>>(),
         vec![
             "envelope/mod.rs",
+            "envelope/net.rs",
             "envelope/secrets.rs",
             "envelope/settings.rs",
             "host.rs",
             "mod.rs",
+            "net.rs",
             "secrets.rs",
             "settings.rs"
         ]
@@ -75,7 +77,13 @@ fn a_renamed_field_changes_the_output() {
     let renamed = source.replace("hours: u16", "hour_count: u16");
     assert_ne!(renamed, source);
     let secrets = fs::read_to_string(sdk("caps/secrets.cap")).expect("secrets.cap reads");
-    let files = rust(&parsed(&[("secrets", &secrets), ("settings", &renamed)])).expect("generates");
+    let net = fs::read_to_string(sdk("caps/net.cap")).expect("net.cap reads");
+    let files = rust(&parsed(&[
+        ("net", &net),
+        ("secrets", &secrets),
+        ("settings", &renamed),
+    ]))
+    .expect("generates");
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
         vec!["settings.rs".to_owned()]
@@ -442,6 +450,12 @@ fn generated(sources: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 /// The text of one generated file. Inputs: the files and the path. Output: the text.
+/// Text with every run of whitespace made one space, so a check reads the same before and
+/// after rustfmt wraps a line. Input: the text. Output: the flattened text.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn file_text<'f>(files: &'f [(String, String)], path: &str) -> &'f str {
     &files
         .iter()
@@ -600,22 +614,27 @@ fn a_call_taking_a_foreign_handle_writes_its_checks_and_traits() {
         ("secrets", "handle Secret"),
     ]);
     let net = file_text(&files, "net.rs");
+    let flat_net = flat(net);
     assert!(
-        net.contains("keys: &[super::secrets::Secret], ring: &Ring"),
+        flat_net.contains(&flat("keys: &[super::secrets::Secret], ring: &Ring")),
         "{net}"
     );
     assert!(
-        net.contains("keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"),
+        flat_net.contains(&flat(
+            "keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"
+        )),
         "{net}"
     );
     assert!(
-        net.contains(
+        flat_net.contains(&flat(
             "fn fits_ring(value: &Ring) -> bool {\n    value.keys.len() <= crate::LIST_ITEMS_MAX\n}"
-        ),
+        )),
         "{net}"
     );
     assert!(
-        net.contains("s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"),
+        flat_net.contains(&flat(
+            "s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"
+        )),
         "{net}"
     );
     assert_eq!(

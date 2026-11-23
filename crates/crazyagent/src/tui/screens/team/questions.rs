@@ -4,7 +4,6 @@ use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::TeamAction;
 use crate::team::questions::{Inbox, OwnerQuestion, WaitingAgent};
-use crate::terminal::AgentId;
 use crate::tui::client::OwnerEvent;
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Message, hint};
@@ -14,6 +13,7 @@ use crate::tui::screens::new_project_page::key_event;
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::text::{cut, styled, wrap};
 use crate::tui::theme::Role;
+use kernel_processes::terminal::AgentId;
 use ratatui::text::Line;
 
 type QuestionLines = (String, Vec<Line<'static>>, Option<(usize, usize)>);

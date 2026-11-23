@@ -2,7 +2,8 @@ use crate::research::runner::RunError;
 #[cfg(unix)]
 use crate::research::runner::{AgentProcess, drain, private_directory};
 #[cfg(unix)]
-use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+use crate::sandbox::ProjectSandbox;
+use kernel_sandbox::net::SandboxNetwork;
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]

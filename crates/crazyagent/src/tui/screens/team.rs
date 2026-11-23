@@ -8,7 +8,7 @@ use crate::team::{
     AgentRole, AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction,
     TeamGraph,
 };
-use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
+use crate::terminal::TerminalFrame;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
@@ -30,6 +30,7 @@ use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
 use crate::tui::text::{cut, join, list_row, pad, styled, width, wrap};
 use crate::tui::theme::Role;
+use kernel_processes::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
@@ -596,9 +597,9 @@ fn edge_label(edge: &RelationEdge) -> String {
 
 /// Says whether a terminal code means the agent's terminal ended for good.
 /// Input: a Closed or Rejected code. Output: true for an ended run, a stopped agent, an
-/// unknown pane or a lead whose teammates' server ended ([`crate::terminal::ended_code`]).
+/// unknown pane or a lead whose teammates' server ended ([`kernel_processes::terminal::ended_code`]).
 fn dead(code: &str) -> bool {
-    matches!(code, ENDED | STOPPED) || crate::terminal::ended_code(code)
+    matches!(code, ENDED | STOPPED) || kernel_processes::terminal::ended_code(code)
 }
 
 /// Says whether a terminal code means the engine connection dropped, so the

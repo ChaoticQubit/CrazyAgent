@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crazyagent_cap::{Capability, Enum, File, Type, TypeRef};
+use crazyagent_cap::{Capability, Enum, Field, File, TypeRef};
 
 use crate::CapgenError;
 
@@ -101,7 +101,8 @@ pub(crate) fn files(files: &[(&str, File)]) -> Result<Vec<(String, String)>, Cap
     let mut imports = Vec::with_capacity(sorted.len());
     for (stem, file) in &sorted {
         let name = snake_kebab(stem, stem)?;
-        if !(file.enums.is_empty() && file.handles.is_empty() && file.types.is_empty()) {
+        let items = file.enums.len() + file.handles.len() + file.types.len();
+        if items > 0 || !crate::rust_wire::events(file).is_empty() {
             text.push('\n');
             text.push_str(&types_interface(stem, &name, file)?);
         }
@@ -166,17 +167,20 @@ fn visit<'f>(
     Ok(())
 }
 
-/// Writes a file's types interface: `use` lines for the foreign leaves its records name,
-/// then its enums, handles and records. Inputs: the stem, its kebab name and the file.
-/// Output: the text, or `capgen_wit_name` / `capgen_name_collision`.
+/// Writes a file's types interface: `use` lines for the foreign leaves its records and
+/// event bodies name, then its enums, handles, records and one record per event kind.
+/// Inputs: the stem, its kebab name and the file. Output: the text, or `capgen_wit_name` /
+/// `capgen_name_collision`.
 fn types_interface(stem: &str, name: &str, file: &File) -> Result<String, CapgenError> {
     let mut taken = BTreeSet::new();
+    let events = crate::rust_wire::events(file);
     let items = file
         .enums
         .iter()
         .map(|item| &item.name)
         .chain(file.handles.iter().map(|item| &item.name))
-        .chain(file.types.iter().map(|item| &item.name));
+        .chain(file.types.iter().map(|item| &item.name))
+        .chain(events.iter().map(|event| &event.kind));
     for item in items {
         take(stem, &mut taken, &pascal_kebab(item))?;
     }
@@ -204,7 +208,10 @@ fn types_interface(stem: &str, name: &str, file: &File) -> Result<String, Capgen
         ));
     }
     for item in &file.types {
-        parts.push(record(stem, item, &written)?);
+        parts.push(record(stem, &item.name, &item.fields, &written)?);
+    }
+    for event in &events {
+        parts.push(record(stem, &event.kind, &event.fields, &written)?);
     }
     assert!(!parts.is_empty());
     Ok(format!(
@@ -314,11 +321,17 @@ fn enumeration(stem: &str, item: &Enum) -> Result<String, CapgenError> {
 }
 
 /// Writes one record with its kebab fields, a foreign leaf by its written name.
-/// Inputs: the stem, the type and the written used names. Output: the block, or the refusal.
-fn record(stem: &str, item: &Type, written: &Written) -> Result<String, CapgenError> {
-    assert!(!item.fields.is_empty());
-    let mut text = format!("  record {} {{\n", escape(&pascal_kebab(&item.name)));
-    for field in &item.fields {
+/// Inputs: the stem, the record's name, its fields and the written used names.
+/// Output: the block, or the refusal.
+fn record(
+    stem: &str,
+    name: &str,
+    fields: &[Field],
+    written: &Written,
+) -> Result<String, CapgenError> {
+    assert!(!fields.is_empty());
+    let mut text = format!("  record {} {{\n", escape(&pascal_kebab(name)));
+    for field in fields {
         text.push_str(&format!(
             "    {}: {},\n",
             escape(&snake_kebab(stem, &field.name)?),
@@ -486,11 +499,17 @@ fn named_in(ty: &TypeRef) -> Option<&str> {
     }
 }
 
-/// The type refs a file's records name. Input: the file. Output: the refs.
+/// The type refs a file's records and event bodies name. Input: the file. Output: the refs.
 fn field_refs(file: &File) -> impl Iterator<Item = &TypeRef> {
+    let events = file
+        .capabilities
+        .iter()
+        .flat_map(|capability| capability.emits.iter())
+        .flat_map(|event| event.fields.iter().map(|field| &field.ty));
     file.types
         .iter()
         .flat_map(|item| item.fields.iter().map(|field| &field.ty))
+        .chain(events)
 }
 
 /// The type refs a file's functions name: capability inputs and outputs, never event

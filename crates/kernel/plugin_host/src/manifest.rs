@@ -17,6 +17,18 @@ pub const PLUGIN_ID_MAX: usize = 64;
 pub const NAME_BYTES_MAX: usize = 64;
 
 const PLUGIN_KEYS: [&str; 5] = ["plugin", "tier", "kind", "version", "permissions"];
+/// The one optional key of every kind's `plugin.toml`: the hosts `net.request` may reach.
+const NET_KEY: &str = "net";
+/// The permission that requires a `[net]` section, and that a `[net]` section requires.
+const NET_PERMISSION: &str = "net.request";
+/// The most hosts one `[net]` section may list.
+pub const HOSTS_MAX: usize = 16;
+/// The most bytes of one `[net]` host name, its port not counted.
+pub const HOST_BYTES_MAX: usize = 253;
+/// The most capture fields one `[net.capture]` host may name.
+pub const NET_CAPTURES_MAX: usize = 4;
+/// The most bytes of one capture field name.
+pub const CAPTURE_FIELD_BYTES_MAX: usize = 64;
 /// The keys only an embedding plugin's `plugin.toml` holds; the embedding reader judges
 /// their values.
 pub const EMBEDDING_KEYS: [&str; 4] = ["title", "release", "description", "http"];
@@ -30,6 +42,16 @@ pub struct Manifest {
     pub kind: String,
     pub version: i64,
     pub permissions: Vec<String>,
+    pub net: Option<Net>,
+}
+
+/// A plugin's `[net]` section: the hosts `net.request` may reach, each a lowercase DNS
+/// name or loopback address with an optional port, and per host the reply fields the
+/// kernel always captures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Net {
+    pub hosts: Vec<String>,
+    pub capture: Vec<(String, Vec<String>)>,
 }
 
 /// What a bounded read of one file found: its UTF-8 text, more bytes than the bound, or a
@@ -169,6 +191,7 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
     let embedding = table.get("kind").and_then(Value::as_str) == Some("embedding");
     if let Some(key) = table.keys().find(|key| {
         !PLUGIN_KEYS.contains(&key.as_str())
+            && key.as_str() != NET_KEY
             && !(embedding && EMBEDDING_KEYS.contains(&key.as_str()))
     }) {
         return Err(invalid(key));
@@ -216,11 +239,155 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
             })
         })
         .ok_or_else(|| invalid("permissions"))?;
+    let net = match (
+        table.get(NET_KEY),
+        permissions.iter().any(|name| name == NET_PERMISSION),
+    ) {
+        (None, false) => None,
+        (Some(section), true) => Some(net(section).ok_or_else(|| Refused {
+            code: "plugin_manifest_not_allowed",
+            line: net_line(text),
+        })?),
+        (None, true) => {
+            return Err(Refused {
+                code: "plugin_net_without_permission",
+                ..invalid("permissions")
+            });
+        }
+        (Some(_), false) => {
+            return Err(Refused {
+                code: "plugin_net_without_permission",
+                line: net_line(text),
+            });
+        }
+    };
     Ok(Manifest {
         plugin,
         tier,
         kind,
         version,
         permissions,
+        net,
     })
+}
+
+/// The line of a manifest's `[net]` section, or of a top-level `net` key. Input: the
+/// text. Output: the 1-based line, 1 when there is none.
+fn net_line(text: &str) -> usize {
+    text.lines()
+        .position(|line| {
+            let line = line.trim_start();
+            line.starts_with("[net]")
+                || line.starts_with("[net.")
+                || line
+                    .strip_prefix(NET_KEY)
+                    .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })
+        .map_or(1, |index| index + 1)
+}
+
+/// Reads one `[net]` section: only `hosts`, 1 to `HOSTS_MAX` distinct [`net_host`]s, and
+/// an optional `[net.capture]` table whose keys are listed hosts, each naming 1 to
+/// `NET_CAPTURES_MAX` distinct [`capture_field`]s. Input: the section's value. Output: the
+/// section, or none for any other key, type or value.
+fn net(section: &Value) -> Option<Net> {
+    let section = section.as_table()?;
+    if section.keys().any(|key| key != "hosts" && key != "capture") {
+        return None;
+    }
+    let hosts = section
+        .get("hosts")?
+        .as_array()?
+        .iter()
+        .map(|host| {
+            host.as_str()
+                .filter(|host| net_host(host))
+                .map(str::to_owned)
+        })
+        .collect::<Option<Vec<String>>>()?;
+    let distinct = hosts
+        .iter()
+        .enumerate()
+        .all(|(index, host)| !hosts[..index].contains(host));
+    if hosts.is_empty() || hosts.len() > HOSTS_MAX || !distinct {
+        return None;
+    }
+    let mut capture = Vec::new();
+    if let Some(table) = section.get("capture") {
+        for (host, fields) in table.as_table()? {
+            let fields = fields
+                .as_array()?
+                .iter()
+                .map(|field| {
+                    field
+                        .as_str()
+                        .filter(|field| capture_field(field))
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<String>>>()?;
+            let distinct = fields
+                .iter()
+                .enumerate()
+                .all(|(index, field)| !fields[..index].contains(field));
+            if !hosts.contains(host)
+                || fields.is_empty()
+                || fields.len() > NET_CAPTURES_MAX
+                || !distinct
+            {
+                return None;
+            }
+            capture.push((host.clone(), fields));
+        }
+    }
+    assert!(hosts.len() <= HOSTS_MAX && capture.len() <= hosts.len());
+    Some(Net { hosts, capture })
+}
+
+/// Whether one `[net]` host fits: a lowercase DNS name of at most `HOST_BYTES_MAX` bytes
+/// whose labels are 1 to 63 letters, digits or inner hyphens, or the loopback address
+/// `127.0.0.1` or `[::1]`, then an optional `:port` from 1 to 65535 without a leading zero.
+/// No scheme, path, query, wildcard, userinfo or other IP literal: a name whose last label
+/// is all digits or starts with `0x` is an IPv4 form a URL parser reads as an address, so it
+/// is refused. Input: the host. Output: the answer.
+fn net_host(host: &str) -> bool {
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port))
+            if !name.ends_with(':') && (!name.contains(':') || name.ends_with(']')) =>
+        {
+            (name, Some(port))
+        }
+        _ => (host, None),
+    };
+    let port_fits = port.is_none_or(|port| {
+        !port.is_empty()
+            && !port.starts_with('0')
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|port| port >= 1)
+    });
+    let loopback = matches!(name, "127.0.0.1" | "[::1]");
+    let last = name.rsplit('.').next().unwrap_or(name);
+    let numeric = last.starts_with("0x")
+        || (!last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit()));
+    let dns = !numeric
+        && name.len() <= HOST_BYTES_MAX
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        });
+    port_fits && (loopback || dns)
+}
+
+/// Whether one capture field name fits: 1 to `CAPTURE_FIELD_BYTES_MAX` bytes of ASCII
+/// letters, digits, `_` or `-`. Input: the name. Output: the answer.
+fn capture_field(field: &str) -> bool {
+    !field.is_empty()
+        && field.len() <= CAPTURE_FIELD_BYTES_MAX
+        && field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }

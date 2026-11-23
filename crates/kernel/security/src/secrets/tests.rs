@@ -369,3 +369,38 @@ fn a_scope_leaf_outside_its_shape_is_refused() {
         );
     }
 }
+
+#[test]
+fn forget_of_a_held_value_drops_it_without_a_store_call() {
+    let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
+    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, None);
+    let id = secrets.hold("github", paste()).unwrap();
+    assert_eq!(
+        secrets.value("github", id).unwrap().expose().as_bytes(),
+        PASTE
+    );
+    secrets.forget("github", id).unwrap();
+    assert_eq!(*store.calls.lock().unwrap(), 0);
+    assert_eq!(
+        secrets.value("github", id).map(|_| ()),
+        Err(StoreError::code("secret_handle_refused"))
+    );
+}
+
+#[test]
+fn a_held_value_is_refused_for_another_plugin_and_never_resolves_to_a_reference() {
+    let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
+    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, None);
+    let id = secrets.hold("github", paste()).unwrap();
+    assert_eq!(
+        secrets.value("notes", id).map(|_| ()),
+        Err(StoreError::code("secret_handle_refused"))
+    );
+    assert_eq!(
+        secrets.forget("notes", id),
+        Err(StoreError::code("secret_handle_refused"))
+    );
+    assert!(handles.lock().unwrap().resolve("github", id).is_err());
+    assert_eq!(*store.calls.lock().unwrap(), 0);
+    assert!(secrets.value("github", id).is_ok());
+}

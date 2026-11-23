@@ -207,14 +207,16 @@ fn malformed() -> std::io::Error {
     )
 }
 
-#[cfg(all(test, unix))]
-pub(crate) mod tests {
+/// Test helpers other crates' tests use to build ELF files, behind the `test-support`
+/// feature so they never reach a release build. Unix only, as the reader's callers are.
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub mod test_support {
     use super::*;
 
     /// Builds the bytes of a minimal ELF executable: the file header, one PT_LOAD program
     /// header, a PT_INTERP header naming `loader` when given, and the loader path. Inputs:
     /// 64-bit or 32-bit, big or little endian, and the loader. Output: the file bytes.
-    pub(crate) fn executable(wide: bool, big: bool, loader: Option<&str>) -> Vec<u8> {
+    pub fn executable(wide: bool, big: bool, loader: Option<&str>) -> Vec<u8> {
         let put = |bytes: &mut Vec<u8>, value: u64, width: usize| {
             let mut field: Vec<u8> = (0..width).map(|at| (value >> (8 * at)) as u8).collect();
             if big {
@@ -269,6 +271,12 @@ pub(crate) mod tests {
         }
         bytes
     }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::test_support::executable;
+    use super::*;
 
     #[cfg(unix)]
     fn written(folder: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {

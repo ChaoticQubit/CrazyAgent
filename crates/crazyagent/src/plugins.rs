@@ -928,10 +928,13 @@ const WINDOWS_CHECK_LIMIT: &str = "limiting a Windows agent's network to a few p
 /// The refusal of a server check whose network names hosts or ports on Windows (#519 F1).
 /// Inputs: the OS and the check's network. Output: the problem to record, or None when the
 /// check may run.
-pub fn check_network_refused(os: &str, network: &crate::sandbox::SandboxNetwork) -> Option<String> {
+pub fn check_network_refused(
+    os: &str,
+    network: &kernel_sandbox::net::SandboxNetwork,
+) -> Option<String> {
     let limited = matches!(
         network,
-        crate::sandbox::SandboxNetwork::Only(remotes) if !remotes.is_empty()
+        kernel_sandbox::net::SandboxNetwork::Only(remotes) if !remotes.is_empty()
     );
     (os == "windows" && limited).then(|| check_refused(WINDOWS_CHECK_LIMIT))
 }
@@ -1154,7 +1157,7 @@ mod tests {
     #[test]
     fn a_windows_check_under_a_host_or_port_limit_is_refused_with_the_firewall_reason() {
         use crate::sandbox::policy::AgentNetwork;
-        use crate::sandbox::{SandboxNetwork, SandboxRemote};
+        use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
         let https = AgentNetwork::Https.sandbox(None);
         assert_eq!(
             https,
@@ -1343,7 +1346,7 @@ mod tests {
             Some("server_node_folder_unreadable")
         );
         let folder = std::path::Path::new(r"C:\Program Files\nodejs");
-        let reason = crate::sandbox::unreadable_reason(folder);
+        let reason = kernel_sandbox::error::unreadable_reason(folder);
         assert!(reason.contains(r"C:\Program Files\nodejs"), "{reason}");
         assert!(check_problem(&check_refused(&reason)).contains(&reason));
     }

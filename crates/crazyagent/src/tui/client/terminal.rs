@@ -1,11 +1,12 @@
 use super::bounded_problem;
 use crate::engine::Client;
 use crate::engine::owner::{OwnerClientKind, TerminalOutput, TerminalSession};
-use crate::terminal::{
-    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, input_runs, input_runs_max,
-};
+use crate::terminal::TerminalFrame;
 use crate::tui::seam::Request;
 use crate::tui::terminal_pane::{PASTE_CLOSE, PASTE_OPEN};
+use kernel_processes::terminal::{
+    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, input_runs, input_runs_max,
+};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
@@ -79,7 +80,7 @@ impl Terminals {
         match request {
             Request::TerminalAttach { agent } => self.want(agent, None),
             Request::TerminalAttachPane { agent, pane } => {
-                assert!(crate::terminal::pane_id_valid(&pane));
+                assert!(kernel_processes::terminal::pane_id_valid(&pane));
                 self.want(agent, Some(pane));
             }
             Request::TerminalInput { agent, bytes } => {

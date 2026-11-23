@@ -1,5 +1,5 @@
 use super::pane::Pane;
-use crazyagent::terminal::DESKTOP_VIEWS_MAX;
+use kernel_processes::terminal::DESKTOP_VIEWS_MAX;
 use std::collections::{HashMap, VecDeque};
 
 /// The most native views open at once across all windows, the engine's own desktop cap.
