@@ -152,6 +152,16 @@ fn versions_compare_as_semver_with_dev_builds_below_their_stable() {
     assert_eq!(code(is_newer("latest", "0.2.0")), "update_manifest_invalid");
 }
 
+/// Build metadata carries no precedence in semver, so two releases that differ only in it
+/// are the same release: neither reads as newer than the other.
+#[test]
+fn versions_that_differ_only_in_build_metadata_are_not_newer() {
+    assert!(!is_newer("1.2.3+b", "1.2.3+a").unwrap());
+    assert!(!is_newer("1.2.3+a", "1.2.3+b").unwrap());
+    assert!(!is_newer("1.2.3+build.9", "1.2.3").unwrap());
+    assert!(is_newer("1.2.4+a", "1.2.3+b").unwrap());
+}
+
 #[test]
 fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
     let folder = tempfile::tempdir().unwrap();
