@@ -166,6 +166,18 @@ const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
 /// ([`record_engine_root`]).
 static ENGINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// The most data folders whose last good read of the set-up projects is kept.
+const LAST_GOOD_ROOTS_MAX: usize = 16;
+
+/// The most folders one read of the set-up projects names: every row engine.db may hold,
+/// in its recorded, real and one-spelling forms ([`FindingHooks::registered_projects`]).
+pub const PROJECT_ROOTS_MAX: usize = 3 * 1024 * (64 + 3);
+
+/// The last good read of the set-up projects per data folder, which a failed read of the
+/// same folder falls back to ([`Places::at_roots`]).
+static LAST_GOOD: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<PathBuf>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Records the data root of the engine this process runs, once, at its start, so a launch
 /// looks in the same places setup does ([`Places::from_environment`]). Only the engine
 /// binary records it; recording another root later is a bug. Input: the absolute root.
@@ -216,6 +228,7 @@ pub struct Places {
     refused_temp: Vec<PathBuf>,
     app_folder: Option<PathBuf>,
     projects: Option<Vec<PathBuf>>,
+    last_good: Vec<PathBuf>,
     seed: FindingSeed,
 }
 
@@ -234,6 +247,7 @@ impl PartialEq for Places {
             refused_temp,
             app_folder,
             projects,
+            last_good,
             seed,
         } = self;
         *folders == other.folders
@@ -245,6 +259,7 @@ impl PartialEq for Places {
             && *refused_temp == other.refused_temp
             && *app_folder == other.app_folder
             && *projects == other.projects
+            && *last_good == other.last_good
             && *seed == other.seed
     }
 }
