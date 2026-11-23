@@ -156,6 +156,7 @@ pub(crate) struct Case {
     pub(crate) temp: tempfile::TempDir,
     pub(crate) root: PathBuf,
     pub(crate) db: rusqlite::Connection,
+    _held: crate::store_log::RowsHold,
 }
 
 impl Case {
@@ -176,7 +177,12 @@ pub(crate) fn case() -> Case {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let db = rusqlite::Connection::open_in_memory().unwrap();
     initialize(&db).unwrap();
-    Case { temp, root, db }
+    Case {
+        temp,
+        root,
+        db,
+        _held: crate::store_log::rows_hold(),
+    }
 }
 
 fn sha(text: &str) -> String {

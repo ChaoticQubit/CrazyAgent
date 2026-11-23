@@ -35,6 +35,10 @@ pub const REDACTED_ON_REMOVE: [&str; 4] = [
 /// its bounds.
 pub const REFUSED: &str = "app_plugin_event_refused";
 
+/// The refusal for a store change made outside a capture: nothing is written, so no store
+/// row ever misses the engine's log.
+pub const UNLOGGED: &str = "app_plugin_store_unlogged";
+
 /// The most events one captured run records, far over what one request writes: a start
 /// pass forgets at most every reserved name, and one plugin holds at most its bindings.
 pub const CAPTURED_EVENTS_MAX: usize = 4096;
@@ -399,8 +403,16 @@ pub struct Captured {
     pub forgotten_keys: Vec<KeyRef>,
 }
 
+/// What this thread's plugin store work runs under: a capture keeping each change for the
+/// log, or, in plugin host rows only, a hold that writes without keeping.
+enum Held {
+    Capture(Captured),
+    #[cfg(test)]
+    Rows,
+}
+
 thread_local! {
-    static CAPTURE: RefCell<Option<Captured>> = const { RefCell::new(None) };
+    static CAPTURE: RefCell<Option<Held>> = const { RefCell::new(None) };
 }
 
 /// Ends the capture this thread holds when the captured run returns or unwinds.
@@ -413,32 +425,58 @@ impl Drop for Ending {
 }
 
 /// Runs plugin store work and collects what it recorded, for the engine to append to its
-/// log in the same transaction. Captures never nest. Input: the work. Output: its result
-/// and what it recorded.
+/// log in the same transaction. Captures never nest, and a change made on another thread
+/// holds no capture, so it is refused. Input: the work. Output: its result and what it
+/// recorded.
 pub fn capture<T>(work: impl FnOnce() -> T) -> (T, Captured) {
-    let outer = CAPTURE.with(|capture| capture.replace(Some(Captured::default())));
+    let outer = CAPTURE.with(|capture| capture.replace(Some(Held::Capture(Captured::default()))));
     assert!(outer.is_none(), "plugin store captures never nest");
     let ending = Ending;
     let result = work();
-    let captured = CAPTURE
-        .with(|capture| capture.borrow_mut().take())
-        .expect("the capture is held until the work returns");
+    let held = CAPTURE.with(|capture| capture.borrow_mut().take());
     drop(ending);
+    let Some(Held::Capture(captured)) = held else {
+        unreachable!("the capture is held until the work returns");
+    };
     assert!(captured.events.len() <= CAPTURED_EVENTS_MAX);
     (result, captured)
 }
 
-/// Checks one change, writes it into the store tables and, inside a capture, keeps it for
-/// the log; outside one it is written only, as plugin host rows and older callers run.
-/// Inputs: the connection and the event. Output: Ok, [`REFUSED`] for an event outside its
-/// bounds, or the database's refusal.
+/// Lets a plugin host row write the store with no log for as long as the returned guard
+/// lives on this thread. Output: the guard.
+#[cfg(test)]
+pub(crate) fn rows_hold() -> RowsHold {
+    let outer = CAPTURE.with(|capture| capture.replace(Some(Held::Rows)));
+    assert!(outer.is_none(), "a row holds the store once");
+    RowsHold
+}
+
+/// Ends a row's hold when the row's case is dropped.
+#[cfg(test)]
+pub(crate) struct RowsHold;
+
+#[cfg(test)]
+impl Drop for RowsHold {
+    fn drop(&mut self) {
+        CAPTURE.with(|capture| capture.borrow_mut().take());
+    }
+}
+
+/// Checks one change and, inside a capture, writes it into the store tables and keeps it
+/// for the log. A change outside any capture is refused before anything is written, so no
+/// store row ever misses the log. Inputs: the connection and the event. Output: Ok,
+/// [`REFUSED`] for an event outside its bounds, [`UNLOGGED`] outside a capture, or the
+/// database's refusal.
 pub(crate) fn record(db: &Connection, event: Event) -> Result<(), Refused> {
     if !event.valid() {
         return Err(refused(REFUSED));
     }
+    if CAPTURE.with(|capture| capture.borrow().is_none()) {
+        return Err(refused(UNLOGGED));
+    }
     apply(db, &event)?;
     CAPTURE.with(|capture| {
-        if let Some(captured) = capture.borrow_mut().as_mut() {
+        if let Some(Held::Capture(captured)) = capture.borrow_mut().as_mut() {
             assert!(captured.events.len() < CAPTURED_EVENTS_MAX);
             captured.events.push(event);
         }
@@ -451,11 +489,11 @@ pub(crate) fn record(db: &Connection, event: Event) -> Result<(), Refused> {
 /// capture took it.
 pub(crate) fn forget_after_commit(key: KeyRef) -> bool {
     CAPTURE.with(|capture| match capture.borrow_mut().as_mut() {
-        Some(captured) => {
+        Some(Held::Capture(captured)) => {
             assert!(captured.forgotten_keys.len() < CAPTURED_EVENTS_MAX);
             captured.forgotten_keys.push(key);
             true
         }
-        None => false,
+        _ => false,
     })
 }

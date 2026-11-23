@@ -419,3 +419,51 @@ fn a_dropped_key_file_is_deleted_after_the_commit() {
     .unwrap();
     assert!(!third.exists(), "a removal deletes the key file");
 }
+
+/// The plugin host modules that write the plugin store, or reach a write through their
+/// start pass, as engine code names them.
+const STORE_WRITERS: [&str; 4] = [
+    "kernel_plugin_host::registry",
+    "kernel_plugin_host::trust",
+    "kernel_plugin_host::store",
+    "grants::list",
+];
+
+/// Every Rust source under a folder, with its path. Input: the folder. Output: the files.
+fn sources(folder: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(folder).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(sources(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let code = std::fs::read_to_string(&path).unwrap();
+            found.push((path, code));
+        }
+    }
+    found
+}
+
+/// Only App plugins code reaches the plugin store's writers, and all of it runs inside the
+/// logged transaction, so no engine path writes a store row the log misses.
+#[test]
+fn only_app_plugins_code_reaches_the_plugin_store_writers() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let owned = src.join("app_plugins");
+    let files = sources(&src);
+    assert!(files.len() > 100, "the engine sources are found");
+    let reaching: Vec<&PathBuf> = files
+        .iter()
+        .filter(|(_, code)| STORE_WRITERS.iter().any(|writer| code.contains(writer)))
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        reaching.contains(&&src.join("app_plugins.rs")),
+        "the scan sees the App plugins module"
+    );
+    let outside: Vec<&&PathBuf> = reaching
+        .iter()
+        .filter(|path| **path != &src.join("app_plugins.rs") && !path.starts_with(&owned))
+        .collect();
+    assert!(outside.is_empty(), "store writers reached from {outside:?}");
+}

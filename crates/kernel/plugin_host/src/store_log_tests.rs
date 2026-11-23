@@ -3,10 +3,7 @@ use rusqlite::types::Value;
 
 use crate::generated::permissions::BUNDLED_GRANTS;
 use crate::store::initialize;
-use crate::store_log::{Event, KINDS, REFUSED, SCHEMA, Source, apply, capture, record};
-
-/// The refusal of a store change made outside a capture.
-const UNLOGGED: &str = "app_plugin_store_unlogged";
+use crate::store_log::{Event, KINDS, REFUSED, SCHEMA, Source, UNLOGGED, apply, capture, record};
 
 /// The agent-quit plugin's id, a bundled code plugin.
 const QUIT: &str = BUNDLED_GRANTS[0].plugin;
