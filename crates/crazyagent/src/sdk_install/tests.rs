@@ -324,6 +324,110 @@ fn the_output_is_bounded_before_and_after_redaction() {
     );
 }
 
+/// An output of `length` bytes: `head`, then `x` filler, then `tail`. Inputs: the head,
+/// the tail and the length. Output: the bytes.
+fn filled(head: &str, tail: &str, length: usize) -> Vec<u8> {
+    assert!(head.len() + tail.len() <= length);
+    let mut output = head.as_bytes().to_vec();
+    output.resize(length - tail.len(), b'x');
+    output.extend_from_slice(tail.as_bytes());
+    output
+}
+
+/// A full kept tail that opens with the end of a run value, cut off by the kernel, hides
+/// that end.
+#[test]
+fn a_value_cut_at_the_front_of_a_full_output_is_hidden() {
+    let ran = Ran {
+        code: 0,
+        output: filled("run-value-1 done", "", exposure::OUTPUT_MAX),
+        env: vec![OsString::from("SECRET-run-value-1")],
+    };
+    let output = bounded(ran, &[]).output;
+    assert!(output.starts_with(b"[REDACTED] done"));
+    assert!(!output.windows(11).any(|window| window == b"run-value-1"));
+}
+
+/// An output read past `OUTPUT_MAX` whose read edge cuts an engine value hides the start
+/// of that value.
+#[test]
+fn a_value_cut_at_the_read_edge_is_hidden() {
+    let mut output = filled("", "", exposure::OUTPUT_MAX - 6);
+    output.extend_from_slice(b"ENGINE-token-abcdef");
+    let ran = Ran {
+        code: 0,
+        output,
+        env: Vec::new(),
+    };
+    let output = bounded(ran, &[OsString::from("ENGINE-token-abcdef")]).output;
+    assert!(output.len() <= exposure::OUTPUT_MAX);
+    assert!(!output.windows(6).any(|window| window == b"ENGINE"));
+}
+
+/// A value whose cut end opens the output, followed at once by a whole value that starts
+/// inside that end, is hidden whole: no byte of either is left beside the marker.
+#[test]
+fn a_whole_value_inside_a_cut_end_is_hidden_with_it() {
+    let ran = Ran {
+        code: 0,
+        output: filled("ols/bin/python3 ok", "", exposure::OUTPUT_MAX),
+        env: vec![
+            OsString::from("/opt/tools/bin"),
+            OsString::from("/bin/python3"),
+        ],
+    };
+    let output = bounded(ran, &[]).output;
+    assert!(output.starts_with(b"[REDACTED] ok"), "{:?}", &output[..16]);
+}
+
+/// A short output that ends with the start of a run value, as a pipe taken before its end
+/// leaves it, hides that start.
+#[test]
+fn a_value_cut_at_the_back_of_a_short_output_is_hidden() {
+    let ran = Ran {
+        code: 1,
+        output: b"installing with SECRET-r".to_vec(),
+        env: vec![OsString::from("SECRET-run-value-1")],
+    };
+    assert_eq!(
+        bounded(ran, &[]).output,
+        b"installing with [REDACTED]".to_vec()
+    );
+}
+
+/// The back edge is always taken as cut, so even one closing byte that starts a value is
+/// redacted: an output ending in `/` is marked when a value starts with `/`.
+#[test]
+fn one_closing_byte_that_starts_a_value_is_redacted() {
+    let ran = Ran {
+        code: 0,
+        output: b"installed to /".to_vec(),
+        env: vec![OsString::from("/e/setup/npm")],
+    };
+    assert_eq!(
+        bounded(ran, &[]).output,
+        b"installed to [REDACTED]".to_vec()
+    );
+}
+
+/// An output shorter than a full tail was not cut at its front, so text that matches the
+/// end of a value there stays, and a whole value is still redacted.
+#[test]
+fn an_uncut_front_stays_and_a_whole_value_is_redacted() {
+    let ran = Ran {
+        code: 0,
+        output: filled(
+            "run-value-1 then SECRET-run-value-1 end",
+            "",
+            exposure::OUTPUT_MAX - 1,
+        ),
+        env: vec![OsString::from("SECRET-run-value-1")],
+    };
+    let output = bounded(ran, &[]).output;
+    assert!(output.starts_with(b"run-value-1 then [REDACTED] end"));
+    assert_eq!(output.len(), exposure::OUTPUT_MAX - 1 - 18 + 10);
+}
+
 /// No bundled plugin holds the `process.install` permission.
 #[test]
 fn no_bundled_plugin_holds_process_install() {
