@@ -3,3 +3,4 @@ tier = "t2"
 kind = "setting"
 version = 1
 permissions = ["settings.write"]
+essential = true

@@ -3,7 +3,9 @@
 mod gateway;
 mod grants;
 
-pub use gateway::{Caller, Gateway, Refusals};
+#[cfg(any(test, feature = "test-support"))]
+pub use gateway::AllOn;
+pub use gateway::{Caller, Gateway, Refusals, Switches};
 pub use grants::{Grants, PERMISSIONS_MAX, PLUGINS_MAX};
 
 #[cfg(test)]

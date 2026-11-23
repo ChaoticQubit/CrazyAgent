@@ -927,6 +927,7 @@ pub enum OwnerRead {
         after: Cursor,
     },
     Capabilities,
+    PluginGrants,
 }
 
 impl OwnerRead {
@@ -944,6 +945,7 @@ impl OwnerRead {
             | Self::Page { .. }
             | Self::Baseline { .. }
             | Self::Capabilities
+            | Self::PluginGrants
             | Self::ConversationHistory { .. }
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
@@ -1322,6 +1324,9 @@ pub enum OwnerData {
     },
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    PluginGrants {
+        plugins: Vec<kernel_plugin_host::grants::PluginGrants>,
     },
     ProviderRetry {
         settings: crate::provider_retry::ProviderRetryView,
