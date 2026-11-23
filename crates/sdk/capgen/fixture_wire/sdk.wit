@@ -1,6 +1,6 @@
 package crazyagent:sdk;
 
-interface types {
+interface sdk-types {
   record not-granted {
     capability: string,
     needs: string,
@@ -14,9 +14,7 @@ interface types {
   }
 }
 
-interface wire {
-  use types.{refusal};
-
+interface wire-types {
   enum mode {
     read,
     write,
@@ -33,6 +31,11 @@ interface wire {
     name: string,
     mode: mode,
   }
+}
+
+interface wire {
+  use sdk-types.{refusal};
+  use wire-types.{blob, plain};
 
   store: func(blob: blob, plain: plain, at: u64) -> result<blob, refusal>;
 

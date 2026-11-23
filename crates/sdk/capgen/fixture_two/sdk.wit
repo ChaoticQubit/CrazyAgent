@@ -1,6 +1,6 @@
 package crazyagent:sdk;
 
-interface types {
+interface sdk-types {
   record not-granted {
     capability: string,
     needs: string,
@@ -14,8 +14,8 @@ interface types {
   }
 }
 
-interface net {
-  use secrets.{mode, secret};
+interface net-types {
+  use secrets-types.{mode, secret};
 
   record request {
     bearer: option<secret>,
@@ -29,7 +29,7 @@ interface net {
   }
 }
 
-interface secrets {
+interface secrets-types {
   enum mode {
     read,
     write,
@@ -38,7 +38,4 @@ interface secrets {
   type secret = u64;
 }
 
-world plugin {
-  import net;
-  import secrets;
-}
+world plugin {}

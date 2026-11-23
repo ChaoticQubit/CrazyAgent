@@ -20,7 +20,7 @@ capability settings.save_quit(settings: QuitSettings) -> unit
 /// The `sdk.wit` that `wit` writes from [`SETTINGS`].
 const SETTINGS_WIT: &str = "package crazyagent:sdk;
 
-interface types {
+interface sdk-types {
   record not-granted {
     capability: string,
     needs: string,
@@ -34,9 +34,7 @@ interface types {
   }
 }
 
-interface settings {
-  use types.{refusal};
-
+interface settings-types {
   enum on-quit {
     keep-running,
     stop,
@@ -52,6 +50,11 @@ interface settings {
     left-running: left-running,
     hours: u16,
   }
+}
+
+interface settings {
+  use sdk-types.{refusal};
+  use settings-types.{quit-settings};
 
   save-quit: func(settings: quit-settings) -> result<_, refusal>;
 }
@@ -61,10 +64,9 @@ world plugin {
 }
 ";
 
-/// Each capgen fixture folder with a WIT form, with the path of its checked-in golden below
-/// `capgen`. The Rust fixture `fixture` has none: its type `Pair` and function `pair` share
-/// one interface name, which WIT refuses.
-const FIXTURES: [(&str, &str); 2] = [
+/// Each capgen fixture folder with the path of its checked-in WIT golden below `capgen`.
+const FIXTURES: [(&str, &str); 3] = [
+    ("fixture", "fixture/fixture.wit"),
     ("fixture_two", "fixture_two/sdk.wit"),
     ("fixture_wire", "fixture_wire/sdk.wit"),
 ];
@@ -148,6 +150,57 @@ fn wit_fixtures_generate_the_checked_in_goldens() {
 }
 
 #[test]
+fn wit_a_type_and_function_clash_gets_the_stem_alias() {
+    let text = folder_wit("capgen/fixture");
+    assert!(text.contains("\ninterface fixture-types {\n"), "{text}");
+    assert!(text.contains("\n  record pair {\n"), "{text}");
+    let uses = text
+        .lines()
+        .find(|line| line.starts_with("  use fixture-types.{"))
+        .unwrap_or_else(|| panic!("fixture uses its types: {text}"));
+    assert!(uses.contains("keyed, pair as fixture-pair"), "{uses}");
+    assert!(
+        text.contains("\n  pair: func(pair: fixture-pair, keyed: keyed) -> result<_, refusal>;\n"),
+        "{text}"
+    );
+    parses("fixture", &text);
+}
+
+#[test]
+fn wit_a_non_clashing_use_has_no_alias() {
+    let text = only_wit(&parsed(&[("settings", SETTINGS)]));
+    assert!(
+        text.contains("\n  use settings-types.{quit-settings};\n"),
+        "{text}"
+    );
+    assert!(!text.contains(" as "), "{text}");
+    let fixture = folder_wit("capgen/fixture");
+    assert!(!fixture.contains("keyed as"), "{fixture}");
+}
+
+#[test]
+fn wit_an_alias_that_clashes_is_refused() {
+    let function = refused(&[(
+        "x",
+        "type Pair { a: u16 }\n\
+         capability x.pair(pair: Pair) -> unit\n  tier: t1\n  needs: x.y\n\
+         capability x.x_pair(a: u16) -> unit\n  tier: t1\n  needs: x.y\n",
+    )]);
+    assert_eq!(function.code, "capgen_name_collision", "{function:?}");
+    assert_eq!(function.detail, "wit: x-pair");
+    let foreign = refused(&[
+        (
+            "a",
+            "enum Mode { x }\nenum BMode { y }\ntype T { m: b.Mode }",
+        ),
+        ("b", "enum Mode { z }"),
+    ]);
+    assert_eq!(foreign.code, "capgen_name_collision", "{foreign:?}");
+    assert_eq!(foreign.detail, "wit: b-mode");
+    assert_eq!(foreign.file, "a.cap");
+}
+
+#[test]
 fn wit_generation_is_byte_stable_in_any_file_order() {
     let net = fs::read_to_string(sdk("capgen/fixture_two/net.cap")).expect("net.cap reads");
     let secrets =
@@ -186,38 +239,25 @@ fn wit_keywords_are_escaped() {
         assert!(text.lines().any(|held| held == line), "{line} in {text}");
     }
     parses("keywords", &text);
-    let count = only_wit(&parsed(&[(
-        "x",
-        "capability x.count(flags: list<bool>) -> u32\n  tier: t1\n  needs: x.y\n",
-    )]));
+    let fixture = folder_wit("capgen/fixture");
     assert!(
-        count.contains("  count: func(%flags: list<bool>) -> result<u32, refusal>;\n"),
-        "{count}"
+        fixture.contains("\n  count: func(%flags: list<bool>) -> result<u32, refusal>;\n"),
+        "{fixture}"
     );
-    parses("flags", &count);
-}
-
-#[test]
-fn wit_the_rust_fixture_is_refused_for_its_pair_clash() {
-    let loaded = load(&sdk("capgen/fixture")).expect("the fixture loads");
-    let borrowed: Vec<(&str, File)> = loaded
-        .iter()
-        .map(|(stem, file)| (stem.as_str(), file.clone()))
-        .collect();
-    let error = wit(&borrowed).expect_err("type Pair and fixture.pair share the name pair");
-    assert_eq!(error.code, "capgen_name_collision", "{error:?}");
-    assert_eq!(error.detail, "wit: pair");
-    assert_eq!(error.file, "fixture.cap");
 }
 
 #[test]
 fn wit_a_fixed_stem_is_refused() {
-    for stem in ["types", "plugin"] {
+    for stem in ["sdk", "plugin", "foo_types"] {
         let error = refused(&[(stem, "type A { a: u16 }")]);
         assert_eq!(error.code, "capgen_reserved_name", "{stem}: {error:?}");
         assert_eq!(error.detail, format!("wit: {stem}"));
         assert_eq!(error.file, format!("{stem}.cap"));
     }
+    parses(
+        "types",
+        &only_wit(&parsed(&[("types", "type A { a: u16 }")])),
+    );
 }
 
 #[test]
@@ -237,39 +277,64 @@ fn wit_a_name_with_no_kebab_form_is_refused() {
 }
 
 #[test]
-fn wit_two_names_mapping_to_one_are_refused() {
-    let error = refused(&[(
-        "x",
-        "type OnQuit { a: u16 }\ncapability x.on_quit(a: OnQuit) -> unit\n  tier: t1\n  needs: x.y\n",
-    )]);
-    assert_eq!(error.code, "capgen_name_collision", "{error:?}");
-    assert_eq!(error.detail, "wit: on-quit");
-    let used = refused(&[
-        ("s", "enum Mode { a }"),
-        ("x", "enum Mode { b }\ntype T { m: s.Mode }"),
-    ]);
-    assert_eq!(used.code, "capgen_name_collision", "{used:?}");
+fn wit_a_foreign_name_equal_to_a_local_one_is_aliased() {
+    let text = only_wit(&parsed(&[
+        ("a", "enum Mode { x }\ntype T { m: b.Mode, here: Mode }"),
+        ("b", "enum Mode { z }"),
+    ]));
+    assert!(
+        text.contains("\n  use b-types.{mode as b-mode};\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n    m: b-mode,\n    here: mode,\n"),
+        "{text}"
+    );
+    parses("foreign alias", &text);
 }
 
 #[test]
-fn wit_a_handle_is_a_u64_alias_and_a_foreign_ref_uses_its_interface() {
+fn wit_a_handle_is_a_u64_alias_and_a_foreign_ref_uses_its_types_interface() {
     let text = folder_wit("capgen/fixture_two");
     for held in [
-        "\ninterface secrets {\n",
+        "\ninterface secrets-types {\n",
         "\n  type secret = u64;\n",
-        "\ninterface net {\n  use secrets.{mode, secret};\n\n",
+        "\ninterface net-types {\n  use secrets-types.{mode, secret};\n\n",
         "\n    bearer: option<secret>,\n",
         "\n    keys: list<secret>,\n",
         "\n    mode: mode,\n",
-        "\nworld plugin {\n  import net;\n  import secrets;\n}\n",
+        "\nworld plugin {}\n",
     ] {
         assert!(text.contains(held), "{held:?} in {text}");
     }
     assert!(!text.contains("resource"), "{text}");
     assert!(
-        !text.contains("use types."),
+        !text.contains("use sdk-types."),
         "no capability, no refusal: {text}"
     );
+}
+
+#[test]
+fn wit_a_types_use_cycle_is_refused() {
+    let error = refused(&[
+        ("a", "enum M { x }\ntype T { n: b.N }"),
+        ("b", "enum N { y }\ntype U { m: a.M }"),
+    ]);
+    assert_eq!(error.code, "capgen_wit_cycle", "{error:?}");
+    let calls = only_wit(&parsed(&[
+        (
+            "a",
+            "enum M { x }\ncapability a.go(n: b.N) -> unit\n  tier: t1\n  needs: a.y\n",
+        ),
+        ("b", "enum N { y }\ntype U { m: a.M }"),
+    ]));
+    parses("calls across", &calls);
+    let chain = only_wit(&parsed(&[
+        ("a", "enum M { x }\ntype T { n: b.N }"),
+        ("b", "enum N { y }\ntype U { o: c.O }"),
+        ("c", "enum O { z }"),
+    ]));
+    parses("chain", &chain);
 }
 
 #[test]
@@ -288,24 +353,8 @@ fn wit_has_no_caller_parameter() {
                 "{word} in {text}"
             );
         }
-        assert!(text.contains("func("));
     }
-}
-
-#[test]
-fn wit_a_use_cycle_is_refused() {
-    let error = refused(&[
-        ("a", "enum M { x }\ntype T { n: b.N }"),
-        ("b", "enum N { y }\ntype U { m: a.M }"),
-    ]);
-    assert_eq!(error.code, "capgen_wit_cycle", "{error:?}");
-    let chain = wit(&parsed(&[
-        ("a", "enum M { x }\ntype T { n: b.N }"),
-        ("b", "enum N { y }\ntype U { o: c.O }"),
-        ("c", "enum O { z }"),
-    ]))
-    .expect("a chain is no cycle");
-    parses("chain", &chain[0].1);
+    assert!(texts.iter().filter(|text| text.contains("func(")).count() >= 3);
 }
 
 #[test]
