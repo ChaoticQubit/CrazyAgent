@@ -559,7 +559,7 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
 pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Refused> {
     prepare(db, engine)?;
     if is_bundled(name) {
-        return if folder::remove(engine.root, name)? {
+        return if folder::remove(engine.root, name, engine.keys.new_ref)? {
             Ok(())
         } else {
             Err(refused("app_plugin_bundled"))
@@ -600,7 +600,7 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     for (_, source, reference) in &bindings {
         forget_key_file(db, engine, source, reference);
     }
-    folder::remove(engine.root, name)?;
+    folder::remove(engine.root, name, engine.keys.new_ref)?;
     Ok(())
 }
 
@@ -711,8 +711,8 @@ type UserFile = (String, Result<Vec<u8>, Problem>);
 #[cfg(unix)]
 mod folder {
     use super::{
-        FOLDER, MANIFEST_FILE, Problem, STAGED, TREE_DEPTH_MAX, TREE_ENTRIES_MAX, USER_PLUGINS_MAX,
-        UserFile, left_over, retired, retired_name,
+        FOLDER, MANIFEST_FILE, Problem, RETIRED, STAGED, TREE_DEPTH_MAX, TREE_ENTRIES_MAX,
+        USER_PLUGINS_MAX, UserFile, left_over, retired, retired_name,
     };
 
     use crate::Refused;
@@ -1019,11 +1019,12 @@ mod folder {
     }
 
     /// Writes a user plugin as a staged 0700 folder holding a 0600 plugin.toml, renamed into
-    /// place; an older folder of that name is moved aside first, moved back when the new one
-    /// cannot take its place, and deleted after, where one it cannot delete stays aside for
-    /// the start sweep, creating the 0700 plugins folder when missing. Inputs: the engine root, a valid name, the
-    /// bytes and the random id source. Output: Ok with the folder synced, or the folder's
-    /// refusal with nothing staged left.
+    /// place, creating the 0700 plugins folder when missing. An older folder of that name is
+    /// moved aside first and moved back when the new one cannot take its place; once the
+    /// new one is in place it moves to a retired name with no plugin name in it and is
+    /// deleted, and one it cannot delete stays aside for the start sweep. Inputs: the engine
+    /// root, a valid name, the bytes and the random id source. Output: Ok with the folder
+    /// synced, or the folder's refusal with nothing staged left.
     pub(super) fn write(
         root: &Path,
         name: &str,
@@ -1075,7 +1076,10 @@ mod folder {
                 return Err(unavailable());
             }
             if replaced {
-                let _ = remove_tree(&directory, &retired);
+                let aside = format!("{RETIRED}{id}");
+                let nameless =
+                    rustix::fs::renameat(&directory, retired.as_str(), &directory, aside.as_str());
+                let _ = remove_tree(&directory, if nameless.is_ok() { &aside } else { &retired });
             }
             Ok(())
         })();
@@ -1137,10 +1141,16 @@ mod folder {
     }
 
     /// Deletes a user plugin's folder and any `.yaml` file an older version left under its
-    /// name; an entry of that name that is not a folder, such as a link, is unlinked itself
-    /// without following it. Inputs: the engine root and a valid name. Output: whether
+    /// name. The folder first moves to a retired name with no plugin name in it, so one it
+    /// cannot delete is never listed or restored again and stays for the start sweep; an
+    /// entry that is not a folder, such as a link, is unlinked itself without following it.
+    /// Inputs: the engine root, a valid name and the random id source. Output: whether
     /// anything was deleted, or the folder's refusal.
-    pub(super) fn remove(root: &Path, name: &str) -> Result<bool, Refused> {
+    pub(super) fn remove(
+        root: &Path,
+        name: &str,
+        new_ref: fn() -> Result<String, &'static str>,
+    ) -> Result<bool, Refused> {
         let Some(directory) = open(root, false)? else {
             return Ok(false);
         };
@@ -1150,7 +1160,12 @@ mod folder {
             Err(_) => return Err(unavailable()),
         };
         match kind {
-            Some(rustix::fs::FileType::Directory) => remove_tree(&directory, name)?,
+            Some(rustix::fs::FileType::Directory) => {
+                let aside = format!("{RETIRED}{}", new_ref().map_err(refused)?);
+                rustix::fs::renameat(&directory, name, &directory, aside.as_str())
+                    .map_err(|_| unavailable())?;
+                let _ = remove_tree(&directory, &aside);
+            }
             Some(_) => match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
                 Ok(()) | Err(rustix::io::Errno::NOENT) => {}
                 Err(_) => return Err(unavailable()),
@@ -1352,7 +1367,11 @@ mod folder {
     }
 
     /// No user plugins folder off Unix. Output: false, nothing was deleted.
-    pub(super) fn remove(_root: &Path, _name: &str) -> Result<bool, Refused> {
+    pub(super) fn remove(
+        _root: &Path,
+        _name: &str,
+        _new_ref: fn() -> Result<String, &'static str>,
+    ) -> Result<bool, Refused> {
         Ok(false)
     }
 }
