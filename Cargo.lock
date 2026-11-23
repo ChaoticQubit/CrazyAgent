@@ -1038,6 +1038,7 @@ name = "crazyagent-kernel-sandbox"
 version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-processes",
+ "nix",
  "rustix 1.1.5",
  "serde",
  "serde_json",

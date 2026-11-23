@@ -1,6 +1,7 @@
 use super::{busy, checked, landing_repositories, names_inside};
-use crate::projects_home::{AddMode, Registered, one_spelling};
+use crate::projects_home::{AddMode, Registered};
 use crate::protocol::ProjectId;
+use kernel_sandbox::paths::one_spelling;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 

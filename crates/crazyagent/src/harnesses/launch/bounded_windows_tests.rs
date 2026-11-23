@@ -72,7 +72,7 @@ fn helper_beside() {
 fn case() -> Case {
     helper_beside();
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let project = base.join("project");
     let home = base.join("agent").join("home");
     let tmp = base.join("agent").join("tmp");
@@ -382,7 +382,7 @@ fn a_home_granted_another_container_than_its_boundary_is_refused() {
 #[test]
 fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let plain = crate::sandbox::canonical(temp.path())
+    let plain = kernel_sandbox::paths::canonical(temp.path())
         .unwrap()
         .join("grants");
     assert_eq!(crate::sandbox::plain_grants(plain.clone()).unwrap(), plain);

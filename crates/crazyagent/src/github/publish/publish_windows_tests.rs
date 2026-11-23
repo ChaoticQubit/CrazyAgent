@@ -349,7 +349,7 @@ const CONTAINED_STEPS: [&str; 6] = [
 /// The project's folder in the form owner git's boundary holds it, the canonical one, which
 /// a contained command's folder must start with. Input: the project. Output: the folder.
 fn contained_folder(made: &Project) -> PathBuf {
-    crate::sandbox::canonical(&made.path()).unwrap()
+    kernel_sandbox::paths::canonical(&made.path()).unwrap()
 }
 
 /// Installs owner git for `made`, owned by the runner user, and gives the git that runs

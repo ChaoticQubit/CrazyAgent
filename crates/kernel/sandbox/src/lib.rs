@@ -11,6 +11,10 @@ pub mod error;
 pub mod lines;
 /// A sandboxed agent's network reach: open, or only the listed loopback and any-host ports.
 pub mod net;
+/// Path checks and spellings every sandbox root is held to: one spelling per path, the
+/// canonical form, the plain-path tests for Unix and Windows, the owner's home and the
+/// Seatbelt filter for a path and what is below it.
+pub mod paths;
 /// The lowest port a sandbox bridge may take.
 pub mod ports;
 /// Boundary qualification: the signed report a release build carries for each sandbox

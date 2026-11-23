@@ -293,10 +293,10 @@ impl Anchor {
             String::from_utf16(&private::place(&directory).map_err(io_error)?)
                 .map_err(|_| fail("owner_anchor_requires_private_directory"))?,
         );
-        let path = crate::projects_home::one_spelling(PathBuf::from(place));
+        let path = kernel_sandbox::paths::one_spelling(PathBuf::from(place));
         if !path
             .to_str()
-            .is_some_and(crate::sandbox::windows_clean_text)
+            .is_some_and(kernel_sandbox::paths::windows_clean_text)
         {
             return Err(fail("owner_anchor_requires_private_directory"));
         }

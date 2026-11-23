@@ -2,6 +2,9 @@ use kernel_sandbox::elf;
 use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::lines::*;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::paths::{
+    PATH_BYTES_MAX, at_or_below, canonical, clean_absolute, owner_home, plain_top,
+};
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use std::ffi::{OsStr, OsString};
@@ -210,7 +213,6 @@ pub fn held_stop(os: &str, code: i32) -> Option<&'static str> {
 /// names it `MasterReason::SandboxStopped`.
 pub const HELD_STOP_CAUSE: &str = "sandbox_held_not_put_back";
 
-const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 /// The most folder links one sandbox makes readable by name beside its roots: the links
 /// its process is started through.
@@ -4494,19 +4496,6 @@ fn spell_stretch(
     }
 }
 
-/// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
-/// one path part, never `.` or `..`, at most 255 bytes, with no control character, quote or
-/// backslash, so it sits in a Seatbelt pattern as written. Takes the name. Returns the answer.
-pub(crate) fn plain_top(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 255
-        && name != "."
-        && name != ".."
-        && !name
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))
-}
-
 /// Seatbelt regex bodies `{prefix}(a|b|...){suffix}` that together match each of
 /// `alternatives`, packed whole, in order, so each body fits [`SBPL_STRING_MAX`] bytes; one
 /// alternative too long beside the prefix keeps a body of its own, which [`sbpl_overlong`]
@@ -4631,34 +4620,6 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
         }
         made => made,
     }
-}
-
-/// The owner's home folder from the user profile, canonical when it resolves, which
-/// no sandbox root may contain. Takes nothing. Returns the folder, or `Invalid` when the
-/// profile names none or a relative one.
-#[cfg(target_os = "windows")]
-fn owner_home() -> Result<PathBuf, SandboxError> {
-    let home = std::env::home_dir().ok_or_else(|| invalid("owner account is unknown"))?;
-    settled_home(home)
-}
-
-#[cfg(unix)]
-fn owner_home() -> Result<PathBuf, SandboxError> {
-    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
-        .map_err(|error| SandboxError::Io(io::Error::from(error)))?
-        .ok_or_else(|| invalid("owner account is unknown"))?;
-    settled_home(user.dir)
-}
-
-/// The owner's home as the sandbox compares it: refused unless absolute and clean, then
-/// [`canonical`] when it resolves, so a home named through the macOS data volume has the
-/// short spelling every sandbox root has. Input: the home the account names. Output: the
-/// folder, or `Invalid` for a relative or unclean one.
-fn settled_home(home: PathBuf) -> Result<PathBuf, SandboxError> {
-    if !clean_absolute(&home) {
-        return Err(invalid("owner home must be absolute"));
-    }
-    Ok(canonical(&home).unwrap_or(home))
 }
 
 /// Names the credential files and folders the sandbox guards as they appear in a path: the
@@ -5086,17 +5047,6 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filter for a path and everything below it: one `^X(/|$)` in place of
-/// `^X(/.*)?$`, whose `(/.*)` tail libsandbox fails to compile again in lower case after a
-/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`
-/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). One regex keeps the profile under its cap
-/// for long roots, where an `X$` and `X/` pair did not (V243-PROFILE-CAP-ROW, DEC-195 Q6).
-/// Input: the pattern after `^`, an absolute path first. Output: the filter.
-pub(crate) fn at_or_below(pattern: &str) -> String {
-    assert!(pattern.starts_with('/'));
-    format!("(regex #\"^{pattern}(/|$)\")")
-}
-
 /// The Seatbelt filters for a `.git` at any depth below `root`, top level included, in every
 /// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
 /// working tree (SM1-R), as [`at_or_below`] spells it. Input: the root. Output: the filters.
@@ -5218,61 +5168,6 @@ pub(crate) fn plain_grants(grants: PathBuf) -> Result<PathBuf, SandboxError> {
     Ok(grants)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn clean_absolute(path: &Path) -> bool {
-    path.is_absolute()
-        && path.as_os_str().len() <= PATH_BYTES_MAX
-        && path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
-        && path.to_str().is_some_and(|text| {
-            !text
-                .chars()
-                .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
-        })
-}
-
-/// Tells whether a Windows path is absolute and plain: a drive prefix such as `C:` (never a
-/// UNC, verbatim or device prefix), then folder names joined by `\`, as
-/// [`windows_clean_text`] checks. Input: the path. Output: true when plain.
-#[cfg(target_os = "windows")]
-fn clean_absolute(path: &Path) -> bool {
-    path.is_absolute()
-        && path.components().all(|component| match component {
-            Component::Prefix(prefix) => matches!(prefix.kind(), std::path::Prefix::Disk(_)),
-            Component::RootDir | Component::Normal(_) => true,
-            Component::CurDir | Component::ParentDir => false,
-        })
-        && path.to_str().is_some_and(windows_clean_text)
-}
-
-/// Checks Windows path text on any system: a drive letter, `:\`, then nonempty folder names
-/// joined by `\`, each neither `.` nor `..` nor ending in a space or dot, without control
-/// characters, quotes, `/`, `:` or the characters Windows forbids in names, at most 1024
-/// bytes. Input: the text. Output: true when plain.
-#[cfg(any(not(unix), test))]
-pub(crate) fn windows_clean_text(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if text.len() > PATH_BYTES_MAX
-        || bytes.len() < 4
-        || !bytes[0].is_ascii_alphabetic()
-        || bytes[1] != b':'
-        || bytes[2] != b'\\'
-    {
-        return false;
-    }
-    text[3..].split('\\').all(|part| {
-        !part.is_empty()
-            && part != "."
-            && part != ".."
-            && !part.ends_with(' ')
-            && !part.ends_with('.')
-            && !part.chars().any(|c| {
-                c.is_control() || matches!(c, '"' | '\'' | '/' | ':' | '<' | '>' | '|' | '?' | '*')
-            })
-    })
-}
-
 /// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
 /// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
 /// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
@@ -5287,43 +5182,6 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
         modules.join(first)
     };
     (program != package.as_path() && program.starts_with(&package)).then_some(package)
-}
-
-/// The canonical form of an existing path. On macOS a path named through the data volume
-/// comes back under its short name, so a root given in the long name is not canonical. On
-/// Windows the verbatim `\\?\` prefix `canonicalize` adds to a drive path is removed; any other
-/// verbatim form stays and fails [`clean_absolute`]. Input: the path. Output: the canonical
-/// path, or the I/O error.
-pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
-    let resolved = path.canonicalize()?;
-    #[cfg(target_os = "windows")]
-    if let Some(plain) = resolved
-        .to_str()
-        .and_then(|text| text.strip_prefix(r"\\?\"))
-        && plain.as_bytes().get(1) == Some(&b':')
-    {
-        return Ok(PathBuf::from(plain));
-    }
-    Ok(crate::projects_home::one_spelling(resolved))
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod owner_home_tests {
-    use super::settled_home;
-    use std::path::PathBuf;
-
-    /// V243-FIRMLINK-SWEEP D1: an owner home the account names through /System/Volumes/Data
-    /// settles to its short name, the spelling every sandbox root has, so the owner home and
-    /// secret denies built from it still match.
-    #[test]
-    fn a_home_named_through_the_data_volume_settles_to_its_short_name() {
-        let base = tempfile::tempdir().unwrap();
-        let short = base.path().canonicalize().unwrap();
-        let long = PathBuf::from(format!("/System/Volumes/Data{}", short.display()));
-        assert!(long.is_dir());
-        assert_eq!(settled_home(long).unwrap(), short);
-        assert_eq!(settled_home(short.clone()).unwrap(), short);
-    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -5431,69 +5289,6 @@ mod harness_folder_tests {
             [".codex", ".claude", ".claude.json"]
         );
         assert_eq!(places[from..to], listed);
-    }
-}
-
-#[cfg(test)]
-mod windows_path_tests {
-    use super::windows_clean_text;
-
-    #[test]
-    fn a_plain_drive_path_is_clean_on_every_system() {
-        for text in [
-            r"C:\Users\owner\project",
-            r"d:\work\agent home\tmp",
-            r"C:\a",
-        ] {
-            assert!(windows_clean_text(text), "{text}");
-        }
-    }
-
-    #[test]
-    fn unc_verbatim_device_and_relative_paths_are_refused() {
-        for text in [
-            r"\\server\share\project",
-            r"\\?\C:\project",
-            r"\\?\UNC\server\share",
-            r"\\.\PhysicalDrive0",
-            r"C:project",
-            r"project\folder",
-            r"\project",
-            "C:/project",
-            r"C:\",
-        ] {
-            assert!(!windows_clean_text(text), "{text}");
-        }
-    }
-
-    #[test]
-    fn dots_quotes_streams_and_aliases_are_refused() {
-        for text in [
-            r"C:\project\..\owner",
-            r"C:\project\.\context",
-            r"C:\project\context.",
-            r"C:\project\context ",
-            r"C:\project\\context",
-            r"C:\project\",
-            r"C:\project\file.txt:stream",
-            "C:\\project\\it's",
-            "C:\\project\\\"quoted\"",
-            "C:\\project\\line\nbreak",
-            r"C:\project\a/b",
-            r"C:\project\*",
-            r"C:\project\a?b",
-            r"C:\project\a|b",
-        ] {
-            assert!(!windows_clean_text(text), "{text:?}");
-        }
-    }
-
-    #[test]
-    fn a_path_longer_than_the_limit_is_refused() {
-        let long = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX));
-        assert!(!windows_clean_text(&long));
-        let fits = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX - 3));
-        assert!(windows_clean_text(&fits));
     }
 }
 
