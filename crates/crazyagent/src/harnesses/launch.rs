@@ -15,6 +15,7 @@ use crate::sandbox::InstalledSandbox;
 #[cfg(not(windows))]
 use crate::sandbox::toolchains::{self, ToolHomes};
 use crate::usage::capture::Tokens;
+#[cfg(unix)]
 use kernel_processes::group::Ending;
 use kernel_security::secret::SecretString;
 #[cfg(unix)]

@@ -9,7 +9,9 @@ use kernel_processes::terminal::{
     PaneCommand, PaneInfo, PaneRef, TerminalStream,
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::{Condvar, Mutex};
