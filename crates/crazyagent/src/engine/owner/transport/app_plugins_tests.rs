@@ -143,3 +143,45 @@ fn the_protocol_refusals_are_listed_for_the_clients() {
     sorted.dedup();
     assert_eq!(sorted, APP_PLUGINS_CODES);
 }
+
+/// An App plugins change holds the owner barrier until storage answers it, so a revocation
+/// sent while the change waits on storage waits for it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_waits_for_an_app_plugin_change_in_flight() {
+    use super::super::barrier_tests::revocation;
+    use super::super::usage_tests::{IN_FLIGHT, Usage, busy_storage, hold_storage};
+    use crate::engine::owner::OwnerClientKind;
+    use std::time::Duration;
+    let settled = Duration::from_secs(60);
+    let _disk = busy_storage().await;
+    let owner = Usage::start_waiting(30_000).await;
+    let runtime = owner.runtime();
+    let release = hold_storage(&runtime.engine.storage.sender);
+    let mut changed = Box::pin(owner.client.app_plugin_set_enabled(
+        "held-plugin".into(),
+        false,
+        None,
+    ));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut changed).await.is_err(),
+        "the change waits behind the busy storage"
+    );
+    assert!(
+        runtime.engine.owner_egress.try_write().is_err(),
+        "the change holds the owner barrier while it waits"
+    );
+    let control = revocation(runtime, OwnerClientKind::Tui, "revoke-during-app-plugin");
+    let mut revoke = Box::pin(runtime.control(control));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
+        "a revocation waits for the change already in flight"
+    );
+    release.send(()).unwrap();
+    let _ = tokio::time::timeout(settled, changed).await.unwrap();
+    assert!(
+        tokio::time::timeout(settled, revoke).await.is_ok(),
+        "the revocation goes on once the change is answered"
+    );
+    owner.stop().await;
+}

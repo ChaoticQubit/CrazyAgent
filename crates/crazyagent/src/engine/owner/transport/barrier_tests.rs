@@ -19,7 +19,11 @@ const FAST_CLIENT_MS: u64 = 1000;
 
 /// The owner control that revokes one client kind at its current epoch.
 /// Inputs: the runtime, the client kind and the operation name. Output: the control.
-fn revocation(runtime: &OwnerRuntimeHandle, target: OwnerClientKind, name: &str) -> OwnerControl {
+pub(super) fn revocation(
+    runtime: &OwnerRuntimeHandle,
+    target: OwnerClientKind,
+    name: &str,
+) -> OwnerControl {
     OwnerControl {
         operation_id: RequestId::new(name).unwrap(),
         target,
