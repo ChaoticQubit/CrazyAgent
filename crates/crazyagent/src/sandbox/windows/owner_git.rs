@@ -1,8 +1,9 @@
-use super::{WindowsSandbox, container_for};
+use super::WindowsSandbox;
 use crate::sandbox::{AGENT_HOME_ENV, ProjectSandbox, Sandbox};
 use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::{canonical, clean_absolute};
+use kernel_sandbox::windows::container_for;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -228,9 +229,10 @@ impl OwnerGit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::windows::{GRANTS_FOLDER, container_name};
+    use crate::sandbox::windows::container_name;
     use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard, check_container};
     use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
+    use kernel_sandbox::windows::GRANTS_FOLDER;
 
     struct Made {
         _temp: tempfile::TempDir,
@@ -644,7 +646,7 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod farm {
     use super::{OWNER_GIT_FOLDER, OwnerGit};
-    use crate::sandbox::windows::{GRANTS_FOLDER, HELPER_NAME};
+    use kernel_sandbox::windows::{GRANTS_FOLDER, HELPER_NAME};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::{Mutex, MutexGuard, PoisonError};

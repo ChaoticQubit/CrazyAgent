@@ -94,7 +94,8 @@ pub fn starts_at_boundary(program: &OsStr) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        windows::helper_beside_engine().is_ok_and(|helper| program == helper.as_os_str())
+        kernel_sandbox::windows::helper_beside_engine()
+            .is_ok_and(|helper| program == helper.as_os_str())
     }
 }
 
@@ -3721,10 +3722,12 @@ impl ProjectSandbox {
 
     /// Refuses to write a Seatbelt profile, which Windows cannot load; Windows agents start
     /// through [`InstalledSandbox`] and the AppContainer boundary. Takes the path, unused.
-    /// Returns `Unavailable` with [`windows::SEATBELT_MISSING`].
+    /// Returns `Unavailable` with [`kernel_sandbox::windows::SEATBELT_MISSING`].
     #[cfg(target_os = "windows")]
     pub fn install(&self, _path: &Path) -> Result<(), SandboxError> {
-        Err(SandboxError::Unavailable(windows::SEATBELT_MISSING.into()))
+        Err(SandboxError::Unavailable(
+            kernel_sandbox::windows::SEATBELT_MISSING.into(),
+        ))
     }
 
     /// A command that runs `program` under the installed profile with a cleared
@@ -3964,7 +3967,9 @@ impl InstalledSandbox {
             "{}",
             grants.display()
         );
-        let helper = windows::existing_helper(&windows::helper_beside_engine()?)?;
+        let helper = kernel_sandbox::windows::existing_helper(
+            &kernel_sandbox::windows::helper_beside_engine()?,
+        )?;
         let windows = windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, grants)?;
         assert!(profile.is_file());
         Ok(Self {

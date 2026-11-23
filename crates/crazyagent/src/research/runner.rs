@@ -3229,7 +3229,7 @@ pub(crate) fn add_worktree(
     _worktree: &Path,
 ) -> Result<(), RunError> {
     Err(RunError::Sandbox(SandboxError::Unavailable(
-        crate::sandbox::windows::SEATBELT_MISSING.into(),
+        kernel_sandbox::windows::SEATBELT_MISSING.into(),
     )))
 }
 
