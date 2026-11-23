@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(all(test, target_os = "macos"))]
+mod close_tests;
+
 impl Tmux {
     /// Closes panes with one tmux command, then ends what they leave in their process groups
     /// (FINDING bridge orphan): tmux only hangs up a closing pane, which a busy Codex
