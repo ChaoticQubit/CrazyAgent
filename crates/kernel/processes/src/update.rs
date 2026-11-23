@@ -193,11 +193,24 @@ pub fn read_channel(root: &Path) -> Result<Channel, UpdateError> {
     }
 }
 
+/// How many times a save renames its file over `update.toml` while another program holds
+/// that file without delete sharing (Windows only), before it reports the file busy.
+#[cfg(windows)]
+pub const CHANNEL_RENAME_TRIES_MAX: u32 = 10;
+/// The most time a save spends on those tries in total (Windows only).
+#[cfg(windows)]
+pub const CHANNEL_RENAME_WAIT_MAX: Duration = Duration::from_secs(1);
+/// The message of `update_channel_busy` (Windows only).
+#[cfg(windows)]
+pub const CHANNEL_BUSY: &str =
+    "Can't save the update channel: another program has update.toml open. Close it and try again.";
+
 /// Writes the update channel to `<root>/update.toml` (owner-only on Unix), replacing the
 /// file atomically. Each call writes its own temporary file in that folder, named for this
-/// process and the call, and removes it if the save fails before the rename, so writers at
-/// the same moment never touch each other's file and the last rename wins whole. The caller
-/// has made the data folder. Inputs: the data folder and the channel. Output: Ok, or
+/// process and the call, and removes it if the save fails, so writers at the same moment
+/// never touch each other's file and the last rename wins whole. The caller has made the
+/// data folder. Inputs: the data folder and the channel. Output: Ok, `update_channel_busy`
+/// when another program kept `update.toml` held past the bounded retries (Windows), or
 /// `update_io`.
 pub fn write_channel(root: &Path, channel: Channel) -> Result<(), UpdateError> {
     static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -212,17 +225,53 @@ pub fn write_channel(root: &Path, channel: Channel) -> Result<(), UpdateError> {
         options.mode(0o600);
     }
     let mut file = options.open(&temporary).map_err(failed)?;
-    let saved = file
+    let written = file
         .write_all(format!("channel = \"{}\"\n", channel.as_str()).as_bytes())
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&temporary, root.join("update.toml"))
-        });
+        .and_then(|()| file.sync_all());
+    drop(file);
+    let saved = written
+        .map_err(failed)
+        .and_then(|()| replace_channel_file(&temporary, &root.join("update.toml")));
     if saved.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
-    saved.map_err(failed)
+    saved
+}
+
+/// Renames a saved channel file over `update.toml`. Inputs: the saved file and
+/// `update.toml`. Output: Ok, or `update_io`.
+#[cfg(not(windows))]
+fn replace_channel_file(from: &Path, to: &Path) -> Result<(), UpdateError> {
+    std::fs::rename(from, to).map_err(|error| io_failure("Can't save the update channel", error))
+}
+
+/// Renames a saved channel file over `update.toml`, trying again while another program holds
+/// `update.toml` without delete sharing (access denied, 5, or sharing violation, 32), at
+/// most [`CHANNEL_RENAME_TRIES_MAX`] times within [`CHANNEL_RENAME_WAIT_MAX`], the wait
+/// doubling from 10 ms. Inputs: the saved file and `update.toml`. Output: Ok,
+/// `update_channel_busy` once the tries are spent, or `update_io` for any other error.
+#[cfg(windows)]
+fn replace_channel_file(from: &Path, to: &Path) -> Result<(), UpdateError> {
+    let started = Instant::now();
+    let mut wait = Duration::from_millis(10);
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        assert!(tries <= CHANNEL_RENAME_TRIES_MAX);
+        let error = match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if !matches!(error.raw_os_error(), Some(5 | 32)) {
+            return Err(io_failure("Can't save the update channel", error));
+        }
+        let left = CHANNEL_RENAME_WAIT_MAX.saturating_sub(started.elapsed());
+        if tries == CHANNEL_RENAME_TRIES_MAX || left.is_zero() {
+            return Err(fail("update_channel_busy", CHANNEL_BUSY));
+        }
+        std::thread::sleep(wait.min(left));
+        wait = wait.saturating_mul(2);
+    }
 }
 
 /// A release manifest (`cli-latest.json`): the version and one archive per Rust target.

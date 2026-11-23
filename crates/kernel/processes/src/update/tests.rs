@@ -691,3 +691,32 @@ fn channel_writers_at_the_same_moment_each_save_whole() {
         .collect();
     assert_eq!(left, vec!["update.toml".to_owned()]);
 }
+
+/// A save while another program holds `update.toml` without delete sharing waits a bounded
+/// time, then reports the file busy and leaves no half-written file; once the file is let
+/// go the save goes through.
+#[cfg(windows)]
+#[test]
+fn a_channel_file_another_program_holds_is_busy_and_saves_once_let_go() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path();
+    write_channel(root, Channel::Stable).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(root.join("update.toml"))
+        .unwrap();
+    let started = Instant::now();
+    let busy = write_channel(root, Channel::Dev).unwrap_err();
+    assert_eq!(busy.code, "update_channel_busy", "{}", busy.message);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(held);
+    write_channel(root, Channel::Dev).unwrap();
+    assert_eq!(read_channel(root).unwrap(), Channel::Dev);
+    let left: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["update.toml".to_owned()]);
+}
