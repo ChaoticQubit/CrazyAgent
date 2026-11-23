@@ -7,7 +7,8 @@ use crate::pools::PoolSummary;
 use crate::project_setup::{Platform, ResearchJob, ResearchStatus, StoredSetup};
 use crate::protocol::{Command, CredentialRef, Cursor, ProjectId, StoredProject};
 use crate::team::TeamGraph;
-use crate::terminal::{AgentId, TerminalFrame};
+use crate::terminal::TerminalFrame;
+use kernel_processes::terminal::AgentId;
 
 /// A pool change asked for in Settings, Pools or a Project. The engine side
 /// builds the exact pool records, keeping an existing pool's projects and roles;

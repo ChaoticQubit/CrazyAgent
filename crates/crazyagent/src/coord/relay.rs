@@ -755,7 +755,7 @@ fn serve_part(
 pub(crate) fn tag_key(tag: &str) -> Option<String> {
     let number: u128 = if tag == LEAD_TAG {
         0
-    } else if crate::terminal::pane_id_valid(tag) {
+    } else if kernel_processes::terminal::pane_id_valid(tag) {
         tag[1..].parse::<u128>().ok()? + 1
     } else {
         return None;
@@ -874,7 +874,7 @@ fn recipients(
         .map_err(state)?;
     for row in rows {
         let (id, pane) = row.map_err(state)?;
-        if crate::terminal::pane_id_valid(&pane) {
+        if kernel_processes::terminal::pane_id_valid(&pane) {
             team.insert(pane, id);
         }
     }

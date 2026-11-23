@@ -6,8 +6,9 @@ use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::{MessageAuthor, MessageState, append_message, now_ms};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{FOLDER, Host};
+use kernel_processes::terminal::Host;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -662,7 +663,7 @@ impl Team {
             worker.project == self.project && worker.role == crate::team::AgentRole::Master
         });
         let screen = master
-            .and_then(|(id, _)| crate::terminal::AgentId::team(*id).ok())
+            .and_then(|(id, _)| kernel_processes::terminal::AgentId::team(*id).ok())
             .and_then(|agent| self.host.screen(&agent).ok())
             .map(|bytes| pane_rows(&bytes))
             .unwrap_or_default();

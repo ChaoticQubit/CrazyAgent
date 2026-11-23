@@ -6,7 +6,7 @@ use super::{
     TEAMMATES_SERVER_REPLACED, TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::launch::Ending;
-use crate::terminal::PaneCommand;
+use kernel_processes::terminal::PaneCommand;
 pub use servers::Servers;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
