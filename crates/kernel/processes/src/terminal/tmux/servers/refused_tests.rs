@@ -736,3 +736,72 @@ fn a_stop_of_a_remembered_teammate_after_a_missed_look_never_opens_another_leads
         std::fs::remove_dir_all(folder).unwrap();
     }
 }
+
+/// The record a lead's start keeps of its teammates' socket name on a host. Takes the host
+/// and the lead's id. Returns the record's path.
+fn teammates_record(host: &Servers, id: i64) -> PathBuf {
+    crate::terminal::tmux::test_seams::test_layout::agent_teammates_socket_name(
+        &host.root.join("team"),
+        id,
+    )
+}
+
+/// A lead whose teammates' socket record is present but cannot be trusted is refused team
+/// routing, never read as a lead with no teammates' server, whose team panes the host would
+/// then resolve on the lead's own server: a record no one can read, one of the wrong size, a
+/// link, a folder, or one whose name is not a teammates' socket name. No case starts a
+/// server.
+#[test]
+fn a_lead_whose_teammates_record_cannot_be_trusted_is_refused_team_routing() {
+    use std::os::unix::fs::PermissionsExt;
+    let cases: [(&str, fn(&Path)); 5] = [
+        ("unreadable", |record| {
+            std::fs::set_permissions(record, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }),
+        ("wrong size", |record| {
+            std::fs::write(record, "teammates-0.sock").unwrap();
+        }),
+        ("a link", |record| {
+            let held = record.with_extension("held");
+            std::fs::rename(record, &held).unwrap();
+            std::os::unix::fs::symlink(&held, record).unwrap();
+        }),
+        ("a folder", |record| {
+            std::fs::remove_file(record).unwrap();
+            std::fs::create_dir(record).unwrap();
+        }),
+        ("not a socket name", |record| {
+            let length = std::fs::metadata(record).unwrap().len();
+            let name = format!("teammates-{}.sock", "g".repeat(16));
+            assert_eq!(name.len() as u64, length);
+            std::fs::write(record, name).unwrap();
+        }),
+    ];
+    for (case, spoil) in cases {
+        let (_root, host, lead, _socket) = lead_with_teammates_socket();
+        spoil(&teammates_record(&host, 7));
+        assert_eq!(
+            host.team_mates(&lead).map(|server| server.is_some()),
+            Err(failure(OWN_SERVER_UNAVAILABLE)),
+            "{case}"
+        );
+    }
+}
+
+/// A lead whose start named no teammates' socket has no teammates' server, so its team panes
+/// are on its own server: no record, with or without the records' folder made.
+#[test]
+fn a_lead_with_no_teammates_record_has_no_teammates_server() {
+    let (_root, host, lead) = fresh_host();
+    assert_eq!(
+        host.team_mates(&lead).map(|server| server.is_some()),
+        Ok(false)
+    );
+    let record = teammates_record(&host, 7);
+    private_folder(record.parent().unwrap());
+    assert!(!record.exists());
+    assert_eq!(
+        host.team_mates(&lead).map(|server| server.is_some()),
+        Ok(false)
+    );
+}
