@@ -45,8 +45,9 @@ pub(super) enum Pending {
     /// to keep: the capture's pane rows cannot be counted, so the reader drops every line up
     /// to the marker line, as it does for a cut capture.
     Marker(Vec<u8>),
-    /// The block that prints the marker of an attach already answered: it holds no pane
-    /// text, so the reader finds its end by its guard and drops it, whatever it printed.
+    /// The block that prints an attach's marker, sent on its own command line right after
+    /// the attach, so tmux runs it even after the attach failed: it holds no pane text, so
+    /// the reader finds its end by its guard and drops it, whatever it printed.
     Spent,
 }
 
@@ -456,10 +457,10 @@ pub(super) fn error_code(lines: &[Vec<u8>]) -> HostError {
 
 /// Hands one closed reply block to the request at the front of the queue. `ran` is whether
 /// the block closed with `%end`, since tmux skips the rest of a command line after an
-/// `%error`: an attach whose located reply ran keeps its place for the capture, one whose
-/// located reply was too large to keep leaves its capture and marker to be drained, and one
-/// whose capture ran leaves its marker block to be dropped. Takes the state, the answer and
-/// whether the command ran.
+/// `%error`: an attach whose located reply ran keeps its place for the capture, and one whose
+/// located reply was too large to keep leaves its capture and marker to be drained. The
+/// marker block, from its own command line, is queued after the attach as `Spent`. Takes the
+/// state, the answer and whether the command ran.
 pub(super) fn finish(state: &mut State, answer: Answer, ran: bool) {
     let Some(front) = state.pending.pop_front() else {
         return;
@@ -503,9 +504,6 @@ pub(super) fn finish(state: &mut State, answer: Answer, ran: bool) {
             let opened =
                 answer.and_then(|screen| viewer(state, agent, &lines, &screen, history, view));
             let _ = reply.send(opened);
-            if ran {
-                state.pending.push_front(Pending::Spent);
-            }
         }
     }
 }
@@ -544,7 +542,10 @@ pub(super) enum Rows {
 /// block.
 pub(super) fn opening(state: &mut State) -> Rows {
     match state.pending.pop_front() {
-        Some(Pending::Marker(marker)) => Rows::Drained(marker),
+        Some(Pending::Marker(marker)) => {
+            drop_spent(state);
+            Rows::Drained(marker)
+        }
         Some(Pending::Attach {
             agent,
             located: Some(lines),
@@ -555,6 +556,7 @@ pub(super) fn opening(state: &mut State) -> Rows {
         }) => {
             let Some((rows, found)) = counted(&lines) else {
                 let _ = reply.send(Err(failure(REPLY_CUT)));
+                drop_spent(state);
                 return Rows::Drained(marker);
             };
             let rows = found.min(history) + usize::from(rows);
@@ -573,6 +575,33 @@ pub(super) fn opening(state: &mut State) -> Rows {
             Rows::Searched
         }
         None => Rows::Searched,
+    }
+}
+
+/// Takes off the queue the block that prints an attach's marker, which its own command line
+/// always runs, since a drain to that marker reads the block itself. Takes the state, whose
+/// front must be that block's `Spent`.
+fn drop_spent(state: &mut State) {
+    let spent = state.pending.pop_front();
+    assert!(matches!(spent, Some(Pending::Spent)));
+}
+
+/// Answers an attach whose counted capture met its error guard with that error, then drains
+/// to the attach's marker: the guard may be pane text, so no row after it is read as a
+/// control line, and a real error leaves only the marker block to drop. Takes the state, the
+/// rows read and the capture's guard. Returns the drain.
+fn capture_failed(state: &mut State, lines: &[Vec<u8>], opened: Vec<u8>) -> Drain {
+    let marker = match state.pending.front() {
+        Some(Pending::Attach { marker, .. }) => marker.clone(),
+        _ => unreachable!("only an attach's capture is counted"),
+    };
+    finish(state, Err(error_code(lines)), false);
+    drop_spent(state);
+    Drain {
+        marker,
+        opened,
+        found: false,
+        lines: 0,
     }
 }
 
@@ -708,6 +737,12 @@ pub(super) fn read(output: ChildStdout, state: &Mutex<State>) {
             let closing = !counted && dropped == 0;
             let ended = closing && guard(&line, b"%end") == Some(open.opened.as_slice());
             let failed = closing && guard(&line, b"%error") == Some(open.opened.as_slice());
+            if counted && dropped == 0 && guard(&line, b"%error") == Some(open.opened.as_slice()) {
+                let opened = std::mem::take(&mut open.opened);
+                drain = Some(capture_failed(&mut state, &open.lines, opened));
+                block = None;
+                continue;
+            }
             if ended || failed {
                 let lines = std::mem::take(&mut open.lines);
                 let answer = if open.oversized {

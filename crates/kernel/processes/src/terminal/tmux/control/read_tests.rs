@@ -86,6 +86,7 @@ fn a_capture_whose_row_count_is_unknown_fails_only_its_attach_and_forges_nothing
     {
         let mut state = state.lock().unwrap();
         state.pending.push_back(cut);
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(queued));
         state.viewers.push(Viewer {
             pane: b"%9".to_vec(),
@@ -128,6 +129,7 @@ fn an_attach_takes_the_marker_block_after_its_capture_so_the_next_request_gets_i
     {
         let mut state = state.lock().unwrap();
         state.pending.push_back(opening);
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(queued));
     }
     let text = format!(
@@ -154,6 +156,7 @@ fn a_marker_cut_short_after_a_whole_capture_still_leaves_the_next_reply_its_own(
     {
         let mut state = state.lock().unwrap();
         state.pending.push_back(opening);
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(queued));
     }
     let text = format!(
@@ -181,6 +184,7 @@ fn a_located_reply_too_large_to_keep_drops_its_capture_and_forges_no_reply() {
     {
         let mut state = state.lock().unwrap();
         state.pending.push_back(opening);
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(queued));
     }
     let mut text = b"%begin 1 7 1\n".to_vec();
@@ -215,6 +219,7 @@ fn a_cut_attach_whose_marker_never_comes_within_a_capture_closes_the_control() {
     {
         let mut state = state.lock().unwrap();
         state.pending.push_back(cut);
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(queued));
     }
     let mut text = b"%begin 1 7 1\n".to_vec();
@@ -233,8 +238,9 @@ fn a_cut_attach_whose_marker_never_comes_within_a_capture_closes_the_control() {
     assert!(state.lock().unwrap().closed);
 }
 
-/// A located reply tmux failed ends the attach there, since tmux skips the
-/// rest of the command line after an error, so the next block is the queued request's own.
+/// A located reply tmux failed ends the attach there, since tmux skips the capture on its
+/// command line after an error; the marker block, from its own line, goes to the attach, so
+/// the next block is the queued request's own.
 #[test]
 fn a_failed_located_reply_ends_the_attach_and_the_next_block_answers_the_next_request() {
     let (opening, answer) = attach(None, false);
@@ -243,10 +249,12 @@ fn a_failed_located_reply_ends_the_attach_and_the_next_block_answers_the_next_re
     {
         let mut state = state.lock().unwrap();
         state.pending.push_back(opening);
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(queued));
     }
-    let text =
-        "%begin 1 7 1\ncan't find pane: %9\n%error 1 7 1\n%begin 1 8 1\nanswer end\n%end 1 8 1\n";
+    let text = format!(
+        "%begin 1 7 1\ncan't find pane: %9\n%error 1 7 1\n%begin 1 8 1\n{MARKER}\n%end 1 8 1\n%begin 1 9 1\nanswer end\n%end 1 9 1\n"
+    );
 
     read_text(text.as_bytes(), &state);
 
@@ -282,6 +290,7 @@ fn a_capture_whose_located_reply_has_no_line_drains_to_its_marker_and_forges_not
             reply,
             marker: MARKER.as_bytes().to_vec(),
         });
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(queued));
         state.viewers.push(Viewer {
             pane: b"%9".to_vec(),
@@ -339,6 +348,7 @@ fn a_capture_cut_after_its_row_counts_is_read_as_data_and_the_control_reads_on()
             reply,
             marker: MARKER.as_bytes().to_vec(),
         });
+        state.pending.push_back(Pending::Spent);
         state.pending.push_back(Pending::Reply(next));
         state.viewers.push(Viewer {
             pane: b"%9".to_vec(),
@@ -393,6 +403,7 @@ fn an_attach_capture_is_counted_from_a_cut_line_once_both_counts_came_whole() {
             reply,
             marker: MARKER.as_bytes().to_vec(),
         });
+        state.pending.push_back(Pending::Spent);
         match opening(&mut state) {
             Rows::Counted(rows) => Some(rows),
             Rows::Drained(_) => None,
