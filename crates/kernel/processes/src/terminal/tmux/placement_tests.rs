@@ -48,7 +48,7 @@ fn settled_with(reply: &str) -> (HostError, Vec<AgentId>) {
     control
         .run(&format!("new-window -d -t {SESSION}: -n {agent} cat"))
         .unwrap();
-    assert_eq!(windows(&control).unwrap(), [agent.clone()]);
+    assert_eq!(windows(&control).unwrap(), std::slice::from_ref(&agent));
     let reply = vec![format!("{reply}{FORMAT_END}").into_bytes()];
     let refused = host.settle(&control, &agent, Ok(reply)).unwrap_err();
     (refused, windows(&control).unwrap())
