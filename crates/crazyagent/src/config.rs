@@ -2018,4 +2018,52 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         std::fs::write(&global, format!("version = {SETTINGS_VERSION}\n")).unwrap();
         assert!(resolve_config(&global, &project).is_ok());
     }
+
+    /// `plugins.when_turned_off` is a working owner setting: absent it reads
+    /// `refuse_new_calls`, adds no descriptor and keeps the config id; set in the global or
+    /// a project file it reads `stop_runs`, takes effect at once and names its origin.
+    #[test]
+    fn plugins_when_turned_off_is_a_working_setting() {
+        use kernel_plugin_host::usage::TurnOff;
+        let version = format!("version = {SETTINGS_VERSION}\n");
+        let plain = resolve_config_bytes(&version, "").unwrap();
+        assert_eq!(
+            plain.settings.plugins.when_turned_off,
+            TurnOff::RefuseNewCalls
+        );
+        assert!(!plain.descriptors.contains_key("plugins.when_turned_off"));
+        assert_eq!(
+            plain.id,
+            from_settings(Settings::default(), plain.descriptors.clone())
+                .unwrap()
+                .id
+        );
+        let set = format!("{version}[plugins]\nwhen_turned_off = \"stop_runs\"\n");
+        for (global, project, origin) in [
+            (set.as_str(), "", Origin::Global),
+            (
+                version.as_str(),
+                "[plugins]\nwhen_turned_off = \"stop_runs\"\n",
+                Origin::Project,
+            ),
+        ] {
+            let config = resolve_config_bytes(global, project).unwrap();
+            assert_eq!(config.settings.plugins.when_turned_off, TurnOff::StopRuns);
+            let descriptor = &config.descriptors["plugins.when_turned_off"];
+            assert_eq!(descriptor.value, serde_json::json!("stop_runs"));
+            assert_eq!(descriptor.default, serde_json::json!("refuse_new_calls"));
+            assert_eq!(descriptor.origin, origin);
+            assert_eq!(descriptor.effect_timing, EffectTiming::Immediate);
+            assert_ne!(config.id, plain.id);
+            config.validate().unwrap();
+        }
+        assert!(
+            resolve_config_bytes(
+                &format!("{version}[plugins]\nwhen_turned_off = \"stop\"\n"),
+                ""
+            )
+            .is_err()
+        );
+        assert!(resolve_config_bytes(&format!("{version}[plugins]\nother = 1\n"), "").is_err());
+    }
 }
