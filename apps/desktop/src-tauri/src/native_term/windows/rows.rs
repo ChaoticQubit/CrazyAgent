@@ -703,8 +703,14 @@ fn the_render_thread_answers_a_view_placed_after_a_removal_inside_present() {
         FARM_WAIT,
         || later.faulted() || presents() > before,
     );
-    let replaced = if later.faulted() { "no" } else { "yes" };
-    println!("device-lost row: a replacement device after the removal came up: {replaced}");
+    assert!(
+        !later.faulted() && presents() > before,
+        "a replacement device comes up after a removal: the later view presents and has not faulted"
+    );
+    println!(
+        "device-lost row: a replacement device after the removal came up, presents {}",
+        presents()
+    );
     dropped_within_the_bound(later, "the later view");
     dropped_within_the_bound(removed, "the removed view");
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes last");
