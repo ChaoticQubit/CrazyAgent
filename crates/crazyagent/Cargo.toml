@@ -73,6 +73,7 @@ crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 [dev-dependencies]
 crazyagent-kernel-storage = { path = "../kernel/storage", features = ["test-support"] }
 crazyagent-kernel-processes = { path = "../kernel/processes", features = ["test-support"] }
+crazyagent-kernel-sandbox = { path = "../kernel/sandbox", features = ["test-support"] }
 crazyagent-cap = { path = "../sdk/cap" }
 crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 tempfile = "=3.27.0"

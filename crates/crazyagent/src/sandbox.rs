@@ -1,3 +1,4 @@
+use kernel_sandbox::elf;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -15,7 +16,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-pub mod elf;
 pub mod extra_paths;
 #[cfg(all(test, target_os = "macos"))]
 mod git_deny_tests;
@@ -5710,7 +5710,7 @@ mod windows_path_tests {
 #[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
-    use crate::sandbox::elf::tests::executable;
+    use kernel_sandbox::elf::test_support::executable;
 
     struct Case {
         _temp: tempfile::TempDir,
