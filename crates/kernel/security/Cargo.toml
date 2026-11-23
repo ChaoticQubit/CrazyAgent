@@ -19,6 +19,9 @@ subtle = "=2.6.1"
 url = "=2.5.8"
 zeroize = "=1.9.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+crazyagent-kernel-processes = { path = "../processes" }
+
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 keyring-core = "=1.0.1"
 

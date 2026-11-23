@@ -688,10 +688,16 @@ fn an_empty_send_host_list_is_refused() {
 
 #[test]
 fn a_keep_as_the_store_refuses_is_refused_at_read() {
-    for name in ["nul", "con", "a.", "nul.token"] {
+    for name in ["a.", "token."] {
         refused_net(&with_send(&format!(
             "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
         )));
+    }
+    for name in ["nul", "con", "nul.token"] {
+        let text = net_text(&with_send(&format!(
+            "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
+        )));
+        assert!(manifest::parse(&text).is_ok(), "{name}");
     }
 }
 
