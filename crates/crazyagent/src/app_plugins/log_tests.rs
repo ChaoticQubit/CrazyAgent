@@ -2,7 +2,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
-use kernel_plugin_host::registry::{FOLDER, Switch, off_code_plugins};
+use kernel_plugin_host::registry::{Switch, off_code_plugins};
 use kernel_plugin_host::store::{KeyFolder, KeyRef};
 use kernel_plugin_host::usage::{TurnOff, Usage};
 use kernel_storage::state_log::replay::rows;
@@ -346,19 +346,23 @@ fn an_off_code_plugin_survives_replay() {
     assert_eq!(bare, 0);
 }
 
-/// Removing a plugin, and the start's drop of a plugin whose folder is gone, leave only
-/// the removal event naming it; another plugin's events and a code plugin's switch stay,
-/// and the rebuilt tables still equal the live ones.
+/// Removing a plugin, and the start pass's drop of an older plugin of the owner's under a
+/// bundled plugin's name, leave only the removal event naming it; another plugin's events
+/// and a code plugin's switch stay, and the rebuilt tables still equal the live ones.
 #[test]
 fn removing_a_plugin_redacts_its_earlier_events() {
     let mut case = case(true);
+    case.run(switch("openai", false)).unwrap();
     case.add("acme", ACME, false).unwrap();
     case.add("near", NEAR, false).unwrap();
     case.run(set_key(b"sk-row-seven-key-01")).unwrap();
     case.code_off();
-    let gone = NEAR.replace("plugin = \"near\"", "plugin = \"gone\"");
-    case.add("gone", &gone, false).unwrap();
-    std::fs::remove_dir_all(case.root.join(FOLDER).join("gone")).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms) VALUES ('openai', ?1, '', 1)",
+            ["0".repeat(64)],
+        )
+        .unwrap();
 
     case.run(Command::List).unwrap();
     case.run(Command::Remove {
@@ -367,7 +371,7 @@ fn removing_a_plugin_redacts_its_earlier_events() {
     .unwrap();
 
     assert_eq!(case.naming("acme"), ["AppPluginForgotten"]);
-    assert_eq!(case.naming("gone"), ["AppPluginForgotten"]);
+    assert_eq!(case.naming("openai"), ["AppPluginForgotten"]);
     assert!(
         case.naming("near")
             .iter()
@@ -381,7 +385,8 @@ fn removing_a_plugin_redacts_its_earlier_events() {
 }
 
 /// An entered key's file is deleted once the change that lets it go has committed: an
-/// unbind, a key replaced by a new one, and the plugin's removal.
+/// unbind, a re-approval whose hosts changed, and the plugin's removal; a key entered again
+/// for a bound secret keeps its file.
 #[test]
 fn a_dropped_key_file_is_deleted_after_the_commit() {
     let case = case(true);
@@ -395,11 +400,19 @@ fn a_dropped_key_file_is_deleted_after_the_commit() {
     case.run(set_key(b"sk-row-eight-key-02")).unwrap();
     let second = case.key_file().unwrap();
     case.run(set_key(b"sk-row-eight-key-03")).unwrap();
-    let third = case.key_file().unwrap();
-    assert_ne!(second, third);
-    assert!(!second.exists(), "a replaced key's file is deleted");
-    assert!(third.exists());
+    assert_eq!(case.key_file().unwrap(), second);
+    assert!(second.exists(), "a key entered again keeps its file");
+    let moved = ACME.replace(
+        "hosts = [\"api.acme.example\"]",
+        "hosts = [\"api.acme.example\", \"eu.acme.example\"]",
+    );
+    assert_ne!(moved, ACME);
+    case.add("acme-moved", &moved, true).unwrap();
+    assert!(case.key_file().is_none());
+    assert!(!second.exists(), "new hosts drop the key and its file");
 
+    case.run(set_key(b"sk-row-eight-key-04")).unwrap();
+    let third = case.key_file().unwrap();
     case.run(Command::Remove {
         name: "acme".into(),
     })

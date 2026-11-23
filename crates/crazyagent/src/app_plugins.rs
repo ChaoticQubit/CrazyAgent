@@ -142,8 +142,8 @@ impl OffSet {
         *self.off.write().unwrap_or_else(PoisonError::into_inner) = loaded;
     }
 
-    /// Switches a bundled code plugin and, once the switch has committed, loads the set
-    /// again. A connection inside an open transaction is refused before anything is
+    /// Switches a plugin, the change logged in its own transaction, and, once the switch
+    /// has committed, loads the set again. A connection inside an open transaction is refused before anything is
     /// written, so the set never shows a switch that could still roll back. Inputs: the
     /// engine connection, the engine facts, the plugin id and the switch. Output: Ok, the
     /// plugin host's refusal code, or `app_plugins_unavailable`.
@@ -157,7 +157,9 @@ impl OffSet {
         if !db.is_autocommit() {
             return Err(EngineError("app_plugins_unavailable".into()));
         }
-        kernel_plugin_host::registry::set_enabled(db, engine, plugin, switch).map_err(error)?;
+        log::logged(db, engine.root, |db| {
+            kernel_plugin_host::registry::set_enabled(db, engine, plugin, switch).map_err(error)
+        })?;
         assert!(db.is_autocommit());
         self.load(db);
         Ok(())
@@ -250,18 +252,53 @@ pub(crate) fn usage() -> &'static Usage {
     &USAGE
 }
 
-/// Runs one App plugins request on the engine connection outside a transaction. A change
-/// answers with the listing after it. Turning a plugin off follows the owner's setting for
-/// runs holding it unless the request picks a choice for this one call. Inputs: the engine
-/// connection, the resolved settings and the command; saving the choice itself is the
+/// Runs one App plugins request on the engine connection, each change logged in the
+/// transaction that writes it: a switch in its own, through the engine's off set, then the
+/// listing; any other request with its listing in one. A change answers with the listing
+/// after it. Turning a plugin off follows the owner's setting for runs holding it unless
+/// the request picks a choice for this one call. Inputs: the engine connection, outside any
+/// transaction, the resolved settings and the command; saving the choice itself is the
 /// storage worker's. Output: the answer, or the plugin store's refusal code.
 pub(crate) fn execute(
     db: &Connection,
     config: &EffectiveConfig,
     command: Command,
 ) -> Result<Done, EngineError> {
-    let policy = &config.settings.plugins;
     let root = crate::storage::trash::engine_root(db)?;
+    let command = match command {
+        Command::SetEnabled {
+            name,
+            enabled,
+            when_off,
+        } => {
+            let policy = &config.settings.plugins;
+            let switch = if enabled {
+                Switch::On
+            } else {
+                Switch::Off {
+                    usage: usage(),
+                    when_off: when_off.unwrap_or(policy.when_turned_off),
+                    essential_unlocked: policy.essential_unlocked,
+                }
+            };
+            switches().switch(db, &engine(root), &name, switch)?;
+            Command::List
+        }
+        other => other,
+    };
+    log::logged(db, root, |db| run(db, root, config, command))
+}
+
+/// Runs one App plugins request other than a switch inside the logged transaction.
+/// Inputs: the transaction's connection, the engine root, the resolved settings and the
+/// command. Output: the answer, or the plugin store's refusal code.
+fn run(
+    db: &Connection,
+    root: &Path,
+    config: &EffectiveConfig,
+    command: Command,
+) -> Result<Done, EngineError> {
+    let policy = &config.settings.plugins;
     let engine = engine(root);
     let now = crate::team::now_ms();
     match command {
@@ -286,21 +323,8 @@ pub(crate) fn execute(
             kernel_plugin_host::trust::trust_file(db, &engine, &name, &sha256, now)
                 .map_err(error)?;
         }
-        Command::SetEnabled {
-            name,
-            enabled,
-            when_off,
-        } => {
-            let switch = if enabled {
-                Switch::On
-            } else {
-                Switch::Off {
-                    usage: usage(),
-                    when_off: when_off.unwrap_or(policy.when_turned_off),
-                    essential_unlocked: policy.essential_unlocked,
-                }
-            };
-            switches().switch(db, &engine, &name, switch)?;
+        Command::SetEnabled { .. } => {
+            unreachable!("a switch runs through the off set in its own transaction")
         }
         Command::Remove { name } => registry::remove(db, &engine, &name).map_err(error)?,
         Command::BindAccount {
@@ -338,11 +362,17 @@ pub(crate) fn sweep_staged(root: &Path) {
 }
 
 /// The owner read of every plugin with the capabilities it is granted, for the engine root
-/// the database sits in. Input: the engine connection. Output: the listing as owner data,
-/// or the plugin host's refusal code, or `file_trash_root_unknown` for an in-memory database.
-pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData, EngineError> {
-    let root = crate::storage::trash::engine_root(db)?;
-    let plugins = kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)?;
+/// the database sits in; a change the plugin store's start pass makes is logged in the
+/// read's transaction. Input: the owner read's transaction. Output: the listing as owner
+/// data, or the plugin host's refusal code, or `file_trash_root_unknown` for an in-memory
+/// database.
+pub(crate) fn grants(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<crate::engine::owner::OwnerData, EngineError> {
+    let root = crate::storage::trash::engine_root(tx)?;
+    let (plugins, _, _) = log::logged_in(tx, |db| {
+        kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)
+    })?;
     assert!(plugins.len() <= kernel_plugin_host::grants::GRANTS_MAX);
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
