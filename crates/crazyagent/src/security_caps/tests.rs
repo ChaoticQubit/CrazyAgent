@@ -90,7 +90,8 @@ fn a_store_error_code_reaches_the_plugin_unchanged() {
         &failing, NAMESPACE, &scopes, &handles, None,
     ));
     assert_eq!(
-        caps.find("github", "token".to_owned()),
+        caps.find("github", "token".to_owned())
+            .map(|found| found.map(Secret::kernel_id)),
         Err(Refusal::Failed {
             code: "credential_store_unavailable".to_owned()
         })
@@ -142,7 +143,11 @@ fn a_handle_crosses_the_adapter_as_the_kernel_id() {
     let found = caps.find("github", "token".to_owned()).unwrap();
     assert_eq!(found.map(Secret::kernel_id), Some(put.kernel_id()));
     assert_eq!(caps.forget("github", put), Ok(()));
-    assert_eq!(caps.find("github", "token".to_owned()), Ok(None));
+    assert_eq!(
+        caps.find("github", "token".to_owned())
+            .map(|found| found.map(Secret::kernel_id)),
+        Ok(None)
+    );
 }
 
 #[test]

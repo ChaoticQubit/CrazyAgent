@@ -82,7 +82,7 @@ pub mod scheduling;
 mod sdk_slice;
 /// The SDK providers the kernel security crate backs: the secrets capabilities over the
 /// OS store, and `Absent`, which fails every call without opening anything.
-mod security_caps;
+pub mod security_caps;
 pub mod service;
 pub mod sessions_log;
 pub mod settings_log;
