@@ -1070,7 +1070,8 @@ impl Tmux {
     }
 
     /// Settles the agent window a spawn asked for: on any error, from the reply that made it
-    /// on, it kills that window, so a failed spawn leaves none. Takes the control, the agent
+    /// on, it kills that window through an open control, reconnecting to the live server when
+    /// a timeout closed this one, so a failed spawn leaves none. Takes the control, the agent
     /// and the reply. Returns the pane, or the code `placed` or the reply failed with.
     fn settle(
         &self,
@@ -1080,7 +1081,8 @@ impl Tmux {
     ) -> Result<PaneRef, HostError> {
         let settled = made.and_then(|lines| self.placed(control, agent, &lines));
         if settled.is_err() {
-            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+            let kill = format!("kill-window -t {}", target(agent));
+            let _ = self.control_with(false).and_then(|open| open.run(&kill));
         }
         settled
     }
