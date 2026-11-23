@@ -3,7 +3,8 @@ use crate::research::accounts::{Reach, SettingsResolver};
 use crate::research::service::ResearchService;
 use crate::team::runtime::live_failover_tests::OwnerAccount;
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 
 const TICK: Duration = Duration::from_secs(1);
 
@@ -39,7 +40,7 @@ impl EngineResearch {
         owner.record_run(&db);
         drop(db);
         let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux.clone()), &base.join(FOLDER)));
+        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux.clone()), &base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
         let (state, projects) = (base.join("research"), base.join("projects"));
         for directory in [&state, &projects] {
             match fs::DirBuilder::new().mode(0o700).create(directory) {

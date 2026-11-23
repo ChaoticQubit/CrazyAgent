@@ -1,4 +1,7 @@
 use crate::engine::EngineError;
+use kernel_processes::terminal::kept::{KEPT_MAX, LastScreenHost};
+#[cfg(unix)]
+use kernel_processes::terminal::tmux::{Servers, Tmux};
 use kernel_processes::terminal::{
     APP_PANE_UNKNOWN, AgentId, CHUNK_BYTES_MAX, CONNECTIONS_MAX, Host, HostError, INPUT_BYTES_MAX,
     OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PASTE_BYTES_MAX, PASTE_SETTLE, PINS_UNSUPPORTED,
@@ -14,38 +17,12 @@ use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 
-mod kept;
-pub(crate) use kept::KEPT_MAX;
 #[cfg(unix)]
 pub mod tmux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
 pub const FOLDER: &str = "terminal";
-pub const HARNESS_SOCKET: &str = "tmux.sock";
-/// The start of a native lead's teammates' socket name: each lead start names a new one,
-/// `teammates-` and 16 hex digits then `.sock`, beside the lead's own.
-pub const TEAMMATES_SOCKET_PREFIX: &str = "teammates-";
-#[cfg(unix)]
-const TEAMMATES_SOCKET_SUFFIX: &str = ".sock";
-#[cfg(unix)]
-const TEAMMATES_NONCE_BYTES: usize = 8;
-#[cfg(unix)]
-const TEAMMATES_NAME_BYTES: usize =
-    TEAMMATES_SOCKET_PREFIX.len() + 2 * TEAMMATES_NONCE_BYTES + TEAMMATES_SOCKET_SUFFIX.len();
-/// The most bytes a teammates' server pid record holds: the socket's name, a space and the
-/// ten digits of the largest pid.
-#[cfg(unix)]
-const TEAMMATES_PIN_BYTES_MAX: usize = TEAMMATES_NAME_BYTES + 1 + 10;
-/// What a teammates' server pid record holds after the socket's name until the server first
-/// answers.
-#[cfg(unix)]
-const TEAMMATES_PIN_PENDING: &str = "pending";
-/// The most digits a lead's servers' deadline record holds, as a server keeper
-/// reads it: every time a system clock gives fits (FBTMUX-P1-R1-L1).
-#[cfg(unix)]
-const SERVERS_DEADLINE_DIGITS_MAX: usize = 19;
-const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const PANES_PER_PROJECT_MAX: usize = crate::config::POOL_MEMBERS_MAX;
 
 const _: () = assert!(PROMPT_BYTES_MAX == crate::team::DIRECT_INPUT_BYTES_MAX);
@@ -57,6 +34,13 @@ impl From<HostError> for EngineError {
     fn from(error: HostError) -> Self {
         EngineError(error.0)
     }
+}
+
+/// The local clock text a kept screen's label shows, the time its terminal ended. Output:
+/// the text.
+fn kept_clock() -> String {
+    use crate::tui::clock::{clock, local_offset, now_ms};
+    clock(now_ms(), local_offset())
 }
 
 fn failure(code: &str) -> HostError {
@@ -381,249 +365,16 @@ pub fn platform(engine_root: &Path) -> (bool, Arc<dyn Host>) {
 /// program, none when tmux is missing. Returns the host; nothing starts until its first call.
 #[cfg(unix)]
 pub fn tmux_host(engine_root: &Path, program: Option<PathBuf>) -> Arc<dyn Host> {
-    let engine = tmux::Tmux::open(program.clone(), &engine_root.join(FOLDER));
-    Arc::new(kept::LastScreenHost::new(tmux::Servers::new(
-        engine,
-        engine_root,
-        program,
-    )))
-}
-
-/// The socket of a native-mode lead's own tmux server: `tmux.sock` in the lead's short private
-/// temp folder, which only that lead's sandbox may bind or reach, never the engine's server.
-/// The engine reaches it only through a tmux client started inside the lead's own profile,
-/// since a tmux server can make any client run a command; never connect a plain client.
-/// Takes the engine root and the lead. Returns the path, or `terminal_agent_invalid` for a
-/// name that is not a team agent.
-pub fn harness_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
-    lead_temp_socket(engine_root, lead, HARNESS_SOCKET)
-}
-
-/// The socket of a native lead's teammates' own tmux server (rv-audit S1 F1), in the lead's
-/// short private temp folder under the name its latest start chose (see
-/// [`renew_teammates_socket`]). That server and every teammate pane it forks run in the
-/// teammates' profile, which serves this socket but never reaches or unlinks it, nor the
-/// lead's own; the lead and the engine's clients reach it inside the lead's profile. Takes
-/// the engine root and the lead. Returns the path, `terminal_agent_invalid` for a name that
-/// is not a team agent, or `terminal_own_server_unavailable` when no plain name is kept.
-#[cfg(unix)]
-pub fn teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
-    use std::os::unix::fs::MetadataExt;
-    let id = lead
-        .team_agent()
-        .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    let kept = crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id);
-    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
-    let plain = std::fs::symlink_metadata(&kept).is_ok_and(|metadata| {
-        metadata.is_file()
-            && metadata.uid() == rustix::process::getuid().as_raw()
-            && u64::try_from(TEAMMATES_NAME_BYTES).is_ok_and(|bytes| metadata.len() == bytes)
-    });
-    if !plain {
-        return Err(unavailable());
-    }
-    let name = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
-    if !teammates_name_valid(&name) {
-        return Err(unavailable());
-    }
-    lead_temp_socket(engine_root, lead, &name)
-}
-
-/// Names a new socket for a native lead's teammates' server as the lead starts and keeps
-/// the name in the engine's own profiles folder, so no path a teammate's profile ever
-/// served is reused: a teammate still running from an earlier start cannot bind a listener
-/// where the lead's tmux clients now connect. The pin record is marked pending for the new
-/// name in the same step, so one that later goes missing or names another socket is refused
-/// (PLCC-L1). Takes the engine root and the lead, whose profiles folder must exist. Returns
-/// the new path, or a plain code.
-#[cfg(unix)]
-pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
-    let id = lead
-        .team_agent()
-        .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    let mut nonce = [0_u8; TEAMMATES_NONCE_BYTES];
-    getrandom::fill(&mut nonce).map_err(|_| failure(OWN_SERVER_UNAVAILABLE))?;
-    let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    let name = format!("{TEAMMATES_SOCKET_PREFIX}{digits}{TEAMMATES_SOCKET_SUFFIX}");
-    assert!(teammates_name_valid(&name));
-    keep_record(
-        &crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id),
-        &name,
-    )?;
-    let pending = format!("{name} {TEAMMATES_PIN_PENDING}");
-    assert!(pending.len() <= TEAMMATES_PIN_BYTES_MAX);
-    keep_record(
-        &crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id),
-        &pending,
-    )?;
-    lead_temp_socket(engine_root, lead, &name)
-}
-
-/// Writes one engine record in the profiles folder no agent writes, in place of any earlier
-/// one: a staged file only this user reads, under a random name of its own so no other
-/// writer's staged file is met or removed (RV-DS241-22), renamed over the record so no
-/// reader sees part of it. Takes the record path and its text. Returns Ok, or
-/// `terminal_own_server_unavailable`.
-#[cfg(unix)]
-fn keep_record(kept: &Path, text: &str) -> Result<(), HostError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    const STAGING_NONCE_BYTES: usize = 16;
-    let mut nonce = [0_u8; STAGING_NONCE_BYTES];
-    getrandom::fill(&mut nonce).map_err(|_| failure(OWN_SERVER_UNAVAILABLE))?;
-    let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    assert_eq!(digits.len(), 2 * STAGING_NONCE_BYTES);
-    let staging = kept.with_extension(format!("{digits}.tmp"));
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(&staging)
-    else {
-        return Err(failure(OWN_SERVER_UNAVAILABLE));
-    };
-    let written = file
-        .write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&staging, kept));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return Err(failure(OWN_SERVER_UNAVAILABLE));
-    }
-    Ok(())
-}
-
-/// The pid a native lead's teammates' server at one socket was pinned to (PLC c, PC-L1),
-/// read without following a link from the record beside the socket's name, which outlives
-/// the engine and a kill of the lead. Takes the engine root, the lead and the socket.
-/// Returns the pid, none while the record is pending for this socket, or
-/// `terminal_own_server_unavailable` for a record that is missing, names another socket or
-/// is not this user's plain file as [`renew_teammates_socket`] and
-/// [`keep_teammates_server_pid`] write one, so such a record refuses every server (PLCC-L1).
-#[cfg(unix)]
-fn teammates_server_pid(
-    engine_root: &Path,
-    lead: &AgentId,
-    socket: &Path,
-) -> Result<Option<u32>, HostError> {
-    use std::os::unix::fs::MetadataExt;
-    let id = lead
-        .team_agent()
-        .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    let kept = crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id);
-    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
-    let metadata = std::fs::symlink_metadata(&kept).map_err(|_| unavailable())?;
-    let plain = metadata.is_file()
-        && metadata.uid() == rustix::process::getuid().as_raw()
-        && u64::try_from(TEAMMATES_PIN_BYTES_MAX).is_ok_and(|bytes| metadata.len() <= bytes);
-    if !plain {
-        return Err(unavailable());
-    }
-    let text = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
-    let (name, value) = text
-        .split_once(' ')
-        .filter(|(name, value)| {
-            teammates_name_valid(name)
-                && (*value == TEAMMATES_PIN_PENDING
-                    || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())))
-        })
-        .ok_or_else(unavailable)?;
-    if socket.file_name().and_then(|kept| kept.to_str()) != Some(name) {
-        return Err(unavailable());
-    }
-    if value == TEAMMATES_PIN_PENDING {
-        return Ok(None);
-    }
-    let pid = value
-        .parse::<u32>()
-        .ok()
-        .filter(|pid| *pid > 0)
-        .ok_or_else(unavailable)?;
-    Ok(Some(pid))
-}
-
-/// Records the pid a native lead's teammates' server at one socket first answered with
-/// (PLC c, PC-L1), beside the socket's name in the engine's profiles folder, in place of
-/// the pending mark its start left. Takes the engine root, the lead, the socket and the
-/// pid. Returns Ok, or `terminal_own_server_unavailable`.
-#[cfg(unix)]
-fn keep_teammates_server_pid(
-    engine_root: &Path,
-    lead: &AgentId,
-    socket: &Path,
-    pid: u32,
-) -> Result<(), HostError> {
-    assert!(pid > 0);
-    let id = lead
-        .team_agent()
-        .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    let name = socket
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| teammates_name_valid(name))
-        .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
-    let text = format!("{name} {pid}");
-    assert!(text.len() <= TEAMMATES_PIN_BYTES_MAX);
-    keep_record(
-        &crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id),
-        &text,
-    )
-}
-
-/// Moves a native lead's servers' deadline (FBTMUX-P1-R1-L1): keeps it, in whole seconds
-/// since the epoch, in the record beside the lead's profiles that no agent writes and that
-/// each of its servers' keepers reads outside the sandboxes. Takes the engine root, the lead
-/// and the deadline. Returns Ok, `terminal_unavailable` for a time before the epoch, or
-/// `terminal_own_server_unavailable` when the record cannot be kept.
-#[cfg(unix)]
-fn keep_servers_deadline(
-    engine_root: &Path,
-    lead: &AgentId,
-    until: SystemTime,
-) -> Result<(), HostError> {
-    let id = lead
-        .team_agent()
-        .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    let seconds = until
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| failure("terminal_unavailable"))?
-        .as_secs();
-    let text = seconds.to_string();
-    assert!(!text.is_empty() && text.len() <= SERVERS_DEADLINE_DIGITS_MAX);
-    keep_record(
-        &crate::team::runtime::agent_servers_deadline(&engine_root.join("team"), id),
-        &text,
-    )
-}
-
-/// Whether a text is a teammates' socket name as [`renew_teammates_socket`] makes one.
-/// Takes the text, read from a file. Returns the answer.
-#[cfg(unix)]
-fn teammates_name_valid(name: &str) -> bool {
-    name.len() == TEAMMATES_NAME_BYTES
-        && name
-            .strip_prefix(TEAMMATES_SOCKET_PREFIX)
-            .and_then(|rest| rest.strip_suffix(TEAMMATES_SOCKET_SUFFIX))
-            .is_some_and(|digits| {
-                digits.len() == 2 * TEAMMATES_NONCE_BYTES
-                    && digits
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-}
-
-/// One named socket in a team agent's short private temp folder. Takes the engine root, the
-/// agent and the socket name. Returns the path, or `terminal_agent_invalid` for a name that
-/// is not a team agent.
-fn lead_temp_socket(engine_root: &Path, lead: &AgentId, name: &str) -> Result<PathBuf, HostError> {
-    let id = lead
-        .team_agent()
-        .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    let home = crate::team::runtime::agent_home(&engine_root.join("team"), id);
-    let socket = crate::sandbox::toolchains::tmp_path(&home).join(name);
-    assert!(socket.is_absolute() && socket.as_os_str().len() <= HARNESS_SOCKET_BYTES_MAX);
-    Ok(socket)
+    let engine = Tmux::open(
+        program.clone(),
+        &engine_root.join(FOLDER),
+        crate::sandbox::confinement(),
+        tmux::tmux_hooks(),
+    );
+    Arc::new(LastScreenHost::new(
+        Servers::new(engine, engine_root, program),
+        kept_clock,
+    ))
 }
 
 /// Opens the engine's terminal host as [`tmux_host`] does, with every server it starts
@@ -637,10 +388,16 @@ pub(crate) fn tmux_host_checking(
     loops: u32,
     late: u32,
 ) -> Arc<dyn Host> {
-    let engine = tmux::Tmux::open(program.clone(), &engine_root.join(FOLDER))
-        .with_deadline_checks(loops, late);
-    Arc::new(kept::LastScreenHost::new(
-        tmux::Servers::new(engine, engine_root, program).with_deadline_checks(loops, late),
+    let engine = Tmux::open(
+        program.clone(),
+        &engine_root.join(FOLDER),
+        crate::sandbox::confinement(),
+        tmux::tmux_hooks(),
+    )
+    .with_deadline_checks(loops, late);
+    Arc::new(LastScreenHost::new(
+        Servers::new(engine, engine_root, program).with_deadline_checks(loops, late),
+        kept_clock,
     ))
 }
 
@@ -650,7 +407,7 @@ pub(crate) fn tmux_host_checking(
 /// Returns that the host can run, and the host.
 #[cfg(target_os = "windows")]
 pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
-    let host: Arc<dyn Host> = Arc::new(kept::LastScreenHost::new(windows::ConptyHost::new()));
+    let host: Arc<dyn Host> = Arc::new(LastScreenHost::new(windows::ConptyHost::new(), kept_clock));
     (true, host)
 }
 
@@ -714,169 +471,6 @@ pub enum TerminalRequest {
         rows: u16,
     },
     Detach,
-}
-
-/// The keys that type one owner prompt into an agent's app, before its Enter. Control
-/// characters other than newline and tab are dropped, so the prompt cannot press keys or end
-/// a paste. With bracketed paste on, the text goes as one paste with carriage returns between
-/// lines, as a terminal pastes; with it off every line break would be an Enter, so lines join
-/// with spaces. Takes the text and whether the app turned bracketed paste on.
-/// Returns the keys, or none for blank text or text over `PROMPT_BYTES_MAX` bytes.
-pub fn prompt_keys(text: &str, bracketed: bool) -> Option<Vec<u8>> {
-    if text.len() > PROMPT_BYTES_MAX {
-        return None;
-    }
-    let clean: String = text
-        .replace("\r\n", "\n")
-        .chars()
-        .map(|character| if character == '\r' { '\n' } else { character })
-        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
-        .collect();
-    let clean = clean.trim();
-    if clean.is_empty() {
-        return None;
-    }
-    let keys = if bracketed {
-        format!("\x1b[200~{}\x1b[201~", clean.replace('\n', "\r"))
-    } else {
-        clean
-            .split('\n')
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    assert!(!keys.contains('\n'));
-    Some(keys.into_bytes())
-}
-
-/// The keys one owner paste types, filtered here at the trust boundary as the desktop's
-/// `pasteText` filters it: every control character (C0, DEL and C1) is dropped except tab,
-/// line feed and carriage return, then CR LF and LF become CR, as a terminal sends Enter, so
-/// a paste can never press Escape, end a bracketed paste or send a Ctrl key. Takes the
-/// pasted text. Returns the keys, empty when nothing is left.
-pub fn paste_keys(text: &str) -> Vec<u8> {
-    let kept: String = text
-        .chars()
-        .filter(|character| matches!(character, '\t' | '\n' | '\r') || !character.is_control())
-        .collect();
-    let keys = kept.replace("\r\n", "\r").replace('\n', "\r");
-    assert!(!keys.contains('\x1b') && !keys.contains('\n') && !keys.contains('\0'));
-    assert!(keys.len() <= text.len());
-    keys.into_bytes()
-}
-
-/// Types one prompt into an agent's app as one submission: a paste when the app turned
-/// bracketed paste on, then Enter once the paste settled, all into the app's own pane, found
-/// once (V243-PASTE-INTERLEAVE-N0), or by name on a host with no pane ids. Takes the host, the
-/// terminal name and the text. Returns whether it was typed; blank or oversized text types
-/// nothing.
-pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
-    if let Some(at) = request_pin(host, agent)? {
-        return prompt_pinned(host, agent, &at, text, APP_PANE_UNKNOWN);
-    }
-    let bracketed = host.input_live(agent)?;
-    prompt_into(text, bracketed, |keys| host.input(agent, keys))
-}
-
-/// Types one prompt into a view's pinned pane, as `type_prompt` does, never by name. Takes the
-/// host, the terminal name, the pane and the text. Returns as `type_prompt`, or
-/// `terminal_agent_unknown` once that pane is no longer one the host can type into, which ends
-/// the view so it opens again with a fresh pin, as its other pinned sends do.
-#[cfg(unix)]
-pub(crate) fn type_prompt_at(
-    host: &dyn Host,
-    agent: &AgentId,
-    at: &PaneAt,
-    text: &str,
-) -> Result<bool, HostError> {
-    prompt_pinned(host, agent, at, text, "terminal_agent_unknown")
-}
-
-/// Types one prompt's keys and Enter into a pinned pane, the paste mode read from that pane.
-/// Takes the host, the name, the pin, the text and the code a stale pin answers. Returns as
-/// `type_prompt`, or that code once the pin is stale.
-fn prompt_pinned(
-    host: &dyn Host,
-    agent: &AgentId,
-    at: &PaneAt,
-    text: &str,
-    stale: &'static str,
-) -> Result<bool, HostError> {
-    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
-    assert!(
-        at.serial > 0,
-        "a pin names the control connection that found it"
-    );
-    let Some(bracketed) = host.input_live_at(agent, at)? else {
-        return Err(failure(stale));
-    };
-    prompt_into(text, bracketed, |keys| {
-        type_piece(host, agent, Some(at), keys, stale)
-    })
-}
-
-/// The pane one engine prompt goes to, found once so every piece of it lands in one pane
-/// (V243-PASTE-INTERLEAVE-N0): the agent's app pane, or none only on a host that answers
-/// `PINS_UNSUPPORTED`, which types by name. Takes the host and the name. Returns the pin,
-/// none, or the host's error, such as `APP_PANE_UNKNOWN` or a failed connect.
-pub(crate) fn request_pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
-    match host.app_pane_at(agent) {
-        Ok(at) => Ok(Some(at)),
-        Err(problem) if problem.0 == PINS_UNSUPPORTED => Ok(None),
-        Err(problem) => Err(problem),
-    }
-}
-
-/// Types one piece of a request into the pane the request was pinned to, or by name with no
-/// pin. Takes the host, the name, the pin, at most `INPUT_BYTES_MAX` bytes and the code a
-/// stale pin answers: `APP_PANE_UNKNOWN` for a request's pin, `terminal_agent_unknown` for a
-/// view's. Returns once typed, or that code, never typing by name instead.
-pub(crate) fn type_piece(
-    host: &dyn Host,
-    agent: &AgentId,
-    pin: Option<&PaneAt>,
-    bytes: &[u8],
-    stale: &'static str,
-) -> Result<(), HostError> {
-    assert!(
-        bytes.len() <= INPUT_BYTES_MAX,
-        "a piece fits one input request"
-    );
-    assert!(
-        matches!(stale, APP_PANE_UNKNOWN | "terminal_agent_unknown"),
-        "a stale pin refuses the request or ends the view"
-    );
-    let Some(at) = pin else {
-        return host.input(agent, bytes);
-    };
-    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
-    match host.input_at(agent, at, bytes)? {
-        true => Ok(()),
-        false => Err(failure(stale)),
-    }
-}
-
-/// Types one prompt's keys as one submission through the given typing: the keys in chunks of
-/// at most `INPUT_BYTES_MAX`, a settle when they went as a paste, then Enter. Takes the text,
-/// whether the app turned bracketed paste on and the typing. Returns whether it was typed;
-/// blank or oversized text types nothing.
-fn prompt_into(
-    text: &str,
-    bracketed: bool,
-    mut typing: impl FnMut(&[u8]) -> Result<(), HostError>,
-) -> Result<bool, HostError> {
-    let Some(keys) = prompt_keys(text, bracketed) else {
-        return Ok(false);
-    };
-    for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        typing(chunk)?;
-    }
-    if bracketed {
-        std::thread::sleep(PASTE_SETTLE);
-    }
-    typing(b"\r")?;
-    Ok(true)
 }
 
 /// What the engine sends on an owner terminal connection.

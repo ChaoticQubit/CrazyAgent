@@ -87,7 +87,8 @@ mod own_turns {
         group_alive,
     };
     use crate::terminal::FOLDER;
-    use crate::terminal::tmux::{SOCKET, Tmux, installed};
+    use crate::terminal::tmux::installed;
+    use kernel_processes::terminal::tmux::{SOCKET, Tmux};
     use kernel_processes::terminal::{AgentId, Host};
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -168,7 +169,7 @@ mod own_turns {
             tmux: tmux.clone(),
             socket: folder.join(SOCKET),
         };
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
         let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
         for path in [&home, &work, &bin] {
             private(path);

@@ -3944,7 +3944,7 @@ mod tests {
         let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
         let bin = root.path().join("setup/bin");
         let found = || {
-            crate::terminal::tmux::installed_at(&crate::tools::tools_new(vec![bin.clone()], None))
+            kernel_processes::terminal::tmux::installed_at(&crate::tools::tools_new(vec![bin.clone()], None))
         };
         let host = || engine.terminal_on(root.path(), found).unwrap();
         assert_eq!(found(), None);

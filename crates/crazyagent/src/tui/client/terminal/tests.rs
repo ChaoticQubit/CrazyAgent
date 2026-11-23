@@ -2,7 +2,8 @@ use super::*;
 use crate::engine::bootstrap::EngineService;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SESSION, SOCKET, Tmux};
 use crate::tui::terminal_pane::TerminalPane;
 use crate::tui::theme::Depth;
 use kernel_processes::terminal::Host;
@@ -202,7 +203,7 @@ fn spawn_shell(tmux: PathBuf, folder: &Path, root: &Path, agent: &AgentId) -> Tm
         env: vec![("PS1".into(), "ready$ ".into())],
         transcript: Transcript::Unavailable,
     };
-    let launcher = Tmux::open(Some(tmux), folder);
+    let launcher = Tmux::open(Some(tmux), folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
     launcher
         .spawn(
             agent,

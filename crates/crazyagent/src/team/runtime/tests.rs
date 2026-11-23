@@ -14,7 +14,9 @@ use crate::team::status;
 
 use crate::terminal::FOLDER;
 
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 
 use std::process::{Command, Stdio};
 
@@ -169,7 +171,7 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()))
     }
 
     fn runtime(&self) -> TeamRuntime {
@@ -28623,7 +28625,7 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
 fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
     const PASSES: u64 = 40;
     let fixture = Fixture::new(1);
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
     let mut team = fixture.runtime();
     team.terminal = Some(host);
     let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);

@@ -483,7 +483,7 @@ impl Server {
         let step = "i=$((i+1)); sleep 0.05; done";
         let ticks =
             |name: &str| format!("i=0; while [ $i -lt 600 ]; do printf '{name}-%s\\n' $i; {step}");
-        let session = crazyagent::terminal::tmux::SESSION;
+        let session = kernel_processes::terminal::tmux::SESSION;
         let size = ["-x", "80", "-y", "24"];
         let first = ["new-session", "-d", "-s", session, "-n", "team-1"];
         let tick = ticks("tick");
@@ -681,7 +681,7 @@ fn flood(time: u64, number: u64) -> String {
 fn a_pane_printing_guard_rows_while_its_history_grows_restores_every_bind_and_forges_nothing() {
     let server = Server::start();
     let (time, number) = server.guard();
-    let session = crazyagent::terminal::tmux::SESSION;
+    let session = kernel_processes::terminal::tmux::SESSION;
     let script = flood(time, number);
     server.run(&["new-window", "-d", "-t", session, "-n", "flood", &script]);
     let (sender, events) = mpsc::channel();

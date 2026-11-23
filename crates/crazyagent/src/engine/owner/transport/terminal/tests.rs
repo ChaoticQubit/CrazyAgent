@@ -5,7 +5,8 @@ use crate::engine::owner::OwnerClientKind;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::master::{OwnerTyping, owner_key_ms};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::Host;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
@@ -135,7 +136,7 @@ async fn attach_sized_mid_session_is_refused() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
             launcher
                 .spawn(
                     &agent,
@@ -608,7 +609,7 @@ async fn fifty_typed_keys_echo_back_within_budget() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
             launcher
                 .spawn(
                     &agent,
@@ -1069,7 +1070,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
             launcher
                 .spawn(
                     &agent,
@@ -1171,7 +1172,7 @@ fn window_size(tmux: &Path, socket: &Path, agent: &AgentId) -> Option<(u16, u16)
         Command::new(tmux)
             .arg("-S")
             .arg(socket)
-            .args(["list-windows", "-t", crate::terminal::tmux::SESSION, "-F"])
+            .args(["list-windows", "-t", kernel_processes::terminal::tmux::SESSION, "-F"])
             .arg("#{window_name} #{window_width} #{window_height}")
             .env_clear(),
     )
@@ -1277,7 +1278,7 @@ async fn a_follower_sizes_its_window_only_while_no_sizer_is_open() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
             launcher
                 .spawn(
                     &agent,
@@ -1490,7 +1491,7 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
     let launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
             launcher
                 .spawn(
                     &agent,
@@ -1728,7 +1729,7 @@ async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
     }));
     assert!(sending.is_err(), "a pinned send to no pane id panics");
     let prompting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::terminal::type_prompt_at(host.as_ref(), &agent, &bogus, "hi")
+        kernel_processes::terminal::type_prompt_at(host.as_ref(), &agent, &bogus, "hi")
     }));
     assert!(prompting.is_err(), "a pinned prompt to no pane id panics");
     let unserialed = PaneAt {
@@ -1736,7 +1737,7 @@ async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
         serial: 0,
     };
     let prompting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::terminal::type_prompt_at(host.as_ref(), &agent, &unserialed, "hi")
+        kernel_processes::terminal::type_prompt_at(host.as_ref(), &agent, &unserialed, "hi")
     }));
     assert!(
         prompting.is_err(),
@@ -1795,7 +1796,7 @@ async fn a_prompt_through_a_pinned_view_lands_in_its_pane_and_is_heard() {
     drop(queue);
     let (reason, heard) = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
     assert_eq!(reason, "terminal_detached");
-    let keys = crate::terminal::prompt_keys(text, true).unwrap();
+    let keys = kernel_processes::terminal::prompt_keys(text, true).unwrap();
     assert_eq!(
         *recording.at_pane.lock().unwrap(),
         vec![keys, b"\r".to_vec()],
@@ -1855,7 +1856,7 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
     let launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
             launcher
                 .spawn(
                     &agent,

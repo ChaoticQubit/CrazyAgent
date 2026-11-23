@@ -532,7 +532,8 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
     use crazyagent::engine::owner::OwnerClientKind;
     use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
     use crazyagent::terminal::FOLDER;
-    use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+    use crazyagent::terminal::tmux::installed;
+    use kernel_processes::terminal::tmux::{SOCKET, Tmux};
     use kernel_processes::terminal::Host;
     use std::os::unix::fs::PermissionsExt;
     struct Server {
@@ -576,7 +577,7 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
         transcript: Transcript::Unavailable,
     };
     let _launcher = {
-        let launcher = Tmux::open(Some(tmux), &folder);
+        let launcher = Tmux::open(Some(tmux), &folder, crazyagent::sandbox::confinement(), crazyagent::terminal::tmux::tmux_hooks());
         launcher
             .spawn(
                 &agent,

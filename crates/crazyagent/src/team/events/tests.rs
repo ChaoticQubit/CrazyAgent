@@ -1,7 +1,8 @@
 use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -68,7 +69,7 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()))
     }
 
     fn agent(&self, project: &str, role: &str, harness: &str, status: &str) -> i64 {

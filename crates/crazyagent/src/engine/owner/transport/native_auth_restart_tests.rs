@@ -253,7 +253,7 @@ impl Restart {
         let tmux = crate::terminal::tmux::installed(&base)
             .expect("tmux must be installed on this machine");
         let host: Arc<dyn kernel_processes::terminal::Host> = Arc::new(
-            crate::terminal::tmux::Tmux::open(Some(tmux), &base.join(crate::terminal::FOLDER)),
+            kernel_processes::terminal::tmux::Tmux::open(Some(tmux), &base.join(crate::terminal::FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()),
         );
         let team = team
             .with_reproof(reproving)

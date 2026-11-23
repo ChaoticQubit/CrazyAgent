@@ -73,6 +73,27 @@ pub(crate) const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// How the tmux host wraps a confined pane, built from this module's sandbox values: the
+/// runner, the keeper and pane shim words and variables, and which variables reach a pane.
+/// Output: the value the kernel tmux host is opened with.
+#[cfg(unix)]
+pub fn confinement() -> kernel_processes::terminal::tmux::Confinement {
+    kernel_processes::terminal::tmux::Confinement {
+        sandbox_exec: SANDBOX_EXEC,
+        #[cfg(target_os = "macos")]
+        keeper: KEEPER,
+        #[cfg(target_os = "macos")]
+        keeper_deadline_variable: KEEPER_DEADLINE,
+        #[cfg(target_os = "macos")]
+        keeper_state_variable: KEEPER_STATE,
+        #[cfg(target_os = "macos")]
+        pane_shim: PANE_SHIM,
+        variable_allowed: agent_variable_allowed,
+        #[cfg(target_os = "macos")]
+        unkept_pane,
+    }
+}
+
 /// Whether `program` is the boundary program [`agent_command`] starts a confined agent from
 /// on this system: [`SANDBOX_EXEC`] on Unix, the boundary helper beside the engine's
 /// executable on Windows. Input: a command's program. Output: true for that program.

@@ -30,3 +30,4 @@ crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
 nix = { version = "=0.28.0", default-features = false, features = ["fs"] }
 tempfile = "=3.27.0"
 tokio = { version = "=1.53.2", features = ["rt"] }
+vt100 = "=0.15.2"

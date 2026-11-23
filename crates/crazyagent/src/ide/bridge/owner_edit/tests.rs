@@ -3,7 +3,8 @@ use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::ide::workspace::tests::{Agent, Case, add_project};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy, IdeAgentFiles};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -82,7 +83,7 @@ fn listening_agent(case: &mut Case) -> (Server, Arc<dyn Host>, Agent, PathBuf) {
         tmux: tmux.clone(),
         socket: case.root.join(FOLDER).join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &case.root.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &case.root.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
     let agent = case.agent("sub", "working");
     let listened = case.root.join("heard.txt");
     host.spawn(

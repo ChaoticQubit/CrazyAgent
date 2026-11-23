@@ -14,7 +14,8 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
 use crazyagent::team::runtime::agent_home;
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host};
 use std::collections::BTreeSet;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -275,7 +276,12 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
         socket: folder.join(SOCKET),
         group: None,
     };
-    let host = Tmux::open(Some(tmux), &folder);
+    let host = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let pane = host
         .spawn(
             agent,

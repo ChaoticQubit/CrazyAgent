@@ -7,7 +7,8 @@ use crazyagent::harnesses::launch::{
 };
 use crazyagent::harnesses::terminal_session::{Resume, TerminalSession};
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -159,7 +160,12 @@ fn world(codex_folder: bool) -> Option<World> {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let (home, repo, bin) = (base.join("home"), base.join("repo"), base.join("bin"));
     for path in [&home, &repo, &bin] {
         private(path);

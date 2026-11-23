@@ -4,7 +4,8 @@ use crate::harnesses::interactive::InteractiveCommand;
 #[cfg(target_os = "macos")]
 use crate::terminal::FOLDER;
 #[cfg(target_os = "macos")]
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -39,7 +40,7 @@ impl Fixture {
     fn host(&self) -> Arc<dyn Host> {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
-            &self.root.path().join(FOLDER),
+            &self.root.path().join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks(),
         ))
     }
 

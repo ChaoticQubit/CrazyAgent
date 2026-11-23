@@ -2,9 +2,9 @@ use super::codex_folder::{self, Screen};
 use super::interactive::settings::{STEPS_MAX, Step, TerminalSettings};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
-    Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
-    validate,
+    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route, validate,
 };
+use kernel_processes::group::Ending;
 use super::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::records::{self, Reader};
 use super::transcript::{TranscriptEvent, TranscriptReader};
@@ -726,10 +726,10 @@ impl TerminalSession {
             self.wait_ready(cancel)?;
         }
         let host = self.host.as_ref();
-        let pin = crate::terminal::request_pin(host, &self.agent).map_err(host_failure)?;
+        let pin = kernel_processes::terminal::request_pin(host, &self.agent).map_err(host_failure)?;
         let typed = |bytes: &[u8]| {
             let stale = kernel_processes::terminal::APP_PANE_UNKNOWN;
-            crate::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes, stale)
+            kernel_processes::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes, stale)
                 .map_err(host_failure)
         };
         for part in paste(prompt) {

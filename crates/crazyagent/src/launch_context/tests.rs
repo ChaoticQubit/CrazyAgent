@@ -2378,7 +2378,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
     let tmux =
         crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
     let host: std::sync::Arc<dyn kernel_processes::terminal::Host> = std::sync::Arc::new(
-        crate::terminal::tmux::Tmux::open(Some(tmux), &root.join(crate::terminal::FOLDER)),
+        kernel_processes::terminal::tmux::Tmux::open(Some(tmux), &root.join(crate::terminal::FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()),
     );
     let pane = crate::harnesses::terminal_session::TerminalSession::start(
         host,
@@ -2481,11 +2481,11 @@ impl LeftPane {
             .expect("tmux must be installed on this machine");
         let socket = root
             .join(crate::terminal::FOLDER)
-            .join(crate::terminal::tmux::SOCKET);
+            .join(kernel_processes::terminal::tmux::SOCKET);
         let host: std::sync::Arc<dyn kernel_processes::terminal::Host> =
-            std::sync::Arc::new(crate::terminal::tmux::Tmux::open(
+            std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
                 Some(tmux.clone()),
-                &root.join(crate::terminal::FOLDER),
+                &root.join(crate::terminal::FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks(),
             ));
         let agent = kernel_processes::terminal::AgentId::team(team).unwrap();
         let config = home.join("config.toml");

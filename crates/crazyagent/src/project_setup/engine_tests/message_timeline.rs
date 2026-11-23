@@ -5,7 +5,8 @@ use crate::team::agent_messages::{
     RESULT_PREVIEW_BYTES_MAX, ResultsShown, Speaker,
 };
 use crate::team::events::{self, EventKind};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::params;
 use std::process::{Command, Stdio};
@@ -52,7 +53,7 @@ impl Pane {
         let tmux = installed(&base).expect("tmux must be installed on this machine");
         let host: Arc<dyn Host> = Arc::new(Tmux::open(
             Some(tmux.clone()),
-            &base.join(crate::terminal::FOLDER),
+            &base.join(crate::terminal::FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks(),
         ));
         let recorded = base.join("typed.txt");
         let target = match typed {

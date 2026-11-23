@@ -6,7 +6,7 @@ use crate::protocol::encode_frame;
 use crate::protocol::plain_code;
 use crate::terminal::{TerminalFrame, TerminalRequest};
 #[cfg(unix)]
-use crate::terminal::{paste_keys, type_prompt, type_prompt_at};
+use kernel_processes::terminal::{paste_keys, type_prompt, type_prompt_at};
 use kernel_processes::terminal::attach_again;
 #[cfg(unix)]
 use kernel_processes::terminal::buffer::Chunk;

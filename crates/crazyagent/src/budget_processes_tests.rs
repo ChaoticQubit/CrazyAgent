@@ -1,7 +1,8 @@
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::paths::Platform;
 use crate::service::Service;
-use crate::terminal::tmux::{Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::Tmux;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use kernel_processes::spawn_gate;
@@ -69,7 +70,7 @@ impl Fixtures {
         std::fs::create_dir(&folder).unwrap();
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         let tmux = installed(home).expect("tmux is required for the budget row");
-        let host = Tmux::open(Some(tmux.clone()), &folder);
+        let host = Tmux::open(Some(tmux.clone()), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
         let cat = |agent: &AgentId| {
             let command = InteractiveCommand {
                 argv: vec!["/bin/cat".into()],
