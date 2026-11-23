@@ -93,7 +93,9 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            launcher
+                .spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+                .unwrap();
             launcher
         })
         .await
@@ -291,7 +293,9 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             for agent in &agents {
-                launcher.spawn(agent, &command).unwrap();
+                launcher
+                    .spawn(agent, &crazyagent::terminal::PaneCommand::from(&command))
+                    .unwrap();
             }
             launcher
         })

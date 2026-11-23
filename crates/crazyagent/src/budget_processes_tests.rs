@@ -77,7 +77,8 @@ impl Fixtures {
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
             };
-            host.spawn(agent, &command).unwrap();
+            host.spawn(agent, &crate::terminal::PaneCommand::from(&command))
+                .unwrap();
         };
         let echo = AgentId::team(1).unwrap();
         #[cfg(target_os = "macos")]

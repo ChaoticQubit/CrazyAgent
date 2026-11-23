@@ -202,7 +202,9 @@ fn spawn_shell(tmux: PathBuf, folder: &Path, root: &Path, agent: &AgentId) -> Tm
         transcript: Transcript::Unavailable,
     };
     let launcher = Tmux::open(Some(tmux), folder);
-    launcher.spawn(agent, &command).unwrap();
+    launcher
+        .spawn(agent, &crate::terminal::PaneCommand::from(&command))
+        .unwrap();
     launcher
 }
 
