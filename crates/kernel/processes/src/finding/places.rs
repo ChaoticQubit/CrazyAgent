@@ -308,9 +308,9 @@ impl Places {
     }
 
     /// The copy of a tool the app ships beside the engine, looked at before every folder and
-    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`
-    /// (DEC-157), none for any other name or with no app folder. Input: the program name.
-    /// Output: the file, which may not exist.
+    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`,
+    /// none for any other name or with no app folder. Input: the program name. Output: the
+    /// file, which may not exist.
     pub fn bundled(&self, name: &str) -> Option<PathBuf> {
         let file = match name {
             "tmux" => BUNDLED_TMUX,
@@ -351,7 +351,7 @@ impl Places {
     /// would trust its files: an absolute folder that exists, none agents can write
     /// ([`Places::agent_writable`]) or another user or group can change, no link on its way
     /// another can move ([`Places::link_hops_kept`]) and, on the engine's places, none in a
-    /// temp folder (RV-DS241-157). Input: the folder. Output: the answer.
+    /// temp folder. Input: the folder. Output: the answer.
     pub fn kept_for_children(&self, folder: &Path) -> bool {
         folder.is_absolute()
             && folder.is_dir()
