@@ -534,6 +534,7 @@ const SNAPSHOTS: [(&str, &[&str]); 5] = [
             "configured_master_steps",
             "configured_master_time",
             "configured_master_frames",
+            "log_compaction_settings",
             "user_profile",
         ],
     ),
