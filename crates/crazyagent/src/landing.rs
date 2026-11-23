@@ -426,7 +426,7 @@ pub enum MergeOutcome {
 /// The lead's own rights for the git steps of a sub-agent merge: the lead's sandbox and
 /// the profile the engine installed for it, under which every step in its clone runs.
 pub struct LeadGit<'a> {
-    pub sandbox: &'a crate::sandbox::ProjectSandbox,
+    pub sandbox: &'a kernel_sandbox::profile::ProjectSandbox,
     pub profile: &'a Path,
 }
 

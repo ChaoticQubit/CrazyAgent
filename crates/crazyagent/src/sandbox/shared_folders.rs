@@ -1,4 +1,4 @@
-use super::ProjectSandbox;
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::shared_folders::{NEEDS_MACOS, REFUSED, SharedFolders, plan};
 use std::path::Path;
 

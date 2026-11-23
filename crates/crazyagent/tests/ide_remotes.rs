@@ -364,9 +364,9 @@ async fn an_owner_rewrite_with_a_transport_allow_cannot_carry_an_agent_worktree_
 #[cfg(target_os = "macos")]
 #[test]
 fn agent_sandbox_cannot_reach_owner_git_credentials() {
-    use crazyagent::sandbox::ProjectSandbox;
     use kernel_sandbox::error::SandboxError;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::profile::env::agent_variable_allowed;
     use std::ffi::OsStr;
 
