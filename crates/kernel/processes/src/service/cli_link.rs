@@ -58,6 +58,15 @@ pub(super) fn link_cli_under(executable: &Path, key: &str) -> Result<PathBuf, Se
     Ok(folder)
 }
 
+/// The name of the lock that serializes PATH changes under one registry key among this
+/// user's installs in one logon session: `Local\CrazyAgent-path-<key>`, the key's `\` and
+/// `:` read as `_`. `Local\` keeps other users from creating it first. Input: the key.
+/// Output: the name.
+#[cfg(not(unix))]
+pub(super) fn path_lock_name(key: &str) -> String {
+    format!(r"Local\CrazyAgent-path-{}", key.replace(['\\', ':'], "_"))
+}
+
 /// The environment variable that hands the folder to the Windows PATH command. PowerShell
 /// joins every argument after `-Command` into the script text, so the folder never goes
 /// on the command line.
