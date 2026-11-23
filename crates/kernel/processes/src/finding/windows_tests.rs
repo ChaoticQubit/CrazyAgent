@@ -202,9 +202,9 @@ fn a_program_is_fixed_only_when_absolute_or_a_bare_file_name() {
     }
 }
 
-/// C2-H8: on Windows, while the set-up projects cannot be read, a tool in a repository on
+/// On Windows, while the set-up projects cannot be read, a tool in a repository on
 /// another drive is agents' to write, and a tool under `ProgramFiles` or `SystemRoot` is not,
-/// its verbatim `\\?\` spelling included (r2).
+/// its verbatim `\\?\` spelling included.
 #[test]
 fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_read() {
     let home = tempfile::tempdir().unwrap();
