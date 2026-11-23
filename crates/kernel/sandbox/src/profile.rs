@@ -235,7 +235,7 @@ pub fn linux_unbridged_notice_on(
 /// those roots, and network per [`SandboxNetwork`].
 #[derive(Debug, Clone)]
 pub struct ProjectSandbox {
-    hooks: &'static ProfileHooks,
+    pub(crate) hooks: &'static ProfileHooks,
     project_root: PathBuf,
     agent_home: PathBuf,
     agent_tmp: PathBuf,

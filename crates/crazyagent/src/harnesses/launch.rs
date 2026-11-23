@@ -1126,7 +1126,7 @@ fn home_containers(
     const FILE_SHARE_WRITE: u32 = 0x2;
     let unsafe_home = || failure("launch_account_home_unsafe");
     let unavailable = |_| failure("launch_account_home_unavailable");
-    let name = crate::sandbox::windows::container_name(sandbox);
+    let name = kernel_sandbox::windows::profile::container_name(sandbox);
     let expected = crazyagent_win_sandbox::container_sid(&name)
         .map_err(|_| failure("launch_sandbox_unavailable"))?;
     assert!(app_container(&expected));
