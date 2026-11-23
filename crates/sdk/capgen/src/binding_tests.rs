@@ -55,7 +55,9 @@ fn the_host_binding_is_generated_for_every_capability() {
     let loaded = load(&sdk("caps")).expect("the caps load");
     let files = binding_from_caps();
     let flat: String = files[0].1.split_whitespace().collect();
-    assert!(flat.starts_with("usebus_gateway::Caller;usesdk::{Refusal,net,secrets,settings};"));
+    assert!(flat.starts_with(
+        "usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{net,secrets,settings};"
+    ));
     assert!(flat.contains(
         "pubstructProviders<'p>{pubnet:&'pdynnet::Provide,pubsecrets:&'pdynsecrets::Provide,pubsettings:&'pdynsettings::Provide,}"
     ));
@@ -80,10 +82,10 @@ fn the_host_binding_is_generated_for_every_capability() {
     assert!(count > 0);
     assert_eq!(flat.matches("self.caller.call(").count(), count);
     assert!(flat.contains(
-        "fnsettings_save_quit(&self,settings:sdk::settings::QuitSettings)->Result<(),Refusal>{self.caller.call(&settings::SAVE_QUIT,settings,settings::check_save_quit_input,|settings|{self.providers.settings.save_quit(self.caller.plugin(),settings)},settings::check_save_quit_output,)}"
+        "fnsettings_save_quit(&self,settings:sdk::generated::settings::QuitSettings,)->Result<(),Refusal>{self.caller.call(&settings::SAVE_QUIT,settings,settings::check_save_quit_input,|settings|{self.providers.settings.save_quit(self.caller.plugin(),settings)},settings::check_save_quit_output,)}"
     ));
     assert!(flat.contains(
-        "fnsecrets_find(&self,name:alloc::string::String,)->Result<core::option::Option<sdk::secrets::Secret>,Refusal>{self.caller.call(&secrets::FIND,name,|name|secrets::check_find_input(name),|name|self.providers.secrets.find(self.caller.plugin(),name),secrets::check_find_output,)}"
+        "fnsecrets_find(&self,name:alloc::string::String,)->Result<core::option::Option<sdk::generated::secrets::Secret>,Refusal>{self.caller.call(&secrets::FIND,name,|name|secrets::check_find_input(name),|name|self.providers.secrets.find(self.caller.plugin(),name),secrets::check_find_output,)}"
     ));
 }
 
@@ -97,7 +99,7 @@ fn a_call_taking_a_foreign_handle_binds_its_inputs_as_one_tuple() {
         ("secrets", "handle Secret"),
     ]);
     assert!(
-        flat.starts_with("usebus_gateway::Caller;usesdk::{Refusal,net};"),
+        flat.starts_with("usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::net;"),
         "{flat}"
     );
     assert!(
@@ -105,7 +107,7 @@ fn a_call_taking_a_foreign_handle_binds_its_inputs_as_one_tuple() {
         "{flat}"
     );
     assert!(flat.contains(
-        "fnnet_send(&self,keys:alloc::vec::Vec<sdk::secrets::Secret>,ring:sdk::net::Ring,s:sdk::secrets::Secret,)->Result<(),Refusal>{self.caller.call(&net::SEND,(keys,ring,s),|(keys,ring,s)|net::check_send_input(keys,ring,s),|(keys,ring,s)|self.providers.net.send(self.caller.plugin(),keys,ring,s),net::check_send_output,)}"
+        "fnnet_send(&self,keys:alloc::vec::Vec<sdk::generated::secrets::Secret>,ring:sdk::generated::net::Ring,s:sdk::generated::secrets::Secret,)->Result<(),Refusal>{self.caller.call(&net::SEND,(keys,ring,s),|(keys,ring,s)|net::check_send_input(keys,ring,s),|(keys,ring,s)|self.providers.net.send(self.caller.plugin(),keys,ring,s),net::check_send_output,)}"
     ), "{flat}");
 }
 

@@ -328,7 +328,7 @@ pub(crate) fn binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, C
         .filter(|stem| calls.iter().any(|call| call.stem == *stem))
         .collect();
     let mut text = format!(
-        "use bus_gateway::Caller;\nuse sdk::{{{}, Refusal}};\n\n",
+        "use bus_gateway::Caller;\nuse sdk::Refusal;\nuse sdk::generated::{{{}}};\n\n",
         used.join(", ")
     );
     text.push_str(
@@ -433,14 +433,15 @@ fn as_reference(ty: &TypeRef) -> bool {
 }
 
 /// The Rust type of a `.cap` type as the SDK host crate names it: a named type through
-/// `sdk::<stem>`, a foreign one through `sdk::<its stem>`, scalars as the SDK writes them.
+/// `sdk::generated::<stem>`, a foreign one through `sdk::generated::<its stem>`, scalars as
+/// the SDK writes them, so no type depends on the SDK root re-exporting its module.
 /// Inputs: the type and the stem of the file it sits in. Output: the type text.
 fn bound_type(ty: &TypeRef, stem: &str) -> String {
     match ty {
         TypeRef::List(item) => format!("alloc::vec::Vec<{}>", bound_type(item, stem)),
         TypeRef::Option(inner) => format!("core::option::Option<{}>", bound_type(inner, stem)),
-        TypeRef::Named(name) => format!("sdk::{stem}::{name}"),
-        TypeRef::Foreign { stem, name } => format!("sdk::{stem}::{name}"),
+        TypeRef::Named(name) => format!("sdk::generated::{stem}::{name}"),
+        TypeRef::Foreign { stem, name } => format!("sdk::generated::{stem}::{name}"),
         scalar => rust_type(scalar, None),
     }
 }
