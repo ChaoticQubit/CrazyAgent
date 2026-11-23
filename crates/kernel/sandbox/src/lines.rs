@@ -1,4 +1,5 @@
 use crate::error::SandboxError;
+use crate::ports::BRIDGE_PORT_MIN;
 
 /// Why `InstalledSandbox::install` refuses a Linux launch under `LinuxStrict::On`: it
 /// does not hold the full Linux sandbox (`linux_holds_fully`).
