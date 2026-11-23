@@ -120,10 +120,21 @@ const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 pub const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// The folders whose tools stay usable while the set-up projects cannot be read
 /// ([`Places::agent_writable`]): the system's, the Homebrew prefixes with their `Cellar` and
-/// `opt` folders (`/usr/local` lies under `/usr`), the Nix store, and on Linux Linuxbrew's
-/// prefix and the NixOS profiles. The normal path trusts every one of them too.
+/// `opt` folders (`/usr/local` lies under `/usr`), the Nix store, the system and default Nix
+/// profiles, on macOS the per-user profiles nix-darwin puts on the PATH, and on Linux
+/// Linuxbrew's prefix. Each is listed as the PATH spells it, since the check reads that form
+/// too. The normal path trusts every one of them, and every other check on a found file runs.
 #[cfg(not(target_os = "linux"))]
-const INSTALL_ROOTS: [&str; 5] = ["/usr", "/bin", "/sbin", "/opt/homebrew", "/nix/store"];
+const INSTALL_ROOTS: [&str; 8] = [
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/opt/homebrew",
+    "/nix/store",
+    "/run/current-system/sw",
+    "/etc/profiles/per-user",
+    "/nix/var/nix/profiles/default",
+];
 #[cfg(target_os = "linux")]
 const INSTALL_ROOTS: [&str; 8] = [
     "/usr",
