@@ -327,7 +327,7 @@ fn a_link_from_a_place_outside_temp_into_a_temp_folder_leads_into_temp() {
 
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
 /// can replace a folder this user owns there, so test stand-ins and engines started from a
-/// `/tmp` folder resolve (leader 17:12, L8c).
+/// `/tmp` folder resolve.
 #[test]
 fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
     let folder = tempfile::Builder::new()
@@ -363,7 +363,7 @@ fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
     (places, sidecar, brew)
 }
 
-/// DEC-157, leader 15:41 and 18:31: the engine uses the tmux it ships. The name `tmux` finds
+/// The engine uses the tmux it ships. The name `tmux` finds
 /// `<app folder>/crazyagent-tmux` before Homebrew or anything on PATH, read as any entry is,
 /// and its words and the sandbox grants start from that file, never the Homebrew one.
 #[test]
