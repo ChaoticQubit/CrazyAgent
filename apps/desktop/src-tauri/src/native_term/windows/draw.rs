@@ -30,7 +30,8 @@ const UNAVAILABLE: &str = "native_terminal_render_unavailable";
 /// Device requests a scale may make after its first lost device, for the run, as
 /// device-replace allows on macOS: one is counted where a surface is made on shared state
 /// holding no device, failed ones too. Each lost device (adapter, device, queue, pipeline,
-/// glyph cache) is forgotten, never dropped: at most `DEVICE_REPLACE_MAX` + 1 per scale.
+/// glyph cache) is released on the render thread, so at most `DEVICE_REPLACE_MAX` + 1 are
+/// made per scale.
 const DEVICE_REPLACE_MAX: u32 = 2;
 
 static STARTED: OnceLock<bool> = OnceLock::new();
@@ -139,6 +140,13 @@ pub fn trial_remove_at_present(id: u64) {
 #[cfg(test)]
 pub fn trial_removals() -> u64 {
     super::super::render::trial_removals()
+}
+
+/// Test builds only: how many lost devices or frames the render thread released, and the
+/// longest release. Output: the count and the time.
+#[cfg(test)]
+pub fn trial_releases() -> (u64, Duration) {
+    super::super::render::trial_releases()
 }
 
 /// Test builds only: fails every swap-chain wait of one view, or none, each recording a

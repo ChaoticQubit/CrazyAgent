@@ -18,10 +18,18 @@ use std::sync::Arc;
 #[cfg(all(windows, test))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 
 /// The code a view ends with when the GPU refused its work: a wgpu error the device's
 /// handler recorded, or a surface or device that could not be made.
 pub const GPU_FAULT: &str = "native_terminal_gpu";
+
+/// The longest releasing a lost device may hold the Windows render thread: wgpu-core 25's
+/// queue drop waits on the last submission for 100, 200, 400, 800, 1600 and 3200 ms, then
+/// panics. A removed D3D12 device's fence reads complete, so its release returns at once.
+#[cfg(windows)]
+pub const RELEASE_STALL_MAX: Duration = Duration::from_millis(6300);
 
 /// The fallback font files loaded beside the style's family, a fixed set instead of every
 /// system font, to keep memory small; Apple Color Emoji is the only system font with
@@ -529,13 +537,18 @@ impl Shared {
     }
 
     /// The device a new surface is made on: the held one, or after a loss a fresh one while
-    /// attempts are left. A lost device is forgotten, never dropped: wgpu 25's queue drop
-    /// waits up to 6.3 s on the main thread and can panic. Leak: one device per loss, at most
-    /// `DEVICE_REPLACE_MAX` + 1 per scale per run (the first and each fresh one). Input: the
-    /// new surface. Output: the device, `native_terminal_gpu` once spent, or `device_for`'s error.
+    /// attempts are left. On macOS and Linux a lost device is forgotten, never dropped: wgpu
+    /// 25's queue drop waits up to 6.3 s on the main thread and can panic, so one device leaks
+    /// per loss, at most `DEVICE_REPLACE_MAX` + 1 per scale per run. On Windows it goes
+    /// through `release`. Input: the new surface. Output: the device, `native_terminal_gpu`
+    /// once spent, or `device_for`'s error.
     fn device_on(&mut self, surface: &wgpu::Surface<'static>) -> Result<&Device, String> {
         if self.device.as_ref().is_some_and(Device::is_lost) {
-            std::mem::forget(self.device.take());
+            let lost = self.device.take();
+            #[cfg(windows)]
+            release(lost);
+            #[cfg(not(windows))]
+            std::mem::forget(lost);
             self.attempts_left.get_or_insert(DEVICE_REPLACE_MAX);
         }
         if self.device.is_none() {
@@ -924,16 +937,16 @@ impl Shared {
         self.device.is_some()
     }
 
-    /// Forgets a device wgpu reported lost, never dropping it: core `Queue::drop` can wait
-    /// and panic, and on Windows it would run on the one render thread. Only the device goes
-    /// (its adapter, queue, pipeline and glyph cache); the instance and fonts stay, and the
-    /// next surface requests a new device. Output: whether a lost device was forgotten.
+    /// Releases a device wgpu reported lost through `release`, so D3D12 can make a new one
+    /// on the same adapter. Only the device goes (its adapter, queue, pipeline and glyph
+    /// cache); the instance and fonts stay, and the next surface requests a new device.
+    /// Output: whether a lost device was released.
     #[cfg(windows)]
     pub fn retire_lost(&mut self) -> bool {
         let Some(lost) = self.device.take_if(|device| device.is_lost()) else {
             return false;
         };
-        std::mem::forget(lost);
+        release(lost);
         true
     }
 
@@ -975,9 +988,9 @@ impl Shared {
     }
 
     /// Gives back a texture acquired for a frame that is not drawn: dropped, which discards
-    /// it, or forgotten on a lost device, where the drop panics in wgpu 25, so one frame
-    /// leaks as in `hand_back`. Input: the texture. Output: ok, or `native_terminal_gpu` on
-    /// a lost device.
+    /// it, or on a lost device, where the drop panics in wgpu 25, forgotten as in `hand_back`
+    /// on macOS and Linux and released on Windows. Input: the texture. Output: ok, or
+    /// `native_terminal_gpu` on a lost device.
     pub fn give_back(&self, output: wgpu::SurfaceTexture) -> Result<(), &'static str> {
         let set = self
             .device
@@ -985,6 +998,9 @@ impl Shared {
             .expect("an acquired texture has a device");
         assert!(output.texture.width() <= set.side_max);
         if set.is_lost() {
+            #[cfg(windows)]
+            release(output);
+            #[cfg(not(windows))]
             std::mem::forget(output);
             return Err(GPU_FAULT);
         }
@@ -1088,9 +1104,10 @@ impl Shared {
 
 /// Hands an acquired frame back to wgpu: presents it once encoded, or lets it drop, which
 /// discards it, when encoding failed. On a lost device both panic in wgpu 25, so the frame
-/// is forgotten instead: one frame leaks, and its view ends. A loss that present itself
-/// finds, as DX12's does on a driver reset, goes through `guarded`. Inputs: the device,
-/// the frame and the encode result. Output: ok, the encode error, or `native_terminal_gpu`.
+/// is forgotten on macOS and Linux (one frame leaks) and released on Windows, and its view
+/// ends. A loss that present itself finds, as DX12's does on a driver reset, goes through
+/// `guarded`. Inputs: the device, the frame and the encode result. Output: ok, the encode
+/// error, or `native_terminal_gpu`.
 fn hand_back(
     set: &Device,
     output: wgpu::SurfaceTexture,
@@ -1099,6 +1116,9 @@ fn hand_back(
     assert!(output.texture.width() <= set.side_max);
     assert!(output.texture.height() <= set.side_max);
     if set.is_lost() {
+        #[cfg(windows)]
+        release(output);
+        #[cfg(not(windows))]
         std::mem::forget(output);
         return Err(GPU_FAULT.to_owned());
     }
@@ -1120,6 +1140,45 @@ fn guarded<T>(lost: &AtomicBool, call: impl FnOnce() -> T) -> Result<T, &'static
         Err(_) if lost.load(Ordering::Acquire) => Err(GPU_FAULT),
         Err(raised) => panic::resume_unwind(raised),
     }
+}
+
+/// Drops a lost device, or a frame acquired on one, on the Windows render thread instead of
+/// forgetting it: D3D12 keeps one device per adapter and refuses a new one while a removed
+/// one is still held. It runs only after a reported loss, within `RELEASE_STALL_MAX`; a
+/// panic inside wgpu's drop is caught and logged, so the render thread goes on. Input: what
+/// to drop.
+#[cfg(windows)]
+fn release<T>(lost: T) {
+    let started = Instant::now();
+    let dropped = panic::catch_unwind(AssertUnwindSafe(move || drop(lost)));
+    if dropped.is_err() {
+        eprintln!("{GPU_FAULT}: releasing a lost device panicked");
+    }
+    released(started.elapsed());
+}
+
+#[cfg(all(windows, test))]
+static RELEASES: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(windows, test))]
+static RELEASE_LONGEST_US: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(windows, test))]
+fn released(took: Duration) {
+    let micros = u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
+    RELEASES.fetch_add(1, Ordering::SeqCst);
+    RELEASE_LONGEST_US.fetch_max(micros, Ordering::SeqCst);
+    assert!(RELEASE_LONGEST_US.load(Ordering::SeqCst) >= micros);
+}
+
+#[cfg(all(windows, not(test)))]
+fn released(_: Duration) {}
+
+/// Test builds only: how many lost devices or frames the render thread released, and the
+/// longest release. Output: the count and the time.
+#[cfg(all(windows, test))]
+pub fn trial_releases() -> (u64, Duration) {
+    let longest = Duration::from_micros(RELEASE_LONGEST_US.load(Ordering::SeqCst));
+    (RELEASES.load(Ordering::SeqCst), longest)
 }
 
 #[cfg(all(windows, test))]
