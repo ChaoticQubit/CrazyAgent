@@ -80,6 +80,9 @@ pub mod routing;
 pub mod sandbox;
 pub mod sandbox_settings;
 pub mod scheduling;
+/// The `process.install` provider: a plugin's recipe mapped onto the kernel recipe, run by
+/// the engine's executor, with its output redacted and bounded.
+mod sdk_install;
 /// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
 /// gateway's grant check and the bundled agent-quit plugin.
 pub mod sdk_processes;
