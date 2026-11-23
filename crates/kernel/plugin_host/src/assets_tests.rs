@@ -139,6 +139,22 @@ fn revoke_of_a_missing_source_is_refused() {
     );
 }
 
+#[test]
+#[should_panic(expected = "a frame holds a snapshot's envelope")]
+fn a_snapshot_frame_without_room_for_its_envelope_panics() {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    let facts = SnapshotFacts {
+        project_id: "p",
+        config_id: "c",
+        asset_bytes_max: 1024,
+        records_max: 8,
+        frame_bytes_max: 2048,
+        same_files: |pinned, live| pinned == live,
+    };
+    let _ = snapshot(&tx, &facts, "s1");
+}
+
 #[cfg(unix)]
 #[test]
 fn admit_pins_the_file_identity_and_refuses_a_native_plugin() {
