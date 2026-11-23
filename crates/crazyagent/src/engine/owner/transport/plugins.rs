@@ -1605,17 +1605,23 @@ fn boundary_check(
         eprintln!("plugin_check_boundary_refused cause=windows_network_limit");
         return Err(problem);
     }
-    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
-        .map(ProjectSandbox::as_job_folder)
-        .and_then(|sandbox| sandbox.keep_ports(kept))
-        .and_then(|sandbox| sandbox.guard_engine(root))
-        .and_then(|sandbox| sandbox.allow_read(reads))
-        .and_then(|sandbox| match install {
-            Some(install) => sandbox.allow_read(install),
-            None => Ok(sandbox),
-        })
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))
-        .map_err(boundary)?;
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &folders[0],
+        &folders[1],
+        &folders[2],
+        network,
+    )
+    .map(ProjectSandbox::as_job_folder)
+    .and_then(|sandbox| sandbox.keep_ports(kept))
+    .and_then(|sandbox| sandbox.guard_engine(root))
+    .and_then(|sandbox| sandbox.allow_read(reads))
+    .and_then(|sandbox| match install {
+        Some(install) => sandbox.allow_read(install),
+        None => Ok(sandbox),
+    })
+    .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))
+    .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);
     let mut process = sandbox.wrap(&server).map_err(boundary)?;

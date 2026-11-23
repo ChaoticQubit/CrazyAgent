@@ -4076,7 +4076,7 @@ fn credential_path(word: &str) -> bool {
     (0..bytes.len())
         .filter(|&at| at == 0 || !part(bytes[at - 1]))
         .any(|at| {
-            crate::sandbox::credential_places().any(|place| {
+            crate::sandbox::credential_places(&crate::sandbox::PROFILE_HOOKS).any(|place| {
                 let end = at + place.len();
                 end <= bytes.len()
                     && bytes[at..end].eq_ignore_ascii_case(place.as_bytes())

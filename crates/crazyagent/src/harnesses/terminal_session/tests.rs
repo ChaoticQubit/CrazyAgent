@@ -188,6 +188,7 @@ mod own_turns {
             let tmp = base.join("full-access-tmp");
             private(&tmp);
             let sandbox = crate::sandbox::ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
                 &work,
                 &home,
                 &tmp,

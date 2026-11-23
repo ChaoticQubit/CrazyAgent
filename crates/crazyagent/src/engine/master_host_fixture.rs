@@ -224,6 +224,7 @@ impl MasterFixture {
         fs::create_dir_all(&tmp).unwrap();
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
         let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &fs::canonicalize(&self.project).unwrap(),
             &fs::canonicalize(home).unwrap(),
             &fs::canonicalize(&tmp).unwrap(),

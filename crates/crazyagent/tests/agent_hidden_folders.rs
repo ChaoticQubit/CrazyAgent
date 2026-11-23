@@ -51,6 +51,7 @@ fn sandbox_with_hidden(case: &Case, hidden: &[PathBuf]) -> ProjectSandbox {
     let loaded = hidden::load(&connection, "app").unwrap();
     assert_eq!(loaded, hidden);
     let mut sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -330,6 +331,7 @@ fn with_the_folder_hidden_under_a_confined_worktree_the_agent_cannot_read_it() {
     let connection = Connection::open_in_memory().unwrap();
     hidden::save(&connection, "app", std::slice::from_ref(&case.secret)).unwrap();
     let mut sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,

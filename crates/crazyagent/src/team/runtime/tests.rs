@@ -15905,7 +15905,14 @@ fn full_access_boundary(scratch: &Path) -> Option<Arc<InstalledSandbox>> {
         for folder in [&project, &home, &tmp] {
             std::fs::create_dir_all(folder).unwrap();
         }
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap();
         let installed = InstalledSandbox::install(
             sandbox,
             &scratch.join("full-access.sb"),
@@ -20908,6 +20915,7 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
             .unwrap();
     }
     crate::sandbox::ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &repository,
         &home,
         &tmp,
@@ -25832,9 +25840,15 @@ fn a_tools_on_agent_profile_follows_the_project_network_choice() {
     let (root, home, tmp) = (make("project"), make("home"), make("tmp"));
     let model = SandboxRemote::AnyHost(8443);
     let profile = |choice: AgentNetwork| {
-        ProjectSandbox::new(&root, &home, &tmp, choice.sandbox(Some(model)))
-            .unwrap()
-            .profile()
+        ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &root,
+            &home,
+            &tmp,
+            choice.sandbox(Some(model)),
+        )
+        .unwrap()
+        .profile()
     };
     let open = profile(AgentNetwork::Open);
     assert!(open.contains("(remote ip \"*:*\")"), "{open}");
@@ -25845,6 +25859,7 @@ fn a_tools_on_agent_profile_follows_the_project_network_choice() {
     assert!(!none.contains("(remote ip \"*:"), "{none}");
     assert!(!none.contains("mDNSResponder"), "{none}");
     let local = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &root,
         &home,
         &tmp,

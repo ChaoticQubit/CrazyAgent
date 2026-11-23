@@ -451,6 +451,7 @@ fn node_command(
     }
     let homes = ToolHomes::owner().map_err(refused)?;
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &folders[0],
         &folders[1],
         &folders[2],
@@ -792,6 +793,7 @@ fn npm_command(
     let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let homes = ToolHomes::owner().map_err(refused)?;
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &canonical(staged)?,
         &canonical(&home)?,
         &canonical(&tmp)?,
