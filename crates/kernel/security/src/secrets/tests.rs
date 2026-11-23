@@ -196,9 +196,9 @@ fn a_refused_name_keeps_the_owner_entry() {
 #[test]
 fn a_full_handle_table_refuses_the_put_before_the_store_write() {
     let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
-    for index in 0..HANDLES_MAX {
-        let found = reference(&format!("{NAMESPACE}.notes"), &format!("n{index}")).unwrap();
-        handles.lock().unwrap().mint("notes", found).unwrap();
+    for index in 0..PLUGIN_HANDLES_MAX {
+        let found = reference(&format!("{NAMESPACE}.github"), &format!("n{index}")).unwrap();
+        handles.lock().unwrap().mint("github", found).unwrap();
     }
     let secrets = Secrets::for_request(
         &store,
