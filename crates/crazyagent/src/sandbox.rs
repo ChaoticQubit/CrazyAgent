@@ -7,9 +7,8 @@ use kernel_sandbox::host::LinuxHost;
 use kernel_sandbox::lines::*;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{
-    SYSTEM_SECRET_PATHS, any_case, at_or_below, canonical, clean_absolute, clear_of_secrets,
-    fold_case, granted_root, owner_home, owner_secret_paths, owner_secrets, plain_top,
-    regex_escape,
+    any_case, at_or_below, canonical, clean_absolute, clear_of_secrets, fold_case, granted_root,
+    owner_home, owner_secrets, plain_top, regex_escape,
 };
 use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::ports::{
