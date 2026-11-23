@@ -650,10 +650,42 @@ pub fn hold(
     }
 }
 
-/// Deletes the plugin folders a crash between a staged copy and its rename left. Input:
-/// the engine root. Output: Ok, or the folder's refusal.
+/// Sweeps what a crash between a staged copy and its rename left in the plugins folder: a
+/// retired folder whose plugin name is missing is moved back under that name, and every
+/// other staged or retired entry is deleted. Input: the engine root. Output: Ok, or the
+/// first refusal after every entry was tried.
 pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
     folder::remove_staged(root)
+}
+
+const STAGED: &str = ".add-";
+const RETIRED: &str = ".old-";
+
+/// The most folder levels below a plugin folder that deleting it goes down.
+const TREE_DEPTH_MAX: usize = 4;
+
+/// The most entries deleting a plugin folder reads from any one folder in it.
+const TREE_ENTRIES_MAX: usize = 64;
+
+/// Whether a plugins folder entry is a staged copy or a retired folder. Input: the entry
+/// name. Output: the answer.
+fn left_over(file: &[u8]) -> bool {
+    file.starts_with(STAGED.as_bytes()) || file.starts_with(RETIRED.as_bytes())
+}
+
+/// The retired folder name a replace moves a plugin's old folder to: the plugin name and
+/// the write id. Inputs: a valid name and the id. Output: the folder name.
+#[cfg(unix)]
+fn retired(name: &str, id: &str) -> String {
+    assert!(embedding::valid_name(name));
+    format!("{RETIRED}{name}.{id}")
+}
+
+/// The plugin name a retired folder was moved aside from. Input: the entry name. Output:
+/// the name, or none when the entry is no retired folder or carries no valid name.
+fn retired_name(file: &str) -> Option<&str> {
+    let (name, _id) = file.strip_prefix(RETIRED)?.rsplit_once('.')?;
+    embedding::valid_name(name).then_some(name)
 }
 
 /// One user plugin the folder listing returns: its name and its plugin.toml bytes, or the
@@ -662,19 +694,21 @@ type UserFile = (String, Result<Vec<u8>, Problem>);
 
 #[cfg(unix)]
 mod folder {
-    use super::{FOLDER, MANIFEST_FILE, Problem, USER_PLUGINS_MAX, UserFile};
+    use super::{
+        FOLDER, MANIFEST_FILE, Problem, STAGED, TREE_DEPTH_MAX, TREE_ENTRIES_MAX, USER_PLUGINS_MAX,
+        UserFile, left_over, retired, retired_name,
+    };
 
     use crate::Refused;
     use crate::embedding::valid_name;
     use crate::manifest::MANIFEST_BYTES_MAX;
     use crate::store::refused;
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use std::collections::BTreeMap;
+    use std::ffi::CStr;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
-    const STAGED: &str = ".add-";
-    const RETIRED: &str = ".old-";
     const LEGACY_SUFFIX: &str = ".yaml";
 
     /// The most entries read from one plugin folder before it is refused for holding more
@@ -909,9 +943,33 @@ mod folder {
         Ok(None)
     }
 
-    /// Deletes one plugin folder: each plain entry in it, at most `ENTRIES_MAX`, then the
-    /// folder. A folder in it is refused, so nothing outside the plugin is touched.
+    /// What one entry is, read without following a link. Inputs: its folder and name.
+    /// Output: its type, none when it is missing, or `app_plugin_folder_unavailable`.
+    fn kind(directory: &std::fs::File, name: &CStr) -> Result<Option<FileType>, Refused> {
+        match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode))),
+            Err(rustix::io::Errno::NOENT) => Ok(None),
+            Err(_) => Err(unavailable()),
+        }
+    }
+
+    fn unlink(directory: &std::fs::File, name: &CStr) -> Result<(), Refused> {
+        match rustix::fs::unlinkat(directory, name, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(_) => Err(unavailable()),
+        }
+    }
+
+    /// Deletes one plugin folder and what it holds, never following a link: a link in it is
+    /// unlinked itself, so nothing outside the plugin is touched. Inputs: the plugins folder
+    /// and the entry name. Output: Ok once it is gone, or `app_plugin_folder_unavailable`
+    /// past `TREE_DEPTH_MAX` levels or `TREE_ENTRIES_MAX` entries in one folder.
     fn remove_tree(directory: &std::fs::File, name: &str) -> Result<(), Refused> {
+        let name = std::ffi::CString::new(name).map_err(|_| unavailable())?;
+        remove_level(directory, &name, TREE_DEPTH_MAX)
+    }
+
+    fn remove_level(directory: &std::fs::File, name: &CStr, depth: usize) -> Result<(), Refused> {
         let folder = std::fs::File::from(
             rustix::fs::openat(
                 directory,
@@ -928,26 +986,26 @@ mod folder {
             if file.to_bytes() == b"." || file.to_bytes() == b".." {
                 continue;
             }
-            if entry.file_type() == rustix::fs::FileType::Directory {
-                return Err(unavailable());
-            }
             inside.push(file.to_owned());
-            if inside.len() > ENTRIES_MAX {
+            if inside.len() > TREE_ENTRIES_MAX {
                 return Err(unavailable());
             }
         }
         for file in &inside {
-            match rustix::fs::unlinkat(&folder, file.as_c_str(), AtFlags::empty()) {
-                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                Err(_) => return Err(unavailable()),
+            match kind(&folder, file)? {
+                Some(FileType::Directory) if depth == 0 => return Err(unavailable()),
+                Some(FileType::Directory) => remove_level(&folder, file, depth - 1)?,
+                Some(_) => unlink(&folder, file)?,
+                None => {}
             }
         }
         rustix::fs::unlinkat(directory, name, AtFlags::REMOVEDIR).map_err(|_| unavailable())
     }
 
     /// Writes a user plugin as a staged 0700 folder holding a 0600 plugin.toml, renamed into
-    /// place; an older folder of that name is moved aside first and deleted after, creating
-    /// the 0700 plugins folder when missing. Inputs: the engine root, a valid name, the
+    /// place; an older folder of that name is moved aside first, moved back when the new one
+    /// cannot take its place, and deleted after, where one it cannot delete stays aside for
+    /// the start sweep, creating the 0700 plugins folder when missing. Inputs: the engine root, a valid name, the
     /// bytes and the random id source. Output: Ok with the folder synced, or the folder's
     /// refusal with nothing staged left.
     pub(super) fn write(
@@ -988,16 +1046,20 @@ mod folder {
                 .and_then(|()| file.sync_all())
                 .and_then(|()| folder.sync_all())
                 .map_err(|_| unavailable())?;
-            let retired = format!("{RETIRED}{id}");
+            let retired = retired(name, &id);
             let replaced = exists(&directory, name)?;
             if replaced {
                 rustix::fs::renameat(&directory, name, &directory, retired.as_str())
                     .map_err(|_| unavailable())?;
             }
-            rustix::fs::renameat(&directory, staged.as_str(), &directory, name)
-                .map_err(|_| unavailable())?;
+            if rustix::fs::renameat(&directory, staged.as_str(), &directory, name).is_err() {
+                if replaced {
+                    let _ = rustix::fs::renameat(&directory, retired.as_str(), &directory, name);
+                }
+                return Err(unavailable());
+            }
             if replaced {
-                remove_tree(&directory, &retired)?;
+                let _ = remove_tree(&directory, &retired);
             }
             Ok(())
         })();
@@ -1008,29 +1070,54 @@ mod folder {
         directory.sync_all().map_err(|_| unavailable())
     }
 
-    /// Deletes the staged and retired plugin folders a crash between a write and its rename
-    /// left, at most `USER_PLUGINS_MAX` a start. Input: the engine root. Output: Ok once
-    /// those found are gone or the folder is missing, or the folder's refusal.
+    /// Sweeps the staged and retired entries a crash between a write and its rename left, at
+    /// most `USER_PLUGINS_MAX` a start, in name order. Input: the engine root. Output: Ok
+    /// once each is restored or deleted or the folder is missing, else the first refusal
+    /// after every entry was tried.
     pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
         let Some(directory) = open(root, false)? else {
             return Ok(());
         };
-        let mut staged = Vec::new();
+        let mut left = Vec::new();
         for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unavailable())? {
             let entry = entry.map_err(|_| unavailable())?;
-            let name = entry.file_name().to_bytes();
-            if name.starts_with(STAGED.as_bytes()) || name.starts_with(RETIRED.as_bytes()) {
-                staged.push(String::from_utf8_lossy(name).into_owned());
-                if staged.len() == USER_PLUGINS_MAX {
+            if left_over(entry.file_name().to_bytes()) {
+                left.push(entry.file_name().to_owned());
+                if left.len() == USER_PLUGINS_MAX {
                     break;
                 }
             }
         }
-        assert!(staged.len() <= USER_PLUGINS_MAX);
-        for name in &staged {
-            remove_tree(&directory, name)?;
+        assert!(left.len() <= USER_PLUGINS_MAX);
+        left.sort();
+        let mut first = None;
+        for file in &left {
+            if let Err(refusal) = sweep(&directory, file) {
+                first.get_or_insert(refusal);
+            }
         }
-        directory.sync_all().map_err(|_| unavailable())
+        directory.sync_all().map_err(|_| unavailable())?;
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Restores or deletes one staged or retired entry: a retired folder goes back under its
+    /// plugin name when that name is missing, any other folder is deleted, and a file or
+    /// link is unlinked. Inputs: the plugins folder and the entry. Output: Ok, or the
+    /// refusal.
+    fn sweep(directory: &std::fs::File, file: &CStr) -> Result<(), Refused> {
+        match kind(directory, file)? {
+            None => Ok(()),
+            Some(FileType::Directory) => {
+                if let Some(name) = file.to_str().ok().and_then(retired_name)
+                    && !exists(directory, name)?
+                {
+                    return rustix::fs::renameat(directory, file, directory, name)
+                        .map_err(|_| unavailable());
+                }
+                remove_level(directory, file, TREE_DEPTH_MAX)
+            }
+            Some(_) => unlink(directory, file),
+        }
     }
 
     /// Deletes a user plugin's folder and any `.yaml` file an older version left under its
@@ -1070,7 +1157,10 @@ mod folder {
 
 #[cfg(not(unix))]
 mod folder {
-    use super::{MANIFEST_FILE, Problem, UserFile};
+    use super::{
+        FOLDER, MANIFEST_FILE, Problem, TREE_DEPTH_MAX, TREE_ENTRIES_MAX, USER_PLUGINS_MAX,
+        UserFile, left_over, retired_name,
+    };
     use crate::Refused;
     use crate::manifest::{Bounded, MANIFEST_BYTES_MAX, read_bounded};
     use crate::store::refused;
@@ -1133,9 +1223,116 @@ mod folder {
         Err(refused("app_plugin_folder_unavailable"))
     }
 
-    /// No user plugins folder off Unix. Output: Ok, nothing to delete.
-    pub(super) fn remove_staged(_root: &Path) -> Result<(), Refused> {
-        Ok(())
+    fn unavailable() -> Refused {
+        refused("app_plugin_folder_unavailable")
+    }
+
+    fn missing(error: &std::io::Error) -> bool {
+        error.kind() == std::io::ErrorKind::NotFound
+    }
+
+    /// What one entry is, read without following a link. Input: its path. Output: its
+    /// type, none when it is missing, or `app_plugin_folder_unavailable`.
+    fn kind(path: &Path) -> Result<Option<std::fs::FileType>, Refused> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some(metadata.file_type())),
+            Err(error) if missing(&error) => Ok(None),
+            Err(_) => Err(unavailable()),
+        }
+    }
+
+    /// Unlinks a file, or a link without following it. Inputs: the path and its type.
+    /// Output: Ok once it is gone, or `app_plugin_folder_unavailable`.
+    fn unlink(path: &Path, file_type: std::fs::FileType) -> Result<(), Refused> {
+        let removed = if file_type.is_symlink() {
+            std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path))
+        } else {
+            std::fs::remove_file(path)
+        };
+        match removed {
+            Ok(()) => Ok(()),
+            Err(error) if missing(&error) => Ok(()),
+            Err(_) => Err(unavailable()),
+        }
+    }
+
+    /// Deletes one folder and what it holds, unlinking a link in it without following it.
+    /// Inputs: the folder and the levels left. Output: Ok once it is gone, or
+    /// `app_plugin_folder_unavailable` past the depth or `TREE_ENTRIES_MAX` entries.
+    fn remove_level(path: &Path, depth: usize) -> Result<(), Refused> {
+        let mut inside = Vec::new();
+        for entry in std::fs::read_dir(path).map_err(|_| unavailable())? {
+            inside.push(entry.map_err(|_| unavailable())?.path());
+            if inside.len() > TREE_ENTRIES_MAX {
+                return Err(unavailable());
+            }
+        }
+        for child in &inside {
+            match kind(child)? {
+                Some(file_type) if file_type.is_dir() && depth == 0 => {
+                    return Err(unavailable());
+                }
+                Some(file_type) if file_type.is_dir() => remove_level(child, depth - 1)?,
+                Some(file_type) => unlink(child, file_type)?,
+                None => {}
+            }
+        }
+        std::fs::remove_dir(path).map_err(|_| unavailable())
+    }
+
+    /// Restores or deletes one staged or retired entry: a retired folder goes back under its
+    /// plugin name when that name is missing, any other folder is deleted, and a file or
+    /// link is unlinked. Inputs: the plugins folder and the entry. Output: Ok, or the
+    /// refusal.
+    fn sweep(folder: &Path, file: &str) -> Result<(), Refused> {
+        let path = folder.join(file);
+        match kind(&path)? {
+            None => Ok(()),
+            Some(file_type) if file_type.is_dir() => {
+                if let Some(name) = retired_name(file)
+                    && kind(&folder.join(name))?.is_none()
+                {
+                    return std::fs::rename(&path, folder.join(name)).map_err(|_| unavailable());
+                }
+                remove_level(&path, TREE_DEPTH_MAX)
+            }
+            Some(file_type) => unlink(&path, file_type),
+        }
+    }
+
+    /// Sweeps the staged and retired entries a crash between a write and its rename left, at
+    /// most `USER_PLUGINS_MAX` a start, in name order. Input: the engine root. Output: Ok
+    /// once each is restored or deleted or the folder is missing, else the first refusal
+    /// after every entry was tried.
+    pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
+        let folder = root.join(FOLDER);
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(error) if missing(&error) => return Ok(()),
+            Err(_) => return Err(unavailable()),
+        };
+        let mut left = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| unavailable())?;
+            let Some(file) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if left_over(file.as_bytes()) {
+                left.push(file);
+                if left.len() == USER_PLUGINS_MAX {
+                    break;
+                }
+            }
+        }
+        assert!(left.len() <= USER_PLUGINS_MAX);
+        left.sort();
+        let mut first = None;
+        for file in &left {
+            if let Err(refusal) = sweep(&folder, file) {
+                first.get_or_insert(refusal);
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 
     /// No user plugins folder off Unix. Output: false, nothing was deleted.

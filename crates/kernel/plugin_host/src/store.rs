@@ -406,11 +406,12 @@ pub fn secret_value(engine: &Engine<'_>, bound: &Bound) -> Result<SecretString, 
         .ok_or_else(|| refused("app_plugin_needs_key"))
 }
 
-/// Deletes what a crash between a staged write and its rename left at the engine root: key
-/// copies staged in the key folders and plugin folders staged in the plugins folder. The
-/// engine runs it at start, before any store call can stage a file. A leftover it cannot
-/// delete, or a folder that refuses it, stays for the next start and stops nothing. Input:
-/// the engine facts. Output: none.
+/// Sweeps what a crash between a staged write and its rename left at the engine root: key
+/// copies staged in the key folders are deleted, a plugin's old folder whose name is
+/// missing is moved back under it, and other staged plugin entries are deleted. The engine
+/// runs it at start, before any store call can stage a file. A leftover it cannot delete,
+/// or a folder that refuses it, stays for the next start and stops nothing. Input: the
+/// engine facts. Output: none.
 pub fn sweep_staged(engine: &Engine<'_>) {
     for folder in KeyFolder::ALL {
         let _ = (engine.keys.sweep)(engine.root, folder);
