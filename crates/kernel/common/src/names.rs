@@ -31,10 +31,9 @@ pub fn single_component(text: &str) -> bool {
 pub const STORE_NAME_BYTES_MAX: usize = 63;
 
 /// Whether a text is a secret store name: 1 to `STORE_NAME_BYTES_MAX` bytes of lowercase
-/// ASCII letters, digits, `.`, `-` or `_`, not starting with `.` or `-`, without `..`, and
-/// one plain path component ([`single_component`]), so no trailing dot and no Windows
-/// device name. The store, the manifest reader and every caller share this one rule.
-/// Input: the text. Output: the answer.
+/// ASCII letters, digits, `.`, `-` or `_`, not starting with `.` or `-`, without `..`. A
+/// store name is never a file name, so the Windows path rules do not apply. The store, the
+/// manifest reader and every caller share this one rule. Input: the text. Output: the answer.
 pub fn is_store_name(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= STORE_NAME_BYTES_MAX
@@ -43,7 +42,13 @@ pub fn is_store_name(text: &str) -> bool {
         && text.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_".contains(&byte)
         })
-        && single_component(text)
+}
+
+/// Whether a text is a store account: a store name ([`is_store_name`]) that does not end
+/// in `.`, the shape the engine's `<service>:<account>` reference refuses at its end.
+/// Input: the text. Output: the answer.
+pub fn is_store_account(text: &str) -> bool {
+    is_store_name(text) && !text.ends_with('.')
 }
 
 /// The refusal [`validate_identity`] gives, which the engine's protocol error carries.

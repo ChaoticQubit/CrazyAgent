@@ -1,7 +1,7 @@
 use kernel_security::error::StoreError;
 use kernel_security::secret::Piece::{Hex, Plain};
 use kernel_security::secret::sized;
-use kernel_security::secret::{SECRET_BYTES_MAX, SecretString};
+use kernel_security::secret::{STORED_BYTES_MAX, SecretString};
 use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,16 @@ const STEP_TIME: Duration = Duration::from_secs(10);
 const OUTPUT_BYTES_MAX: usize = 4096;
 const ITEM_MISSING: i32 = 44;
 const NAMESPACE_ROOT: &str = "dev.crazyagent.";
+/// The most bytes of the keychain file path a store names.
+const KEYCHAIN_PATH_BYTES_MAX: usize = 512;
+/// The longest line `security -i` takes on stdin.
+const SECURITY_LINE_MAX: usize = 4_096;
+/// The longest `add-generic-password` line `put` writes: the fixed words, a service and
+/// account of 63 bytes each, the item as hex, and the keychain path.
+const PUT_LINE_MAX: usize =
+    28 + 63 + 6 + 63 + 5 + 2 * STORED_BYTES_MAX + 2 + KEYCHAIN_PATH_BYTES_MAX + 2;
+
+const _: () = assert!(PUT_LINE_MAX <= SECURITY_LINE_MAX);
 
 /// The macOS Keychain as a credential store. Every item lives in one keychain file, the
 /// owner's default unless the store was opened with `at`, under services that start with
@@ -56,6 +66,7 @@ impl Keychain {
         let namespace = owned_namespace(namespace)?;
         let shown = keychain.to_str().ok_or_else(unavailable)?;
         if !keychain.is_absolute()
+            || shown.len() > KEYCHAIN_PATH_BYTES_MAX
             || shown.contains(['\'', '"', '\\', '\n', '\r'])
             || !keychain.is_file()
         {
@@ -97,7 +108,7 @@ impl Store for Keychain {
         account: &str,
         secret: &SecretString,
     ) -> Result<SecretRef, StoreError> {
-        if secret.expose().len() > SECRET_BYTES_MAX {
+        if secret.expose().len() > STORED_BYTES_MAX {
             return Err(StoreError::code("credential_secret_invalid"));
         }
         let service = self.owned(service)?;
@@ -115,6 +126,7 @@ impl Store for Keychain {
             Plain("\"\n"),
         ])
         .ok_or_else(|| StoreError::code("credential_secret_invalid"))?;
+        assert!(line.len() <= PUT_LINE_MAX);
         let ran = run(&["-i".as_ref()], Some(&line), None);
         kernel_security::secret::wipe(&mut line);
         if ran?.code != Some(0) {
@@ -143,7 +155,7 @@ impl Store for Keychain {
                 if ran.stdout.last() == Some(&b'\n') {
                     ran.stdout.pop();
                 }
-                SecretString::new(std::mem::take(&mut ran.stdout))
+                SecretString::stored(std::mem::take(&mut ran.stdout))
             }
             Some(ITEM_MISSING) => Err(StoreError::code("credential_missing")),
             _ => Err(unavailable()),

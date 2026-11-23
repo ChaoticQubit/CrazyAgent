@@ -76,7 +76,7 @@ impl Store for OsKeyring {
         let account = checked_name(account)?;
         let found = reference(service, account)?;
         let entry = self.entry(service, account)?;
-        let copy = SecretString::new(secret.expose().as_bytes().to_vec())?;
+        let copy = SecretString::stored(secret.expose().as_bytes().to_vec())?;
         bounded(self.step_time, move || {
             entry.set_secret(copy.expose().as_bytes()).map_err(failure)
         })?;
@@ -86,7 +86,7 @@ impl Store for OsKeyring {
     fn get(&self, reference: &SecretRef) -> Result<SecretString, StoreError> {
         let entry = self.owned_entry(reference)?;
         bounded(self.step_time, move || {
-            SecretString::new(entry.get_secret().map_err(failure)?)
+            SecretString::stored(entry.get_secret().map_err(failure)?)
         })
     }
 
