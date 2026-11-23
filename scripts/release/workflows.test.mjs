@@ -730,17 +730,24 @@ test("each OS's Rust shards wait only on that OS's build, so a slow macOS build 
   }
 });
 
-test("every test farm Rust shard installs the build job's toolchain, Windows SQLite and debug settings and fetches the locked crates before it runs, so rows that spawn the cargo that built them build offline (DEC-191)", async () => {
+test("every test farm Rust shard installs the build job's toolchain plus rustfmt for capgen's rows, Windows SQLite and debug settings and fetches the locked crates before it runs, so rows that spawn the cargo that built them build offline (DEC-191, POD-A-A5C-L2)", async () => {
   const farm = await workflow("tests.yml");
   const build = actionSteps(await farmAction("rust-archive"));
   const rust = actionSteps(await farmAction("rust-shard"));
   const named = (all, name) => all.findIndex((step) => step.startsWith(`    - name: ${name}\n`));
   const shard = rust.findIndex((step) => step.includes("bash scripts/ci/farm-rust-shard.sh "));
   assert(shard >= 0, "the shard step exists");
-  for (const name of ["Install Rust toolchain", "Set debug info for the platform's disk", "Fetch Rust dependencies"]) {
+  const install = 'rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal';
+  const own = {
+    "Install Rust toolchain": (step) => step.replace(`${install}\n`, `${install} --component rustfmt\n`),
+    "Set debug info for the platform's disk": (step) => step,
+    "Fetch Rust dependencies": (step) => step,
+  };
+  assert(build[named(build, "Install Rust toolchain")].includes(`${install}\n`), "the build installs the pinned toolchain without rustfmt");
+  for (const [name, shardForm] of Object.entries(own)) {
     const at = named(rust, name);
     assert(at >= 0 && at < shard, `${name} runs before the shard`);
-    assert.equal(rust[at], build[named(build, name)], `${name} is the build action's own step`);
+    assert.equal(rust[at], shardForm(build[named(build, name)]), `${name} is the build action's own step, with rustfmt added for the toolchain`);
   }
   assert(rust[named(rust, "Fetch Rust dependencies")].endsWith("run: cargo fetch --locked"));
   assert(named(rust, "Install Rust toolchain") < named(rust, "Fetch Rust dependencies"), "crates are fetched with the pinned cargo");

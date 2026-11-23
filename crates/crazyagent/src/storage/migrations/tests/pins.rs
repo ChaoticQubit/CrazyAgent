@@ -219,7 +219,7 @@ fn stable_rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
         .unwrap();
     assert!(!done.is_empty(), "the upgrade puts snapshots on the log");
     for seq in done {
-        crate::state_log::verify_snapshot(db, u64::try_from(seq).unwrap()).unwrap();
+        kernel_storage::state_log::verify_snapshot(db, u64::try_from(seq).unwrap()).unwrap();
     }
     let mut kept: Vec<(String, Vec<u8>)> = db
         .prepare("SELECT digest, text FROM kept_texts")
@@ -701,8 +701,8 @@ fn standing_of(db: &Connection) -> Standing {
     (
         count("SELECT revision FROM state WHERE id=1"),
         count("SELECT COUNT(*) FROM events"),
-        crate::state_log::replay::rows(db, "repository_admissions").unwrap(),
-        crate::state_log::replay::rows(db, "worktree_leases").unwrap(),
+        kernel_storage::state_log::replay::rows(db, "repository_admissions").unwrap(),
+        kernel_storage::state_log::replay::rows(db, "worktree_leases").unwrap(),
     )
 }
 
@@ -736,7 +736,7 @@ fn an_upgrade_of_the_p5_fixture_puts_its_worktree_rows_on_the_log() {
     let done: Vec<(i64, String)> = db
         .prepare("SELECT seq, aggregate FROM state_log WHERE kind=?1 ORDER BY seq")
         .unwrap()
-        .query_map([crate::state_log::SNAPSHOT_DONE], |row| {
+        .query_map([kernel_storage::state_log::SNAPSHOT_DONE], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .unwrap()
@@ -749,7 +749,7 @@ fn an_upgrade_of_the_p5_fixture_puts_its_worktree_rows_on_the_log() {
         "one run per step"
     );
     for (seq, _) in &done {
-        crate::state_log::verify_snapshot(&db, *seq as u64).unwrap();
+        kernel_storage::state_log::verify_snapshot(&db, *seq as u64).unwrap();
     }
     let tx = db.transaction().unwrap();
     crate::worktrees::log::rebuild(&tx).unwrap();

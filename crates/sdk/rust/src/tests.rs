@@ -53,9 +53,16 @@ fn the_sdk_re_exports_no_ambient_power() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![src.join("lib.rs")];
     for entry in fs::read_dir(src.join("generated")).expect("generated reads") {
-        files.push(entry.expect("entry reads").path());
+        let path = entry.expect("entry reads").path();
+        if !path.is_dir() {
+            files.push(path);
+            continue;
+        }
+        for inner in fs::read_dir(&path).expect("a generated subfolder reads") {
+            files.push(inner.expect("entry reads").path());
+        }
     }
-    assert!(files.len() >= 4);
+    assert!(files.len() >= 7);
     for file in files {
         let text = fs::read_to_string(&file).expect("source reads");
         for banned in [
@@ -271,4 +278,147 @@ fn a_foreign_handle_and_enum_are_the_owning_files_types() {
         serde_json::to_string(&route).expect("a route serializes"),
         r#"{"mode":"write","port":443}"#
     );
+}
+
+mod wire {
+    use crate::fixture_wire::envelope::wire::{Blob, StoreInput};
+    use crate::fixture_wire::wire::{self as sdk_wire, Mode, Plain};
+    use crate::settings::{LeftRunning, OnQuit, QuitSettings};
+    use crate::wire::{Bytes, Id, U64};
+
+    /// The shared wire fixture: the `wire.store` input as compact JSON, byte for byte the
+    /// same file the TS conformance row reads.
+    const SHARED: &str = include_str!("../../ts/test/wire.json");
+
+    /// The `QuitSettings` serde bytes as the SDK wrote them before the envelopes existed.
+    const QUIT_BODY: &str = r#"{"on_quit":"stop","left_running":"never","hours":12}"#;
+
+    #[test]
+    fn wire_json_decodes_and_reencodes_byte_equal() {
+        let input: StoreInput = serde_json::from_str(SHARED).expect("wire.json decodes");
+        let (blob, plain, at) = input.into_parts();
+        assert_eq!(
+            blob,
+            sdk_wire::Blob {
+                size: u64::MAX,
+                data: vec![0, 1, 255],
+                parts: vec![0, 9_007_199_254_740_993],
+                tail: None,
+            }
+        );
+        assert_eq!(
+            plain,
+            Plain {
+                name: "x".into(),
+                mode: Mode::Write,
+            }
+        );
+        assert_eq!(at, 7);
+        let again = StoreInput {
+            blob: Blob::from(blob),
+            plain,
+            at: U64(at),
+        };
+        assert_eq!(
+            serde_json::to_string(&again).expect("the envelope encodes"),
+            SHARED
+        );
+    }
+
+    #[test]
+    fn wire_refuses_non_canonical_u64_and_base64() {
+        for text in [
+            r#""01""#,
+            "7",
+            r#""18446744073709551616""#,
+            r#""+7""#,
+            r#""""#,
+        ] {
+            assert!(serde_json::from_str::<U64>(text).is_err(), "{text}");
+            assert!(serde_json::from_str::<Id>(text).is_err(), "{text}");
+        }
+        assert_eq!(
+            serde_json::from_str::<U64>(r#""18446744073709551615""#).expect("u64::MAX reads"),
+            U64(u64::MAX)
+        );
+        assert_eq!(
+            serde_json::from_str::<U64>(r#""0""#).expect("0 reads"),
+            U64(0)
+        );
+        for text in [
+            r#""Zg=""#,
+            r#""Zh==""#,
+            r#""Zg==Zg==""#,
+            r#""Z===""#,
+            r#""Zm9v YmFy""#,
+            "[102]",
+        ] {
+            assert!(serde_json::from_str::<Bytes>(text).is_err(), "{text}");
+        }
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            let json = alloc::format!("\"{encoded}\"");
+            assert_eq!(
+                serde_json::from_str::<Bytes>(&json).expect("an RFC 4648 vector reads"),
+                Bytes(plain.as_bytes().to_vec())
+            );
+            assert_eq!(
+                serde_json::to_string(&Bytes(plain.as_bytes().to_vec())).expect("encodes"),
+                json
+            );
+        }
+        let unknown = SHARED.replacen("\"at\"", "\"plugin\":\"p\",\"at\"", 1);
+        assert!(serde_json::from_str::<StoreInput>(&unknown).is_err());
+    }
+
+    #[test]
+    fn sdk_type_serde_is_unchanged_by_the_wire_module() {
+        let settings = QuitSettings {
+            on_quit: OnQuit::Stop,
+            left_running: LeftRunning::Never,
+            hours: 12,
+        };
+        assert_eq!(
+            serde_json::to_string(&settings).expect("serializes"),
+            QUIT_BODY
+        );
+        let envelope = crate::generated::envelope::settings::SaveQuitInput { settings };
+        let json = serde_json::to_string(&envelope).expect("the envelope encodes");
+        assert_eq!(json, alloc::format!("{{\"settings\":{QUIT_BODY}}}"));
+        let read: crate::generated::envelope::settings::SaveQuitInput =
+            serde_json::from_str(&json).expect("the envelope decodes");
+        assert_eq!(read.into_parts(), (settings,));
+        let blob = sdk_wire::Blob {
+            size: 1,
+            data: vec![2],
+            parts: vec![3],
+            tail: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&blob).expect("the SDK blob serializes"),
+            r#"{"size":1,"data":[2],"parts":[3],"tail":null}"#
+        );
+        let found = crate::generated::envelope::secrets::FindOutput::from(Some(
+            crate::secrets::Secret::from_kernel(9),
+        ));
+        assert_eq!(
+            serde_json::to_string(&found).expect("the output encodes"),
+            r#""9""#
+        );
+        let forget: crate::generated::envelope::secrets::ForgetInput =
+            serde_json::from_str(r#"{"secret":"9"}"#).expect("a handle id decodes");
+        assert_eq!(forget.into_parts().0.kernel_id(), 9);
+        assert_eq!(
+            serde_json::to_string(&crate::generated::envelope::secrets::ForgetOutput::from(()))
+                .expect("a unit output encodes"),
+            "null"
+        );
+    }
 }

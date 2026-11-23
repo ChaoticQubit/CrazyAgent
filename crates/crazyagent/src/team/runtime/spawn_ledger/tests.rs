@@ -143,7 +143,11 @@ impl Case {
             env: Vec::new(),
             transcript: Transcript::ClaudeSession { file },
         };
-        host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
+        host.spawn(
+            &AgentId::team(id).unwrap(),
+            &crate::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
 }
 

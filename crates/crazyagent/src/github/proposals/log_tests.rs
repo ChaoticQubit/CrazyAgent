@@ -1,7 +1,8 @@
 use super::*;
 use crate::landing_log::RULE_REQUEST_SAVED;
 use crate::project_setup::removed::event::{KIND, ProjectRemoved};
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::Aggregate;
+use kernel_storage::state_log::Draft;
 
 /// Every logged rule request body, in seq order. Input: the store. Output: the bodies.
 fn saved(db: &Connection) -> Vec<serde_json::Value> {
@@ -114,14 +115,14 @@ fn remove(case: &Case, kept: bool) {
     let behavior = TransactionBehavior::Immediate;
     let tx = Transaction::new_unchecked(&case.db, behavior).unwrap();
     let fence = crate::worktrees::log::store_fence(&tx).unwrap();
-    let mut log = Appender::own(&tx, fence).unwrap();
+    let mut log = crate::state_log::own(&tx, fence).unwrap();
     let removed = ProjectRemoved {
         project: case.project.clone(),
         kept,
     };
     let body = removed.body().unwrap();
     let draft = Draft {
-        aggregate: Aggregate::Projects,
+        aggregate: Aggregate::Projects.into(),
         kind: KIND,
         schema: 1,
         at_ms: 1,

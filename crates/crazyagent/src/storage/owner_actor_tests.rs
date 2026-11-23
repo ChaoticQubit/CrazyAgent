@@ -923,7 +923,7 @@ fn owner_ledger_abort_rolls_back_domain_effect_and_pages_bound_corrupt_body() {
 /// v2.5 L6 (leader 03:14, fix11 L7 Q6): an engine-own write moves the revision and writes
 /// one `events` row at it, so a client catching up from `events` sees the change and its
 /// next save applies instead of failing `stale_revision`. The write goes through
-/// `Appender::opening`, which is `Appender::own` behind the open's proof.
+/// `state_log::opening`, which is `state_log::own` behind the open's proof.
 #[test]
 fn a_client_save_after_an_own_write_applies() {
     let (_root, path, cfg) = fixture();
@@ -947,7 +947,7 @@ fn a_client_save_after_an_own_write_applies() {
 
     let tx = db.transaction().unwrap();
     let opening = super::opening::Opening::new(7);
-    let appender = crate::state_log::Appender::opening(&tx, opening).unwrap();
+    let appender = crate::state_log::opening(&tx, opening).unwrap();
     assert_eq!(appender.revision(), 2);
     drop(appender);
     tx.commit().unwrap();

@@ -1,6 +1,7 @@
 use super::*;
-use crate::state_log::replay::redact;
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::Aggregate;
+use crate::state_log::redact;
+use kernel_storage::state_log::Draft;
 use rusqlite::Connection;
 
 /// A seeded store: the `state` row at revision 0 and the owner tables holding the test host
@@ -25,7 +26,7 @@ fn code<T>(result: Result<T, EngineError>) -> Option<String> {
 /// One worktrees event. Output: the draft.
 fn draft() -> Draft<'static> {
     Draft {
-        aggregate: Aggregate::Worktrees,
+        aggregate: Aggregate::Worktrees.into(),
         kind: "Tick",
         schema: 1,
         at_ms: 1,
@@ -68,15 +69,18 @@ fn a_writer_whose_fence_the_store_does_not_hold_is_refused_for_each_class() {
         ),
     ] {
         assert_eq!(
-            code(Appender::own(&tx, fence.clone())),
+            code(crate::state_log::own(&tx, fence.clone())),
             Some(expected.into())
         );
-        assert_eq!(code(Appender::owner(&tx, 1, fence)), Some(expected.into()));
+        assert_eq!(
+            code(crate::state_log::owner(&tx, 1, fence)),
+            Some(expected.into())
+        );
     }
     tx.execute("UPDATE owner_identities SET status='revoked'", [])
         .unwrap();
     assert_eq!(
-        code(Appender::own(&tx, Fence::Owner(test_owner()))),
+        code(crate::state_log::own(&tx, Fence::Owner(test_owner()))),
         Some("owner_grant_stale_or_revoked".into())
     );
     assert_eq!(revision(&tx), 0, "a refused writer moves no revision");
@@ -91,12 +95,12 @@ fn a_stale_engine_epoch_or_an_offline_runtime_is_refused_for_each_writer_class()
         .unwrap();
     for fence in [engine(), Fence::Owner(test_owner())] {
         assert_eq!(
-            code(Appender::own(&tx, fence.clone())),
+            code(crate::state_log::own(&tx, fence.clone())),
             stale,
             "second instance"
         );
         assert_eq!(
-            code(Appender::owner(&tx, 1, fence)),
+            code(crate::state_log::owner(&tx, 1, fence)),
             stale,
             "second instance"
         );
@@ -107,12 +111,20 @@ fn a_stale_engine_epoch_or_an_offline_runtime_is_refused_for_each_writer_class()
     )
     .unwrap();
     for fence in [engine(), Fence::Owner(test_owner())] {
-        assert_eq!(code(Appender::own(&tx, fence.clone())), stale, "offline");
-        assert_eq!(code(Appender::owner(&tx, 1, fence)), stale, "offline");
+        assert_eq!(
+            code(crate::state_log::own(&tx, fence.clone())),
+            stale,
+            "offline"
+        );
+        assert_eq!(
+            code(crate::state_log::owner(&tx, 1, fence)),
+            stale,
+            "offline"
+        );
     }
     tx.execute("UPDATE owner_meta SET runtime_state='active'", [])
         .unwrap();
-    assert!(Appender::own(&tx, engine()).is_ok());
+    assert!(crate::state_log::own(&tx, engine()).is_ok());
 }
 
 #[test]
@@ -134,11 +146,11 @@ fn an_append_from_outside_the_engine_process_is_refused_until_its_host_starts_he
     let refused = Some("state_log_fence_out_of_process".to_string());
     let tx = db.transaction().unwrap();
     for fence in [Fence::Engine(outside.clone()), owner.clone()] {
-        assert_eq!(code(Appender::own(&tx, fence)), refused);
+        assert_eq!(code(crate::state_log::own(&tx, fence)), refused);
     }
     host_started(&outside);
     assert!(hosted(&outside));
-    let mut log = Appender::own(&tx, Fence::Engine(outside.clone())).unwrap();
+    let mut log = crate::state_log::own(&tx, Fence::Engine(outside.clone())).unwrap();
     assert_eq!(log.append(&draft()).unwrap(), 1);
     host_stopped(&outside);
     assert!(!hosted(&outside));
@@ -148,7 +160,7 @@ fn an_append_from_outside_the_engine_process_is_refused_until_its_host_starts_he
         "a stopped host's projection"
     );
     for fence in [Fence::Engine(outside.clone()), owner] {
-        assert_eq!(code(Appender::own(&tx, fence)), refused);
+        assert_eq!(code(crate::state_log::own(&tx, fence)), refused);
     }
 }
 
@@ -156,7 +168,7 @@ fn an_append_from_outside_the_engine_process_is_refused_until_its_host_starts_he
 fn a_projection_apply_reasserts_the_fence_and_does_not_run_on_a_stale_one() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     log.append(&draft()).unwrap();
     let mut ran = 0;
     let read = log.project(|tx| {
@@ -181,7 +193,7 @@ fn a_projection_apply_reasserts_the_fence_and_does_not_run_on_a_stale_one() {
 fn redact_is_fenced_like_an_append() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let seq = Appender::own(&tx, engine())
+    let seq = crate::state_log::own(&tx, engine())
         .unwrap()
         .append(&draft())
         .unwrap();
@@ -269,10 +281,15 @@ fn opening_store(db_instance: &str) -> Connection {
 fn an_opening_writer_appends_while_no_host_of_its_store_runs() {
     let mut db = opening_store(&"e".repeat(64));
     let tx = db.transaction().unwrap();
-    let mut appender = Appender::opening(&tx, Opening::for_test(7)).unwrap();
+    let mut appender = crate::state_log::opening(&tx, Opening::for_test(7)).unwrap();
     assert_eq!(appender.revision(), 1);
     assert_eq!(appender.append(&draft()).unwrap(), 1);
-    assert_eq!(appender.project(|_| Ok(3)).unwrap(), 3);
+    assert_eq!(
+        appender
+            .project(|_| Ok::<_, kernel_storage::StorageError>(3))
+            .unwrap(),
+        3
+    );
     tx.commit().unwrap();
     assert_eq!(revision(&db), 1);
 
@@ -284,7 +301,7 @@ fn an_opening_writer_appends_while_no_host_of_its_store_runs() {
     )
     .unwrap();
     let tx = bare.transaction().unwrap();
-    let appender = Appender::opening(&tx, Opening::for_test(7)).unwrap();
+    let appender = crate::state_log::opening(&tx, Opening::for_test(7)).unwrap();
     assert_eq!(
         appender.revision(),
         5,
@@ -304,7 +321,7 @@ fn an_opening_writer_is_refused_once_a_host_of_its_store_runs() {
     };
     let mut db = opening_store(&instance);
     let tx = db.transaction().unwrap();
-    let appender = Appender::opening(&tx, Opening::for_test(7)).unwrap();
+    let appender = crate::state_log::opening(&tx, Opening::for_test(7)).unwrap();
     host_started(&host);
     assert_eq!(
         code(appender.project(|_| Ok(()))),
@@ -313,7 +330,7 @@ fn an_opening_writer_is_refused_once_a_host_of_its_store_runs() {
     );
     drop(appender);
     assert_eq!(
-        code(Appender::opening(&tx, Opening::for_test(7))),
+        code(crate::state_log::opening(&tx, Opening::for_test(7))),
         Some("state_log_opening_host_running".into())
     );
     tx.commit().unwrap();
@@ -326,7 +343,7 @@ fn an_opening_writer_is_refused_once_a_host_of_its_store_runs() {
 
     let tx = db.transaction().unwrap();
     assert!(
-        Appender::opening(&tx, Opening::for_test(7)).is_ok(),
+        crate::state_log::opening(&tx, Opening::for_test(7)).is_ok(),
         "a stopped host no longer refuses it"
     );
 }

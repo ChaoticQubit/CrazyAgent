@@ -5,7 +5,7 @@ use crate::landing_log::{
     OWNER_EDITS_SETTLED, PUBLISH_PROMPT_NEVER, PUBLISH_PROMPT_SNOOZED,
     WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
 };
-use crate::state_log::replay::rows;
+use kernel_storage::state_log::replay::rows;
 use serde_json::json;
 
 const BRANCH: &str = "crazyagent/task-one";
@@ -322,18 +322,19 @@ fn a_logged_project_delete_drops_its_prompt_answer_on_rebuild_and_a_remove_keeps
 /// without its projection. Inputs: the store, the project and whether its notes are kept.
 fn removal(db: &Connection, project: &ProjectId, kept: bool) {
     use crate::project_setup::removed::event::{KIND, ProjectRemoved};
-    use crate::state_log::{Aggregate, Appender, Draft};
+    use crate::state_log::Aggregate;
+    use kernel_storage::state_log::Draft;
     let behavior = rusqlite::TransactionBehavior::Immediate;
     let tx = rusqlite::Transaction::new_unchecked(db, behavior).unwrap();
     let fence = crate::worktrees::log::store_fence(&tx).unwrap();
-    let mut log = Appender::own(&tx, fence).unwrap();
+    let mut log = crate::state_log::own(&tx, fence).unwrap();
     let removed = ProjectRemoved {
         project: project.clone(),
         kept,
     };
     let body = removed.body().unwrap();
     let draft = Draft {
-        aggregate: Aggregate::Projects,
+        aggregate: Aggregate::Projects.into(),
         kind: KIND,
         schema: 1,
         at_ms: 1,

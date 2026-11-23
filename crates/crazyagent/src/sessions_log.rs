@@ -4,11 +4,14 @@ use crate::engine::owner::Admission;
 use crate::master_session::{MasterSessionView, SESSION_DELETED, SessionDeleted};
 use crate::owner_texts::TextDigest;
 use crate::protocol::{Outcome, ProjectId, SessionId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use crate::storage::opening::Opening;
 use crate::storage::versioned::{Refusal, Writer};
+use kernel_storage::state_log::Appender;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -92,13 +95,13 @@ const MARKS_MAX: usize = 16_384;
 const SNAPSHOT_ROWS_MAX: usize = 262_144;
 /// The bytes of a chunk body kept for its envelope (aggregate, table, index) around rows.
 const CHUNK_ENVELOPE_BYTES: usize = 1_024;
-/// The code `Appender::owner` refuses with when its revision is logged already.
+/// The code `state_log::owner` refuses with when its revision is logged already.
 const NOT_NEWER: &str = "state_log_revision_not_newer";
 /// The code the store fence refuses with before an owner runtime is active.
 const RUNTIME_STALE: &str = "owner_runtime_stale";
 
 const _: () = assert!(DROPPED_MAX * 21 + CHUNK_ENVELOPE_BYTES <= BODY_BYTES_MAX);
-const _: () = assert!(MARKS_MAX < crate::state_log::TRANSACTION_EVENTS_MAX);
+const _: () = assert!(MARKS_MAX < kernel_storage::state_log::TRANSACTION_EVENTS_MAX);
 
 /// One master session row: its two ids at the top level, so a Delete's redaction and a demo
 /// clear's find it, the row's `created` revision and the stored session, a closed view of
@@ -431,7 +434,7 @@ fn close_own(tx: &Transaction<'_>) -> Result<usize, EngineError> {
         return Ok(0);
     }
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut log = Appender::own(tx, fence)?;
+    let mut log = crate::state_log::own(tx, fence)?;
     close(&mut log)
 }
 
@@ -442,7 +445,7 @@ fn close_at(tx: &Transaction<'_>, revision: u64, fence: Fence) -> Result<usize, 
     if !touched(tx)? {
         return Ok(0);
     }
-    let mut log = match Appender::owner(tx, revision, fence) {
+    let mut log = match crate::state_log::owner(tx, revision, fence) {
         Ok(log) => log,
         Err(refused) if refused.0 == NOT_NEWER => return Ok(0),
         Err(refused) => return Err(refused),
@@ -477,77 +480,77 @@ fn append(log: &mut Appender<'_, '_>, at_ms: u64, event: &Event) -> Result<u64, 
     let aggregate = Aggregate::Sessions;
     let seq = match event {
         Event::Session(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_SESSION,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Entry(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ENTRY,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::EntriesDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ENTRIES_DROPPED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Text(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TEXT,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::TextsDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TEXTS_DROPPED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Turn(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TURN,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Preparation(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PREPARATION,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Resolve(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RESOLVE,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::ResolvesDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RESOLVES_DROPPED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Profile(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PROFILE,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::ProfilesDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PROFILES_DROPPED,
             schema: SCHEMA,
             at_ms,
@@ -984,7 +987,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     crate::storage::agent_text::ensure(tx)?;
     clear(tx)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Sessions, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Sessions, 0, |logged| {
         if logged.kind == SESSION_DELETED {
             let deleted: SessionDeleted = serde_json::from_slice(&logged.body)
                 .map_err(|_| error("sessions_log_event_invalid"))?;
@@ -1018,7 +1021,7 @@ pub fn snapshot(log: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineErr
     }
     assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
     assert_eq!(chunks[0].table, TABLES[0]);
-    log.snapshot(Aggregate::Sessions, at_ms, chunks)
+    Ok(log.snapshot(Aggregate::Sessions, at_ms, chunks)?)
 }
 
 /// The first snapshot run of the seven tables, for the schema step that puts sessions on
@@ -1068,7 +1071,7 @@ fn stored_rows(tx: &Transaction<'_>, tables: &[&str]) -> Result<i64, EngineError
 /// step's transaction and the proof. Output: true once the run closed, or the refusal.
 fn run_once(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let at_ms = opening.at_ms();
-    let mut log = Appender::opening(tx, opening)?;
+    let mut log = crate::state_log::opening(tx, opening)?;
     let done = snapshot(&mut log, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     Ok(true)
@@ -1084,7 +1087,7 @@ pub(crate) fn forget_project(
     project: &str,
     fence: &Fence,
 ) -> Result<usize, EngineError> {
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Sessions],
         None,

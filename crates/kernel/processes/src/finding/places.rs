@@ -390,7 +390,7 @@ impl Places {
     /// which they can write whole. When those could not be read it fails closed: every path
     /// outside the engine's data folder counts, under HOME and outside HOME too unless it
     /// lies under an install root ([`Places::installed`]) or the app's folder, since a
-    /// repository the engine registered may lie anywhere (C2-H8). Inputs: HOME's names
+    /// repository the engine registered may lie anywhere. Inputs: HOME's names
     /// ([`home_names`]) and the path. Output: the answer.
     pub(super) fn in_set_up_project(&self, homes: &[PathBuf], path: &Path) -> bool {
         assert!(homes.len() <= 4);

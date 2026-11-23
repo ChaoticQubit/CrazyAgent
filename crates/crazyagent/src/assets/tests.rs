@@ -1,5 +1,7 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+use kernel_common::hash;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -157,13 +159,47 @@ fn hdiutil(arguments: &[&str], paths: &[&Path]) -> Result<String, String> {
     }
 }
 
-fn admitted(db: &Connection, id: &str) -> AdmittedSource {
+/// The (device, inode) an admitted source was pinned at, from its stored body. Inputs:
+/// the database and the source id. Output: the pair.
+fn admitted(db: &Connection, id: &str) -> (u64, u64) {
     let body: String = db
         .query_row("SELECT body FROM asset_sources WHERE id=?1", [id], |r| {
             r.get(0)
         })
         .unwrap();
-    serde_json::from_str(&body).unwrap()
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    (
+        body["device"].as_u64().unwrap(),
+        body["inode"].as_u64().unwrap(),
+    )
+}
+
+/// Takes and reads one snapshot through the plugin host with the engine's file identity
+/// rule, as the adapter does. Inputs: the database, the config and a new snapshot id.
+/// Output: the one asset read, or the refusal.
+fn snapshot_one(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    id: &str,
+) -> Result<kernel::Content, kernel::Failure> {
+    let tx = db.transaction().unwrap();
+    let facts = kernel::SnapshotFacts {
+        project_id: "p",
+        config_id: config.id.as_str(),
+        asset_bytes_max: config.settings.knowledge.asset_bytes_max,
+        records_max: config.settings.knowledge.records_max,
+        frame_bytes_max: FRAME_BYTES_MAX,
+        same_files: crate::file_identity::same_files,
+    };
+    kernel::snapshot(&tx, &facts, id)?;
+    let read = kernel::ReadFacts {
+        project_id: "p",
+        task_config_id: config.id.as_str(),
+    };
+    let mut snapshot = kernel::read(&tx, &read, id)?;
+    tx.commit().unwrap();
+    assert_eq!(snapshot.assets.len(), 1);
+    Ok(snapshot.assets.remove(0))
 }
 
 #[test]
@@ -198,10 +234,9 @@ fn an_admitted_asset_is_read_after_its_volume_is_renumbered_and_a_replaced_one_i
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let pinned = admitted(&db, "rules");
-    let maximum = config.settings.knowledge.asset_bytes_max;
+    let (device, inode) = admitted(&db, "rules");
     assert_eq!(
-        content(&pinned, maximum).unwrap().bytes,
+        snapshot_one(&mut db, &config, "s1").unwrap().bytes,
         b"Use plain words."
     );
 
@@ -211,11 +246,11 @@ fn an_admitted_asset_is_read_after_its_volume_is_renumbered_and_a_replaced_one_i
     let live = std::fs::metadata(&file).unwrap();
     assert_ne!(
         live.dev(),
-        pinned.device,
+        device,
         "the reattached volume has another device number"
     );
-    assert_eq!(live.ino(), pinned.inode);
-    let read = content(&pinned, maximum).unwrap();
+    assert_eq!(live.ino(), inode);
+    let read = snapshot_one(&mut db, &config, "s2").unwrap();
     assert_eq!(read.bytes, b"Use plain words.");
     assert_eq!(read.content_hash, hash(b"Use plain words."));
 
@@ -223,10 +258,10 @@ fn an_admitted_asset_is_read_after_its_volume_is_renumbered_and_a_replaced_one_i
     std::fs::write(&other, "Use plain words.").unwrap();
     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::rename(&other, &file).unwrap();
-    assert_ne!(std::fs::metadata(&file).unwrap().ino(), pinned.inode);
+    assert_ne!(std::fs::metadata(&file).unwrap().ino(), inode);
     assert_eq!(
-        content(&pinned, maximum).unwrap_err().0,
-        "asset_source_replaced"
+        snapshot_one(&mut db, &config, "s3"),
+        Err(kernel::Failure::Refused("asset_source_replaced".into()))
     );
 }
 
@@ -270,4 +305,92 @@ fn an_image_entry_of_hdiutil_info_holds_its_own_disk_and_never_the_next_images()
             .unwrap()
             .contains(&disk(later))
     );
+}
+
+#[test]
+fn the_wire_assets_keep_the_plugin_host_shape() {
+    let words = b"Use plain words.";
+    let content =
+        |id: &str, name: &str, scope: AssetScope, kind: AssetKind, path: &str| AssetContent {
+            source: AssetSource {
+                id: RequestId::new(id).unwrap(),
+                name: name.into(),
+                scope,
+                kind,
+                path: path.into(),
+            },
+            content_hash: hash(words),
+            bytes: words.to_vec(),
+        };
+    let assets = vec![
+        content(
+            "rules",
+            "rules",
+            AssetScope::Project(ProjectId::new("p").unwrap()),
+            AssetKind::Rules,
+            "/x/rules.md",
+        ),
+        content(
+            "g-skill",
+            "skill",
+            AssetScope::Global,
+            AssetKind::Skill,
+            "/x/skill.md",
+        ),
+        content(
+            "t",
+            "t",
+            AssetScope::Global,
+            AssetKind::ConfigurationText,
+            "/x/t.md",
+        ),
+    ];
+    let twins: Vec<kernel::Content> = reshape(&assets).unwrap();
+    let wire = (
+        ProjectId::new("p").unwrap(),
+        ConfigId::new("c").unwrap(),
+        &assets,
+    );
+    assert_eq!(
+        serde_json::to_vec(&wire).unwrap(),
+        serde_json::to_vec(&("p", "c", &twins)).unwrap()
+    );
+    let snapshot = AssetSnapshot {
+        id: SnapshotId::new("s1").unwrap(),
+        project_id: ProjectId::new("p").unwrap(),
+        config_id: ConfigId::new("c").unwrap(),
+        content_hash: "h".into(),
+        assets,
+    };
+    let twin: kernel::Snapshot = reshape(&snapshot).unwrap();
+    assert_eq!(
+        serde_json::to_string(&twin).unwrap(),
+        serde_json::to_string(&snapshot).unwrap()
+    );
+    assert_eq!(reshape::<_, AssetSnapshot>(&twin).unwrap(), snapshot);
+    let native = AssetSource {
+        id: RequestId::new("n").unwrap(),
+        name: "n".into(),
+        scope: AssetScope::Global,
+        kind: AssetKind::NativePlugin,
+        path: "/x/n".into(),
+    };
+    let twin: kernel::Source = reshape(&native).unwrap();
+    assert_eq!(twin.kind, kernel::Kind::NativePlugin);
+    let bad = kernel::Snapshot {
+        id: "../s".into(),
+        ..twin_snapshot()
+    };
+    assert!(reshape::<_, AssetSnapshot>(&bad).is_err());
+}
+
+/// An empty plugin host snapshot with valid ids. Output: it.
+fn twin_snapshot() -> kernel::Snapshot {
+    kernel::Snapshot {
+        id: "s".into(),
+        project_id: "p".into(),
+        config_id: "c".into(),
+        content_hash: "h".into(),
+        assets: Vec::new(),
+    }
 }

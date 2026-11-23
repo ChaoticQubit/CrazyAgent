@@ -24,6 +24,23 @@ impl Provide for Noop {
     }
 }
 
+/// A secrets provider the row never reaches: it times only the quit save.
+struct NoSecrets;
+
+impl sdk::secrets::Provide for NoSecrets {
+    fn put_from_owner(&self, _: &'static str, _: String) -> Result<sdk::secrets::Secret, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn find(&self, _: &'static str, _: String) -> Result<Option<sdk::secrets::Secret>, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn forget(&self, _: &'static str, _: sdk::secrets::Secret) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
 /// A refusal sink the row never reaches: the bound plugin holds its grant.
 struct Unreached;
 
@@ -87,7 +104,7 @@ fn overhead_per_sdk_call() {
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["settings.write"])]).unwrap();
     let provider = Noop;
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &provider, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &NoSecrets, &refusals);
     let bound = gateway.bind(PLUGIN);
     let input = QuitSettings {
         on_quit: OnQuit::Stop,

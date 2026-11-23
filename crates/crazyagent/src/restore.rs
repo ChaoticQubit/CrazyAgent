@@ -92,15 +92,22 @@ pub fn state(root: &Path) -> Option<RestoreState> {
     }
 }
 
-/// Reads one record line: `pending`, `restored replaced-<time>` or
+/// Reads one record line: `pending` or `restoring`, both shown as a restore in progress,
+/// `restored replaced-<time>` with an optional `unverified_pin`, or
 /// `failed storage_restore_<reason>`. Input: the line. Output: the state, or none.
 #[cfg(unix)]
 fn parse(line: &str) -> Option<RestoreState> {
-    use crate::storage::setup::{RECORD_FAILED, RECORD_PENDING, RECORD_RESTORED};
+    use crate::storage::setup::{
+        RECORD_FAILED, RECORD_PENDING, RECORD_RESTORED, RECORD_RESTORING, RECORD_UNVERIFIED_PIN,
+    };
     let mut words = line.split(' ');
-    let state = match (words.next()?, words.next(), words.next()) {
-        (word, None, None) if word == RECORD_PENDING => RestoreState::Pending,
-        (word, Some(copy), None) if word == RECORD_RESTORED => {
+    let state = match (words.next()?, words.next(), words.next(), words.next()) {
+        (word, None, None, None) if word == RECORD_PENDING || word == RECORD_RESTORING => {
+            RestoreState::Pending
+        }
+        (word, Some(copy), tail, None)
+            if word == RECORD_RESTORED && tail.is_none_or(|tail| tail == RECORD_UNVERIFIED_PIN) =>
+        {
             let named = copy.strip_prefix(COPY_PREFIX).is_some_and(|time| {
                 !time.is_empty() && time.bytes().all(|b| b.is_ascii_alphanumeric())
             });
@@ -109,7 +116,7 @@ fn parse(line: &str) -> Option<RestoreState> {
             }
             RestoreState::Restored { copy: copy.into() }
         }
-        (word, Some(code), None) if word == RECORD_FAILED => {
+        (word, Some(code), None, None) if word == RECORD_FAILED => {
             let coded = code.starts_with("storage_restore_")
                 && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
             if !coded {
