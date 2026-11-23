@@ -1049,7 +1049,7 @@ fn settings_body_is_closed(kind: &str) {
     let value = |settings: serde_json::Value| json!({"settings": settings});
     let (sample, keys): (serde_json::Value, &[&str]) = match kind {
         settings::KIND_SANDBOX => (
-            value(json!(crate::sandbox_settings::SandboxSettings::default())),
+            value(json!(kernel_sandbox::settings::SandboxSettings::default())),
             &["settings"],
         ),
         settings::KIND_CLEANUP => (

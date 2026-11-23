@@ -15887,7 +15887,7 @@ fn full_access_boundary(scratch: &Path) -> Option<Arc<InstalledSandbox>> {
         let installed = InstalledSandbox::install(
             sandbox,
             &scratch.join("full-access.sb"),
-            crate::sandbox::LinuxSupervisor::On,
+            kernel_sandbox::settings::LinuxSupervisor::On,
             LinuxStrict::Off,
         )
         .unwrap();

@@ -1595,8 +1595,8 @@ fn boundary_check(
     };
     #[cfg(not(target_os = "linux"))]
     let (calls, strict) = (
-        crate::sandbox::LinuxSupervisor::On,
-        crate::sandbox::LinuxStrict::Off,
+        kernel_sandbox::settings::LinuxSupervisor::On,
+        kernel_sandbox::settings::LinuxStrict::Off,
     );
     let profile = check_profile(&checks, id);
     if let Some(problem) = crate::plugins::check_network_refused(std::env::consts::OS, &network) {

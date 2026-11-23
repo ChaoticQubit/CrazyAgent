@@ -1083,8 +1083,8 @@ fn turn_sandbox(
     };
     #[cfg(not(target_os = "linux"))]
     let (calls, strict) = (
-        crate::sandbox::LinuxSupervisor::On,
-        crate::sandbox::LinuxStrict::Off,
+        kernel_sandbox::settings::LinuxSupervisor::On,
+        kernel_sandbox::settings::LinuxStrict::Off,
     );
     let profile = runtime.path.join(MASTER_PROFILE);
     let installed =
@@ -1123,7 +1123,7 @@ fn turn_sandbox(
 #[cfg(any(target_os = "linux", all(test, unix)))]
 fn stored_sandbox_settings(
     root: &Root,
-) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
+) -> Result<kernel_sandbox::settings::SandboxSettings, EngineError> {
     let engine = root
         .engine_root()
         .map_err(|_| failure("master_sandbox_unavailable"))?;
@@ -1448,8 +1448,8 @@ mod tests {
         crate::sandbox_settings::initialize(&connection).unwrap();
         crate::sandbox_settings::save(
             &connection,
-            &crate::sandbox_settings::SandboxSettings {
-                linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+            &kernel_sandbox::settings::SandboxSettings {
+                linux_sockets: kernel_sandbox::settings::LinuxSockets::TcpPorts,
                 ..Default::default()
             },
         )
@@ -1557,7 +1557,7 @@ mod tests {
         let settings = stored_sandbox_settings(&root).unwrap();
         assert_eq!(
             settings.linux_sockets,
-            crate::sandbox::LinuxSockets::TcpPorts
+            kernel_sandbox::settings::LinuxSockets::TcpPorts
         );
         assert!(!base.join("engine.db").exists());
     }

@@ -1,8 +1,8 @@
 use super::refused;
 use crate::file_lock::HeldLock;
 use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
-use crate::sandbox_settings::SandboxSettings;
 use crate::setup::InstallError;
+use kernel_sandbox::settings::SandboxSettings;
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;

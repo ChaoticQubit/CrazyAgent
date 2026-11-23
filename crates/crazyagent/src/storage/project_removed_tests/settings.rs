@@ -1,7 +1,7 @@
 use super::*;
 use crate::cleanup_settings::{CleanupMode, CleanupSettings};
-use crate::sandbox_settings::SandboxSettings;
 use crate::settings_log::{self, Event, ProjectSaved};
+use kernel_sandbox::settings::SandboxSettings;
 
 /// The two per-project settings tables a removal clears.
 const PROJECT_TABLES: [&str; 2] = ["agent_instruction_settings", "roadmap_status_settings"];
@@ -112,7 +112,7 @@ fn an_owner_settings_save_logs_its_event_at_the_request_s_revision_and_a_stale_o
     assert_eq!(published, 1, "the request's own events row");
 
     let fresh = SandboxSettings {
-        linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+        linux_sockets: kernel_sandbox::settings::LinuxSockets::TcpPorts,
         ..SandboxSettings::default()
     };
     let stale = request(

@@ -1,3 +1,4 @@
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
@@ -1024,46 +1025,6 @@ impl SandboxRemote {
             Self::AnyHost(port)
         })
     }
-}
-
-/// How a limited-network agent's sockets are held on Linux, the owner's setting "Linux
-/// limited-network sockets". Landlock limits outbound TCP by port only, so a UDP, ping or
-/// other socket would reach any host. `TcpOnly` (the default) refuses every socket but TCP
-/// and has names looked up over TCP, `Refuse` starts no limited-network agent, and
-/// `TcpPorts` keeps only Landlock's TCP port rules. Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxSockets {
-    #[default]
-    TcpOnly,
-    Refuse,
-    TcpPorts,
-}
-
-/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the
-/// owner's setting "Linux call supervisor" (DEC-179 addendum 2). `On` (the default) adds
-/// the guards a launch needs: ports on this computer only, no new `.git` outside the
-/// agent's own git folders, signals only to programs it started. `Off` keeps the launch
-/// and every line as they were before the supervisor. Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxSupervisor {
-    #[default]
-    On,
-    Off,
-}
-
-/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's
-/// setting "Refuse agents without the full Linux sandbox" (DEC-185). `Off` (the default)
-/// starts it with what this Linux holds and the lines that say what it cannot; `On` refuses
-/// it unless [`linux_holds_fully`] does. Team agents need the full sandbox whatever it says.
-/// Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxStrict {
-    #[default]
-    Off,
-    On,
 }
 
 /// The engine refusal code of a Linux launch the strict setting refuses ([`LinuxStrict`]).

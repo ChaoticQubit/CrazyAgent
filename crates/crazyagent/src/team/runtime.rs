@@ -42,9 +42,10 @@ use crate::sandbox::policy::{
 };
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{
-    InstalledSandbox, LinuxStrict, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
+use kernel_sandbox::settings::LinuxStrict;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]

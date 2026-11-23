@@ -190,8 +190,8 @@ mod own_turns {
             let installed = crate::sandbox::InstalledSandbox::install(
                 sandbox,
                 &base.join("full-access.sb"),
-                crate::sandbox::LinuxSupervisor::On,
-                crate::sandbox::LinuxStrict::Off,
+                kernel_sandbox::settings::LinuxSupervisor::On,
+                kernel_sandbox::settings::LinuxStrict::Off,
             )
             .unwrap();
             LaunchBoundary::Installed(Arc::new(installed.unconfined()))

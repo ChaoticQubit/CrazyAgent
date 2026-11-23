@@ -337,7 +337,8 @@ impl LaunchBoundary {
 /// folders. Output: the boundary.
 #[cfg(all(test, unix))]
 pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let home = scratch.join("full-access-home");
     let tmp = scratch.join("full-access-tmp");
     for folder in [&home, &tmp] {

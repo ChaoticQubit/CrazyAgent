@@ -25,12 +25,12 @@ use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{
-    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxError, SandboxNetwork,
-    SandboxRemote,
+    InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use crate::terminal::{AgentId, Host};
+use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};

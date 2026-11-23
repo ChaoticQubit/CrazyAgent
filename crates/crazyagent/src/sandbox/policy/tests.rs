@@ -789,7 +789,8 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
 
 #[test]
 fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
-    use crate::sandbox::{LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets};
+    use crate::sandbox::{LINUX_PORTS_ANY_HOST_LINE, LinuxHost};
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -845,9 +846,8 @@ fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
 
 #[test]
 fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_https() {
-    use crate::sandbox::{
-        LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
-    };
+    use crate::sandbox::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost};
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -884,9 +884,8 @@ fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_
 
 #[test]
 fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
-    use crate::sandbox::{
-        LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
-    };
+    use crate::sandbox::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost};
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |supervised, routed| {
         Some(LinuxHost {
             nested: true,
@@ -994,8 +993,9 @@ fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
 fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hold() {
     use crate::sandbox::{
         LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_ROOT_LINE,
-        LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE, LinuxHost, LinuxSupervisor,
+        LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE, LinuxHost,
     };
+    use kernel_sandbox::settings::LinuxSupervisor;
     let held = |nested, scoped| LinuxHost {
         nested,
         scoped,

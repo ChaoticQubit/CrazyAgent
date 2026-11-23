@@ -11,12 +11,12 @@ use crate::protocol::{Command, Outcome, ProjectId};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::roadmap_status::Refresh;
-use crate::sandbox::LinuxSockets;
-use crate::sandbox_settings::SandboxSettings;
 use crate::state_log::fence::{engine, seed};
 use crate::state_log::replay::{Logged, redact, rows};
 use crate::state_log::{Aggregate, Appender, SNAPSHOT_CHUNK};
 use crate::storage::opening::Opening;
+use kernel_sandbox::settings::LinuxSockets;
+use kernel_sandbox::settings::SandboxSettings;
 use rusqlite::Connection;
 use rusqlite::types::Value;
 

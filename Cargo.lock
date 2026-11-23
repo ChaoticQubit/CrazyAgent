@@ -955,6 +955,7 @@ dependencies = [
  "bytemuck",
  "crazyagent",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-sandbox",
  "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",

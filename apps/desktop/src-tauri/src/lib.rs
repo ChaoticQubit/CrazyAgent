@@ -77,7 +77,6 @@ use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::quit_settings::QuitSettings;
 use crazyagent::roadmap_status::{Refresh, RoadmapStatus};
-use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
@@ -88,6 +87,7 @@ use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
 use engine_swap::*;
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

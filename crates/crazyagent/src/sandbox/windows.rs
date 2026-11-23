@@ -460,8 +460,9 @@ fn system_root() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{InstalledSandbox, LinuxStrict, LinuxSupervisor, SandboxRemote};
+    use crate::sandbox::{InstalledSandbox, SandboxRemote};
     use crazyagent_win_sandbox::profile::check_container;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     use std::sync::mpsc;

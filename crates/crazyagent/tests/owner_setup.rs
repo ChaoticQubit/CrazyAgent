@@ -11,8 +11,8 @@ use crazyagent::master_session::{MasterBackend, MasterOwnerAction};
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crazyagent::project_setup::{ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crazyagent::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
-use crazyagent::sandbox_settings::SandboxSettings;
+use kernel_sandbox::settings::SandboxSettings;
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -791,6 +791,45 @@ async fn a_signed_in_style_claude_account_can_be_the_project_master() {
     assert_eq!(selection.backend, MasterBackend::Claude);
     assert_eq!(selection.route.account_ref.as_str(), "claude-1");
     assert_eq!(selection.target_profile_ref.as_str(), "claude-a");
+    drop(controller);
+    case.close().await;
+}
+
+/// OC04: the owner's three sandbox options read through the engine after the types moved
+/// into kernel/sandbox are the same values and words as before: a fresh engine shows the
+/// defaults, a saved non-default choice of all three reads back equal with the 2.4.4 JSON,
+/// and it survives a restart.
+#[tokio::test]
+async fn owner_sandbox_reads_the_three_options_unchanged() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    let fresh = controller.sandbox_settings().await.unwrap();
+    assert_eq!(
+        fresh.settings,
+        kernel_sandbox::settings::SandboxSettings::default()
+    );
+    let chosen = kernel_sandbox::settings::SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::On,
+    };
+    let set = controller
+        .set_sandbox_settings(chosen, fresh.version, 1)
+        .await;
+    assert_eq!(applied(set.unwrap()), OwnerResult::Applied);
+    let read = controller.sandbox_settings().await.unwrap();
+    assert_eq!(read.settings, chosen);
+    assert_eq!(
+        serde_json::to_string(&read.settings).unwrap(),
+        r#"{"linux_sockets":"refuse","linux_supervisor":"off","linux_strict":"on"}"#
+    );
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.sandbox_settings().await.unwrap().settings,
+        chosen
+    );
     drop(controller);
     case.close().await;
 }

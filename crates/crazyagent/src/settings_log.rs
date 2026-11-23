@@ -10,11 +10,11 @@ use crate::protocol::{Command, Outcome, ProjectId};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::QuitSettings;
 use crate::roadmap_status::Refresh;
-use crate::sandbox_settings::SandboxSettings;
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use crate::storage::opening::Opening;
+use kernel_sandbox::settings::SandboxSettings;
 use rusqlite::types::Value as Column;
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,

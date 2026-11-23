@@ -595,7 +595,7 @@ impl AgentPolicy {
         project: &Path,
         homes: &ToolHomes,
         version: u64,
-        settings: Option<crate::sandbox_settings::SandboxSettings>,
+        settings: Option<kernel_sandbox::settings::SandboxSettings>,
         other_git: bool,
     ) -> PolicyView {
         let allowed = self.allowed(project);
@@ -901,11 +901,11 @@ pub struct NetworkView {
 pub fn linux_network_gap(
     network: AgentNetwork,
     host: Option<crate::sandbox::LinuxHost>,
-    sockets: Option<crate::sandbox::LinuxSockets>,
+    sockets: Option<kernel_sandbox::settings::LinuxSockets>,
     grants: &[AccessGrant],
 ) -> Option<String> {
     let host = host?;
-    let tcp = sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    let tcp = sockets == Some(kernel_sandbox::settings::LinuxSockets::TcpOnly);
     let low = grants.iter().any(|grant| {
         matches!(grant, AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN)
     });
@@ -955,7 +955,7 @@ impl LevelView {
     /// [`LevelView::refresh`] last read of it under the owner's call supervisor setting; a
     /// repository may be anywhere in a project not made yet. Input: the setting, none when
     /// unreadable. Output: one view for each level.
-    pub fn all(calls: Option<crate::sandbox::LinuxSupervisor>) -> Vec<Self> {
+    pub fn all(calls: Option<kernel_sandbox::settings::LinuxSupervisor>) -> Vec<Self> {
         Self::on(
             crate::sandbox::linux_host_kept().map(|host| host.under(calls)),
             true,

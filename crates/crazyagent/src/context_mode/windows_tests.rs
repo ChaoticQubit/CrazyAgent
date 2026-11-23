@@ -262,8 +262,8 @@ fn any_other_server_launches_as_approved_on_windows() {
 /// the call supervisor's default whatever the owner stored, since only Linux reads them.
 #[test]
 fn the_windows_install_steps_take_strict_off_whatever_is_stored() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case();
     let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
     crate::sandbox_settings::initialize(&connection).unwrap();

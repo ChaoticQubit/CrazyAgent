@@ -5,9 +5,9 @@ use crazyagent::sandbox::linux::{
 };
 
 use crazyagent::sandbox::{
-    InstalledSandbox, LinuxSockets, LinuxStrict, LinuxSupervisor, ProjectSandbox, Sandbox,
-    SandboxError, SandboxNetwork, SandboxRemote,
+    InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 
 use crazyagent::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest,
