@@ -595,6 +595,7 @@ impl AgentPolicy {
     /// sandbox settings, none when unreadable, and whether the project may hold another git
     /// repository ([`LevelView::other_git`]); what this Linux holds as the caller last kept
     /// it, none elsewhere; the engine's hooks read the project's local folders. Output: the view.
+    #[allow(clippy::too_many_arguments)]
     pub fn view(
         &self,
         hooks: &PolicyHooks,
