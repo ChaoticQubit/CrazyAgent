@@ -97,7 +97,8 @@ pub struct Offer {
 
 /// The page for the pinned backup's end and the last restore. Inputs: the end in epoch
 /// milliseconds, the record's state, now and the UTC offset. Output: what the page shows; a
-/// restore is offered only while the backup lasts and none runs or brought the data back.
+/// restore is offered only while the backup lasts and none runs, did not finish or brought
+/// the data back.
 pub fn offer(until_ms: Option<i64>, last: Option<&RestoreState>, now: i64, offset: i64) -> Offer {
     let failure = match last {
         Some(RestoreState::Failed { code }) => Some(plain(code).to_owned()),
@@ -105,6 +106,9 @@ pub fn offer(until_ms: Option<i64>, last: Option<&RestoreState>, now: i64, offse
     };
     let (offer, line) = match (last, until_ms) {
         (Some(RestoreState::Pending), _) => (false, RESTORE_RUNNING.to_owned()),
+        (Some(RestoreState::Restoring { .. } | RestoreState::Broken { .. }), _) => {
+            (false, BROKEN.to_owned())
+        }
         (Some(RestoreState::Restored { .. }), _) => (false, RESTORED.to_owned()),
         (_, None) => (false, RESTORE_NONE.to_owned()),
         (_, Some(until)) => (
