@@ -335,6 +335,75 @@ fn sweep(directory: &Dir, file: &OsStr) -> Result<(), Refused> {
     }
 }
 
+/// A user plugin's folder moved aside under a retired name that still names it. Dropped
+/// before it is finished, it goes back under the plugin name, as a start sweep after a
+/// crash would put it back.
+pub(super) struct Retired<'a> {
+    root: &'a Path,
+    name: &'a str,
+    aside: Option<String>,
+}
+
+/// Moves a user plugin's folder aside under a retired name that still names it, so a
+/// removal whose rows do not commit puts it back. Inputs: the engine root, a valid name and
+/// the random id source. Output: the retired folder, holding none when no folder has that
+/// name, or the folder's refusal with the folder left in place.
+pub(super) fn retire<'a>(
+    root: &'a Path,
+    name: &'a str,
+    new_ref: fn() -> Result<String, &'static str>,
+) -> Result<Retired<'a>, Refused> {
+    let mut held = Retired {
+        root,
+        name,
+        aside: None,
+    };
+    let Some(directory) = open(root, false)? else {
+        return Ok(held);
+    };
+    if os::kind(&directory, name.as_ref()).map_err(|()| unavailable())? != Some(Kind::Folder) {
+        return Ok(held);
+    }
+    let aside = retired(name, &new_ref().map_err(refused)?);
+    os::rename(&directory, name.as_ref(), aside.as_ref()).map_err(|()| unavailable())?;
+    held.aside = Some(aside);
+    os::sync(&directory).map_err(|()| unavailable())?;
+    Ok(held)
+}
+
+impl Retired<'_> {
+    /// Deletes the retired folder once its removal committed. It first loses the plugin
+    /// name, so a folder it cannot delete stays for the start sweep and is never put back.
+    /// Output: Ok, or the folder's refusal when the folder keeps the plugin name.
+    pub(super) fn finish(mut self) -> Result<(), Refused> {
+        let Some(aside) = self.aside.take() else {
+            return Ok(());
+        };
+        let directory = open(self.root, false)?.ok_or_else(unavailable)?;
+        let (_, id) = aside
+            .rsplit_once('.')
+            .expect("a retired name ends in its id");
+        let nameless = format!("{RETIRED}{id}");
+        assert!(retired_name(&nameless).is_none());
+        let lost = os::rename(&directory, aside.as_ref(), nameless.as_ref()).is_ok();
+        let gone = remove_tree(&directory, if lost { &nameless } else { &aside });
+        os::sync(&directory).map_err(|()| unavailable())?;
+        if lost { Ok(()) } else { gone }
+    }
+}
+
+impl Drop for Retired<'_> {
+    fn drop(&mut self) {
+        let Some(aside) = self.aside.take() else {
+            return;
+        };
+        if let Ok(Some(directory)) = open(self.root, false) {
+            let _ = os::rename(&directory, aside.as_ref(), self.name.as_ref());
+            let _ = os::sync(&directory);
+        }
+    }
+}
+
 /// Deletes a user plugin's folder and any `.yaml` file an older version left under its
 /// name. The folder first moves to a retired name with no plugin name in it, so one it
 /// cannot delete is never listed or restored again and stays for the start sweep; an
