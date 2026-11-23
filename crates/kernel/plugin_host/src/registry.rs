@@ -293,7 +293,10 @@ fn view(db: &Connection, engine: &Engine<'_>, found: Found) -> Result<PluginView
     }
     let reviewed = trust::reviewed(db, found.origin, &manifest)?;
     let status = if !reviewed {
-        PluginStatus::NeedsReview
+        match trust::trusted_sha256(db, &manifest.name)? {
+            Some(trusted_sha256) => PluginStatus::Changed { trusted_sha256 },
+            None => PluginStatus::NeedsReview,
+        }
     } else if secrets.iter().any(|secret| secret.binding == Binding::None) {
         PluginStatus::NeedsKey
     } else {
