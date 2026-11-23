@@ -1,6 +1,7 @@
 use super::*;
 use crate::accounts::{AccountStatus, Provider};
-use crate::engine::owner::{APP_PLUGINS_CODES, PermissionWords, PluginChanged, WhenTurnedOff};
+use crate::engine::owner::transport::app_plugins::{PermissionWords, PluginChanged};
+use crate::engine::owner::{APP_PLUGINS_CODES, WhenTurnedOff};
 use crate::protocol::CredentialRef;
 use crate::tui::client::OwnerEvent;
 use crate::tui::frame::{HINT_ROWS_MAX, wrapped_footer};
