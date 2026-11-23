@@ -306,7 +306,7 @@ fn a_listed_research_run_keeps_its_harness_output_in_owner_only_logs() {
 /// its credential and lease kept, since it may still run; a confirmed stop leaves the list.
 #[test]
 fn a_research_agent_not_surely_stopped_stays_listed_after_its_run_returns() {
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
     let saved = [PathBuf::from("/tmp/sa-vid14-research/vault")];
     for (project, stopped, kept) in [
         ("sa-vid14-research-stopped", Ok(()), false),
@@ -338,7 +338,7 @@ fn a_research_agent_not_surely_stopped_stays_listed_after_its_run_returns() {
 #[test]
 fn a_research_agent_whose_stop_left_processes_stays_listed_while_they_run() {
     use crate::harnesses::leftovers::{Lineage, held_in};
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
     let project = "sa-vid14-research-left";
     let saved = [PathBuf::from("/tmp/sa-vid14-research-left/vault")];
     let mut sleeper = kernel_processes::spawn_gate::spawn(

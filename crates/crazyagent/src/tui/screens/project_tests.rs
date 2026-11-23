@@ -5387,7 +5387,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_r_restarts_them(
 /// named under Hidden by kind, each once, with no key, and the line goes once none is left.
 #[test]
 fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
-    use crate::sandbox::hidden_paths::RunKind;
+    use kernel_sandbox::hidden_paths::RunKind;
     let look = Look::plain();
     let project = ProjectId::new("hidden-runs").unwrap();
     let mut screen = loaded(&project);
@@ -5436,7 +5436,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
 /// once.
 #[test]
 fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
-    use crate::sandbox::hidden_paths::RunKind;
+    use kernel_sandbox::hidden_paths::RunKind;
     let look = Look::plain();
     let project = ProjectId::new("hidden-runs-poll").unwrap();
     let mut screen = loaded(&project);

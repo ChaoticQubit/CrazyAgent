@@ -1624,7 +1624,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
 /// takes it off the list. A project id of its own keeps other tests' turns off this list.
 #[tokio::test]
 async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing};
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     case.register().await;
     let result = case
@@ -1688,7 +1688,7 @@ async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
 #[test]
 fn an_uncertain_master_cleanup_keeps_the_turn_listed_after_it_returns() {
     use crate::harnesses::leftovers::{LEFT, SANDBOX_UNCHECKED};
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing};
     let saved = [std::path::PathBuf::from("/tmp/sa-vid14-master-left/vault")];
     let ended = |cause: &str| Err(EngineError(cause.into()));
     for (project, result, kept) in [

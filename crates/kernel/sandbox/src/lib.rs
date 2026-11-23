@@ -11,6 +11,9 @@ pub mod error;
 /// The plain refusal sentences, the log row and the owner's private temp folder a grant
 /// of extra access reads.
 pub mod grants;
+/// A project's hidden folders: the bounds, the digest a launch records, the check that git
+/// tracks none of them and the list of engine runs that can still open one.
+pub mod hidden_paths;
 /// What this Linux holds for an agent beyond its Landlock rules: namespaces, signal scope,
 /// the call supervisor, root, AppArmor and its own network.
 pub mod host;

@@ -26,11 +26,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+pub mod access_store;
 pub mod extra_paths;
 #[cfg(all(test, target_os = "macos"))]
 mod git_deny_tests;
 pub mod grants;
-pub mod hidden_paths;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -224,10 +224,10 @@ const READ_ROOTS_MAX: usize = 16;
 const LINKS_MAX: usize = 4;
 const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
-/// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
+/// ([`kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
 /// graph step's `.crazyagent/`, or a native lead's part of the relay mailbox and its own temp
 /// folder, which its teammates' sandbox hides.
-pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
+pub const HIDDEN_MAX: usize = kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;

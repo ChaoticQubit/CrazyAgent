@@ -1483,8 +1483,8 @@ fn a_writing_run_is_shown_nothing_in_a_hidden_folder_and_no_secret_looking_path(
     )
     .unwrap();
     let hidden =
-        crate::sandbox::hidden_paths::checked(notes.to_str().unwrap(), folder.path()).unwrap();
-    crate::sandbox::hidden_paths::save(&db, project.as_str(), &[hidden]).unwrap();
+        kernel_sandbox::hidden_paths::checked(notes.to_str().unwrap(), folder.path()).unwrap();
+    crate::sandbox::access_store::hidden::save(&db, project.as_str(), &[hidden]).unwrap();
     let research = [
         Research {
             path: "notes/rivals.md".into(),

@@ -174,7 +174,7 @@ pub(crate) fn update(
         ));
     };
     if let Err(code) =
-        crate::sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, repo, hidden)
+        kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, repo, hidden)
     {
         return Ok(GraphEnding::Failed(code));
     }

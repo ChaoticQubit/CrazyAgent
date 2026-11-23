@@ -620,7 +620,7 @@ fn confined(
     scratch: &Scratch,
     settings: Option<&(PathBuf, PathBuf)>,
     uv_clash: bool,
-) -> Result<(ProjectSandbox, crate::sandbox::hidden_paths::HiddenRun), &'static str> {
+) -> Result<(ProjectSandbox, kernel_sandbox::hidden_paths::HiddenRun), &'static str> {
     let kept = match settings {
         Some((global, project)) => crate::sandbox::settings_owner_ports(global, project)?,
         None => Vec::new(),
@@ -628,13 +628,13 @@ fn confined(
     let project = record.project.as_str();
     let policy =
         crate::sandbox::policy_store::load(db, project).map_err(|_| "agent_access_unread")?;
-    let listed = crate::sandbox::hidden_paths::starting(
-        crate::sandbox::hidden_paths::RunKind::Lockfiles,
+    let listed = kernel_sandbox::hidden_paths::starting(
+        kernel_sandbox::hidden_paths::RunKind::Lockfiles,
         project,
     )
     .ok_or("hidden_paths_unread")?;
-    let hidden =
-        crate::sandbox::hidden_paths::load(db, project).map_err(|_| "hidden_paths_unread")?;
+    let hidden = crate::sandbox::access_store::hidden::load(db, project)
+        .map_err(|_| "hidden_paths_unread")?;
     listed.hid(&hidden);
     let homes = ToolHomes::owner().map_err(|_| "tool_homes_unread")?;
     let tmp = toolchains::make_tmp(&scratch.home).map_err(|_| "tmp_unmade")?;

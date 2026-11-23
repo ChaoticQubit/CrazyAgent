@@ -427,7 +427,7 @@ fn a_demo_that_would_start_wider_than_sandboxed_stops_at_the_assertion() {
     crate::sandbox::extra_paths::save(&db, PROJECT_ID, &folder).unwrap();
     assert!(trips(), "a read folder");
     crate::sandbox::extra_paths::save(&db, PROJECT_ID, &[]).unwrap();
-    crate::sandbox::hidden_paths::save(&db, PROJECT_ID, &folder).unwrap();
+    crate::sandbox::access_store::hidden::save(&db, PROJECT_ID, &folder).unwrap();
     assert!(trips(), "a hidden folder");
 }
 

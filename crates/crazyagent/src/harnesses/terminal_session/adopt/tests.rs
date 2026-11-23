@@ -478,7 +478,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     assert_eq!(PaneRecord::decode(&networked), Some(narrowed));
     assert!(!text.contains("hidden"), "{text}");
     let secrets =
-        crate::sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
+        kernel_sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
     let hid = PaneRecord {
         hidden: Some(vec![secrets.clone()]),
         ..record.clone()
@@ -498,7 +498,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let nine = PaneRecord {
         hidden: Some(vec![
             secrets.clone();
-            crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
+            kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
         ]),
         ..record.clone()
     };

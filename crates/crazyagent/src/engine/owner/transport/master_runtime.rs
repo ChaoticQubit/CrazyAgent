@@ -819,7 +819,7 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-        listed: crate::sandbox::hidden_paths::HiddenRun,
+        listed: kernel_sandbox::hidden_paths::HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
         let harness = match prepared.session.selection.backend {
             MasterBackend::Codex => NativeHarness::Codex,
@@ -1473,9 +1473,9 @@ pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
 /// `master_sandbox_unavailable` when the list is full.
 fn listed_master_turn(
     project: &ProjectId,
-) -> Result<crate::sandbox::hidden_paths::HiddenRun, EngineError> {
-    crate::sandbox::hidden_paths::starting(
-        crate::sandbox::hidden_paths::RunKind::Master,
+) -> Result<kernel_sandbox::hidden_paths::HiddenRun, EngineError> {
+    kernel_sandbox::hidden_paths::starting(
+        kernel_sandbox::hidden_paths::RunKind::Master,
         project.as_str(),
     )
     .ok_or_else(|| failure("master_sandbox_unavailable"))
@@ -1498,7 +1498,7 @@ fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
 /// still run, until the engine starts again (SA-VID14 r1, r2 F1); a native turn asks its
 /// host whether it settled instead (r2 F2). Inputs: the guard and the result.
 pub(super) fn keep_listed_if_uncertain<T>(
-    listed: crate::sandbox::hidden_paths::HiddenRun,
+    listed: kernel_sandbox::hidden_paths::HiddenRun,
     result: &Result<T, EngineError>,
 ) {
     if result.as_ref().is_err_and(|error| {

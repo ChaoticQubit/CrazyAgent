@@ -3818,11 +3818,11 @@ fn owner_read(
             version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
         OwnerRead::ProjectHiddenPaths { project_id } => {
-            let saved =
-                crate::sandbox::hidden_paths::load(&tx, project_id.as_str()).map_err(error)?;
+            let saved = crate::sandbox::access_store::hidden::load(&tx, project_id.as_str())
+                .map_err(error)?;
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
-                runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                runs: kernel_sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
                 unavailable: crate::sandbox::HIDDEN_UNHELD,
                 paths: saved
                     .iter()

@@ -1,6 +1,5 @@
-use kernel_sandbox::access::AccessHooks;
-use kernel_sandbox::paths::canonical;
-use rusqlite::{Connection, params};
+use crate::access::AccessHooks;
+use crate::paths::canonical;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -13,21 +12,6 @@ pub const HIDDEN_PATHS_MAX: usize = 8;
 pub const DIGEST_HEX_LEN: usize = 32;
 
 const PATH_TEXT_MAX: usize = 1024;
-
-const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_hidden_paths (
-    project TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    path TEXT NOT NULL,
-    PRIMARY KEY (project, position)
-)";
-
-const SEERS: &str = "team_hidden_seers";
-
-const SEERS_TABLE: &str = "CREATE TABLE IF NOT EXISTS team_hidden_seers (
-    agent INTEGER PRIMARY KEY,
-    project TEXT NOT NULL,
-    restart INTEGER NOT NULL DEFAULT 0 CHECK(restart IN (0, 1))
-)";
 
 /// Names one hidden folder as an agent's launch records it: the first 16 bytes of the
 /// SHA-256 of its canonical path in lowercase hex, so a pane record stays small.
@@ -65,97 +49,6 @@ pub fn covers(built: Option<&[String]>, saved: &[PathBuf]) -> bool {
                 .any(|above| built.contains(&digest(above)))
         })
     })
-}
-
-/// Replaces the running agents of one project that can still open a folder hidden after
-/// they started, writing only when the set changed; an agent kept on the list keeps the
-/// owner's restart ask. Inputs: the engine connection, the project id and the agents.
-/// Output: done, or the database error.
-pub fn set_seers(
-    connection: &Connection,
-    project: &str,
-    agents: &BTreeSet<i64>,
-) -> rusqlite::Result<()> {
-    let listed = seers(connection, project)?;
-    if &listed == agents {
-        return Ok(());
-    }
-    let tx = connection.unchecked_transaction()?;
-    tx.execute(SEERS_TABLE, [])?;
-    for gone in listed.difference(agents) {
-        tx.execute(
-            "DELETE FROM team_hidden_seers WHERE agent=?1 AND project=?2",
-            params![gone, project],
-        )?;
-    }
-    for agent in agents.difference(&listed) {
-        tx.execute(
-            "INSERT OR REPLACE INTO team_hidden_seers(agent, project, restart) VALUES (?1, ?2, 0)",
-            params![agent, project],
-        )?;
-    }
-    tx.commit()
-}
-
-/// Drops one project's list of agents that can still open a hidden folder, as removing
-/// the project does. Inputs: the open transaction and the project id. Output: done, or the
-/// database error.
-pub fn forget_seers(connection: &Connection, project: &str) -> rusqlite::Result<()> {
-    if present(connection)? {
-        connection.execute("DELETE FROM team_hidden_seers WHERE project=?1", [project])?;
-    }
-    Ok(())
-}
-
-/// Tells whether the engine ever kept a list of agents that can still open a hidden
-/// folder. Input: the connection. Output: the answer, or the database error.
-fn present(connection: &Connection) -> rusqlite::Result<bool> {
-    connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
-        [SEERS],
-        |row| row.get(0),
-    )
-}
-
-/// Reads one project's listed agents, only those the owner asked to restart when `asked`
-/// holds. Inputs: the connection, the project id and the choice. Output: their ids, none
-/// without a list, or the database error.
-fn listed(connection: &Connection, project: &str, asked: bool) -> rusqlite::Result<BTreeSet<i64>> {
-    if !present(connection)? {
-        return Ok(BTreeSet::new());
-    }
-    let mut statement = connection.prepare(if asked {
-        "SELECT agent FROM team_hidden_seers WHERE project=?1 AND restart=1"
-    } else {
-        "SELECT agent FROM team_hidden_seers WHERE project=?1"
-    })?;
-    statement.query_map([project], |row| row.get(0))?.collect()
-}
-
-/// Reads the agents of one project listed as able to open a folder hidden after they
-/// started; a database without the list has none. Inputs: the connection and the project
-/// id. Output: their ids.
-pub fn seers(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
-    listed(connection, project, false)
-}
-
-/// Asks every listed agent of one project to restart, as the owner's Restart them does.
-/// Inputs: the open transaction and the project id. Output: how many listed agents were
-/// asked, none for a project with none listed, or the database error.
-pub fn ask_restart(connection: &Connection, project: &str) -> rusqlite::Result<usize> {
-    if !present(connection)? {
-        return Ok(0);
-    }
-    connection.execute(
-        "UPDATE team_hidden_seers SET restart=1 WHERE project=?1",
-        [project],
-    )
-}
-
-/// Reads the listed agents of one project the owner asked to restart. Inputs: the
-/// connection and the project id. Output: their ids.
-pub fn restarts(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
-    listed(connection, project, true)
 }
 
 /// The most engine runs the hidden folders run list holds at once; a run that would pass it
@@ -354,66 +247,19 @@ pub fn checked_all(texts: &[String], project_root: &Path) -> Result<Vec<PathBuf>
     Ok(paths)
 }
 
-/// Replaces a project's hidden folders. Inputs: the open connection or transaction, the
-/// project id and the checked folders. Output: done, or the database error.
-pub fn save(connection: &Connection, project: &str, paths: &[PathBuf]) -> rusqlite::Result<()> {
-    assert!(paths.len() <= HIDDEN_PATHS_MAX);
-    connection.execute(TABLE, [])?;
-    connection.execute(
-        "DELETE FROM project_hidden_paths WHERE project=?1",
-        [project],
-    )?;
-    for (position, path) in paths.iter().enumerate() {
-        let text = path
-            .to_str()
-            .ok_or_else(|| rusqlite::Error::InvalidPath(path.clone()))?;
-        connection.execute(
-            "INSERT INTO project_hidden_paths (project, position, path) VALUES (?1, ?2, ?3)",
-            params![project, position as i64, text],
-        )?;
-    }
-    Ok(())
-}
-
-/// Reads a project's hidden folders in the order the owner saved them; none when nothing was
-/// ever saved. A folder saved under the data volume's long name comes back under its short
-/// name, the one a sandbox root has. Inputs: the open connection or transaction and the
-/// project id. Output: the folders, or the database error.
-pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<PathBuf>> {
-    let present: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_hidden_paths')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !present {
-        return Ok(Vec::new());
-    }
-    let mut statement = connection.prepare(
-        "SELECT path FROM project_hidden_paths WHERE project=?1 ORDER BY position LIMIT ?2",
-    )?;
-    let paths = statement
-        .query_map(params![project, HIDDEN_PATHS_MAX as i64], |row| {
-            row.get::<_, String>(0)
-                .map(|text| kernel_sandbox::paths::one_spelling(PathBuf::from(text)))
-        })?
-        .collect::<rusqlite::Result<Vec<PathBuf>>>()?;
-    assert!(paths.len() <= HIDDEN_PATHS_MAX);
-    Ok(paths)
-}
-
 /// The longest the tracked-files check lets git run before it is killed and the folder is
 /// refused as unchecked.
 const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 /// The most of git's answer the check reads; a tracked folder shows in the first bytes.
-const CHECK_BYTES_MAX: u64 = 64 * 1024;
+pub const CHECK_BYTES_MAX: u64 = 64 * 1024;
 
 /// Whether git tracks any file inside any of these folders, asked with one `ls-files -z` run
-/// through [`crate::project_files::owner_git`] on their paths joined by `/`, each as
+/// through the owner's git ([`AccessHooks::owner_git`]) on their paths joined by `/`, each as
 /// `:(literal,icase)`, killed after 5 s; a tracked file lives in every agent's worktree and in
-/// history. Inputs: the project root and the folders. Output: [`answer`]'s, `Ok(false)` with no
+/// history. Inputs: the hooks, the project root and the folders. Output: [`answer`]'s, `Ok(false)` with no
 /// folder inside the root or no `.git`, else unchecked when a folder or git cannot be read.
-fn any_tracked(
+pub fn any_tracked(
     hooks: &AccessHooks,
     project_root: &Path,
     folders: &[PathBuf],
@@ -555,7 +401,6 @@ mod tests {
         run.hid(hidden);
         run
     }
-    use rusqlite::Connection;
 
     fn project() -> tempfile::TempDir {
         #[cfg(unix)]
@@ -646,16 +491,6 @@ mod tests {
         }
     }
 
-    /// The check for one folder, as a list of one. Inputs: the project root and the folder.
-    /// Output: what [`any_tracked`] answers.
-    fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static str> {
-        any_tracked(
-            &crate::sandbox::ACCESS_HOOKS,
-            project_root,
-            &[folder.to_path_buf()],
-        )
-    }
-
     /// V243-WIN-HIDDEN-GIT (leader 09:21, #590): git's answer counts only when every line is
     /// whole and falls in an asked folder, itself or below it, ASCII case ignored as git's
     /// `icase` does; an empty line, a line in no asked folder (a sibling sharing the name's
@@ -689,381 +524,6 @@ mod tests {
         assert_eq!(answer(&b"x".repeat(cap), &specs, false), unchecked);
     }
 
-    /// Runs the test's own git in `path` with no system or global config, as the owner makes
-    /// a repository: `/usr/bin/git` on Unix, the git on PATH on Windows. Inputs: the folder and
-    /// the arguments.
-    fn git_in(path: &Path, args: &[&str]) {
-        let program = if cfg!(unix) { "/usr/bin/git" } else { "git" };
-        let mut command = std::process::Command::new(program);
-        command
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
-            .current_dir(path)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let status = kernel_processes::spawn_gate::status(&mut command).unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
-
-    /// A repository with `secret/key.txt` tracked and `scratch/tmp.txt` not. Input: the
-    /// canonical project folder. Output: the tracked and the untracked folder.
-    fn tracked_and_untracked(path: &Path) -> (PathBuf, PathBuf) {
-        git_in(path, &["init", "-q"]);
-        let tracked = path.join("secret");
-        let untracked = path.join("scratch");
-        std::fs::create_dir(&tracked).unwrap();
-        std::fs::create_dir(&untracked).unwrap();
-        std::fs::write(tracked.join("key.txt"), "k\n").unwrap();
-        std::fs::write(untracked.join("tmp.txt"), "t\n").unwrap();
-        git_in(path, &["add", "secret/key.txt"]);
-        (tracked, untracked)
-    }
-
-    /// V243-WIN-HIDDEN-GIT: a `commondir` planted in `.git`, naming a common folder whose config
-    /// holds an unknown repository extension, redirects nothing. On Unix git's common folder is
-    /// pinned to `.git`, so the tracked folder is still found; on Windows the check before git
-    /// starts refuses a `.git` that points elsewhere, so the folder is unchecked.
-    #[test]
-    fn a_commondir_planted_in_the_git_folder_redirects_nothing() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let (tracked, _) = tracked_and_untracked(&path);
-        let store = project();
-        for name in ["objects", "refs"] {
-            std::fs::create_dir(store.path().join(name)).unwrap();
-        }
-        std::fs::write(
-            store.path().join("config"),
-            "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tplanted = true\n",
-        )
-        .unwrap();
-        let common = format!("{}\n", canonical(store.path()).unwrap().display());
-        std::fs::write(path.join(".git").join("commondir"), common).unwrap();
-        let answer = git_tracks(&path, &tracked);
-        if cfg!(windows) {
-            assert_eq!(answer, Err("hidden_path_unchecked"));
-        } else {
-            assert_eq!(answer, Ok(true));
-        }
-    }
-
-    /// V243-WIN-HIDDEN-GIT: a tracked folder two levels down is found, and so is the folder
-    /// holding it; on Windows, where folder names ignore case, the folder typed in another case
-    /// is found too, since git is asked about its canonical spelling joined by `/`.
-    #[test]
-    fn a_tracked_folder_inside_another_is_found_in_any_case_spelling_windows_accepts() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        git_in(&path, &["init", "-q"]);
-        let nested = path.join("conf").join("secret");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("key.txt"), "k\n").unwrap();
-        git_in(&path, &["add", "conf/secret/key.txt"]);
-        assert_eq!(git_tracks(&path, &nested), Ok(true));
-        assert_eq!(git_tracks(&path, &path.join("conf")), Ok(true));
-        if cfg!(windows) {
-            let typed = path.join("CONF").join("Secret");
-            assert_eq!(git_tracks(&path, &typed), Ok(true));
-        }
-    }
-
-    /// #590 (rv-sec3 F1): a folder renamed on disk to another case without git, so the index
-    /// still holds its old case, is found tracked; a folder whose name reads as a pattern
-    /// (`[s]ecret`) matches only itself, so the tracked `secret` beside it stays out of its
-    /// answer.
-    #[test]
-    fn a_folder_the_index_tracks_under_another_case_is_found_and_a_pattern_name_is_literal() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let (tracked, _) = tracked_and_untracked(&path);
-        let pattern = path.join("[s]ecret");
-        std::fs::create_dir(&pattern).unwrap();
-        std::fs::write(pattern.join("tmp.txt"), "t\n").unwrap();
-        assert_eq!(git_tracks(&path, &pattern), Ok(false));
-        let renamed = path.join("Secret");
-        std::fs::rename(&tracked, &renamed).unwrap();
-        assert_eq!(git_tracks(&path, &renamed), Ok(true));
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[renamed]),
-            Err("hidden_path_tracked")
-        );
-    }
-
-    /// #590 (leader 10:34): git's `icase` folds ASCII letters only, while Windows and macOS
-    /// folder names also fold other letters, so there a folder path with any non-ASCII
-    /// character in a git project is refused as unchecked by name; with no repository, and on
-    /// Linux, where names match byte for byte, it is checked as before.
-    #[test]
-    fn a_non_ascii_folder_name_in_a_git_project_is_unchecked_where_names_fold_case() {
-        let plain = project();
-        let plain_path = canonical(plain.path()).unwrap();
-        let loose = plain_path.join("clé");
-        std::fs::create_dir(&loose).unwrap();
-        assert_eq!(git_tracks(&plain_path, &loose), Ok(false));
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let _ = tracked_and_untracked(&path);
-        let folder = path.join("clé");
-        std::fs::create_dir(&folder).unwrap();
-        std::fs::write(folder.join("tmp.txt"), "t\n").unwrap();
-        let wanted = if cfg!(any(windows, target_os = "macos")) {
-            Err("hidden_path_name_unchecked")
-        } else {
-            Ok(false)
-        };
-        assert_eq!(git_tracks(&path, &folder), wanted);
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
-            wanted.map(|_| ())
-        );
-    }
-
-    /// V243-WIN-HIDDEN-GIT (leader 09:21): a saved list of several folders costs one git run,
-    /// wherever the tracked folder stands in it, and an empty list runs no git at all.
-    #[test]
-    fn a_list_of_folders_is_checked_with_one_git_run() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let (tracked, untracked) = tracked_and_untracked(&path);
-        let mut folders = vec![untracked];
-        for name in ["plain-a", "plain-b", "plain-c"] {
-            let folder = path.join(name);
-            std::fs::create_dir(&folder).unwrap();
-            folders.push(folder);
-        }
-        let runs = crate::project_files::owner_git_runs(|| {
-            assert_eq!(
-                none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &folders),
-                Ok(())
-            );
-        });
-        assert_eq!(runs, 1, "four untracked folders");
-        folders.push(tracked);
-        let runs = crate::project_files::owner_git_runs(|| {
-            assert_eq!(
-                none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &folders),
-                Err("hidden_path_tracked")
-            );
-        });
-        assert_eq!(runs, 1, "the tracked folder last of five");
-        let runs = crate::project_files::owner_git_runs(|| {
-            assert_eq!(
-                none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[]),
-                Ok(())
-            );
-        });
-        assert_eq!(runs, 0, "no folder");
-    }
-
-    /// V243-WIN-HIDDEN-GIT (leader 08:33, 09:21): times `none_tracked` per call, as each launch
-    /// gate makes it, on one untracked folder and on a full list of untracked folders, 20 calls
-    /// each, and prints the median and the slowest of each. The farm runs it quiet and under a
-    /// CPU load step; it asserts only the answers.
-    #[test]
-    #[ignore = "timing, run by the farm quiet and under a CPU load step"]
-    fn none_tracked_time_per_call() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let (tracked, untracked) = tracked_and_untracked(&path);
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[tracked]),
-            Err("hidden_path_tracked")
-        );
-        let mut full = vec![untracked.clone()];
-        for n in 1..HIDDEN_PATHS_MAX {
-            let folder = path.join(format!("plain-{n}"));
-            std::fs::create_dir(&folder).unwrap();
-            full.push(folder);
-        }
-        let ms = |time: std::time::Duration| time.as_secs_f64() * 1000.0;
-        for folders in [std::slice::from_ref(&untracked), &full[..]] {
-            let mut times: Vec<std::time::Duration> = (0..20)
-                .map(|_| {
-                    let start = std::time::Instant::now();
-                    assert_eq!(
-                        none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, folders),
-                        Ok(())
-                    );
-                    start.elapsed()
-                })
-                .collect();
-            times.sort();
-            println!(
-                "TIMING none_tracked folders={} calls=20 median_ms={:.1} max_ms={:.1}",
-                folders.len(),
-                ms(times[10]),
-                ms(times[19])
-            );
-        }
-    }
-
-    #[test]
-    fn a_folder_git_tracks_is_refused_and_an_untracked_one_is_accepted() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let git = |args: &[&str]| git_in(&path, args);
-        git(&["init", "-q"]);
-        let tracked = path.join("secret");
-        let untracked = path.join("scratch");
-        std::fs::create_dir(&tracked).unwrap();
-        std::fs::create_dir(&untracked).unwrap();
-        std::fs::write(tracked.join("key.txt"), "k\n").unwrap();
-        std::fs::write(untracked.join("tmp.txt"), "t\n").unwrap();
-        git(&["add", "secret/key.txt"]);
-        assert_eq!(git_tracks(&path, &tracked), Ok(true));
-        assert_eq!(git_tracks(&path, &untracked), Ok(false));
-        assert_eq!(
-            none_tracked(
-                &crate::sandbox::ACCESS_HOOKS,
-                &path,
-                &[tracked.clone(), untracked.clone()]
-            ),
-            Err("hidden_path_tracked")
-        );
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[untracked]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn a_folder_with_no_repository_is_not_tracked() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let folder = path.join("plain");
-        std::fs::create_dir(&folder).unwrap();
-        assert_eq!(git_tracks(&path, &folder), Ok(false));
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
-            Ok(())
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_hostile_fsmonitor_command_never_runs_during_the_check() {
-        let root = project();
-        let path = root.path().canonicalize().unwrap();
-        let git = |args: &[&str]| {
-            let mut command = std::process::Command::new("/usr/bin/git");
-            command
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .current_dir(&path)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            assert!(
-                kernel_processes::spawn_gate::status(&mut command)
-                    .unwrap()
-                    .success()
-            );
-        };
-        git(&["init", "-q"]);
-        let marker = path.join("pwned");
-        let folder = path.join("secret");
-        std::fs::create_dir(&folder).unwrap();
-        std::fs::write(folder.join("key.txt"), "k\n").unwrap();
-        git(&["add", "secret/key.txt"]);
-        let hostile = format!("touch {}", marker.display());
-        std::fs::write(
-            path.join(".git").join("config"),
-            format!(
-                "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = {hostile}\n\tfsmonitorHookVersion = 1\n"
-            ),
-        )
-        .unwrap();
-        let _ = git_tracks(&path, &folder);
-        assert!(!marker.exists(), "fsmonitor command ran: marker written");
-    }
-
-    #[test]
-    fn a_corrupt_index_fails_the_check_closed() {
-        let root = project();
-        let path = canonical(root.path()).unwrap();
-        let git = |args: &[&str]| git_in(&path, args);
-        git(&["init", "-q"]);
-        let folder = path.join("secret");
-        std::fs::create_dir(&folder).unwrap();
-        std::fs::write(folder.join("key.txt"), "k\n").unwrap();
-        git(&["add", "secret/key.txt"]);
-        std::fs::write(path.join(".git").join("index"), b"not a git index\n").unwrap();
-        assert_eq!(git_tracks(&path, &folder), Err("hidden_path_unchecked"));
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
-            Err("hidden_path_unchecked")
-        );
-    }
-
-    #[test]
-    fn a_dot_git_file_fails_the_check_closed() {
-        let root = project();
-        let path = root.path().canonicalize().unwrap();
-        let folder = path.join("secret");
-        std::fs::create_dir(&folder).unwrap();
-        std::fs::write(folder.join("key.txt"), "k\n").unwrap();
-        std::fs::write(path.join(".git"), b"gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
-        assert_eq!(git_tracks(&path, &folder), Err("hidden_path_unchecked"));
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
-            Err("hidden_path_unchecked")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_folder_with_more_than_64_kib_of_tracked_names_is_still_tracked() {
-        let root = project();
-        let path = root.path().canonicalize().unwrap();
-        let git = |args: &[&str]| {
-            let mut command = std::process::Command::new("/usr/bin/git");
-            command
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .current_dir(&path)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            assert!(
-                kernel_processes::spawn_gate::status(&mut command)
-                    .unwrap()
-                    .success()
-            );
-        };
-        git(&["init", "-q"]);
-        let folder = path.join("bulk");
-        std::fs::create_dir(&folder).unwrap();
-        let mut total = 0usize;
-        let mut index = 0usize;
-        while total <= CHECK_BYTES_MAX as usize {
-            let name = format!("{index:06}-{}.txt", "x".repeat(200));
-            std::fs::write(folder.join(&name), "t\n").unwrap();
-            total += "bulk/".len() + name.len() + 1;
-            index += 1;
-        }
-        git(&["add", "bulk"]);
-        assert_eq!(git_tracks(&path, &folder), Ok(true));
-        assert_eq!(
-            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
-            Err("hidden_path_tracked")
-        );
-    }
-
-    #[test]
-    fn saved_folders_read_back_in_order_and_are_empty_without_a_table() {
-        let connection = Connection::open_in_memory().unwrap();
-        assert!(load(&connection, "app").unwrap().is_empty());
-        let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")];
-        save(&connection, "app", &paths).unwrap();
-        assert_eq!(load(&connection, "app").unwrap(), paths);
-        save(&connection, "app", &[]).unwrap();
-        assert!(load(&connection, "app").unwrap().is_empty());
-    }
-
     #[test]
     fn an_agent_sees_a_hidden_folder_unless_it_or_a_folder_above_was_hidden_at_its_start() {
         let secrets = PathBuf::from("/tmp/app/secrets");
@@ -1091,30 +551,6 @@ mod tests {
             !digest_plain("ABCDEF"),
             "upper case or short is not a digest"
         );
-    }
-
-    #[test]
-    fn listed_agents_keep_their_restart_ask_until_they_leave_the_list() {
-        let connection = Connection::open_in_memory().unwrap();
-        assert!(seers(&connection, "app").unwrap().is_empty());
-        assert_eq!(ask_restart(&connection, "app").unwrap(), 0, "none listed");
-        let both = BTreeSet::from([3, 4]);
-        set_seers(&connection, "app", &both).unwrap();
-        set_seers(&connection, "web", &BTreeSet::from([9])).unwrap();
-        assert_eq!(seers(&connection, "app").unwrap(), both);
-        assert!(restarts(&connection, "app").unwrap().is_empty());
-        assert_eq!(ask_restart(&connection, "app").unwrap(), 2);
-        assert_eq!(restarts(&connection, "app").unwrap(), both);
-        assert!(
-            restarts(&connection, "web").unwrap().is_empty(),
-            "one project only"
-        );
-        set_seers(&connection, "app", &BTreeSet::from([4, 5])).unwrap();
-        assert_eq!(seers(&connection, "app").unwrap(), BTreeSet::from([4, 5]));
-        assert_eq!(restarts(&connection, "app").unwrap(), BTreeSet::from([4]));
-        set_seers(&connection, "app", &BTreeSet::new()).unwrap();
-        assert!(seers(&connection, "app").unwrap().is_empty());
-        assert_eq!(seers(&connection, "web").unwrap(), BTreeSet::from([9]));
     }
 
     /// SA-VID14-R2-N2: an engine run that started before a folder was hidden is listed by
@@ -1236,107 +672,6 @@ mod tests {
         let again = registry.add(entry()).unwrap();
         assert!(!keys.contains(&again), "a key is never reused");
         assert_eq!(registry.runs.len(), RUNS_MAX);
-    }
-
-    /// SA-VID14-R2-N2: every source file that loads a project's saved hidden folders was
-    /// checked against the run list. Those that start an engine run hold its guard for each
-    /// kind; the rest are team agents (SA-VID14-A), the master turn bundle whose guard sits in
-    /// master_runtime.rs, or reads that feed no sandbox. A new loader fails until classified.
-    #[test]
-    fn every_loader_of_saved_hidden_folders_holds_the_guard_or_is_classified() {
-        let guarded: BTreeMap<&str, &[&str]> = BTreeMap::from([
-            (
-                "landing/lockfiles.rs",
-                &["RunKind::Lockfiles", "listed.hid(&hidden)"][..],
-            ),
-            (
-                "onboarding/service.rs",
-                &[
-                    "RunKind::CodeGraph",
-                    "listed.hid(&hidden)",
-                    "std::mem::forget(listed)",
-                ][..],
-            ),
-            (
-                "research/runner.rs",
-                &["RunKind::Research", "run.kind", "listed.hid(&hidden)"][..],
-            ),
-            (
-                "engine/owner/transport/master_runtime.rs",
-                &[
-                    "RunKind::Master",
-                    "listed.hid(master_turn_hides(&prepared))",
-                    "if active.host.settled()",
-                ][..],
-            ),
-        ]);
-        let classified = BTreeSet::from([
-            "demo.rs",
-            "project_overview/agent.rs",
-            "project_overview/run.rs",
-            "research/jobs.rs",
-            "roadmap_status/run.rs",
-            "storage.rs",
-            "storage/master_session.rs",
-            "team/runtime.rs",
-        ]);
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut folders = vec![src.clone()];
-        let mut loaders = BTreeSet::new();
-        while let Some(folder) = folders.pop() {
-            for entry in std::fs::read_dir(&folder).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    if path.file_name() != Some("tests".as_ref()) {
-                        folders.push(path);
-                    }
-                    continue;
-                }
-                let name = path.file_name().unwrap().to_str().unwrap();
-                if path.extension() != Some("rs".as_ref())
-                    || name == "tests.rs"
-                    || name.ends_with("_tests.rs")
-                {
-                    continue;
-                }
-                let relative = path
-                    .strip_prefix(&src)
-                    .unwrap()
-                    .components()
-                    .map(|part| part.as_os_str().to_str().unwrap())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                if relative != "sandbox/hidden_paths.rs"
-                    && std::fs::read_to_string(&path)
-                        .unwrap()
-                        .contains("hidden_paths::load(")
-                {
-                    loaders.insert(relative);
-                }
-            }
-        }
-        assert!(
-            loaders.len() >= classified.len(),
-            "the walk read the sources"
-        );
-        for loader in &loaders {
-            assert!(
-                guarded.contains_key(loader.as_str()) || classified.contains(loader.as_str()),
-                "{loader} loads saved hidden folders: hold the run list guard or classify it"
-            );
-        }
-        for (file, kinds) in &guarded {
-            let source = std::fs::read_to_string(src.join(file)).unwrap();
-            assert!(source.contains("hidden_paths::starting("), "{file}");
-            for kind in *kinds {
-                assert!(source.contains(kind), "{file} lists {kind}");
-            }
-            assert!(
-                source.matches("std::mem::forget(listed)").count()
-                    >= source.matches("std::mem::forget(lease)").count(),
-                "{file}: every exit that keeps a lease because its processes may still run keeps its run named"
-            );
-        }
     }
 
     /// SA-VID14 r1 (rv-code4 F1, rv-sec2 F2): a run is listed before it reads the saved

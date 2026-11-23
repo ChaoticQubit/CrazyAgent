@@ -152,7 +152,8 @@ fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
             params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
         )
         .unwrap();
-    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[long(&drafts)]).unwrap();
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[long(&drafts)])
+        .unwrap();
     let access = fixture.access.clone();
     let runtime = TeamRuntime::open(
         &fixture.base.join("engine.db"),

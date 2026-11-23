@@ -2608,6 +2608,44 @@ async fn owner_read_project_agent_policy_returns_the_saved_policy() {
     engine.stop().await;
 }
 
+/// The owner's read of a project's hidden folders returns what the project saved: the
+/// folders in saved order, the version the saves made, no run listed, and whether this
+/// system holds hidden folders at all.
+#[tokio::test]
+async fn owner_read_project_hidden_paths_returns_the_saved_list_and_version() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let saved = vec![
+        stored.project_folder().join("vault"),
+        stored.project_folder().join("dump"),
+    ];
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    crate::sandbox::access_store::hidden::save(&connection, "setup-pooled", &saved).unwrap();
+    drop(connection);
+    let read = owner.project_hidden_paths(project).await.unwrap();
+    let shown: Vec<String> = saved
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    assert_eq!(read.paths, shown);
+    assert_eq!(read.version, 0);
+    assert!(read.runs.is_empty());
+    assert_eq!(read.unavailable, crate::sandbox::HIDDEN_UNHELD);
+    engine.stop().await;
+}
+
 /// The half of the agent policy that runs on every system, Linux included, at the level every
 /// system offers: a Sandboxed save with toolchain choices and the IDE hooks switch lands at
 /// version 1, a save from the version before it is refused as `stale_revision` and changes
@@ -3932,7 +3970,7 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
 #[cfg(unix)]
 #[tokio::test]
 async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hidden() {
-    use crate::sandbox::hidden_paths::RunKind;
+    use kernel_sandbox::hidden_paths::RunKind;
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let project = ProjectId::new("hidden-runs-wire").unwrap();
@@ -3950,7 +3988,7 @@ async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hi
     let secret = stored.project_folder().join("secret");
     std::fs::create_dir_all(&secret).unwrap();
     let secret = std::fs::canonicalize(&secret).unwrap();
-    let run = crate::sandbox::hidden_paths::starting(RunKind::Research, project.as_str()).unwrap();
+    let run = kernel_sandbox::hidden_paths::starting(RunKind::Research, project.as_str()).unwrap();
     let saved = owner
         .set_project_hidden_paths(
             project.clone(),
@@ -3981,7 +4019,7 @@ async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hi
         "and while it runs after"
     );
     let after =
-        crate::sandbox::hidden_paths::starting(RunKind::Overview, project.as_str()).unwrap();
+        kernel_sandbox::hidden_paths::starting(RunKind::Overview, project.as_str()).unwrap();
     after.hid(std::slice::from_ref(&secret));
     drop(run);
     assert_eq!(

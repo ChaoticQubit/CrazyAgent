@@ -63,7 +63,7 @@ pub enum RecordSource {
 /// keeps whether the pane's keeper was given the engine's freeze record, when the pane was
 /// last frozen, how long it was frozen before, and for a native lead the keepers of its
 /// servers, and the digests of the folders its sandbox hid, as
-/// [`crate::sandbox::hidden_paths::digest`] writes them. A record from an engine that did
+/// [`kernel_sandbox::hidden_paths::digest`] writes them. A record from an engine that did
 /// not keep the level, the files, the toolchains, the port, the network, the grants, the
 /// freeze facts or the hidden folders has none; no grants means none were held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,10 +211,10 @@ impl PaneRecord {
                     .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
         });
         let hidden = record.hidden.as_ref().is_none_or(|hidden| {
-            hidden.len() <= crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+            hidden.len() <= kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX
                 && hidden
                     .iter()
-                    .all(|digest| crate::sandbox::hidden_paths::digest_plain(digest))
+                    .all(|digest| kernel_sandbox::hidden_paths::digest_plain(digest))
         });
         let keepers = record.keepers.as_ref().is_none_or(|keepers| {
             keepers.len() <= KEEPERS_MAX

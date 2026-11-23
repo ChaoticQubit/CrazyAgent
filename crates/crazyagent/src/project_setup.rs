@@ -451,7 +451,7 @@ pub struct HiddenPaths {
     pub paths: Vec<String>,
     pub version: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runs: Vec<crate::sandbox::hidden_paths::RunKind>,
+    pub runs: Vec<kernel_sandbox::hidden_paths::RunKind>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unavailable: bool,
 }
@@ -958,7 +958,7 @@ impl SetupAction {
                 Ok(())
             }
             Self::SetHiddenPaths { paths, .. } => {
-                if paths.len() > crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+                if paths.len() > kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX
                     || paths
                         .iter()
                         .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
@@ -2694,7 +2694,7 @@ fn set_read_paths(
     Ok(Outcome::Applied)
 }
 
-/// Saves a project's hidden folders once each passes [`crate::sandbox::hidden_paths::checked`]
+/// Saves a project's hidden folders once each passes [`kernel_sandbox::hidden_paths::checked`]
 /// against the project's folder and the screen showed the current ones. Takes the transaction,
 /// project, the version shown and the typed paths. Returns Applied, or a plain rejection for an
 /// unknown project, a refused path, any folder where [`crate::sandbox::HIDDEN_UNHELD`], or
@@ -2712,12 +2712,12 @@ fn set_hidden_paths(
         return Ok(rejected("hidden_paths_need_macos"));
     }
     let folder = setup.project_folder();
-    let checked = match crate::sandbox::hidden_paths::checked_all(paths, &folder) {
+    let checked = match kernel_sandbox::hidden_paths::checked_all(paths, &folder) {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
     if let Err(code) =
-        crate::sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, &folder, &checked)
+        kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, &folder, &checked)
     {
         return Ok(rejected(code));
     }
@@ -2725,7 +2725,7 @@ fn set_hidden_paths(
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    crate::sandbox::access_store::hidden::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
 

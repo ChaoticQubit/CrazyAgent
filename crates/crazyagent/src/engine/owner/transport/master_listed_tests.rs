@@ -865,7 +865,7 @@ exec /bin/sleep 60
 /// its harness stopped leaves the list.
 #[test]
 fn a_listed_master_turn_not_surely_stopped_stays_listed_after_it_returns() {
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
     let saved = [PathBuf::from("/tmp/sa-vid14-listed-master/vault")];
     for (project, ran, kept) in [
         ("sa-vid14-listed-master-ok", Ok(()), false),

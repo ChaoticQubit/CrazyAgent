@@ -702,12 +702,12 @@ impl ResearchJobs {
     }
 
     /// Reads the folders the owner keeps a project's agents out of, see
-    /// [`crate::sandbox::hidden_paths::load`]. Takes the project. Returns the folders.
+    /// [`crate::sandbox::access_store::hidden::load`]. Takes the project. Returns the folders.
     pub fn hidden_paths(
         &self,
         project: &crate::protocol::ProjectId,
     ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
-        crate::sandbox::hidden_paths::load(&self.connection, project.as_str())
+        crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
     }
 
     /// Reads the terminal display the owner chose for a project's terminals

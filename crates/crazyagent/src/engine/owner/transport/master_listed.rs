@@ -24,9 +24,9 @@ use crate::master_session::{
 use crate::model_gateway::relay::Relay;
 use crate::plugins::LaunchServer;
 use crate::protocol::{CredentialRef, RequestId};
-use crate::sandbox::hidden_paths::HiddenRun;
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
 use crate::usage::capture::Tokens;
+use kernel_sandbox::hidden_paths::HiddenRun;
 use kernel_security::secret::SecretString;
 use std::ffi::OsString;
 use std::path::PathBuf;

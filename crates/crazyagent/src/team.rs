@@ -3082,7 +3082,9 @@ fn perform(
             Err(code) => rejected(code),
         }),
         TeamAction::RestartHiddenSeers { .. } => {
-            if crate::sandbox::hidden_paths::ask_restart(tx, project.as_str()).map_err(error)? == 0
+            if crate::sandbox::access_store::hidden::ask_restart(tx, project.as_str())
+                .map_err(error)?
+                == 0
             {
                 return Ok(rejected("team_no_hidden_seers"));
             }
@@ -5738,7 +5740,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .map_err(error)?
     };
     let changed = crate::instruction_files::badges(connection, project).map_err(error)?;
-    let seers = crate::sandbox::hidden_paths::seers(connection, project.as_str()).map_err(error)?;
+    let seers =
+        crate::sandbox::access_store::hidden::seers(connection, project.as_str()).map_err(error)?;
     for agent in &mut agents {
         agent.owner_stopped = stopped.contains(&agent.id);
         agent.instructions_changed = changed.contains(&agent.id) && agent.status.live();

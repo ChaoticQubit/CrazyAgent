@@ -190,16 +190,16 @@ pub(super) fn answer(
         return Err(Unchecked::Failed(unreached.line().to_owned()));
     }
     let failed = |words: &str| Unchecked::Failed(words.to_owned());
-    let hidden = crate::sandbox::hidden_paths::load(db, project.as_str())
+    let hidden = crate::sandbox::access_store::hidden::load(db, project.as_str())
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
-    crate::sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, root, &hidden)
+    kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, root, &hidden)
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
     let check = prepare(db, project, root).map_err(failed)?;
     let name = run_name(project, crate::team::now_ms());
     let run = ReadOnlyRun {
         name: &name,
         agent: "roadmap-status",
-        kind: Some(crate::sandbox::hidden_paths::RunKind::Roadmap),
+        kind: Some(kernel_sandbox::hidden_paths::RunKind::Roadmap),
         project: Some(project),
         folder: root,
         prompt: &check.prompt,

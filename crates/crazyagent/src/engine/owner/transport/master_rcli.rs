@@ -184,7 +184,7 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-        listed: crate::sandbox::hidden_paths::HiddenRun,
+        listed: kernel_sandbox::hidden_paths::HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
         let ran = self.run_rcli_master_turn(prepared, turn_id).await;
         super::master_runtime::keep_listed_if_uncertain(listed, &ran);

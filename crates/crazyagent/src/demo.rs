@@ -273,7 +273,7 @@ pub(crate) fn assert_confined(db: &Connection, project_id: &ProjectId) -> Result
     assert_eq!(project_id.as_str(), PROJECT_ID);
     let policy = crate::sandbox::policy_store::load(db, PROJECT_ID).map_err(error)?;
     let read = crate::sandbox::extra_paths::load(db, PROJECT_ID).map_err(error)?;
-    let hidden = crate::sandbox::hidden_paths::load(db, PROJECT_ID).map_err(error)?;
+    let hidden = crate::sandbox::access_store::hidden::load(db, PROJECT_ID).map_err(error)?;
     assert_eq!(
         policy.access,
         kernel_sandbox::policy::AgentAccess::Sandboxed

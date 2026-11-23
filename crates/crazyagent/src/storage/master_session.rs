@@ -2971,8 +2971,8 @@ fn bundle(
         .map_err(|problem| EngineError(problem.0))?;
     let agent_policy =
         crate::sandbox::policy_store::load(tx, session.project_id.as_str()).map_err(error)?;
-    let hidden_paths =
-        crate::sandbox::hidden_paths::load(tx, session.project_id.as_str()).map_err(error)?;
+    let hidden_paths = crate::sandbox::access_store::hidden::load(tx, session.project_id.as_str())
+        .map_err(error)?;
     crate::harnesses::leftovers::set_mode(
         session.project_id.as_str(),
         crate::team::leftover_mode(tx, session.project_id.as_str())?,

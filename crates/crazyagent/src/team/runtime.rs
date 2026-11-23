@@ -4373,18 +4373,18 @@ impl TeamRuntime {
     /// Takes the project's stored setup. Returns any SQLite failure.
     fn mark_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let saved = crate::sandbox::hidden_paths::load(&self.connection, project.as_str())
+        let saved = crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
             .map_err(error)?;
         let seers: BTreeSet<i64> = self
             .workers
             .iter()
             .filter(|(_, w)| &w.project == project && !w.stopping)
             .filter(|(_, w)| w.access != AgentAccess::Full && w.role != AgentRole::Teammate)
-            .filter(|(_, w)| !crate::sandbox::hidden_paths::covers(w.hidden.as_deref(), &saved))
+            .filter(|(_, w)| !kernel_sandbox::hidden_paths::covers(w.hidden.as_deref(), &saved))
             .map(|(id, _)| *id)
             .collect();
         assert!(seers.len() <= self.workers.len());
-        crate::sandbox::hidden_paths::set_seers(&self.connection, project.as_str(), &seers)
+        crate::sandbox::access_store::hidden::set_seers(&self.connection, project.as_str(), &seers)
             .map_err(error)
     }
 
@@ -4394,8 +4394,9 @@ impl TeamRuntime {
     /// every saved folder. Takes the project's stored setup. Returns any SQLite failure.
     fn restart_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let asked = crate::sandbox::hidden_paths::restarts(&self.connection, project.as_str())
-            .map_err(error)?;
+        let asked =
+            crate::sandbox::access_store::hidden::restarts(&self.connection, project.as_str())
+                .map_err(error)?;
         for id in asked {
             let Some(worker) = self.workers.get_mut(&id) else {
                 continue;
@@ -8546,7 +8547,8 @@ impl TeamRuntime {
                 };
                 #[cfg(unix)]
                 let hidden =
-                    crate::sandbox::hidden_paths::load(&self.connection, project.as_str()).ok();
+                    crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
+                        .ok();
                 for name in &wanted {
                     match crate::landing::add_teammate_worktree(
                         &self.connection,
@@ -9756,10 +9758,12 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
-        let hidden =
-            crate::sandbox::hidden_paths::load(&self.connection, stored.project_id.as_str())
-                .map_err(|_| with_code("the project's hidden folders could not be read", None))?;
-        crate::sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, &root, &hidden)
+        let hidden = crate::sandbox::access_store::hidden::load(
+            &self.connection,
+            stored.project_id.as_str(),
+        )
+        .map_err(|_| with_code("the project's hidden folders could not be read", None))?;
+        kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, &root, &hidden)
             .map_err(|code| with_code("a hidden folder is now tracked by git", Some(code)))?;
         for folder in &hidden {
             sandbox = sandbox.hide(folder).map_err(sandboxed)?;
@@ -9898,7 +9902,7 @@ impl TeamRuntime {
             task_start,
             hidden: hidden
                 .iter()
-                .map(|folder| crate::sandbox::hidden_paths::digest(folder))
+                .map(|folder| kernel_sandbox::hidden_paths::digest(folder))
                 .collect(),
         };
         let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));

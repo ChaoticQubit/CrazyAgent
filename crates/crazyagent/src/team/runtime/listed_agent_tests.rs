@@ -498,7 +498,7 @@ fn a_team_agent_of_a_listed_harness_hides_and_records_the_saved_hidden_folders()
     let runtime = listed_runtime(&fixture);
     let secrets = fixture.setup.project_folder().join("secrets");
     std::fs::create_dir_all(&secrets).unwrap();
-    crate::sandbox::hidden_paths::save(
+    crate::sandbox::access_store::hidden::save(
         &fixture.connection,
         PROJECT,
         std::slice::from_ref(&secrets),
@@ -524,6 +524,6 @@ fn a_team_agent_of_a_listed_harness_hides_and_records_the_saved_hidden_folders()
     let (_, plan, _) = prepared.expect("the listed agent prepares");
     assert_eq!(
         plan.hidden,
-        vec![crate::sandbox::hidden_paths::digest(&secrets)]
+        vec![kernel_sandbox::hidden_paths::digest(&secrets)]
     );
 }

@@ -1835,7 +1835,7 @@ fn a_native_team_starts_in_a_project_hiding_as_many_folders_as_it_may() {
     .unwrap()
     .allow_scratch(&tmp)
     .unwrap();
-    for index in 0..crazyagent::sandbox::hidden_paths::HIDDEN_PATHS_MAX {
+    for index in 0..kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX {
         sandbox = sandbox
             .hide(&case.project.join(format!("hidden-{index}")))
             .unwrap();

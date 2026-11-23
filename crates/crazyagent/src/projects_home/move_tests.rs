@@ -283,7 +283,8 @@ impl Case {
             )
             .unwrap();
         crate::sandbox::extra_paths::save(&self.db, PROJECT, &[self.repo.join("docs")]).unwrap();
-        crate::sandbox::hidden_paths::save(&self.db, PROJECT, &[self.repo.join("secret")]).unwrap();
+        crate::sandbox::access_store::hidden::save(&self.db, PROJECT, &[self.repo.join("secret")])
+            .unwrap();
     }
 
     /// Records one research job of the project. Input: its status.
@@ -1020,7 +1021,7 @@ fn a_long_stored_project_move_reroots_rows_recorded_under_the_short_name() {
         ))
     });
     let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
-    crate::sandbox::hidden_paths::save(&case.db, PROJECT, &[short.join("drafts")]).unwrap();
+    crate::sandbox::access_store::hidden::save(&case.db, PROJECT, &[short.join("drafts")]).unwrap();
     assert_eq!(
         case.move_project(AddMode::Move, &[]).unwrap(),
         Finished::Moved { repointed: 0 },
@@ -1028,7 +1029,7 @@ fn a_long_stored_project_move_reroots_rows_recorded_under_the_short_name() {
     );
     assert_eq!(case.stored_folder(), case.target());
     assert_eq!(
-        crate::sandbox::hidden_paths::load(&case.db, PROJECT).unwrap(),
+        crate::sandbox::access_store::hidden::load(&case.db, PROJECT).unwrap(),
         vec![case.target().join("drafts")]
     );
 }

@@ -148,8 +148,8 @@ pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError
     crate::ide::log::forget_rows(tx, &removed.project)?;
     crate::storage::agent_text::forget_project(tx, &removed.project)?;
     crate::questions::forget_project(tx, &removed.project)?;
-    crate::sandbox::hidden_paths::save(tx, project, &[]).map_err(failed)?;
-    crate::sandbox::hidden_paths::forget_seers(tx, project).map_err(failed)?;
+    crate::sandbox::access_store::hidden::save(tx, project, &[]).map_err(failed)?;
+    crate::sandbox::access_store::hidden::forget_seers(tx, project).map_err(failed)?;
     crate::sandbox::policy_store::remove(tx, project).map_err(failed)?;
     crate::sandbox::grants::forget_project(tx, project).map_err(failed)?;
     tx.execute(

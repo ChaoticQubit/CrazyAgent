@@ -1004,7 +1004,7 @@ fn turn_sandbox(
     }
     let repository = &kernel_sandbox::paths::one_spelling(repository.to_path_buf());
     let worktree = &kernel_sandbox::paths::one_spelling(worktree.to_path_buf());
-    crate::sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, repository, hidden)
+    kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, repository, hidden)
         .map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {

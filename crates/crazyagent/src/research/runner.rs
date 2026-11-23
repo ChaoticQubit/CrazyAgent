@@ -19,7 +19,6 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
-use crate::sandbox::hidden_paths::HiddenRun;
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::toolchains;
 use crate::sandbox::warden::Warden;
@@ -28,6 +27,7 @@ use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::hidden_paths::HiddenRun;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
@@ -1324,8 +1324,8 @@ impl ResearchRunner {
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
             let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
-            let listed = crate::sandbox::hidden_paths::starting(
-                crate::sandbox::hidden_paths::RunKind::Research,
+            let listed = kernel_sandbox::hidden_paths::starting(
+                kernel_sandbox::hidden_paths::RunKind::Research,
                 project.as_str(),
             )
             .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?;
@@ -1333,7 +1333,7 @@ impl ResearchRunner {
                 .hidden_paths(&project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
             listed.hid(if unconfined { &[] } else { &hidden });
-            if let Err(code) = crate::sandbox::hidden_paths::none_tracked(
+            if let Err(code) = kernel_sandbox::hidden_paths::none_tracked(
                 &crate::sandbox::ACCESS_HOOKS,
                 &root,
                 &hidden,
@@ -1921,7 +1921,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     #[cfg(unix)]
     pub agent: &'a str,
     #[cfg(unix)]
-    pub kind: Option<crate::sandbox::hidden_paths::RunKind>,
+    pub kind: Option<kernel_sandbox::hidden_paths::RunKind>,
     #[cfg(unix)]
     pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
@@ -2081,7 +2081,7 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let listed = match (run.kind, run.project) {
             (Some(kind), Some(project)) => Some(
-                crate::sandbox::hidden_paths::starting(kind, project.as_str())
+                kernel_sandbox::hidden_paths::starting(kind, project.as_str())
                     .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?,
             ),
             _ => None,
@@ -2095,7 +2095,7 @@ impl ResearchRunner {
         if let Some(listed) = &listed {
             listed.hid(&hidden);
         }
-        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(
+        if let Err(code) = kernel_sandbox::hidden_paths::none_tracked(
             &crate::sandbox::ACCESS_HOOKS,
             &folder,
             &hidden,
@@ -5935,7 +5935,7 @@ mod tests {
             let run = ReadOnlyRun {
                 name,
                 agent: "onboarding",
-                kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+                kind: Some(kernel_sandbox::hidden_paths::RunKind::Onboarding),
                 project: Some(&project),
                 folder,
                 prompt: "Map this repository.",
@@ -5970,7 +5970,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "onboard-m-alpha-1",
             agent: "onboarding",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Onboarding),
             project: Some(&project),
             folder: &folder,
             prompt: "Map this repository.",
@@ -6050,7 +6050,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-1",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -6118,7 +6118,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-6",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -6191,7 +6191,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-2",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -6303,7 +6303,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-3",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -6354,7 +6354,7 @@ mod tests {
             let run = ReadOnlyRun {
                 name,
                 agent: "overview",
-                kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+                kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
                 project: None,
                 folder: &folder,
                 prompt: "Describe this project.",
