@@ -15,10 +15,19 @@ fn files_named(folder: &Path, keep: &dyn Fn(&Path) -> bool, found: &mut Vec<Path
         ".worktrees",
         "graphify-out",
     ];
-    for entry in std::fs::read_dir(folder).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if path.is_dir() {
+    let entries =
+        std::fs::read_dir(folder).unwrap_or_else(|error| panic!("read {folder:?}: {error}"));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("entry in {folder:?}: {error}"));
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             if !skipped.contains(&name.as_str()) {
                 files_named(&path, keep, found);
             }
@@ -26,6 +35,19 @@ fn files_named(folder: &Path, keep: &dyn Fn(&Path) -> bool, found: &mut Vec<Path
             found.push(path);
         }
     }
+}
+
+/// The text of a file the guards read. Panics naming the file when it cannot be read.
+/// Input: the file. Output: its text.
+fn text_of(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path:?}: {error}"))
+}
+
+/// The real path of a file the guards compare. Panics naming the file when it has none.
+/// Input: the file. Output: its real path.
+fn real_of(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|error| panic!("real path of {path:?}: {error}"))
 }
 
 fn names_item_of(text: &str, krate: &str) -> bool {
@@ -53,7 +75,7 @@ fn the_kernel_names_no_crazyagent_or_sandbox_item() {
     assert!(sources.len() >= 6, "{sources:?}");
     let engine = ["crazy", "agent"].concat();
     for path in &sources {
-        let text = std::fs::read_to_string(path).unwrap();
+        let text = text_of(path);
         for krate in [engine.as_str(), "sandbox"] {
             assert!(
                 !names_item_of(&text, krate),
@@ -73,19 +95,52 @@ fn the_kernel_names_no_crazyagent_or_sandbox_item() {
 }
 
 /// The dependency tables of one Cargo.toml that turn on this crate's `test-support`
-/// feature. Input: the manifest's text. Output: each such table's name.
-fn test_support_tables(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut table = String::new();
-    for line in text.lines() {
-        if line.starts_with('[') {
-            table = line.to_owned();
-        }
-        if line.starts_with("crazyagent-kernel-processes") && line.contains("test-support") {
-            found.push(table.clone());
+/// feature, read as TOML so a dependency table of its own or a wrapped features line counts
+/// as an inline one. Panics naming the manifest when it does not parse. Inputs: the
+/// manifest's path and text. Output: each such table's name.
+fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
+    let manifest: toml::Table = toml::from_str(text)
+        .unwrap_or_else(|error| panic!("{path:?} does not parse as a manifest: {error}"));
+    let kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let mut tables: Vec<(String, &toml::Value)> = kinds
+        .iter()
+        .filter_map(|kind| Some(((*kind).to_owned(), manifest.get(*kind)?)))
+        .collect();
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (target, inside) in targets {
+            for kind in kinds {
+                if let Some(table) = inside.get(kind) {
+                    tables.push((format!("target.{target}.{kind}"), table));
+                }
+            }
         }
     }
-    found
+    let name = "crazyagent-kernel-processes";
+    tables
+        .into_iter()
+        .filter(|(_, table)| {
+            table.as_table().is_some_and(|table| {
+                table.iter().any(|(key, entry)| {
+                    let entry = entry.as_table();
+                    let named = key == name
+                        || entry
+                            .and_then(|entry| entry.get("package"))
+                            .and_then(toml::Value::as_str)
+                            == Some(name);
+                    let features = entry
+                        .and_then(|entry| entry.get("features"))
+                        .and_then(toml::Value::as_array);
+                    named
+                        && features.is_some_and(|features| {
+                            features
+                                .iter()
+                                .any(|feature| feature.as_str() == Some("test-support"))
+                        })
+                })
+            })
+        })
+        .map(|(table, _)| table)
+        .collect()
 }
 
 /// A folder that holds a link to a sibling folder gives each file once, never through the
@@ -108,7 +163,10 @@ fn files_named_skips_folder_links() {
 #[test]
 fn a_dependency_table_turning_test_support_on_is_caught() {
     let text = "[package]\nname = \"other\"\n\n[dev-dependencies.crazyagent-kernel-processes]\npath = \"../kernel/processes\"\nfeatures = [\"test-support\"]\n";
-    assert_eq!(test_support_tables(text), ["dev-dependencies"]);
+    assert_eq!(
+        test_support_tables(Path::new("other/Cargo.toml"), text),
+        ["dev-dependencies"]
+    );
 }
 
 /// Only the engine crate's dev-dependencies turn on this crate's `test-support` feature, so
@@ -125,11 +183,11 @@ fn test_support_is_enabled_only_by_crazyagent_dev_dependencies() {
     assert!(manifests.len() >= 10, "{manifests:?}");
     let mut enabling = Vec::new();
     for manifest in &manifests {
-        let text = std::fs::read_to_string(manifest).unwrap();
-        for table in test_support_tables(&text) {
+        let text = text_of(manifest);
+        for table in test_support_tables(manifest, &text) {
             let place = manifest
                 .strip_prefix(&root)
-                .unwrap()
+                .unwrap_or_else(|_| panic!("{manifest:?} is outside {root:?}"))
                 .to_string_lossy()
                 .replace('\\', "/");
             enabling.push(format!("{place} {table}"));
@@ -147,10 +205,7 @@ fn test_support_is_enabled_only_by_crazyagent_dev_dependencies() {
 #[test]
 fn the_stub_hooks_are_named_only_inside_the_kernel_sources() {
     let name = ["STUB", "_HOOKS"].concat();
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .canonicalize()
-        .unwrap();
+    let source = real_of(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
     let mut files = Vec::new();
     files_named(
         &workspace_root(),
@@ -160,8 +215,8 @@ fn the_stub_hooks_are_named_only_inside_the_kernel_sources() {
     assert!(files.len() >= 100, "{}", files.len());
     let (inside, outside): (Vec<&PathBuf>, Vec<&PathBuf>) = files
         .iter()
-        .filter(|path| std::fs::read_to_string(path).unwrap().contains(&name))
-        .partition(|path| path.canonicalize().unwrap().starts_with(&source));
+        .filter(|path| text_of(path).contains(&name))
+        .partition(|path| real_of(path).starts_with(&source));
     assert!(!inside.is_empty(), "the search found no stub hooks at all");
     assert!(outside.is_empty(), "named outside the kernel: {outside:?}");
 }
@@ -170,10 +225,7 @@ fn the_stub_hooks_are_named_only_inside_the_kernel_sources() {
 /// a new export fails this row until it is named here.
 #[test]
 fn finding_test_support_exports_exactly_the_named_items() {
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/finding/test_support.rs"),
-    )
-    .unwrap();
+    let text = text_of(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/finding/test_support.rs"));
     let linux_only = "#[cfg(target_os = \"linux\")]";
     let lines: Vec<&str> = text.lines().collect();
     let mut exported: Vec<&str> = lines
