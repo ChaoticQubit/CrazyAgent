@@ -199,3 +199,30 @@ fn a_turn_off_choice_storage_cannot_record_leaves_the_file_as_it_was() {
     assert!(verified_source_hash(&config, Some(&fixture.sources)).is_ok());
     assert!(!fixture.staged_left());
 }
+
+/// A turn-off choice storage cannot record is refused with a listed code before the global
+/// file is touched, so no put-back write can fail and leave the files and the worker apart.
+#[test]
+fn a_turn_off_choice_storage_cannot_record_never_touches_the_file() {
+    let fixture = Fixture::new();
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY, body BLOB)",
+    )
+    .unwrap();
+    let mut config = fixture.sources.config().unwrap();
+    let before = std::fs::metadata(&fixture.global).unwrap().ino();
+    let command = crate::app_plugins::Command::SetWhenOff {
+        when_off: TurnOff::StopRuns,
+    };
+    let refused = app_plugins(&db, &mut config, (false, Some(&fixture.sources), command))
+        .unwrap_err()
+        .0;
+    assert!(
+        crate::engine::owner::APP_PLUGINS_CODES.contains(&refused.as_str()),
+        "{refused}"
+    );
+    assert_eq!(std::fs::metadata(&fixture.global).unwrap().ino(), before);
+    assert_eq!(std::fs::read_to_string(&fixture.global).unwrap(), GLOBAL);
+    assert!(verified_source_hash(&config, Some(&fixture.sources)).is_ok());
+}
