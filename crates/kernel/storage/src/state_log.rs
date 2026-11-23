@@ -1,7 +1,11 @@
 /// The validated aggregate name the log stores.
 pub mod aggregate;
 
+/// The appender of one write transaction, behind the writer's fence hook.
+mod appender;
+
 pub use aggregate::{AGGREGATE_BYTES_MAX, AggregateName};
+pub use appender::{Appender, FenceCheck};
 
 use crate::StorageError;
 use rusqlite::{Connection, OptionalExtension};

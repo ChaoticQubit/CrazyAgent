@@ -23,11 +23,17 @@ fn store() -> Connection {
     db
 }
 
-/// What the rows compare: the `state` revision, every `events` row and every log row.
-/// Input: the open transaction. Output: the three, in a form that compares.
-fn written(tx: &Transaction<'_>) -> (i64, Vec<(i64, String)>, Vec<(i64, i64, Vec<u8>)>) {
+/// What the rows compare: the `state` revision, every `events` row as cursor and body, and
+/// every log row as seq, revision and body.
+type Written = (i64, Vec<(i64, String)>, Vec<(i64, i64, Vec<u8>)>);
+
+/// What the rows compare, read from the store. Input: the open transaction. Output: the
+/// [`Written`] three, in a form that compares.
+fn written(tx: &Transaction<'_>) -> Written {
     let revision = tx
-        .query_row("SELECT revision FROM state WHERE id=1", [], |row| row.get(0))
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let events = tx
         .prepare("SELECT cursor, body FROM events ORDER BY cursor")
@@ -47,12 +53,12 @@ fn written(tx: &Transaction<'_>) -> (i64, Vec<(i64, String)>, Vec<(i64, i64, Vec
 }
 
 /// A fence that refuses every check. Output: the hook.
-fn refusing() -> FenceCheck<'static> {
+fn refusing() -> FenceCheck {
     Box::new(|_| Err(StorageError("fence_refused".into())))
 }
 
 /// A fence that passes every check. Output: the hook.
-fn passing() -> FenceCheck<'static> {
+fn passing() -> FenceCheck {
     Box::new(|_| Ok(()))
 }
 
@@ -87,8 +93,10 @@ fn a_refusing_fence_leaves_the_log_the_revision_and_events_unchanged() {
 fn a_fence_that_refuses_after_the_start_stops_project_before_its_apply() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let checks = Cell::new(0);
-    let fence: FenceCheck<'_> = Box::new(|_| {
+    let checks = std::rc::Rc::new(Cell::new(0));
+    let counted = std::rc::Rc::clone(&checks);
+    let fence: FenceCheck = Box::new(move |_| {
+        let checks = &counted;
         checks.set(checks.get() + 1);
         if checks.get() == 1 {
             Ok(())
@@ -115,13 +123,18 @@ fn an_events_body_over_the_bound_is_refused_and_nothing_is_written() {
     let tx = db.transaction().unwrap();
     let before = written(&tx);
     let over = Appender::own(&tx, passing(), |_| Ok("a".repeat(BODY_BYTES_MAX + 1)));
-    assert_eq!(over.err(), Some(StorageError("state_log_body_bounds".into())));
+    assert_eq!(
+        over.err(),
+        Some(StorageError("state_log_body_bounds".into()))
+    );
     assert_eq!(written(&tx), before);
     Appender::own(&tx, passing(), |_| Ok("a".repeat(BODY_BYTES_MAX))).unwrap();
     let kind: String = tx
-        .query_row("SELECT typeof(body) FROM events WHERE cursor=5", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT typeof(body) FROM events WHERE cursor=5",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(kind, "text");
 }
