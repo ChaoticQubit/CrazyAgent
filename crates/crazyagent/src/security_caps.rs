@@ -1,7 +1,7 @@
 use kernel_security::error::StoreError;
 use kernel_security::net as kernel_net;
 use kernel_security::secrets::Secrets;
-use sdk::generated::{service, update};
+use sdk::generated::{editor, service, update};
 use sdk::secrets::Secret;
 use sdk::settings::QuitSettings;
 use sdk::{Refusal, net, process, secrets, settings};
@@ -164,6 +164,12 @@ impl secrets::Provide for Absent {
     }
 
     fn forget(&self, _: &'static str, _: Secret) -> Result<(), Refusal> {
+        Err(absent())
+    }
+}
+
+impl editor::Provide for Absent {
+    fn spawn(&self, _: &'static str, _: editor::EditorLaunch) -> Result<u32, Refusal> {
         Err(absent())
     }
 }

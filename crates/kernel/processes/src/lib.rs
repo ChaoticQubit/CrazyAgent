@@ -2,6 +2,10 @@
 
 #[cfg(any(windows, test))]
 pub mod batch;
+/// The editor server seam: the kernel starts only a command its caller confined, and
+/// refuses an unconfined one where this machine requires confinement.
+#[cfg(unix)]
+pub mod editor;
 pub mod fd_wait;
 /// Program finding: where the engine looks for the tools it runs, which files it refuses
 /// and why, with the engine's own checks passed in ([`finding::FindingHooks`]).

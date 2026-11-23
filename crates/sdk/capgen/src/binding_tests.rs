@@ -55,12 +55,20 @@ fn the_host_binding_is_generated_for_every_capability() {
     let loaded = load(&sdk("caps")).expect("the caps load");
     let files = binding_from_caps();
     let flat: String = files[0].1.split_whitespace().collect();
-    assert!(flat.starts_with(
-        "usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{net,secrets,settings};"
-    ));
-    assert!(flat.contains(
-        "pubstructProviders<'p>{pubnet:&'pdynnet::Provide,pubsecrets:&'pdynsecrets::Provide,pubsettings:&'pdynsettings::Provide,}"
-    ));
+    let mut stems: Vec<&str> = loaded.iter().map(|(stem, _)| stem.as_str()).collect();
+    stems.sort_unstable();
+    assert!(stems.len() >= 6);
+    let used = format!(
+        "usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{{{}}};",
+        stems.join(",")
+    );
+    assert!(flat.starts_with(&used), "{used}");
+    let fields: String = stems
+        .iter()
+        .map(|stem| format!("pub{stem}:&'pdyn{stem}::Provide,"))
+        .collect();
+    let providers = format!("pubstructProviders<'p>{{{fields}}}");
+    assert!(flat.contains(&providers), "{providers}");
     assert!(flat.contains("pubstructBound<'g,'p>{caller:Caller<'g>,providers:&'pProviders<'p>,}"));
     let mut count = 0;
     for (stem, file) in &loaded {
