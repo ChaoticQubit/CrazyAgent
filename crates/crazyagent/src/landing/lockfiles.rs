@@ -662,7 +662,8 @@ fn confined(
     #[cfg(target_os = "macos")]
     if uv_clash && let Some(uv) = sandbox.tool_program("uv") {
         let project = root.to_str().ok_or("tool_cache_project_name")?;
-        let cache = crate::sandbox::tool_cache::prepare(
+        let cache = kernel_sandbox::tool_cache::prepare(
+            &crate::sandbox::TOOL_CACHE_HOOKS,
             &scratch.folder,
             project,
             REGENERATE_CACHE,

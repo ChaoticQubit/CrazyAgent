@@ -202,7 +202,14 @@ fn the_capability_list_takes_the_layout_rustfmt_gives_it() {
 #[test]
 fn generation_fails_closed_without_rustfmt() {
     let missing = std::ffi::OsStr::new("/nonexistent/capgen-test/rustfmt");
-    let refused = crate::rustfmt_with(missing, "mod.rs", "pub mod host;\n").unwrap_err();
+    let refused = crate::rustfmt_with(
+        missing,
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .unwrap_err();
     assert_eq!(refused.code, "capgen_rustfmt_missing");
     assert_eq!(refused.file, "mod.rs");
     assert!(
@@ -212,13 +219,21 @@ fn generation_fails_closed_without_rustfmt() {
     );
 }
 
-/// Generates the test module from the fixture `.cap`. Output: its text.
-fn fixture_module() -> String {
-    let source =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))
-            .expect("fixture.cap reads");
-    let file = crazyagent_cap::parse_as("fixture", &source).expect("fixture.cap parses");
-    rust_test_module("fixture", &file).expect("fixture.cap generates")
+/// What a row that reads files gives back: nothing, or the first error with its path.
+type Checked = Result<(), Box<dyn std::error::Error>>;
+
+/// Reads one file for a row. Input: the path. Output: the text, or an error naming the path.
+fn read(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()).into())
+}
+
+/// Generates the test module from the fixture `.cap`. Output: its text, or the read, parse
+/// or generation error.
+fn fixture_module() -> Result<String, Box<dyn std::error::Error>> {
+    let source = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))?;
+    let file = crazyagent_cap::parse_as("fixture", &source)
+        .map_err(|error| format!("fixture.cap: {error:?}"))?;
+    rust_test_module("fixture", &file).map_err(|error| format!("fixture.cap: {error:?}").into())
 }
 
 /// Returns the derive line written above one generated item. Inputs: the module text and
@@ -235,15 +250,15 @@ fn derive_of<'t>(module: &'t str, head: &str) -> &'t str {
 }
 
 #[test]
-fn the_fixture_generates_the_checked_in_test_module() {
-    let checked_in =
-        fs::read_to_string(sdk("rust/src/fixture_generated.rs")).expect("the test module reads");
-    assert_eq!(fixture_module(), checked_in);
+fn the_fixture_generates_the_checked_in_test_module() -> Checked {
+    let checked_in = read(&sdk("rust/src/fixture_generated.rs"))?;
+    assert_eq!(fixture_module()?, checked_in);
+    Ok(())
 }
 
 #[test]
-fn derives_follow_the_fields() {
-    let module = fixture_module();
+fn derives_follow_the_fields() -> Checked {
+    let module = fixture_module()?;
     assert_eq!(
         derive_of(&module, "pub struct Header"),
         "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]"
@@ -278,11 +293,12 @@ fn derives_follow_the_fields() {
             .expect("the item's block");
         assert_eq!(block.contains("deny_unknown_fields"), denies, "{head}");
     }
+    Ok(())
 }
 
 #[test]
-fn wrapped_types_use_alloc_and_core_paths() {
-    let module = fixture_module();
+fn wrapped_types_use_alloc_and_core_paths() -> Checked {
+    let module = fixture_module()?;
     for line in [
         "    pub headers: alloc::vec::Vec<Header>,\n",
         "    pub body: core::option::Option<alloc::vec::Vec<u8>>,\n",
@@ -290,11 +306,12 @@ fn wrapped_types_use_alloc_and_core_paths() {
     ] {
         assert!(module.contains(line), "{line}");
     }
+    Ok(())
 }
 
 #[test]
-fn bound_checks_are_written_for_every_capability_in_both_directions() {
-    let module = fixture_module();
+fn bound_checks_are_written_for_every_capability_in_both_directions() -> Checked {
+    let module = fixture_module()?;
     for function in ["send", "reveal", "pair", "count", "wrap", "shadow"] {
         for direction in ["input", "output"] {
             let head = format!("pub fn check_{function}_{direction}(");
@@ -321,6 +338,7 @@ fn bound_checks_are_written_for_every_capability_in_both_directions() {
         .1;
     assert_eq!(settings.matches("pub fn check_").count(), 2, "{settings}");
     assert!(!settings.contains("alloc::"), "{settings}");
+    Ok(())
 }
 
 #[test]
@@ -450,6 +468,12 @@ fn generated(sources: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 /// The text of one generated file. Inputs: the files and the path. Output: the text.
+/// Text with every run of whitespace made one space, so a check reads the same before and
+/// after rustfmt wraps a line. Input: the text. Output: the flattened text.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn file_text<'f>(files: &'f [(String, String)], path: &str) -> &'f str {
     &files
         .iter()
@@ -608,26 +632,276 @@ fn a_call_taking_a_foreign_handle_writes_its_checks_and_traits() {
         ("secrets", "handle Secret"),
     ]);
     let net = file_text(&files, "net.rs");
+    let flat_net = flat(net);
     assert!(
-        net.contains("keys: &[super::secrets::Secret], ring: &Ring"),
+        flat_net.contains(&flat("keys: &[super::secrets::Secret], ring: &Ring")),
         "{net}"
     );
     assert!(
-        net.contains("keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"),
+        flat_net.contains(&flat(
+            "keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"
+        )),
         "{net}"
     );
     assert!(
-        net.contains(
+        flat_net.contains(&flat(
             "fn fits_ring(value: &Ring) -> bool {\n    value.keys.len() <= crate::LIST_ITEMS_MAX\n}"
-        ),
+        )),
         "{net}"
     );
     assert!(
-        net.contains("s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"),
+        flat_net.contains(&flat(
+            "s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"
+        )),
         "{net}"
     );
     assert_eq!(
         derive_of(net, "pub struct Ring"),
         "#[derive(Clone, PartialEq, Eq)]"
     );
+}
+
+/// Makes a fresh folder under the system temp folder for one load row.
+/// Input: a name unique to the row. Output: the empty folder.
+fn load_scratch(name: &str) -> PathBuf {
+    let folder = std::env::temp_dir().join(format!("capgen-load-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&folder);
+    fs::create_dir_all(&folder).expect("the scratch folder is made");
+    folder
+}
+
+#[test]
+fn load_refuses_a_bad_stem_before_any_output() {
+    let mut stems = vec!["Foo", "a-b", "a__b"];
+    if cfg!(unix) {
+        stems.push("a\nb");
+    }
+    for stem in stems {
+        let folder = load_scratch("stem");
+        fs::write(folder.join("good.cap"), "enum A { a }").expect("writes");
+        fs::write(folder.join(format!("{stem}.cap")), "enum B { b }").expect("writes");
+        let refusal = load(&folder).expect_err("a bad stem is refused");
+        assert_eq!(refusal.code, "cap_stem", "{stem:?}");
+        assert_eq!(refusal.file, format!("{stem}.cap"), "{stem:?}");
+        fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn load_refuses_a_symlink_and_a_fifo() {
+    let folder = load_scratch("kind");
+    let outside = load_scratch("kind-target");
+    fs::write(outside.join("real.cap"), "enum A { a }").expect("writes");
+    std::os::unix::fs::symlink(outside.join("real.cap"), folder.join("link.cap"))
+        .expect("the symlink is made");
+    let refusal = load(&folder).expect_err("a symlink is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("capgen_file_kind", "link.cap")
+    );
+    fs::remove_file(folder.join("link.cap")).expect("the symlink is removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(folder.join("pipe.cap"))
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    let refusal = load(&folder).expect_err("a fifo is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("capgen_file_kind", "pipe.cap")
+    );
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+    fs::remove_dir_all(&outside).expect("the scratch folder is removed");
+}
+
+#[test]
+fn load_refuses_an_oversized_file_before_reading_it() {
+    let folder = load_scratch("size");
+    let mut over = vec![0xFF_u8; crazyagent_cap::SOURCE_BYTES_MAX + 1];
+    over[0] = b'e';
+    fs::write(folder.join("big.cap"), &over).expect("writes");
+    let refusal = load(&folder).expect_err("an oversized file is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("cap_source_too_large", "big.cap")
+    );
+    fs::remove_file(folder.join("big.cap")).expect("removes");
+    fs::create_dir(folder.join("dir.cap")).expect("the folder is made");
+    let refusal = load(&folder).expect_err("a folder is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("capgen_file_kind", "dir.cap")
+    );
+    fs::remove_dir(folder.join("dir.cap")).expect("removes");
+    let mut at_bound = b"enum A { a }".to_vec();
+    at_bound.resize(crazyagent_cap::SOURCE_BYTES_MAX, b' ');
+    fs::write(folder.join("edge.cap"), &at_bound).expect("writes");
+    assert_eq!(load(&folder).expect("a file at the bound loads").len(), 1);
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}
+
+/// Finds a checked-in executable shell stub standing in for rustfmt, so no row writes and
+/// then runs a program while another row spawns. Input: the stub's name. Output: its path.
+#[cfg(unix)]
+fn rustfmt_stub(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixture/rustfmt/{name}.sh"))
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rustfmt_toml_in_the_working_folder_changes_nothing() -> Checked {
+    let config = crate::rustfmt_config();
+    assert!(config.is_file(), "{}", config.display());
+    assert_eq!(read(&config)?, "");
+    let echo = rustfmt_stub("echo");
+    let args = crate::rustfmt_with(
+        echo.as_os_str(),
+        &config,
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let expected = format!(
+        "--edition\n2024\n--emit\nstdout\n--config-path\n{}\n",
+        config.display()
+    );
+    assert_eq!(args, expected);
+    let missing = load_scratch("rustfmt-no-config").join("rustfmt.toml");
+    let refused = crate::rustfmt_with(
+        echo.as_os_str(),
+        &missing,
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_missing");
+    assert!(
+        refused.detail.contains("rustfmt.toml"),
+        "{}",
+        refused.detail
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hung_rustfmt_is_stopped_with_a_timeout() {
+    let hung = rustfmt_stub("hung");
+    let started = std::time::Instant::now();
+    let refused = crate::rustfmt_with(
+        hung.as_os_str(),
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "pub mod host;\n",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_timeout");
+    assert_eq!(refused.file, "mod.rs");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(crate::RUSTFMT_DEADLINE, std::time::Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_empty_rustfmt_output_is_a_refusal() {
+    let silent = rustfmt_stub("silent");
+    let refused = crate::rustfmt_with(
+        silent.as_os_str(),
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_refused");
+    assert_eq!(refused.detail, "empty output");
+    let blank = crate::rustfmt_with(
+        silent.as_os_str(),
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "\n",
+        crate::RUSTFMT_DEADLINE,
+    );
+    assert_eq!(blank, Ok(String::new()));
+}
+
+#[test]
+fn a_test_module_refuses_two_names_with_one_rust_form() {
+    let source = "capability s.a_b() -> unit tier: t1 needs: s.x\n\
+                  capability s.a.b() -> unit tier: t1 needs: s.x";
+    let file = crazyagent_cap::parse_as("s", source).expect("parses");
+    let refused = crate::rust::test_module("s", &file).unwrap_err();
+    assert_eq!(refused.code, "capgen_name_collision");
+    assert_eq!(refused.detail, "check_a_b_input");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_entry_name_that_is_not_utf8_is_marked() {
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(
+        crate::entry_name(OsStr::new("mod.rs")),
+        Ok("mod.rs".to_owned())
+    );
+    for bytes in [&b"a\xff"[..], &b"a\xfe"[..]] {
+        assert_eq!(
+            crate::entry_name(OsStr::from_bytes(bytes)),
+            Err("a\u{fffd} (not utf-8)".to_owned())
+        );
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn drift_reports_names_that_are_not_utf8_once() {
+    use std::os::unix::ffi::OsStrExt;
+    let folder = load_scratch("drift-not-utf8");
+    let files = vec![("mod.rs".to_owned(), "pub mod a;\n".to_owned())];
+    fs::write(folder.join("mod.rs"), "pub mod a;\n").expect("mod.rs writes");
+    for bytes in [&b"a\xff"[..], &b"a\xfe"[..]] {
+        fs::write(folder.join(OsStr::from_bytes(bytes)), "x").expect("the odd name writes");
+    }
+    assert_eq!(
+        drift(&folder, &files),
+        vec!["a\u{fffd} (not utf-8)".to_owned()]
+    );
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn drift_reports_an_unreadable_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = load_scratch("drift-unreadable");
+    let files = vec![("mod.rs".to_owned(), "pub mod a;\n".to_owned())];
+    fs::write(folder.join("mod.rs"), "pub mod a;\n").expect("mod.rs writes");
+    let inner = folder.join("envelope");
+    fs::create_dir(&inner).expect("the subfolder is made");
+    fs::write(inner.join("stray.rs"), "x").expect("a stray file writes");
+    fs::set_permissions(&inner, fs::Permissions::from_mode(0o000)).expect("locks");
+    let found = drift(&folder, &files);
+    fs::set_permissions(&inner, fs::Permissions::from_mode(0o755)).expect("unlocks");
+    assert_eq!(found, vec!["envelope (unreadable)".to_owned()]);
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}
+
+#[test]
+fn write_restores_files_into_an_empty_expected_folder() {
+    let folder = load_scratch("drift-empty-expected");
+    let files = vec![
+        ("envelope/mod.rs".to_owned(), "pub mod a;\n".to_owned()),
+        ("mod.rs".to_owned(), "pub mod envelope;\n".to_owned()),
+    ];
+    fs::write(folder.join("mod.rs"), "pub mod envelope;\n").expect("mod.rs writes");
+    fs::create_dir(folder.join("envelope")).expect("the expected folder is made");
+    fs::create_dir(folder.join("stray")).expect("the stray folder is made");
+    assert_eq!(
+        drift(&folder, &files),
+        vec!["envelope/mod.rs".to_owned(), "stray".to_owned()]
+    );
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
 }

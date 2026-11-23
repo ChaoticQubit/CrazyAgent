@@ -107,9 +107,14 @@ fn a_fifo_plugin_toml_is_refused_without_waiting() {
         .status()
         .expect("mkfifo runs");
     assert!(made.success(), "the fifo is made");
-    let started = std::time::Instant::now();
-    assert_eq!(read_bounded(&file, MANIFEST_BYTES_MAX), Bounded::Unreadable);
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read_bounded(&file, MANIFEST_BYTES_MAX));
+    });
+    let read = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the read returns before the deadline instead of waiting on the fifo");
+    assert_eq!(read, Bounded::Unreadable);
 }
 
 /// A `plugin.toml` that is a link is refused, even to a valid file.
@@ -229,11 +234,18 @@ fn a_kind_or_permission_outside_the_character_rule_is_refused() {
 
 /// The dependencies of every dependency table in a `Cargo.toml` text, the `target.*`
 /// tables included: the table, the entry's key and the crate behind it, which is the
-/// `package` a renamed entry names, else the key (a `workspace = true` entry names its root
-/// entry by the key). Input: the text. Output: (table, key, crate), in table then key order.
-fn dependency_names(text: &str) -> Vec<(String, String, String)> {
+/// `package` a renamed entry names, else the key. A `workspace = true` entry is read from
+/// the root's `[workspace.dependencies]` entry of the same key, and an empty crate stands
+/// for a key the root does not hold. Inputs: the member text and the root text. Output:
+/// (table, key, crate), in table then key order.
+fn dependency_names(text: &str, root: &str) -> Vec<(String, String, String)> {
     const SECTIONS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
     let cargo: toml::Table = text.parse().expect("Cargo.toml parses");
+    let root: toml::Table = root.parse().expect("root Cargo.toml parses");
+    let inherited = root
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table);
     let mut tables: Vec<(String, &toml::Table)> = vec![(String::new(), &cargo)];
     if let Some(targets) = cargo.get("target").and_then(toml::Value::as_table) {
         for (cfg, table) in targets {
@@ -247,14 +259,21 @@ fn dependency_names(text: &str) -> Vec<(String, String, String)> {
         for section in SECTIONS {
             if let Some(deps) = table.get(section).and_then(toml::Value::as_table) {
                 for (key, entry) in deps {
-                    let package = entry
-                        .get("package")
-                        .map(|package| package.as_str().unwrap_or("").to_owned());
-                    names.push((
-                        format!("{prefix}{section}"),
-                        key.clone(),
-                        package.unwrap_or_else(|| key.clone()),
-                    ));
+                    let from_root =
+                        entry.get("workspace").and_then(toml::Value::as_bool) == Some(true);
+                    let entry = if from_root {
+                        inherited.and_then(|table| table.get(key))
+                    } else {
+                        Some(entry)
+                    };
+                    let krate = match entry {
+                        None => String::new(),
+                        Some(entry) => entry.get("package").map_or_else(
+                            || key.clone(),
+                            |package| package.as_str().unwrap_or("").to_owned(),
+                        ),
+                    };
+                    names.push((format!("{prefix}{section}"), key.clone(), krate));
                 }
             }
         }
@@ -280,8 +299,8 @@ const ALLOWED: [(&str, &str); 9] = [
 /// The entries of a `Cargo.toml` text whose crate is not on [`ALLOWED`] in its table,
 /// or whose key names another crate than the one behind it. Input: the text. Output: the
 /// (table, key, crate) of each.
-fn outside_allowlist(text: &str) -> Vec<(String, String, String)> {
-    dependency_names(text)
+fn outside_allowlist(text: &str, root: &str) -> Vec<(String, String, String)> {
+    dependency_names(text, root)
         .into_iter()
         .filter(|(table, key, krate)| {
             key != krate || !ALLOWED.contains(&(table.as_str(), krate.as_str()))
@@ -292,9 +311,10 @@ fn outside_allowlist(text: &str) -> Vec<(String, String, String)> {
 #[test]
 fn plugin_host_depends_on_no_sdk_or_engine_crate() {
     let text = include_str!("../Cargo.toml");
-    let outside = outside_allowlist(text);
+    let root = include_str!("../../../../Cargo.toml");
+    let outside = outside_allowlist(text, root);
     assert!(outside.is_empty(), "{outside:?}");
-    let mut direct: Vec<(String, String)> = dependency_names(text)
+    let mut direct: Vec<(String, String)> = dependency_names(text, root)
         .into_iter()
         .map(|(table, _, krate)| (table, krate))
         .collect();
@@ -312,14 +332,14 @@ fn the_allowlist_walks_target_tables() {
     let text = "[dependencies]\ntoml = \"1\"\n\n[target.'cfg(unix)'.dependencies]\ncrazyagent-sdk = { path = \"x\" }\n\n[target.'cfg(windows)'.dev-dependencies]\ncrazyagent = { path = \"y\" }\n";
     let pair = |table: &str, name: &str| (table.to_owned(), name.to_owned(), name.to_owned());
     assert_eq!(
-        dependency_names(text),
+        dependency_names(text, ""),
         vec![
             pair("dependencies", "toml"),
             pair("target.cfg(unix).dependencies", "crazyagent-sdk"),
             pair("target.cfg(windows).dev-dependencies", "crazyagent"),
         ]
     );
-    assert_eq!(outside_allowlist(text).len(), 2);
+    assert_eq!(outside_allowlist(text, "").len(), 2);
 }
 
 /// A renamed entry is judged by the crate behind it, so an allowed key
@@ -328,7 +348,7 @@ fn the_allowlist_walks_target_tables() {
 fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {
     let renamed = "[dependencies]\nserde = { package = \"crazyagent-sdk\", path = \"x\" }\n";
     assert_eq!(
-        outside_allowlist(renamed),
+        outside_allowlist(renamed, ""),
         vec![(
             "dependencies".to_owned(),
             "serde".to_owned(),
@@ -337,8 +357,9 @@ fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {
     );
     let workspace =
         "[dependencies]\ntoml = { workspace = true }\ncrazyagent = { workspace = true }\n";
+    let root = "[workspace.dependencies]\ntoml = \"1\"\ncrazyagent = { path = \"x\" }\n";
     assert_eq!(
-        outside_allowlist(workspace),
+        outside_allowlist(workspace, root),
         vec![(
             "dependencies".to_owned(),
             "crazyagent".to_owned(),
@@ -346,7 +367,29 @@ fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {
         )]
     );
     let odd = "[dependencies]\nserde = { package = 1 }\n";
-    assert_eq!(outside_allowlist(odd).len(), 1);
+    assert_eq!(outside_allowlist(odd, "").len(), 1);
+}
+
+/// A `workspace = true` entry is judged by the crate its root entry names, so an allowed
+/// key cannot carry an SDK or engine crate through a rename in the root table, and an
+/// entry the root does not hold is reported.
+#[test]
+fn the_allowlist_judges_the_crate_behind_an_inherited_entry() {
+    let member = "[dependencies]\ntoml = { workspace = true }\nserde = { workspace = true }\n";
+    let root = "[workspace]\nmembers = []\n\n[workspace.dependencies]\ntoml = { package = \"crazyagent-sdk\", version = \"1\" }\n";
+    assert_eq!(
+        outside_allowlist(member, root),
+        vec![
+            ("dependencies".to_owned(), "serde".to_owned(), String::new()),
+            (
+                "dependencies".to_owned(),
+                "toml".to_owned(),
+                "crazyagent-sdk".to_owned()
+            ),
+        ]
+    );
+    let plain = "[workspace.dependencies]\ntoml = \"1\"\nserde = { version = \"1\" }\n";
+    assert!(outside_allowlist(member, plain).is_empty());
 }
 
 /// A manifest text that asks for `net.request` and holds one `[net]` section. Input: the
@@ -396,6 +439,7 @@ fn a_valid_net_section_reads_its_hosts_and_captures() {
                 "github.com".to_owned(),
                 vec!["access_token".to_owned(), "device_code".to_owned()],
             )],
+            send: Vec::new(),
         })
     );
     assert_eq!(
@@ -591,4 +635,102 @@ fn a_hex_or_octal_ip_host_is_refused() {
         ))
         .is_ok()
     );
+}
+
+/// A `[net]` body with two hosts, one capture row and the given `[net.send]` lines.
+fn with_send(send: &str) -> String {
+    format!(
+        "hosts = [\"github.com\", \"api.github.com\"]\n\n[net.capture]\n\"github.com\" = [\"access_token\", \"device_code\"]\n\n[net.send]\n{send}"
+    )
+}
+
+#[test]
+fn a_valid_send_row_reads_its_hosts_and_keep_as() {
+    let text = net_text(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], keep_as = \"token\" }\ndevice_code = { hosts = [\"api.github.com\"] }\n",
+    ));
+    let read = manifest::parse(&text).unwrap().net.unwrap();
+    assert_eq!(
+        read.send,
+        vec![
+            manifest::NetSend {
+                field: "access_token".to_owned(),
+                hosts: vec!["api.github.com".to_owned()],
+                keep_as: Some("token".to_owned()),
+            },
+            manifest::NetSend {
+                field: "device_code".to_owned(),
+                hosts: vec!["api.github.com".to_owned()],
+                keep_as: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_send_row_for_an_uncaptured_field_is_refused() {
+    refused_net(&with_send(
+        "refresh_token = { hosts = [\"api.github.com\"] }\n",
+    ));
+}
+
+#[test]
+fn a_send_host_outside_hosts_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"uploads.github.com\"] }\n",
+    ));
+}
+
+#[test]
+fn an_empty_send_host_list_is_refused() {
+    refused_net(&with_send("access_token = { hosts = [] }\n"));
+}
+
+#[test]
+fn a_keep_as_the_store_refuses_is_refused_at_read() {
+    for name in ["a.", "token."] {
+        refused_net(&with_send(&format!(
+            "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
+        )));
+    }
+    for name in ["nul", "con", "nul.token"] {
+        let text = net_text(&with_send(&format!(
+            "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
+        )));
+        assert!(manifest::parse(&text).is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn a_duplicate_send_host_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\", \"api.github.com\"] }\n",
+    ));
+}
+
+#[test]
+fn a_reused_or_refused_keep_as_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], keep_as = \"token\" }\ndevice_code = { hosts = [\"api.github.com\"], keep_as = \"token\" }\n",
+    ));
+    for name in ["", "Token", ".token", "a..b", "a b"] {
+        refused_net(&with_send(&format!(
+            "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
+        )));
+    }
+    refused_net(&with_send(&format!(
+        "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{}\" }}\n",
+        "t".repeat(manifest::KEEP_AS_BYTES_MAX + 1)
+    )));
+}
+
+#[test]
+fn an_unknown_send_key_or_type_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], to = [\"github.com\"] }\n",
+    ));
+    refused_net(&with_send("access_token = [\"api.github.com\"]\n"));
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], keep_as = 1 }\n",
+    ));
 }

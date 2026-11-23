@@ -43,6 +43,7 @@ pub mod landing_turns;
 pub mod launch_context;
 pub mod learning;
 pub mod ledger;
+pub mod log_compaction;
 pub mod master_frame_limit;
 pub mod master_session;
 pub mod master_sessions;
@@ -81,6 +82,7 @@ pub mod sandbox_settings;
 pub mod scheduling;
 /// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
 /// gateway's grant check and the bundled agent-quit plugin.
+pub mod sdk_processes;
 mod sdk_slice;
 /// The SDK providers the kernel security crate backs: the secrets capabilities over the
 /// OS store, and `Absent`, which fails every call without opening anything.

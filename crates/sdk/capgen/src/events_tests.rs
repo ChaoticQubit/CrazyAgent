@@ -134,7 +134,18 @@ fn an_event_named_like_a_type_is_refused() {
         let source = format!(
             "{item}\ncapability x.go() -> unit tier: t1 needs: x.y emits: {name} {{ b: u16 }}"
         );
-        for refusal in refused_by_all(&[("x", &source)]) {
+        let parsed_first = crazyagent_cap::parse_as("x", &source).expect_err("cap refuses first");
+        assert_eq!(parsed_first.code, "cap_duplicate_name", "{item}");
+        assert_eq!(parsed_first.line, 2, "{item}");
+        let renamed = source.replace(&format!("emits: {name} "), "emits: Other ");
+        let mut files = parsed(&[("x", &renamed)]);
+        files[0].1.capabilities[0].emits[0].kind = name.to_owned();
+        let refusals = [
+            rust(&files).expect_err("rust refuses"),
+            ts(&files).expect_err("ts refuses"),
+            wit(&files).expect_err("wit refuses"),
+        ];
+        for refusal in refusals {
             assert_eq!(refusal.code, "capgen_name_collision", "{item}: {refusal:?}");
             assert_eq!(refusal.file, "x.cap", "{item}");
             assert_eq!(refusal.detail, name, "{item}");

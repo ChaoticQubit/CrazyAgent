@@ -1,4 +1,5 @@
 use super::{draw_page, step};
+use crate::log_compaction::{HELP, LABEL, LogCompaction, LogCompactionView};
 use crate::restore::RestoreState;
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
@@ -42,7 +43,9 @@ const BUSY: &str = "Something else had CrazyAgent's data open, so your 2.4 data 
     back. Close other CrazyAgent windows, then try again.";
 const FAILED: &str =
     "Your 2.4 data wasn't brought back, and CrazyAgent went on with your 2.5 data. Try again.";
+const BROKEN: &str = "Restore did not finish. Your data is safe in a backup.";
 const BUTTON: &str = "Bring back 2.4 data";
+const COMPACTION_UNSAVED: &str = "The compaction switch wasn't saved. Try again.";
 const TEXT_WIDTH: usize = 72;
 const MODAL_TEXT: usize = 54;
 
@@ -52,6 +55,7 @@ pub fn plain(code: &str) -> &'static str {
     let said = match code {
         "engine_restoring" => RESTORING,
         "engine_restored" => RESTORED,
+        "engine_restore_broken" => BROKEN,
         "storage_restore_unavailable" => RESTORE_NONE,
         "storage_restore_agents_running" => AGENTS_RUNNING,
         "storage_restore_busy" => BUSY,
@@ -64,7 +68,7 @@ pub fn plain(code: &str) -> &'static str {
 /// The problem a failed connect to the TUI's own engine shows: the restore that holds the
 /// engine, as the desktop's connect names it (L5 F1), else the problem unchanged. Inputs:
 /// the problem, the engine root and whether its login service still runs a process.
-/// Output: `engine_restoring`, `engine_restored` or the problem.
+/// Output: `engine_restoring`, `engine_restored`, `engine_restore_broken` or the problem.
 pub fn held(problem: String, root: &Path, running: bool) -> String {
     assert!(!problem.is_empty(), "a failed connect names its problem");
     let Some(code) = crate::restore::blocks_start(root, running) else {
@@ -77,7 +81,9 @@ pub fn held(problem: String, root: &Path, running: bool) -> String {
 /// Whether a code is one a restore holds the engine with, which the TUI shows in the
 /// restore's own sentence. Input: the code. Output: the answer.
 pub fn holds(code: &str) -> bool {
-    code == crate::restore::ENGINE_RESTORING || code == crate::restore::ENGINE_RESTORED
+    code == crate::restore::ENGINE_RESTORING
+        || code == crate::restore::ENGINE_RESTORED
+        || code == crate::restore::ENGINE_RESTORE_BROKEN
 }
 
 /// What the page shows: whether the button is offered, the line under the tabs and the last
@@ -91,7 +97,8 @@ pub struct Offer {
 
 /// The page for the pinned backup's end and the last restore. Inputs: the end in epoch
 /// milliseconds, the record's state, now and the UTC offset. Output: what the page shows; a
-/// restore is offered only while the backup lasts and none runs or brought the data back.
+/// restore is offered only while the backup lasts and none runs, did not finish or brought
+/// the data back.
 pub fn offer(until_ms: Option<i64>, last: Option<&RestoreState>, now: i64, offset: i64) -> Offer {
     let failure = match last {
         Some(RestoreState::Failed { code }) => Some(plain(code).to_owned()),
@@ -99,6 +106,9 @@ pub fn offer(until_ms: Option<i64>, last: Option<&RestoreState>, now: i64, offse
     };
     let (offer, line) = match (last, until_ms) {
         (Some(RestoreState::Pending), _) => (false, RESTORE_RUNNING.to_owned()),
+        (Some(RestoreState::Restoring { .. } | RestoreState::Broken { .. }), _) => {
+            (false, BROKEN.to_owned())
+        }
         (Some(RestoreState::Restored { .. }), _) => (false, RESTORED.to_owned()),
         (_, None) => (false, RESTORE_NONE.to_owned()),
         (_, Some(until)) => (
@@ -117,6 +127,20 @@ pub fn offer(until_ms: Option<i64>, last: Option<&RestoreState>, now: i64, offse
     assert!(!shown.offer || until_ms.is_some());
     assert!(shown.failure.is_none() || matches!(last, Some(RestoreState::Failed { .. })));
     shown
+}
+
+/// The compaction row's lines for the engine's read of the switch: the label with the
+/// stored choice and the help line, only in a dev build, none before the read or in any
+/// other build. Input: the read. Output: the lines.
+pub fn compaction_lines(view: Option<&LogCompactionView>) -> Vec<String> {
+    let Some(view) = view.filter(|view| view.dev_build) else {
+        return Vec::new();
+    };
+    let state = match view.choice {
+        LogCompaction::Off => "Off",
+        LogCompaction::On => "On",
+    };
+    vec![format!("{LABEL}: {state}"), HELP.to_owned()]
 }
 
 /// Whether Settings shows Restore 2.4 for the engine at `root`: it has a pinned 2.4 backup or
@@ -155,6 +179,8 @@ pub struct RestorePage {
     asking: bool,
     confirm_focused: bool,
     sending: bool,
+    compaction: Option<LogCompactionView>,
+    switching: bool,
 }
 
 impl RestorePage {
@@ -170,7 +196,31 @@ impl RestorePage {
             asking: false,
             confirm_focused: false,
             sending: false,
+            compaction: None,
+            switching: false,
         }
+    }
+
+    /// Sends the other compaction choice once, while the row shows and no save runs. Input:
+    /// the context. Output: whether a save was sent.
+    fn switch_compaction(&mut self, ctx: &mut Ctx) -> bool {
+        let Some(view) = self.compaction.filter(|view| view.dev_build) else {
+            return false;
+        };
+        if self.switching {
+            return false;
+        }
+        let choice = match view.choice {
+            LogCompaction::Off => LogCompaction::On,
+            LogCompaction::On => LogCompaction::Off,
+        };
+        self.switching = true;
+        let generation = ctx.next_generation();
+        send(
+            ctx,
+            SettingsJob::AppSetup(AppSetupJob::SetLogCompaction { choice, generation }),
+        );
+        true
     }
 
     fn confirm_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -227,6 +277,9 @@ impl Screen for RestorePage {
         if self.shown.offer && !self.sending {
             hints.push(hint("Enter", BUTTON));
         }
+        if !compaction_lines(self.compaction.as_ref()).is_empty() && !self.switching {
+            hints.push(hint("c", LABEL));
+        }
         hints.push(sections_hint(ctx.glyphs));
         hints.push(hint("Esc", "Home"));
         hints
@@ -242,6 +295,7 @@ impl Screen for RestorePage {
                 self.confirm_focused = false;
                 Flow::Handled
             }
+            Key::Char('c') if self.switch_compaction(ctx) => Flow::Handled,
             _ => Flow::Ignored,
         }
     }
@@ -256,11 +310,23 @@ impl Screen for RestorePage {
             self.shown = read(ctx);
             return Flow::Handled;
         }
-        if let Some(SettingsEvent::AppSetup(AppSetupEvent::Restored(result))) =
-            settings_event(arrival)
-            && self.sending
-        {
-            self.answered(result, ctx);
+        match settings_event(arrival) {
+            Some(SettingsEvent::AppSetup(AppSetupEvent::Restored(result))) if self.sending => {
+                self.answered(result, ctx);
+            }
+            Some(SettingsEvent::AppSetup(AppSetupEvent::LogCompaction(result))) => {
+                self.compaction = result.as_ref().ok().copied();
+            }
+            Some(SettingsEvent::AppSetup(AppSetupEvent::LogCompactionSet(result)))
+                if self.switching =>
+            {
+                self.switching = false;
+                if result.is_err() {
+                    ctx.say(Message::warning(COMPACTION_UNSAVED, ""));
+                }
+                send(ctx, SettingsJob::AppSetup(AppSetupJob::LogCompaction));
+            }
+            _ => {}
         }
         Flow::Handled
     }
@@ -268,6 +334,9 @@ impl Screen for RestorePage {
     fn shown(&mut self, ctx: &mut Ctx) {
         if !self.asking && !self.sending {
             self.shown = read(ctx);
+        }
+        if !self.switching {
+            send(ctx, SettingsJob::AppSetup(AppSetupJob::LogCompaction));
         }
     }
 
@@ -300,6 +369,16 @@ impl Screen for RestorePage {
         } else if self.shown.offer {
             content.push(Line::default());
             content.push(buttons(&[BUTTON], Some(0), &ctx.theme));
+        }
+        let compaction = compaction_lines(self.compaction.as_ref());
+        if let [row, help] = compaction.as_slice() {
+            content.push(Line::default());
+            content.push(Line::raw(row.clone()));
+            content.extend(
+                wrap(help, width)
+                    .into_iter()
+                    .map(|line| styled(line, Role::Muted, &ctx.theme)),
+            );
         }
         draw_page(frame, area, SettingsSection::Restore, content, None, ctx)
     }

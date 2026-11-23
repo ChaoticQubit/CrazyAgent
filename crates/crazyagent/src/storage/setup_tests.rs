@@ -2349,20 +2349,27 @@ fn removing_a_project_keeps_the_hooks_a_new_pin_matches_by_what_they_run() {
 fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_is_recorded_as_failed() {
     use kernel_storage::restore::{PinCheck, Restored};
     let kept = Path::new("/engine/backups/replaced-20261122T110000Z").to_path_buf();
-    let failed = |text: String| restore_line(&Err(EngineError(text)));
+    let failed = |text: String| restore_line(&Err(EngineError(text)), None);
+    let named = Some("replaced-20261122T110000Z");
 
     assert_eq!(
-        restore_line(&Ok(Restored {
-            kept: kept.clone(),
-            pin: PinCheck::Digest,
-        })),
+        restore_line(
+            &Ok(Restored {
+                kept: kept.clone(),
+                pin: PinCheck::Digest,
+            }),
+            named
+        ),
         "restored replaced-20261122T110000Z"
     );
     assert_eq!(
-        restore_line(&Ok(Restored {
-            kept,
-            pin: PinCheck::Unverified,
-        })),
+        restore_line(
+            &Ok(Restored {
+                kept,
+                pin: PinCheck::Unverified,
+            }),
+            None
+        ),
         "restored replaced-20261122T110000Z unverified_pin"
     );
     assert_eq!(
@@ -2379,6 +2386,18 @@ fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_is_recorded_as_fai
             kernel_storage::restore::RESTORE_ROLLBACK_FAILED
         )),
         "failed storage_restore_rollback_failed"
+    );
+    let rollback = format!(
+        "{}: check; the rollback failed: check; the replaced data stays in /x",
+        kernel_storage::restore::RESTORE_ROLLBACK_FAILED
+    );
+    assert_eq!(
+        restore_line(&Err(EngineError(rollback)), named),
+        "failed storage_restore_rollback_failed replaced-20261122T110000Z"
+    );
+    assert_eq!(
+        restore_line(&Err(EngineError("storage_restore_busy".into())), named),
+        "failed storage_restore_busy"
     );
 }
 

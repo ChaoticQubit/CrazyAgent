@@ -113,10 +113,9 @@ pub fn check_command(
     limit: Duration,
     check: kernel_sandbox::profile::command::LineageCheck,
 ) -> Result<Vec<String>, &'static str> {
-    use crate::harnesses::leftovers::{
-        self, Follower, HoldBy, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped,
-    };
+    use crate::harnesses::leftovers::{self, Follower, HoldBy, Lineage, Unstopped};
     use kernel_sandbox::profile::command::LineageCheck;
+    use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
     let token = match check {
         LineageCheck::Unneeded => None,
         LineageCheck::FullAccess | LineageCheck::Sandboxed => {

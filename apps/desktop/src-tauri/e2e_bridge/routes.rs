@@ -44,6 +44,27 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let mut bridge = lock(state).await?; bridge.connect().await }.await;
             routed(result)
         }
+        "desktop_restore_recovery" => {
+            let result: Result<_, BridgeError> = async { let (layout, running) = restore::engine()?; restore::blocking(move || restore::recovery(layout.root(), running)).await }.await;
+            routed(result)
+        }
+        "desktop_restore_recover" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                action: String,
+            }
+            let Args { action } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let (layout, running) = restore::engine()?; let settings = (layout.global_settings(), layout.project_settings()); restore::blocking(move || { restore::recover(layout.root(), running, &action, (&settings.0, &settings.1)) }) .await }.await;
+            routed(result)
+        }
+        "desktop_restore_open_backups" => {
+            let result: Result<_, BridgeError> = async { let (layout, _) = restore::engine()?; let folder = crazyagent::restore::backups(layout.root()); restore::blocking(move || crazyagent::platform::reveal(&folder)).await }.await;
+            routed(result)
+        }
         "desktop_status" => {
             let result: Result<_, BridgeError> = async { Ok(read(state).await?.status()) }.await;
             routed(result)
@@ -1524,7 +1545,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_native_terminal_enabled" => {
-            let result: Result<_, BridgeError> = async { Ok(cfg!(target_os = "macos")) }.await;
+            let result: Result<_, BridgeError> = async { Ok(native_enabled()) }.await;
             routed(result)
         }
         "desktop_team_terminals_per_window" => {
@@ -2630,6 +2651,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
         }
         "desktop_provider_retry" => {
             let result: Result<_, BridgeError> = async { lock(state).await?.provider_retry().await }.await;
+            routed(result)
+        }
+        "desktop_log_compaction" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.log_compaction().await }.await;
+            routed(result)
+        }
+        "desktop_set_log_compaction" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                choice: crazyagent::log_compaction::LogCompaction,
+                generation: u64,
+            }
+            let Args { choice, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_log_compaction(choice, generation) .await }.await;
             routed(result)
         }
         "desktop_set_provider_retry" => {

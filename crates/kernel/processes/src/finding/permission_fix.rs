@@ -21,8 +21,8 @@ const PREFIX_DEPTH_MIN: usize = 3;
 /// manager owns how they are laid out.
 const MANAGED_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
 
-/// What one permission fix changes (DEC-162): a prefix walked as a whole tree, or one folder
-/// or file alone.
+/// What one permission fix changes: a prefix walked as a whole tree, or one folder or file
+/// alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
     pub path: PathBuf,
@@ -172,7 +172,7 @@ pub fn fix(target: &Target, places: &Places) -> Result<Report, &'static str> {
 }
 
 /// Removes group and other write from a tree inside the engine's own setup folder after
-/// setup installs into it, since uv writes files under the process umask (DEC-162 R2).
+/// setup installs into it, since uv writes files under the process umask.
 /// Inputs: the setup folder and the tree. Output: the report, or the code as for [`fix`].
 #[cfg(unix)]
 pub fn tighten_setup(setup: &Path, tree: &Path) -> Result<Report, &'static str> {

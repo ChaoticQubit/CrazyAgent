@@ -9,8 +9,9 @@ use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::team::{AgentStatus, NodeKind};
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+use crazyagent::terminal::tmux::installed;
 use crazyagent::terminal::{FOLDER, TerminalFrame};
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -96,7 +97,12 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
         let agent = agent.clone();
         let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crazyagent::sandbox::confinement(),
+                crazyagent::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,
@@ -289,7 +295,12 @@ impl SubAgent {
         let launcher = {
             let agent = agent.clone();
             tokio::task::spawn_blocking(move || {
-                let launcher = Tmux::open(Some(tmux), &folder);
+                let launcher = Tmux::open(
+                    Some(tmux),
+                    &folder,
+                    crazyagent::sandbox::confinement(),
+                    crazyagent::terminal::tmux::tmux_hooks(),
+                );
                 launcher
                     .spawn(
                         &agent,

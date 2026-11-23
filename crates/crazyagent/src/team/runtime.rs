@@ -2649,7 +2649,7 @@ impl TeamRuntime {
             .state
             .parent()
             .zip(AgentId::team(lead).ok())
-            .and_then(|(root, lead)| crate::terminal::teammates_socket(root, &lead).ok()));
+            .and_then(|(root, lead)| crate::terminal::tmux::teammates_socket(root, &lead).ok()));
         #[cfg(not(unix))]
         {
             let _ = lead;
@@ -9319,12 +9319,14 @@ impl TeamRuntime {
                     Some(kernel_processes::terminal::OWN_SERVER_UNAVAILABLE),
                 )
             })?;
-        let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
+        let socket = scratch.join(kernel_processes::terminal::HARNESS_SOCKET);
         assert!(
             self.state
                 .parent()
                 .zip(AgentId::team(id).ok())
-                .and_then(|(runtime, lead)| crate::terminal::harness_socket(runtime, &lead).ok())
+                .and_then(
+                    |(runtime, lead)| crate::terminal::tmux::harness_socket(runtime, &lead).ok()
+                )
                 .is_some_and(|named| named == socket),
             "the lead's own socket is the one the terminal host routes to"
         );
@@ -9334,11 +9336,11 @@ impl TeamRuntime {
             .ok_or("the team state folder has no engine root")?;
         let lead = AgentId::team(id)
             .map_err(|e| with_code("the lead has no terminal name", Some(&e.0)))?;
-        let mates_socket = crate::terminal::renew_teammates_socket(runtime, &lead)
+        let mates_socket = crate::terminal::tmux::renew_teammates_socket(runtime, &lead)
             .map_err(|e| with_code("the teammates' socket could not be named", Some(&e.0)))?;
         assert!(
             mates_socket.parent() == Some(scratch)
-                && crate::terminal::teammates_socket(runtime, &lead)
+                && crate::terminal::tmux::teammates_socket(runtime, &lead)
                     .is_ok_and(|named| named == mates_socket),
             "the teammates' socket is the one the terminal host routes to"
         );
@@ -9834,7 +9836,8 @@ impl TeamRuntime {
         expose_graph(&root, &working_dir)?;
         #[cfg(target_os = "macos")]
         if let Some(runtime) = self.state.parent() {
-            use crate::sandbox::tool_cache::{CacheShape, grant};
+            use crate::sandbox::tool_cache::grant;
+            use kernel_sandbox::tool_cache::CacheShape;
             let shape = match layout {
                 Layout::Linked => CacheShape::Worktree,
                 Layout::Clone => CacheShape::Clone,
@@ -14476,9 +14479,7 @@ fn listed_handover(
                 Some(&error.0),
             )
         })?;
-    assert!(crate::model_gateway::relay::is_placeholder(
-        handover.token()
-    ));
+    assert!(kernel_common::relay_names::is_placeholder(handover.token()));
     Ok(Some(handover))
 }
 

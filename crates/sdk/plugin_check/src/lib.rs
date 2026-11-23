@@ -23,6 +23,7 @@ pub struct Violation {
 /// Output: nothing, or every violation sorted by file, line and code.
 pub fn check_crate(dir: &Path) -> Result<(), Vec<Violation>> {
     let mut out = Vec::new();
+    root_entries(dir, &mut out);
     manifest::cargo(dir, &mut out);
     manifest::build_script(dir, &mut out);
     if let Err(violation) = read_manifest(dir) {
@@ -89,22 +90,51 @@ pub fn check_plugins(root: &Path) -> Result<(), Vec<Violation>> {
 /// folder it shows. It is never Rust source and never a crate.
 pub const FINDER_FILE: &str = ".DS_Store";
 
+/// The entries a plugin crate folder may hold, besides a Finder file. The target folders
+/// `manifest.rs` already refuses are reported there, never twice.
+pub const ROOT_ALLOWED: [&str; 4] = ["Cargo.toml", "build.rs", "plugin.toml", "src"];
+
+/// Refuses every crate-root entry outside `ROOT_ALLOWED` with `plugin_tree_not_allowed`.
+/// Inputs: the crate folder and the violation list. Output: the list grows.
+fn root_entries(dir: &Path, out: &mut Vec<Violation>) {
+    for name in entries(dir, Path::new("."), out) {
+        let Some(text) = name.to_str() else {
+            out.push(tree(name));
+            continue;
+        };
+        if !ROOT_ALLOWED.contains(&text) && !manifest::TARGETS_NOT_ALLOWED.contains(&text) {
+            out.push(tree(name));
+        }
+    }
+}
+
+/// Whether a folder entry is the Finder file the checks skip: named `FINDER_FILE` and a
+/// regular file, never a folder or a symlink. Inputs: the folder and the entry name.
+/// Output: true to skip it.
+pub(crate) fn is_finder_file(folder: &Path, name: &std::ffi::OsStr) -> bool {
+    name == FINDER_FILE
+        && std::fs::symlink_metadata(folder.join(name)).is_ok_and(|meta| meta.is_file())
+}
+
 /// The most bundled plugins the central check walks.
 pub const PLUGINS_MAX: usize = 1_024;
 
-/// The sorted entry names of one folder; an unreadable folder is one violation.
-/// Inputs: the folder, its name below the plugins folder and the violation list.
-/// Output: the names.
+/// The sorted entry names of one folder, a Finder file left out; an unreadable folder or
+/// entry is a violation at that folder. Inputs: the folder, its name in violations and the
+/// violation list. Output: the names.
 fn entries(folder: &Path, below: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
     let Ok(read) = std::fs::read_dir(folder) else {
         out.push(tree(below.to_path_buf()));
         return Vec::new();
     };
-    let mut names: Vec<PathBuf> = read
-        .flatten()
-        .filter(|entry| entry.file_name() != FINDER_FILE)
-        .map(|entry| PathBuf::from(entry.file_name()))
-        .collect();
+    let mut names = Vec::new();
+    for entry in read {
+        match entry {
+            Ok(entry) if is_finder_file(folder, &entry.file_name()) => {}
+            Ok(entry) => names.push(PathBuf::from(entry.file_name())),
+            Err(_) => out.push(tree(below.to_path_buf())),
+        }
+    }
     names.sort();
     names
 }

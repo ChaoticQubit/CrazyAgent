@@ -17,22 +17,35 @@ impl Places {
     /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.
     /// Output: the bounded places.
     pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>, seed: FindingSeed) -> Self {
-        Self::kept(folders, home, Vec::new(), false, Some(Vec::new()), seed)
+        Self::kept(
+            folders,
+            Vec::new(),
+            home,
+            Vec::new(),
+            false,
+            (Some(Vec::new()), Vec::new()),
+            seed,
+        )
     }
 
-    /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
-    /// one agents can write, at most [`PLACES_MAX`], and sets aside one of those in an engine
-    /// `setup` folder ([`Places::in_engine_setup`]). Inputs: the folders, HOME, the engine
-    /// data folders, whether probed temp folders are refused and the set-up projects' folders,
-    /// none when they could not be read, and the seed. Output: the bounded places.
+    /// Keeps the folders in order, then the fallback folders, dropping relative, oversized
+    /// and repeated ones and every one agents can write, at most [`PLACES_MAX`], and sets
+    /// aside one of those in an engine `setup` folder ([`Places::in_engine_setup`]). The
+    /// ordinary folders fill only the room the fallback folders leave, so those are always
+    /// kept, last. Inputs: the folders, the fallback folders (the system's, then the
+    /// engine's), HOME, the engine data folders, whether probed temp folders are refused, the
+    /// set-up projects' folders, none when they could not be read, with the last good read's
+    /// folders kept for that case, and the seed. Output: the bounded places.
     pub(super) fn kept(
         folders: Vec<PathBuf>,
+        tail: Vec<PathBuf>,
         home: Option<PathBuf>,
         engine_roots: Vec<PathBuf>,
         temp_refused: bool,
-        projects: Option<Vec<PathBuf>>,
+        (projects, last_good): (Option<Vec<PathBuf>>, Vec<PathBuf>),
         seed: FindingSeed,
     ) -> Self {
+        assert!(projects.is_none() || last_good.is_empty());
         let hooks = seed.hooks;
         let mut places = Self {
             folders: Vec::new(),
@@ -51,11 +64,17 @@ impl Places {
             refused_temp: Vec::new(),
             app_folder: None,
             projects,
+            last_good,
             seed,
         };
-        for folder in folders {
-            if places.folders.len() == PLACES_MAX {
-                break;
+        assert!(tail.len() <= SYSTEM_FOLDERS.len() + 3 * 2);
+        let room = PLACES_MAX - tail.len();
+        let ordinary = folders.into_iter().map(|folder| (folder, room));
+        let last = tail.into_iter().map(|folder| (folder, PLACES_MAX));
+        for (folder, cap) in ordinary.chain(last) {
+            if places.folders.len() == cap {
+                assert!(cap == room);
+                continue;
             }
             if !usable(&folder) || places.folders.contains(&folder) {
                 continue;
@@ -156,8 +175,8 @@ impl Places {
         }
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
-        folders.extend(system);
-        folders.extend(
+        let mut tail = system;
+        tail.extend(
             engine_root
                 .into_iter()
                 .flat_map(|root| engine_folders(&hooks, root)),
@@ -168,10 +187,11 @@ impl Places {
                 .map(Path::to_path_buf),
             ..Self::kept(
                 folders,
+                tail,
                 home,
                 engine_roots(&hooks, engine_root),
                 true,
-                Some(Vec::new()),
+                (Some(Vec::new()), Vec::new()),
                 seed,
             )
             .set_aside_temp(temp)
@@ -191,7 +211,8 @@ impl Places {
     /// root this process recorded given explicitly so rows never record the global. With an
     /// engine root given or recorded, the set-up projects are read from its `engine.db` on
     /// every build, so a project set up after the engine started counts
-    /// ([`FindingHooks::registered_projects`]); with neither, only the `.crazyagent` folder marks a project.
+    /// ([`FindingHooks::registered_projects`]); a failed read keeps that data folder's last
+    /// good read ([`last_good_read`]); with neither, only the `.crazyagent` folder marks a project.
     /// Inputs: the engine root given, if any, the recorded one and the seed. Output: the
     /// places.
     pub(super) fn at_roots(
@@ -209,9 +230,14 @@ impl Places {
         let data_root = engine_root
             .map(Path::to_path_buf)
             .or_else(|| seed.layout_root.clone());
+        let (projects, last_good) = match engine_root {
+            Some(root) => last_good_read(&hooks, root, (hooks.registered_projects)(root)),
+            None => (Some(Vec::new()), Vec::new()),
+        };
         Self {
             engine_roots: engine_roots(&hooks, data_root.as_deref()),
-            projects: engine_root.map_or_else(|| Some(Vec::new()), hooks.registered_projects),
+            projects,
+            last_good,
             ..Self::engine(
                 engine_root,
                 app.as_deref(),
@@ -253,16 +279,16 @@ impl Places {
             .filter(|folder| !tail.contains(folder))
             .partition(|folder| temp_refused && in_temp(&self.seed.hooks, folder));
         folders.extend(probed);
-        folders.extend(last);
         let set_aside = self.refused_setup;
         let carried = self.refused_temp;
         let app_folder = self.app_folder;
         let mut places = Self::kept(
             folders,
+            last,
             self.home,
             self.engine_roots,
             temp_refused,
-            self.projects,
+            (self.projects, self.last_good),
             self.seed,
         );
         for folder in set_aside {
@@ -282,9 +308,9 @@ impl Places {
     }
 
     /// The copy of a tool the app ships beside the engine, looked at before every folder and
-    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`
-    /// (DEC-157), none for any other name or with no app folder. Input: the program name.
-    /// Output: the file, which may not exist.
+    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`,
+    /// none for any other name or with no app folder. Input: the program name. Output: the
+    /// file, which may not exist.
     pub fn bundled(&self, name: &str) -> Option<PathBuf> {
         let file = match name {
             "tmux" => BUNDLED_TMUX,
@@ -325,7 +351,7 @@ impl Places {
     /// would trust its files: an absolute folder that exists, none agents can write
     /// ([`Places::agent_writable`]) or another user or group can change, no link on its way
     /// another can move ([`Places::link_hops_kept`]) and, on the engine's places, none in a
-    /// temp folder (RV-DS241-157). Input: the folder. Output: the answer.
+    /// temp folder. Input: the folder. Output: the answer.
     pub fn kept_for_children(&self, folder: &Path) -> bool {
         folder.is_absolute()
             && folder.is_dir()
@@ -388,13 +414,17 @@ impl Places {
 
     /// Whether a path lies in a folder the engine names for agents ([`FindingHooks::registered_projects`]),
     /// which they can write whole. When those could not be read it fails closed: every path
-    /// outside the engine's data folder counts, under HOME and outside HOME too unless it
-    /// lies under an install root ([`Places::installed`]) or the app's folder, since a
-    /// repository the engine registered may lie anywhere. Inputs: HOME's names
-    /// ([`home_names`]) and the path. Output: the answer.
+    /// under a folder the last good read named counts, then every path outside the engine's
+    /// data folder, under HOME and outside HOME too unless it lies under an install root
+    /// ([`Places::installed`]) or the app's folder, since a repository the engine registered
+    /// may lie anywhere. Inputs: HOME's names ([`home_names`]) and the path. Output: the
+    /// answer.
     pub(super) fn in_set_up_project(&self, homes: &[PathBuf], path: &Path) -> bool {
         assert!(homes.len() <= 4);
         let Some(roots) = &self.projects else {
+            if self.last_good.iter().any(|root| path.starts_with(root)) {
+                return true;
+            }
             if self.engine_roots.iter().any(|root| path.starts_with(root)) {
                 return false;
             }
@@ -422,4 +452,44 @@ impl Places {
                 .as_deref()
                 .is_some_and(|folder| path.starts_with(folder))
     }
+}
+
+/// Keeps one data folder's read of the set-up projects as its last good read, or takes that
+/// read back when this one failed, so a folder the engine named stays one agents can write
+/// while engine.db cannot be read, after the engine restarts too. A good read that differs
+/// from the kept one goes to the engine's store ([`FindingHooks::last_good_store`]) and
+/// replaces the folder's entry; a failed read with no entry takes what the store holds
+/// ([`FindingHooks::last_good_load`]). Past [`LAST_GOOD_ROOTS_MAX`] folders a new one is not
+/// kept in memory. Inputs: the hooks, the data folder and this read, none when it failed.
+/// Output: the read, and the last good folders when it failed.
+fn last_good_read(
+    hooks: &FindingHooks,
+    data_root: &Path,
+    read: Option<Vec<PathBuf>>,
+) -> (Option<Vec<PathBuf>>, Vec<PathBuf>) {
+    let mut kept = LAST_GOOD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(kept.len() <= LAST_GOOD_ROOTS_MAX);
+    let Some(roots) = read else {
+        if let Some(last) = kept.get(data_root) {
+            return (None, last.clone());
+        }
+        let stored = (hooks.last_good_load)(data_root).unwrap_or_default();
+        assert!(stored.len() <= PROJECT_ROOTS_MAX);
+        assert!(stored.iter().all(|root| root.is_absolute()));
+        if !stored.is_empty() && kept.len() < LAST_GOOD_ROOTS_MAX {
+            kept.insert(data_root.to_path_buf(), stored.clone());
+        }
+        return (None, stored);
+    };
+    assert!(roots.len() <= PROJECT_ROOTS_MAX);
+    if kept.get(data_root) != Some(&roots) {
+        (hooks.last_good_store)(data_root, &roots);
+    }
+    if kept.contains_key(data_root) || kept.len() < LAST_GOOD_ROOTS_MAX {
+        kept.insert(data_root.to_path_buf(), roots.clone());
+    }
+    assert!(kept.len() <= LAST_GOOD_ROOTS_MAX);
+    (Some(roots), Vec::new())
 }

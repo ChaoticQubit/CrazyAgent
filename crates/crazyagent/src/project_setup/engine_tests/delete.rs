@@ -1477,7 +1477,7 @@ async fn removing_a_project_takes_its_tool_cache_and_keeps_one_another_project_u
         );
     }
     let cache = |of: &std::path::Path| {
-        crate::sandbox::tool_cache::project_folder(engine.root.path(), of.to_str().unwrap())
+        kernel_sandbox::tool_cache::project_folder(engine.root.path(), of.to_str().unwrap())
     };
     for of in [&folder, &shared] {
         std::fs::create_dir_all(cache(of).join("sandboxed-worktree").join("uv")).unwrap();
@@ -1522,7 +1522,7 @@ async fn a_stale_tool_cache_record_never_takes_the_cache_of_a_project_added_agai
     let (_, folder) = project(&mut owner).await;
     let (service, service_folder) = service(&mut owner, 2).await;
     let cache = |of: &std::path::Path| {
-        crate::sandbox::tool_cache::project_folder(engine.root.path(), of.to_str().unwrap())
+        kernel_sandbox::tool_cache::project_folder(engine.root.path(), of.to_str().unwrap())
     };
     for of in [&folder, &service_folder] {
         std::fs::create_dir_all(cache(of).join("sandboxed-worktree").join("uv")).unwrap();

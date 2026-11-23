@@ -7,7 +7,7 @@ use crate::activity::ActivityKind;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::storage::versioned;
-use crate::terminal::type_prompt;
+use kernel_processes::terminal::type_prompt;
 use kernel_processes::terminal::{AgentId, Host, HostError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};

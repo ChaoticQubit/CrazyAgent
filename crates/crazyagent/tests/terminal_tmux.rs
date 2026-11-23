@@ -2,9 +2,10 @@
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::harnesses::terminal_session::end_left_pane;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+use crazyagent::terminal::tmux::installed;
 use crazyagent::terminal::{FOLDER, plain_reason, platform, renew_once};
 use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{
     AgentId, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream, VIEWER_BUFFER_BYTES_MAX,
     VIEWERS_MAX, quit,
@@ -143,7 +144,12 @@ fn an_agent_terminal_takes_input_resizes_and_survives_a_new_engine_client() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let agent = AgentId::team(1).unwrap();
     let command = shell(
         root.path(),
@@ -206,7 +212,12 @@ fn an_agent_terminal_takes_input_resizes_and_survives_a_new_engine_client() {
     drop(stream);
     drop(host);
 
-    let again = Tmux::open(Some(tmux), &folder);
+    let again = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     assert_eq!(
         again.alive().unwrap(),
         std::slice::from_ref(&agent),
@@ -246,7 +257,12 @@ fn arguments_and_environment_reach_the_agent_exactly() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host = Tmux::open(Some(tmux), &folder);
+    let host = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let agent = AgentId::new("research-7").unwrap();
     let tricky = "a\"b\\c $HOME #x ~y'z;\nline2";
     let command = shell(
@@ -303,8 +319,18 @@ fn a_host_without_tmux_reports_every_call_unavailable() {
     let agent = AgentId::team(2).unwrap();
     let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
     for host in [
-        Tmux::open(None, &folder),
-        Tmux::open(Some(PathBuf::from("tmux")), &folder),
+        Tmux::open(
+            None,
+            &folder,
+            crazyagent::sandbox::confinement(),
+            crazyagent::terminal::tmux::tmux_hooks(),
+        ),
+        Tmux::open(
+            Some(PathBuf::from("tmux")),
+            &folder,
+            crazyagent::sandbox::confinement(),
+            crazyagent::terminal::tmux::tmux_hooks(),
+        ),
     ] {
         assert_eq!(
             host.spawn(
@@ -345,7 +371,12 @@ fn a_terminal_folder_too_long_for_a_socket_address_still_runs_agents() {
     let deep = root.path().join("d".repeat(110));
     let socket = deep.join(SOCKET);
     assert!(socket.as_os_str().len() > 120);
-    let host = Tmux::open(Some(tmux.clone()), &deep);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &deep,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let _closing = Closing(&host);
     let agent = AgentId::team(1).unwrap();
     let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
@@ -362,7 +393,12 @@ fn a_terminal_folder_too_long_for_a_socket_address_still_runs_agents() {
         0,
         "only the owner can reach the server"
     );
-    let again = Tmux::open(Some(tmux), &deep);
+    let again = Tmux::open(
+        Some(tmux),
+        &deep,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     assert_eq!(
         again.alive().unwrap(),
         std::slice::from_ref(&agent),
@@ -379,7 +415,12 @@ fn a_shared_terminal_folder_is_refused() {
     let folder = root.path().join(FOLDER);
     std::fs::create_dir(&folder).unwrap();
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let host = Tmux::open(Some(tmux), &folder);
+    let host = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let agent = AgentId::team(1).unwrap();
     let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
     assert_eq!(
@@ -418,7 +459,12 @@ fn panes_have_a_scrollback_cap_and_close_when_their_process_ends() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let agent = AgentId::team(3).unwrap();
     host.spawn(
         &agent,
@@ -464,7 +510,12 @@ fn a_viewer_that_falls_behind_reads_behind_and_a_fresh_view_draws_the_screen_now
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host = Tmux::open(Some(tmux), &folder);
+    let host = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let agent = AgentId::team(4).unwrap();
     host.spawn(
         &agent,
@@ -518,7 +569,12 @@ fn the_screen_on_attach_keeps_the_spaces_the_program_wrote() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host = Tmux::open(Some(tmux), &folder);
+    let host = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let agent = AgentId::team(6).unwrap();
     host.spawn(
         &agent,
@@ -567,7 +623,12 @@ fn the_screen_on_attach_turns_on_the_input_modes_the_agent_app_set() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host = Tmux::open(Some(tmux), &folder);
+    let host = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let moded = AgentId::team(7).unwrap();
     host.spawn(
         &moded,
@@ -621,7 +682,12 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let master = AgentId::team(1).unwrap();
     let sub = AgentId::team(2).unwrap();
     for agent in [&master, &sub] {
@@ -643,7 +709,12 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     );
     drop(host);
 
-    let again = Tmux::open(Some(tmux.clone()), &folder);
+    let again = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     assert_eq!(again.alive().unwrap(), std::slice::from_ref(&master));
     again.close(&[]).unwrap();
     assert!(
@@ -673,7 +744,12 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     );
 
     let unused = root.path().join("unused");
-    let idle = Tmux::open(Some(tmux), &unused);
+    let idle = Tmux::open(
+        Some(tmux),
+        &unused,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     assert!(idle.alive().unwrap().is_empty());
     assert_eq!(
         idle.attach(&master).unwrap_err().0,
@@ -765,7 +841,12 @@ fn ending_a_gone_leftover_pane_kills_no_other_pane() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let gone = AgentId::team(3).unwrap();
     let other = AgentId::team(4).unwrap();
     let sleeper = shell(
@@ -952,7 +1033,12 @@ fn a_server_whose_engine_home_is_deleted_ends_with_its_agents() {
         .unwrap();
     let folder = home.join(FOLDER);
     let socket = folder.join(SOCKET);
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let agent = AgentId::team(1).unwrap();
     let pane = host
         .spawn(
@@ -992,7 +1078,12 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let team = AgentId::team(1).unwrap();
     let research = AgentId::new("research-7-1").unwrap();
     let mut panes = Vec::new();
@@ -1018,7 +1109,12 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
     assert!(ends(&panes[1..]), "the research agent's process ended");
     drop(host);
 
-    let next = Tmux::open(Some(tmux.clone()), &folder);
+    let next = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     assert_eq!(
         next.alive().unwrap(),
         std::slice::from_ref(&team),
@@ -1048,7 +1144,12 @@ fn an_engine_stop_set_to_stop_team_agents_ends_them_and_the_server() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let team = AgentId::team(1).unwrap();
     let research = AgentId::new("research-7-1").unwrap();
     let mut pids = Vec::new();
@@ -1073,7 +1174,12 @@ fn an_engine_stop_set_to_stop_team_agents_ends_them_and_the_server() {
         "with no team agent kept the stop ends the server and removes its socket"
     );
     assert!(ends(&pids), "the agents and the server process are gone");
-    let next = Tmux::open(Some(tmux.clone()), &folder);
+    let next = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     assert!(
         next.alive().unwrap().is_empty(),
         "the next engine finds none"
@@ -1093,7 +1199,12 @@ fn renewing_moves_the_server_deadline_to_the_time_given() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let until = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000);
     host.renew(until).unwrap();
     assert!(!socket.exists(), "renewing starts no server");
@@ -1132,7 +1243,12 @@ fn an_unreadable_quitting_setting_renews_with_the_default_limit() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let team = AgentId::team(1).unwrap();
     host.spawn(
         &team,
@@ -1218,7 +1334,12 @@ fn pane_rows_shaped_like_control_replies_stay_screen_text() {
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let forger = AgentId::team(11).unwrap();
     let sibling = AgentId::team(12).unwrap();
     for agent in [&forger, &sibling] {
@@ -1313,7 +1434,12 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let (forger, sibling) = (AgentId::team(13).unwrap(), AgentId::team(14).unwrap());
     let still = shell(
         root.path(),
@@ -1518,7 +1644,12 @@ fn engine_process_with_planted_variables_spawns_a_pane() {
     for (name, value) in PLANTED.iter().chain(&PLANTED_TERMINAL) {
         assert_eq!(std::env::var(name).unwrap(), *value);
     }
-    let host = Tmux::open(Some(tmux(&root)), &root.join(FOLDER));
+    let host = Tmux::open(
+        Some(tmux(&root)),
+        &root.join(FOLDER),
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let program = std::env::current_exe().unwrap();
     let out = root.join("pane.env");
     let command = shell(
@@ -1840,9 +1971,10 @@ impl Lead {
         )
         .unwrap();
         let socket =
-            crazyagent::terminal::harness_socket(&path, &AgentId::team(1).unwrap()).unwrap();
-        let mates = crazyagent::terminal::renew_teammates_socket(&path, &AgentId::team(1).unwrap())
-            .unwrap();
+            crazyagent::terminal::tmux::harness_socket(&path, &AgentId::team(1).unwrap()).unwrap();
+        let mates =
+            crazyagent::terminal::tmux::renew_teammates_socket(&path, &AgentId::team(1).unwrap())
+                .unwrap();
         Self {
             root,
             tmux,
@@ -1984,7 +2116,12 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         &kernel_processes::terminal::PaneCommand::from(&lead.shell("engine$ ", &["/bin/sh"])),
     )
     .unwrap();
-    let engine_only = Tmux::open(Some(lead.tmux.clone()), &root.join(FOLDER));
+    let engine_only = Tmux::open(
+        Some(lead.tmux.clone()),
+        &root.join(FOLDER),
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     assert_eq!(
         engine_only.alive().unwrap(),
         std::slice::from_ref(&engine_agent)
@@ -2073,7 +2210,7 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         std::io::ErrorKind::ConnectionRefused
     );
     assert_ne!(
-        crazyagent::terminal::renew_teammates_socket(&root, &leader).unwrap(),
+        crazyagent::terminal::tmux::renew_teammates_socket(&root, &leader).unwrap(),
         lead.mates,
         "the lead's next start names a new teammates' socket"
     );
@@ -2643,11 +2780,11 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     }
     let _next_own = Server {
         tmux: lead.tmux.clone(),
-        socket: crazyagent::terminal::harness_socket(&root, &next).unwrap(),
+        socket: crazyagent::terminal::tmux::harness_socket(&root, &next).unwrap(),
     };
     let _next_mates = Server {
         tmux: lead.tmux.clone(),
-        socket: crazyagent::terminal::renew_teammates_socket(&root, &next).unwrap(),
+        socket: crazyagent::terminal::tmux::renew_teammates_socket(&root, &next).unwrap(),
     };
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     host.spawn_own_server(

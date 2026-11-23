@@ -19,6 +19,8 @@ use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
+#[cfg(target_os = "macos")]
+use kernel_sandbox::tool_cache::ToolCacheHooks;
 use kernel_sandbox::toolchains::ToolchainHooks;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -31,7 +33,9 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub mod access_store;
@@ -86,6 +90,27 @@ impl OwnerGit {
 /// pnpm store, the only store variable pnpm 12 reads (probe P5). [`agent_env`] keeps a
 /// harness from replacing either once the sandbox set it.
 pub(crate) const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
+
+/// How the tmux host wraps a confined pane, built from this module's sandbox values: the
+/// runner, the keeper and pane shim words and variables, and which variables reach a pane.
+/// Output: the value the kernel tmux host is opened with.
+#[cfg(unix)]
+pub fn confinement() -> kernel_processes::terminal::tmux::Confinement {
+    kernel_processes::terminal::tmux::Confinement {
+        sandbox_exec: SANDBOX_EXEC,
+        #[cfg(target_os = "macos")]
+        keeper: KEEPER,
+        #[cfg(target_os = "macos")]
+        keeper_deadline_variable: KEEPER_DEADLINE,
+        #[cfg(target_os = "macos")]
+        keeper_state_variable: KEEPER_STATE,
+        #[cfg(target_os = "macos")]
+        pane_shim: PANE_SHIM,
+        variable_allowed: agent_variable_allowed,
+        #[cfg(target_os = "macos")]
+        unkept_pane,
+    }
+}
 
 /// The loopback ports the owner's configured model endpoints listen on, which a tools-on
 /// agent must not bind before the owner's model server does. An endpoint URL that does not
@@ -168,7 +193,7 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 /// other owner processes can read, save a launch's own token in [`Handed`] names on macOS only
 /// (its profile denies those reads; Linux is refused). Inputs: name, value. Output: allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
-    let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
+    let token = kernel_common::relay_names::TOKEN_PREFIX.as_bytes();
     if value
         .as_encoded_bytes()
         .windows(token.len())
@@ -176,10 +201,10 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     {
         return false;
     }
-    if name == crate::harnesses::leftovers::LINEAGE_VARIABLE {
+    if name == kernel_sandbox::profile::env::LINEAGE_VARIABLE {
         return value
             .to_str()
-            .is_some_and(crate::harnesses::leftovers::LineageToken::valid);
+            .is_some_and(kernel_sandbox::profile::env::LineageToken::valid);
     }
     if AGENT_GIT_ENV
         .iter()
@@ -192,7 +217,7 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
         .to_str()
         .is_some_and(|name| AGENT_KEY_VARIABLES.contains(&name))
     {
-        return value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        return value == kernel_common::relay_names::LOCAL_PLACEHOLDER;
     }
     !agent_env_refused(name)
 }
@@ -235,8 +260,8 @@ impl<'a> Handed<'a> {
     /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
     /// nor the keyless placeholder, a name refused for more than a key suffix, and off macOS.
     pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
-        let handed = crate::model_gateway::relay::is_relay_token(value)
-            || value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        let handed = kernel_common::relay_names::is_relay_token(value)
+            || value == kernel_common::relay_names::LOCAL_PLACEHOLDER;
         if !cfg!(target_os = "macos") || !handed {
             return Err(invalid("a launch hands only its own relay token"));
         }
@@ -250,7 +275,7 @@ impl<'a> Handed<'a> {
         if names.iter().any(other) {
             return Err(invalid("a launch hands its value only under a key name"));
         }
-        assert!(crate::model_gateway::relay::is_placeholder(value));
+        assert!(kernel_common::relay_names::is_placeholder(value));
         Ok(Self { names, value })
     }
 
@@ -660,6 +685,23 @@ pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
     launch_state: crate::launch_context::STATE,
     remove_agent_tree: toolchain_remove_agent_tree,
 };
+
+/// The tool cache hooks the engine passes: the pinning flag clearing of
+/// [`tool_cache_unpin`], the agent tree removal of [`toolchain_remove_agent_tree`] and the
+/// engine's priming process.
+#[cfg(target_os = "macos")]
+pub const TOOL_CACHE_HOOKS: ToolCacheHooks = ToolCacheHooks {
+    unpin: tool_cache_unpin,
+    remove_agent_tree: toolchain_remove_agent_tree,
+    priming_command: tool_cache::priming_command,
+};
+
+/// Clears the pinning flags an agent may set on an entry as Clean up does. Inputs: the open
+/// parent and the entry's name. Output: none.
+#[cfg(target_os = "macos")]
+fn tool_cache_unpin(parent: std::os::fd::BorrowedFd<'_>, name: &str) {
+    crate::team::cleanup::unpin(parent, name);
+}
 
 /// Removes a folder an agent wrote as Clean up removes an agent's tree, with the engine's
 /// refusal text as the error. Input: the folder. Output: done, or the error.
@@ -4357,7 +4399,7 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod handed_tests {
     use super::*;
-    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    use kernel_common::relay_names::LOCAL_PLACEHOLDER;
 
     const NAMES: [&str; 1] = ["OPENAI_API_KEY"];
 

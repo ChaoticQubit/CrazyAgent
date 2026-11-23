@@ -2,17 +2,19 @@ use super::accounts::Handover;
 use super::drivers::acp::Acp;
 use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
-use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
+use super::leftovers::{Follower, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, EngineServer, Installed};
-use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
+#[cfg(unix)]
+use kernel_processes::group::Ending;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
@@ -34,6 +36,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
+use {crate::model_gateway::relay::Relay, kernel_common::relay_names::is_placeholder};
 
 pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
@@ -51,7 +54,7 @@ const INPUT_RETRY: Duration = Duration::from_millis(20);
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-pub(super) const LOCAL_PLACEHOLDER_KEY: &str = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+pub(super) const LOCAL_PLACEHOLDER_KEY: &str = kernel_common::relay_names::LOCAL_PLACEHOLDER;
 const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DURABLE_INPUT: &str = "input";
@@ -500,73 +503,6 @@ pub(crate) fn kill_group(group: u32) {
     };
     assert!(pid.as_raw_nonzero().get() > 1);
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-}
-
-/// How long a group its holder saw end stays refused to every later claim: past
-/// `GROUP_FRESH` and the keeper's wait, so a session that saw its pane alive just before
-/// another path ended the group finds the number refused and only watches it (CB-2 r1 F1).
-const ENDED_REFUSED: Duration = Duration::from_secs(10);
-
-/// The process groups some path is ending now, with no time, and those a holder saw end,
-/// with the time it saw that, so a pane's stop and the terminal host's close never both
-/// signal one group (CB-2 one signal) and no later path claims a number that may lead a
-/// new group by then (CB-2 r1 F1).
-static ENDING: std::sync::Mutex<std::collections::BTreeMap<u32, Option<Instant>>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// One path's hold on ending a process group: while it lives every other path leaves the
-/// group alone. Dropping it frees the number, or, once its holder saw the group answer
-/// ESRCH, keeps it refused for `ENDED_REFUSED`, as it may lead a new group by then.
-pub(crate) struct Ending {
-    group: u32,
-    gone: bool,
-}
-
-impl Ending {
-    /// Takes the hold on a process group. Input: the group id, a pid above 1. Output: the
-    /// hold, or none while another path holds that group or a holder saw it end within
-    /// `ENDED_REFUSED`.
-    pub(crate) fn claim(group: u32) -> Option<Self> {
-        assert!(group > 1 && i32::try_from(group).is_ok());
-        let mut ending = ENDING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ending.retain(|_, ended| ended.is_none_or(|at| at.elapsed() < ENDED_REFUSED));
-        if ending.contains_key(&group) {
-            return None;
-        }
-        ending.insert(group, None);
-        Some(Self { group, gone: false })
-    }
-
-    /// The group this hold names. Output: its id as a pid.
-    #[cfg(unix)]
-    pub(crate) fn pid(&self) -> rustix::process::Pid {
-        i32::try_from(self.group)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-            .expect("a held group id is a pid above 1")
-    }
-
-    /// Records that the group answered ESRCH, so dropping this hold keeps its number
-    /// refused for `ENDED_REFUSED` instead of freeing it.
-    #[cfg(unix)]
-    pub(crate) fn gone(&mut self) {
-        self.gone = true;
-    }
-}
-
-impl Drop for Ending {
-    fn drop(&mut self) {
-        let mut ending = ENDING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.gone {
-            ending.insert(self.group, Some(Instant::now()));
-        } else {
-            ending.remove(&self.group);
-        }
-    }
 }
 
 /// Ends a pane's process group once its pane is gone, from the one path that holds it
@@ -2378,7 +2314,7 @@ impl Session {
             || request
                 .account
                 .key()
-                .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
+                .is_some_and(|key| kernel_common::relay_names::is_relay_token(key.reveal()));
         let mut session = Self {
             child,
             warden,

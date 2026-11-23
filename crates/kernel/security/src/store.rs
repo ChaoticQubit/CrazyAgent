@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use crate::secret::SecretString;
 
-pub const NAME_BYTES_MAX: usize = 63;
+pub const NAME_BYTES_MAX: usize = kernel_common::names::STORE_NAME_BYTES_MAX;
 pub const REFERENCE_BYTES_MAX: usize = NAME_BYTES_MAX * 2 + 1;
 
 /// Names one item in a credential store as `<service>:<account>`, both names checked by
@@ -62,32 +62,34 @@ pub trait Store: Send + Sync {
     ) -> Result<String, StoreError>;
 }
 
-/// Checks one service or account name: 1 to 63 bytes of lowercase ASCII letters, digits,
-/// `.`, `-` and `_`, not starting with `.` or `-`. Output: the name, or `credential_name_invalid`.
+/// Checks one service or account name with [`kernel_common::names::is_store_name`]: 1 to
+/// 63 bytes of lowercase ASCII letters, digits, `.`, `-` and `_`, not starting with `.` or
+/// `-`. Output: the name, or `credential_name_invalid`.
 pub fn checked_name(name: &str) -> Result<&str, StoreError> {
-    if name.is_empty()
-        || name.len() > NAME_BYTES_MAX
-        || name.starts_with(['.', '-'])
-        || name.contains("..")
-        || !name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_".contains(&byte)
-        })
-    {
-        return Err(StoreError::code("credential_name_invalid"));
+    if kernel_common::names::is_store_name(name) {
+        Ok(name)
+    } else {
+        Err(StoreError::code("credential_name_invalid"))
     }
-    Ok(name)
 }
 
 /// Names one stored item as `<service>:<account>`, refusing the shapes the engine's wire
-/// identity refuses, before any store writes: a trailing `.`, a Windows device name as the
-/// stem, and on Windows a one-letter service, which reads as a drive. Inputs: the service
-/// and account. Output: the reference, which holds no secret, or `credential_name_invalid`.
+/// identity refuses, before any store writes: an account ending in `.`
+/// ([`kernel_common::names::is_store_account`]), a Windows device name as the stem of the
+/// joined reference, and a one-letter service, which reads as a drive on Windows and is
+/// refused on every OS. Inputs: the service and account. Output: the reference, which holds
+/// no secret, or `credential_name_invalid`.
 pub fn reference(service: &str, account: &str) -> Result<SecretRef, StoreError> {
-    let joined = format!("{}:{}", checked_name(service)?, checked_name(account)?);
-    let drive = cfg!(windows) && service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
-    if joined.ends_with(['.', ' ']) || kernel_common::windows_device(&joined) || drive {
-        return Err(StoreError::code("credential_name_invalid"));
+    let invalid = || StoreError::code("credential_name_invalid");
+    if !kernel_common::names::is_store_account(account) {
+        return Err(invalid());
     }
+    let joined = format!("{}:{}", checked_name(service)?, checked_name(account)?);
+    let drive = service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
+    if kernel_common::windows_device(&joined) || drive {
+        return Err(invalid());
+    }
+    assert!(!joined.ends_with(['.', ' ']));
     assert!(joined.len() <= REFERENCE_BYTES_MAX);
     Ok(SecretRef(joined))
 }
@@ -104,6 +106,29 @@ pub fn parts(reference: &SecretRef) -> Result<(&str, &str), StoreError> {
         checked_name(service).map_err(|_| invalid())?,
         checked_name(account).map_err(|_| invalid())?,
     ))
+}
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod os_keyring;
+#[cfg(target_os = "windows")]
+mod windows;
+
+/// Opens this computer's OS keyring, Linux Secret Service or Windows Credential Manager,
+/// for one engine namespace under `dev.crazyagent.`, with a git helper that runs this
+/// executable's `git-credential` command. Input: the namespace. Output: the shared store,
+/// or `credential_namespace_refused` / `credential_store_unavailable`.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub fn open_os_keyring(namespace: &str) -> Result<std::sync::Arc<dyn Store>, StoreError> {
+    let executable =
+        std::env::current_exe().map_err(|_| StoreError::code("credential_store_unavailable"))?;
+    Ok(std::sync::Arc::new(os_keyring::OsKeyring::open(
+        namespace,
+        &executable,
+    )?))
 }
 
 #[cfg(test)]

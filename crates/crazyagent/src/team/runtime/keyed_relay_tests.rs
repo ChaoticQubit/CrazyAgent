@@ -1,5 +1,5 @@
 use super::*;
-use crate::model_gateway::relay::is_placeholder;
+use kernel_common::relay_names::is_placeholder;
 
 const PROVIDER_KEY: &str = "sk-provider-key-never-in-the-agent";
 
@@ -365,13 +365,13 @@ fn a_native_lead_on_a_keyed_endpoint_is_refused_before_any_server_starts() {
     assert!(!worktree.exists(), "no worktree is made for a refused lead");
     let lead = AgentId::team(id).unwrap();
     assert_eq!(host.server_keepers(&lead), Vec::new());
-    let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+    let socket = crate::terminal::tmux::harness_socket(&fixture.base, &lead).unwrap();
     assert!(
         kernel_processes::spawn_gate::connect_unix_std(&socket).is_err(),
         "a refused lead's own server runs"
     );
     assert!(
-        crate::terminal::teammates_socket(&fixture.base, &lead).is_err(),
+        crate::terminal::tmux::teammates_socket(&fixture.base, &lead).is_err(),
         "a refused lead's teammates' server is named"
     );
 }

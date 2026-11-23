@@ -29,13 +29,14 @@ const PAGE_LIMIT = 200;
 const ACCOUNT_PAGES_MAX = 100;
 
 const COPY: Record<string, string> = {
-  engine_unreachable: "CrazyAgent's engine isn't running.",
+  engine_unreachable: "CrazyAgent's engine isn't running.", not_connected: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
   ...STORAGE_COPY,
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
   engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
   engine_restoring: "CrazyAgent is bringing back your 2.4 data, so its engine stays stopped. Wait a minute, then reconnect.",
+  engine_restore_broken: "Restore did not finish. Your data is safe in a backup.",
   engine_restored: "Your 2.4 data is back. Install CrazyAgent 2.4.2 to use it. Restart engine goes back to 2.5, which updates that data again.",
   storage_restore_unavailable: "There's no 2.4 backup to bring back. CrazyAgent keeps it for 30 days after the update to 2.5.",
   storage_restore_agents_running: "Agents are running. Stop every agent and research run, then bring back your 2.4 data.",
@@ -598,6 +599,26 @@ export interface ProviderRetryView {
  * Retry briefly chosen before the first save. */
 export function getProviderRetry(): Promise<Result<ProviderRetryView>> {
   return call<ProviderRetryView>("desktop_provider_retry");
+}
+
+/** The event log compaction switch, the engine's `LogCompaction`. */
+export type LogCompaction = "off" | "on";
+
+/** The owner's read of the switch, the engine's `LogCompactionView`: the stored choice and
+ * whether this build is a dev build, the only build that shows the row. */
+export interface LogCompactionView {
+  choice: LogCompaction;
+  dev_build: boolean;
+}
+
+/** Reads the event log compaction switch. Output: the view, Off before the first save. */
+export function getLogCompaction(): Promise<Result<LogCompactionView>> {
+  return call<LogCompactionView>("desktop_log_compaction");
+}
+
+/** Saves the event log compaction switch. Input: the choice. Output: ok once saved. */
+export function saveLogCompaction(choice: LogCompaction): Promise<Result<void>> {
+  return change("desktop_set_log_compaction", { choice, generation: nextGeneration() });
 }
 
 /** Saves what harnesses do when a model provider can't be reached. Input: the option.

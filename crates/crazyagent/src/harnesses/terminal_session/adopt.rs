@@ -5,11 +5,11 @@ use super::{
 use crate::harnesses::interactive::settings::TerminalSettings;
 use crate::harnesses::interactive::{self, Transcript};
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
-use crate::harnesses::leftovers::LineageToken;
 use crate::harnesses::transcript::{READ_BYTES_MAX, TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::policy::{AgentAccess, AgentNetwork};
+use kernel_sandbox::profile::env::LineageToken;
 use kernel_sandbox::toolchains::Toolchain;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};

@@ -1,3 +1,4 @@
+use super::restore_recovery::{Next, Recovering};
 use super::settings::restore;
 use super::{Flow, Place, Screen, open};
 use crate::tui::brand;
@@ -19,19 +20,47 @@ use ratatui::text::{Line, Span};
 #[derive(Default)]
 pub struct Startup {
     profile_failed: bool,
+    recovery: Recovering,
 }
 
 impl Startup {
     /// A new startup screen.
     /// Input: none. Output: the screen.
     pub fn new() -> Self {
-        Self {
-            profile_failed: false,
-        }
+        Self::default()
     }
 
     fn down(ctx: &Ctx) -> bool {
         matches!(ctx.link, Link::Down(_))
+    }
+
+    /// Whether the engine is down because a restore did not finish, which shows the recovery
+    /// screen in place of the engine-down one. Input: the context. Output: the answer.
+    fn broken(ctx: &Ctx) -> bool {
+        matches!(&ctx.link, Link::Down(code) if code == crate::restore::ENGINE_RESTORE_BROKEN)
+    }
+
+    /// The recovery screen's lines: its title and the recovery's lines, wrapped to the
+    /// screen. Inputs: the context and the width. Output: the lines.
+    fn recovery_lines(&self, ctx: &Ctx, width: u16) -> Vec<Line<'static>> {
+        let limit = usize::from(width).saturating_sub(4).max(1);
+        let mut lines = vec![
+            Line::default(),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Restore 2.4", ctx.theme.heading),
+            ]),
+            Line::default(),
+        ];
+        for said in self.recovery.lines() {
+            lines.extend(
+                wrap(&said, limit)
+                    .into_iter()
+                    .map(|line| Line::raw(format!("  {line}"))),
+            );
+        }
+        assert!(lines.len() >= 4);
+        lines
     }
 
     fn stuck(&self, ctx: &Ctx) -> bool {
@@ -130,7 +159,16 @@ impl Screen for Startup {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        if self.stuck(ctx) {
+        if Self::broken(ctx) {
+            let mut hints: Vec<Hint> = self
+                .recovery
+                .actions()
+                .into_iter()
+                .map(|(key, label)| hint(&key.to_string(), label))
+                .collect();
+            hints.extend([hint("r", "Try again"), hint("Ctrl-Q", "Quit")]);
+            hints
+        } else if self.stuck(ctx) {
             vec![
                 hint("r", "Try again"),
                 hint("c", "Copy details for support"),
@@ -143,6 +181,14 @@ impl Screen for Startup {
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if !self.stuck(ctx) {
+            return Flow::Handled;
+        }
+        if Self::broken(ctx) {
+            if let Key::Char(pressed) = key
+                && ctx.starts_engine
+            {
+                self.recovery.key(*pressed);
+            }
             return Flow::Handled;
         }
         match key {
@@ -194,9 +240,35 @@ impl Screen for Startup {
         }
     }
 
+    fn follows(&self, ctx: &Ctx) -> bool {
+        self.busy(ctx) || self.recovery.busy()
+    }
+
+    fn shown(&mut self, ctx: &mut Ctx) {
+        if !Self::broken(ctx) {
+            return;
+        }
+        match self.recovery.poll() {
+            Next::Stay => {}
+            Next::Start => {
+                ctx.link = Link::Connecting;
+                ctx.start_engine();
+            }
+            Next::Reconnect => {
+                ctx.link = Link::Connecting;
+                ctx.request(Request::Reconnect);
+            }
+        }
+    }
+
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
-        let lines = if Self::down(ctx) {
+        if Self::broken(ctx) && ctx.starts_engine {
+            self.recovery.start();
+        }
+        let lines = if Self::broken(ctx) {
+            self.recovery_lines(ctx, area.width)
+        } else if Self::down(ctx) {
             down_lines(ctx, area.width)
         } else if self.profile_failed {
             vec![

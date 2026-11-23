@@ -1,12 +1,11 @@
 use super::master_launch::error;
-use crate::harnesses::leftovers::{
-    self, Follower, HoldBy, LINEAGE_VARIABLE, Leftovers, Lineage, LineageToken, Unstopped,
-};
+use crate::harnesses::leftovers::{self, Follower, HoldBy, Leftovers, Lineage, Unstopped};
 use crate::protocol::CredentialRef;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
 use crate::sandbox::warden::{self, Warden};
 use kernel_processes::spawn_gate::Keeper;
 use kernel_sandbox::profile::command::LineageCheck;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};

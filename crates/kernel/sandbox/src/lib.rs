@@ -52,6 +52,10 @@ pub mod settings;
 /// The project folders an agent shares: the scope, the access and the picked names and
 /// shared-back secrets, with the checks a client's choice is held to.
 pub mod shared_folders;
+/// The per-project tool cache a confined macOS agent's uv and pnpm write: its folders, uv's
+/// markers and the priming that finds them.
+#[cfg(target_os = "macos")]
+pub mod tool_cache;
 /// The owner's toolchains an agent reads: the tool homes, the toolchain families and the
 /// read-only grants a project's choice gives.
 pub mod toolchains;

@@ -5,7 +5,7 @@ use super::process::{
 use super::pump;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
-use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::harnesses::leftovers::{Follower, Lineage, Unstopped};
 use crate::protocol::ProjectId;
 use crate::sandbox::warden::{self, Warden};
 #[cfg(windows)]
@@ -13,6 +13,7 @@ use crazyagent_win_sandbox::ProcessTree;
 #[cfg(unix)]
 use kernel_processes::fd_wait;
 use kernel_sandbox::profile::command::LineageCheck;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 #[cfg(unix)]
 use rustix::event::{PollFd, PollFlags};
 #[cfg(unix)]

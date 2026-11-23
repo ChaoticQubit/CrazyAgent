@@ -1,9 +1,11 @@
 use crate::engine::owner::{OwnerClient, OwnerClientKind};
 use crate::paths::{Layout, RootEnvironment};
 use kernel_common::Platform;
+#[cfg(unix)]
+use kernel_processes::service::UNLOAD_TIMEOUT;
 use kernel_processes::service::{
-    Hooks, POLL, Repair, START_TIMEOUT, Service, ServiceError, UNLOAD_TIMEOUT, failure,
-    persistable, retire_old_copies,
+    Hooks, POLL, Repair, START_TIMEOUT, Service, ServiceError, failure, persistable,
+    retire_old_copies,
 };
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -123,8 +125,10 @@ pub async fn ensure_running(
     if answering(&layout.socket()) {
         return Ok(Started::AlreadyRunning);
     }
-    if crate::restore::holds_restart(layout.root(), crate::restore::service_running(service)) {
-        return Err(failure(crate::restore::ENGINE_RESTORING));
+    if let Some(code) =
+        crate::restore::restart_refusal(layout.root(), crate::restore::service_running(service))
+    {
+        return Err(failure(code));
     }
     layout.prepare()?;
     let since = log_length(layout);

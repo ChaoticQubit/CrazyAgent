@@ -7,8 +7,9 @@ use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::{MessageAuthor, MessageState, append_message, now_ms};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
 use kernel_processes::terminal::Host;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -483,8 +484,12 @@ impl Team {
             .map(|account| launch(account.connection.harness.as_str()))
             .collect();
         assert!(!executables.is_empty());
-        let host_terminal: Arc<dyn Host> =
-            Arc::new(Tmux::open(Some(tmux.clone()), &base.join(FOLDER)));
+        let host_terminal: Arc<dyn Host> = Arc::new(Tmux::open(
+            Some(tmux.clone()),
+            &base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ));
         let mut runtime = TeamRuntime::open(
             &base.join("engine.db"),
             &base.join("team"),

@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::Refused;
 use crate::embedding::{self, Manifest};
 use crate::manifest::MANIFEST_BYTES_MAX;
-use crate::problem::Problem;
+use crate::problem::{PORT_HANDED_OUT, Problem};
 use crate::store::{Keys, Loaded, binding_rows, drop_binding, refused, resolve, sqlite};
 use crate::trust;
 use crate::usage::{ChangeNotice, Holder, Lease, TurnOff, Usage};
@@ -398,7 +398,9 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// so what runs is what was reviewed. Keys bound to an older version stay only while its
 /// hosts are unchanged. Inputs: database, engine facts, the picked folder, the SHA-256 the
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
-/// or `app_plugin_changed`, `_refused`, `_name_taken`, or the folder's refusal.
+/// or `app_plugin_changed`, `_refused`, `_name_taken`, `_past_cap` (the listing would not
+/// show it, or would drop a listed plugin for it), `_port_handed_out` (its loopback port
+/// is in the range the engine reads now), or the folder's refusal.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -419,6 +421,12 @@ pub fn add(
     }
     if !replace && folder::read(engine.root, &manifest.name)?.is_some() {
         return Err(refused("app_plugin_name_taken"));
+    }
+    if !folder::fits(engine.root, &manifest.name)? {
+        return Err(refused("app_plugin_past_cap"));
+    }
+    if handed_problem(&manifest, engine.handed_out.as_ref()).is_some() {
+        return Err(refused(PORT_HANDED_OUT));
     }
     folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
     trust::settle(db, engine, &manifest, now_ms)
@@ -573,15 +581,10 @@ pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
 /// refusal that kept it unread.
 type UserFile = (String, Result<Vec<u8>, Problem>);
 
-const STAGED: &str = ".add-";
-const RETIRED: &str = ".old-";
-const LEGACY_SUFFIX: &str = ".yaml";
-
 #[cfg(unix)]
 mod folder {
-    use super::{
-        FOLDER, LEGACY_SUFFIX, MANIFEST_FILE, Problem, RETIRED, STAGED, USER_PLUGINS_MAX, UserFile,
-    };
+    use super::{FOLDER, MANIFEST_FILE, Problem, USER_PLUGINS_MAX, UserFile};
+
     use crate::Refused;
     use crate::embedding::valid_name;
     use crate::manifest::MANIFEST_BYTES_MAX;
@@ -590,6 +593,10 @@ mod folder {
     use std::collections::BTreeMap;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
+
+    const STAGED: &str = ".add-";
+    const RETIRED: &str = ".old-";
+    const LEGACY_SUFFIX: &str = ".yaml";
 
     /// The most entries read from one plugin folder before it is refused for holding more
     /// than its plugin.toml.
@@ -784,6 +791,18 @@ mod folder {
         Ok(names.contains_key(name))
     }
 
+    /// Whether a plugin of this name, once written, is among the first `USER_PLUGINS_MAX`
+    /// by name without dropping another from them: it is listed already, or the folder
+    /// holds fewer entries than the cap, old plugin files included. Inputs: the engine root
+    /// and a valid plugin name. Output: the answer, or the folder's refusal.
+    pub(super) fn fits(root: &Path, name: &str) -> Result<bool, Refused> {
+        let Some(directory) = open(root, false)? else {
+            return Ok(true);
+        };
+        let (names, _) = names(&directory)?;
+        Ok(names.contains_key(name) || names.len() < USER_PLUGINS_MAX)
+    }
+
     fn exists(directory: &std::fs::File, name: &str) -> Result<bool, Refused> {
         match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(_) => Ok(true),
@@ -936,16 +955,27 @@ mod folder {
     }
 
     /// Deletes a user plugin's folder and any `.yaml` file an older version left under its
-    /// name. Inputs: the engine root and a valid name. Output: whether anything was deleted,
-    /// or the folder's refusal.
+    /// name; an entry of that name that is not a folder, such as a link, is unlinked itself
+    /// without following it. Inputs: the engine root and a valid name. Output: whether
+    /// anything was deleted, or the folder's refusal.
     pub(super) fn remove(root: &Path, name: &str) -> Result<bool, Refused> {
         let Some(directory) = open(root, false)? else {
             return Ok(false);
         };
-        let folder = exists(&directory, name)?;
-        if folder {
-            remove_tree(&directory, name)?;
+        let kind = match rustix::fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Some(rustix::fs::FileType::from_raw_mode(stat.st_mode)),
+            Err(rustix::io::Errno::NOENT) => None,
+            Err(_) => return Err(unavailable()),
+        };
+        match kind {
+            Some(rustix::fs::FileType::Directory) => remove_tree(&directory, name)?,
+            Some(_) => match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(_) => return Err(unavailable()),
+            },
+            None => {}
         }
+        let folder = kind.is_some();
         let legacy = match rustix::fs::unlinkat(
             &directory,
             format!("{name}{LEGACY_SUFFIX}").as_str(),
@@ -974,6 +1004,11 @@ mod folder {
 
     /// No user plugins folder off Unix, so no plugin is past its cap. Output: true.
     pub(super) fn listed(_root: &Path, _name: &str) -> Result<bool, Refused> {
+        Ok(true)
+    }
+
+    /// No user plugins folder off Unix, so no add is past its cap. Output: true.
+    pub(super) fn fits(_root: &Path, _name: &str) -> Result<bool, Refused> {
         Ok(true)
     }
 

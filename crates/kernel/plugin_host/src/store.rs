@@ -209,6 +209,9 @@ pub(crate) fn resolve(
     })
 }
 
+/// Deletes one binding row, then the key file entered for it through [`forget_key_file`].
+/// Inputs: database, engine facts, plugin, secret and the row's source and reference.
+/// Output: Ok once the row is gone, or the database's refusal with the row and file kept.
 pub(crate) fn drop_binding(
     db: &Connection,
     engine: &Engine<'_>,
@@ -217,18 +220,47 @@ pub(crate) fn drop_binding(
     source: &str,
     reference: &str,
 ) -> Result<(), Refused> {
-    if source == KEY
-        && let Some(key) = plugin_key(reference)
-    {
-        (engine.keys.remove)(engine.root, KeyFolder::Plugin, &key)
-            .map_err(|()| refused("app_plugin_key_store_unavailable"))?;
-    }
     db.execute(
         "DELETE FROM app_plugin_secrets WHERE plugin=?1 AND secret=?2",
         [plugin, secret],
     )
     .map_err(sqlite)?;
+    forget_key_file(db, engine, source, reference);
     Ok(())
+}
+
+/// Deletes the key file a removed or replaced binding row named, only once that change is
+/// committed: when the connection holds no open transaction. Under an open transaction, or
+/// when the delete fails, the file stays and the start sweep deletes it once no row names
+/// it. Inputs: database, engine facts and the old row's source and reference. Output: none.
+fn forget_key_file(db: &Connection, engine: &Engine<'_>, source: &str, reference: &str) {
+    if source == KEY
+        && db.is_autocommit()
+        && let Some(key) = plugin_key(reference)
+    {
+        let _ = (engine.keys.remove)(engine.root, KeyFolder::Plugin, &key);
+    }
+}
+
+/// Every key name a binding row names, whatever its source, for the start sweep to keep.
+/// Input: the database. Output: the names, or the database's refusal, on which the sweep
+/// deletes nothing.
+pub fn named_keys(db: &Connection) -> Result<std::collections::BTreeSet<String>, Refused> {
+    let mut statement = db
+        .prepare("SELECT reference FROM app_plugin_secrets")
+        .map_err(sqlite)?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(sqlite)?
+        .collect::<Result<_, _>>()
+        .map_err(sqlite)?;
+    Ok(names)
+}
+
+/// Whether a file name in the plugin key folder is a key entered for a plugin, the only
+/// kind the start sweep may delete. Input: the name. Output: true when it is.
+pub fn is_entered_key(name: &str) -> bool {
+    plugin_key(name).is_some()
 }
 
 fn bindable(db: &Connection, engine: &Engine<'_>, name: &str, secret: &str) -> Result<(), Refused> {
@@ -251,11 +283,7 @@ fn save_binding(
     source: &str,
     reference: &str,
 ) -> Result<(), Refused> {
-    if let Some((old_source, old_reference)) = binding_row(db, plugin, secret)?
-        && (old_source != source || old_reference != reference)
-    {
-        drop_binding(db, engine, plugin, secret, &old_source, &old_reference)?;
-    }
+    let old = binding_row(db, plugin, secret)?;
     db.execute(
         "INSERT INTO app_plugin_secrets (plugin, secret, source, reference) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(plugin, secret) DO UPDATE SET source=excluded.source,
@@ -263,6 +291,11 @@ fn save_binding(
         [plugin, secret, source, reference],
     )
     .map_err(sqlite)?;
+    if let Some((old_source, old_reference)) = old
+        && (old_source != source || old_reference != reference)
+    {
+        forget_key_file(db, engine, &old_source, &old_reference);
+    }
     Ok(())
 }
 
@@ -295,7 +328,9 @@ pub fn bind_account(
 }
 
 /// Saves a key the owner entered for one declared secret through the engine's key store,
-/// replacing the one entered before in place. The key is never logged, shown or put in argv
+/// replacing the one entered before in place with no binding write; a first key or one
+/// that replaces an account binding writes the binding and is deleted again if that write
+/// fails. The key is never logged, shown or put in argv
 /// or env, and is wiped. Inputs: database, engine facts, plugin, secret and key bytes.
 /// Output: Ok, or `app_plugin_key_invalid`, `_key_store_unavailable`,
 /// `_secret_not_declared`, `_needs_review`, `_not_found`.
@@ -333,8 +368,11 @@ pub fn set_key(
             std::mem::take(&mut key),
         )
         .map_err(|()| refused("app_plugin_key_store_unavailable"))?;
+        if kept.is_some() {
+            return Ok(());
+        }
         let bound = save_binding(db, engine, name, secret, KEY, reference.as_str());
-        if bound.is_err() && kept.is_none() {
+        if bound.is_err() {
             let _ = (engine.keys.remove)(engine.root, KeyFolder::Plugin, &reference);
         }
         bound

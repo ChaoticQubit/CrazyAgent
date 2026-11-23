@@ -446,7 +446,7 @@ fn master_turns(master: Master) -> (Value, Vec<(String, String)>) {
         (base.to_str().unwrap().to_owned(), "<BASE>".to_owned()),
     ];
     let cache =
-        crate::sandbox::tool_cache::project_folder(Path::new("/"), repository.to_str().unwrap());
+        kernel_sandbox::tool_cache::project_folder(Path::new("/"), repository.to_str().unwrap());
     pairs.push((
         cache.file_name().unwrap().to_str().unwrap().to_owned(),
         "<REPOSITORY_TOOL_CACHE>".to_owned(),

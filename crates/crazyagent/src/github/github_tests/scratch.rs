@@ -1,6 +1,6 @@
 use super::*;
-use crate::credentials::Keychain;
 use crate::credentials::test_keychain::TestKeychain;
+use kernel_security::store::macos::Keychain;
 
 pub(super) struct Scratch {
     pub(super) root: tempfile::TempDir,
@@ -19,7 +19,7 @@ impl Scratch {
         keychain.serve(&namespace);
         Self {
             root: tempfile::tempdir().unwrap(),
-            store: Arc::new(Keychain::new(&namespace).unwrap()),
+            store: Arc::new(crate::credentials::keychain(&namespace).unwrap()),
             namespace,
             _keychain: keychain,
         }

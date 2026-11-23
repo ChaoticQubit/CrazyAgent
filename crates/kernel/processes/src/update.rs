@@ -193,17 +193,30 @@ pub fn read_channel(root: &Path) -> Result<Channel, UpdateError> {
     }
 }
 
+/// How many times a save renames its file over `update.toml` while another program holds
+/// that file without delete sharing (Windows only), before it reports the file busy.
+#[cfg(windows)]
+pub const CHANNEL_RENAME_TRIES_MAX: u32 = 10;
+/// The most time a save spends on those tries in total (Windows only).
+#[cfg(windows)]
+pub const CHANNEL_RENAME_WAIT_MAX: Duration = Duration::from_secs(1);
+/// The message of `update_channel_busy` (Windows only).
+#[cfg(windows)]
+pub const CHANNEL_BUSY: &str =
+    "Can't save the update channel: another program has update.toml open. Close it and try again.";
+
 /// Writes the update channel to `<root>/update.toml` (owner-only on Unix), replacing the
-/// file atomically. The caller has made the data folder. Inputs: the data folder and the
-/// channel. Output: Ok, or `update_io`.
+/// file atomically. Each call writes its own temporary file in that folder, named for this
+/// process and the call, and removes it if the save fails, so writers at the same moment
+/// never touch each other's file and the last rename wins whole. The caller has made the
+/// data folder. Inputs: the data folder and the channel. Output: Ok, `update_channel_busy`
+/// when another program kept `update.toml` held past the bounded retries (Windows), or
+/// `update_io`.
 pub fn write_channel(root: &Path, channel: Channel) -> Result<(), UpdateError> {
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let failed = |error| io_failure("Can't save the update channel", error);
-    let temporary = root.join(".update.toml.new");
-    if let Err(error) = std::fs::remove_file(&temporary)
-        && error.kind() != ErrorKind::NotFound
-    {
-        return Err(failed(error));
-    }
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = root.join(format!(".update.toml.{}.{call}.new", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -212,10 +225,53 @@ pub fn write_channel(root: &Path, channel: Channel) -> Result<(), UpdateError> {
         options.mode(0o600);
     }
     let mut file = options.open(&temporary).map_err(failed)?;
-    file.write_all(format!("channel = \"{}\"\n", channel.as_str()).as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(failed)?;
-    std::fs::rename(&temporary, root.join("update.toml")).map_err(failed)
+    let written = file
+        .write_all(format!("channel = \"{}\"\n", channel.as_str()).as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    let saved = written
+        .map_err(failed)
+        .and_then(|()| replace_channel_file(&temporary, &root.join("update.toml")));
+    if saved.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    saved
+}
+
+/// Renames a saved channel file over `update.toml`. Inputs: the saved file and
+/// `update.toml`. Output: Ok, or `update_io`.
+#[cfg(not(windows))]
+fn replace_channel_file(from: &Path, to: &Path) -> Result<(), UpdateError> {
+    std::fs::rename(from, to).map_err(|error| io_failure("Can't save the update channel", error))
+}
+
+/// Renames a saved channel file over `update.toml`, trying again while another program holds
+/// `update.toml` without delete sharing (access denied, 5, or sharing violation, 32), at
+/// most [`CHANNEL_RENAME_TRIES_MAX`] times within [`CHANNEL_RENAME_WAIT_MAX`], the wait
+/// doubling from 10 ms. Inputs: the saved file and `update.toml`. Output: Ok,
+/// `update_channel_busy` once the tries are spent, or `update_io` for any other error.
+#[cfg(windows)]
+fn replace_channel_file(from: &Path, to: &Path) -> Result<(), UpdateError> {
+    let started = Instant::now();
+    let mut wait = Duration::from_millis(10);
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        assert!(tries <= CHANNEL_RENAME_TRIES_MAX);
+        let error = match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if !matches!(error.raw_os_error(), Some(5 | 32)) {
+            return Err(io_failure("Can't save the update channel", error));
+        }
+        let left = CHANNEL_RENAME_WAIT_MAX.saturating_sub(started.elapsed());
+        if tries == CHANNEL_RENAME_TRIES_MAX || left.is_zero() {
+            return Err(fail("update_channel_busy", CHANNEL_BUSY));
+        }
+        std::thread::sleep(wait.min(left));
+        wait = wait.saturating_mul(2);
+    }
 }
 
 /// A release manifest (`cli-latest.json`): the version and one archive per Rust target.
@@ -258,40 +314,40 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, UpdateError> {
 }
 
 /// The Rust target this build's release archive is published under. Output: the triple, or
-/// None on a platform with no release build.
+/// None on a platform with no release build ([`target_for`]).
 pub fn target() -> Option<&'static str> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Some("aarch64-apple-darwin")
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Some("x86_64-apple-darwin")
-    } else if cfg!(all(
-        target_os = "linux",
-        target_arch = "x86_64",
-        target_env = "gnu"
-    )) {
-        Some("x86_64-unknown-linux-gnu")
-    } else if cfg!(all(
-        target_os = "linux",
-        target_arch = "aarch64",
-        target_env = "gnu"
-    )) {
-        Some("aarch64-unknown-linux-gnu")
-    } else if cfg!(all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc"
-    )) {
-        Some("x86_64-pc-windows-msvc")
+    let env = if cfg!(target_env = "gnu") {
+        "gnu"
+    } else if cfg!(target_env = "msvc") {
+        "msvc"
+    } else if cfg!(target_env = "musl") {
+        "musl"
     } else {
-        None
+        ""
+    };
+    target_for(std::env::consts::OS, std::env::consts::ARCH, env)
+}
+
+/// The Rust target a release archive is published under for an operating system, processor
+/// and C library or toolchain, as Rust names them: both Mac processors, glibc Linux on
+/// x86_64 and aarch64, and MSVC Windows on x86_64. Inputs: the three names. Output: the
+/// triple, or None for any other platform.
+fn target_for(os: &str, arch: &str, env: &str) -> Option<&'static str> {
+    match (os, arch, env) {
+        ("macos", "aarch64", _) => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64", _) => Some("x86_64-apple-darwin"),
+        ("linux", "x86_64", "gnu") => Some("x86_64-unknown-linux-gnu"),
+        ("linux", "aarch64", "gnu") => Some("aarch64-unknown-linux-gnu"),
+        ("windows", "x86_64", "msvc") => Some("x86_64-pc-windows-msvc"),
+        _ => None,
     }
 }
 
-/// Whether a published version is newer than the running one, as semver (dev builds sort
-/// below their stable). Inputs: both versions. Output: the answer or
-/// `update_manifest_invalid`.
+/// Whether a published version is newer than the running one, by semver precedence: dev
+/// builds sort below their stable, and build metadata does not count. Inputs: both versions.
+/// Output: the answer or `update_manifest_invalid`.
 pub fn is_newer(available: &str, current: &str) -> Result<bool, UpdateError> {
-    Ok(version(available)? > version(current)?)
+    Ok(version(available)?.cmp_precedence(&version(current)?) == std::cmp::Ordering::Greater)
 }
 
 fn allowed_url(text: &str) -> Result<url::Url, UpdateError> {
