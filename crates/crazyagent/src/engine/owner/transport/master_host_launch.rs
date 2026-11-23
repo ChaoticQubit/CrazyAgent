@@ -1062,7 +1062,7 @@ fn turn_sandbox(
         engine_root,
         &std::fs::canonicalize(repository).map_err(io_error)?,
         policy,
-        crate::sandbox::tool_cache::CacheShape::Worktree,
+        kernel_sandbox::tool_cache::CacheShape::Worktree,
         &worktree.to_string_lossy(),
     );
     let sandbox = hidden
@@ -1411,7 +1411,7 @@ fn default_master_tool_caches(runtime: &Path, repository: &Path) -> Vec<PathBuf>
     #[cfg(target_os = "macos")]
     {
         let project = std::fs::canonicalize(repository).unwrap();
-        let cache = crate::sandbox::tool_cache::project_folder(runtime, project.to_str().unwrap())
+        let cache = kernel_sandbox::tool_cache::project_folder(runtime, project.to_str().unwrap())
             .join("sandboxed-worktree");
         assert!(cache.is_dir(), "{}", cache.display());
         vec![cache]
@@ -1717,8 +1717,8 @@ mod tests {
         master_in_generation(&base).unwrap();
         let project = std::fs::canonicalize(base.join("repository")).unwrap();
         let project = project.to_str().unwrap();
-        assert!(crate::sandbox::tool_cache::project_folder(&engine, project).is_dir());
-        assert!(!crate::sandbox::tool_cache::project_folder(&base, project).exists());
+        assert!(kernel_sandbox::tool_cache::project_folder(&engine, project).is_dir());
+        assert!(!kernel_sandbox::tool_cache::project_folder(&base, project).exists());
     }
 
     /// A master's boundary denies the engine root's secrets as well as its own owner

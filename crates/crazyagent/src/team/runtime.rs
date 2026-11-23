@@ -9829,7 +9829,8 @@ impl TeamRuntime {
         expose_graph(&root, &working_dir)?;
         #[cfg(target_os = "macos")]
         if let Some(runtime) = self.state.parent() {
-            use crate::sandbox::tool_cache::{CacheShape, grant};
+            use crate::sandbox::tool_cache::grant;
+            use kernel_sandbox::tool_cache::CacheShape;
             let shape = match layout {
                 Layout::Linked => CacheShape::Worktree,
                 Layout::Clone => CacheShape::Clone,

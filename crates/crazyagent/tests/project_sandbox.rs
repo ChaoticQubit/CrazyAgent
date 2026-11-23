@@ -1,11 +1,11 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, Sandbox, agent_env, tool_cache};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::tool_cache::CacheShape;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -81,12 +81,12 @@ fn quoted(path: &Path) -> String {
 /// A tool cache prepared under an engine runtime folder beside the case, with the real uv
 /// the agent's PATH finds when `uv` is set. A machine without uv fails the rows that ask
 /// for it instead of skipping them (T8).
-fn tool_cache(case: &Case, uv: bool) -> tool_cache::Prepared {
+fn tool_cache(case: &Case, uv: bool) -> kernel_sandbox::tool_cache::Prepared {
     let runtime = case.root.join("runtime");
     fs::create_dir_all(&runtime).unwrap();
     let base = sandbox(case, SandboxNetwork::Only(Vec::new()));
     let program = uv.then(|| base.tool_program("uv").expect("uv missing"));
-    tool_cache::prepare(
+    kernel_sandbox::tool_cache::prepare(
         &crazyagent::sandbox::TOOL_CACHE_HOOKS,
         &runtime,
         "project-1",
