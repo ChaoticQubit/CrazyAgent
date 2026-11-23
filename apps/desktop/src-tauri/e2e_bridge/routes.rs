@@ -2677,7 +2677,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_add(folder, sha256, replace)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .app_plugin_add(folder, sha256, replace)?; call.await }.await;
             routed(result)
         }
         "desktop_app_plugin_trust" => {
@@ -2706,7 +2706,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_set_enabled(name, enabled, when_off)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .app_plugin_set_enabled(name, enabled, when_off)?; call.await }.await;
             routed(result)
         }
         "desktop_app_plugin_users" => {
@@ -2747,7 +2747,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_bind_account(name, secret, account)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .app_plugin_bind_account(name, secret, account)?; call.await }.await;
             routed(result)
         }
         "desktop_app_plugin_set_key" => {

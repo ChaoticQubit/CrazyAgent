@@ -1,11 +1,29 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.meta.url));
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
 export const BRIDGE = fileURLToPath(new URL("../../src-tauri/src/bridge", import.meta.url));
+const SRC = fileURLToPath(new URL("../../src-tauri/src", import.meta.url));
+
+/** Reads a module file of lib.rs by name. Input: the module name. Output: its text, or null
+ * when lib.rs has no such file. */
+function moduleFile(name) {
+  const path = join(SRC, `${name}.rs`);
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+/** Puts each module file of lib.rs that holds Tauri commands in place of its `mod` line, so its
+ * commands are read in source order with the rest. Inputs: the lib.rs source and a reader of a
+ * module file by name. Output: the joined source; a module without commands keeps its line. */
+export function withCommandFiles(source, read = moduleFile) {
+  return source.replace(/^mod (\w+);$/gm, (line, name) => {
+    const text = read(name);
+    return text !== null && text.includes("#[tauri::command]") ? text : line;
+  });
+}
 
 const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
 const NATIVE_PARAM = /State<|AppHandle|Channel<|\bWebview\b/;
@@ -254,7 +272,8 @@ function imports(source) {
  * field from the key the app reads, flattened so those keys sit beside the other arguments.
  * Inputs: the lib.rs source and `methods` output, the app's bridge when omitted. Output: the
  * routes.rs text. */
-export function render(source, impls = bridgeMethods()) {
+export function render(lib, impls = bridgeMethods()) {
+  const source = withCommandFiles(lib);
   const routes = commands(source).map((command) => plan(command, impls)).filter((planned) => planned.route).map((planned) => planned.route);
   const arms = routes.map(({ name, args, body }) => {
     const structs = args.filter((arg) => arg.keys).map((arg) => `            #[derive(serde::Deserialize)]

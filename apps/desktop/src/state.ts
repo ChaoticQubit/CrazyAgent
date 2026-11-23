@@ -6,15 +6,13 @@ import type { EngineState } from "./ui/shell";
 import type { Route } from "./ui/router";
 import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
-import { changedLine, loadAppPlugins } from "./api-app-plugins";
+import { useAppPluginNotices } from "./app-plugin-notices";
 import { loadFoundProjects, loadIntakeJobs } from "./api-intake";
 import { notifyIntake } from "./notify";
 import { foundPollMs, intakePollMs, jobEnds, jobLine } from "./screens/intake/intake";
 import { carryFollowUps } from "./screens/new-project/carry";
-import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
-import type { InputChoice } from "./screens/team/terminal-io";
-import { rendererChoice, rendererDefault } from "./screens/team/terminal-renderer";
-import type { RendererChoice } from "./screens/team/terminal-renderer";
+import { INPUT_DEFAULT, inputChoice, type InputChoice } from "./screens/team/terminal-io";
+import { rendererChoice, rendererDefault, type RendererChoice } from "./screens/team/terminal-renderer";
 import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
 import type { QuestionsShown } from "./api-questions";
 export type Loaded<T> = { kind: "loading" } | Result<T>;
@@ -460,16 +458,7 @@ export function useSession(home: boolean): Session {
     void read();
     return () => { live = false; clearTimeout(timer); };
   }, [engine, intakeTick]);
-
-  useEffect(() => {
-    if (engine !== "running") return;
-    let live = true;
-    void loadAppPlugins().then((result) => {
-      const line = live && result.kind === "ok" ? changedLine(result.value) : null;
-      if (line) showToast(line, { name: "settings", tab: "app-plugins" });
-    });
-    return () => { live = false; };
-  }, [engine]);
+  useAppPluginNotices(engine, showToast);
 
   useEffect(() => {
     if (engine !== "running") return;
