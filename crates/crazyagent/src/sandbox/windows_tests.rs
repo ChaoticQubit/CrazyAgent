@@ -1,24 +1,19 @@
 mod profile_rows {
     use crate::sandbox::InstalledSandbox;
-    use crazyagent_win_sandbox::plan::plan;
-    use crazyagent_win_sandbox::profile::check_container;
     use crazyagent_win_sandbox::profile::{
-        BoundaryProfile, Capability, Guard, Guarded, check_path,
+        BoundaryProfile, Capability, Guard, Guarded, check_container,
     };
     use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
-    use kernel_sandbox::error::{SandboxError, invalid};
-    use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
-    use kernel_sandbox::net::SandboxRemote;
+    use kernel_sandbox::error::SandboxError;
     use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-    use kernel_sandbox::paths::{canonical, clean_absolute};
+    use kernel_sandbox::paths::canonical;
     use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::profile::command::Sandbox;
-    use kernel_sandbox::profile::env::agent_process_env;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     use kernel_sandbox::windows::profile::*;
     use kernel_sandbox::windows::{APPCONTAINER_MISSING, CONTAINER_PREFIX, HELPER_NAME};
-    use std::ffi::{OsStr, OsString};
-    use std::fs::{self, OpenOptions};
+    use std::ffi::OsStr;
+    use std::fs;
     use std::io::Write;
     use std::io::{BufRead, BufReader};
     use std::path::{Path, PathBuf};
@@ -757,14 +752,12 @@ mod profile_rows {
 mod owner_git_rows {
     use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard, check_container};
     use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
-    use kernel_sandbox::error::{SandboxError, invalid};
+    use kernel_sandbox::error::SandboxError;
     use kernel_sandbox::net::SandboxNetwork;
-    use kernel_sandbox::paths::{canonical, clean_absolute};
+    use kernel_sandbox::paths::canonical;
     use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::profile::command::Sandbox;
-    use kernel_sandbox::profile::consts::AGENT_HOME_ENV;
     use kernel_sandbox::windows::GRANTS_FOLDER;
-    use kernel_sandbox::windows::container_for;
     use kernel_sandbox::windows::owner_git::*;
     use kernel_sandbox::windows::profile::container_name;
     use std::ffi::OsStr;
@@ -1009,7 +1002,14 @@ mod owner_git_rows {
     /// profile. Inputs: the folders, the owner-git folder, the project, git and the words.
     fn refused_install(made: &Made, folder: &Path, project: &Path, git: &Path, words: &str) {
         let helper = std::env::current_exe().unwrap();
-        match OwnerGit::install(folder, project, git, &helper, &made.grants) {
+        match OwnerGit::install(
+            &crate::sandbox::PROFILE_HOOKS,
+            folder,
+            project,
+            git,
+            &helper,
+            &made.grants,
+        ) {
             Err(SandboxError::Invalid(reason)) => {
                 assert!(reason.contains(words), "{}: {reason}", git.display())
             }

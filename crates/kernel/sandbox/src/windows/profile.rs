@@ -5,7 +5,7 @@ use crate::paths::{canonical, clean_absolute};
 use crate::profile::ProjectSandbox;
 use crate::profile::command::Sandbox;
 use crate::profile::env::agent_process_env;
-use crate::windows::{GRANTS_FOLDER, container_for, existing_helper, helper_beside_engine};
+use crate::windows::{container_for, existing_helper, helper_beside_engine};
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};

@@ -656,8 +656,13 @@ mod windows_tests {
     /// Makes a repository with one commit of `README.md` and `.gitignore`, an untracked
     /// `notes.txt` and an ignored `debug.log`, owned by the runner user, and installs owner
     /// git for it. Input: the temp folder. Output: the repository folder and its owner git.
-    fn contained_repository(place: &Path) -> (std::path::PathBuf, kernel_sandbox::windows::owner_git::OwnerGit) {
-        use crate::sandbox::windows_farm;
+    fn contained_repository(
+        place: &Path,
+    ) -> (
+        std::path::PathBuf,
+        kernel_sandbox::windows::owner_git::OwnerGit,
+    ) {
+        use crate::sandbox::windows_farm as farm;
         let (repo, home) = (place.join("repo"), place.join("home"));
         for folder in [&repo, &home] {
             fs::create_dir(folder).unwrap();
@@ -696,7 +701,7 @@ mod windows_tests {
     #[test]
     #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
     fn a_contained_windows_list_opens_no_share_a_git_folder_names_after_the_check() {
-        use crate::sandbox::windows_farm;
+        use crate::sandbox::windows_farm as farm;
         let sessions = farm::hold();
         let mut reached = Vec::new();
         for (shape, _) in farm::SHAPES {

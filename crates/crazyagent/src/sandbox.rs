@@ -1611,10 +1611,10 @@ mod firmlink_tests {
     }
 }
 
-#[cfg(target_os = "windows")]
 /// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
 /// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
 /// I/O error.
+#[cfg(target_os = "windows")]
 pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
     let layout =
         crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
