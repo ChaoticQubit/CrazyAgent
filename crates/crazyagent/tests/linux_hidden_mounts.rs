@@ -2,7 +2,7 @@
 use crazyagent::sandbox::linux::{HIDDEN_MOUNTED_AGAIN, LinuxBackend, LinuxSandbox};
 use kernel_sandbox::linux::helper::{BWRAP_PATHS, HIDDEN_MOUNTS_NOT_PRIVATE, NEST_ARGS};
 
-use crazyagent::sandbox::ProjectSandbox;
+use kernel_sandbox::profile::ProjectSandbox;
 
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::SandboxNetwork;

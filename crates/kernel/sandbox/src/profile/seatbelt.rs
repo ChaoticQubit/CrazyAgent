@@ -3,12 +3,14 @@ use crate::error::{SandboxError, invalid};
 #[cfg(target_os = "macos")]
 use crate::paths::clean_absolute;
 use crate::paths::{SYSTEM_SECRET_PATHS, any_case, at_or_below, owner_secret_paths, regex_escape};
+use crate::profile::consts::*;
 use crate::profile::consts::{
     ADMIN_LINKS, CREDENTIAL_NAMES, ENGINE_SECRET_FILES, FIXED_WRITES, GIT_FALLBACK,
     MULTI_PACK_INDEX, PINNED_WRITES, RUNTIME_ENTRIES_MAX, SBPL_STRING_MAX, STORE_ALTERNATES,
 };
 #[cfg(target_os = "macos")]
 use crate::profile::consts::{MACH_SERVICES, METADATA_LITERALS, SYSTEM_READ_ROOTS};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 #[cfg(unix)]
 use std::io;
@@ -680,6 +682,99 @@ pub fn regranted_denies(hooks: &ProfileHooks, home: &Path, folders: &[&Path]) ->
     }
     text.push_str(&format!("(deny file-write*{nested})\n"));
     text
+}
+
+/// Reads one git link file the engine's own `git worktree add` wrote: a plain file of at
+/// most 2 KiB holding `prefix`, one absolute or relative path and a newline. Input: the
+/// file and its prefix. Output: the path text, or `Invalid` for any other file.
+pub fn git_link(path: &Path, prefix: &str) -> Result<String, SandboxError> {
+    use std::io::Read;
+    let refused = || invalid("the worktree's git link is not a plain git link file");
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() > GIT_LINK_BYTES_MAX {
+        return Err(refused());
+    }
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(GIT_LINK_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .map_err(|_| refused())?;
+    let target = text
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .filter(|target| !target.is_empty() && !target.contains('\n'))
+        .ok_or_else(refused)?;
+    Ok(target.to_owned())
+}
+
+pub fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a OsStr)> {
+    env.iter()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .collect()
+}
+
+/// Makes sure a store a profile keeps read-only is a plain folder the engine made: creates
+/// it empty, mode 0700 on unix, or keeps an entry already there only when it is a real
+/// folder, never a file or a link. Disk state is input here, so a wrong entry is an error.
+/// Input: the store path. Output: Ok, or `InvalidData` for any other entry at the path.
+pub fn ensure_store(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(path);
+    #[cfg(not(unix))]
+    let created = fs::DirBuilder::new().create(path);
+    match created {
+        Err(problem) if problem.kind() == io::ErrorKind::AlreadyExists => {
+            if fs::symlink_metadata(path)?.is_dir() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a submodule store must be a plain folder",
+                ))
+            }
+        }
+        made => made,
+    }
+}
+
+/// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
+/// the last matching rule and a deny a later allow overrides no longer holds (CTX-M1 F1).
+/// Inputs: the profile text and the deny rules as written in it. Output: false when any
+/// deny is missing or comes before a write allow.
+pub fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
+    let last_write_allow = text
+        .rfind("(allow file-write*")
+        .max(text.rfind("(allow file-read* file-write*"));
+    denies
+        .iter()
+        .all(|deny| text.rfind(deny.as_str()) > last_write_allow)
+}
+
+/// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
+/// link may be made there and no folder but a lock, so no teammate places a path the lead's
+/// own Claude Code writes through (TPH-2 C). Input: the folder. Output: the rules.
+pub fn shared_denies(folder: &Path) -> String {
+    let folder = folder.display();
+    format!(
+        "(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type SYMLINK)))\n(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type DIRECTORY) (require-not (regex #\"{LOCK_FOLDER}\"))))\n"
+    )
+}
+
+/// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
+/// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
+/// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
+/// folder, or none when the program is not inside one.
+pub fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
+    let modules = prefix.join("lib").join("node_modules");
+    let mut parts = program.strip_prefix(&modules).ok()?.components();
+    let first = parts.next()?.as_os_str();
+    let package = if first.to_str()?.starts_with('@') {
+        modules.join(first).join(parts.next()?.as_os_str())
+    } else {
+        modules.join(first)
+    };
+    (program != package.as_path() && program.starts_with(&package)).then_some(package)
 }
 
 #[cfg(all(test, unix))]

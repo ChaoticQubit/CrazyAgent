@@ -7,11 +7,11 @@ use kernel_sandbox::linux::helper::{
     BWRAP_PATHS, HelperRequest, LOADER_REFUSED, NEST_ARGS, loader_variable,
 };
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox};
+use crazyagent::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox};
 
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 
 use crazyagent::harnesses::launch::{

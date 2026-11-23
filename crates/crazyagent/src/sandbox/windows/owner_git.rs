@@ -1,8 +1,8 @@
 use super::WindowsSandbox;
-use crate::sandbox::ProjectSandbox;
 use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::{canonical, clean_absolute};
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::profile::consts::AGENT_HOME_ENV;
 use kernel_sandbox::windows::container_for;
