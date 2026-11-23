@@ -425,7 +425,7 @@ fn npm_starts_under_the_install_sandbox_profile() {
 #[test]
 fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_install_profile() {
     let real = system_bin();
-    let cli = crate::sandbox::canonical(&real.join("npm")).unwrap();
+    let cli = kernel_sandbox::paths::canonical(&real.join("npm")).unwrap();
     let package = cli.parent().and_then(Path::parent).unwrap().to_path_buf();
     assert!(package.ends_with("lib/node_modules/npm"), "{cli:?}");
     let build = std::env::current_exe().unwrap();
@@ -457,10 +457,10 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     )
     .unwrap();
     assert!(writable.success(), "{modules:?}");
-    let node = crate::sandbox::canonical(&real.join("node")).unwrap();
+    let node = kernel_sandbox::paths::canonical(&real.join("node")).unwrap();
     copy_node(&node, &bin);
     std::os::unix::fs::symlink("../lib/node_modules/npm/bin/npm-cli.js", bin.join("npm")).unwrap();
-    let program = crate::sandbox::canonical(&bin.join("npm")).unwrap();
+    let program = kernel_sandbox::paths::canonical(&bin.join("npm")).unwrap();
     assert_eq!(
         crate::harnesses::node_prefix(&program).as_deref(),
         Some(prefix.as_path()),
@@ -503,7 +503,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
 #[test]
 fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_profile() {
     let real = system_bin();
-    let cli = crate::sandbox::canonical(&real.join("npm")).unwrap();
+    let cli = kernel_sandbox::paths::canonical(&real.join("npm")).unwrap();
     let package = cli.parent().and_then(Path::parent).unwrap().to_path_buf();
     assert!(package.ends_with("lib/node_modules/npm"), "{cli:?}");
     let build = std::env::current_exe().unwrap();
@@ -543,7 +543,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
     )
     .unwrap();
     assert!(writable.success(), "{modules:?}");
-    let node = crate::sandbox::canonical(&real.join("node")).unwrap();
+    let node = kernel_sandbox::paths::canonical(&real.join("node")).unwrap();
     copy_node(&node, &tree.join("bin"));
     for (name, script) in [("npm", "npm-cli.js"), ("npx", "npx-cli.js")] {
         let target = format!("../lib/node_modules/npm/bin/{script}");
@@ -560,7 +560,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
         String::new()
     } else {
         let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
-        let canonical = crate::sandbox::canonical(&scratch).unwrap();
+        let canonical = kernel_sandbox::paths::canonical(&scratch).unwrap();
         let mut command = node_command(&root, &scratch, &bin).unwrap();
         let failed = kernel_processes::spawn_gate::collected(&mut command).unwrap();
         end_check(&scratch, &canonical);
@@ -1230,8 +1230,8 @@ fn an_agent_launch_runs_the_checked_shared_install_or_no_context_mode_never_npx(
 /// Linux; off Linux they take the defaults, strict off, which those boundaries ignore.
 #[test]
 fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     #[cfg(target_os = "linux")]
     assert_eq!(
@@ -1263,8 +1263,8 @@ fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
 /// Off Linux strict changes nothing.
 #[test]
 fn the_node_check_and_npm_refuse_under_stored_strict_when_linux_cannot_hold_fully() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
     crate::sandbox_settings::initialize(&connection).unwrap();

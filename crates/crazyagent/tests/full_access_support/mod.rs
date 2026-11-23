@@ -1,7 +1,7 @@
 use crazyagent::harnesses::launch::LaunchBoundary;
-use crazyagent::sandbox::{
-    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork,
-};
+use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox};
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use std::path::Path;
 use std::sync::Arc;
 

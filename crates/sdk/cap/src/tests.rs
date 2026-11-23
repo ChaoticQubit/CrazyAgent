@@ -535,3 +535,34 @@ fn a_misshapen_foreign_typeref_is_refused() {
         at("cap_unknown_type", 1, 13)
     );
 }
+
+#[test]
+fn a_stem_that_is_not_snake_case_is_refused() {
+    let long = "a".repeat(NAME_BYTES_MAX + 1);
+    for stem in [
+        "Foo",
+        "a-b",
+        "a__b",
+        "a_",
+        "1a",
+        "a\nb",
+        "",
+        "a.b",
+        long.as_str(),
+    ] {
+        assert_eq!(
+            parse_as(stem, "enum A { a }"),
+            Err(ParseError {
+                line: 1,
+                column: 1,
+                code: "cap_stem",
+            }),
+            "{stem:?}"
+        );
+    }
+    let longest = "a".repeat(NAME_BYTES_MAX);
+    for stem in ["a", "a_2", "fixture_two", "x9", longest.as_str()] {
+        assert!(parse_as(stem, "enum A { a }").is_ok(), "{stem:?}");
+    }
+    assert!(parse("enum A { a }").is_ok());
+}

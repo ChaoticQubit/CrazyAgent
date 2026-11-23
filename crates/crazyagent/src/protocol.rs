@@ -180,7 +180,7 @@ pub enum Command {
     },
     #[serde(skip_deserializing)]
     OwnerSandbox {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     #[serde(skip_deserializing)]
@@ -194,6 +194,10 @@ pub enum Command {
     #[serde(skip_deserializing)]
     OwnerProviderRetry {
         choice: crate::provider_retry::ProviderRetry,
+    },
+    #[serde(skip_deserializing)]
+    OwnerLogCompaction {
+        choice: crate::log_compaction::LogCompaction,
     },
     #[serde(skip_deserializing)]
     OwnerMasterSteps {
@@ -437,6 +441,7 @@ impl Command {
             | Self::OwnerAgentCleanup { .. }
             | Self::OwnerAgentQuit { .. }
             | Self::OwnerProviderRetry { .. }
+            | Self::OwnerLogCompaction { .. }
             | Self::OwnerMasterSteps { .. }
             | Self::OwnerMasterTime { .. }
             | Self::OwnerMasterFrames { .. }

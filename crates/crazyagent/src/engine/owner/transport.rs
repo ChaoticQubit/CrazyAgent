@@ -194,10 +194,10 @@ impl Root {
     fn open(path: &Path) -> Result<Self, EngineError> {
         use crazyagent_win_sandbox::private;
         use std::os::windows::ffi::OsStrExt;
-        let path = crate::projects_home::one_spelling(path.to_path_buf());
+        let path = kernel_sandbox::paths::one_spelling(path.to_path_buf());
         if !path
             .to_str()
-            .is_some_and(crate::sandbox::windows_clean_text)
+            .is_some_and(kernel_sandbox::paths::windows_clean_text)
         {
             return Err(failure("owner_root_requires_canonical_trusted_path"));
         }

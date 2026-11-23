@@ -147,14 +147,14 @@ impl AgentSpace {
         let mut engine: Vec<PathBuf> =
             kernel_processes::finding::engine_roots(&crate::tools::HOOKS, Some(root))
                 .into_iter()
-                .chain(crate::sandbox::canonical(root).ok())
+                .chain(kernel_sandbox::paths::canonical(root).ok())
                 .filter(usable)
                 .collect();
         engine.sort();
         engine.dedup();
         let mut folders = Vec::new();
         for folder in named {
-            let real = crate::sandbox::canonical(&folder).ok();
+            let real = kernel_sandbox::paths::canonical(&folder).ok();
             folders.extend(std::iter::once(folder).chain(real).filter(usable));
         }
         folders.sort();
@@ -181,10 +181,10 @@ impl AgentSpace {
     pub fn holds(&self, path: &Path) -> bool {
         let placed = path
             .parent()
-            .and_then(|folder| crate::sandbox::canonical(folder).ok())
+            .and_then(|folder| kernel_sandbox::paths::canonical(folder).ok())
             .zip(path.file_name())
             .map(|(folder, name)| folder.join(name));
-        let real = crate::sandbox::canonical(path).ok();
+        let real = kernel_sandbox::paths::canonical(path).ok();
         [Some(path.to_path_buf()), placed, real]
             .into_iter()
             .flatten()

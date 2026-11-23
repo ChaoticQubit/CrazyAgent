@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// The engine answers program finding needs without naming the engine crate: harness
 /// shims and prefixes, the projects the engine registered, and the folder checks that live
-/// with the sandbox and the service until their own moves. Built once by crazyagent
+/// with the sandbox until its own move. Built once by crazyagent
 /// (crazyagent's `HOOKS`). Inputs: the fields. Output: a value carried on [`Places`].
 #[derive(Clone, Copy)]
 pub struct FindingHooks {
@@ -32,8 +32,6 @@ pub struct FindingHooks {
     pub one_spelling: fn(PathBuf) -> PathBuf,
     pub canonical: fn(&Path) -> std::io::Result<PathBuf>,
     pub in_agent_tmp: fn(&Path) -> bool,
-    pub changeable_past_sticky: fn(&Path) -> Option<PathBuf>,
-    pub changeable_by_others: fn(&Path) -> Option<PathBuf>,
     pub harness_prefix: fn(&Path) -> PathBuf,
     pub gate_root: fn() -> Option<PathBuf>,
 }
@@ -166,6 +164,18 @@ const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
 /// ([`record_engine_root`]).
 static ENGINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// The most data folders whose last good read of the set-up projects is kept.
+const LAST_GOOD_ROOTS_MAX: usize = 16;
+
+/// The most folders one read of the set-up projects names: every row engine.db may hold,
+/// in its recorded, real and one-spelling forms ([`FindingHooks::registered_projects`]).
+pub const PROJECT_ROOTS_MAX: usize = 3 * 1024 * (64 + 3);
+
+/// The last good read of the set-up projects per data folder, which a failed read of the
+/// same folder falls back to ([`Places::at_roots`]).
+static LAST_GOOD: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<PathBuf>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Records the data root of the engine this process runs, once, at its start, so a launch
 /// looks in the same places setup does ([`Places::from_environment`]). Only the engine
 /// binary records it; recording another root later is a bug. Input: the absolute root.
@@ -216,6 +226,7 @@ pub struct Places {
     refused_temp: Vec<PathBuf>,
     app_folder: Option<PathBuf>,
     projects: Option<Vec<PathBuf>>,
+    last_good: Vec<PathBuf>,
     seed: FindingSeed,
 }
 
@@ -234,6 +245,7 @@ impl PartialEq for Places {
             refused_temp,
             app_folder,
             projects,
+            last_good,
             seed,
         } = self;
         *folders == other.folders
@@ -245,6 +257,7 @@ impl PartialEq for Places {
             && *refused_temp == other.refused_temp
             && *app_folder == other.app_folder
             && *projects == other.projects
+            && *last_good == other.last_good
             && *seed == other.seed
     }
 }
@@ -1273,7 +1286,7 @@ pub fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refus
     let hops = (places.seed.hooks.link_hops)(candidate)?;
     Some(if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
-    } else if let Some(part) = (places.seed.hooks.changeable_past_sticky)(candidate) {
+    } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
     } else if places.temp_refused
         && leads_into_temp(&places.seed.hooks, candidate, &real, &places.temps)

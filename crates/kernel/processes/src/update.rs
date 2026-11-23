@@ -287,11 +287,11 @@ pub fn target() -> Option<&'static str> {
     }
 }
 
-/// Whether a published version is newer than the running one, as semver (dev builds sort
-/// below their stable). Inputs: both versions. Output: the answer or
-/// `update_manifest_invalid`.
+/// Whether a published version is newer than the running one, by semver precedence: dev
+/// builds sort below their stable, and build metadata does not count. Inputs: both versions.
+/// Output: the answer or `update_manifest_invalid`.
 pub fn is_newer(available: &str, current: &str) -> Result<bool, UpdateError> {
-    Ok(version(available)? > version(current)?)
+    Ok(version(available)?.cmp_precedence(&version(current)?) == std::cmp::Ordering::Greater)
 }
 
 fn allowed_url(text: &str) -> Result<url::Url, UpdateError> {

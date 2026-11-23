@@ -77,7 +77,6 @@ use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::quit_settings::QuitSettings;
 use crazyagent::roadmap_status::{Refresh, RoadmapStatus};
-use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::service::HOOKS;
 use crazyagent::setup::SetupStatus;
@@ -90,6 +89,7 @@ use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
 use engine_swap::*;
 use kernel_processes::service::{READY_TIMEOUT, Repair, Service, persistable};
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -4045,6 +4045,29 @@ async fn desktop_provider_retry(
 }
 
 #[tauri::command]
+async fn desktop_log_compaction(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::log_compaction::LogCompactionView, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.log_compaction().await
+}
+
+#[tauri::command]
+async fn desktop_set_log_compaction(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::log_compaction::LogCompaction,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_log_compaction(choice, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_set_provider_retry(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -6217,6 +6240,8 @@ native_commands! {
     desktop_set_quit_settings,
     desktop_provider_retry,
     desktop_set_provider_retry,
+    desktop_log_compaction,
+    desktop_set_log_compaction,
     desktop_learning_progress,
     desktop_set_learning_mark,
     desktop_master_step_settings,

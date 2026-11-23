@@ -118,3 +118,24 @@ fn a_failure_in_step_12_leaves_the_2_4_4_fixture_byte_identical() {
     assert_eq!(names(&root).len(), 1);
     assert!(root.backups()[0].join(CHECKED).is_file());
 }
+
+#[test]
+fn an_upgrade_of_the_2_4_4_fixture_adds_an_empty_plugin_records_table() {
+    let (root, _) = fixture_v244();
+    let sources = sources(&root);
+    let mut db = root.connection();
+    assert_eq!(plugin_records(&db), None);
+
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        STEPS,
+        SystemTime::now(),
+        backup,
+    )
+    .unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    assert_eq!(plugin_records(&db), Some(0));
+}

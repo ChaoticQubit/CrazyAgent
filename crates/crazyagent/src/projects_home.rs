@@ -33,6 +33,9 @@ pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use kernel_sandbox::paths::one_spelling;
+#[cfg(target_os = "macos")]
+use kernel_sandbox::paths::{DATA_VOLUME, same_entry};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -277,54 +280,6 @@ pub fn owner_home() -> Result<PathBuf, EngineError> {
     let home = one_spelling(home);
     assert!(home.is_absolute());
     Ok(home)
-}
-
-/// The mount of the macOS data volume, under which every firmlinked folder (/Users,
-/// /private, /Applications and the rest) has a second name.
-#[cfg(target_os = "macos")]
-const DATA_VOLUME: &str = "/System/Volumes/Data";
-
-/// True when two paths name one existing entry (device and inode). Inputs: the paths.
-/// Output: the answer, false when either does not resolve.
-#[cfg(target_os = "macos")]
-fn same_entry(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(left), std::fs::metadata(right)) {
-        (Ok(left), Ok(right)) => (left.dev(), left.ino()) == (right.dev(), right.ino()),
-        _ => false,
-    }
-}
-
-/// One spelling for a path: on macOS a path under the data volume that names the same entry as
-/// the path without that prefix is given without it, the spelling `canonicalize` gives the
-/// short form, so both compare equal as text; on Windows a verbatim disk path is given plain
-/// ([`windows_plain`]) and any other form is kept, so the plain-path checks refuse it. Input:
-/// a path, resolved or not; only its text changes. Output: that spelling, or the path
-/// unchanged.
-pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    if let Ok(rest) = real.strip_prefix(DATA_VOLUME) {
-        let short = Path::new("/").join(rest);
-        if same_entry(&real, &short) {
-            return short;
-        }
-    }
-    #[cfg(windows)]
-    if let Some(plain) = real.to_str().and_then(windows_plain) {
-        return PathBuf::from(plain);
-    }
-    real
-}
-
-/// The plain Windows spelling of path text (leader 11-20 05:2x, rv-sec2 #717 C1): a
-/// verbatim disk path `\\?\C:\...` gives `C:\...`, and plain text stays as it is, when the
-/// result passes [`crate::sandbox::windows_clean_text`]. A UNC, device or other verbatim form,
-/// or text Win32 would normalise to another name, gives none. Input: the text. Output: the
-/// plain text, or none.
-#[cfg(any(windows, test))]
-pub(crate) fn windows_plain(text: &str) -> Option<&str> {
-    let plain = text.strip_prefix(r"\\?\").unwrap_or(text);
-    crate::sandbox::windows_clean_text(plain).then_some(plain)
 }
 
 /// The data volume's name for a path in its one spelling, when that names the same entry,

@@ -48,50 +48,311 @@ fn the_save_quit_capability_has_its_declared_facts() {
     );
 }
 
-#[test]
-fn the_sdk_re_exports_no_ambient_power() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = vec![src.join("lib.rs")];
-    for entry in fs::read_dir(src.join("generated")).expect("generated reads") {
-        let path = entry.expect("entry reads").path();
-        if !path.is_dir() {
-            files.push(path);
+/// The std modules that hand a plugin power over the machine.
+const AMBIENT: [&str; 4] = ["fs", "net", "process", "env"];
+
+/// The crate roots no SDK file may re-export with `pub use`.
+const ROOTS: [&str; 4] = ["std", "core", "alloc", "serde_json"];
+
+/// Splits Rust source into tokens: identifiers (a raw `r#` prefix dropped), `::`, and single
+/// punctuation characters. Comments, string, byte-string and char literals are skipped, so
+/// a path spelled in a docstring or a literal is never a hit. Input: the source.
+/// Output: the tokens in order.
+fn rust_tokens(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let before = at;
+        let c = chars[at];
+        let next = chars.get(at + 1).copied();
+        if c.is_whitespace() {
+            at += 1;
+        } else if c == '/' && next == Some('/') {
+            while at < chars.len() && chars[at] != '\n' {
+                at += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            let mut depth = 0usize;
+            while at < chars.len() {
+                if chars[at] == '/' && chars.get(at + 1) == Some(&'*') {
+                    depth += 1;
+                    at += 2;
+                } else if chars[at] == '*' && chars.get(at + 1) == Some(&'/') {
+                    depth -= 1;
+                    at += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    at += 1;
+                }
+            }
+        } else if let Some(end) = string_end(&chars, at) {
+            at = end;
+        } else if c == '\'' || (c == 'b' && next == Some('\'')) {
+            let quote = if c == 'b' { at + 1 } else { at };
+            if chars.get(quote + 1) == Some(&'\\') {
+                at = quote + 3;
+                while at < chars.len() && chars[at] != '\'' {
+                    at += 1;
+                }
+                at += 1;
+            } else if chars.get(quote + 2) == Some(&'\'') {
+                at = quote + 3;
+            } else {
+                at = quote + 1;
+            }
+        } else if c.is_alphabetic() || c == '_' {
+            let mut end = at;
+            while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let word: String = chars[at..end].iter().collect();
+            at = end;
+            if word == "r" && chars.get(at) == Some(&'#') {
+                at += 1;
+                continue;
+            }
+            tokens.push(word);
+        } else if c == ':' && next == Some(':') {
+            tokens.push("::".to_owned());
+            at += 2;
+        } else {
+            tokens.push(c.to_string());
+            at += 1;
+        }
+        assert!(at > before, "the scan moves on");
+    }
+    tokens
+}
+
+/// Where a string or byte-string literal starting at a position ends: `"..."`, `b"..."`,
+/// `r"..."`, `r#"..."#` and `br#"..."#`. Inputs: the source characters and the position.
+/// Output: the position just past the literal, or `None` when none starts there.
+fn string_end(chars: &[char], at: usize) -> Option<usize> {
+    let mut quote = at;
+    if chars.get(quote) == Some(&'b') {
+        quote += 1;
+    }
+    let raw = chars.get(quote) == Some(&'r');
+    if raw {
+        quote += 1;
+    }
+    let mut hashes = 0;
+    while raw && chars.get(quote + hashes) == Some(&'#') {
+        hashes += 1;
+    }
+    if chars.get(quote + hashes) != Some(&'"') {
+        return None;
+    }
+    if !raw && quote != at && chars[at] != 'b' {
+        return None;
+    }
+    let mut end = quote + hashes + 1;
+    while end < chars.len() {
+        if !raw && chars[end] == '\\' {
+            end += 2;
             continue;
         }
-        for inner in fs::read_dir(&path).expect("a generated subfolder reads") {
-            files.push(inner.expect("entry reads").path());
+        if chars[end] == '"' && (0..hashes).all(|offset| chars.get(end + 1 + offset) == Some(&'#'))
+        {
+            return Some(end + 1 + hashes);
+        }
+        end += 1;
+    }
+    Some(chars.len())
+}
+
+/// Finds the first way a Rust source could hand a plugin ambient power: a path through
+/// `std::fs`, `std::net`, `std::process` or `std::env` (a brace list, an alias or a glob
+/// included), a glob of `std` itself, `std` or `std::{self}` aliased, `extern crate std`
+/// or `pub extern crate`, a `#[path]` module, `include!`, or a `pub use` of a crate root.
+/// Input: the source. Output: the disguise found, or `None`.
+fn ambient_power(source: &str) -> Option<String> {
+    let tokens = rust_tokens(source);
+    let at = |index: usize| tokens.get(index).map(String::as_str).unwrap_or("");
+    for index in 0..tokens.len() {
+        let token = at(index);
+        if token == "std" && at(index + 1) == "as" {
+            return Some("std aliased".to_owned());
+        }
+        if token == "std" && at(index + 1) == "::" {
+            let module = at(index + 2);
+            if AMBIENT.contains(&module) {
+                return Some(format!("std::{module}"));
+            }
+            if module == "*" {
+                return Some("std::*".to_owned());
+            }
+            if module == "{" {
+                let mut depth = 0usize;
+                for inner in index + 2..tokens.len() {
+                    match at(inner) {
+                        "{" => depth += 1,
+                        "}" => depth -= 1,
+                        word if AMBIENT.contains(&word) || word == "self" || word == "*" => {
+                            return Some(format!("std::{{{word}}}"));
+                        }
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        if token == "extern" && at(index + 1) == "crate" {
+            if at(index + 2) == "std" {
+                return Some("extern crate std".to_owned());
+            }
+            if index > 0 && at(index - 1) == "pub" {
+                return Some("pub extern crate".to_owned());
+            }
+        }
+        if token == "#" {
+            let open = if at(index + 1) == "!" {
+                index + 2
+            } else {
+                index + 1
+            };
+            if at(open) == "[" && at(open + 1) == "path" {
+                return Some("#[path]".to_owned());
+            }
+        }
+        if token == "include" && at(index + 1) == "!" {
+            return Some("include!".to_owned());
         }
     }
-    assert!(files.len() >= 7);
-    for file in files {
-        let text = fs::read_to_string(&file).expect("source reads");
-        for banned in [
-            "pub use std",
-            "pub use core",
-            "pub use alloc",
-            "pub use serde_json",
-            "pub use ::std",
-            "pub use ::core",
-            "pub use ::alloc",
-            "pub extern crate",
-        ] {
-            assert!(!text.contains(banned), "{} has {banned}", file.display());
+    for index in 0..tokens.len() {
+        if at(index) == "use" && index > 0 && at(index - 1) == "pub" {
+            let mut root = index + 1;
+            while matches!(at(root), "::" | "{") {
+                root += 1;
+            }
+            if ROOTS.contains(&at(root)) {
+                return Some(format!("pub use {}", at(root)));
+            }
+        }
+    }
+    None
+}
+
+/// Lists the SDK's shipped Rust files: every `.rs` under `src`, its subfolders included,
+/// except the test rows and the `cfg(test)` fixture trees. Inputs: the folder and its depth.
+/// Output: the files grow.
+fn shipped_sources(folder: &Path, depth: usize, files: &mut Vec<std::path::PathBuf>) {
+    assert!(depth <= 3, "the SDK tree is shallow");
+    let mut entries: Vec<_> = fs::read_dir(folder)
+        .unwrap_or_else(|error| panic!("{}: {error}", folder.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("{}: {error}", folder.display()))
+                .path()
+        })
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with("fixture") || name == "tests.rs" || name.ends_with("_tests.rs") {
+            continue;
+        }
+        if path.is_dir() {
+            shipped_sources(&path, depth + 1, files);
+        } else if name.ends_with(".rs") {
+            files.push(path);
         }
     }
 }
 
 #[test]
-fn the_host_and_free_functions_take_no_caller() {
+fn the_sdk_re_exports_no_ambient_power() {
+    let mut files = Vec::new();
+    shipped_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        0,
+        &mut files,
+    );
+    assert!(files.len() >= 9, "{files:?}");
+    assert!(files.iter().any(|file| file.ends_with("src/lib.rs")));
+    assert!(
+        files
+            .iter()
+            .any(|file| file.ends_with("generated/envelope/settings.rs"))
+    );
+    for file in files {
+        let text =
+            fs::read_to_string(&file).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        assert_eq!(ambient_power(&text), None, "{}", file.display());
+    }
+}
+
+#[test]
+fn the_ambient_power_scan_catches_each_disguise() {
+    for (source, found) in [
+        ("pub use std::fs;", "std::fs"),
+        ("pub use {std::fs};", "std::fs"),
+        ("pub use std::{fs, net};", "std::{fs}"),
+        (
+            "pub use std::{io::Read, process::Command};",
+            "std::{process}",
+        ),
+        ("pub use std::fs as files;", "std::fs"),
+        ("use std::*;\npub use fs::File;", "std::*"),
+        ("use std::{io, *};\npub type F = fs::File;", "std::{*}"),
+        ("pub use ::std::env;", "std::env"),
+        ("use std::fs as inner;\npub use inner::*;", "std::fs"),
+        ("use std::{self as s};\npub use s::net::*;", "std::{self}"),
+        ("use std as s;\npub use s::net;", "std aliased"),
+        ("pub type File = std::fs::File;", "std::fs"),
+        (
+            "pub fn run() -> std::process::Child { todo!() }",
+            "std::process",
+        ),
+        ("pub use r#std::fs;", "std::fs"),
+        ("extern crate std as s;", "extern crate std"),
+        ("pub extern crate alloc;", "pub extern crate"),
+        ("#[path = \"x.rs\"]\npub mod x;", "#[path]"),
+        ("include!(\"x.rs\");", "include!"),
+        ("pub use core::fmt;", "pub use core"),
+        ("pub use alloc::{string::String};", "pub use alloc"),
+        ("pub use serde_json::Value;", "pub use serde_json"),
+    ] {
+        assert_eq!(ambient_power(source).as_deref(), Some(found), "{source}");
+    }
+    for clean in [
+        "extern crate alloc;\nuse alloc::string::String;",
+        "/// std::fs is never re-exported.\npub struct S;",
+        "/* std::process */ pub const C: &str = \"std::fs\";",
+        "pub const R: &str = r#\"std::env \"quoted\"\"#;",
+        "fn f<'de>(c: char) -> bool { c == 'a' || c == '\\'' }",
+        "pub use generated::host::Host;",
+        "use core::fmt;",
+    ] {
+        assert_eq!(ambient_power(clean), None, "{clean}");
+    }
+}
+
+#[test]
+fn the_host_and_free_functions_take_no_caller() -> Result<(), Box<dyn std::error::Error>> {
     let generated = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/generated");
-    let host = fs::read_to_string(generated.join("host.rs")).expect("host.rs reads");
+    let read = |name: &str| {
+        let path = generated.join(name);
+        fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))
+    };
+    let host = read("host.rs")?;
     assert!(host.contains(
         "    fn settings_save_quit(&self, settings: settings::QuitSettings) -> Result<(), Refusal>;\n"
     ));
-    let settings = fs::read_to_string(generated.join("settings.rs")).expect("settings.rs reads");
+    let settings = read("settings.rs")?;
     assert!(settings.contains(
         "pub fn save_quit(host: &dyn Host, settings: QuitSettings) -> Result<(), Refusal> {\n"
     ));
     assert!(!host.contains("caller"));
+    Ok(())
 }
 
 #[test]

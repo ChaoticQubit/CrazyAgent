@@ -157,10 +157,10 @@ impl AgentNetwork {
     /// model proxy: under None for a model off loopback, except on Windows, whose AppContainer
     /// cannot reach loopback (P6), so the agent reaches the model's port on any host instead
     /// (DEC-203 O2a). Inputs: the OS, whether tools are on, the model. Output: the answer.
-    pub fn proxied(self, os: &str, tools: bool, model: super::SandboxRemote) -> bool {
+    pub fn proxied(self, os: &str, tools: bool, model: kernel_sandbox::net::SandboxRemote) -> bool {
         tools
             && self == Self::None
-            && !matches!(model, super::SandboxRemote::Loopback(_))
+            && !matches!(model, kernel_sandbox::net::SandboxRemote::Loopback(_))
             && os != "windows"
     }
 
@@ -173,23 +173,25 @@ impl AgentNetwork {
         self,
         os: &str,
         tools: bool,
-        model: super::SandboxRemote,
+        model: kernel_sandbox::net::SandboxRemote,
         proxy: Option<u16>,
-    ) -> Result<super::SandboxNetwork, super::SandboxError> {
+    ) -> Result<kernel_sandbox::net::SandboxNetwork, kernel_sandbox::error::SandboxError> {
         assert_eq!(
             proxy.is_some(),
             self.proxied(os, tools, model),
             "a proxy port is given exactly when the agent is proxied"
         );
-        if os == "windows" && matches!(model, super::SandboxRemote::Loopback(_)) {
-            return Err(super::SandboxError::Unavailable(
-                super::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+        if os == "windows" && matches!(model, kernel_sandbox::net::SandboxRemote::Loopback(_)) {
+            return Err(kernel_sandbox::error::SandboxError::Unavailable(
+                kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE.into(),
             ));
         }
         Ok(match proxy {
-            Some(port) => super::SandboxNetwork::Only(vec![super::SandboxRemote::Loopback(port)]),
+            Some(port) => kernel_sandbox::net::SandboxNetwork::Only(vec![
+                kernel_sandbox::net::SandboxRemote::Loopback(port),
+            ]),
             None if !tools || (self == Self::None && os == "windows") => {
-                super::SandboxNetwork::Only(vec![model])
+                kernel_sandbox::net::SandboxNetwork::Only(vec![model])
             }
             None => self.sandbox(Some(model)),
         })
@@ -200,18 +202,23 @@ impl AgentNetwork {
     /// port 443 plus the model's port for Https, and for None the model only on loopback:
     /// a model on any host is reached under None only through a model proxy's loopback
     /// port, so no None path grants a host port or DNS (S4B-M1).
-    pub fn sandbox(self, model: Option<super::SandboxRemote>) -> super::SandboxNetwork {
+    pub fn sandbox(
+        self,
+        model: Option<kernel_sandbox::net::SandboxRemote>,
+    ) -> kernel_sandbox::net::SandboxNetwork {
         match self {
-            Self::Open => super::SandboxNetwork::Open,
+            Self::Open => kernel_sandbox::net::SandboxNetwork::Open,
             Self::Https => {
-                let mut remotes = vec![super::SandboxRemote::AnyHost(443)];
+                let mut remotes = vec![kernel_sandbox::net::SandboxRemote::AnyHost(443)];
                 remotes.extend(model);
-                super::SandboxNetwork::Only(remotes)
+                kernel_sandbox::net::SandboxNetwork::Only(remotes)
             }
-            Self::None => super::SandboxNetwork::Only(
+            Self::None => kernel_sandbox::net::SandboxNetwork::Only(
                 model
                     .into_iter()
-                    .filter(|remote| matches!(remote, super::SandboxRemote::Loopback(_)))
+                    .filter(|remote| {
+                        matches!(remote, kernel_sandbox::net::SandboxRemote::Loopback(_))
+                    })
                     .collect(),
             ),
         }
@@ -293,11 +300,16 @@ impl HomeCaches {
 /// the project's network choice at Own branch through [`AgentNetwork::sandbox`], with no
 /// model port. A Full access process has no Seatbelt for a choice to limit, so it never
 /// asks. Inputs: the level and the choice. Output: the sandbox's network.
-pub fn ide_network(level: AgentAccess, choice: AgentNetwork) -> super::SandboxNetwork {
+pub fn ide_network(
+    level: AgentAccess,
+    choice: AgentNetwork,
+) -> kernel_sandbox::net::SandboxNetwork {
     assert_ne!(level, AgentAccess::Full);
     match level {
         AgentAccess::OwnBranch => choice.sandbox(None),
-        AgentAccess::Sandboxed | AgentAccess::Full => super::SandboxNetwork::Only(Vec::new()),
+        AgentAccess::Sandboxed | AgentAccess::Full => {
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new())
+        }
     }
 }
 
@@ -354,7 +366,7 @@ impl AgentFilesRule {
             IdeAgentFiles::NoDeleteOrRename => "file-write-unlink",
             IdeAgentFiles::ReadOnly => "file-write*",
         };
-        assert!(super::clean_absolute(root));
+        assert!(kernel_sandbox::paths::clean_absolute(root));
         let root = super::any_case(root.to_str().expect("a clean absolute path is text"));
         let state = super::any_case("/.crazyagent");
         let layout = if self.older_agents {
@@ -365,7 +377,7 @@ impl AgentFilesRule {
         let agents = format!("{root}{layout}/{}", super::any_case("worktrees"));
         format!(
             "(deny {operation}\n  {})\n(deny file-write-unlink\n  (regex #\"^{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n",
-            super::at_or_below(&format!("{agents}/[^/]+"))
+            kernel_sandbox::paths::at_or_below(&format!("{agents}/[^/]+"))
         )
     }
 }
@@ -595,7 +607,7 @@ impl AgentPolicy {
         project: &Path,
         homes: &ToolHomes,
         version: u64,
-        settings: Option<crate::sandbox_settings::SandboxSettings>,
+        settings: Option<kernel_sandbox::settings::SandboxSettings>,
         other_git: bool,
     ) -> PolicyView {
         let allowed = self.allowed(project);
@@ -901,13 +913,13 @@ pub struct NetworkView {
 pub fn linux_network_gap(
     network: AgentNetwork,
     host: Option<crate::sandbox::LinuxHost>,
-    sockets: Option<crate::sandbox::LinuxSockets>,
+    sockets: Option<kernel_sandbox::settings::LinuxSockets>,
     grants: &[AccessGrant],
 ) -> Option<String> {
     let host = host?;
-    let tcp = sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    let tcp = sockets == Some(kernel_sandbox::settings::LinuxSockets::TcpOnly);
     let low = grants.iter().any(|grant| {
-        matches!(grant, AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN)
+        matches!(grant, AccessGrant::Port { port } if *port < kernel_sandbox::ports::BRIDGE_PORT_MIN)
     });
     if host.routed && tcp && network == AgentNetwork::Https && !low {
         assert!(host.nested);
@@ -915,16 +927,18 @@ pub fn linux_network_gap(
     }
     if host.supervised && tcp && network != AgentNetwork::Open {
         return (network == AgentNetwork::Https)
-            .then(|| crate::sandbox::LINUX_DNS_ANY_HOST_LINE.to_owned());
+            .then(|| kernel_sandbox::lines::LINUX_DNS_ANY_HOST_LINE.to_owned());
     }
     let bridges = network == AgentNetwork::None && host.nested && tcp;
     if !bridges {
-        return Some(crate::sandbox::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        return Some(kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE.to_owned());
     }
     grants
         .iter()
         .filter_map(|grant| match grant {
-            AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN => Some(*port),
+            AccessGrant::Port { port } if *port < kernel_sandbox::ports::BRIDGE_PORT_MIN => {
+                Some(*port)
+            }
             _ => None,
         })
         .min()
@@ -955,7 +969,7 @@ impl LevelView {
     /// [`LevelView::refresh`] last read of it under the owner's call supervisor setting; a
     /// repository may be anywhere in a project not made yet. Input: the setting, none when
     /// unreadable. Output: one view for each level.
-    pub fn all(calls: Option<crate::sandbox::LinuxSupervisor>) -> Vec<Self> {
+    pub fn all(calls: Option<kernel_sandbox::settings::LinuxSupervisor>) -> Vec<Self> {
         Self::on(
             crate::sandbox::linux_host_kept().map(|host| host.under(calls)),
             true,
@@ -1022,23 +1036,23 @@ pub fn linux_gaps(
     }
     let mut lines = Vec::with_capacity(4);
     if host.root {
-        lines.push(crate::sandbox::LINUX_ROOT_LINE);
+        lines.push(kernel_sandbox::lines::LINUX_ROOT_LINE);
     }
     if host.supervised {
         if other_git {
-            lines.push(crate::sandbox::LINUX_KEPT_GIT_LINE);
+            lines.push(kernel_sandbox::lines::LINUX_KEPT_GIT_LINE);
         }
-        lines.push(crate::sandbox::LINUX_SUPERVISED_LINE);
+        lines.push(kernel_sandbox::lines::LINUX_SUPERVISED_LINE);
     } else {
-        lines.push(crate::sandbox::LINUX_NESTED_GIT_LINE);
+        lines.push(kernel_sandbox::lines::LINUX_NESTED_GIT_LINE);
     }
     if host.armored && !host.root {
-        lines.push(crate::sandbox::LINUX_APPARMOR_LINE);
+        lines.push(kernel_sandbox::lines::LINUX_APPARMOR_LINE);
     }
     if !host.nested && (host.scoped || host.supervised) {
-        lines.push(crate::sandbox::LINUX_PROCESS_LIST_LINE);
+        lines.push(kernel_sandbox::lines::LINUX_PROCESS_LIST_LINE);
     } else if !host.nested {
-        lines.push(crate::sandbox::LINUX_SIGNALS_LINE);
+        lines.push(kernel_sandbox::lines::LINUX_SIGNALS_LINE);
     }
     assert!((1..=4).contains(&lines.len()));
     lines

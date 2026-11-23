@@ -1,5 +1,13 @@
+use kernel_sandbox::elf;
+use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::lines::*;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::paths::{
+    PATH_BYTES_MAX, at_or_below, canonical, clean_absolute, owner_home, plain_top,
+};
+use kernel_sandbox::ports::BRIDGE_PORT_MIN;
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -13,7 +21,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-pub mod elf;
 pub mod extra_paths;
 #[cfg(all(test, target_os = "macos"))]
 mod git_deny_tests;
@@ -227,7 +234,6 @@ pub fn held_stop(os: &str, code: i32) -> Option<&'static str> {
 /// names it `MasterReason::SandboxStopped`.
 pub const HELD_STOP_CAUSE: &str = "sandbox_held_not_put_back";
 
-const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 /// The most folder links one sandbox makes readable by name beside its roots: the links
 /// its process is started through.
@@ -998,100 +1004,8 @@ pub fn agent_command<'a>(
     windows::agent_command(profile, program, base, harness)
 }
 
-/// Network reach of a sandboxed agent: open when the agent's tools are on, except that
-/// it never binds or listens on an [`OWNER_PORTS`] port, one [`ProjectSandbox::keep_ports`]
-/// keeps or one of [`model_proxy::PROXY_PORTS`] or [`model_proxy::RELAY_PORTS`], otherwise
-/// only the listed remotes, each one port on loopback or on any host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SandboxNetwork {
-    Open,
-    Only(Vec<SandboxRemote>),
-}
-
-/// One outbound TCP destination a tools-off agent may still reach. Seatbelt
-/// filters by port only, either on loopback or on any host, so `accounts::account_url`
-/// refuses an endpoint on another machine on a port a cloud metadata service answers on
-/// when it is saved (MACOS-ANYHOST-METADATA).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxRemote {
-    Loopback(u16),
-    AnyHost(u16),
-}
-
-impl SandboxRemote {
-    /// The destination a tools-off agent needs for one model endpoint: the URL's port on
-    /// loopback for a local server, otherwise that port on any host. Input: an http or
-    /// https URL. Output: the remote, or a refusal for another scheme, host or port.
-    pub fn for_endpoint(url: &str) -> Result<Self, SandboxError> {
-        let parsed = url::Url::parse(url).map_err(|_| invalid("endpoint URL is invalid"))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(invalid("endpoint URL must be http or https"));
-        }
-        let port = parsed
-            .port_or_known_default()
-            .filter(|port| *port != 0)
-            .ok_or_else(|| invalid("endpoint port is missing"))?;
-        let loopback = match parsed.host() {
-            Some(url::Host::Ipv4(address)) => address.is_loopback(),
-            Some(url::Host::Ipv6(address)) => address.is_loopback(),
-            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-            None => return Err(invalid("endpoint host is missing")),
-        };
-        assert_ne!(port, 0);
-        Ok(if loopback {
-            Self::Loopback(port)
-        } else {
-            Self::AnyHost(port)
-        })
-    }
-}
-
-/// How a limited-network agent's sockets are held on Linux, the owner's setting "Linux
-/// limited-network sockets". Landlock limits outbound TCP by port only, so a UDP, ping or
-/// other socket would reach any host. `TcpOnly` (the default) refuses every socket but TCP
-/// and has names looked up over TCP, `Refuse` starts no limited-network agent, and
-/// `TcpPorts` keeps only Landlock's TCP port rules. Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxSockets {
-    #[default]
-    TcpOnly,
-    Refuse,
-    TcpPorts,
-}
-
-/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the
-/// owner's setting "Linux call supervisor" (DEC-179 addendum 2). `On` (the default) adds
-/// the guards a launch needs: ports on this computer only, no new `.git` outside the
-/// agent's own git folders, signals only to programs it started. `Off` keeps the launch
-/// and every line as they were before the supervisor. Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxSupervisor {
-    #[default]
-    On,
-    Off,
-}
-
-/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's
-/// setting "Refuse agents without the full Linux sandbox" (DEC-185). `Off` (the default)
-/// starts it with what this Linux holds and the lines that say what it cannot; `On` refuses
-/// it unless [`linux_holds_fully`] does. Team agents need the full sandbox whatever it says.
-/// Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxStrict {
-    #[default]
-    Off,
-    On,
-}
-
 /// The engine refusal code of a Linux launch the strict setting refuses ([`LinuxStrict`]).
 pub const LINUX_NOT_FULL: &str = "linux_sandbox_not_full";
-
-/// Why [`InstalledSandbox::install`] refuses a Linux launch under [`LinuxStrict::On`]: it
-/// does not hold the full Linux sandbox ([`linux_holds_fully`]).
-pub const LINUX_NOT_FULL_LINE: &str = "this Linux does not hold the full sandbox for this launch, and the setting 'Refuse agents without the full Linux sandbox' is on";
 
 /// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
 /// (the nested backend), the call supervisor running, and its network limits held, so none
@@ -1121,21 +1035,6 @@ pub fn linux_holds_fully(
         SandboxRemote::Loopback(port) => *port >= BRIDGE_PORT_MIN,
         SandboxRemote::AnyHost(_) => routed,
     })
-}
-
-/// The engine refusal code of a Windows launch whose limited network names a loopback port
-/// (DESIGN-0256 O2a).
-pub const MODEL_LOOPBACK_UNAVAILABLE_WINDOWS: &str = "model_loopback_unavailable_windows";
-
-/// Why a Windows launch is refused when its network names a loopback port: the AppContainer
-/// cannot reach this computer's own network without an admin exemption (probe P6).
-pub const MODEL_LOOPBACK_WINDOWS_LINE: &str = "a Windows agent cannot reach a port on this computer, such as a local model server or the relay, because its AppContainer has no way to this computer's own network";
-
-/// Tells whether a launch refusal is the Windows loopback one ([`MODEL_LOOPBACK_WINDOWS_LINE`]),
-/// so a caller can give it its own code ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]). Input: the
-/// refusal. Output: the answer.
-pub fn model_loopback_windows(error: &SandboxError) -> bool {
-    matches!(error, SandboxError::Unavailable(reason) if reason == MODEL_LOOPBACK_WINDOWS_LINE)
 }
 
 /// The engine refusal code of a Linux launch whose project hides folders on a computer
@@ -1244,10 +1143,6 @@ pub const GIT_FALLBACK: &str = ".git.git";
 /// (DEC-185 S2b).
 pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
 
-/// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
-/// own an agent's helper has no capability to listen below it.
-pub const BRIDGE_PORT_MIN: u16 = 1024;
-
 /// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
 /// computer's network on a Linux that could give them one of their own: on the project's
 /// Agent access page and in the agent's messages at its launch. Input: the port. Output:
@@ -1323,68 +1218,6 @@ pub fn linux_unbridged_notice(
     let host = linux_host_kept().map(|host| host.under(calls));
     linux_unbridged_notice_on(host, choice, sandbox)
 }
-
-/// What a launch tells the owner in the agent's messages when this Linux nests agents but
-/// could not give this one the network of its own its ports allow (DEC-179 SBX-2): why it
-/// has none, the AppArmor profile and root included (rv-sa241 NOTE-2, NOTE-3), and what
-/// that leaves open.
-pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so every port it may reach is open to it on every host, this computer included.";
-
-/// [`LINUX_UNROUTED_LINE`] for an agent with no loopback port, or one the call supervisor
-/// keeps to this computer (rv-sa241 7b LOW-1 and N1): its ports on any host then reach
-/// this computer too.
-pub const LINUX_UNROUTED_ANY_HOST_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so the ports it may reach on any host include this computer's own.";
-
-/// What a limited network cannot hold on Linux, shown there only, under the network choice
-/// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
-/// host, so a port an agent may reach on this computer is open to it on every host.
-pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
-
-/// What a writable project folder cannot hold on a Linux where no call supervisor runs,
-/// among the engine's lines under the access level in the desktop and the TUI (RV-DS241-85,
-/// DEC-179 T4c): no Landlock rule stops an agent from making a git repository inside a
-/// folder it may change.
-pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
-
-/// What a Linux agent can still do to the owner's other programs where this machine gives
-/// it neither a process namespace of its own nor the Landlock signal scope (Linux before
-/// 6.12 without usable user namespaces), shown there only, under the access level in the
-/// desktop and the TUI (SA vid 4, DEC-089).
-pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which programs you run and stop or signal them, such as a dev server or CrazyAgent itself. Linux 6.12 or newer stops the signals.";
-
-/// What a Linux agent can still see where the kernel scopes its signals but this machine
-/// gives it no process namespace of its own, shown there only, under the access level in
-/// the desktop and the TUI (RV-DS241-86).
-pub const LINUX_PROCESS_LIST_LINE: &str =
-    "On this Linux, agents can see which programs you run and how they were started.";
-
-/// What a writable project folder still cannot hold where the call supervisor runs: it
-/// refuses every new `.git` entry but the agent's own, yet an agent may change a git
-/// repository already in the project. Shown under the access level when the project may
-/// hold one ([`linux_other_git`]) and in the New Project catalog (DEC-179 T4c).
-pub const LINUX_KEPT_GIT_LINE: &str = "On Linux, agents can change a git repository already inside a project folder they may change, and your own git or IDE runs its settings when you open that folder. Check folders with a .git inside the project before you open them.";
-
-/// What the call supervisor changes for agents where it runs (DEC-179 T4c): it makes the
-/// calls it guards for them, so a program's own Landlock limits do not hold for those
-/// (QUESTION-16:21), and it refuses a create, even of a file already there, under a `.git`
-/// the agent did not make (rv-sec3 N3).
-pub const LINUX_SUPERVISED_LINE: &str = "On this Linux, CrazyAgent makes some calls for agents, such as making a file or folder or connecting, so a program an agent starts can't narrow those with limits of its own. In a .git folder CrazyAgent didn't make, agents can't create files and some writes to files already there are refused, so git commands that write fail in a repository nested in the project.";
-
-/// Why no call supervisor runs where CrazyAgent runs as root (rv-sec3 N1): dumpability does
-/// not keep a root agent away from it, so none starts and the lines after this one hold.
-pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it starts no call supervisor and agents can do what the lines below say. Run CrazyAgent as your own user to turn it on.";
-
-/// What a limited network that reaches websites still cannot hold where the call supervisor
-/// keeps ports on this computer to it (DEC-179 T4c): agents look up names over TCP, so port
-/// 53 is open to them on every host.
-pub const LINUX_DNS_ANY_HOST_LINE: &str =
-    "On this Linux, agents can also reach port 53, used to look up names, on every host.";
-
-/// Why agents share the owner's process space where AppArmor keeps unprivileged programs
-/// out of user namespaces (Ubuntu 23.10 and newer) and this machine nests none, shown before
-/// the process or signals line it explains, with the deb package that adds the profile
-/// allowing it (DEC-179 SBX-3, addendum 7).
-pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from getting a process space of their own. CrazyAgent's .deb package adds the AppArmor profile that allows it: install it, or if it is installed, run sudo dpkg-reconfigure crazy-agent.";
 
 /// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
 /// when it starts agents in a process namespace of their own, `scoped` when the kernel
@@ -1473,49 +1306,6 @@ pub fn linux_other_git(project: &Path) -> bool {
     {
         let _ = project;
         true
-    }
-}
-
-/// Refusal to build or install a project sandbox: `Invalid` for an unsafe path or policy,
-/// `Unavailable` with a plain reason, such as a missing Windows helper or loopback limit,
-/// `Unreadable` for a Windows read root no app container may read and this user cannot change
-/// (V244-WIN-NPM), or `Io`.
-#[derive(Debug)]
-pub enum SandboxError {
-    Invalid(String),
-    Unavailable(String),
-    Unreadable(PathBuf),
-    Io(io::Error),
-}
-
-impl fmt::Display for SandboxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(reason) => write!(f, "sandbox refused: {reason}"),
-            Self::Unavailable(reason) => write!(f, "sandbox unavailable: {reason}"),
-            Self::Unreadable(folder) => {
-                write!(f, "sandbox unavailable: {}", unreadable_reason(folder))
-            }
-            Self::Io(error) => write!(f, "sandbox I/O: {error}"),
-        }
-    }
-}
-
-/// Why a Windows read root refuses a launch, in plain words naming the folder: no app
-/// container may read it and this Windows user cannot change who may. Input: the folder.
-/// Output: the reason.
-pub fn unreadable_reason(folder: &Path) -> String {
-    format!(
-        "Windows does not let sandboxed programs read {}, and this Windows user cannot change who reads it",
-        folder.display()
-    )
-}
-
-impl std::error::Error for SandboxError {}
-
-impl From<io::Error> for SandboxError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
     }
 }
 
@@ -4727,19 +4517,6 @@ fn spell_stretch(
     }
 }
 
-/// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
-/// one path part, never `.` or `..`, at most 255 bytes, with no control character, quote or
-/// backslash, so it sits in a Seatbelt pattern as written. Takes the name. Returns the answer.
-pub(crate) fn plain_top(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 255
-        && name != "."
-        && name != ".."
-        && !name
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))
-}
-
 /// Seatbelt regex bodies `{prefix}(a|b|...){suffix}` that together match each of
 /// `alternatives`, packed whole, in order, so each body fits [`SBPL_STRING_MAX`] bytes; one
 /// alternative too long beside the prefix keeps a body of its own, which [`sbpl_overlong`]
@@ -4841,10 +4618,6 @@ pub(crate) fn priming_profile(folder: &Path, uv: &Path) -> String {
     text
 }
 
-fn invalid(reason: &str) -> SandboxError {
-    SandboxError::Invalid(reason.into())
-}
-
 /// Makes sure a store a profile keeps read-only is a plain folder the engine made: creates
 /// it empty, mode 0700 on unix, or keeps an entry already there only when it is a real
 /// folder, never a file or a link. Disk state is input here, so a wrong entry is an error.
@@ -4868,34 +4641,6 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
         }
         made => made,
     }
-}
-
-/// The owner's home folder from the user profile, canonical when it resolves, which
-/// no sandbox root may contain. Takes nothing. Returns the folder, or `Invalid` when the
-/// profile names none or a relative one.
-#[cfg(target_os = "windows")]
-fn owner_home() -> Result<PathBuf, SandboxError> {
-    let home = std::env::home_dir().ok_or_else(|| invalid("owner account is unknown"))?;
-    settled_home(home)
-}
-
-#[cfg(unix)]
-fn owner_home() -> Result<PathBuf, SandboxError> {
-    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
-        .map_err(|error| SandboxError::Io(io::Error::from(error)))?
-        .ok_or_else(|| invalid("owner account is unknown"))?;
-    settled_home(user.dir)
-}
-
-/// The owner's home as the sandbox compares it: refused unless absolute and clean, then
-/// [`canonical`] when it resolves, so a home named through the macOS data volume has the
-/// short spelling every sandbox root has. Input: the home the account names. Output: the
-/// folder, or `Invalid` for a relative or unclean one.
-fn settled_home(home: PathBuf) -> Result<PathBuf, SandboxError> {
-    if !clean_absolute(&home) {
-        return Err(invalid("owner home must be absolute"));
-    }
-    Ok(canonical(&home).unwrap_or(home))
 }
 
 /// Names the credential files and folders the sandbox guards as they appear in a path: the
@@ -5323,17 +5068,6 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filter for a path and everything below it: one `^X(/|$)` in place of
-/// `^X(/.*)?$`, whose `(/.*)` tail libsandbox fails to compile again in lower case after a
-/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`
-/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). One regex keeps the profile under its cap
-/// for long roots, where an `X$` and `X/` pair did not (V243-PROFILE-CAP-ROW, DEC-195 Q6).
-/// Input: the pattern after `^`, an absolute path first. Output: the filter.
-pub(crate) fn at_or_below(pattern: &str) -> String {
-    assert!(pattern.starts_with('/'));
-    format!("(regex #\"^{pattern}(/|$)\")")
-}
-
 /// The Seatbelt filters for a `.git` at any depth below `root`, top level included, in every
 /// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
 /// working tree (SM1-R), as [`at_or_below`] spells it. Input: the root. Output: the filters.
@@ -5455,61 +5189,6 @@ pub(crate) fn plain_grants(grants: PathBuf) -> Result<PathBuf, SandboxError> {
     Ok(grants)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn clean_absolute(path: &Path) -> bool {
-    path.is_absolute()
-        && path.as_os_str().len() <= PATH_BYTES_MAX
-        && path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
-        && path.to_str().is_some_and(|text| {
-            !text
-                .chars()
-                .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
-        })
-}
-
-/// Tells whether a Windows path is absolute and plain: a drive prefix such as `C:` (never a
-/// UNC, verbatim or device prefix), then folder names joined by `\`, as
-/// [`windows_clean_text`] checks. Input: the path. Output: true when plain.
-#[cfg(target_os = "windows")]
-fn clean_absolute(path: &Path) -> bool {
-    path.is_absolute()
-        && path.components().all(|component| match component {
-            Component::Prefix(prefix) => matches!(prefix.kind(), std::path::Prefix::Disk(_)),
-            Component::RootDir | Component::Normal(_) => true,
-            Component::CurDir | Component::ParentDir => false,
-        })
-        && path.to_str().is_some_and(windows_clean_text)
-}
-
-/// Checks Windows path text on any system: a drive letter, `:\`, then nonempty folder names
-/// joined by `\`, each neither `.` nor `..` nor ending in a space or dot, without control
-/// characters, quotes, `/`, `:` or the characters Windows forbids in names, at most 1024
-/// bytes. Input: the text. Output: true when plain.
-#[cfg(any(not(unix), test))]
-pub(crate) fn windows_clean_text(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if text.len() > PATH_BYTES_MAX
-        || bytes.len() < 4
-        || !bytes[0].is_ascii_alphabetic()
-        || bytes[1] != b':'
-        || bytes[2] != b'\\'
-    {
-        return false;
-    }
-    text[3..].split('\\').all(|part| {
-        !part.is_empty()
-            && part != "."
-            && part != ".."
-            && !part.ends_with(' ')
-            && !part.ends_with('.')
-            && !part.chars().any(|c| {
-                c.is_control() || matches!(c, '"' | '\'' | '/' | ':' | '<' | '>' | '|' | '?' | '*')
-            })
-    })
-}
-
 /// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
 /// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
 /// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
@@ -5524,43 +5203,6 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
         modules.join(first)
     };
     (program != package.as_path() && program.starts_with(&package)).then_some(package)
-}
-
-/// The canonical form of an existing path. On macOS a path named through the data volume
-/// comes back under its short name, so a root given in the long name is not canonical. On
-/// Windows the verbatim `\\?\` prefix `canonicalize` adds to a drive path is removed; any other
-/// verbatim form stays and fails [`clean_absolute`]. Input: the path. Output: the canonical
-/// path, or the I/O error.
-pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
-    let resolved = path.canonicalize()?;
-    #[cfg(target_os = "windows")]
-    if let Some(plain) = resolved
-        .to_str()
-        .and_then(|text| text.strip_prefix(r"\\?\"))
-        && plain.as_bytes().get(1) == Some(&b':')
-    {
-        return Ok(PathBuf::from(plain));
-    }
-    Ok(crate::projects_home::one_spelling(resolved))
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod owner_home_tests {
-    use super::settled_home;
-    use std::path::PathBuf;
-
-    /// V243-FIRMLINK-SWEEP D1: an owner home the account names through /System/Volumes/Data
-    /// settles to its short name, the spelling every sandbox root has, so the owner home and
-    /// secret denies built from it still match.
-    #[test]
-    fn a_home_named_through_the_data_volume_settles_to_its_short_name() {
-        let base = tempfile::tempdir().unwrap();
-        let short = base.path().canonicalize().unwrap();
-        let long = PathBuf::from(format!("/System/Volumes/Data{}", short.display()));
-        assert!(long.is_dir());
-        assert_eq!(settled_home(long).unwrap(), short);
-        assert_eq!(settled_home(short.clone()).unwrap(), short);
-    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -5671,73 +5313,10 @@ mod harness_folder_tests {
     }
 }
 
-#[cfg(test)]
-mod windows_path_tests {
-    use super::windows_clean_text;
-
-    #[test]
-    fn a_plain_drive_path_is_clean_on_every_system() {
-        for text in [
-            r"C:\Users\owner\project",
-            r"d:\work\agent home\tmp",
-            r"C:\a",
-        ] {
-            assert!(windows_clean_text(text), "{text}");
-        }
-    }
-
-    #[test]
-    fn unc_verbatim_device_and_relative_paths_are_refused() {
-        for text in [
-            r"\\server\share\project",
-            r"\\?\C:\project",
-            r"\\?\UNC\server\share",
-            r"\\.\PhysicalDrive0",
-            r"C:project",
-            r"project\folder",
-            r"\project",
-            "C:/project",
-            r"C:\",
-        ] {
-            assert!(!windows_clean_text(text), "{text}");
-        }
-    }
-
-    #[test]
-    fn dots_quotes_streams_and_aliases_are_refused() {
-        for text in [
-            r"C:\project\..\owner",
-            r"C:\project\.\context",
-            r"C:\project\context.",
-            r"C:\project\context ",
-            r"C:\project\\context",
-            r"C:\project\",
-            r"C:\project\file.txt:stream",
-            "C:\\project\\it's",
-            "C:\\project\\\"quoted\"",
-            "C:\\project\\line\nbreak",
-            r"C:\project\a/b",
-            r"C:\project\*",
-            r"C:\project\a?b",
-            r"C:\project\a|b",
-        ] {
-            assert!(!windows_clean_text(text), "{text:?}");
-        }
-    }
-
-    #[test]
-    fn a_path_longer_than_the_limit_is_refused() {
-        let long = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX));
-        assert!(!windows_clean_text(&long));
-        let fits = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX - 3));
-        assert!(windows_clean_text(&fits));
-    }
-}
-
 #[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
-    use crate::sandbox::elf::tests::executable;
+    use kernel_sandbox::elf::test_support::executable;
 
     struct Case {
         _temp: tempfile::TempDir,

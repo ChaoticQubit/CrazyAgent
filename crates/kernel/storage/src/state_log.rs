@@ -287,6 +287,6 @@ impl Clock {
 }
 
 /// Builds a log error. Input: the cause. Output: the error with its text.
-fn error(value: impl std::fmt::Display) -> StorageError {
+pub(crate) fn error(value: impl std::fmt::Display) -> StorageError {
     StorageError(value.to_string())
 }

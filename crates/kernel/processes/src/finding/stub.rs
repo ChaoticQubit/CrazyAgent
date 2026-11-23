@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::{ffi::OsStr, path::Path};
 
 /// Hooks that answer nothing, for the kernel's own rows: no links, shims, prefixes,
-/// projects, twins, agent temp folders, folders others can change or gate root; a path is
+/// projects, twins, agent temp folders or gate root; a path is
 /// its one spelling and canonical as std reads it. No row whose answer needs an engine
 /// check runs on these; those rows run in crazyagent on its real hooks.
 pub(crate) const STUB_HOOKS: FindingHooks = FindingHooks {
@@ -19,8 +19,6 @@ pub(crate) const STUB_HOOKS: FindingHooks = FindingHooks {
     one_spelling: |path| path,
     canonical: |path| std::fs::canonicalize(path),
     in_agent_tmp: |_| false,
-    changeable_past_sticky: |_| None,
-    changeable_by_others: |_| None,
     harness_prefix: |root| root.join(".stub-harness-prefix"),
     gate_root: || None,
 };

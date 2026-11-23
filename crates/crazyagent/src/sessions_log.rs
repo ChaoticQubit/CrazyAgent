@@ -469,6 +469,7 @@ pub(crate) fn close(log: &mut Appender<'_, '_>) -> Result<usize, EngineError> {
         append(log, at_ms, event)?;
     }
     log.project(|tx| unmark(tx, &marks))?;
+    crate::state_log::compact_after(log, Aggregate::Sessions, at_ms, chunks)?;
     assert!(marks.len() <= MARKS_MAX);
     Ok(events.len())
 }
@@ -1014,14 +1015,21 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
 /// holder in the run's live transaction. Inputs: the log writer and its clock. Output: the `seq` of
 /// the run's closing event, or `sessions_log_snapshot_rows` or the log's refusal.
 pub fn snapshot(log: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = log.project(|tx| chunks(tx))?;
+    Ok(log.snapshot(Aggregate::Sessions, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of the seven tables as they stand, texts and bodies as
+/// digests, for [`snapshot`] and for compaction. Input: the transaction. Output: the chunks,
+/// or the first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for table in TABLES {
-        let rows = log.project(|tx| table_rows(tx, table))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table)?)?);
     }
     assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
     assert_eq!(chunks[0].table, TABLES[0]);
-    Ok(log.snapshot(Aggregate::Sessions, at_ms, chunks)?)
+    Ok(chunks)
 }
 
 /// The first snapshot run of the seven tables, for the schema step that puts sessions on

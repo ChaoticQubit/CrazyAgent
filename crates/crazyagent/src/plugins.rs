@@ -66,10 +66,10 @@ pub(crate) fn absolute_command(command: &str) -> bool {
 
 /// Whether a server command is a full path on this system: on Windows a plain drive path
 /// such as `C:\Program Files\nodejs\npx.cmd`, never a `/`, UNC, verbatim, device or stream
-/// path ([`crate::sandbox::windows_clean_text`]). Input: the command. Output: the answer.
+/// path ([`kernel_sandbox::paths::windows_clean_text`]). Input: the command. Output: the answer.
 #[cfg(not(unix))]
 pub(crate) fn absolute_command(command: &str) -> bool {
-    crate::sandbox::windows_clean_text(command)
+    kernel_sandbox::paths::windows_clean_text(command)
 }
 
 impl ServerSpec {
@@ -557,7 +557,7 @@ fn npx_spec(
         return Err(other);
     }
     let plain = |file: &Path| {
-        crate::sandbox::canonical(file)
+        kernel_sandbox::paths::canonical(file)
             .ok()?
             .into_os_string()
             .into_string()
@@ -928,10 +928,13 @@ const WINDOWS_CHECK_LIMIT: &str = "limiting a Windows agent's network to a few p
 /// The refusal of a server check whose network names hosts or ports on Windows (#519 F1).
 /// Inputs: the OS and the check's network. Output: the problem to record, or None when the
 /// check may run.
-pub fn check_network_refused(os: &str, network: &crate::sandbox::SandboxNetwork) -> Option<String> {
+pub fn check_network_refused(
+    os: &str,
+    network: &kernel_sandbox::net::SandboxNetwork,
+) -> Option<String> {
     let limited = matches!(
         network,
-        crate::sandbox::SandboxNetwork::Only(remotes) if !remotes.is_empty()
+        kernel_sandbox::net::SandboxNetwork::Only(remotes) if !remotes.is_empty()
     );
     (os == "windows" && limited).then(|| check_refused(WINDOWS_CHECK_LIMIT))
 }
@@ -1154,7 +1157,7 @@ mod tests {
     #[test]
     fn a_windows_check_under_a_host_or_port_limit_is_refused_with_the_firewall_reason() {
         use crate::sandbox::policy::AgentNetwork;
-        use crate::sandbox::{SandboxNetwork, SandboxRemote};
+        use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
         let https = AgentNetwork::Https.sandbox(None);
         assert_eq!(
             https,
@@ -1343,7 +1346,7 @@ mod tests {
             Some("server_node_folder_unreadable")
         );
         let folder = std::path::Path::new(r"C:\Program Files\nodejs");
-        let reason = crate::sandbox::unreadable_reason(folder);
+        let reason = kernel_sandbox::error::unreadable_reason(folder);
         assert!(reason.contains(r"C:\Program Files\nodejs"), "{reason}");
         assert!(check_problem(&check_refused(&reason)).contains(&reason));
     }
@@ -1390,7 +1393,7 @@ mod windows_tests {
 
     /// WIN-PACK-SEED: on Windows a server command is a plain drive path, such as the `npx.cmd`
     /// setup finds, never a `/` path, a bare name, or a UNC, verbatim, device, drive-relative,
-    /// forward-slash or stream path ([`crate::sandbox::windows_clean_text`]).
+    /// forward-slash or stream path ([`kernel_sandbox::paths::windows_clean_text`]).
     #[test]
     fn a_windows_server_command_is_a_plain_drive_path() {
         let stdio = |command: &str| ServerSpec::Stdio {
@@ -1426,7 +1429,7 @@ mod windows_tests {
     #[test]
     fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
         let folder = tempfile::tempdir().unwrap();
-        let real = crate::sandbox::canonical(folder.path()).unwrap();
+        let real = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
             .join("where.exe");

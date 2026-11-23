@@ -6,10 +6,6 @@ use kernel_processes::terminal::{
     APP_PANE_UNKNOWN, AgentId, CHUNK_BYTES_MAX, Host, HostError, PROMPT_BYTES_MAX, PaneAt,
     PaneCommand, PaneInfo, PaneRef, RENEW_EVERY, TerminalStream,
 };
-#[cfg(target_os = "windows")]
-use kernel_processes::terminal::{
-    INPUT_BYTES_MAX, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, VIEWERS_MAX, buffer,
-};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,8 +15,6 @@ use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
 pub mod tmux;
-#[cfg(target_os = "windows")]
-pub mod windows;
 
 pub const FOLDER: &str = "terminal";
 pub const PANES_PER_PROJECT_MAX: usize = crate::config::POOL_MEMBERS_MAX;
@@ -41,11 +35,6 @@ impl From<HostError> for EngineError {
 fn kept_clock() -> String {
     use crate::tui::clock::{clock, local_offset, now_ms};
     clock(now_ms(), local_offset())
-}
-
-#[cfg(target_os = "windows")]
-fn failure(code: &str) -> HostError {
-    HostError(code.into())
 }
 
 /// A host that starts each agent through `Host::spawn_own_server`, in a tmux server of its
@@ -408,7 +397,12 @@ pub(crate) fn tmux_host_checking(
 /// Returns that the host can run, and the host.
 #[cfg(target_os = "windows")]
 pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
-    let host: Arc<dyn Host> = Arc::new(LastScreenHost::new(windows::ConptyHost::new(), kept_clock));
+    let host: Arc<dyn Host> = Arc::new(LastScreenHost::new(
+        kernel_processes::terminal::windows::ConptyHost::new(
+            crate::sandbox::agent_variable_allowed,
+        ),
+        kept_clock,
+    ));
     (true, host)
 }
 

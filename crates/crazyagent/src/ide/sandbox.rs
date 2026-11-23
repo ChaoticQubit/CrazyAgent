@@ -1,10 +1,9 @@
 use crate::engine::EngineError;
 use crate::sandbox::policy::AgentFilesRule;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-use crate::sandbox::{
-    ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, at_or_below, sbpl_overlong,
-    seatbelt_pattern,
-};
+use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, any_case, sbpl_overlong, seatbelt_pattern};
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::paths::at_or_below;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -82,7 +81,7 @@ pub fn profile(
         .collect();
     if port == 0
         || !plain(data)
-        || crate::sandbox::canonical(data).ok().as_deref() != Some(data)
+        || kernel_sandbox::paths::canonical(data).ok().as_deref() != Some(data)
         || grants.root.starts_with(data)
         || data.starts_with(grants.root)
         || grants.tmp.starts_with(data)
