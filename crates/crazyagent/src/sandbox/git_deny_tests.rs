@@ -63,6 +63,7 @@ fn case_in(temp: tempfile::TempDir, root: PathBuf) -> Case {
 /// The project-root sandbox of the case, as the IDE server and IDE shell build it.
 fn sandbox(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,

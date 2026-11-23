@@ -172,14 +172,20 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
     kernel_sandbox::toolchains::prepare_cargo_home(&super::TOOLCHAIN_HOOKS, &home, &homes)?;
     let network = kernel_sandbox::policy::ide_network(launch.level, launch.network);
-    let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, network)?
-        .guard_engine(&root)?
-        .keep_ports(launch.kept_ports)?
-        .allow_tools(&Toolchains::detect(launch.folder, &homes))?
-        .allow_scratch(&scratch)?
-        .keep_owner_config()
-        .protect_agent_files(launch.agent_files)
-        .allow_extra_reads(launch.extra_reads)?;
+    let (sandbox, _) = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        launch.folder,
+        &home,
+        &tmp,
+        network,
+    )?
+    .guard_engine(&root)?
+    .keep_ports(launch.kept_ports)?
+    .allow_tools(&Toolchains::detect(launch.folder, &homes))?
+    .allow_scratch(&scratch)?
+    .keep_owner_config()
+    .protect_agent_files(launch.agent_files)
+    .allow_extra_reads(launch.extra_reads)?;
     let profile = place.join("shell.sb");
     sandbox.install(&profile)?;
     let base = sandbox.base_env(true);

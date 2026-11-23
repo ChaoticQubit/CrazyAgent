@@ -51,7 +51,14 @@ fn profile_build_p95() {
     let base = [("HOME", home.as_os_str()), ("TMPDIR", tmp.as_os_str())];
     let program = Path::new("/usr/bin/true");
     timed("profile_build_p95", || {
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap();
         sandbox.install(&profile).unwrap();
         let none = std::iter::empty::<(&OsStr, Option<&OsStr>)>();
         let command = agent_command(&profile, program, &base, none).unwrap();
@@ -101,7 +108,14 @@ fn linux_policy_write_p95() {
     }
     let harness = Command::new("/bin/true");
     timed("linux_policy_write_p95", || {
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap();
         let linux = LinuxSandbox::detect(sandbox, helper).unwrap();
         let command = linux.wrap(&harness).unwrap();
         assert_ne!(command.get_program(), harness.get_program());

@@ -104,6 +104,7 @@ fn case() -> Case {
 /// The sandbox of a launch in `own` that reads the project folder, with `shared` applied.
 fn sandbox(case: &Case, shared: &SharedFolders) -> ProjectSandbox {
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.own,
         &case.home,
         &case.tmp,

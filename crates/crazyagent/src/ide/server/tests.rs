@@ -415,6 +415,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
         fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700)).unwrap();
     }
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &root.join("project"),
         &root.join("home"),
         &root.join("tmp"),

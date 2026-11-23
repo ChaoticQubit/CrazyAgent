@@ -207,8 +207,14 @@ pub(crate) fn update(
     private_directory(&home)?;
     let tmp = agent.join("tmp");
     private_directory(&tmp)?;
-    let mut sandbox = ProjectSandbox::new(&out, &home, &tmp, SandboxNetwork::Only(Vec::new()))?
-        .allow_read(repo)?;
+    let mut sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &out,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )?
+    .allow_read(repo)?;
     let (roots, link) = read_roots(&graphify);
     for root in &roots {
         sandbox = sandbox.allow_read(root)?;

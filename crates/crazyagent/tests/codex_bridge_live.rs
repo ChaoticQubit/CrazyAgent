@@ -231,6 +231,7 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
     let socket = codex::socket(home).unwrap();
     codex::prepare_folder().unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &project,
         home,
         &tmp,

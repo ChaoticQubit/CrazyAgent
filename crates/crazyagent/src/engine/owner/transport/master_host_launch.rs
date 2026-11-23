@@ -1039,13 +1039,25 @@ fn turn_sandbox(
         &policy.allowed(repository),
     );
     let sandbox = match engine {
-        None => ProjectSandbox::new(worktree, &home, &tmp, network)
-            .and_then(|sandbox| sandbox.allow_read(repository)),
+        None => ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            worktree,
+            &home,
+            &tmp,
+            network,
+        )
+        .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
             let engine = std::fs::canonicalize(engine).map_err(io_error)?;
-            ProjectSandbox::new(worktree, &home, &tmp, network)
-                .and_then(|sandbox| sandbox.allow_read(repository))
-                .and_then(|sandbox| sandbox.allow_engine(&engine))
+            ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                worktree,
+                &home,
+                &tmp,
+                network,
+            )
+            .and_then(|sandbox| sandbox.allow_read(repository))
+            .and_then(|sandbox| sandbox.allow_engine(&engine))
         }
     }
     .and_then(|sandbox| sandbox.allow_read(&install))

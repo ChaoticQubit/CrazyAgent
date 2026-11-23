@@ -657,6 +657,7 @@ fn a_refused_release_reports_false_and_keeps_the_profile() {
         &folders[1]
     ));
     let sandbox = crate::sandbox::ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &folders[0],
         &folders[1],
         &folders[2],
@@ -814,6 +815,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
     let grants = case.root.join("grants");
     fs::create_dir_all(&grants).unwrap();
     let sandbox = crate::sandbox::ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &job,
         &home,
         &tmp,

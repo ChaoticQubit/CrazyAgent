@@ -64,6 +64,7 @@ enum Hiding {
 /// The closed policy that hides the case's folder. Input: the case. Output: the policy.
 fn hiding_policy(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.root.join("agent").join("home"),
         &case.root.join("agent").join("tmp"),

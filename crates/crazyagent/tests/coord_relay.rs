@@ -646,6 +646,7 @@ fn under_overlaps_block_the_edit_hook_still_denies_from_an_engine_in_an_app_bund
     std::fs::copy(env!("CARGO_BIN_EXE_crazyagent"), &engine).unwrap();
     let socket = crazyagent::team::caller::socket_for_mailbox(&team.mailbox).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &claimed.repo,
         &claimed.home,
         team.mailbox.parent().unwrap(),

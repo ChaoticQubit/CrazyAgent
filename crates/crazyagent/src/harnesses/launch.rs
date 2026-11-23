@@ -347,7 +347,14 @@ pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoun
     for folder in [&home, &tmp] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    let sandbox = ProjectSandbox::new(project, &home, &tmp, SandboxNetwork::Open).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        project,
+        &home,
+        &tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap();
     let installed = InstalledSandbox::install(
         sandbox,
         &scratch.join("full-access.sb"),

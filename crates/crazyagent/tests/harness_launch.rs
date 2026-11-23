@@ -604,6 +604,7 @@ fn sandboxed_stand_in(
     assert_eq!(first.code(), Some(3));
     let profile = root.path().join("agent.sb");
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &project,
         &home,
         &tmp,

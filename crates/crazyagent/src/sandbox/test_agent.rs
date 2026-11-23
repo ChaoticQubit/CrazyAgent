@@ -58,10 +58,16 @@ impl TestAgent {
             "{\"engine_secret\":\"FIXTURE-ENGINE-SECRET\"}",
         )
         .unwrap();
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, network)
-            .unwrap()
-            .guard_engine(&runtime)
-            .unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            network,
+        )
+        .unwrap()
+        .guard_engine(&runtime)
+        .unwrap();
         let profile = profiles.join("agent-1.sb");
         sandbox.install(&profile).unwrap();
         Self {

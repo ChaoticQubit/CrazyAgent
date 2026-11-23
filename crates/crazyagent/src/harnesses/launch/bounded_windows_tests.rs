@@ -99,8 +99,14 @@ fn case() -> Case {
 /// Inputs: the case, the project, the home and the profile name. Output: the
 /// installed boundary.
 fn installed(case: &Case, project: &Path, home: &Path, profile: &str) -> Arc<InstalledSandbox> {
-    let sandbox =
-        ProjectSandbox::new(project, home, &case.tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        project,
+        home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
     let installed = InstalledSandbox::install_with_grants(
         sandbox,
         &case.profiles.join(profile),
