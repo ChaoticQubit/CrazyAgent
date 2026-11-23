@@ -4,6 +4,7 @@ type Plain { name: text, mode: Mode }
 capability wire.store(blob: Blob, plain: Plain, at: u64) -> Blob
   tier: t1
   needs: wire.store
+  emits: BlobStored { at: u64, data: bytes, blob: Blob }
 capability wire.peek(plain: Plain) -> option<u64>
   tier: t1
   needs: wire.store
