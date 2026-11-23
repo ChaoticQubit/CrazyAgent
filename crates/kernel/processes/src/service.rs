@@ -420,6 +420,8 @@ WantedBy=default.target\n",
     }
 
     fn command(program: &str, args: &[&OsStr]) -> Vec<OsString> {
+        #[cfg(test)]
+        let program = uninstall_tests::program(program);
         std::iter::once(OsString::from(program))
             .chain(args.iter().map(|arg| arg.to_os_string()))
             .collect()
@@ -1460,6 +1462,8 @@ mod acl;
 /// owners, modes, groups and access lists on Unix, access lists on Windows. Input: a path.
 /// Output: the first such entry, or none.
 mod changeable;
+#[cfg(test)]
+mod uninstall_tests;
 #[cfg(all(test, unix))]
 use changeable::{Part, first_changeable_part};
 pub use changeable::{changeable_by_others, changeable_past_sticky};
