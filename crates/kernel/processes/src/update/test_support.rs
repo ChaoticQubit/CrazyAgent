@@ -1,4 +1,4 @@
-use super::UpdateError;
+use super::{Unpacked, UpdateError, Verified};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -49,4 +49,20 @@ pub fn response(head: &str, body: &[u8]) -> Vec<u8> {
     let mut bytes = head.as_bytes().to_vec();
     bytes.extend_from_slice(body);
     bytes
+}
+
+/// An archive taken as verified without a signature, for rows of [`super::unpack`] that
+/// need no release key. Input: the archive. Output: the token.
+pub fn verified(archive: &std::path::Path) -> Verified {
+    Verified {
+        archive: archive.to_path_buf(),
+    }
+}
+
+/// A folder taken as unpacked from a verified archive, for rows of [`super::swap`] that
+/// stage their files by hand. Input: the folder. Output: the token.
+pub fn unpacked(folder: &std::path::Path) -> Unpacked {
+    Unpacked {
+        folder: folder.to_path_buf(),
+    }
 }

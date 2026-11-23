@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kernel_processes::update::{self, UpdateError};
+use kernel_processes::update::{self, UpdateError, test_support};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -78,11 +78,11 @@ fn a_signed_release_archive_is_verified_unpacked_and_swapped_in_with_the_real_bi
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    update::verify_file(&archive, &sha, &signature, &key, VERSION).unwrap();
+    let verified = update::verify_file(&archive, &sha, &signature, &key, VERSION).unwrap();
 
     let staging = install.path().join(".crazyagent-update-test");
     std::fs::create_dir(&staging).unwrap();
-    let unpacked = update::unpack(&archive, &staging.join("unpacked")).unwrap();
+    let unpacked = update::unpack(&verified, &staging.join("unpacked")).unwrap();
     update::swap(install.path(), &unpacked, VERSION).unwrap();
 
     assert_eq!(
@@ -118,7 +118,11 @@ fn a_new_binary_that_does_not_answer_its_version_never_replaces_the_old_one() {
     std::fs::create_dir(&staged).unwrap();
     script(&staged.join("crazyagent"), "exit 3");
     assert_eq!(
-        code(update::swap(install.path(), &staged, VERSION)),
+        code(update::swap(
+            install.path(),
+            &test_support::unpacked(&staged),
+            VERSION
+        )),
         "update_new_version_failed"
     );
     assert_eq!(
@@ -128,7 +132,8 @@ fn a_new_binary_that_does_not_answer_its_version_never_replaces_the_old_one() {
     assert!(leftovers(install.path()).is_empty());
 
     script(&staged.join("crazyagent"), "echo crazyagent 0.0.2");
-    let error = update::swap(install.path(), &staged, VERSION).unwrap_err();
+    let error =
+        update::swap(install.path(), &test_support::unpacked(&staged), VERSION).unwrap_err();
     assert_eq!(
         (error.code, error.message),
         (
@@ -157,7 +162,11 @@ fn a_binary_that_fails_after_the_rename_is_rolled_back_to_the_old_files() {
     );
     script(&staged.join("crazyagent-rcli"), "echo new rcli");
     assert_eq!(
-        code(update::swap(install.path(), &staged, VERSION)),
+        code(update::swap(
+            install.path(),
+            &test_support::unpacked(&staged),
+            VERSION
+        )),
         "update_new_version_failed"
     );
     assert_eq!(
@@ -191,12 +200,12 @@ fn an_archive_without_crazyagent_is_refused_before_anything_changes() {
     );
     let into = release.path().join("unpacked");
     assert_eq!(
-        code(update::unpack(&archive, &into)),
+        code(update::unpack(&test_support::verified(&archive), &into)),
         "update_archive_invalid"
     );
     std::fs::write(release.path().join("garbage.tar.gz"), b"not an archive").unwrap();
     let error = update::unpack(
-        &release.path().join("garbage.tar.gz"),
+        &test_support::verified(&release.path().join("garbage.tar.gz")),
         &release.path().join("unpacked-2"),
     )
     .unwrap_err();
@@ -230,7 +239,7 @@ fn every_helper_the_release_ships_is_replaced_including_the_windows_boundary_and
     for helper in helpers {
         script(&staged.join(helper), &format!("echo new {helper}"));
     }
-    update::swap(install.path(), &staged, VERSION).unwrap();
+    update::swap(install.path(), &test_support::unpacked(&staged), VERSION).unwrap();
     for helper in helpers {
         assert_eq!(
             std::fs::read_to_string(install.path().join(helper)).unwrap(),
@@ -253,7 +262,7 @@ fn an_update_from_a_release_without_the_bundled_tmux_succeeds_and_makes_no_tmux_
     std::fs::create_dir(&staged).unwrap();
     executable(&staged.join("crazyagent"), &real_crazyagent());
     script(&staged.join("crazyagent-rcli"), "echo new rcli");
-    update::swap(install.path(), &staged, VERSION).unwrap();
+    update::swap(install.path(), &test_support::unpacked(&staged), VERSION).unwrap();
     assert_eq!(
         std::fs::read_to_string(install.path().join("crazyagent-rcli")).unwrap(),
         "#!/bin/sh\necho new rcli\n"
