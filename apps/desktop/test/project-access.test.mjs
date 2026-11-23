@@ -77,7 +77,7 @@ test("Full access asks for the plain warning first, and the project page names t
 test("New Project preselects Own branch and every level the engine knows has the engine's label", () => {
   assert.equal(wizard.emptyDraft().access, "own_branch");
   assert.equal(wizard.NEW_PROJECT_ACCESS, "own_branch");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   assert.match(engine, /pub const NEW_PROJECT: Self = Self::OwnBranch;/);
   for (const level of access.ACCESS_LEVELS) assert.ok(engine.includes(`=> "${level.access}"`) && engine.includes(`=> "${level.label}"`), level.access);
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
@@ -111,8 +111,8 @@ test("New Project preselects Sandboxed where the engine says Own branch can't ru
 
 test("every engine refusal for agent access has its own sentence", () => {
   const missing = new Set();
-  for (const file of ["sandbox/policy.rs", "project_setup.rs", "storage.rs"]) {
-    const engine = readFileSync(new URL(`../../../crates/crazyagent/src/${file}`, import.meta.url), "utf8");
+  for (const file of ["kernel/sandbox/src/policy.rs", "crazyagent/src/project_setup.rs", "crazyagent/src/storage.rs"]) {
+    const engine = readFileSync(new URL(`../../../crates/${file}`, import.meta.url), "utf8");
     for (const code of engine.matchAll(/"(agent_(?:access|policy|network|toolchain|project)_[a-z_]+)"/g)) {
       if (!api.KNOWN_ERROR_CODES.includes(code[1])) missing.add(code[1]);
     }
@@ -187,7 +187,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
   const created = readFileSync(new URL("../src/screens/new-project/carry.ts", import.meta.url), "utf8");
   assert.ok(created.includes("read.value.ide_git_hooks"), "a new project keeps the IDE hooks switch the engine saved, Off");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   assert.match(engine, /#\[serde\(default\)\]\n    pub ide_git_hooks: bool,/);
 });
 
@@ -195,7 +195,7 @@ test("the tool cache choice is saved with the policy, the saved one unless the o
   assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "per_agent"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "per_agent", home_caches: "clear_when_raised", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
   assert.equal(access.policyOf({ ...view, tool_cache: "per_agent" }, "sandboxed", "open", [true, false], false, "allow_all").tool_cache, "per_agent", "a save that shows no choice keeps the saved one");
   assert.deepEqual(access.TOOL_CACHE_CHOICES.map((choice) => [choice.scope, choice.label]), view.tool_caches.map((row) => [row.scope, row.label]));
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   for (const choice of access.TOOL_CACHE_CHOICES) assert.ok(engine.includes(`"${choice.label}"`), `${choice.label} is the engine's label`);
   assert.match(access.TOOL_CACHE_CLEAN, /^uv cache clean fails inside an agent's sandbox\./);
   assert.match(access.TOOL_CACHE_CHOICES.find((choice) => choice.scope === "shared").help, /One agent can change what the other agents at its level install\./, "Shared says one agent can change what the others install");
@@ -216,7 +216,7 @@ test("the Tool caches in agent homes choice is saved with the policy, the saved 
   assert.equal(access.policyOf({ ...view, home_caches: undefined }, "sandboxed", "open", [true, false], false, "allow_all").home_caches, "clear_when_raised", "a view from before the setting reads the default");
   assert.equal(access.HOME_CACHES, "Tool caches in agent homes");
   assert.deepEqual(access.HOME_CACHES_CHOICES.map((choice) => [choice.choice, choice.label]), view.home_cache_choices.map((row) => [row.choice, row.label]));
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   for (const choice of access.HOME_CACHES_CHOICES) assert.ok(engine.includes(`=> "${choice.choice}"`) && engine.includes(`=> "${choice.label}"`), `${choice.label} is the engine's word`);
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`"${access.HOME_CACHES}"`));
@@ -246,7 +246,7 @@ test("the IDE agent folders choice is saved with the policy, restarts the IDE an
   assert.equal(access.AGENT_FILES_IGNORED_UNDER_FULL, "Full access runs the IDE without a sandbox, so this choice does not apply.");
   assert.match(access.POLICY_RESTARTS_IDE, /the agent folders choice below Full access/);
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`"${access.IDE_AGENT_FILES}"`));
   assert.ok(tui.includes(`"${access.AGENT_FILES_IGNORED_UNDER_FULL}"`));
   for (const choice of access.IDE_AGENT_FILES_CHOICES) {
@@ -330,7 +330,7 @@ test("F08: the Apply access changes choice and the allowed extras save with the 
   assert.deepEqual(edited.grants, [port, socket, { kind: "temp_folder" }]);
   assert.throws(() => access.policyOf(saved, "sandboxed", "open", [true, false], false, "allow_all", "shared", undefined, "when_idle", [socket, { ...socket, path: "/a.sock" }, { ...socket, path: "/b.sock" }]), /at most 2 sockets/);
   assert.deepEqual(access.APPLY_CHOICES.map((choice) => choice.apply), ["when_idle", "next_start"], "When idle first, the proposed default");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   for (const choice of access.APPLY_CHOICES) assert.ok(engine.includes(`"${choice.label}"`), `${choice.label} is the engine's label`);
 });
 
@@ -342,7 +342,7 @@ test("F08: an extra the owner types is a full plain socket path or a port below 
   assert.equal(access.grantLabel({ kind: "port", port: 5432 }), "Port 5432 on this computer");
   assert.equal(access.grantLabel({ kind: "socket", path: "/tmp/app.sock" }), "Socket /tmp/app.sock");
   assert.equal(access.grantLabel({ kind: "temp_folder" }), "Your temp folder");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   assert.ok(engine.includes('"Port {port} on this computer"') || engine.includes("Port {} on this computer"), "the engine names a port the same way");
   assert.ok(engine.includes('"Your temp folder"'));
 });
@@ -357,7 +357,7 @@ test("F08: Agent access shows the extras with what each means, the apply choice 
   assert.match(access.REMOVING_EXTRA_STOPS_AGENTS, /stops every agent holding it at once/);
   assert.match(access.GRANT_MEANINGS.socket, /never replace or remove it/);
   assert.match(access.GRANT_MEANINGS.temp_folder, /other apps' temp files/);
-  const grants = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/grants.rs", import.meta.url), "utf8");
+  const grants = ["crazyagent/src/sandbox/grants.rs", "kernel/sandbox/src/grants.rs"].map((file) => readFileSync(new URL(`../../../crates/${file}`, import.meta.url), "utf8")).join("\n");
   const body = grants.slice(grants.indexOf("pub fn refusal_text"), grants.indexOf("\n}\n", grants.indexOf("pub fn refusal_text")));
   const pairs = [...body.matchAll(/"([a-z_]+)" => \{?\s*"((?:[^"\\]|\\.)*)"/g)];
   assert.ok(pairs.length >= 17, `${pairs.length} refusals`);
@@ -387,7 +387,7 @@ test("the shared folders choice is saved with the policy, the saved one unless t
   assert.deepEqual(access.DEFAULT_SHARED_FOLDERS, SHARED, "All with Read-only by default");
   const readWrite = access.SHARED_ACCESS_CHOICES.find((choice) => choice.access === "read_write");
   assert.match(readWrite.help, /node_modules, target and venv stay writable, and your own tools run what is in them outside the sandbox\./, "Read-write says which program folders stay writable and who runs them (L4 r2 L1)");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/shared_folders.rs", import.meta.url), "utf8");
+  const engine = ["crazyagent/src/sandbox/shared_folders.rs", "kernel/sandbox/src/shared_folders.rs"].map((file) => readFileSync(new URL(`../../../crates/${file}`, import.meta.url), "utf8")).join("\n");
   for (const choice of [...access.SHARED_SCOPE_CHOICES, ...access.SHARED_ACCESS_CHOICES]) {
     assert.ok(engine.includes(`=> "${choice.label}"`), `${choice.label} is the engine's label`);
     assert.ok(engine.includes(`"${choice.help}"`), `${choice.label} says what the engine's help says`);
@@ -459,7 +459,7 @@ test("every shared folders refusal has its own sentence in both UIs", () => {
 });
 
 test("only on Linux does the network choice say ports hold no host, and the access level names nested git once, only as the engine sends it (RV-DS241-83, -85, DEC-179 T4c)", () => {
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/lines.rs", import.meta.url), "utf8");
   assert.ok(engine.includes(`pub const LINUX_PORTS_ANY_HOST_LINE: &str = "${access.LINUX_PORTS_ANY_HOST}";`), "the port gap reads as the engine states it");
   assert.ok(!("LINUX_NESTED_GIT" in access), "the engine's level lines carry the nested git line");
   const nested = engine.match(/pub const LINUX_NESTED_GIT_LINE: &str = "([^"]+)";/)[1];
@@ -517,7 +517,7 @@ test("only on Linux below Full access do the allowed extras say a port is open o
 });
 
 test("the access choice shows what the engine says this Linux can't hold for the chosen level (SA vid 4)", () => {
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/lines.rs", import.meta.url), "utf8");
   const line = /pub const LINUX_SIGNALS_LINE: &str = "([^"]+)";/.exec(engine)?.[1];
   assert.ok(line, "the engine states the signal gap");
   const told = (level) => level === "sandboxed" ? [line] : [];
@@ -533,7 +533,7 @@ test("the access choice shows what the engine says this Linux can't hold for the
 
 test("on Windows Full access is refused with its own sentence, a loopback model reads plainly, and a limited network says it reaches the whole internet, in both UIs (DESIGN-0256 O3a, O2a)", async () => {
   const client = await import("../src/engine-client.ts");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/policy.rs", import.meta.url), "utf8");
   const config = readFileSync(new URL("../../../crates/crazyagent/src/config.rs", import.meta.url), "utf8");
   const wide = engine.match(/pub const WINDOWS_NETWORK_WIDE_LINE: &str = "([^"]+)";/)?.[1];
   assert.ok(wide, "the engine names the Windows network line");
