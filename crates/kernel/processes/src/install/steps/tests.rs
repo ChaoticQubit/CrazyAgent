@@ -1,5 +1,6 @@
 use super::*;
 use crate::install::{InstallRecipe, InstallResult, SystemManager, TEMPLATE_MISMATCH, Verb};
+use std::time::Duration;
 
 const HASH: &str = "743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73";
 
@@ -422,6 +423,87 @@ fn a_step_runs_with_only_its_environment() {
         Ok(InstallResult {
             code: 0,
             output: b"one two".to_vec(),
+            stderr: Vec::new(),
         })
     );
+}
+
+/// A shell line that prints 2000 lines of 41 bytes, more than the kept bound, then `END`,
+/// to the stream its argument names (`1` or `2`).
+const CHATTY: &str = "i=0; while [ $i -lt 2000 ]; do printf '%s\\n' 0123456789012345678901234567890123456789 >&$0; i=$((i+1)); done; printf END >&$0";
+
+/// Runs a shell line as one step with no environment, the temp folder as its working folder
+/// and the given bound. Inputs: the line, its `$0` and the bound. Output: the run.
+fn shell(line: &str, zero: &str, limit: Duration) -> Result<InstallResult, &'static str> {
+    let step = Step {
+        program: PathBuf::from("/bin/sh"),
+        args: words(&["-c", line, zero]),
+        env: Vec::new(),
+    };
+    run(&step, &[], &std::env::temp_dir(), limit)
+}
+
+/// A step that prints past the bound keeps the last bytes of its standard output, so the
+/// error a tool prints at its end is what the caller reads.
+#[test]
+fn a_step_keeps_the_last_bytes_of_its_standard_output() {
+    let ran = shell(CHATTY, "1", Duration::from_secs(30)).unwrap();
+    assert_eq!(ran.code, 0);
+    assert_eq!(ran.output.len(), crate::run::OUTPUT_BYTES_MAX);
+    assert!(ran.output.ends_with(b"789\nEND"));
+}
+
+/// A step's standard error is kept, its last bytes within the same bound, apart from its
+/// standard output.
+#[test]
+fn a_step_keeps_the_last_bytes_of_its_standard_error() {
+    let ran = shell(CHATTY, "2", Duration::from_secs(30)).unwrap();
+    assert_eq!(ran.code, 0);
+    assert!(ran.output.is_empty());
+    assert_eq!(ran.stderr.len(), crate::run::OUTPUT_BYTES_MAX);
+    assert!(ran.stderr.ends_with(b"789\nEND"));
+}
+
+/// A step past its bound is first asked to stop: its whole group gets TERM, so a tool that
+/// cleans up on TERM writes its marker before the run ends as `setup_timeout`.
+#[test]
+fn a_step_past_its_limit_is_asked_to_stop_before_it_is_killed() {
+    let folder = tempfile::tempdir().unwrap();
+    let marker = folder.path().join("stopped");
+    let line = "trap 'printf stopped > \"$0\"; exit 0' TERM; /bin/sleep 30 & wait";
+    let ran = shell(line, marker.to_str().unwrap(), Duration::from_secs(1));
+    assert_eq!(ran, Err("setup_timeout"));
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "stopped");
+}
+
+/// A step that ignores TERM is killed with its group once the grace after its bound has
+/// passed: the run ends as `setup_timeout` no sooner than the bound plus the grace, and
+/// well before the step's own end.
+#[test]
+fn a_step_that_ignores_the_stop_request_is_killed_after_the_grace() {
+    let started = std::time::Instant::now();
+    let ran = shell("trap '' TERM; /bin/sleep 30", "x", Duration::from_secs(1));
+    let took = started.elapsed();
+    assert_eq!(ran, Err("setup_timeout"));
+    assert!(took >= Duration::from_secs(3), "{took:?}");
+    assert!(took < Duration::from_secs(15), "{took:?}");
+}
+
+/// A step that exits leaves no process of its group running: a child it started in the
+/// background is ended when the run returns.
+#[test]
+fn a_step_that_exits_leaves_no_process_of_its_group() {
+    let folder = tempfile::tempdir().unwrap();
+    let noted = folder.path().join("child");
+    let line = "/bin/sleep 30 >/dev/null 2>&1 & printf %s $! > \"$0\"";
+    let ran = shell(line, noted.to_str().unwrap(), Duration::from_secs(30)).unwrap();
+    assert_eq!(ran.code, 0);
+    let child: i32 = std::fs::read_to_string(&noted).unwrap().parse().unwrap();
+    let child = rustix::process::Pid::from_raw(child).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while rustix::process::test_kill_process(child).is_ok() && std::time::Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert!(rustix::process::test_kill_process(child).is_err());
 }
