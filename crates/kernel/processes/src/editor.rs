@@ -1,5 +1,6 @@
 use crate::spawn_gate;
 use crate::terminal::tmux::Confinement;
+use std::ffi::OsStr;
 use std::process::{Child, Command};
 
 /// A command that must run confined does not start through the confinement runner.
@@ -17,7 +18,10 @@ pub fn spawn(
     confined: &Confinement,
     required: bool,
 ) -> Result<Child, &'static str> {
-    let _ = (confined, required);
+    assert!(std::path::Path::new(confined.sandbox_exec).is_absolute());
+    if required && command.get_program() != OsStr::new(confined.sandbox_exec) {
+        return Err(NOT_CONFINED);
+    }
     spawn_gate::spawn(command).map_err(|_| SPAWN_FAILED)
 }
 
