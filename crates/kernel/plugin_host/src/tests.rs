@@ -236,7 +236,7 @@ fn a_kind_or_permission_outside_the_character_rule_is_refused() {
 /// tables included: the table, the entry's key and the crate behind it, which is the
 /// `package` a renamed entry names, else the key (a `workspace = true` entry names its root
 /// entry by the key). Input: the text. Output: (table, key, crate), in table then key order.
-fn dependency_names(text: &str) -> Vec<(String, String, String)> {
+fn dependency_names(text: &str, _root: &str) -> Vec<(String, String, String)> {
     const SECTIONS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
     let cargo: toml::Table = text.parse().expect("Cargo.toml parses");
     let mut tables: Vec<(String, &toml::Table)> = vec![(String::new(), &cargo)];
@@ -285,8 +285,8 @@ const ALLOWED: [(&str, &str); 9] = [
 /// The entries of a `Cargo.toml` text whose crate is not on [`ALLOWED`] in its table,
 /// or whose key names another crate than the one behind it. Input: the text. Output: the
 /// (table, key, crate) of each.
-fn outside_allowlist(text: &str) -> Vec<(String, String, String)> {
-    dependency_names(text)
+fn outside_allowlist(text: &str, root: &str) -> Vec<(String, String, String)> {
+    dependency_names(text, root)
         .into_iter()
         .filter(|(table, key, krate)| {
             key != krate || !ALLOWED.contains(&(table.as_str(), krate.as_str()))
@@ -297,9 +297,10 @@ fn outside_allowlist(text: &str) -> Vec<(String, String, String)> {
 #[test]
 fn plugin_host_depends_on_no_sdk_or_engine_crate() {
     let text = include_str!("../Cargo.toml");
-    let outside = outside_allowlist(text);
+    let root = include_str!("../../../../Cargo.toml");
+    let outside = outside_allowlist(text, root);
     assert!(outside.is_empty(), "{outside:?}");
-    let mut direct: Vec<(String, String)> = dependency_names(text)
+    let mut direct: Vec<(String, String)> = dependency_names(text, root)
         .into_iter()
         .map(|(table, _, krate)| (table, krate))
         .collect();
@@ -317,14 +318,14 @@ fn the_allowlist_walks_target_tables() {
     let text = "[dependencies]\ntoml = \"1\"\n\n[target.'cfg(unix)'.dependencies]\ncrazyagent-sdk = { path = \"x\" }\n\n[target.'cfg(windows)'.dev-dependencies]\ncrazyagent = { path = \"y\" }\n";
     let pair = |table: &str, name: &str| (table.to_owned(), name.to_owned(), name.to_owned());
     assert_eq!(
-        dependency_names(text),
+        dependency_names(text, ""),
         vec![
             pair("dependencies", "toml"),
             pair("target.cfg(unix).dependencies", "crazyagent-sdk"),
             pair("target.cfg(windows).dev-dependencies", "crazyagent"),
         ]
     );
-    assert_eq!(outside_allowlist(text).len(), 2);
+    assert_eq!(outside_allowlist(text, "").len(), 2);
 }
 
 /// A renamed entry is judged by the crate behind it, so an allowed key
@@ -333,7 +334,7 @@ fn the_allowlist_walks_target_tables() {
 fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {
     let renamed = "[dependencies]\nserde = { package = \"crazyagent-sdk\", path = \"x\" }\n";
     assert_eq!(
-        outside_allowlist(renamed),
+        outside_allowlist(renamed, ""),
         vec![(
             "dependencies".to_owned(),
             "serde".to_owned(),
@@ -342,8 +343,9 @@ fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {
     );
     let workspace =
         "[dependencies]\ntoml = { workspace = true }\ncrazyagent = { workspace = true }\n";
+    let root = "[workspace.dependencies]\ntoml = \"1\"\ncrazyagent = { path = \"x\" }\n";
     assert_eq!(
-        outside_allowlist(workspace),
+        outside_allowlist(workspace, root),
         vec![(
             "dependencies".to_owned(),
             "crazyagent".to_owned(),
@@ -351,7 +353,33 @@ fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {
         )]
     );
     let odd = "[dependencies]\nserde = { package = 1 }\n";
-    assert_eq!(outside_allowlist(odd).len(), 1);
+    assert_eq!(outside_allowlist(odd, "").len(), 1);
+}
+
+/// A `workspace = true` entry is judged by the crate its root entry names, so an allowed
+/// key cannot carry an SDK or engine crate through a rename in the root table, and an
+/// entry the root does not hold is reported.
+#[test]
+fn the_allowlist_judges_the_crate_behind_an_inherited_entry() {
+    let member = "[dependencies]\ntoml = { workspace = true }\nserde = { workspace = true }\n";
+    let root = "[workspace]\nmembers = []\n\n[workspace.dependencies]\ntoml = { package = \"crazyagent-sdk\", version = \"1\" }\n";
+    assert_eq!(
+        outside_allowlist(member, root),
+        vec![
+            (
+                "dependencies".to_owned(),
+                "serde".to_owned(),
+                String::new()
+            ),
+            (
+                "dependencies".to_owned(),
+                "toml".to_owned(),
+                "crazyagent-sdk".to_owned()
+            ),
+        ]
+    );
+    let plain = "[workspace.dependencies]\ntoml = \"1\"\nserde = { version = \"1\" }\n";
+    assert!(outside_allowlist(member, plain).is_empty());
 }
 
 /// A manifest text that asks for `net.request` and holds one `[net]` section. Input: the
