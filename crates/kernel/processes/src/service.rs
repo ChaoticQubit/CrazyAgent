@@ -1081,7 +1081,7 @@ pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>,
     assert!(installed.is_absolute() && !installed.starts_with(old));
     let main = format!("crazyagent{}", std::env::consts::EXE_SUFFIX);
     if let Some(cli) = cli
-        && std::fs::read_link(cli.join("crazyagent")).is_ok_and(|named| named == old.join(&main))
+        && names_old_copy(&cli.join("crazyagent"), &old.join(&main))
         && link_cli(installed, cli).is_err()
     {
         return;
@@ -1093,6 +1093,18 @@ pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>,
         }
     }
     let _ = std::fs::remove_dir(old);
+}
+
+/// Whether the command line link at `link` leads to the old copy `old`, however it names it:
+/// by an absolute path, by one relative to the link's folder, or through other links, both
+/// read to the file they end at. A link that cannot be followed, or an old copy that is not
+/// there, leads to nothing. Inputs: the link and the old copy. Output: the answer.
+fn names_old_copy(link: &Path, old: &Path) -> bool {
+    std::fs::symlink_metadata(link).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && matches!(
+            (std::fs::canonicalize(link), std::fs::canonicalize(old)),
+            (Ok(led), Ok(copy)) if led == copy
+        )
 }
 
 /// Whether `copy` is a regular file private to this user where Unix modes exist, so no other
