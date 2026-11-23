@@ -202,7 +202,14 @@ fn the_capability_list_takes_the_layout_rustfmt_gives_it() {
 #[test]
 fn generation_fails_closed_without_rustfmt() {
     let missing = std::ffi::OsStr::new("/nonexistent/capgen-test/rustfmt");
-    let refused = crate::rustfmt_with(missing, "mod.rs", "pub mod host;\n").unwrap_err();
+    let refused = crate::rustfmt_with(
+        missing,
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .unwrap_err();
     assert_eq!(refused.code, "capgen_rustfmt_missing");
     assert_eq!(refused.file, "mod.rs");
     assert!(
@@ -212,13 +219,21 @@ fn generation_fails_closed_without_rustfmt() {
     );
 }
 
-/// Generates the test module from the fixture `.cap`. Output: its text.
-fn fixture_module() -> String {
-    let source =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))
-            .expect("fixture.cap reads");
-    let file = crazyagent_cap::parse_as("fixture", &source).expect("fixture.cap parses");
-    rust_test_module("fixture", &file).expect("fixture.cap generates")
+/// What a row that reads files gives back: nothing, or the first error with its path.
+type Checked = Result<(), Box<dyn std::error::Error>>;
+
+/// Reads one file for a row. Input: the path. Output: the text, or an error naming the path.
+fn read(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()).into())
+}
+
+/// Generates the test module from the fixture `.cap`. Output: its text, or the read, parse
+/// or generation error.
+fn fixture_module() -> Result<String, Box<dyn std::error::Error>> {
+    let source = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))?;
+    let file = crazyagent_cap::parse_as("fixture", &source)
+        .map_err(|error| format!("fixture.cap: {error:?}"))?;
+    rust_test_module("fixture", &file).map_err(|error| format!("fixture.cap: {error:?}").into())
 }
 
 /// Returns the derive line written above one generated item. Inputs: the module text and
@@ -235,15 +250,15 @@ fn derive_of<'t>(module: &'t str, head: &str) -> &'t str {
 }
 
 #[test]
-fn the_fixture_generates_the_checked_in_test_module() {
-    let checked_in =
-        fs::read_to_string(sdk("rust/src/fixture_generated.rs")).expect("the test module reads");
-    assert_eq!(fixture_module(), checked_in);
+fn the_fixture_generates_the_checked_in_test_module() -> Checked {
+    let checked_in = read(&sdk("rust/src/fixture_generated.rs"))?;
+    assert_eq!(fixture_module()?, checked_in);
+    Ok(())
 }
 
 #[test]
-fn derives_follow_the_fields() {
-    let module = fixture_module();
+fn derives_follow_the_fields() -> Checked {
+    let module = fixture_module()?;
     assert_eq!(
         derive_of(&module, "pub struct Header"),
         "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]"
@@ -278,11 +293,12 @@ fn derives_follow_the_fields() {
             .expect("the item's block");
         assert_eq!(block.contains("deny_unknown_fields"), denies, "{head}");
     }
+    Ok(())
 }
 
 #[test]
-fn wrapped_types_use_alloc_and_core_paths() {
-    let module = fixture_module();
+fn wrapped_types_use_alloc_and_core_paths() -> Checked {
+    let module = fixture_module()?;
     for line in [
         "    pub headers: alloc::vec::Vec<Header>,\n",
         "    pub body: core::option::Option<alloc::vec::Vec<u8>>,\n",
@@ -290,11 +306,12 @@ fn wrapped_types_use_alloc_and_core_paths() {
     ] {
         assert!(module.contains(line), "{line}");
     }
+    Ok(())
 }
 
 #[test]
-fn bound_checks_are_written_for_every_capability_in_both_directions() {
-    let module = fixture_module();
+fn bound_checks_are_written_for_every_capability_in_both_directions() -> Checked {
+    let module = fixture_module()?;
     for function in ["send", "reveal", "pair", "count", "wrap", "shadow"] {
         for direction in ["input", "output"] {
             let head = format!("pub fn check_{function}_{direction}(");
@@ -321,6 +338,7 @@ fn bound_checks_are_written_for_every_capability_in_both_directions() {
         .1;
     assert_eq!(settings.matches("pub fn check_").count(), 2, "{settings}");
     assert!(!settings.contains("alloc::"), "{settings}");
+    Ok(())
 }
 
 #[test]
@@ -721,4 +739,102 @@ fn load_refuses_an_oversized_file_before_reading_it() {
     fs::write(folder.join("edge.cap"), &at_bound).expect("writes");
     assert_eq!(load(&folder).expect("a file at the bound loads").len(), 1);
     fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}
+
+/// Finds a checked-in executable shell stub standing in for rustfmt, so no row writes and
+/// then runs a program while another row spawns. Input: the stub's name. Output: its path.
+#[cfg(unix)]
+fn rustfmt_stub(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixture/rustfmt/{name}.sh"))
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rustfmt_toml_in_the_working_folder_changes_nothing() -> Checked {
+    let config = crate::rustfmt_config();
+    assert!(config.is_file(), "{}", config.display());
+    assert_eq!(read(&config)?, "");
+    let echo = rustfmt_stub("echo");
+    let args = crate::rustfmt_with(
+        echo.as_os_str(),
+        &config,
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let expected = format!(
+        "--edition\n2024\n--emit\nstdout\n--config-path\n{}\n",
+        config.display()
+    );
+    assert_eq!(args, expected);
+    let missing = load_scratch("rustfmt-no-config").join("rustfmt.toml");
+    let refused = crate::rustfmt_with(
+        echo.as_os_str(),
+        &missing,
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_missing");
+    assert!(
+        refused.detail.contains("rustfmt.toml"),
+        "{}",
+        refused.detail
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hung_rustfmt_is_stopped_with_a_timeout() {
+    let hung = rustfmt_stub("hung");
+    let started = std::time::Instant::now();
+    let refused = crate::rustfmt_with(
+        hung.as_os_str(),
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "pub mod host;\n",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_timeout");
+    assert_eq!(refused.file, "mod.rs");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(crate::RUSTFMT_DEADLINE, std::time::Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_empty_rustfmt_output_is_a_refusal() {
+    let silent = rustfmt_stub("silent");
+    let refused = crate::rustfmt_with(
+        silent.as_os_str(),
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "pub mod host;\n",
+        crate::RUSTFMT_DEADLINE,
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_refused");
+    assert_eq!(refused.detail, "empty output");
+    let blank = crate::rustfmt_with(
+        silent.as_os_str(),
+        &crate::rustfmt_config(),
+        "mod.rs",
+        "\n",
+        crate::RUSTFMT_DEADLINE,
+    );
+    assert_eq!(blank, Ok(String::new()));
+}
+
+#[test]
+fn a_test_module_refuses_two_names_with_one_rust_form() {
+    let source = "capability s.a_b() -> unit tier: t1 needs: s.x\n\
+                  capability s.a.b() -> unit tier: t1 needs: s.x";
+    let file = crazyagent_cap::parse_as("s", source).expect("parses");
+    let refused = crate::rust::test_module("s", &file).unwrap_err();
+    assert_eq!(refused.code, "capgen_name_collision");
+    assert_eq!(refused.detail, "check_a_b_input");
 }
