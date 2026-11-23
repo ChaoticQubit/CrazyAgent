@@ -299,6 +299,7 @@ fn gateway_update_set_channel_p95() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &NoService,
@@ -365,6 +366,7 @@ fn gateway_service_status_p95() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &Reported,
