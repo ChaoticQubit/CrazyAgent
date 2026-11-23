@@ -2,8 +2,9 @@ use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
 use kernel_processes::terminal::AgentId;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use rusqlite::params;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -81,7 +82,12 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(self.tmux.clone()),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn pane(&self, host: &Arc<dyn Host>, agent: i64, out: &Path) {
