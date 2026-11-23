@@ -1,4 +1,4 @@
-use bus_gateway::{Gateway, Grants};
+use bus_gateway::{AllOn, Gateway, Grants};
 use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
 use kernel_processes::update::Channel;
 use sdk::generated::service::{Provide as _, ServiceState};
@@ -47,7 +47,7 @@ fn agent_quit_calling_each_update_and_service_capability_is_refused_once_each() 
     let update = UpdateProvider { layout: &layout };
     let service = ServiceProvider { layout: &layout };
     let refusals = EngineRefusals::new();
-    let gateway = Gateway::new(crate::sdk_slice::bundled_grants(), &refusals);
+    let gateway = Gateway::new(crate::sdk_slice::bundled_grants(), &refusals, &AllOn);
     let providers = Providers {
         net: &Absent,
         process: &Absent,
@@ -99,7 +99,7 @@ fn a_test_grant_reaches_the_update_provider() {
     let update = UpdateProvider { layout: &layout };
     let grants = Grants::new(&[(SETTINGS_ROW, Tier::T2, &["update.write"])]).unwrap();
     let refusals = EngineRefusals::new();
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &Absent,
         process: &Absent,

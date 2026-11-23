@@ -9,17 +9,42 @@ pub trait Refusals {
     fn refused(&self, plugin: &'static str, capability: &Capability, refusal: &Refusal);
 }
 
+/// Whether the owner has a plugin on: the gateway asks it before any grant check, so a plugin
+/// turned off makes no call at all. A source that cannot tell must answer off.
+pub trait Switches {
+    /// Whether a plugin is on. Input: the plugin id. Output: true when its calls may run.
+    fn is_on(&self, plugin: &str) -> bool;
+}
+
+/// Switches with every plugin on, for tests that are not about switching; the engine always
+/// hands the gateway its own off set.
+#[cfg(any(test, feature = "test-support"))]
+pub struct AllOn;
+
+#[cfg(any(test, feature = "test-support"))]
+impl Switches for AllOn {
+    fn is_on(&self, _: &str) -> bool {
+        true
+    }
+}
+
 /// The in-process bus gateway: it checks each SDK call against the caller's grants and
 /// runs an admitted call through its bound checks and the provider the caller hands in.
 pub struct Gateway<'p> {
     grants: &'p Grants,
     refusals: &'p dyn Refusals,
+    switches: &'p dyn Switches,
 }
 
 impl<'p> Gateway<'p> {
-    /// Builds a gateway. Inputs: the grant table and the refusal sink. Output: the gateway.
-    pub fn new(grants: &'p Grants, refusals: &'p dyn Refusals) -> Self {
-        Self { grants, refusals }
+    /// Builds a gateway. Inputs: the grant table, the refusal sink and the owner's plugin
+    /// switches. Output: the gateway.
+    pub fn new(grants: &'p Grants, refusals: &'p dyn Refusals, switches: &'p dyn Switches) -> Self {
+        Self {
+            grants,
+            refusals,
+            switches,
+        }
     }
 
     /// Binds a caller to one plugin id; the only way a caller's identity enters a call.
@@ -31,10 +56,15 @@ impl<'p> Gateway<'p> {
         }
     }
 
-    /// Whether a plugin may call a capability: known to the table, the capability's tier
-    /// at or below its own, and holding the permission. Inputs: the plugin id and the
-    /// capability. Output: nothing, `NotGranted` or `TierTooHigh`.
+    /// Whether a plugin may call a capability: switched on, known to the table, the
+    /// capability's tier at or below its own, and holding the permission. Inputs: the plugin
+    /// id and the capability. Output: nothing, `PluginOff`, `NotGranted` or `TierTooHigh`.
     pub(crate) fn admit(&self, plugin: &str, capability: &Capability) -> Result<(), Refusal> {
+        if !self.switches.is_on(plugin) {
+            return Err(Refusal::PluginOff {
+                capability: capability.name,
+            });
+        }
         let not_granted = Refusal::NotGranted {
             capability: capability.name,
             needs: capability.needs,
