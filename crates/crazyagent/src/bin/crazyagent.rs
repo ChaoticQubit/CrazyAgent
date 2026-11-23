@@ -1011,16 +1011,19 @@ fn run_tui_command(args: &[OsString]) -> Result<(), String> {
 /// Whether a restore of the pinned 2.4 backup still runs in the default engine's process, so an
 /// explicit start waits instead of stopping it in the middle of the copy (L5).
 /// Inputs: the layout and the login service. Output: the answer.
-fn restoring(layout: &crazyagent::paths::Layout, service: &crazyagent::service::Service) -> bool {
+fn restoring(
+    layout: &crazyagent::paths::Layout,
+    service: &kernel_processes::service::Service,
+) -> bool {
     let running = crazyagent::restore::service_running(service);
     crazyagent::restore::holds_restart(layout.root(), running)
 }
 
 fn default_service(
     layout: &crazyagent::paths::Layout,
-) -> Result<crazyagent::service::Service, String> {
-    crazyagent::service::Service::current_user(
-        crazyagent::paths::Platform::CURRENT,
+) -> Result<kernel_processes::service::Service, String> {
+    crazyagent::service::current_user(
+        kernel_common::Platform::CURRENT,
         current_executable()?,
         layout,
     )
@@ -1045,7 +1048,7 @@ async fn prepare_engine(
             service,
             &service.executable,
             std::env::var_os("PATH").as_deref(),
-            crazyagent::service::READY_TIMEOUT,
+            kernel_processes::service::READY_TIMEOUT,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1070,7 +1073,7 @@ async fn prepare_engine(
 async fn offer_restart(
     message: &str,
     layout: Option<&crazyagent::paths::Layout>,
-    service: Option<&crazyagent::service::Service>,
+    service: Option<&kernel_processes::service::Service>,
 ) -> Result<(), String> {
     use std::io::BufRead;
     eprintln!("{message}");
@@ -1094,9 +1097,14 @@ async fn offer_restart(
     service.stop().map_err(|e| e.to_string())?;
     let since = crazyagent::service::log_length(layout);
     service.start().map_err(|e| e.to_string())?;
-    crazyagent::service::wait_started(layout, service, crazyagent::service::READY_TIMEOUT, since)
-        .await
-        .map_err(|e| e.to_string())?;
+    crazyagent::service::wait_started(
+        layout,
+        service,
+        kernel_processes::service::READY_TIMEOUT,
+        since,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     match crazyagent::service::check_engine(
         layout.root(),
         crazyagent::engine::owner::OwnerClientKind::Tui,
@@ -1129,9 +1137,14 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .ok_or("HOME is not set")?;
         let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
         let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
-        let target = crazyagent::service::persistable(&executable, &layout, appdir.as_deref())
-            .map_err(|e| e.to_string())?;
-        let link = crazyagent::service::link_cli(&target, &home.join(".local").join("bin"))
+        let target = kernel_processes::service::persistable(
+            &executable,
+            layout.root(),
+            appdir.as_deref(),
+            &crazyagent::service::HOOKS,
+        )
+        .map_err(|e| e.to_string())?;
+        let link = kernel_processes::service::link_cli(&target, &home.join(".local").join("bin"))
             .map_err(|e| e.to_string())?;
         println!("Linked {} to {}", link.display(), target.display());
         return Ok(());
@@ -1146,7 +1159,7 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .block_on(crazyagent::service::wait_started(
                 layout,
                 &service,
-                crazyagent::service::READY_TIMEOUT,
+                kernel_processes::service::READY_TIMEOUT,
                 since,
             ))
             .map_err(|e| e.to_string())
@@ -1161,7 +1174,9 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
                 ));
             }
             let since = crazyagent::service::log_length(&layout);
-            service.install().map_err(|e| e.to_string())?;
+            service
+                .install(&crazyagent::service::HOOKS)
+                .map_err(|e| e.to_string())?;
             wait(&layout, since)?;
             println!(
                 "Installed {} ({}); it runs {}",
@@ -1184,24 +1199,30 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             let since = crazyagent::service::log_length(&layout);
             let another = service.runs_another_program();
             let installed = service.definition.is_file();
-            let repair = service.repair(&service.executable, installed, false);
-            if installed && repair == crazyagent::service::Repair::Refuse {
+            let repair = service.repair(
+                &service.executable,
+                installed,
+                false,
+                &crazyagent::service::HOOKS,
+            );
+            if installed && repair == kernel_processes::service::Repair::Refuse {
                 return Err(service.refuse().0);
             }
-            if installed && repair == crazyagent::service::Repair::Install {
+            if installed && repair == kernel_processes::service::Repair::Install {
                 let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
-                let executable = crazyagent::service::persistable(
+                let executable = kernel_processes::service::persistable(
                     &service.executable,
-                    &layout,
+                    layout.root(),
                     appdir.as_deref(),
+                    &crazyagent::service::HOOKS,
                 )
                 .map_err(|e| e.to_string())?;
-                crazyagent::service::Service {
+                kernel_processes::service::Service {
                     executable: executable.clone(),
                     ..service.clone()
                 }
-                .install()
-                .map(|()| crazyagent::service::retire_old_copies(&layout, &executable))
+                .install(&crazyagent::service::HOOKS)
+                .map(|()| kernel_processes::service::retire_old_copies(layout.root(), &executable, &crazyagent::service::HOOKS))
             } else {
                 if another {
                     eprintln!(

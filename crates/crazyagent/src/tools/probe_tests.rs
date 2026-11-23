@@ -12,7 +12,7 @@ fn private_scratch() -> (tempfile::TempDir, PathBuf) {
         .tempdir_in(crate::harnesses::finding::private_root())
         .unwrap();
     let real = folder.path().canonicalize().unwrap();
-    assert_eq!(crate::service::changeable_by_others(&real), None);
+    assert_eq!(kernel_processes::service::changeable_by_others(&real), None);
     (folder, real)
 }
 
