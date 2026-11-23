@@ -228,3 +228,25 @@ fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_
     );
     assert!(!places.agent_writable(&shipped), "{}", shipped.display());
 }
+
+/// A name starting with this drive's letter and `:` joined to a searched folder replaces
+/// that folder and reaches the drive's current folder instead, so a real program planted
+/// there is not resolved through it: the name is not found, whatever file it would reach.
+#[test]
+fn a_drive_prefixed_name_never_reaches_a_file_outside_the_searched_folders() {
+    let (_folder, _real, places) = node_folder();
+    let here = std::env::current_dir().unwrap();
+    let drive = here.to_str().unwrap()[..1].to_owned();
+    assert!(drive.chars().all(|c| c.is_ascii_alphabetic()), "{drive}");
+    let stem = format!("drive-reach-{}", std::process::id());
+    let planted = here.join(format!("{stem}.exe"));
+    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    std::fs::copy(shipped, &planted).unwrap();
+    let found = resolve(&format!("{drive}:{stem}"), &places);
+    std::fs::remove_file(&planted).unwrap();
+    let missing = found.unwrap_err();
+    assert_eq!(missing.reason, Reason::NotFound);
+    assert!(missing.refused.is_none());
+}

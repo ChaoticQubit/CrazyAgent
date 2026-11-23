@@ -1284,16 +1284,12 @@ pub fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refus
     })
 }
 
-/// Whether a program name may be looked up in a folder: not empty, bounded, not `.` or `..`
-/// and holding no `/`, `\`, NUL or `:`, which on Windows starts a drive prefix that
-/// replaces the folder or names an alternate data stream. One rule on every OS. Input: the
-/// name. Output: the answer.
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= NAME_BYTES_MAX
         && name != "."
         && name != ".."
-        && !name.contains(['/', '\\', '\0', ':'])
+        && !name.contains(['/', '\\', '\0'])
 }
 
 /// Whether a path may name a place: absolute, bounded, not `/` and plain, with no `.` or

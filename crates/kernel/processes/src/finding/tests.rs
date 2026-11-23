@@ -122,16 +122,16 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     }
 }
 
-/// A program name holding `:` is not looked up: on Windows a drive prefix (`C:node`)
-/// replaces the folder it is joined to and `name:stream` names an alternate data stream, so
-/// the file reached would lie outside every searched folder. Each such name is not found,
-/// even with a file of that name in a searched folder, and an `env` line naming one is
-/// refused as [`Refusal::FirstLine`].
+/// A program name that starts like a Windows drive, one ASCII letter and `:`, is not
+/// looked up on any OS: on Windows `C:node` joined to a folder replaces that folder, so the
+/// file reached would lie outside every searched folder. Each such name is not found, even
+/// with a file of that name in a searched folder, an `env` line naming one is refused as
+/// [`Refusal::FirstLine`], and a `:` later in a name is still looked up.
 #[test]
-fn a_program_name_holding_a_drive_prefix_or_stream_is_refused() {
+fn a_program_name_starting_with_a_drive_is_refused() {
     let (_folder, home) = scratch();
     let places = home_only(&home);
-    for name in ["C:node", "c:tool", "node:stream"] {
+    for name in ["C:node", "c:tool"] {
         program(&home.join(".local/bin").join(name), NODE);
         let missing = resolve(name, &places).unwrap_err();
         assert_eq!(missing.reason, Reason::NotFound, "{name}");
@@ -142,6 +142,8 @@ fn a_program_name_holding_a_drive_prefix_or_stream_is_refused() {
         refusal_of(&named, &places),
         Some((named, Refusal::FirstLine))
     );
+    let later = program(&home.join(".local/bin/node:stream"), NODE);
+    assert_eq!(resolve("node:stream", &places).unwrap().entry, later);
 }
 
 /// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
