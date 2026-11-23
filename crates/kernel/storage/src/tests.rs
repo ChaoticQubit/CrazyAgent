@@ -179,7 +179,7 @@ fn a_target_or_build_dependency_turning_test_support_on_is_caught() {
 #[test]
 fn a_feature_that_turns_test_support_on_through_a_dependency_is_caught() {
     let text = "[dependencies]\nstore = { package = \"crazyagent-kernel-storage\", path = \"../storage\", optional = true }\n\n[features]\nextra = [\"store?/test-support\"]\nother = [\"crazyagent-kernel-storage/test-support\"]\nplain = [\"dep:store\"]\n";
-    assert_eq!(refused_in(text), ["features.extra"]);
+    assert_eq!(refused_in(text), ["features.extra", "features.other"]);
 }
 
 #[cfg(unix)]
