@@ -1,4 +1,4 @@
-/** The plugin tiers of DEC-206 Q5, lowest first; `kernel` is a kernel module's capability. */
+/** The plugin tiers, lowest first; `kernel` is a kernel module's capability. */
 export type Tier = "kernel" | "t1" | "t2" | "t3";
 
 /** One capability's static facts, as capgen writes them: name, tier and permission. */
