@@ -102,15 +102,33 @@ pub struct ParseError {
 }
 
 /// Parses one `.cap` source whose file stem is not known, so no ref counts as naming its
-/// own file. Input: the source text. Output: as [`parse_as`].
+/// own file. Input: the source text. Output: as [`parse_as`], with no stem to refuse.
 pub fn parse(source: &str) -> Result<File, ParseError> {
-    parse_as("", source)
+    parse_stemmed("", source)
 }
 
-/// Parses one `.cap` source and checks it, refusing a ref qualified with the file's own
-/// stem (`cap_self_qualified`). Inputs: the file's stem and the source text.
-/// Output: the file's syntax tree, or the first refusal with its position.
+/// Parses one `.cap` source and checks it, refusing a stem that is not a snake name of at
+/// most `NAME_BYTES_MAX` bytes with no `__` and no trailing `_` (`cap_stem`, line 1 column
+/// 1), and a ref qualified with the file's own stem (`cap_self_qualified`). Inputs: the
+/// file's stem and the source text. Output: the file's syntax tree, or the first refusal.
 pub fn parse_as(stem: &str, source: &str) -> Result<File, ParseError> {
+    let valid = stem.len() <= NAME_BYTES_MAX
+        && kernel_common::names::is_snake(stem)
+        && !stem.contains("__")
+        && !stem.ends_with('_');
+    if !valid {
+        return Err(ParseError {
+            line: 1,
+            column: 1,
+            code: "cap_stem",
+        });
+    }
+    parse_stemmed(stem, source)
+}
+
+/// Lexes, parses and checks one source under a stem already accepted, or none.
+/// Inputs: the stem, empty when unknown, and the source text. Output: as [`parse_as`].
+fn parse_stemmed(stem: &str, source: &str) -> Result<File, ParseError> {
     let tokens = lex::lex(source)?;
     let (file, spots) = parse::file(stem, tokens)?;
     check::check(&file, &spots)?;

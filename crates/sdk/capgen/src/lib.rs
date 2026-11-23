@@ -120,7 +120,9 @@ fn rustfmt_with(program: &OsStr, path: &str, text: &str) -> Result<String, Capge
     Ok(formatted)
 }
 
-/// Reads and parses every `.cap` file of a folder. Input: the folder.
+/// Reads and parses every `.cap` file of a folder. Each must be a regular file, never a
+/// symlink, FIFO or folder (`capgen_file_kind`), of at most `SOURCE_BYTES_MAX` bytes by its
+/// metadata and by a bounded read (`cap_source_too_large`). Input: the folder.
 /// Output: each file's stem with its parsed file, sorted by stem, or the first refusal.
 pub fn load(caps: &Path) -> Result<Vec<(String, File)>, CapgenError> {
     let refuse = |file: &str, code: &'static str, detail: String| CapgenError {
@@ -159,8 +161,8 @@ pub fn load(caps: &Path) -> Result<Vec<(String, File)>, CapgenError> {
     let mut loaded = Vec::with_capacity(stems.len());
     for stem in stems {
         let name = format!("{stem}.cap");
-        let source = fs::read_to_string(caps.join(&name))
-            .map_err(|error| refuse(&name, "capgen_read", error.to_string()))?;
+        let source = read_bounded(&caps.join(&name))
+            .map_err(|(code, detail)| refuse(&name, code, detail))?;
         let file = crazyagent_cap::parse_as(&stem, &source).map_err(|error| {
             refuse(
                 &name,
@@ -171,6 +173,40 @@ pub fn load(caps: &Path) -> Result<Vec<(String, File)>, CapgenError> {
         loaded.push((stem, file));
     }
     Ok(loaded)
+}
+
+/// Reads one `.cap` file without following a link: a regular file only, refused by its
+/// metadata length past `SOURCE_BYTES_MAX` before any byte is read, then read through a
+/// bound one byte past it, so a file that grows between the two steps is still refused.
+/// Input: the path. Output: the UTF-8 source, or the refusal code with its detail.
+fn read_bounded(path: &Path) -> Result<String, (&'static str, String)> {
+    use std::io::Read;
+    let max = crazyagent_cap::SOURCE_BYTES_MAX;
+    let too_large = || ("cap_source_too_large", "line 1 column 1".to_owned());
+    let meta = fs::symlink_metadata(path).map_err(|error| ("capgen_read", error.to_string()))?;
+    let kind = meta.file_type();
+    if !kind.is_file() {
+        let what = if kind.is_symlink() {
+            "a symlink"
+        } else if kind.is_dir() {
+            "a folder"
+        } else {
+            "not a regular file"
+        };
+        return Err(("capgen_file_kind", what.to_owned()));
+    }
+    if meta.len() > max as u64 {
+        return Err(too_large());
+    }
+    let file = fs::File::open(path).map_err(|error| ("capgen_read", error.to_string()))?;
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(max));
+    file.take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ("capgen_read", error.to_string()))?;
+    if bytes.len() > max {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes).map_err(|error| ("capgen_read", error.to_string()))
 }
 
 /// Compares generated files with a folder's files, the folder's subfolders read one level
