@@ -41,12 +41,62 @@ pub enum Bounded {
     Unreadable,
 }
 
-/// Reads one file, taking at most `max` + 1 bytes, so a large file is refused without
-/// holding it whole in memory. Inputs: the path and the bound. Output: the text,
-/// `TooLarge` past the bound, or `Unreadable`.
+/// The Windows open flag that opens a link as itself, the twin of Unix `O_NOFOLLOW` on the
+/// last path component.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// The Windows file attribute of a reparse point, such as a symbolic link or a junction.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// Opens one file without following a link at its last component and without waiting on a
+/// FIFO, then keeps it only when the handle is a regular file (Windows: and no reparse
+/// point). Input: the path. Output: the file, or none.
+fn open_plain(path: &Path) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            )
+            .open(path)
+            .ok()?
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()?
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return None;
+        }
+    }
+    Some(file)
+}
+
+/// Reads one file through a guarded open ([`open_plain`]: no link, no FIFO, a regular file
+/// only), taking at most `max` + 1 bytes, so a large file is refused without holding it
+/// whole in memory. Inputs: the path and the bound. Output: the text, `TooLarge` past the
+/// bound, or `Unreadable`.
 pub fn read_bounded(path: &Path, max: usize) -> Bounded {
     use std::io::Read;
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(file) = open_plain(path) else {
         return Bounded::Unreadable;
     };
     let limit = u64::try_from(max)
@@ -64,13 +114,19 @@ pub fn read_bounded(path: &Path, max: usize) -> Bounded {
 }
 
 /// Whether a plugin id is 1 to `PLUGIN_ID_MAX` bytes of lowercase ASCII letters, digits
-/// and hyphens, so it is safe in a log line, an event body and a folder name. Input: the
-/// id. Output: true when it is.
+/// and hyphens, starting with a letter or digit and never a Windows device name, so it is
+/// safe in a log line, an event body and a folder name on every system. Input: the id.
+/// Output: true when it is.
 pub fn is_plugin_id(id: &str) -> bool {
     (1..=PLUGIN_ID_MAX).contains(&id.len())
         && id
             .bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && id
+            .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !kernel_common::windows_device(id)
 }
 
 /// The 1-based line of the first occurrence of a needle, 1 when absent or empty.

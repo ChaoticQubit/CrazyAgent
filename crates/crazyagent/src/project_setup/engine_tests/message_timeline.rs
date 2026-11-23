@@ -70,8 +70,11 @@ impl Pane {
             env: Vec::new(),
             transcript: Transcript::Unavailable,
         };
-        host.spawn(&AgentId::team(agent).unwrap(), &command)
-            .unwrap();
+        host.spawn(
+            &AgentId::team(agent).unwrap(),
+            &crate::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
         Self {
             folder,
             tmux,

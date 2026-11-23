@@ -156,7 +156,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let typed = base.join("typed.txt");
     host.spawn(
         &AgentId::team(writer).unwrap(),
-        &InteractiveCommand {
+        &crazyagent::terminal::PaneCommand::from(&InteractiveCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -165,7 +165,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
             cwd: base.clone(),
             env: Vec::new(),
             transcript: Transcript::Unavailable,
-        },
+        }),
     )
     .unwrap();
 

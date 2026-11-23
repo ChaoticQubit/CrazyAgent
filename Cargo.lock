@@ -887,6 +887,7 @@ dependencies = [
  "crazyagent-kernel-common",
  "crazyagent-kernel-plugin-host",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-sandbox",
  "crazyagent-kernel-security",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
@@ -997,6 +998,7 @@ name = "crazyagent-kernel-plugin-host"
 version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-common",
+ "crazyagent-kernel-security",
  "rusqlite",
  "rustix 1.1.5",
  "serde",
@@ -1026,6 +1028,18 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "url",
+]
+
+[[package]]
+name = "crazyagent-kernel-sandbox"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-kernel-processes",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

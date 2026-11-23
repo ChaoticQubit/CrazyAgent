@@ -1910,7 +1910,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::scheduling::initialize(connection)?;
     crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
-    crate::app_plugins::store::initialize(connection)?;
+    crate::app_plugins::initialize(connection)?;
     kernel_storage::namespace::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;

@@ -1,9 +1,8 @@
 #![cfg(target_os = "windows")]
 
-use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::terminal::buffer::Chunk;
 use crazyagent::terminal::windows::ConptyHost;
-use crazyagent::terminal::{AgentId, Host, INPUT_BYTES_MAX, SIZE_MAX, TerminalStream};
+use crazyagent::terminal::{AgentId, Host, INPUT_BYTES_MAX, PaneCommand, SIZE_MAX, TerminalStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
@@ -14,14 +13,13 @@ fn cmd() -> PathBuf {
         .join("cmd.exe")
 }
 
-fn command(args: &[&str], cwd: &Path) -> InteractiveCommand {
-    InteractiveCommand {
+fn command(args: &[&str], cwd: &Path) -> PaneCommand {
+    PaneCommand {
         argv: std::iter::once(cmd().display().to_string())
             .chain(args.iter().map(|arg| arg.to_string()))
             .collect(),
         cwd: cwd.to_path_buf(),
         env: vec![("PANE_MARK".into(), "pane-env".into())],
-        transcript: Transcript::Unavailable,
     }
 }
 
