@@ -26,6 +26,28 @@ pub struct Bytes(pub Vec<u8>);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Id(pub u64);
 
+/// Why a stored event body did not convert to its wire form: the body is not the stored
+/// shape of its kind, and the reason is the JSON decoder's message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventError {
+    pub reason: String,
+}
+
+/// Converts one stored event body to its wire JSON through the kind's two generated forms.
+/// Input: the stored body bytes. Output: the wire JSON, or the [`EventError`] when the
+/// bytes are not the stored shape; never a panic.
+pub fn event_body<S, W>(body: &[u8]) -> Result<serde_json::Value, EventError>
+where
+    S: serde::de::DeserializeOwned,
+    W: Serialize + From<S>,
+{
+    let refuse = |error: serde_json::Error| EventError {
+        reason: alloc::string::ToString::to_string(&error),
+    };
+    let stored: S = serde_json::from_slice(body).map_err(refuse)?;
+    serde_json::to_value(W::from(stored)).map_err(refuse)
+}
+
 /// Writes a `u64` as its decimal string. Input: the value. Output: the string.
 pub fn encode_u64(value: u64) -> String {
     alloc::format!("{value}")
