@@ -304,17 +304,28 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
 }
 
 /// Restores or deletes one staged or retired entry: a retired folder goes back under its
-/// plugin name when that name is missing, any other folder is deleted, and a file or
-/// link is unlinked. Inputs: the plugins folder and the entry. Output: Ok, or the
-/// refusal.
+/// plugin name when that name is missing; one beside a live plugin of its name first loses
+/// that name, so a folder it cannot delete is never restored later; any other folder is
+/// deleted, and a file or link is unlinked. Inputs: the plugins folder and the entry.
+/// Output: Ok, or the refusal.
 fn sweep(directory: &Dir, file: &OsStr) -> Result<(), Refused> {
     match os::kind(directory, file).map_err(|()| unavailable())? {
         None => Ok(()),
         Some(Kind::Folder) => {
-            if let Some(name) = file.to_str().and_then(retired_name)
-                && !exists(directory, name)?
+            if let Some(text) = file.to_str()
+                && let Some(name) = retired_name(text)
             {
-                return os::rename(directory, file, name.as_ref()).map_err(|()| unavailable());
+                if !exists(directory, name)? {
+                    return os::rename(directory, file, name.as_ref()).map_err(|()| unavailable());
+                }
+                let (_, id) = text
+                    .rsplit_once('.')
+                    .expect("a retired name ends in its id");
+                let nameless = format!("{RETIRED}{id}");
+                assert!(retired_name(&nameless).is_none());
+                if os::rename(directory, file, nameless.as_ref()).is_ok() {
+                    return remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
+                }
             }
             remove_level(directory, file, TREE_DEPTH_MAX)
         }
