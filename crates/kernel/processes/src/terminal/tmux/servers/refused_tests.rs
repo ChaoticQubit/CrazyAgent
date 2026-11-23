@@ -746,6 +746,9 @@ fn teammates_record(host: &Servers, id: i64) -> PathBuf {
     )
 }
 
+/// One way a row spoils a lead's teammates' socket record. Takes the record.
+type Spoil = fn(&Path);
+
 /// A lead whose teammates' socket record is present but cannot be trusted is refused team
 /// routing, never read as a lead with no teammates' server, whose team panes the host would
 /// then resolve on the lead's own server: a record no one can read, one of the wrong size, a
@@ -754,7 +757,7 @@ fn teammates_record(host: &Servers, id: i64) -> PathBuf {
 #[test]
 fn a_lead_whose_teammates_record_cannot_be_trusted_is_refused_team_routing() {
     use std::os::unix::fs::PermissionsExt;
-    let cases: [(&str, fn(&Path)); 5] = [
+    let cases: [(&str, Spoil); 5] = [
         ("unreadable", |record| {
             std::fs::set_permissions(record, std::fs::Permissions::from_mode(0o000)).unwrap();
         }),
