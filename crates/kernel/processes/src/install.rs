@@ -256,8 +256,86 @@ fn download(version_text: &str, target_text: &str, hash: &str) -> Result<(), &'s
 /// field can add an argument, start an option or name a file. Input: the recipe. Output:
 /// nothing, or the refusal code.
 pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
-    let _ = recipe;
-    Ok(())
+    match recipe {
+        InstallRecipe::UvRelease {
+            version: pinned,
+            target,
+            sha256,
+        }
+        | InstallRecipe::NodeArchive {
+            version: pinned,
+            target,
+            sha256,
+        } => download(pinned, target, sha256),
+        InstallRecipe::UvTool {
+            package,
+            version: pinned,
+            python: wanted,
+            lock,
+        } => {
+            if !setup_name(package) {
+                return Err(NAME_INVALID);
+            }
+            if !version(pinned) {
+                return Err(VERSION_INVALID);
+            }
+            if !python(wanted) {
+                return Err(TARGET_INVALID);
+            }
+            if lock.len() > LOCK_BYTES_MAX {
+                return Err(LOCK_TOO_LARGE);
+            }
+            Ok(())
+        }
+        InstallRecipe::BrewFormula { name, .. } | InstallRecipe::BrewCask { name, .. } => {
+            (name.len() <= NAME_BYTES_MAX && plain(name))
+                .then_some(())
+                .ok_or(NAME_INVALID)
+        }
+        InstallRecipe::NpmGlobal {
+            package,
+            version: pinned,
+            flags,
+            ..
+        } => {
+            if !npm_package(package) {
+                return Err(NAME_INVALID);
+            }
+            if !(version(pinned) && part(pinned)) {
+                return Err(VERSION_INVALID);
+            }
+            if flags.len() > NPM_FLAGS_MAX || !flags.iter().all(|flag| option(flag)) {
+                return Err(TEMPLATE_MISMATCH);
+            }
+            if !flags
+                .iter()
+                .all(|flag| NPM_FLAGS_ALLOWED.contains(&flag.as_str()))
+            {
+                return Err(FLAG_UNLISTED);
+            }
+            Ok(())
+        }
+        InstallRecipe::Winget { id, version: pinned } => {
+            if !winget_id(id) {
+                return Err(NAME_INVALID);
+            }
+            version(pinned).then_some(()).ok_or(VERSION_INVALID)
+        }
+        InstallRecipe::SystemPackage { package, .. } => {
+            setup_name(package).then_some(()).ok_or(NAME_INVALID)
+        }
+        InstallRecipe::SelfUpdate { program, args } => {
+            if !(program.len() <= NAME_BYTES_MAX && plain(program)) {
+                return Err(NAME_INVALID);
+            }
+            let listed = args.len() <= ARGS_MAX
+                && args.iter().all(|arg| word(arg))
+                && SELF_UPDATE_ARGS_ALLOWED
+                    .iter()
+                    .any(|allowed| allowed.iter().copied().eq(args.iter().map(String::as_str)));
+            listed.then_some(()).ok_or(TEMPLATE_MISMATCH)
+        }
+    }
 }
 
 #[cfg(test)]
