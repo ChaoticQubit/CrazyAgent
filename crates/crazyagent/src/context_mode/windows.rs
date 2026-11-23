@@ -1,8 +1,8 @@
 use super::refused;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
-use crate::setup::InstallError;
-use crate::setup::run::run_bounded;
 use kernel_sandbox::settings::LinuxSupervisor;
+use kernel_processes::run::InstallError;
+use kernel_processes::run::run_bounded;
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};

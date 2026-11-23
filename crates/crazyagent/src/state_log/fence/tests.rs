@@ -1,6 +1,7 @@
 use super::*;
 use crate::state_log::replay::redact;
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::Draft;
 use rusqlite::Connection;
 
 /// A seeded store: the `state` row at revision 0 and the owner tables holding the test host
@@ -25,7 +26,7 @@ fn code<T>(result: Result<T, EngineError>) -> Option<String> {
 /// One worktrees event. Output: the draft.
 fn draft() -> Draft<'static> {
     Draft {
-        aggregate: Aggregate::Worktrees,
+        aggregate: Aggregate::Worktrees.into(),
         kind: "Tick",
         schema: 1,
         at_ms: 1,

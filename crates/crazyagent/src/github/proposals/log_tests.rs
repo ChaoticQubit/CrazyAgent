@@ -1,7 +1,8 @@
 use super::*;
 use crate::landing_log::RULE_REQUEST_SAVED;
 use crate::project_setup::removed::event::{KIND, ProjectRemoved};
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::Draft;
 
 /// Every logged rule request body, in seq order. Input: the store. Output: the bodies.
 fn saved(db: &Connection) -> Vec<serde_json::Value> {
@@ -121,7 +122,7 @@ fn remove(case: &Case, kept: bool) {
     };
     let body = removed.body().unwrap();
     let draft = Draft {
-        aggregate: Aggregate::Projects,
+        aggregate: Aggregate::Projects.into(),
         kind: KIND,
         schema: 1,
         at_ms: 1,

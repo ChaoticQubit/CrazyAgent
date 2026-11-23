@@ -144,7 +144,7 @@ fn a_snapshot_run_carries_the_profile_digest_never_its_text() {
     let done = snapshot(&mut appender, 9).unwrap();
     drop(appender);
     tx.commit().unwrap();
-    crate::state_log::verify_snapshot(&db, done).unwrap();
+    kernel_storage::state_log::verify_snapshot(&db, done).unwrap();
     let body = stored(&db).unwrap();
     let kept = kept(&db);
     assert_eq!(kept.len(), 1);

@@ -10,11 +10,13 @@ use crate::protocol::{Command, Outcome, ProjectId};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::QuitSettings;
 use crate::roadmap_status::Refresh;
-use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-use crate::storage::opening::Opening;
 use kernel_sandbox::settings::SandboxSettings;
+use crate::state_log::fence::Fence;
+use crate::state_log::replay::{self, Logged};
+use crate::state_log::{Aggregate, Appender};
+use crate::storage::opening::Opening;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value as Column;
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
@@ -206,84 +208,84 @@ pub fn record(
     let aggregate = Aggregate::Settings;
     let seq = match event {
         Event::Sandbox(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_SANDBOX,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Cleanup(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_CLEANUP,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Quit(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_QUIT,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Retry(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RETRY,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::HarnessUpdate(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_HARNESS_UPDATE,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::InstructionApp(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_INSTRUCTION_APP,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Instruction(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_INSTRUCTION,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Roadmap(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ROADMAP,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Steps(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_STEPS,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Time(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TIME,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Frames(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_FRAMES,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Profile(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PROFILE,
             schema: SCHEMA,
             at_ms,

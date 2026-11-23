@@ -56,3 +56,24 @@ fn wipe_zeroes_bytes_and_wider_units() {
     wipe(&mut wide);
     assert_eq!(wide, [0_u32; 4]);
 }
+
+#[test]
+fn sized_writes_exactly_its_measured_length() {
+    let written = super::sized(&[
+        super::Piece::Plain("a="),
+        super::Piece::Escaped("x\"y\\z"),
+        super::Piece::Plain("&"),
+        super::Piece::Form("a b&c"),
+        super::Piece::Plain(":"),
+        super::Piece::Hex(&[0x00, 0xab, 0xff]),
+    ])
+    .unwrap();
+    assert_eq!(written, b"a=x\\\"y\\\\z&a+b%26c:00abff".to_vec());
+}
+
+#[test]
+fn sized_refuses_a_control_byte_in_an_escaped_piece() {
+    for bad in ["line\n", "tab\t", "del\u{7f}"] {
+        assert!(super::sized(&[super::Piece::Plain("ok"), super::Piece::Escaped(bad)]).is_none());
+    }
+}

@@ -466,7 +466,7 @@ fn listed_stop_settled<K: Send + 'static>(
 /// lowercase hex characters, or [`NOT_INSTALLED`] for a file that cannot be read.
 #[cfg(unix)]
 fn program_digest(program: &std::path::Path) -> Result<String, EngineError> {
-    crate::setup::process::file_sha256(program).map_err(|_| failure(NOT_INSTALLED))
+    kernel_processes::run::file_sha256(program).map_err(|_| failure(NOT_INSTALLED))
 }
 
 /// Refuses the digest of a listed master's program where no listed master runs, as a

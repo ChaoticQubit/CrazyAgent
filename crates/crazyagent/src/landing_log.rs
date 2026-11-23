@@ -1,7 +1,9 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+use crate::state_log::replay::{self, Logged};
+use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 
 mod kept;
 
@@ -591,7 +593,7 @@ fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64
         !changes.is_empty(),
         "a write group logs at least one change"
     );
-    assert!(changes.len() <= crate::state_log::TRANSACTION_EVENTS_MAX);
+    assert!(changes.len() <= kernel_storage::state_log::TRANSACTION_EVENTS_MAX);
     let bodies = changes
         .iter()
         .map(Change::body)
@@ -599,7 +601,7 @@ fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64
     let mut last = 0;
     for (change, body) in changes.iter().zip(&bodies) {
         last = appender.append(&Draft {
-            aggregate: Aggregate::Landing,
+            aggregate: Aggregate::Landing.into(),
             kind: change.kind(),
             schema: SCHEMA,
             at_ms: Clock::System.now_ms(),
@@ -736,7 +738,7 @@ pub(crate) fn record_requests_opening(
         return Ok(());
     }
     let mut appender = Appender::opening(tx, opening)?;
-    for group in changes.chunks(crate::state_log::TRANSACTION_EVENTS_MAX) {
+    for group in changes.chunks(kernel_storage::state_log::TRANSACTION_EVENTS_MAX) {
         append_all(&mut appender, group)?;
     }
     assert!(appender.revision() > 0, "the opening moved the revision");

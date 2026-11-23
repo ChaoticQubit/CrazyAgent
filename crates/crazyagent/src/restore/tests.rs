@@ -41,6 +41,13 @@ fn the_record_reads_back_as_each_state_and_nothing_else() {
     let copy = "replaced-20261117T001500000Z";
     let cases = [
         ("pending", Some(RestoreState::Pending)),
+        ("restoring", Some(RestoreState::Pending)),
+        (
+            "restored replaced-20261117T001500000Z unverified_pin",
+            Some(RestoreState::Restored { copy: copy.into() }),
+        ),
+        ("restoring now", None),
+        ("restored replaced-20261117T001500000Z unchecked", None),
         (
             "restored replaced-20261117T001500000Z",
             Some(RestoreState::Restored { copy: copy.into() }),
