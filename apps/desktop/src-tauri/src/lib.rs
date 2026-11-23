@@ -79,6 +79,7 @@ use crazyagent::quit_settings::QuitSettings;
 use crazyagent::roadmap_status::{Refresh, RoadmapStatus};
 use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
+use crazyagent::service::HOOKS;
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus, TerminalsPerWindow};
@@ -88,6 +89,7 @@ use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
 use engine_swap::*;
+use kernel_processes::service::{READY_TIMEOUT, Repair, Service, persistable};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -175,12 +177,11 @@ fn sidecar_executable() -> Result<std::path::PathBuf, BridgeError> {
 }
 
 /// The default engine layout and the login service that runs this app's sidecar.
-fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::Service), BridgeError>
-{
+fn default_engine() -> Result<(crazyagent::paths::Layout, Service), BridgeError> {
     let layout =
         crazyagent::paths::Layout::current().map_err(|_| engine_failure("not_configured"))?;
-    let service = crazyagent::service::Service::current_user(
-        crazyagent::paths::Platform::CURRENT,
+    let service = crazyagent::service::current_user(
+        kernel_common::Platform::CURRENT,
         sidecar_executable()?,
         &layout,
     )
@@ -188,19 +189,18 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
     Ok((layout, service))
 }
 
-/// Installs the service or starts it as it is, as [`crazyagent::service::Service::repair`]
-/// says: a definition naming a gone, /Volumes or translocated program is never started as
-/// it is (RV-DS241-118), and a sidecar on a disk image or in a temporary folder is never
-/// installed (`engine_app_not_installed`); a refusal removes a definition naming a broken
-/// program first. Restart engine never replaces another program this engine may not
-/// (`engine_newer_than_app`, RV-DS241-129). Then it waits for the engine while the service
-/// still runs it ([`crazyagent::service::wait_started`]). The service runs the sidecar, or its
-/// private copy when the sidecar sits in the AppImage mount folder; a sidecar other users can
-/// change is refused. Inputs: the layout, the service and whether to replace the definition
-/// with this app's sidecar. Output: Ok once it answers.
+/// Installs the service or starts it as it is, as [`Service::repair`] says: a definition naming a
+/// gone, /Volumes or translocated program is never started as it is (RV-DS241-118), and a sidecar
+/// on a disk image or in a temporary folder is never installed (`engine_app_not_installed`); a
+/// refusal removes a definition naming a broken program first. Restart engine never replaces
+/// another program this engine may not (`engine_newer_than_app`, RV-DS241-129). Then it waits for
+/// the engine while the service still runs it ([`crazyagent::service::wait_started`]). The service
+/// runs the sidecar, or its private copy when the sidecar sits in the AppImage mount folder; a
+/// sidecar other users can change is refused. Inputs: the layout, the service and whether to
+/// replace the definition with this app's sidecar. Output: Ok once it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
-    service: &crazyagent::service::Service,
+    service: &Service,
     reinstall: bool,
 ) -> Result<(), BridgeError> {
     let since = crazyagent::service::log_length(layout);
@@ -210,20 +210,20 @@ async fn start_engine(
         .installed;
     let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
     let bundled = &service.executable;
-    let service = crazyagent::service::Service {
-        executable: crazyagent::service::persistable(bundled, layout, appdir.as_deref())
+    let service = Service {
+        executable: persistable(bundled, layout.root(), appdir.as_deref(), &HOOKS)
             .map_err(|_| engine_failure("engine_service_failed"))?,
         ..service.clone()
     };
-    match service.repair(bundled, installed, reinstall) {
-        crazyagent::service::Repair::Refuse => {
+    match service.repair(bundled, installed, reinstall, &HOOKS) {
+        Repair::Refuse => {
             service.refuse();
             return Err(engine_failure("engine_app_not_installed"));
         }
-        crazyagent::service::Repair::Keep => {
+        Repair::Keep => {
             return Err(engine_failure("engine_newer_than_app"));
         }
-        crazyagent::service::Repair::Install => {
+        Repair::Install => {
             if !service.executable.is_file() {
                 return Err(engine_failure("engine_sidecar_missing"));
             }
@@ -233,14 +233,14 @@ async fn start_engine(
                     .map_err(|_| engine_failure("engine_service_failed"))?;
             }
             service
-                .install()
+                .install(&HOOKS)
                 .map_err(|_| engine_failure("engine_service_failed"))?;
         }
-        crazyagent::service::Repair::Start => service
+        Repair::Start => service
             .start()
             .map_err(|_| engine_failure("engine_service_failed"))?,
     }
-    crazyagent::service::wait_started(layout, &service, crazyagent::service::READY_TIMEOUT, since)
+    crazyagent::service::wait_started(layout, &service, READY_TIMEOUT, since)
         .await
         .map_err(|_| engine_failure(crazyagent::service::start_failure(layout)))
 }
@@ -5893,11 +5893,11 @@ pub fn desktop_socket(
     explicit: Option<std::ffi::OsString>,
     env: &crazyagent::paths::RootEnvironment,
 ) -> Option<std::path::PathBuf> {
-    use crazyagent::paths::{Layout, Platform, data_root};
+    use crazyagent::paths::{Layout, data_root};
     if let Some(socket) = explicit.filter(|socket| !socket.is_empty()) {
         return Some(socket.into());
     }
-    let root = data_root(Platform::CURRENT, env).ok()?;
+    let root = data_root(kernel_common::Platform::CURRENT, env).ok()?;
     Some(Layout::new(root).ok()?.socket())
 }
 

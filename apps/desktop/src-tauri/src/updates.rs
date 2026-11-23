@@ -289,8 +289,8 @@ async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> Engi
     let watched = crazyagent::paths::Layout::current()
         .ok()
         .and_then(|layout| {
-            crazyagent::service::Service::current_user(
-                crazyagent::paths::Platform::CURRENT,
+            crazyagent::service::current_user(
+                kernel_common::Platform::CURRENT,
                 sidecar.clone(),
                 &layout,
             )
@@ -309,9 +309,14 @@ async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> Engi
     let begun = Instant::now();
     let started = async {
         let _ = service(sidecar, "start").await;
-        crazyagent::service::wait_start(&layout, &engine, crazyagent::service::READY_TIMEOUT, since)
-            .await
-            .ok()
+        crazyagent::service::wait_start(
+            &layout,
+            &engine,
+            kernel_processes::service::READY_TIMEOUT,
+            since,
+        )
+        .await
+        .ok()
     };
     tokio::pin!(started);
     let mut tick = tokio::time::interval(STARTING_TICK);

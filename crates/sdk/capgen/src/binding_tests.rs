@@ -55,9 +55,9 @@ fn the_host_binding_is_generated_for_every_capability() {
     let loaded = load(&sdk("caps")).expect("the caps load");
     let files = binding_from_caps();
     let flat: String = files[0].1.split_whitespace().collect();
-    assert!(flat.starts_with("usebus_gateway::Caller;usesdk::{Refusal,secrets,settings};"));
+    assert!(flat.starts_with("usebus_gateway::Caller;usesdk::{Refusal,net,secrets,settings};"));
     assert!(flat.contains(
-        "pubstructProviders<'p>{pubsecrets:&'pdynsecrets::Provide,pubsettings:&'pdynsettings::Provide,}"
+        "pubstructProviders<'p>{pubnet:&'pdynnet::Provide,pubsecrets:&'pdynsecrets::Provide,pubsettings:&'pdynsettings::Provide,}"
     ));
     assert!(flat.contains("pubstructBound<'g,'p>{caller:Caller<'g>,providers:&'pProviders<'p>,}"));
     let mut count = 0;

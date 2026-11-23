@@ -40,6 +40,33 @@ pub(crate) fn reviewed(
     Ok(trusted.as_deref() == Some(manifest.sha256.as_str()))
 }
 
+/// Refuses a plugin to run unless the owner trusted this exact text. Inputs: the database,
+/// where it is from and the manifest. Output: Ok, `app_plugin_needs_review` when no trust
+/// row holds it, `app_plugin_changed` when the trusted text differs from the file, or
+/// `app_plugins_unavailable`.
+pub(crate) fn check(db: &Connection, origin: Origin, manifest: &Manifest) -> Result<(), Refused> {
+    if origin == Origin::Bundled {
+        return Ok(());
+    }
+    match trusted_sha256(db, &manifest.name)? {
+        None => Err(refused("app_plugin_needs_review")),
+        Some(trusted) if trusted != manifest.sha256 => Err(refused("app_plugin_changed")),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The SHA-256 the owner trusted for a user plugin. Inputs: the database and the name.
+/// Output: the hash, none without a trust row, or `app_plugins_unavailable`.
+pub(crate) fn trusted_sha256(db: &Connection, name: &str) -> Result<Option<String>, Refused> {
+    db.query_row(
+        "SELECT sha256 FROM app_plugin_trust WHERE name=?1",
+        [name],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(sqlite)
+}
+
 /// The trust screen for a re-review: whether the text changed since the trust
 /// row, and the hosts it reaches that the row does not hold, listed first. A plugin with no
 /// trust row reads as a first review: unchanged, nothing grew. Inputs: the database, the

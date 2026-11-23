@@ -25,6 +25,8 @@ pub mod registry;
 pub mod store;
 #[cfg(feature = "store")]
 pub mod trust;
+#[cfg(feature = "store")]
+pub mod usage;
 pub mod views;
 
 #[cfg(all(test, feature = "store"))]
@@ -37,5 +39,7 @@ mod problem_tests;
 mod registry_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "store"))]
+mod usage_tests;
 #[cfg(all(test, feature = "store"))]
 mod views_tests;

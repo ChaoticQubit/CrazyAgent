@@ -254,6 +254,8 @@ fn entries(folder: &Path) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod binding_tests;
+#[cfg(test)]
+mod events_tests;
 mod permissions;
 #[cfg(test)]
 mod permissions_tests;

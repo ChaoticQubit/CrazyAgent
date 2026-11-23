@@ -10,7 +10,7 @@ name = "kernel_processes"
 path = "src/lib.rs"
 
 [features]
-test-support = []
+test-support = ["dep:tempfile"]
 
 [dependencies]
 base64 = "=0.22.1"
@@ -20,7 +20,8 @@ semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.10.9"
-tokio = { version = "=1.53.2", features = ["net", "time"] }
+tempfile = { version = "=3.27.0", optional = true }
+tokio = { version = "=1.53.2", features = ["net", "sync", "time"] }
 toml = { version = "=1.1.6", default-features = false, features = ["parse", "serde"] }
 url = "=2.5.8"
 
@@ -32,8 +33,11 @@ sha2 = "=0.10.9"
 
 [target.'cfg(windows)'.dependencies]
 crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
+portable-pty = "=0.9.0"
+vt100 = "=0.15.2"
 
 [dev-dependencies]
 minisign = "=0.10.0"
 nix = { version = "=0.28.0", default-features = false, features = ["fs"] }
 tempfile = "=3.27.0"
+tokio = { version = "=1.53.2", features = ["rt"] }

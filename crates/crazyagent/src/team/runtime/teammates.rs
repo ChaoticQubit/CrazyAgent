@@ -53,7 +53,7 @@ pub(super) fn members(home: &Path) -> Vec<Member> {
                     || name.is_empty()
                     || name.len() > NAME_BYTES_MAX
                     || name.chars().any(char::is_control)
-                    || !crate::terminal::pane_id_valid(pane)
+                    || !kernel_processes::terminal::pane_id_valid(pane)
                     || found.iter().any(|seen: &Member| seen.pane == pane)
                 {
                     continue;

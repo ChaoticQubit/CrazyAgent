@@ -3,8 +3,10 @@
 mod poll_support;
 
 use crazyagent::engine::owner::OwnerClientKind;
-use crazyagent::paths::{Layout, Platform};
-use crazyagent::service::{EngineCheck, READY_TIMEOUT, Service, Started};
+use crazyagent::paths::Layout;
+use crazyagent::service::{EngineCheck, Started};
+use kernel_common::Platform;
+use kernel_processes::service::{READY_TIMEOUT, Service};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -368,7 +370,7 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
             })
     };
     let since = crazyagent::service::log_length(&layout);
-    service.install().unwrap();
+    service.install(&crazyagent::service::HOOKS).unwrap();
     assert_eq!(
         std::fs::read_to_string(&service.definition).unwrap(),
         service.definition_text().unwrap()
@@ -467,7 +469,7 @@ fn a_service_engine_slow_to_start_is_waited_for_while_launchd_still_runs_it() {
         ),
     );
     let installed = Installed(service.clone());
-    service.install().unwrap();
+    service.install(&crazyagent::service::HOOKS).unwrap();
     let started = Instant::now();
     let outcome = runtime().block_on(crazyagent::service::ensure_running(
         &layout,
@@ -509,7 +511,7 @@ fn a_start_while_a_restore_still_copies_refuses_and_leaves_the_engine_process_ru
         "exec sleep 120",
     );
     let installed = Installed(service.clone());
-    service.install().unwrap();
+    service.install(&crazyagent::service::HOOKS).unwrap();
     let mut pid = None;
     let ran = poll_support::poll_until(Instant::now() + Duration::from_secs(10), || {
         let status = service.status().unwrap();
@@ -566,7 +568,7 @@ fn a_service_engine_that_exits_while_starting_is_reported_at_once_not_waited_for
         &format!("sleep {}\nexit 3", UNPROVEN.as_secs() + 1),
     );
     let installed = Installed(service.clone());
-    service.install().unwrap();
+    service.install(&crazyagent::service::HOOKS).unwrap();
     let started = Instant::now();
     let error = runtime()
         .block_on(crazyagent::service::ensure_running(

@@ -2,8 +2,9 @@ use super::*;
 use crate::agent_git::Layout;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::runtime::{TeamLimits, TeamRuntime};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -145,7 +146,7 @@ impl Case {
         };
         host.spawn(
             &AgentId::team(id).unwrap(),
-            &crate::terminal::PaneCommand::from(&command),
+            &kernel_processes::terminal::PaneCommand::from(&command),
         )
         .unwrap();
     }

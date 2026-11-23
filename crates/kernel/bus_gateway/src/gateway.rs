@@ -115,4 +115,15 @@ impl Caller<'_> {
             check_output,
         )
     }
+
+    fn net_request(&self, request: net::Request) -> Result<net::Reply, Refusal> {
+        self.gateway.call(
+            self.plugin,
+            &net::REQUEST,
+            request,
+            net::check_request_input,
+            |request| self.gateway.net.request(self.plugin, request),
+            net::check_request_output,
+        )
+    }
 }

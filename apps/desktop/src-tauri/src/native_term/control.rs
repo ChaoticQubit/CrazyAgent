@@ -1,6 +1,6 @@
 use super::codec::{self, unescape};
 use super::pane::{GRID_MAX, GRID_MIN};
-use crazyagent::terminal::DESKTOP_VIEWS_MAX;
+use kernel_processes::terminal::DESKTOP_VIEWS_MAX;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;

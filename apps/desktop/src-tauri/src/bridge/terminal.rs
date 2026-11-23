@@ -4,9 +4,9 @@ use super::{BridgeError, NativeBridge, bounded, failure};
 use crazyagent::engine::owner::{TerminalControl, TerminalOutput, TerminalSession};
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::TeamGraph;
-use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, PASTE_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame,
-    TerminalRequest,
+use crazyagent::terminal::{TerminalFrame, TerminalRequest};
+use kernel_processes::terminal::{
+    AgentId, INPUT_BYTES_MAX, PASTE_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
 pub const VIEWERS_MAX: usize = 9;
-pub const VIEWS_MAX: usize = crazyagent::terminal::DESKTOP_VIEWS_MAX;
+pub const VIEWS_MAX: usize = kernel_processes::terminal::DESKTOP_VIEWS_MAX;
 pub const WINDOWS_MAX: usize = 8;
 const WALL_PREFIX: &str = "terminals-";
 const WALL_DIGEST_DIGITS: usize = 16;
@@ -212,7 +212,7 @@ pub fn place_project(label: &str, id: Option<&str>) -> Result<Option<String>, Br
 /// Checks a pane id the window sent for a native teammate's view, such as `%12`. Takes the
 /// text. Returns the pane id, or `terminal_pane_invalid`.
 pub fn pane(text: &str) -> Result<String, BridgeError> {
-    crazyagent::terminal::pane_id_valid(text)
+    kernel_processes::terminal::pane_id_valid(text)
         .then(|| text.to_owned())
         .ok_or_else(|| failure("terminal_pane_invalid"))
 }
@@ -1500,7 +1500,7 @@ mod tests {
     fn a_pane_attach_refused_as_its_teammates_server_ended_keeps_its_code_for_the_view() {
         for ended in [
             "terminal_agent_unknown",
-            crazyagent::terminal::TEAMMATES_SERVER_ENDED,
+            kernel_processes::terminal::TEAMMATES_SERVER_ENDED,
         ] {
             assert_eq!(attach_failure(ended).code, ended);
         }

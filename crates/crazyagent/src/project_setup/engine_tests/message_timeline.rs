@@ -6,7 +6,7 @@ use crate::team::agent_messages::{
 };
 use crate::team::events::{self, EventKind};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::params;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ impl Pane {
         };
         host.spawn(
             &AgentId::team(agent).unwrap(),
-            &crate::terminal::PaneCommand::from(&command),
+            &kernel_processes::terminal::PaneCommand::from(&command),
         )
         .unwrap();
         Self {

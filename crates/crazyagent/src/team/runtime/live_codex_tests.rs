@@ -5,8 +5,9 @@ use super::managed_agent::{
 };
 use super::{Report, TurnEnd};
 use crate::team::{AgentRole, BackgroundAtEnd};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;

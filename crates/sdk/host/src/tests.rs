@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 
 use bus_gateway::{Gateway, Grants, Refusals};
+use sdk::net;
 use sdk::secrets::{self, Secret};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
 use sdk::{Capability, Refusal, TEXT_BYTES_MAX, Tier};
@@ -118,6 +119,7 @@ fn grants() -> Grants {
             &["secrets.put", "secrets.find", "secrets.forget"],
         ),
         ("finder", Tier::T1, &["secrets.find"]),
+        ("fetcher", Tier::T1, &["net.request"]),
     ])
     .expect("the table builds")
 }
@@ -164,6 +166,7 @@ fn a_granted_call_reaches_the_provider_once() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -185,6 +188,7 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -212,6 +216,7 @@ fn an_unknown_plugin_is_refused() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -242,6 +247,7 @@ fn the_provider_rejection_comes_back_unchanged() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -262,6 +268,7 @@ fn the_settings_provider_gets_the_bound_plugin_as_caller() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -282,6 +289,7 @@ fn an_ungranted_secrets_call_never_reaches_the_provider() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &secrets,
         settings: &provider,
     };
@@ -307,6 +315,7 @@ fn each_secrets_call_needs_its_own_grant() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &secrets,
         settings: &provider,
     };
@@ -332,6 +341,7 @@ fn the_caller_passed_to_the_secrets_provider_is_the_bound_plugin() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &secrets,
         settings: &provider,
     };
@@ -360,6 +370,7 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
     );
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
+        net: &UNUSED_NET,
         secrets: &secrets,
         settings: &provider,
     };
@@ -375,4 +386,124 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
     assert!(secrets::find(&host, at).is_ok());
     assert_eq!(*secrets.callers.borrow(), vec![("find", "keeper")]);
     assert!(refusals.seen.borrow().is_empty());
+}
+
+/// The net provider the rows that never reach it pass: any call panics.
+struct UnusedNet;
+
+/// The one `UnusedNet` the rows pass.
+const UNUSED_NET: UnusedNet = UnusedNet;
+
+impl net::Provide for UnusedNet {
+    fn request(&self, _: &'static str, _: net::Request) -> Result<net::Reply, Refusal> {
+        panic!("this row never reaches the net provider")
+    }
+}
+
+/// The net provider fake: records each caller and answers an empty 200 reply.
+#[derive(Default)]
+struct CountingNet {
+    callers: RefCell<Vec<&'static str>>,
+}
+
+impl net::Provide for CountingNet {
+    fn request(&self, caller: &'static str, _: net::Request) -> Result<net::Reply, Refusal> {
+        self.callers.borrow_mut().push(caller);
+        Ok(net::Reply {
+            status: 200,
+            body: Vec::new(),
+            headers: Vec::new(),
+            captured: Vec::new(),
+        })
+    }
+}
+
+/// A GET request of one URL. Input: the URL. Output: the request.
+fn net_get(url: String) -> net::Request {
+    net::Request {
+        method: net::Method::Get,
+        url,
+        headers: Vec::new(),
+        bearer: None,
+        form: Vec::new(),
+        secret_form: Vec::new(),
+        json: None,
+        reply_headers: Vec::new(),
+        capture: Vec::new(),
+    }
+}
+
+#[test]
+fn an_ungranted_net_request_never_reaches_egress_allows() {
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
+    let fetch = CountingNet::default();
+    let gateway = Gateway::new(&grants, &refusals);
+    let providers = Providers {
+        net: &fetch,
+        secrets: &UNUSED_SECRETS,
+        settings: &provider,
+    };
+    for plugin in ["keeper", "low", "agent-quit", "unknown"] {
+        let refused = net::request(
+            &Bound::new(gateway.bind(plugin), &providers),
+            net_get("https://api.github.com/user".to_owned()),
+        );
+        assert!(
+            matches!(refused, Err(Refusal::NotGranted { .. })),
+            "{plugin}"
+        );
+    }
+    assert!(fetch.callers.borrow().is_empty());
+    let reply = net::request(
+        &Bound::new(gateway.bind("fetcher"), &providers),
+        net_get("https://api.github.com/user".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(reply.status, 200);
+    assert_eq!(*fetch.callers.borrow(), vec!["fetcher"]);
+}
+
+#[test]
+fn net_inputs_over_their_bounds_are_refused() {
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
+    let fetch = CountingNet::default();
+    let gateway = Gateway::new(&grants, &refusals);
+    let providers = Providers {
+        net: &fetch,
+        secrets: &UNUSED_SECRETS,
+        settings: &provider,
+    };
+    let host = Bound::new(gateway.bind("fetcher"), &providers);
+    let long = format!("https://api.github.com/{}", "a".repeat(TEXT_BYTES_MAX));
+    assert!(matches!(
+        net::request(&host, net_get(long)),
+        Err(Refusal::Rejected { .. })
+    ));
+    let mut headers = net_get("https://api.github.com/user".to_owned());
+    headers.headers = vec![
+        net::Field {
+            name: "a".to_owned(),
+            value: "b".to_owned(),
+        };
+        sdk::LIST_ITEMS_MAX + 1
+    ];
+    assert!(matches!(
+        net::request(&host, headers),
+        Err(Refusal::Rejected { .. })
+    ));
+    let mut json = net_get("https://api.github.com/user".to_owned());
+    json.json = Some(vec![b'a'; sdk::BYTES_MAX + 1]);
+    assert!(matches!(
+        net::request(&host, json),
+        Err(Refusal::Rejected { .. })
+    ));
+    assert!(fetch.callers.borrow().is_empty());
 }

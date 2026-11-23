@@ -183,6 +183,7 @@ pub(crate) fn save_quit_with(
     };
     let gateway = Gateway::new(grants, &record);
     let providers = Providers {
+        net: &crate::security_caps::Absent,
         secrets: &crate::security_caps::Absent,
         settings: &provider,
     };

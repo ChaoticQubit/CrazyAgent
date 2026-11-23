@@ -794,3 +794,60 @@ fn a_failure_after_step_13_leaves_no_event_and_no_change() {
 mod budget;
 mod restore;
 mod v244_fixture;
+
+/// The row count of `plugin_records`, none when the store has no such table. Input: the
+/// connection. Output: the count.
+fn plugin_records(db: &Connection) -> Option<i64> {
+    has_table(db, "plugin_records").unwrap().then(|| {
+        db.query_row("SELECT COUNT(*) FROM plugin_records", [], |row| row.get(0))
+            .unwrap()
+    })
+}
+
+#[test]
+fn an_upgrade_of_the_p5_fixture_adds_an_empty_plugin_records_table() {
+    let (root, _) = fixture();
+    let sources = sources(&root);
+    let mut db = root.connection();
+    assert_eq!(plugin_records(&db), None);
+
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        STEPS,
+        SystemTime::now(),
+        backup,
+    )
+    .unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    assert_eq!(plugin_records(&db), Some(0));
+}
+
+#[test]
+fn a_step_that_ends_the_transaction_after_plugin_records_restores_the_p5_fixture_without_it() {
+    let (root, _) = fixture();
+    let before = rows(&root.connection());
+    let sources = sources(&root);
+    let mut db = root.connection();
+
+    let failed = upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        &steps(&[escaping]),
+        SystemTime::now(),
+        backup,
+    )
+    .unwrap_err()
+    .0;
+
+    assert!(
+        failed.contains("the database was restored from the backup"),
+        "{failed}"
+    );
+    assert_eq!(version(&db).unwrap(), V24_VERSION_MAX);
+    assert_eq!(plugin_records(&db), None);
+    assert_eq!(rows(&db), before);
+}
