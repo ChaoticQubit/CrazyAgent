@@ -8,8 +8,9 @@ use kernel_sandbox::toolchains::{
 };
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "macos")]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
