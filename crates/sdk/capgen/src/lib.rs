@@ -34,6 +34,15 @@ pub fn rust(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError
         .collect()
 }
 
+/// Writes the TypeScript SDK for the parsed `.cap` files after every check the Rust SDK
+/// runs, laid out by capgen itself, byte-stable for the same input in any order.
+/// Input: each file's stem with its parsed file, any order.
+/// Output: `index.ts` and one `<stem>.ts` per file with their texts, sorted by path, or the
+/// first refusal (`capgen_reserved_name` with the detail `ts: <name>`, ...).
+pub fn ts(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
+    ts::files(files)
+}
+
 /// Writes one `.cap` file as a single test module with its own `Host` trait, laid out by
 /// rustfmt, for the SDK's tests to compile every emitter. Inputs: the stem and the parsed
 /// file. Output: the module text, or the first refusal.
@@ -179,3 +188,6 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
 mod rust;
 #[cfg(test)]
 mod tests;
+mod ts;
+#[cfg(test)]
+mod ts_tests;

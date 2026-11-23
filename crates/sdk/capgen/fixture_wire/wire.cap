@@ -1,0 +1,9 @@
+enum Mode { read, write }
+type Blob { size: u64, data: bytes, parts: list<u64>, tail: option<bytes> }
+type Plain { name: text, mode: Mode }
+capability wire.store(blob: Blob, plain: Plain, at: u64) -> Blob
+  tier: t1
+  needs: wire.store
+capability wire.peek(plain: Plain) -> option<u64>
+  tier: t1
+  needs: wire.store

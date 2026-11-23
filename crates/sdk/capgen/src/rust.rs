@@ -258,7 +258,7 @@ fn refuse(stem: &str, code: &'static str, detail: String) -> CapgenError {
 
 /// The Rust name of a snake variant: each `_`-separated part with its first letter upper.
 /// Input: the variant. Output: its Pascal name.
-fn pascal(snake: &str) -> String {
+pub(crate) fn pascal(snake: &str) -> String {
     snake
         .split('_')
         .map(|part| {
