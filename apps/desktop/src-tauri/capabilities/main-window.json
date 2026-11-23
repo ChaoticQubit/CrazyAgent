@@ -170,6 +170,8 @@
     "allow-desktop-set-refused-tool",
     "allow-desktop-restore-status",
     "allow-desktop-restore-pinned",
+    "allow-desktop-log-compaction",
+    "allow-desktop-set-log-compaction",
     "allow-desktop-set-pack-entry",
     "allow-desktop-remove-pack-entry",
     "allow-desktop-project-memories",
