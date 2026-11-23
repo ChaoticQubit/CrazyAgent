@@ -173,8 +173,9 @@ pub fn load(caps: &Path) -> Result<Vec<(String, File)>, CapgenError> {
     Ok(loaded)
 }
 
-/// Compares generated files with a folder's files. Inputs: the folder and the generated
-/// files. Output: every path that differs, is missing or is extra in the folder, sorted.
+/// Compares generated files with a folder's files, the folder's subfolders read one level
+/// deep with paths `<subfolder>/<file>`. Inputs: the folder and the generated files.
+/// Output: every path that differs, is missing or is extra in the folder, sorted.
 pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
     let mut differing = Vec::new();
     for (path, text) in files {
@@ -182,24 +183,53 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
             differing.push(path.clone());
         }
     }
-    if let Ok(entries) = fs::read_dir(generated) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !files.iter().any(|(path, _)| *path == name) {
-                differing.push(name);
-            }
+    let mut present = Vec::new();
+    for (name, is_folder) in entries(generated) {
+        if !is_folder {
+            present.push(name);
+            continue;
+        }
+        let inner = entries(&generated.join(&name));
+        for (file, _) in &inner {
+            present.push(format!("{name}/{file}"));
+        }
+        if inner.is_empty() {
+            present.push(name);
+        }
+    }
+    for name in present {
+        if !files.iter().any(|(path, _)| *path == name) {
+            differing.push(name);
         }
     }
     differing.sort();
+    assert!(differing.windows(2).all(|pair| pair[0] != pair[1]));
     differing
 }
 
+/// Lists one folder's entries. Input: the folder. Output: each entry's name with whether
+/// it is a folder, empty when the folder does not read.
+fn entries(folder: &Path) -> Vec<(String, bool)> {
+    let Ok(read) = fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    read.flatten()
+        .map(|entry| {
+            let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            (entry.file_name().to_string_lossy().into_owned(), is_folder)
+        })
+        .collect()
+}
+
 mod rust;
+mod rust_wire;
 #[cfg(test)]
 mod tests;
 mod ts;
 #[cfg(test)]
 mod ts_tests;
+#[cfg(test)]
+mod wire_tests;
 mod wit;
 #[cfg(test)]
 mod wit_tests;
