@@ -601,7 +601,7 @@ fn a_drop_file_master_s_access_request_is_raised_when_its_reply_ends() {
     assert!(
         open[0]
             .asker
-            .starts_with(crate::sandbox::grants::ASKER_PREFIX)
+            .starts_with(kernel_sandbox::grants::ASKER_PREFIX)
     );
     assert!(
         open[0].question.contains("Port 5432 on this computer"),

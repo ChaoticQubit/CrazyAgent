@@ -9669,7 +9669,7 @@ impl TeamRuntime {
             .transpose()
             .map_err(|code| with_code(kernel_sandbox::grants::refusal_text(code), Some(code)))?;
         let data = crate::sandbox::grants_store::data_root(&self.connection).unwrap_or_default();
-        let held = crate::sandbox::grants::held_now(
+        let held = kernel_sandbox::grants::held_now(
             &crate::sandbox::GRANT_HOOKS,
             &policy.grants,
             &kept,
