@@ -123,7 +123,7 @@ const _: () = assert!(
 /// gets them when the engine opens it. Input: the open upgrade transaction. Output: Ok, or
 /// `app_plugins_unavailable`.
 fn app_plugin_store(tx: &Transaction<'_>) -> Result<(), StorageError> {
-    crate::app_plugins::store::initialize(tx)?;
+    crate::app_plugins::initialize(tx)?;
     Ok(())
 }
 

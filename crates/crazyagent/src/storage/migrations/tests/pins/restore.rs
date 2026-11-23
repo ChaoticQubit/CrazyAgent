@@ -320,7 +320,7 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         backup,
     )
     .unwrap();
-    crate::app_plugins::store::initialize(&db).unwrap();
+    crate::app_plugins::initialize(&db).unwrap();
     db.execute(
         "INSERT INTO app_plugin_secrets (plugin, secret, source, reference) \
          VALUES ('openai', 'api_key', 'key', 'plugin-key-restore')",

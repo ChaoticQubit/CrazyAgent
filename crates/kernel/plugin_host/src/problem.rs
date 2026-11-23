@@ -205,11 +205,11 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
     ),
     (
         "app_plugin_file_name_mismatch",
-        "the file name must be the plugin's name followed by .yaml.",
+        "the folder name must be the plugin's id.",
     ),
     (
         "app_plugin_file_unsafe",
-        "the file is not a plain file owned by you; it was not read.",
+        "the plugin folder or its plugin.toml is not a plain folder or file owned by you; it was not read.",
     ),
     (
         "app_plugin_folder_unsafe",
@@ -218,6 +218,14 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
     (
         "app_plugin_folder_unavailable",
         "the plugins folder could not be read.",
+    ),
+    (
+        "app_plugin_format_old",
+        "this plugin is a .yaml file from an older version of the app; add it again as a folder with a plugin.toml.",
+    ),
+    (
+        "plugin_folder_extra_entry",
+        "a plugin folder holds its plugin.toml only; remove every other file or folder from it.",
     ),
     ("app_plugin_not_found", "no plugin has that name."),
     (
@@ -242,7 +250,7 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
     ),
     (
         "app_plugin_past_cap",
-        "only the first 64 plugin files by name are read; remove one to use this plugin.",
+        "only the first 64 plugin folders by name are read; remove one to use this plugin.",
     ),
     ("app_plugin_off", "this plugin is turned off."),
     (
