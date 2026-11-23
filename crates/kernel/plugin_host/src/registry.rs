@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::Refused;
 use crate::embedding::{self, Manifest};
 use crate::manifest::MANIFEST_BYTES_MAX;
-use crate::problem::Problem;
+use crate::problem::{PORT_HANDED_OUT, Problem};
 use crate::store::{Keys, Loaded, binding_rows, drop_binding, refused, resolve, sqlite};
 use crate::trust;
 use crate::usage::{ChangeNotice, Holder, Lease, TurnOff, Usage};
@@ -398,7 +398,8 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// so what runs is what was reviewed. Keys bound to an older version stay only while its
 /// hosts are unchanged. Inputs: database, engine facts, the picked folder, the SHA-256 the
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
-/// or `app_plugin_changed`, `_refused`, `_name_taken`, or the folder's refusal.
+/// or `app_plugin_changed`, `_refused`, `_name_taken`, `_port_handed_out` (its loopback
+/// port is in the range the engine reads now), or the folder's refusal.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -419,6 +420,9 @@ pub fn add(
     }
     if !replace && folder::read(engine.root, &manifest.name)?.is_some() {
         return Err(refused("app_plugin_name_taken"));
+    }
+    if handed_problem(&manifest, engine.handed_out.as_ref()).is_some() {
+        return Err(refused(PORT_HANDED_OUT));
     }
     folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
     trust::settle(db, engine, &manifest, now_ms)
