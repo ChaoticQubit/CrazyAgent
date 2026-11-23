@@ -41,3 +41,23 @@ fn a_full_access_pane_on_linux_is_refused_before_its_command_is_built() {
     assert_eq!(refused.0, "launch_sandbox_unavailable");
     assert_eq!(tree(&case.home), before);
 }
+
+/// A Full access launch on Linux is refused and builds nothing (rv-sec3 #709 F1, rv-sec2
+/// #710 C5): Full access is only an installed boundary marked unconfined, and that boundary
+/// refuses with the macOS-only line, so no request reaches the unconfined command here.
+#[test]
+fn a_full_access_launch_on_linux_is_refused_and_builds_nothing() {
+    let case = case();
+    let full = team_boundary(&case).unconfined();
+    assert!(matches!(
+        full.wrap(&Command::new("/usr/bin/true")),
+        Err(SandboxError::Unavailable(reason))
+            if reason == kernel_sandbox::profile::consts::FULL_ACCESS_NEEDS_MACOS
+    ));
+    let request = linux_launch(&case, LaunchBoundary::Installed(Arc::new(full)), &case.home);
+    assert!(request.boundary.is_unconfined());
+    let before = tree(&case.home);
+    let refused = crazyagent::harnesses::launch::command(&request).unwrap_err();
+    assert_eq!(refused.0, "launch_sandbox_unavailable");
+    assert_eq!(tree(&case.home), before);
+}

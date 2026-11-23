@@ -2808,44 +2808,6 @@ fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
     forward_logged(stdout, sender, None);
 }
 
-/// [`forward`], with every byte read also going to the run's events log, when it keeps one,
-/// up to its cap (T19b 19b-4, QUESTION-0151). Takes the stdout, the sender and the log.
-fn forward_logged(stdout: ChildStdout, sender: SyncSender<Line>, mut log: Option<Capped>) {
-    let mut reader = BufReader::new(stdout);
-    let mut skipping = false;
-    loop {
-        let mut line = Vec::new();
-        let limit = u64::try_from(LINE_BYTES_MAX + 1).unwrap_or(u64::MAX);
-        match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => {
-                let _ = sender.send(Line::Closed);
-                return;
-            }
-            Ok(_) => {
-                if let Some(log) = log.as_mut() {
-                    log.write(&line);
-                }
-                let ended = line.last() == Some(&b'\n');
-                if skipping {
-                    skipping = !ended;
-                    continue;
-                }
-                if line.len() > LINE_BYTES_MAX && !ended {
-                    skipping = true;
-                    if sender.send(Line::Skipped).is_err() {
-                        return;
-                    }
-                    continue;
-                }
-                assert!(line.len() <= LINE_BYTES_MAX + 1);
-                if sender.send(Line::Bytes(line)).is_err() {
-                    return;
-                }
-            }
-        }
-    }
-}
-
 mod turn_session;
 pub use turn_session::TurnSession;
 
@@ -2862,4 +2824,4 @@ mod home_windows_tests;
 mod bounded_windows_tests;
 
 mod output_tail;
-use output_tail::tail;
+use output_tail::{forward_logged, tail};

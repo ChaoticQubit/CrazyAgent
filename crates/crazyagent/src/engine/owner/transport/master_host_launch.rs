@@ -1443,6 +1443,8 @@ mod tests {
     use super::super::Root;
     use super::*;
     use crate::provider_retry::{CODEX_UNBOUNDED_OFF, ProviderRetry};
+    #[cfg(target_os = "macos")]
+    use kernel_sandbox::profile::command::{SANDBOX_EXEC, SESSION_SHIM};
     use std::collections::BTreeMap;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
@@ -2366,16 +2368,13 @@ mod tests {
         )
         .unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
-        assert_eq!(
-            wrapped.get_program(),
-            kernel_sandbox::profile::command::SANDBOX_EXEC
-        );
+        assert_eq!(wrapped.get_program(), SANDBOX_EXEC);
         let args = wrapped
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
         let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
-        start.extend(kernel_sandbox::profile::command::SESSION_SHIM);
+        start.extend(SESSION_SHIM);
         start.push(executable.to_str().unwrap());
         assert_eq!(args[..start.len()], start);
         assert!(
@@ -2434,16 +2433,13 @@ mod tests {
         )
         .unwrap();
         let claude = sandbox.wrap(&claude).unwrap();
-        assert_eq!(
-            claude.get_program(),
-            kernel_sandbox::profile::command::SANDBOX_EXEC
-        );
+        assert_eq!(claude.get_program(), SANDBOX_EXEC);
         let claude_args = claude
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
         let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
-        start.extend(kernel_sandbox::profile::command::SESSION_SHIM);
+        start.extend(SESSION_SHIM);
         start.push(executable.to_str().unwrap());
         assert_eq!(claude_args[..start.len()], start);
         assert!(claude_args.windows(2).any(|pair| pair == ["--tools", ""]));
