@@ -375,7 +375,7 @@ fn updated(
 
 /// The engine's own home folder: HOME as given on Unix; on Windows the profile folder
 /// ([`crate::projects_home::owner_home`]) in its plain drive spelling, the one install
-/// paths are matched in ([`crate::sandbox::canonical`]). Output: the absolute folder, none
+/// paths are matched in ([`kernel_sandbox::paths::canonical`]). Output: the absolute folder, none
 /// when it is unset, relative or does not resolve.
 pub(super) fn home_folder() -> Option<PathBuf> {
     #[cfg(unix)]
@@ -383,7 +383,7 @@ pub(super) fn home_folder() -> Option<PathBuf> {
     #[cfg(windows)]
     let home = crate::projects_home::owner_home()
         .ok()
-        .and_then(|home| crate::sandbox::canonical(&home).ok());
+        .and_then(|home| kernel_sandbox::paths::canonical(&home).ok());
     home.filter(|home| home.is_absolute())
 }
 
@@ -717,8 +717,8 @@ impl Updates {
         runs: bool,
     ) -> HarnessVersions {
         let id = spec.id;
-        let real =
-            crate::sandbox::canonical(executable).unwrap_or_else(|_| executable.to_path_buf());
+        let real = kernel_sandbox::paths::canonical(executable)
+            .unwrap_or_else(|_| executable.to_path_buf());
         let method = method(id, &real, roots);
         let command = update_command(id, executable, &real, roots);
         let off = settings.mode == UpdateMode::Off;
@@ -837,7 +837,8 @@ impl Updates {
             return Err(super::TOOL_UNSAFE);
         }
         let running = self.begin(id)?;
-        let real = crate::sandbox::canonical(&executable).unwrap_or_else(|_| executable.clone());
+        let real =
+            kernel_sandbox::paths::canonical(&executable).unwrap_or_else(|_| executable.clone());
         let fixed = update_command(id, &executable, &real, roots)?;
         let held = folders(&fixed, roots);
         let roots = roots.clone();
@@ -1057,7 +1058,7 @@ mod windows_tests {
         let home = home_folder().unwrap();
         assert_eq!(
             home,
-            crate::sandbox::canonical(Path::new(&profile)).unwrap()
+            kernel_sandbox::paths::canonical(Path::new(&profile)).unwrap()
         );
         assert!(!home.to_str().unwrap().starts_with(r"\\?\"), "{home:?}");
         assert_eq!(Roots::system().home, home);
@@ -1081,7 +1082,7 @@ mod windows_tests {
             .join("System32")
             .join("curl.exe");
         let folder = tempfile::tempdir_in(&home).unwrap();
-        let kept = crate::sandbox::canonical(folder.path()).unwrap();
+        let kept = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let curl = kept.join("curl.exe");
         std::fs::copy(&shipped, &curl).unwrap();
         assert!(version_if_runs(&curl, &home, &places).is_some());
@@ -1108,7 +1109,7 @@ mod windows_tests {
             .join("System32")
             .join("curl.exe");
         let folder = tempfile::tempdir_in(&home).unwrap();
-        let kept = crate::sandbox::canonical(folder.path()).unwrap();
+        let kept = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let node = kept.join("node");
         let package = kept.join("package").join("bin");
         std::fs::create_dir_all(&node).unwrap();

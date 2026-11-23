@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn a_pack_program_is_found_as_cmd_or_exe_in_kept_places_and_uv_as_setup_runs_it() {
         let temp = tempfile::tempdir().unwrap();
-        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
         let bin = base.join("bin");
         let links = base
             .join("local")
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn a_pack_server_is_never_seeded_with_a_uv_agents_can_write() {
         let temp = tempfile::tempdir().unwrap();
-        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
         let local = base.join(".crazyagent").join("local");
         let links = local.join("Microsoft").join("WinGet").join("Links");
         std::fs::create_dir_all(&links).unwrap();

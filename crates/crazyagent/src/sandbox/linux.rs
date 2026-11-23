@@ -3,12 +3,13 @@ use super::{
     ADMIN_LINKS, ADMIN_WRITES, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX,
     LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
     LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, OWNER_PORTS, ProjectSandbox, REMOTES_MAX, Routed,
-    STORE_ALTERNATES, Sandbox, agent_env, clean_absolute,
+    STORE_ALTERNATES, Sandbox, agent_env,
 };
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::paths::clean_absolute;
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
 use landlock::{

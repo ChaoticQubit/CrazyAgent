@@ -203,7 +203,7 @@ pub(super) fn npm_wrap(
 ) -> Result<Command, InstallError> {
     let settings = boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
-    let real = crate::sandbox::canonical(bin).map_err(refused)?;
+    let real = kernel_sandbox::paths::canonical(bin).map_err(refused)?;
     let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict)
         .map_err(|error| super::boundary_refused(&real, error))?;
     sandbox.wrap(&npm_invocation(bin, cwd)).map_err(refused)

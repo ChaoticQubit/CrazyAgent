@@ -105,7 +105,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
     let folder = setup
         .project_folder()
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
         .map_err(|_| "the project folder is missing".to_owned())?;
     let extra_reads = super::extra_paths::load(&db, project.as_str())
         .map_err(|_| "the project's read-only folders could not be read".to_owned())?;
@@ -137,10 +137,10 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use super::toolchains::{self, ToolHomes, Toolchains};
     use super::{
-        ProjectSandbox, SANDBOX_EXEC, agent_variable_allowed, borrowed, canonical, clean_absolute,
-        owner_terminal_env,
+        ProjectSandbox, SANDBOX_EXEC, agent_variable_allowed, borrowed, owner_terminal_env,
     };
     use kernel_sandbox::error::invalid;
+    use kernel_sandbox::paths::{canonical, clean_absolute};
     if launch.level == AgentAccess::Full {
         return Err(invalid("a Full access terminal runs in the IDE server"));
     }
@@ -296,7 +296,7 @@ pub fn owner_shell() -> Result<PathBuf, String> {
 #[cfg(target_os = "macos")]
 fn listed_shell(shell: &Path) -> Result<(), SandboxError> {
     use std::io::Read;
-    if !super::clean_absolute(shell) {
+    if !kernel_sandbox::paths::clean_absolute(shell) {
         return Err(kernel_sandbox::error::invalid(
             "the shell must be an absolute plain path",
         ));

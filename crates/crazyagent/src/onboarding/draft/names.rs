@@ -190,7 +190,7 @@ pub(crate) fn below_root(
 ) -> Option<Vec<String>> {
     let root = repo
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
         .unwrap_or_else(|_| repo.to_path_buf());
     hidden
         .iter()
