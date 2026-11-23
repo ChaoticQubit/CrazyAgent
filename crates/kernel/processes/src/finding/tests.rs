@@ -232,6 +232,41 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
     );
 }
 
+/// However many ordinary folders the PATH and the probes name, the system folders and the
+/// engine's own folders are kept, last and in order, and a tool found only in the engine's
+/// `setup/bin` still resolves: the ordinary folders fill only the room those leave. The
+/// ordinary folders are made up, so none is read.
+#[test]
+fn the_system_and_engine_folders_are_kept_past_a_full_path() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let own = program(&root.join("setup/bin/crazyagent-row-tool"), NODE);
+    let ordinary: Vec<PathBuf> = (0..200)
+        .map(|n| PathBuf::from(format!("/opt/crazyagent-row-{n:03}/bin")))
+        .collect();
+    let path = std::env::join_paths(&ordinary).unwrap();
+    let mut tail: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+    tail.extend(engine_folders(&STUB_HOOKS, &root));
+    let from_path = stub_engine(Some(&root), None, Some(home.clone()), Some(&path));
+    let from_probes = stub_engine(Some(&root), None, Some(home.clone()), Some(OsStr::new("")))
+        .with_probed(ordinary.clone());
+    for (name, places) in [("path", from_path), ("probes", from_probes)] {
+        let folders = places.folders();
+        assert!(folders.len() <= PLACES_MAX, "{name}");
+        assert!(
+            folders.ends_with(&tail),
+            "{name}: {:?}",
+            &folders[folders.len() - tail.len()..]
+        );
+        assert!(folders.contains(&ordinary[0]), "{name}");
+        assert_eq!(
+            resolve("crazyagent-row-tool", &places).unwrap().program,
+            own,
+            "{name}"
+        );
+    }
+}
+
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
 /// that sits in a temp folder, which agents with the temp folder grant and other users
 /// write, is refused. Probed folders meet the same rule on the engine's places (2.4.1 R1).
