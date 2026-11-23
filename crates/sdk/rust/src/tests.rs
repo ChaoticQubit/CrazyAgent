@@ -166,9 +166,9 @@ fn string_end(chars: &[char], at: usize) -> Option<usize> {
 
 /// Finds the first way a Rust source could hand a plugin ambient power: a path through
 /// `std::fs`, `std::net`, `std::process` or `std::env` (a brace list, an alias or a glob
-/// included), a glob of `std` itself, `std` or `std::{self}` aliased, `extern crate std` or `pub extern crate`, a
-/// `#[path]` module, `include!`, or a `pub use` of a crate root. Input: the source.
-/// Output: the disguise found, or `None`.
+/// included), a glob of `std` itself, `std` or `std::{self}` aliased, `extern crate std`
+/// or `pub extern crate`, a `#[path]` module, `include!`, or a `pub use` of a crate root.
+/// Input: the source. Output: the disguise found, or `None`.
 fn ambient_power(source: &str) -> Option<String> {
     let tokens = rust_tokens(source);
     let at = |index: usize| tokens.get(index).map(String::as_str).unwrap_or("");
