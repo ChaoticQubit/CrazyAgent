@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// The engine answers program finding needs without naming the engine crate: harness
 /// shims and prefixes, the projects the engine registered, and the folder checks that live
-/// with the sandbox and the service until their own moves. Built once by crazyagent
+/// with the sandbox until its own move. Built once by crazyagent
 /// (crazyagent's `HOOKS`). Inputs: the fields. Output: a value carried on [`Places`].
 #[derive(Clone, Copy)]
 pub struct FindingHooks {
@@ -32,8 +32,6 @@ pub struct FindingHooks {
     pub one_spelling: fn(PathBuf) -> PathBuf,
     pub canonical: fn(&Path) -> std::io::Result<PathBuf>,
     pub in_agent_tmp: fn(&Path) -> bool,
-    pub changeable_past_sticky: fn(&Path) -> Option<PathBuf>,
-    pub changeable_by_others: fn(&Path) -> Option<PathBuf>,
     pub harness_prefix: fn(&Path) -> PathBuf,
     pub gate_root: fn() -> Option<PathBuf>,
 }
@@ -1266,7 +1264,7 @@ pub fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refus
     let hops = (places.seed.hooks.link_hops)(candidate)?;
     Some(if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
-    } else if let Some(part) = (places.seed.hooks.changeable_past_sticky)(candidate) {
+    } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
     } else if places.temp_refused
         && leads_into_temp(&places.seed.hooks, candidate, &real, &places.temps)

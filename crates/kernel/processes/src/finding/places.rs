@@ -330,7 +330,7 @@ impl Places {
         folder.is_absolute()
             && folder.is_dir()
             && !self.agent_writable(folder)
-            && (self.seed.hooks.changeable_past_sticky)(folder).is_none()
+            && crate::service::changeable_past_sticky(folder).is_none()
             && !(self.temp_refused && in_temp_of(&self.seed.hooks, folder, &self.temps))
             && self.link_hops_kept(folder)
     }
@@ -357,7 +357,7 @@ impl Places {
         }
         let changeable = hops
             .iter()
-            .find_map(|hop| (self.seed.hooks.changeable_past_sticky)(hop));
+            .find_map(|hop| crate::service::changeable_past_sticky(hop));
         if let Some(part) = changeable {
             return Some(Refusal::OthersCanChange(part));
         }
