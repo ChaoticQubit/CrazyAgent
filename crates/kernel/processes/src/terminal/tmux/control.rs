@@ -292,15 +292,25 @@ impl Control {
     }
 
     /// Ends the client gently: drops the input so tmux sees the end of its commands and
-    /// waits up to `CLOSE_TIME` for it to exit, then stops it. A write that holds the input
-    /// is blocked on a full pipe, so then the client is stopped at once.
+    /// waits for it to exit, then stops it, all within `CLOSE_TIME`. A write that still holds
+    /// the input at the deadline is blocked on a full pipe, so the client is stopped then.
     pub(super) fn close(&self) {
-        match self.input.try_lock() {
-            Ok(mut input) => *input = None,
-            Err(std::sync::TryLockError::Poisoned(_)) => {}
-            Err(std::sync::TryLockError::WouldBlock) => return self.stop(),
-        }
         let deadline = Instant::now() + CLOSE_TIME;
+        loop {
+            match self.input.try_lock() {
+                Ok(mut input) => {
+                    *input = None;
+                    break;
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => break,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() >= deadline => {
+                    return self.stop();
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
         if let Ok(mut slot) = self.child.lock()
             && let Some(child) = slot.as_mut()
         {
