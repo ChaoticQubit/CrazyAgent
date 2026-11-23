@@ -299,7 +299,7 @@ fn runs_within(tmux: &kernel_processes::finding::Resolved, time: Duration) -> bo
     };
     let mut arguments = rest.to_vec();
     arguments.push("-V".into());
-    let version = crate::setup::process::run(
+    let version = kernel_processes::run::run(
         Path::new(program),
         &arguments,
         &[],
@@ -307,9 +307,9 @@ fn runs_within(tmux: &kernel_processes::finding::Resolved, time: Duration) -> bo
         time,
     );
     let running = match version {
-        Err(crate::setup::InstallError(code)) => code == "setup_timeout",
+        Err(kernel_processes::run::InstallError(code)) => code == "setup_timeout",
         Ok((false, _)) => false,
-        Ok((true, output)) => crate::setup::process::version_from(&output)
+        Ok((true, output)) => kernel_processes::run::version_from(&output)
             .is_ok_and(|found| supported(found.as_str()) == Some(true)),
     };
     if running {

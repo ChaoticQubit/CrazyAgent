@@ -1,9 +1,11 @@
-use super::process::{file_sha256, is_sha256, private_folder, run, staging_folder, version_from};
 use super::{
     Dependency, GRAPHIFY_PYTHON, InstallError, Installer, LOCK_FILE, Pin, ToolLock, Version,
     keep_only,
 };
 use kernel_processes::finding::permission_fix;
+use kernel_processes::run::{
+    file_sha256, is_sha256, private_folder, run, staging_folder, version_from,
+};
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -233,7 +235,9 @@ impl PinnedInstaller {
         }
         let bin = self.setup.join("bin");
         private_folder(&bin)?;
-        let staging = staging_folder(&self.setup, "download")?;
+        let id = crate::engine::owner::random_id()
+            .map_err(|_| InstallError("setup_store_unavailable"))?;
+        let staging = staging_folder(&self.setup, "download", &id)?;
         let result = (|| {
             let archive = staging.join("archive.tar.gz");
             self.download(url, sha256, &archive, &staging)?;
@@ -362,7 +366,9 @@ impl PinnedInstaller {
             ("UV_NO_CONFIG", "1".into()),
             ("UV_NO_PROGRESS", "1".into()),
         ]);
-        let staged = staging_folder(&home, "env")?;
+        let id = crate::engine::owner::random_id()
+            .map_err(|_| InstallError("setup_store_unavailable"))?;
+        let staged = staging_folder(&home, "env", &id)?;
         let result = (|| {
             let requirements = staged.join(LOCK_FILE);
             std::fs::OpenOptions::new()
