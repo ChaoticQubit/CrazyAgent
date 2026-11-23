@@ -14,6 +14,21 @@ interface sdk-types {
   }
 }
 
+interface secrets-types {
+  type secret = u64;
+}
+
+interface secrets {
+  use sdk-types.{refusal};
+  use secrets-types.{secret};
+
+  put-from-owner: func(name: string) -> result<secret, refusal>;
+
+  find: func(name: string) -> result<option<secret>, refusal>;
+
+  forget: func(secret: secret) -> result<_, refusal>;
+}
+
 interface settings-types {
   enum on-quit {
     keep-running,
@@ -40,5 +55,6 @@ interface settings {
 }
 
 world plugin {
+  import secrets;
   import settings;
 }
