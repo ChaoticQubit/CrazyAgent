@@ -197,12 +197,8 @@ impl<'r> Requests<'r> {
         self.egress.allows(caller, parsed.scheme(), &host, port)?;
         let pinned = pinned(self.egress, &parsed, port)?;
         check_shape(&request)?;
-        let fields = capture::fields(
-            self.rules,
-            caller,
-            &capture::host_key(&parsed),
-            &request.capture,
-        )?;
+        let host_key = capture::host_key(&parsed);
+        let fields = capture::fields(self.rules, caller, &host_key, &request.capture)?;
         for wanted in &fields {
             if let Some(name) = &wanted.keep_as {
                 self.secrets.check_name(caller, name)?;
@@ -212,14 +208,14 @@ impl<'r> Requests<'r> {
             return Err(StoreError::code("secret_handles_full"));
         }
         let bearer = match request.bearer {
-            Some(id) => Some(self.secrets.value(caller, id)?),
+            Some(id) => Some(self.secrets.value(caller, id, &host_key)?),
             None => None,
         };
         let mut secret_form = Vec::with_capacity(request.secret_form.len());
         for field in &request.secret_form {
             secret_form.push((
                 field.name.as_str(),
-                self.secrets.value(caller, field.secret)?,
+                self.secrets.value(caller, field.secret, &host_key)?,
             ));
         }
         let config = config(
@@ -249,7 +245,13 @@ impl<'r> Requests<'r> {
         if !fits {
             return Err(StoreError::code("cap_output_too_large"));
         }
-        let (body, captured) = capture::take(self.secrets, caller, &fields, raw.body)?;
+        let (body, captured) = capture::take(
+            self.secrets,
+            caller,
+            (self.rules, &host_key),
+            &fields,
+            raw.body,
+        )?;
         Ok(Reply {
             status: raw.status,
             body,

@@ -72,6 +72,7 @@ fn kernel_request_times() -> Vec<Duration> {
         .hold(
             "budget",
             SecretString::bearer(b"gho_budget-held-token".to_vec()).unwrap(),
+            &["api.github.com".to_owned()],
         )
         .unwrap();
     let rules = CaptureRules::new(&[]).unwrap();
