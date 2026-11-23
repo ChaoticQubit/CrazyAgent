@@ -213,6 +213,40 @@ fn calls<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// The plain or `update::` calls of one swap step in a non-test source, by the function
+/// holding each. Inputs: the source's path, its text and the step's name. Output: the
+/// holding functions' text up to each call.
+fn swap_calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
+    if !text.contains("kernel_processes::update") && !path.ends_with("src/update.rs") {
+        return Vec::new();
+    }
+    calls(text, name)
+}
+
+/// A folder that holds a link to a sibling folder gives each `.rs` file once, at its real
+/// path, so a link never counts a file twice.
+#[cfg(unix)]
+#[test]
+fn rust_sources_skips_folder_links_and_finds_each_file_once() {
+    let temporary = tempfile::tempdir().unwrap();
+    let real = temporary.path().canonicalize().unwrap();
+    std::fs::create_dir(real.join("held")).unwrap();
+    std::fs::write(real.join("held").join("one.rs"), "fn one() {}\n").unwrap();
+    std::os::unix::fs::symlink(real.join("held"), real.join("linked")).unwrap();
+    let mut found = Vec::new();
+    rust_sources(&real, &mut found);
+    assert_eq!(found, vec![real.join("held").join("one.rs")]);
+}
+
+/// A source that names the update module through a grouped import still has its plain swap
+/// calls looked at, so no import spelling hides a swap from the install guard.
+#[test]
+fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
+    let text = "use kernel_processes::{update, process};\n\nfn sneak() {\n    swap(&a, &b);\n}\n";
+    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
+    assert_eq!(found, vec!["\nfn sneak() {\n    "]);
+}
+
 /// Every install step that writes a release over the running app is reached only after its
 /// signature check: the desktop installs only the bytes `update.download` verified, and the
 /// command line swaps only inside `swap_around_engine`, which only `install_release` runs,
@@ -239,13 +273,10 @@ fn no_install_path_skips_verification() {
                 desktop.push((path.clone(), function_holding(&text, at).to_owned()));
             }
         }
-        if !text.contains("kernel_processes::update") && !path.ends_with("src/update.rs") {
-            continue;
-        }
-        for body in calls(&text, "swap") {
+        for body in swap_calls(path, &text, "swap") {
             swaps.push((path.clone(), body.to_owned()));
         }
-        for body in calls(&text, "swap_around_engine") {
+        for body in swap_calls(path, &text, "swap_around_engine") {
             engine_swaps.push((path.clone(), body.to_owned()));
         }
     }
