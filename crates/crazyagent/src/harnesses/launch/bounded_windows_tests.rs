@@ -4,11 +4,12 @@ use super::{
 };
 use crate::sandbox::windows::{HELPER_NAME, container_name};
 use crate::sandbox::{
-    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, LinuxSupervisor,
-    ProjectSandbox, SandboxNetwork,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, ProjectSandbox,
 };
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::settings::LinuxSupervisor;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -393,7 +394,7 @@ fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
     ] {
         let error = crate::sandbox::plain_grants(PathBuf::from(refused)).unwrap_err();
         assert!(
-            matches!(error, crate::sandbox::SandboxError::Invalid(_)),
+            matches!(error, kernel_sandbox::error::SandboxError::Invalid(_)),
             "{refused}: {error:?}"
         );
     }

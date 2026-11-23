@@ -822,7 +822,7 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
 #[test]
 fn only_on_linux_does_a_port_question_say_the_port_is_open_on_every_host() {
     let port = AccessGrant::Port { port: 5_432 };
-    let line = crate::sandbox::LINUX_PORTS_ANY_HOST_LINE;
+    let line = kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE;
     assert_eq!(asked_meaning(&port, None), meaning(&port));
     assert_eq!(
         asked_meaning(&port, Some(line)),

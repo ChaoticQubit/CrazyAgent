@@ -119,7 +119,7 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
             &["-y".to_owned(), format!("context-mode@{version}")],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err()
     };
@@ -186,7 +186,7 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
         &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     assert_eq!(refused, "server_node_too_old");
@@ -242,7 +242,7 @@ fn the_context_mode_check_of_an_npx_the_resolver_does_not_find_says_so_and_never
         &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     assert_eq!(refused, "server_npx_not_found");
@@ -323,7 +323,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
         &args,
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     );
     let tools = checked.unwrap_or_else(|problem| {
         panic!("the check runs the shared install agents launch, not npx: {problem}")
@@ -351,7 +351,7 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
             &["--list".to_owned()],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err()
     };
@@ -422,7 +422,7 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
         &["--list".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     let helper = std::env::current_exe()
@@ -492,7 +492,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
             &["--list".to_owned()],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err();
         if !helper.is_file() {
@@ -627,7 +627,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
             &folders[0],
             &folders[1],
             &folders[2],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap();
         let mut profile = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();

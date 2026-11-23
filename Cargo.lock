@@ -958,6 +958,7 @@ dependencies = [
  "crazyagent",
  "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-sandbox",
  "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",
@@ -1042,6 +1043,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "url",
 ]
 
 [[package]]

@@ -11,8 +11,6 @@ use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::{
     HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
 };
-use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
-use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::pack::entry_title;
 use crate::setup::{
     Dependency, DependencyState, PackEntry, PackKind, PackState, RefusedTool, SetupStatus, ToolFix,
@@ -30,6 +28,8 @@ use crate::tui::text::{
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, checkbox};
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;

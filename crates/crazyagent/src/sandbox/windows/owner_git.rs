@@ -1,8 +1,7 @@
 use super::{WindowsSandbox, container_for};
-use crate::sandbox::{
-    AGENT_HOME_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, canonical,
-    clean_absolute, invalid,
-};
+use crate::sandbox::{AGENT_HOME_ENV, ProjectSandbox, Sandbox, canonical, clean_absolute};
+use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::net::SandboxNetwork;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
