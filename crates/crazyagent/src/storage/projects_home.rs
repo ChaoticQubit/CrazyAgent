@@ -1788,7 +1788,7 @@ fn rewrite_folders(
         let recorded = if Path::new(&stored.folder) == folder {
             moved.clone()
         } else {
-            moved.join(home::CRAZYAGENT_DIRECTORY)
+            moved.join(kernel_common::names::CRAZYAGENT_DIRECTORY)
         };
         let text = |path: &Path| {
             path.to_str()

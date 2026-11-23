@@ -333,7 +333,7 @@ fn make_guarded_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError>
     }
     let root = sandbox.project_root();
     let git = root.join(".git");
-    let state = root.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = root.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     let wanted = [
         git.join("hooks"),
         git.join("modules"),

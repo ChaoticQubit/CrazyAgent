@@ -75,3 +75,5 @@ pub fn validate_identity(value: &str) -> Result<(), &'static str> {
     assert!(value.len() <= 128);
     Ok(())
 }
+
+pub const CRAZYAGENT_DIRECTORY: &str = ".crazyagent";

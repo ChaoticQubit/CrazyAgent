@@ -385,7 +385,7 @@ pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
     launch_state: crate::launch_context::STATE,
     launch_lock: crate::launch_context::LOCK,
     codex_system_skills: crate::launch_context::CODEX_SYSTEM_SKILLS,
-    crazyagent_directory: crate::projects_home::CRAZYAGENT_DIRECTORY,
+    crazyagent_directory: kernel_common::names::CRAZYAGENT_DIRECTORY,
     #[cfg(unix)]
     binding_path: crate::team::caller::binding_path,
     mailbox_folder: crate::team::tool::MAILBOX_FOLDER,

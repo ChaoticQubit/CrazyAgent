@@ -66,7 +66,7 @@ fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
         let rest = length - folder.as_os_str().len() - 1;
         folder.push("m".repeat(rest));
         assert_eq!(folder.as_os_str().len(), length);
-        fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        fs::create_dir_all(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         let setup = stored(&folder);
 
         let text = render(&setup.project_id, Some(&setup), "", Layout::Linked);
@@ -2193,7 +2193,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let folder = root.join("project");
-    fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    fs::create_dir_all(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let setup = stored(&folder);
     let linked = [
         "Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`.",

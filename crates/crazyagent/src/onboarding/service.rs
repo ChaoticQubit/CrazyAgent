@@ -5,7 +5,6 @@ use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
 #[cfg(unix)]
 use super::main_graph;
 use super::{Step, bounded_reason, now_ms};
-use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
 use crate::research::accounts::AccountPick;
 #[cfg(unix)]
@@ -17,6 +16,7 @@ use crate::research::runner::{
     RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
     confined_unavailable,
 };
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use kernel_sandbox::error::SandboxError;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::cell::Cell;

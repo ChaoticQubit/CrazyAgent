@@ -29,7 +29,7 @@ impl Case {
         for path in [&root, &folder, &tmp_folder] {
             std::fs::create_dir_all(path).unwrap();
         }
-        std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         let db = crate::questions::open(&root).unwrap();
         crate::storage::initialize_authority_schemas(&db).unwrap();
         crate::team::initialize(&db).unwrap();

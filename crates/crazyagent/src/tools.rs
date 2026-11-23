@@ -28,7 +28,7 @@ pub const HOOKS: FindingHooks = FindingHooks {
     registered_projects,
     last_good_load: last_good::load,
     last_good_store: last_good::store,
-    projects_marker: crate::projects_home::CRAZYAGENT_DIRECTORY,
+    projects_marker: kernel_common::names::CRAZYAGENT_DIRECTORY,
     data_twin: crate::projects_home::data_twin,
     one_spelling: kernel_sandbox::paths::one_spelling,
     canonical: kernel_sandbox::paths::canonical,

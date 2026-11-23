@@ -380,7 +380,7 @@ fn placed(db: &Connection, project: &ProjectId, place: &Place) -> Result<bool, E
         return Ok(false);
     };
     assert!(folder.is_absolute());
-    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     let parent = place.worktree.parent();
     let inside = place.worktree.file_name().is_some()
         && [state.join("worktrees"), folder.join("worktrees")]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::projects_home::CRAZYAGENT_DIRECTORY;
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 

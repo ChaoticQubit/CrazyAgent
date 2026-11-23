@@ -2,6 +2,7 @@
 
 use crazyagent::projects_home::*;
 use crazyagent::protocol::ProjectId;
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};

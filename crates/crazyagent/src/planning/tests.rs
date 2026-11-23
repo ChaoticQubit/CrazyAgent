@@ -62,7 +62,7 @@ fn written_by_a_process(folder: &Path, text: &str) -> String {
 }
 
 fn project_state(project: &Path) -> std::path::PathBuf {
-    let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = project.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     fs::create_dir_all(state.join("context").join("research")).unwrap();
     fs::write(state.join("context").join("brief.md"), "# Planner\n").unwrap();
     state

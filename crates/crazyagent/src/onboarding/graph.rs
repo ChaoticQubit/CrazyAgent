@@ -220,7 +220,7 @@ pub(crate) fn update(
     for root in &roots {
         sandbox = sandbox.allow_read(root)?;
     }
-    sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
+    sandbox = sandbox.hide(&repo.join(kernel_common::names::CRAZYAGENT_DIRECTORY))?;
     for folder in hidden {
         sandbox = sandbox.hide(folder)?;
     }
@@ -325,7 +325,7 @@ fn kept_paths(repo: &Path, kept_out: &[String]) -> Vec<PathBuf> {
         .iter()
         .filter(|path| {
             let top = path.split('/').next().unwrap_or_default();
-            top != GRAPH_OUT && top != crate::projects_home::CRAZYAGENT_DIRECTORY
+            top != GRAPH_OUT && top != kernel_common::names::CRAZYAGENT_DIRECTORY
         })
         .map(|path| repo.join(path.trim_end_matches('/')))
         .collect()

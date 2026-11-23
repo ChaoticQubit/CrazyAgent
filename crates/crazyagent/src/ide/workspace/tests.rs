@@ -149,7 +149,7 @@ impl Case {
         std::fs::write(folder.join("README"), "one\n").unwrap();
         git(&folder, &["add", "README"]);
         git(&folder, &["commit", "-q", "-m", "Start"]);
-        std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         Self {
             _tmp: tmp,
             root,

@@ -111,7 +111,7 @@ impl Engine {
         std::fs::canonicalize(self.home.path())
             .unwrap()
             .join(name)
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
     }
 
     async fn stop(mut self) {
