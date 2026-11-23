@@ -1,4 +1,4 @@
-use super::test_support::{code, read_request, response, said, serve};
+use super::test_support::{TestResult, at, code, joined, read_request, response, said, serve};
 use super::*;
 
 struct Signer {
@@ -185,11 +185,11 @@ fn versions_that_differ_only_in_build_metadata_are_not_newer() {
 }
 
 #[test]
-fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
-    let folder = tempfile::tempdir().unwrap();
+fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() -> TestResult {
+    let folder = tempfile::tempdir()?;
     let archive = folder.path().join("crazyagent.tar.gz");
     let bytes: Vec<u8> = (0..70_000_u32).map(|value| (value % 251) as u8).collect();
-    std::fs::write(&archive, &bytes).unwrap();
+    at(&archive, std::fs::write(&archive, &bytes))?;
     let owner = signer();
     let signed = owner.sign(
         &bytes,
@@ -201,7 +201,7 @@ fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
 
     let mut tampered = bytes.clone();
     tampered[40_000] ^= 0x01;
-    std::fs::write(&archive, &tampered).unwrap();
+    at(&archive, std::fs::write(&archive, &tampered))?;
     assert_eq!(
         code(verify_file(&archive, &sha, &signed, &owner.key, "0.2.0")),
         "update_checksum_mismatch"
@@ -217,7 +217,7 @@ fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
         "update_signature_invalid"
     );
 
-    std::fs::write(&archive, &bytes).unwrap();
+    at(&archive, std::fs::write(&archive, &bytes))?;
     let stranger = signer();
     assert_eq!(
         code(verify_file(&archive, &sha, &signed, &stranger.key, "0.2.0")),
@@ -262,17 +262,18 @@ fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
         )),
         "update_key_missing"
     );
+    Ok(())
 }
 
 /// A trusted comment that names a field twice is refused before its version is read, so the
 /// updater and the release asset check can never read different versions from one signature
 /// (RV-DS241-35).
 #[test]
-fn a_trusted_comment_that_names_a_field_twice_is_refused() {
-    let folder = tempfile::tempdir().unwrap();
+fn a_trusted_comment_that_names_a_field_twice_is_refused() -> TestResult {
+    let folder = tempfile::tempdir()?;
     let archive = folder.path().join("crazyagent.tar.gz");
     let bytes = b"release archive bytes".to_vec();
-    std::fs::write(&archive, &bytes).unwrap();
+    at(&archive, std::fs::write(&archive, &bytes))?;
     let owner = signer();
     let sha = sha256_hex(&bytes);
     for trusted in [
@@ -287,6 +288,7 @@ fn a_trusted_comment_that_names_a_field_twice_is_refused() {
             "{trusted}"
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -346,7 +348,7 @@ fn the_compiled_in_key_comes_from_the_desktop_updater_config() {
 }
 
 #[test]
-fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() {
+fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() -> TestResult {
     let body: Vec<u8> = (0..3000_u32).map(|value| (value % 256) as u8).collect();
     let oversize = vec![b'x'; 10_000];
     let (url, server) = serve(vec![
@@ -369,7 +371,7 @@ fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() {
             "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             b"",
         ),
-    ]);
+    ])?;
     let timeout = Duration::from_secs(30);
     let mut received = Vec::new();
     assert_eq!(download(&url, &mut received, 4096, timeout).unwrap(), 3000);
@@ -395,21 +397,23 @@ fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() {
         "update_download_missing"
     );
     assert!(received.is_empty());
-    server.join().unwrap();
+    joined(server)?;
+    Ok(())
 }
 
 #[test]
-fn a_slow_server_is_cut_off_at_the_timeout() {
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/release", listener.local_addr().unwrap());
+fn a_slow_server_is_cut_off_at_the_timeout() -> TestResult {
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0")?;
+    let url = format!("http://{}/release", listener.local_addr()?);
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener)?;
         read_request(&mut stream);
         std::thread::sleep(Duration::from_secs(4));
         let _ = stream.write_all(&response(
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n",
             b"ok",
         ));
+        Ok(())
     });
     let started = Instant::now();
     let mut received = Vec::new();
@@ -422,7 +426,8 @@ fn a_slow_server_is_cut_off_at_the_timeout() {
         )
     );
     assert!(started.elapsed() < Duration::from_secs(4));
-    server.join().unwrap();
+    joined(server)?;
+    Ok(())
 }
 
 #[test]
@@ -461,16 +466,21 @@ fn an_http_error_is_read_from_curl_whatever_its_exit_code() {
 
 #[cfg(unix)]
 #[test]
-fn a_failed_service_step_reads_as_one_plain_sentence_without_its_usage_text() {
+fn a_failed_service_step_reads_as_one_plain_sentence_without_its_usage_text() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
-    let folder = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir()?;
     let executable = folder.path().join("crazyagent");
-    std::fs::write(
+    at(
         &executable,
-        "#!/bin/sh\necho 'Usage: crazyagent service <install|start|stop>'\necho 'error: unrecognized subcommand' >&2\nexit 2\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\necho 'Usage: crazyagent service <install|start|stop>'\necho 'error: unrecognized subcommand' >&2\nexit 2\n",
+        ),
+    )?;
+    at(
+        &executable,
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)),
+    )?;
     assert_eq!(
         said(service_command(&executable, "stop").unwrap_err()),
         (
@@ -485,6 +495,7 @@ fn a_failed_service_step_reads_as_one_plain_sentence_without_its_usage_text() {
             "The engine didn't start. Start it with: crazyagent service start".to_owned()
         )
     );
+    Ok(())
 }
 
 #[test]
@@ -506,7 +517,7 @@ fn only_https_or_this_computer_is_downloaded_from() {
 }
 
 #[test]
-fn executables_inside_an_installed_app_are_not_replaced() {
+fn executables_inside_an_installed_app_are_not_replaced() -> TestResult {
     assert!(inside_app_bundle(Path::new(
         "/Applications/CrazyAgent.app/Contents/MacOS/crazyagent"
     )));
@@ -516,12 +527,14 @@ fn executables_inside_an_installed_app_are_not_replaced() {
     assert!(!inside_app_bundle(Path::new(
         "/Users/mira/.local/bin/crazyagent"
     )));
-    let install = tempfile::tempdir().unwrap();
+    let install = tempfile::tempdir()?;
     let executable = install.path().join("crazyagent.exe");
-    std::fs::write(&executable, b"").unwrap();
+    at(&executable, std::fs::write(&executable, b""))?;
     assert!(!inside_app_bundle(&executable));
-    std::fs::write(install.path().join("uninstall.exe"), b"").unwrap();
+    let uninstall = install.path().join("uninstall.exe");
+    at(&uninstall, std::fs::write(&uninstall, b""))?;
     assert!(inside_app_bundle(&executable));
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -575,17 +588,17 @@ fn a_helper_past_its_time_limit_is_stopped_and_its_output_is_bounded() {
     assert_eq!(output.stdout.len() as u64, OUTPUT_BYTES_MAX);
 }
 
-fn signed_archive(folder: &Path) -> (PathBuf, Vec<u8>) {
+fn signed_archive(folder: &Path) -> TestResult<(PathBuf, Vec<u8>)> {
     let archive = folder.join("crazyagent.tar.gz");
     let bytes: Vec<u8> = (0..9_000_u32).map(|value| (value % 241) as u8).collect();
-    std::fs::write(&archive, &bytes).unwrap();
-    (archive, bytes)
+    at(&archive, std::fs::write(&archive, &bytes))?;
+    Ok((archive, bytes))
 }
 
 #[test]
-fn cli_update_refuses_a_bad_signature_archive() {
-    let folder = tempfile::tempdir().unwrap();
-    let (archive, bytes) = signed_archive(folder.path());
+fn cli_update_refuses_a_bad_signature_archive() -> TestResult {
+    let folder = tempfile::tempdir()?;
+    let (archive, bytes) = signed_archive(folder.path())?;
     let release = signer();
     let other = signer();
     let trusted = "timestamp:1761400000\tfile:crazyagent.tar.gz\tversion:0.2.0";
@@ -608,12 +621,13 @@ fn cli_update_refuses_a_bad_signature_archive() {
         )),
         "update_signature_invalid"
     );
+    Ok(())
 }
 
 #[test]
-fn cli_update_refuses_an_unsigned_archive() {
-    let folder = tempfile::tempdir().unwrap();
-    let (archive, bytes) = signed_archive(folder.path());
+fn cli_update_refuses_an_unsigned_archive() -> TestResult {
+    let folder = tempfile::tempdir()?;
+    let (archive, bytes) = signed_archive(folder.path())?;
     let release = signer();
     let sha = sha256_hex(&bytes);
     for unsigned in ["", "   ", &STANDARD.encode("")] {
@@ -623,46 +637,47 @@ fn cli_update_refuses_an_unsigned_archive() {
             "{unsigned:?}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn the_desktop_config_public_key_is_the_one_read() {
+fn the_desktop_config_public_key_is_the_one_read() -> TestResult {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../apps/desktop/src-tauri/tauri.conf.json");
-    let text = std::fs::read_to_string(&path).unwrap();
-    let config: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let configured = config["plugins"]["updater"]["pubkey"].as_str().unwrap();
+    let text = at(&path, std::fs::read_to_string(&path))?;
+    let config: serde_json::Value = serde_json::from_str(&text)?;
+    let configured = config["plugins"]["updater"]["pubkey"]
+        .as_str()
+        .ok_or_else(|| format!("{path:?} names no plugins.updater.pubkey string"))?;
     assert_eq!(DESKTOP_CONFIG, text);
     if configured == KEY_PLACEHOLDER {
         assert_eq!(code(public_key()), "update_key_missing");
     } else {
         assert_eq!(public_key().unwrap(), configured);
     }
+    Ok(())
 }
 
 /// A URL holding `[`, `]`, `{` or `}` reaches the server as the URL parser wrote it, in one
 /// request, never expanded by curl as a range or a list.
 #[test]
-fn a_url_with_brackets_and_braces_reaches_the_server_as_written() {
+fn a_url_with_brackets_and_braces_reaches_the_server_as_written() -> TestResult {
     use std::io::{Read, Write};
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener)?;
         let mut head = Vec::new();
         let mut byte = [0_u8; 1];
-        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte)? == 1 {
             head.push(byte[0]);
         }
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-            .unwrap();
-        String::from_utf8(head)
-            .unwrap()
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?;
+        Ok(String::from_utf8_lossy(&head)
             .lines()
             .next()
-            .unwrap()
-            .to_owned()
+            .unwrap_or_default()
+            .to_owned())
     });
     let url = format!("http://127.0.0.1:{port}/release/x[1-2]/y{{a,b}}");
     let mut received = Vec::new();
@@ -673,15 +688,16 @@ fn a_url_with_brackets_and_braces_reaches_the_server_as_written() {
     assert_eq!(received, b"ok");
     let path = allowed_url(&url).unwrap().path().to_owned();
     assert!(path.contains("[1-2]"), "{path}");
-    assert_eq!(server.join().unwrap(), format!("GET {path} HTTP/1.1"));
+    assert_eq!(joined(server)?, format!("GET {path} HTTP/1.1"));
+    Ok(())
 }
 
 /// Writers of the update channel at the same moment never clobber each other: each of 8
 /// threads saves stable or dev 50 times and every save succeeds, `update.toml` then reads
 /// as one of the two channels, and no half-written file is left in the folder.
 #[test]
-fn channel_writers_at_the_same_moment_each_save_whole() {
-    let folder = tempfile::tempdir().unwrap();
+fn channel_writers_at_the_same_moment_each_save_whole() -> TestResult {
+    let folder = tempfile::tempdir()?;
     let root = folder.path().to_path_buf();
     let writers: Vec<_> = (0..8)
         .map(|n| {
@@ -707,11 +723,11 @@ fn channel_writers_at_the_same_moment_each_save_whole() {
         read_channel(&root).unwrap(),
         Channel::Stable | Channel::Dev
     ));
-    let left: Vec<String> = std::fs::read_dir(&root)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let left: Vec<String> = at(&root, std::fs::read_dir(&root))?
+        .map(|entry| Ok(at(&root, entry)?.file_name().to_string_lossy().into_owned()))
+        .collect::<TestResult<_>>()?;
     assert_eq!(left, vec!["update.toml".to_owned()]);
+    Ok(())
 }
 
 /// A save while another program holds `update.toml` without delete sharing waits a bounded
@@ -719,16 +735,19 @@ fn channel_writers_at_the_same_moment_each_save_whole() {
 /// go the save goes through.
 #[cfg(windows)]
 #[test]
-fn a_channel_file_another_program_holds_is_busy_and_saves_once_let_go() {
+fn a_channel_file_another_program_holds_is_busy_and_saves_once_let_go() -> TestResult {
     use std::os::windows::fs::OpenOptionsExt;
-    let folder = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir()?;
     let root = folder.path();
     write_channel(root, Channel::Stable).unwrap();
-    let held = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(0x1 | 0x2)
-        .open(root.join("update.toml"))
-        .unwrap();
+    let file = root.join("update.toml");
+    let held = at(
+        &file,
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&file),
+    )?;
     let started = Instant::now();
     let busy = write_channel(root, Channel::Dev).unwrap_err();
     assert_eq!(busy.code, "update_channel_busy", "{}", busy.message);
@@ -736,9 +755,9 @@ fn a_channel_file_another_program_holds_is_busy_and_saves_once_let_go() {
     drop(held);
     write_channel(root, Channel::Dev).unwrap();
     assert_eq!(read_channel(root).unwrap(), Channel::Dev);
-    let left: Vec<String> = std::fs::read_dir(root)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let left: Vec<String> = at(root, std::fs::read_dir(root))?
+        .map(|entry| Ok(at(root, entry)?.file_name().to_string_lossy().into_owned()))
+        .collect::<TestResult<_>>()?;
     assert_eq!(left, vec!["update.toml".to_owned()]);
+    Ok(())
 }
