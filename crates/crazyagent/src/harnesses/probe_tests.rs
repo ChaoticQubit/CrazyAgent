@@ -34,7 +34,8 @@ fn the_catalog_looks_in_homebrew_where_the_tool_resolver_does() {
     let directories = Search::from_environment().directories;
     for folder in &homebrew {
         assert!(
-            directories.contains(folder) || crate::service::changeable_by_others(folder).is_some(),
+            directories.contains(folder)
+                || kernel_processes::service::changeable_by_others(folder).is_some(),
             "{}",
             folder.display()
         );

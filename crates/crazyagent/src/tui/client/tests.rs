@@ -281,9 +281,9 @@ fn idle_service(
     folder: &std::path::Path,
     layout: &crate::paths::Layout,
     executable: PathBuf,
-) -> crate::service::Service {
-    crate::service::Service {
-        platform: crate::paths::Platform::CURRENT,
+) -> kernel_processes::service::Service {
+    kernel_processes::service::Service {
+        platform: kernel_common::Platform::CURRENT,
         name: format!("dev.crazyagent.test.tui-start.{}", std::process::id()),
         executable,
         root: layout.root().to_path_buf(),

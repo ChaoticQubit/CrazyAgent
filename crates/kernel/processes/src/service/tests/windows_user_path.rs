@@ -65,7 +65,7 @@ impl Drop for ScratchKey {
     /// Removes the key and its values. A removal that fails fails the row, unless the row is
     /// already failing, where a second panic would abort the whole run.
     fn drop(&mut self) {
-        let removed = kernel_processes::spawn_gate::output(&mut powershell_command(
+        let removed = crate::spawn_gate::output(&mut powershell_command(
             "$ErrorActionPreference='Stop'; \
 Remove-Item -LiteralPath $env:CRAZYAGENT_TEST_KEY -Recurse",
             &[("CRAZYAGENT_TEST_KEY", &self.name)],

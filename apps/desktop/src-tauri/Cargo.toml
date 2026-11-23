@@ -31,6 +31,7 @@ tauri-build = { version = "=2.7.3", features = [] }
 
 [dependencies]
 crazyagent = { path = "../../../crates/crazyagent" }
+crazyagent-kernel-common = { path = "../../../crates/kernel/common" }
 crazyagent-kernel-processes = { path = "../../../crates/kernel/processes" }
 crazyagent-kernel-security = { path = "../../../crates/kernel/security" }
 getrandom = "=0.4.3"
