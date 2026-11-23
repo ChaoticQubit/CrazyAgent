@@ -1,14 +1,13 @@
 use super::fence::{self, Fence};
-use super::{
-    Aggregate, BODY_BYTES_MAX, Chunk, SNAPSHOT_CHUNK, SNAPSHOT_DONE, SnapshotChunk, TOMBSTONE,
-    error, verify_snapshot,
-};
+use super::{Aggregate, error};
 use crate::engine::EngineError;
+use kernel_storage::state_log::{
+    BODY_BYTES_MAX, Chunk, SNAPSHOT_CHUNK, SNAPSHOT_DONE, TOMBSTONE, read_chunk, verify_snapshot,
+};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -47,46 +46,6 @@ pub struct ProcessExited {
     pub pid: u32,
     pub code: Option<i32>,
     pub signal: Option<i32>,
-}
-
-/// Where a writer reads the time it stamps on an event: the system clock, or a manual one a
-/// test sets. Replay never reads a clock; a projection takes time from each event's `at_ms`.
-#[derive(Debug)]
-pub enum Clock {
-    System,
-    Manual(AtomicU64),
-}
-
-impl Clock {
-    /// A manual clock reading the given time. Input: ms since the Unix epoch. Output: the
-    /// clock.
-    pub fn manual(at_ms: u64) -> Self {
-        Self::Manual(AtomicU64::new(at_ms))
-    }
-
-    /// The time now. Output: ms since the Unix epoch, 0 for a system time before it.
-    pub fn now_ms(&self) -> u64 {
-        match self {
-            Self::System => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |elapsed| {
-                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-                }),
-            Self::Manual(now) => now.load(Ordering::SeqCst),
-        }
-    }
-
-    /// Sets a manual clock. Input: ms since the Unix epoch. Output: Ok, or
-    /// `state_log_clock_system` for the system clock.
-    pub fn set_ms(&self, at_ms: u64) -> Result<(), EngineError> {
-        match self {
-            Self::System => Err(error("state_log_clock_system")),
-            Self::Manual(now) => {
-                now.store(at_ms, Ordering::SeqCst);
-                Ok(())
-            }
-        }
-    }
 }
 
 /// Replays the log after `after` into one aggregate's projection. Every event is read, in
@@ -133,14 +92,7 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
     if event.kind != SNAPSHOT_CHUNK {
         return Err(refused());
     }
-    let chunk: SnapshotChunk = serde_json::from_slice(&event.body).map_err(|_| refused())?;
-    if chunk.aggregate != event.aggregate {
-        return Err(refused());
-    }
-    Ok(Chunk {
-        table: chunk.table,
-        rows: chunk.rows,
-    })
+    read_chunk(event.aggregate.name(), &event.body).ok_or_else(refused)
 }
 
 /// Redacts one logged event in place for an owner delete: its body becomes [`TOMBSTONE`]
@@ -416,7 +368,7 @@ fn batch(db: &Connection, after: u64, revision: u64) -> Result<Vec<Logged>, Engi
 
 /// The aggregate a stored name names, read through its serde name, which
 /// [`Aggregate::name`] matches. Input: the name. Output: the aggregate, none for another.
-fn parse(name: &str) -> Option<Aggregate> {
+pub(super) fn parse(name: &str) -> Option<Aggregate> {
     serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
 }
 

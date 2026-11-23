@@ -2,9 +2,11 @@ use crate::engine::EngineError;
 use crate::owner_texts::{self, TextDigest};
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{Command, Outcome, ProjectId, RequestId};
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+use crate::state_log::replay::{self, Logged};
+use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -701,7 +703,7 @@ fn append(
         let body = serde_json::to_vec(change).map_err(error)?;
         assert!(body.len() <= BODY_BYTES_MAX, "a change body fits one event");
         last = appender.append(&Draft {
-            aggregate: Aggregate::Memory,
+            aggregate: Aggregate::Memory.into(),
             kind: KIND,
             schema: SCHEMA,
             at_ms,

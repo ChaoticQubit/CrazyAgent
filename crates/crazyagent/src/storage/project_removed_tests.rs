@@ -531,11 +531,11 @@ fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_ba
         .map(|(_, _, _, _, body)| body)
         .collect();
     assert_eq!(admitted.len(), 2);
-    assert_eq!(admitted[0].as_slice(), crate::state_log::TOMBSTONE);
+    assert_eq!(admitted[0].as_slice(), kernel_storage::state_log::TOMBSTONE);
     assert!(String::from_utf8_lossy(admitted[1]).contains("/repo/other"));
     let (_, _, kind, _, body) = events.last().unwrap();
     assert_eq!(kind, event::KIND, "the removal keeps its own event");
-    assert_ne!(body.as_slice(), crate::state_log::TOMBSTONE);
+    assert_ne!(body.as_slice(), kernel_storage::state_log::TOMBSTONE);
 
     let live = rows(&s.db, "repository_admissions").unwrap();
     assert_eq!(live.len(), 1, "only the other project's admission stands");
@@ -576,7 +576,7 @@ fn a_cleared_ids_admissions_are_tombstoned_and_their_replay_brings_none_back() {
     assert_eq!(admitted.len(), 2);
     assert_eq!(
         admitted[0].as_slice(),
-        crate::state_log::TOMBSTONE,
+        kernel_storage::state_log::TOMBSTONE,
         "the cleared id's admission is redacted"
     );
     assert!(String::from_utf8_lossy(&admitted[1]).contains("/repo/other"));
