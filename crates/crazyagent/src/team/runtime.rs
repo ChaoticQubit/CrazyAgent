@@ -406,7 +406,7 @@ impl Plan {
         let boundary = if unconfined {
             let full = self.full_access.clone().ok_or_else(|| {
                 with_code(
-                    crate::sandbox::FULL_ACCESS_NEEDS_MACOS,
+                    kernel_sandbox::profile::consts::FULL_ACCESS_NEEDS_MACOS,
                     Some("sandbox_unavailable"),
                 )
             })?;
@@ -1131,7 +1131,7 @@ fn prepare_mates_home(
     let mates = crate::launch_context::mates_home(home);
     private_directory(&mates)?;
     crate::agent_home::reset_mates_home(&mates).map_err(|e| EngineError(e.0))?;
-    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         let shared = home.join(folder);
         match std::fs::DirBuilder::new().mode(0o700).create(&shared) {
             Ok(()) => {}

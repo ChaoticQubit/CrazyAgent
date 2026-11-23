@@ -2642,7 +2642,10 @@ async fn owner_read_project_hidden_paths_returns_the_saved_list_and_version() {
     assert_eq!(read.paths, shown);
     assert_eq!(read.version, 0);
     assert!(read.runs.is_empty());
-    assert_eq!(read.unavailable, crate::sandbox::HIDDEN_UNHELD);
+    assert_eq!(
+        read.unavailable,
+        kernel_sandbox::profile::consts::HIDDEN_UNHELD
+    );
     engine.stop().await;
 }
 

@@ -1603,7 +1603,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_project_scope_conflict"
         | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
         "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
-        crate::sandbox::HELD_STOP_CAUSE => MasterReason::SandboxStopped,
+        kernel_sandbox::profile::consts::HELD_STOP_CAUSE => MasterReason::SandboxStopped,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
@@ -2203,7 +2203,7 @@ mod tests {
     /// sandbox as its reason, never the runtime or Unknown.
     #[test]
     fn a_held_name_the_sandbox_could_not_put_back_names_the_sandbox() {
-        let cause = EngineError(crate::sandbox::HELD_STOP_CAUSE.into());
+        let cause = EngineError(kernel_sandbox::profile::consts::HELD_STOP_CAUSE.into());
         assert_eq!(reason_for_error(&cause), MasterReason::SandboxStopped);
     }
 

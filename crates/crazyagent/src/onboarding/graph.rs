@@ -179,7 +179,7 @@ pub(crate) fn update(
         return Ok(GraphEnding::Failed(code));
     }
     let kept = kept_paths(repo, &kept_out);
-    if kept.len() > crate::sandbox::KEPT_OUT_MAX
+    if kept.len() > kernel_sandbox::profile::consts::KEPT_OUT_MAX
         || !kept.iter().all(|path| ProjectSandbox::keepable(path))
     {
         return Ok(GraphEnding::Failed(GRAPH_KEEP_OUT_REFUSED));

@@ -40,7 +40,7 @@ fn a_native_leads_teammates_home_is_reset_at_each_launch() {
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
         .collect();
     assert!(left.is_empty(), "the teammates' home kept {left:?}");
-    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         assert_eq!(
             std::fs::read_link(mates.join(folder)).unwrap(),
             home.join(folder)

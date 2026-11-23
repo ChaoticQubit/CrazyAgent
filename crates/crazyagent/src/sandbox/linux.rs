@@ -1,9 +1,4 @@
-use super::{
-    ADMIN_LINKS, ADMIN_WRITES, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES,
-    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
-    LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, ProjectSandbox, Routed, STORE_ALTERNATES, Sandbox,
-    agent_env,
-};
+use super::{ProjectSandbox, Routed, Sandbox, agent_env};
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use kernel_sandbox::error::{SandboxError, invalid};
@@ -14,6 +9,11 @@ use kernel_sandbox::paths::clean_absolute;
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::ports::{
     KEPT_PORTS_MAX, OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
+};
+use kernel_sandbox::profile::consts::{
+    ADMIN_LINKS, ADMIN_WRITES, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES,
+    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
+    LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, STORE_ALTERNATES,
 };
 use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
 use landlock::{

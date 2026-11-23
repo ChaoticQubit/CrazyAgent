@@ -1894,7 +1894,7 @@ pub(crate) fn reset_mates_home(mates: &Path) -> Result<(), AgentHomeError> {
 }
 
 /// What stays in a native lead's teammates' home: what [`kept_in`] names for Claude Code, with
-/// the folders [`crate::sandbox::CLAUDE_TEAM_SHARED`] names kept only as links, since there
+/// the folders [`kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED`] names kept only as links, since there
 /// they lead to the lead's own folders (RV-DS241-137 code r2 F1). Input: whether the download
 /// caches go. Output: the names with their kinds.
 #[cfg(unix)]
@@ -1902,7 +1902,7 @@ fn mates_kept(clear: bool) -> Vec<(&'static str, Kept)> {
     kept_in(Harness::Claude, clear)
         .into_iter()
         .map(|(name, kind)| {
-            if crate::sandbox::CLAUDE_TEAM_SHARED.contains(&name) {
+            if kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED.contains(&name) {
                 (name, Kept::Link)
             } else {
                 (name, kind)

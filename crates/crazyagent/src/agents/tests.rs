@@ -715,7 +715,7 @@ fn a_run_the_sandbox_stopped_for_a_held_name_shows_why() {
         .status
     };
     let stopped = ended(kernel_sandbox::lines::HELD_NOT_PUT_BACK_EXIT);
-    assert_eq!(stopped, crate::sandbox::HELD_NOT_PUT_BACK);
+    assert_eq!(stopped, kernel_sandbox::profile::consts::HELD_NOT_PUT_BACK);
     assert_eq!(ended(125), "Exited with code 125");
     assert_eq!(ended(3), "Exited with code 3");
 }

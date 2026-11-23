@@ -15926,7 +15926,7 @@ fn assert_full_access(start: Result<LaunchRequest, String>) {
     } else {
         let refused = start.unwrap_err();
         assert!(
-            refused.starts_with(crate::sandbox::FULL_ACCESS_NEEDS_MACOS),
+            refused.starts_with(kernel_sandbox::profile::consts::FULL_ACCESS_NEEDS_MACOS),
             "{refused}"
         );
     }
@@ -32179,7 +32179,7 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
 
     let tmp = home.parent().unwrap().join("tmp");
     let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
-    let teams = home.join(crate::sandbox::CLAUDE_TEAM_SHARED[0]);
+    let teams = home.join(kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED[0]);
     let mut tried = Vec::new();
     for (who, profile, own, folder, pinned) in [
         (

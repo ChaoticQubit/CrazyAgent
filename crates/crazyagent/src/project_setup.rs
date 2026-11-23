@@ -444,7 +444,7 @@ pub struct ReadPaths {
 /// The folders a project's agents are kept out of in saved order, with the version the
 /// owner's screen sends back when it changes them, and the kinds of engine runs still
 /// running that started before one of them was hidden (SA-VID14-R2-N2), and whether this
-/// system's boundary cannot hold hidden folders at all ([`crate::sandbox::HIDDEN_UNHELD`]).
+/// system's boundary cannot hold hidden folders at all ([`kernel_sandbox::profile::consts::HIDDEN_UNHELD`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiddenPaths {
@@ -2701,7 +2701,7 @@ fn set_read_paths(
 /// Saves a project's hidden folders once each passes [`kernel_sandbox::hidden_paths::checked`]
 /// against the project's folder and the screen showed the current ones. Takes the transaction,
 /// project, the version shown and the typed paths. Returns Applied, or a plain rejection for an
-/// unknown project, a refused path, any folder where [`crate::sandbox::HIDDEN_UNHELD`], or
+/// unknown project, a refused path, any folder where [`kernel_sandbox::profile::consts::HIDDEN_UNHELD`], or
 /// `stale_revision` when the folders changed since, so a stale screen never un-hides a folder.
 fn set_hidden_paths(
     tx: &Transaction<'_>,
@@ -2712,7 +2712,7 @@ fn set_hidden_paths(
     let Some(setup) = load_setup(tx, project_id)? else {
         return Ok(rejected("invalid_project"));
     };
-    if crate::sandbox::HIDDEN_UNHELD && !paths.is_empty() {
+    if kernel_sandbox::profile::consts::HIDDEN_UNHELD && !paths.is_empty() {
         return Ok(rejected("hidden_paths_need_macos"));
     }
     let folder = setup.project_folder();

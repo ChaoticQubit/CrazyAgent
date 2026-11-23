@@ -3024,7 +3024,7 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     let tmp =
         kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
             .unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -3261,7 +3261,7 @@ fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
     let tmp =
         kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
             .unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -3501,7 +3501,7 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
     let tmp =
         kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
             .unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");

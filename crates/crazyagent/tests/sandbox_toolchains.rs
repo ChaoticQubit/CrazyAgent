@@ -2315,7 +2315,7 @@ fn a_link_at_the_caller_socket_path_never_reaches_the_lead_s_server() {
 /// them: the team folders Claude Code shares in the lead's home and the teammates' private
 /// home beside it. Takes the lead's home. Returns the teammates' home.
 fn team_homes(home: &Path) -> PathBuf {
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(home.join(folder)).unwrap();
     }
     let mates = home.with_file_name("mates-home");

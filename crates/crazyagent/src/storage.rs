@@ -3823,7 +3823,7 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: kernel_sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
-                unavailable: crate::sandbox::HIDDEN_UNHELD,
+                unavailable: kernel_sandbox::profile::consts::HIDDEN_UNHELD,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())
