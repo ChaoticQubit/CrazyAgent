@@ -147,7 +147,7 @@ pub struct HarnessVersions {
 }
 
 /// What an installed harness lacks before it can run, from the tool resolver
-/// (`crate::tools::resolve_entry`): the program its first line asks for, such as `node`
+/// (`kernel_processes::finding::resolve_entry`): the program its first line asks for, such as `node`
 /// for an npm-built Codex, and the resolver's one owner line for it. No path is sent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -219,7 +219,7 @@ pub struct Roots {
     pub brew_prefixes: Vec<PathBuf>,
     pub casks: bool,
     pub npm: Option<NpmInstall>,
-    pub places: crate::tools::Places,
+    pub places: kernel_processes::finding::Places,
 }
 
 /// The npm an npm harness installs with and the node entry it runs, found by the one
@@ -463,9 +463,12 @@ fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
 /// tool resolver would run: no part of its path, as written or real, that agents or another
 /// user can change, an interpreter its first line names vetted the same way, and no link on
 /// its way to the real file that could be moved before the command runs the path as written
-/// ([`crate::tools::Places::link_hops_kept`]). Inputs: the command and the resolver's
+/// ([`kernel_processes::finding::Places::link_hops_kept`]). Inputs: the command and the resolver's
 /// places. Output: the same command, or the refusal code of the tool check.
-fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'static str> {
+fn checked(
+    fixed: Fixed,
+    places: &kernel_processes::finding::Places,
+) -> Result<Fixed, &'static str> {
     trusted(&fixed.program)?;
     vetted(&fixed, places)?;
     if !places.link_hops_kept(&fixed.program) {
@@ -483,23 +486,27 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 /// the command's own search folders hold, since the child's PATH looks there first. That
 /// copy must resolve, a link whose target is not there yet included, and the walk goes on
 /// from it; a copy behind it never runs. Each of those folders that exists must be one a
-/// lookup would trust ([`crate::tools::Places::kept_for_children`]), so no copy can appear
+/// lookup would trust ([`kernel_processes::finding::Places::kept_for_children`]), so no copy can appear
 /// there before the run (RV-DS241-203). Every interpreter on the way must run the script it
 /// is given and nothing it looks up ([`runs_its_script`]). Inputs: the command and the
 /// resolver's places. Output: the real file the resolver resolved the program to and
 /// checked, or `TOOL_UNSAFE`.
-fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
+fn vetted(
+    fixed: &Fixed,
+    places: &kernel_processes::finding::Places,
+) -> Result<PathBuf, &'static str> {
     let kept = fixed.search.iter().all(|folder| {
         std::fs::symlink_metadata(folder).is_err() || places.kept_for_children(folder)
     });
     if !kept {
         return Err(TOOL_UNSAFE);
     }
-    let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
+    let resolved = kernel_processes::finding::resolve_entry(&fixed.program, places)
+        .map_err(|_| TOOL_UNSAFE)?;
     let program = resolved.program.clone();
     let mut at = resolved;
-    for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
-        let crate::tools::Kind::Script {
+    for _ in 0..=kernel_processes::finding::INTERPRETER_DEPTH_MAX {
+        let kernel_processes::finding::Kind::Script {
             interpreter,
             arguments,
             by_name,
@@ -550,7 +557,7 @@ fn runs_its_script(interpreter: &Path, arguments: &[String]) -> bool {
 /// The copy of an interpreter named by name that `env` takes in a command's run: the first
 /// entry of that name in the command's search folders, a dangling link included, since an
 /// agent could fill its target before the run. A first copy the run's user cannot start,
-/// which `env` would pass over, does not resolve ([`crate::tools::resolve_entry`]), so the
+/// which `env` would pass over, does not resolve ([`kernel_processes::finding::resolve_entry`]), so the
 /// command fails closed rather than judging the copy behind it (rv-sec3 B18 F1). Inputs:
 /// the command, the interpreter the resolver found and the places. Output: that copy
 /// resolved, none when no search folder holds the name, or `TOOL_UNSAFE` when the first
@@ -558,8 +565,8 @@ fn runs_its_script(interpreter: &Path, arguments: &[String]) -> bool {
 fn taken_copy(
     fixed: &Fixed,
     found: &Path,
-    places: &crate::tools::Places,
-) -> Result<Option<crate::tools::Resolved>, &'static str> {
+    places: &kernel_processes::finding::Places,
+) -> Result<Option<kernel_processes::finding::Resolved>, &'static str> {
     let name = found.file_name().ok_or(TOOL_UNSAFE)?;
     let Some(copy) = fixed
         .search
@@ -569,7 +576,7 @@ fn taken_copy(
     else {
         return Ok(None);
     };
-    let taken = crate::tools::resolve_entry(&copy, places).map_err(|_| TOOL_UNSAFE)?;
+    let taken = kernel_processes::finding::resolve_entry(&copy, places).map_err(|_| TOOL_UNSAFE)?;
     assert_eq!(taken.entry.file_name(), Some(name));
     Ok(Some(taken))
 }
@@ -811,11 +818,7 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
 /// refused or cannot be asked, prints no plain version, or the home is unknown.
 pub(crate) fn version_under_home(executable: &Path) -> Option<String> {
     let home = state::home_folder()?;
-    state::version_if_runs(
-        executable,
-        &home,
-        &crate::tools::Places::from_environment(None),
-    )
+    state::version_if_runs(executable, &home, &crate::tools::tools_places(None))
 }
 
 /// Tells whether text is a plain version: two to six numbers joined by single dots, at most
@@ -1005,7 +1008,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1048,7 +1051,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
         assert_eq!(

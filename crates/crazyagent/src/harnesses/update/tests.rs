@@ -20,7 +20,7 @@ impl Machine {
         let npm = self.root.path().join("brew/bin/npm");
         let engine = crate::setup::harness_prefix(self.root.path());
         let home = self.root.path().join("home");
-        let places = crate::tools::Places::new(
+        let places = crate::tools::tools_new(
             vec![
                 self.root.path().join("setup/bin"),
                 self.root.path().join("brew/bin"),
@@ -1876,13 +1876,13 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
 /// folders under that machine's HOME only, so this Mac's own Node never counts.
 fn home_node_roots(machine: &Machine) -> Roots {
     let home = machine.roots().home;
-    let folders: Vec<PathBuf> = crate::tools::Places::engine(None, None, Some(home.clone()), None)
+    let folders: Vec<PathBuf> = crate::tools::tools_engine(None, None, Some(home.clone()), None)
         .folders()
         .iter()
         .filter(|folder| folder.starts_with(&home))
         .cloned()
         .collect();
-    let places = crate::tools::Places::new(folders, Some(home));
+    let places = crate::tools::tools_new(folders, Some(home));
     Roots {
         npm: super::state::engine_npm_at(machine.root.path(), &places),
         ..machine.roots()
@@ -2069,15 +2069,15 @@ fn a_harness_the_resolver_refuses_as_agent_writable_is_never_asked_its_version()
             method("codex", &real, &machine.roots()),
             Method::Npm { .. }
         ));
-        let resolved = crate::tools::resolve_entry(&link, &machine.roots().places);
+        let resolved = kernel_processes::finding::resolve_entry(&link, &machine.roots().places);
         let case = Case::new(machine, entry("codex", Some(link)), None);
         let versions = case.versions(false);
         if project {
             let refused = resolved.unwrap_err();
-            assert_eq!(refused.reason, crate::tools::Reason::Refused);
+            assert_eq!(refused.reason, kernel_processes::finding::Reason::Refused);
             assert_eq!(
                 refused.refused.as_ref().map(|refused| refused.why.clone()),
-                Some(crate::tools::Refusal::AgentsCanWrite)
+                Some(kernel_processes::finding::Refusal::AgentsCanWrite)
             );
             assert_eq!(versions.installed, None);
             assert_eq!(
@@ -2132,15 +2132,20 @@ fn an_agent_written_link_to_an_owner_harness_never_starts_a_node_planted_beside_
             ran.display()
         ),
     );
-    let refused = crate::tools::resolve_entry(&link, &machine.roots().places).unwrap_err();
-    assert_eq!(refused.reason, crate::tools::Reason::Refused);
+    let refused =
+        kernel_processes::finding::resolve_entry(&link, &machine.roots().places).unwrap_err();
+    assert_eq!(refused.reason, kernel_processes::finding::Reason::Refused);
     assert_eq!(
         refused.refused.as_ref().map(|refused| refused.why.clone()),
-        Some(crate::tools::Refusal::AgentsCanWrite)
+        Some(kernel_processes::finding::Refusal::AgentsCanWrite)
     );
     std::fs::remove_dir(&marker).unwrap();
-    let bare = crate::tools::resolve_entry(&link, &machine.roots().places).unwrap_err();
-    assert_eq!(bare.reason, crate::tools::Reason::NeedsInterpreter);
+    let bare =
+        kernel_processes::finding::resolve_entry(&link, &machine.roots().places).unwrap_err();
+    assert_eq!(
+        bare.reason,
+        kernel_processes::finding::Reason::NeedsInterpreter
+    );
     assert_eq!(bare.needs.as_deref(), Some("node"));
     std::fs::create_dir_all(&marker).unwrap();
     let case = Case::new(machine, entry("codex", Some(link)), None);
@@ -2175,10 +2180,10 @@ fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
     );
     let folder = open.parent().unwrap();
     std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o777)).unwrap();
-    let refused = crate::tools::resolve_entry(&open, &roots.places).unwrap_err();
+    let refused = kernel_processes::finding::resolve_entry(&open, &roots.places).unwrap_err();
     assert!(matches!(
         refused.refused.as_ref().map(|refused| &refused.why),
-        Some(crate::tools::Refusal::OthersCanChange(_))
+        Some(kernel_processes::finding::Refusal::OthersCanChange(_))
     ));
     let needs = super::state::needs(&open, &roots.places);
     assert_eq!(needs.map(|needs| needs.line), Some(refused.line()));
@@ -2212,7 +2217,7 @@ fn a_harness_file_trusted_refuses_is_never_asked_its_version_on_macos() {
     std::os::unix::fs::chown(&file, None, Some(ADMIN_GROUP)).unwrap();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o775)).unwrap();
     assert!(
-        crate::tools::resolve_entry(&file, &roots.places).is_ok(),
+        kernel_processes::finding::resolve_entry(&file, &roots.places).is_ok(),
         "the resolver passes a file only the administrators can also write"
     );
     assert_eq!(super::trusted(&file), Err(TOOL_UNSAFE));
@@ -2248,11 +2253,11 @@ fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
     let link = outside.path().join("bin/codex");
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
-    let refused = crate::tools::resolve_entry(&link, &engine).unwrap_err();
+    let engine = crate::tools::tools_places(Some(&at.join("engine")));
+    let refused = kernel_processes::finding::resolve_entry(&link, &engine).unwrap_err();
     assert_eq!(
         refused.refused.as_ref().map(|refused| refused.why.clone()),
-        Some(crate::tools::Refusal::InTemp),
+        Some(kernel_processes::finding::Refusal::InTemp),
         "an owner link into the temp folder is refused on the engine's places"
     );
     let needs = super::state::needs(&link, &engine);
@@ -2296,7 +2301,7 @@ fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_r
         method("codex", &owned, &roots),
         Method::Npm { .. }
     ));
-    assert!(crate::tools::resolve_entry(&link, &roots.places).is_ok());
+    assert!(kernel_processes::finding::resolve_entry(&link, &roots.places).is_ok());
     let (moved, to) = (middle.clone(), planted.clone());
     let step: super::state::Step = Box::new(move || {
         std::fs::remove_file(&moved).unwrap();
@@ -2387,7 +2392,7 @@ fn a_self_update_is_refused_when_a_middle_link_sits_where_agents_or_others_can_m
         std::os::unix::fs::symlink(&middle, &entry).unwrap();
         assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
         assert_eq!(
-            crate::tools::resolve_entry(&entry, &roots.places).is_ok(),
+            kernel_processes::finding::resolve_entry(&entry, &roots.places).is_ok(),
             !refused,
             "{place}: the resolver judges every link too (B1)"
         );
@@ -2421,12 +2426,14 @@ fn a_self_update_is_refused_when_its_env_interpreter_has_a_dangling_copy_agents_
     let filled = at.join("proj/tools/node");
     std::os::unix::fs::symlink(&filled, entry.with_file_name("node")).unwrap();
     assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
-    match crate::tools::resolve_entry(&entry, &roots.places)
+    match kernel_processes::finding::resolve_entry(&entry, &roots.places)
         .unwrap()
         .kind
     {
-        crate::tools::Kind::Script { interpreter, .. } => assert_eq!(interpreter.entry, vetted),
-        crate::tools::Kind::Native => panic!("the self-updater is a script"),
+        kernel_processes::finding::Kind::Script { interpreter, .. } => {
+            assert_eq!(interpreter.entry, vetted)
+        }
+        kernel_processes::finding::Kind::Native => panic!("the self-updater is a script"),
     }
     assert_eq!(
         update_command("codex", &entry, &real, &roots).unwrap_err(),
@@ -2654,7 +2661,7 @@ fn a_middle_link_in_a_project_is_refused_and_one_through_an_owner_folder_passes(
 
 /// RV-DS241-203: a command's search folders are the child's PATH ahead of the system folders,
 /// so each one that exists must be one a lookup would trust
-/// ([`crate::tools::Places::kept_for_children`]):
+/// ([`kernel_processes::finding::Places::kept_for_children`]):
 /// a folder every user can write or one inside a project agents can write is refused even
 /// with no copy of an interpreter in it yet, while the owner's folder and a folder not made
 /// yet, as the engine's npm prefix before its first install, pass.
@@ -2712,14 +2719,14 @@ fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(to, link).unwrap();
     }
-    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
+    let engine = crate::tools::tools_places(Some(&at.join("engine")));
     let command = |program: &Path| Fixed {
         program: program.to_path_buf(),
         args: vec!["--version"],
         search: vec![program.parent().unwrap().to_path_buf()],
         prefix: None,
     };
-    assert!(crate::tools::resolve_entry(&through, &engine).is_err());
+    assert!(kernel_processes::finding::resolve_entry(&through, &engine).is_err());
     assert_eq!(
         checked(command(&through), &engine).unwrap_err(),
         TOOL_UNSAFE
@@ -2849,7 +2856,7 @@ fn a_second_npm_install_keeps_the_prefix_node_on_the_real_node_when_the_resolver
     let prefix = crate::setup::harness_prefix(root);
     let node = machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
     machine.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
-    let places = crate::tools::Places::new(
+    let places = crate::tools::tools_new(
         vec![prefix.join("bin"), node.parent().unwrap().to_path_buf()],
         None,
     );
@@ -2879,7 +2886,7 @@ fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
     let old = machine.program("brew/Cellar/node/26.0.0/bin/node", 0o755);
     machine.program("brew/bin/npm", 0o755);
     std::os::unix::fs::symlink(&old, brew_bin.join("node")).unwrap();
-    let places = crate::tools::Places::new(vec![brew_bin.clone()], None);
+    let places = crate::tools::tools_new(vec![brew_bin.clone()], None);
     let npm = super::state::engine_npm_at(root, &places).unwrap();
     crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
     let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
@@ -3094,10 +3101,13 @@ fn a_check_never_runs_an_npm_prefix_node_others_can_change() {
     std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
     executable(&open.join("node"), "#!/bin/sh\n: > \"$HOME/marker\"\n");
     std::os::unix::fs::symlink(open.join("node"), bin.join("node")).unwrap();
-    let resolved = crate::tools::resolve_entry(&bin.join("npm"), &machine.roots().places);
+    let resolved =
+        kernel_processes::finding::resolve_entry(&bin.join("npm"), &machine.roots().places);
     match resolved.unwrap().kind {
-        crate::tools::Kind::Script { interpreter, .. } => assert_eq!(interpreter.entry, vetted),
-        crate::tools::Kind::Native => panic!("npm is a script"),
+        kernel_processes::finding::Kind::Script { interpreter, .. } => {
+            assert_eq!(interpreter.entry, vetted)
+        }
+        kernel_processes::finding::Kind::Native => panic!("npm is a script"),
     }
     match check_command("codex", &real, &machine.roots()) {
         Ok(Some(fixed)) => {

@@ -2452,7 +2452,10 @@ fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
         return host;
     }
     let helper = helper_beside_engine();
-    let host = read_host(&helper.unwrap_or_default(), crate::tools::engine_root());
+    let host = read_host(
+        &helper.unwrap_or_default(),
+        kernel_processes::finding::engine_root(),
+    );
     *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
     host
 }

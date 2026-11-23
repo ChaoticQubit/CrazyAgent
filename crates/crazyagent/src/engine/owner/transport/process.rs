@@ -1353,7 +1353,7 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
             }
             let home =
                 crate::skills::import::home().ok_or_else(|| failure("process_import_missing"))?;
-            let places = crate::tools::Places::from_environment(Some(root));
+            let places = crate::tools::tools_places(Some(root));
             Answer::Text(crate::instruction_files::sources::read(
                 &home, registry, &places, &harness,
             )?)
@@ -2057,13 +2057,14 @@ fn checks(root: &Path, project: Option<&ProjectId>, text: &str, app: Option<&str
         findings.push(Finding::new(FindingKind::OverBudget, Vec::new(), &note));
     }
     let (folder, skills, servers) = inventory(root, project);
-    let places = crate::tools::Places::from_environment(Some(root));
-    let pending = crate::tools::probe::mark().first_run_pending;
+    let places = crate::tools::tools_places(Some(root));
+    let pending =
+        kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending;
     let program = |name: &str| {
         if pending {
             return None;
         }
-        match crate::tools::resolve(name, &places) {
+        match kernel_processes::finding::resolve(name, &places) {
             Ok(_) => Some(true),
             Err(missing) => missing.refused.is_none().then_some(false),
         }
