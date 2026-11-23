@@ -569,6 +569,37 @@ async fn handed(
     }
 }
 
+/// A custodian child between its start on a blocking thread and its handover to the
+/// dispatch: if the dispatch is dropped while the start is awaited, the child is cleaned up
+/// as a failed handover is, never left running.
+struct Starting(Option<std::process::Child>);
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = custody::cleanup_direct_child(
+                &mut child,
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            );
+        }
+    }
+}
+
+/// Starts the custodian through the spawn gate on a blocking thread, so a start held at the
+/// gate never blocks a runtime worker. Input: the configured command. Output: the child, or
+/// the start's own error.
+async fn spawn_custodian(mut command: std::process::Command) -> Result<std::process::Child, EngineError> {
+    let mut started = tokio::task::spawn_blocking(move || {
+        kernel_processes::spawn_gate::spawn(&mut command).map(|child| Starting(Some(child)))
+    })
+    .await
+    .map_err(io_error)?
+    .map_err(io_error)?;
+    let child = started.0.take();
+    assert!(child.is_some());
+    child.ok_or_else(|| EngineError("native_auth_host_child_missing".into()))
+}
+
 pub(in crate::engine) async fn dispatch(
     work: crate::storage::NativeAuthWork,
     host: crate::engine::owner::transport::NativeAuthDispatchHost,
@@ -602,7 +633,7 @@ pub(in crate::engine) async fn dispatch(
             .as_ref()
             .map(|(harness, words)| (kind.as_str(), harness.as_ref(), words.as_slice())),
     )?;
-    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(io_error)?;
+    let mut child = spawn_custodian(command).await?;
     let cause = child.stderr.take().map(CustodianCause::new).transpose();
     let streams = match (child.stdin.take(), cause) {
         (Some(input), Ok(cause)) => Ok((input, cause)),
