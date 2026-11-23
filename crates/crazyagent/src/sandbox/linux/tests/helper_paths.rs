@@ -39,3 +39,33 @@ fn a_test_binary_in_cargos_deps_folder_takes_cargos_helper_build_only_when_none_
     fs::write(&beside, "").unwrap();
     assert_eq!(helper_for(&engine), beside, "the one beside it wins");
 }
+
+#[test]
+fn without_the_helper_bubblewrap_starts_no_agent() {
+    let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+    match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
+        Err(SandboxError::Unavailable(reason)) => {
+            assert!(reason.contains("helper"), "{reason}");
+        }
+        other => panic!("bubblewrap without the socket filter must be refused: {other:?}"),
+    }
+}
+
+/// The owner's setting Off, and a host that only has bubblewrap, start no supervisor:
+/// the launch stays as it was before the supervisor (DEC-179 add.2 Q1).
+#[test]
+fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
+    let helper = std::env::current_exe().unwrap();
+    let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+    let landlock = LinuxBackend::Landlock {
+        helper: helper.clone(),
+    };
+    let off = LinuxSandbox::new(sandbox.clone(), landlock).unwrap();
+    assert_eq!(off.supervise(LinuxSupervisor::Off, None).supervision, None);
+    let bubblewrap = LinuxBackend::Bubblewrap {
+        bwrap: helper.clone(),
+        helper,
+    };
+    let alone = LinuxSandbox::new(sandbox, bubblewrap).unwrap();
+    assert_eq!(alone.supervise(LinuxSupervisor::On, None).supervision, None);
+}
