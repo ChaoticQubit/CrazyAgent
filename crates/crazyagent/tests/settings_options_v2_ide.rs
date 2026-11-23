@@ -6,8 +6,8 @@ use crazyagent::engine::owner::OwnerResult;
 use crazyagent::ide;
 use crazyagent::ide::fetch::BuildState;
 use crazyagent::protocol::ProjectId;
-use crazyagent::sandbox::policy::AgentPolicy;
 use e2e_support::{Engine, Owner, git, repository, scratch};
+use kernel_sandbox::policy::AgentPolicy;
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -145,7 +145,7 @@ impl Hooked {
                     home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
-                    network: crazyagent::sandbox::policy::AgentNetwork::default(),
+                    network: kernel_sandbox::policy::AgentNetwork::default(),
                     ..Default::default()
                 },
                 generation,

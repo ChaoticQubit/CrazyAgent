@@ -3,6 +3,14 @@ use std::fmt;
 
 pub const SECRET_BYTES_MAX: usize = 1024;
 pub const TOKEN_BYTES_MAX: usize = 16_384;
+/// The most bytes of one stored item: a secret with the header of host keys stored ahead
+/// of it.
+pub const STORED_BYTES_MAX: usize = 1_536;
+/// The most bytes Windows Credential Manager keeps in one credential blob.
+pub const CREDENTIAL_BLOB_BYTES_MAX: usize = 2_560;
+
+const _: () = assert!(SECRET_BYTES_MAX < STORED_BYTES_MAX);
+const _: () = assert!(STORED_BYTES_MAX < CREDENTIAL_BLOB_BYTES_MAX);
 
 /// A secret held only in memory: one to 1024 visible ASCII bytes, or up to 16 KiB for a
 /// provider's bearer token, zeroed on drop and redacted from Debug. Input: the raw bytes.
@@ -22,12 +30,31 @@ impl SecretString {
         Self::within(bytes, TOKEN_BYTES_MAX)
     }
 
+    /// Holds one stored item as the store reads or writes it, such as a secret with its
+    /// header of host keys. A space may open the item, as the mark of that header, and
+    /// nowhere else. Input: the raw bytes. Output: the item of up to `STORED_BYTES_MAX`
+    /// bytes, or `credential_secret_invalid`.
+    pub fn stored(bytes: Vec<u8>) -> Result<Self, StoreError> {
+        let start = usize::from(bytes.first() == Some(&b' '));
+        Self::checked(bytes, start, STORED_BYTES_MAX)
+    }
+
     /// Checks the bytes against the rules above with `bytes_max` as the length bound.
     /// Inputs: the raw bytes and the bound. Output: the secret, or the refusal.
-    fn within(mut bytes: Vec<u8>, bytes_max: usize) -> Result<Self, StoreError> {
-        if bytes.is_empty()
+    fn within(bytes: Vec<u8>, bytes_max: usize) -> Result<Self, StoreError> {
+        Self::checked(bytes, 0, bytes_max)
+    }
+
+    /// Checks the bytes from `start` on for visible ASCII, at least one of them, and the
+    /// whole length against `bytes_max`. Inputs: the raw bytes, the first byte the rule
+    /// covers and the bound. Output: the secret, or `credential_secret_invalid`.
+    fn checked(mut bytes: Vec<u8>, start: usize, bytes_max: usize) -> Result<Self, StoreError> {
+        assert!(start <= 1);
+        if bytes.len() <= start
             || bytes.len() > bytes_max
-            || bytes.iter().any(|byte| !(0x21..=0x7e).contains(byte))
+            || bytes[start..]
+                .iter()
+                .any(|byte| !(0x21..=0x7e).contains(byte))
         {
             wipe(&mut bytes);
             return Err(StoreError::code("credential_secret_invalid"));

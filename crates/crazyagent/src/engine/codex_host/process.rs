@@ -402,10 +402,14 @@ impl CodexHostProcess {
                     && state
                         .status
                         .and_then(|status| status.code())
-                        .and_then(|code| crate::sandbox::held_stop(std::env::consts::OS, code))
+                        .and_then(|code| {
+                            kernel_sandbox::profile::consts::held_stop(std::env::consts::OS, code)
+                        })
                         .is_some();
                 if held {
-                    return Err(EngineError(crate::sandbox::HELD_STOP_CAUSE.into()));
+                    return Err(EngineError(
+                        kernel_sandbox::profile::consts::HELD_STOP_CAUSE.into(),
+                    ));
                 }
                 if let Some(code) = state.error.or(state.cleanup_error) {
                     return Err(EngineError(code.into()));

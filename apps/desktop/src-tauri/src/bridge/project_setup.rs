@@ -416,7 +416,7 @@ impl NativeBridge {
     pub async fn project_agent_policy(
         &mut self,
         id: &str,
-    ) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+    ) -> Result<kernel_sandbox::policy::PolicyView, BridgeError> {
         let policy = self
             .controller()?
             .project_agent_policy(project(id)?)
@@ -524,7 +524,7 @@ impl NativeBridge {
         &mut self,
         id: &str,
         version: u64,
-        policy: crazyagent::sandbox::policy::AgentPolicy,
+        policy: kernel_sandbox::policy::AgentPolicy,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;

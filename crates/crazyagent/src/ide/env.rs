@@ -1,4 +1,4 @@
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 

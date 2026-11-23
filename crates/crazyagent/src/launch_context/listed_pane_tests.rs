@@ -291,7 +291,7 @@ fn a_listed_pane_for_another_harness_than_its_settings_trips_its_assert() {
 /// bridge its sandboxed command starts with, which exports them as the harness starts.
 #[test]
 fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
-    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    use kernel_common::relay_names::LOCAL_PLACEHOLDER;
     use std::ffi::OsStr;
     let (_folder, home) = harness_home("standin-jsonl-append");
     let scratch = tempfile::tempdir().unwrap();
@@ -347,7 +347,7 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
 /// of the pane's own variables.
 #[test]
 fn a_pane_s_bridge_takes_only_the_names_its_hand_over_lists() {
-    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    use kernel_common::relay_names::LOCAL_PLACEHOLDER;
     let line = "    STANDIN_APPEND_CONFIG: \"{home}/config\"\n";
     let both = format!("{line}    STANDIN_APPEND_MODE: \"{LOCAL_PLACEHOLDER}\"\n");
     let text = APPEND.replacen(line, &both, 1);
@@ -390,13 +390,15 @@ fn a_listed_pane_takes_its_temp_folder_and_tools_from_its_tool_home() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let (folder, home) = harness_home("standin-jsonl-append");
     let base = folder.path().canonicalize().unwrap();
     let _removed = TmpRemoved(base.clone());
-    let made = crate::sandbox::toolchains::make_tmp(&base).unwrap();
+    let made =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &base).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let work = scratch.path().canonicalize().unwrap();
     let profile = work.join("project.sb");

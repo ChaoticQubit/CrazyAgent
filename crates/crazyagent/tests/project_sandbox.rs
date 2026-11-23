@@ -1,11 +1,11 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
-use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, Sandbox, agent_env, tool_cache};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::tool_cache::CacheShape;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -49,7 +49,14 @@ fn case() -> Case {
 }
 
 fn sandbox(case: &Case, network: SandboxNetwork) -> ProjectSandbox {
-    ProjectSandbox::new(&case.project, &case.home, &case.tmp, network).unwrap()
+    ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &case.project,
+        &case.home,
+        &case.tmp,
+        network,
+    )
+    .unwrap()
 }
 
 fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
@@ -66,7 +73,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
 }
 
 fn owner_home() -> PathBuf {
-    crazyagent::sandbox::toolchains::ToolHomes::owner()
+    kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf()
@@ -81,12 +88,19 @@ fn quoted(path: &Path) -> String {
 /// A tool cache prepared under an engine runtime folder beside the case, with the real uv
 /// the agent's PATH finds when `uv` is set. A machine without uv fails the rows that ask
 /// for it instead of skipping them (T8).
-fn tool_cache(case: &Case, uv: bool) -> tool_cache::Prepared {
+fn tool_cache(case: &Case, uv: bool) -> kernel_sandbox::tool_cache::Prepared {
     let runtime = case.root.join("runtime");
     fs::create_dir_all(&runtime).unwrap();
     let base = sandbox(case, SandboxNetwork::Only(Vec::new()));
     let program = uv.then(|| base.tool_program("uv").expect("uv missing"));
-    tool_cache::prepare(&runtime, "project-1", "sandboxed-root", program.as_deref()).unwrap()
+    kernel_sandbox::tool_cache::prepare(
+        &crazyagent::sandbox::TOOL_CACHE_HOOKS,
+        &runtime,
+        "project-1",
+        "sandboxed-root",
+        program.as_deref(),
+    )
+    .unwrap()
 }
 
 /// The variables a sandbox's commands start with, by name.
@@ -1301,8 +1315,8 @@ fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port()
         ("hello".to_owned(), String::new()),
         "an agent's dev server on loopback takes connections"
     );
-    assert_eq!(crazyagent::sandbox::OWNER_PORTS, [1455, 11434]);
-    for port in crazyagent::sandbox::OWNER_PORTS {
+    assert_eq!(kernel_sandbox::ports::OWNER_PORTS, [1455, 11434]);
+    for port in kernel_sandbox::ports::OWNER_PORTS {
         for host in ["127.0.0.1", "0.0.0.0", "::1"] {
             let name = format!("owner-{port}-{}.sb", host.replace([':', '.'], "-"));
             let (got, said) = listen(&open, &case, &name, host, port, false);
@@ -1487,13 +1501,13 @@ fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
         Err(SandboxError::Invalid(_))
     ));
     let many: Vec<u16> =
-        (20_000..20_000 + crazyagent::sandbox::KEPT_PORTS_MAX as u16 + 1).collect();
+        (20_000..20_000 + kernel_sandbox::ports::KEPT_PORTS_MAX as u16 + 1).collect();
     assert!(matches!(
         open.clone().keep_ports(&many),
         Err(SandboxError::Invalid(_))
     ));
     let kept = open
-        .keep_ports(&many[..crazyagent::sandbox::KEPT_PORTS_MAX])
+        .keep_ports(&many[..kernel_sandbox::ports::KEPT_PORTS_MAX])
         .unwrap()
         .keep_ports(&[1455, 11434, 20_000])
         .unwrap();
@@ -1508,11 +1522,39 @@ fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
 fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     let case = case();
     let network = || SandboxNetwork::Only(Vec::new());
-    assert!(ProjectSandbox::new(Path::new("relative"), &case.home, &case.tmp, network()).is_err());
-    assert!(ProjectSandbox::new(&owner_home(), &case.home, &case.tmp, network()).is_err());
-    assert!(ProjectSandbox::new(Path::new("/"), &case.home, &case.tmp, network()).is_err());
     assert!(
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            Path::new("relative"),
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &owner_home(),
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            Path::new("/"),
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &owner_home().join(".codex"),
             &case.tmp,
@@ -1522,9 +1564,19 @@ fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     );
     let quote = case.root.join("bad\"name");
     fs::create_dir_all(&quote).unwrap();
-    assert!(ProjectSandbox::new(&quote, &case.home, &case.tmp, network()).is_err());
     assert!(
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &quote,
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project.join("missing"),
             &case.home,
             &case.tmp,
@@ -3021,8 +3073,10 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
     assert!(switched.status.success(), "{switched:?}");
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
+            .unwrap();
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -3256,8 +3310,10 @@ fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
     let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
     assert!(switched.status.success(), "{switched:?}");
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
+            .unwrap();
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -3494,8 +3550,10 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
         assert!(added.status.success(), "{added:?}");
     }
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
+            .unwrap();
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -4031,6 +4089,7 @@ fn an_agent_starts_in_a_project_named_with_long_fold_runs_and_runs_no_app_plante
     fs::create_dir_all(&bundle).unwrap();
     fs::copy("/usr/bin/true", bundle.join("Python")).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &project,
         &case.home,
         &case.tmp,
@@ -4203,7 +4262,7 @@ fn a_confined_shell_lists_its_own_running_child() {
 /// TMPDIR and takes a new file there, and a port grant joins the limited network.
 #[test]
 fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets() {
-    use crazyagent::sandbox::policy::AccessGrant;
+    use kernel_sandbox::policy::AccessGrant;
     let case = case();
     let owner_tmp = case.root.join("otmp");
     fs::create_dir_all(&owner_tmp).unwrap();
@@ -4272,9 +4331,10 @@ fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets
 /// the first and last open name and a plain file read, an unlisted name stays closed.
 #[test]
 fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
-    use crazyagent::sandbox::policy::AccessGrant;
-    use crazyagent::sandbox::shared_folders::{SharedFolders, apply};
-    use crazyagent::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crazyagent::sandbox::shared_folders::apply;
+    use kernel_sandbox::policy::AccessGrant;
+    use kernel_sandbox::shared_folders::SharedFolders;
+    use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let case = case();
     let own = case.project.join(".crazyagent/worktrees/agent-1");
     let owner_tmp = case.root.join("otmp");
@@ -4313,6 +4373,7 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
         .chain(open.iter().cloned())
         .collect();
     let base = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &own,
         &case.home,
         &case.tmp,
@@ -4381,106 +4442,5 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
     assert_eq!(fs::read_to_string(shared.join("new.txt")).unwrap(), "hi\n");
 }
 
-/// v2.4.0 gate, security: every `SECRET_NAMES` entry stays denied once the secret rule is
-/// split into strings Seatbelt reads. Each entry has one sample path only it matches (grep
-/// -E outside the sandbox proves the pairing), and under the real profile no sample, at the
-/// top of the project or deeper, can be read, while a plain file next to them can.
-#[test]
-fn every_secret_name_stays_denied_once_the_secret_rule_is_split() {
-    use crazyagent::sandbox::shared_folders::{SECRET_NAMES, SharedFolders, apply};
-    const SAMPLES: [&str; 25] = [
-        ".env",
-        ".git-credentials",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        ".pgpass",
-        ".htpasswd",
-        ".dockercfg",
-        ".s3cfg",
-        ".yarnrc.yml",
-        "pip.conf",
-        "kubeconfig",
-        ".ssh/id",
-        ".aws/config",
-        ".gnupg/pubring.kbx",
-        ".kube/config",
-        ".docker/config.json",
-        ".config/gcloud/adc",
-        "id_ed25519",
-        "credentials.json",
-        "secrets.yaml",
-        "my-service-account.json",
-        "server.pem",
-        "main.tfstate.backup",
-        "prod.tfvars",
-    ];
-    assert_eq!(SAMPLES.len(), SECRET_NAMES.len());
-    let case = case();
-    let list = case.outside.join("samples.txt");
-    fs::write(&list, format!("{}\n", SAMPLES.join("\n"))).unwrap();
-    for (at, name) in SECRET_NAMES.iter().enumerate() {
-        let found = kernel_processes::spawn_gate::output(
-            std::process::Command::new("/usr/bin/grep")
-                .arg("-Eix")
-                .arg(format!("(.*/)?({name})(/.*)?"))
-                .arg(&list)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap();
-        let matched: Vec<String> = String::from_utf8_lossy(&found.stdout)
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        assert_eq!(matched, [SAMPLES[at]], "{name}");
-    }
-    let deep = case.project.join("deep").join("er");
-    let mut paths = Vec::new();
-    for sample in SAMPLES {
-        for base in [&case.project, &deep] {
-            let path = base.join(sample);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, "secret").unwrap();
-            paths.push(path);
-        }
-    }
-    let plain = deep.join("plain.txt");
-    fs::write(&plain, "plain").unwrap();
-    let sandbox = apply(
-        sandbox(&case, SandboxNetwork::Only(Vec::new())),
-        &case.project,
-        &SharedFolders::default(),
-    )
-    .unwrap();
-    let text = sandbox.profile();
-    let denies = text
-        .matches(&format!(
-            "(require-not (subpath \"{}/.git\"))",
-            case.project.display()
-        ))
-        .count();
-    assert!(denies >= 2, "{text}");
-    let script = paths
-        .iter()
-        .map(|path| {
-            format!(
-                "cat {p} >/dev/null 2>&1 && echo open {p};",
-                p = quoted(path)
-            )
-        })
-        .chain([format!(
-            "cat {} >/dev/null && echo plain-read",
-            quoted(&plain)
-        )])
-        .collect::<Vec<_>>()
-        .join(" ");
-    let out = run(&sandbox, &case.profiles.join("secret-names.sb"), &script);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "plain-read\n",
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+#[path = "project_sandbox/secret_rule.rs"]
+mod secret_rule;

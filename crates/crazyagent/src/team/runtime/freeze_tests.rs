@@ -35,7 +35,7 @@ fn endpoint_runtimes(fixture: &Fixture) -> impl Fn() -> TeamRuntime + '_ {
 fn free_proxy_port() -> u16 {
     let model = ModelHost::new("models.crazyagent.test", 443).unwrap();
     let port = ModelProxy::bind(7, vec![model], None, &[]).unwrap().port();
-    assert!(crate::sandbox::model_proxy::PROXY_PORTS.contains(&port));
+    assert!(kernel_sandbox::ports::PROXY_PORTS.contains(&port));
     port
 }
 
@@ -577,12 +577,12 @@ impl NativeLead {
             std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &fixture.connection,
             PROJECT,
-            &crate::sandbox::policy::AgentPolicy {
-                network: crate::sandbox::policy::AgentNetwork::None,
-                ..crate::sandbox::policy::AgentPolicy::default()
+            &kernel_sandbox::policy::AgentPolicy {
+                network: kernel_sandbox::policy::AgentNetwork::None,
+                ..kernel_sandbox::policy::AgentPolicy::default()
             },
         )
         .unwrap();

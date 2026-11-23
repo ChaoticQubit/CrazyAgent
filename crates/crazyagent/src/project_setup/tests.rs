@@ -207,7 +207,7 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
         version: 0,
         paths,
     };
-    let limit = crate::sandbox::extra_paths::EXTRA_PATHS_MAX;
+    let limit = kernel_sandbox::extra_paths::EXTRA_PATHS_MAX;
     assert!(action(vec!["/tmp/a".into(); limit]).validate().is_ok());
     assert!(action(vec![]).validate().is_ok());
     for paths in [
@@ -224,9 +224,12 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
 /// here: every level on macOS, Sandboxed alone on Linux.
 #[test]
 fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
-    use crate::sandbox::policy::{AgentAccess, LevelView};
+    use kernel_sandbox::policy::{AgentAccess, LevelView};
     let catalog = catalog(&config(), None, &[], &BTreeSet::new(), None).unwrap();
-    assert_eq!(catalog.agent_access, LevelView::all(None));
+    assert_eq!(
+        catalog.agent_access,
+        LevelView::all(&crate::sandbox::POLICY_HOOKS, None)
+    );
     let runs: Vec<(AgentAccess, bool)> = catalog
         .agent_access
         .iter()

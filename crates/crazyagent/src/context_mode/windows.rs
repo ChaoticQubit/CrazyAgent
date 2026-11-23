@@ -212,7 +212,7 @@ pub(super) fn npm_wrap(
 /// Takes back what the boundary granted a finished job's container and deletes the container
 /// ([`crazyagent_win_sandbox::release`]), then deletes the profile. The container is named
 /// from the canonical job folder and home its launch used, read before the job ran, since the
-/// job may rename or delete its own folders ([`crate::sandbox::windows::container_for`]). A
+/// job may rename or delete its own folders ([`kernel_sandbox::windows::container_for`]). A
 /// profile never written means nothing was granted. Inputs: the job's profile, folder and
 /// home. Output: whether nothing is left; a profile that cannot be read or a refused release
 /// is logged with its cause and kept.
@@ -227,7 +227,7 @@ pub(super) fn release(profile: &Path, folder: &Path, home: &Path) -> bool {
             return false;
         }
     }
-    let container = crate::sandbox::windows::container_for(folder, home);
+    let container = kernel_sandbox::windows::container_for(folder, home);
     match crazyagent_win_sandbox::release(profile, &container) {
         Ok(()) => {
             let _ = std::fs::remove_file(profile);

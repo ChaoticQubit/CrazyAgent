@@ -41,6 +41,7 @@ impl DetachingRun {
         let (project, home, tmp) = (folder("project"), folder("home"), folder("tmp"));
         let profile = root.path().join("agent.sb");
         ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &project,
             &home,
             &tmp,

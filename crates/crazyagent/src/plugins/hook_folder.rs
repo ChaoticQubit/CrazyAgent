@@ -304,7 +304,7 @@ fn wanted(name: &OsStr, hooks: &[HookSpec]) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
-    if crate::instruction_files::names_one_of(name, &SKIPPED) || name.starts_with('.') {
+    if kernel_sandbox::paths::names_one_of(name, &SKIPPED) || name.starts_with('.') {
         return false;
     }
     if ALWAYS.contains(&name) {
@@ -333,7 +333,7 @@ fn copy_children(
     bounds: (usize, u64),
 ) -> Result<(), &'static str> {
     for name in names(from, "plugin_store_unavailable")? {
-        if crate::instruction_files::names_one_of(&name.to_string_lossy(), &SKIPPED) {
+        if kernel_sandbox::paths::names_one_of(&name.to_string_lossy(), &SKIPPED) {
             continue;
         }
         copy_child(from, &name, &target.join(&name), depth + 1, tally, bounds)?;

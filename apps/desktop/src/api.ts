@@ -29,7 +29,7 @@ const PAGE_LIMIT = 200;
 const ACCOUNT_PAGES_MAX = 100;
 
 const COPY: Record<string, string> = {
-  engine_unreachable: "CrazyAgent's engine isn't running.",
+  engine_unreachable: "CrazyAgent's engine isn't running.", not_connected: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
   ...STORAGE_COPY,
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",

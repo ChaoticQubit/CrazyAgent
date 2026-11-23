@@ -181,7 +181,7 @@ pub enum OwnerMutation {
     SetProjectAgentPolicy {
         project_id: ProjectId,
         version: u64,
-        policy: crate::sandbox::policy::AgentPolicy,
+        policy: kernel_sandbox::policy::AgentPolicy,
     },
     Team {
         action: crate::team::TeamAction,
@@ -1267,13 +1267,13 @@ pub enum OwnerData {
         paths: Vec<String>,
         version: u64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        runs: Vec<crate::sandbox::hidden_paths::RunKind>,
+        runs: Vec<kernel_sandbox::hidden_paths::RunKind>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         unavailable: bool,
     },
     ProjectAgentPolicy {
         project_id: ProjectId,
-        policy: crate::sandbox::policy::PolicyView,
+        policy: kernel_sandbox::policy::PolicyView,
     },
     ResearchJobs {
         project_id: ProjectId,

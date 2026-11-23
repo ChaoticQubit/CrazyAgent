@@ -137,3 +137,37 @@ fn cargo_tree_is_the_allowlist() {
     let planted = "[dependencies]\nserde = \"1\"\n\n[target.'cfg(unix)'.dependencies]\nrustix = { version = \"=1.1.5\" }\nkernel = { path = \"../x\" }\n";
     assert_eq!(unpinned(planted), ["serde = \"1\""]);
 }
+
+#[test]
+fn the_model_proxy_variables_name_its_port_and_its_tunnels_dial_no_local_or_metadata_address() {
+    use crate::model_proxy::{HOSTS_MAX, may_dial, variables};
+    let pairs = variables(29_300);
+    assert_eq!(
+        pairs.clone().map(|(name, _)| name),
+        [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "NO_PROXY",
+            "no_proxy"
+        ]
+    );
+    for (name, value) in &pairs[..4] {
+        assert_eq!(value, "http://127.0.0.1:29300", "{name}");
+    }
+    for (name, value) in &pairs[4..] {
+        assert!(value.is_empty(), "{name}");
+    }
+    assert_eq!(HOSTS_MAX, 8);
+    for refused in [
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "169.254.169.254",
+        "::ffff:127.0.0.1",
+    ] {
+        assert!(!may_dial(refused.parse().unwrap()), "{refused}");
+    }
+    assert!(may_dial("192.0.2.1".parse().unwrap()));
+}

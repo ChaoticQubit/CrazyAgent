@@ -417,7 +417,7 @@ impl Drop for Removed {
 #[test]
 fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() {
     let (_folder, home) = scratch();
-    let agent_temp = crate::sandbox::toolchains::tmp_path(&home);
+    let agent_temp = kernel_sandbox::toolchains::tmp_path(&home);
     std::fs::create_dir(&agent_temp).unwrap();
     let _removed = Removed(agent_temp.clone());
     let planted = program(&agent_temp.join("bin/tmux"), NODE);
@@ -1284,7 +1284,7 @@ fn an_app_installed_npm_harness_in_the_setup_prefix_resolves_and_the_old_prefix_
 /// An engine data folder whose `engine.db` is in WAL and written once, as an engine leaves
 /// it, holding one project setup per folder. Inputs: the data folder and the project folders.
 /// Output: none.
-fn engine_with_projects(root: &Path, folders: &[&Path]) {
+pub(super) fn engine_with_projects(root: &Path, folders: &[&Path]) {
     std::fs::create_dir_all(root).unwrap();
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     let mode: String = connection

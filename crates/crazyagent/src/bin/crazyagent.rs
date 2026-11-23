@@ -267,7 +267,10 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error}");
-                ExitCode::FAILURE
+                match crazyagent::restore::stops_on_purpose(&error) {
+                    true => ExitCode::SUCCESS,
+                    false => ExitCode::FAILURE,
+                }
             }
         };
     }
@@ -1008,15 +1011,15 @@ fn run_tui_command(args: &[OsString]) -> Result<(), String> {
         .and_then(|client| crazyagent::tui::run_tui(client, engine).map_err(|e| e.to_string()))
 }
 
-/// Whether a restore of the pinned 2.4 backup still runs in the default engine's process, so an
-/// explicit start waits instead of stopping it in the middle of the copy (L5).
-/// Inputs: the layout and the login service. Output: the answer.
-fn restoring(
+/// Why an explicit start of the default engine must not run: a restore of the pinned 2.4
+/// backup still copies in its process, or did not finish and the engine refuses to start (L5).
+/// Inputs: the layout and the login service. Output: the code, or none.
+fn refused(
     layout: &crazyagent::paths::Layout,
     service: &kernel_processes::service::Service,
-) -> bool {
+) -> Option<&'static str> {
     let running = crazyagent::restore::service_running(service);
-    crazyagent::restore::holds_restart(layout.root(), running)
+    crazyagent::restore::restart_refusal(layout.root(), running)
 }
 
 fn default_service(
@@ -1041,6 +1044,9 @@ async fn prepare_engine(
         if !crazyagent::service::answering(&layout.socket())
             && let Some(code) = crazyagent::restore::blocks_start(layout.root(), running)
         {
+            if code == crazyagent::restore::ENGINE_RESTORE_BROKEN {
+                return Ok(());
+            }
             return Err(crazyagent::tui::restore_words(code).into());
         }
         crazyagent::service::ensure_running(
@@ -1190,10 +1196,8 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             println!("Removed {}", service.name);
         }
         "start" if answering => println!("The engine is already running"),
-        "start" if restoring(&layout, &service) => {
-            return Err(
-                crazyagent::tui::restore_words(crazyagent::restore::ENGINE_RESTORING).into(),
-            );
+        "start" if let Some(code) = refused(&layout, &service) => {
+            return Err(crazyagent::tui::restore_words(code).into());
         }
         "start" => {
             let since = crazyagent::service::log_length(&layout);

@@ -154,7 +154,7 @@ impl OwnerController {
     pub async fn project_agent_policy(
         &mut self,
         project_id: ProjectId,
-    ) -> Result<crate::sandbox::policy::PolicyView, EngineError> {
+    ) -> Result<kernel_sandbox::policy::PolicyView, EngineError> {
         match self
             .read(OwnerRead::ProjectAgentPolicy { project_id })
             .await?
@@ -452,7 +452,7 @@ impl OwnerController {
         &mut self,
         project_id: ProjectId,
         version: u64,
-        policy: crate::sandbox::policy::AgentPolicy,
+        policy: kernel_sandbox::policy::AgentPolicy,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.project_agent_policy(project_id.clone()).await?;

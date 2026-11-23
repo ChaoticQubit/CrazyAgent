@@ -693,21 +693,21 @@ impl ResearchJobs {
     }
 
     /// Reads the extra read-only folders the owner saved for a project's agents, see
-    /// [`crate::sandbox::extra_paths::load`]. Takes the project. Returns the folders.
+    /// [`crate::sandbox::access_store::read::load`]. Takes the project. Returns the folders.
     pub fn read_paths(
         &self,
         project: &crate::protocol::ProjectId,
     ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
-        crate::sandbox::extra_paths::load(&self.connection, project.as_str())
+        crate::sandbox::access_store::read::load(&self.connection, project.as_str())
     }
 
     /// Reads the folders the owner keeps a project's agents out of, see
-    /// [`crate::sandbox::hidden_paths::load`]. Takes the project. Returns the folders.
+    /// [`crate::sandbox::access_store::hidden::load`]. Takes the project. Returns the folders.
     pub fn hidden_paths(
         &self,
         project: &crate::protocol::ProjectId,
     ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
-        crate::sandbox::hidden_paths::load(&self.connection, project.as_str())
+        crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
     }
 
     /// Reads the terminal display the owner chose for a project's terminals
@@ -722,12 +722,12 @@ impl ResearchJobs {
     }
 
     /// Reads the agent policy the owner saved for a project, see
-    /// [`crate::sandbox::policy::load`]. Takes the project. Returns the policy.
+    /// [`crate::sandbox::policy_store::load`]. Takes the project. Returns the policy.
     pub fn agent_policy(
         &self,
         project: &crate::protocol::ProjectId,
-    ) -> rusqlite::Result<crate::sandbox::policy::AgentPolicy> {
-        crate::sandbox::policy::load(&self.connection, project.as_str())
+    ) -> rusqlite::Result<kernel_sandbox::policy::AgentPolicy> {
+        crate::sandbox::policy_store::load(&self.connection, project.as_str())
     }
 
     /// Reads the owner's Leftover processes setting for a project (DEC-147.4), see

@@ -5420,6 +5420,7 @@ fn merge_from_a_lead_merges_its_finished_worker_and_closes_its_change_set() {
         std::fs::create_dir_all(folder).unwrap();
     }
     crate::sandbox::ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &clones.project,
         &home,
         &tmp,

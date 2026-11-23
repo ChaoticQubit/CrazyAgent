@@ -86,10 +86,10 @@ pub(crate) fn edit(
     if status != "starting" && status != "working" {
         return Err(failure("ide_agent_not_running"));
     }
-    let policy = crate::sandbox::policy::load(&db, project.as_str())
+    let policy = crate::sandbox::policy_store::load(&db, project.as_str())
         .map_err(|_| failure("ide_owner_edit_unavailable"))?;
-    if policy.access != crate::sandbox::policy::AgentAccess::Full
-        && policy.ide_agent_files == crate::sandbox::policy::IdeAgentFiles::ReadOnly
+    if policy.access != kernel_sandbox::policy::AgentAccess::Full
+        && policy.ide_agent_files == kernel_sandbox::policy::IdeAgentFiles::ReadOnly
     {
         return Err(failure("ide_agent_files_read_only"));
     }

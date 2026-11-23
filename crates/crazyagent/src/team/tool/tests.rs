@@ -1811,7 +1811,7 @@ fn an_ask_call_names_single_or_text_and_a_kind_that_does_not_fit_is_refused() {
 /// broader, extra or out of bounds is refused with the tool's own sentence.
 #[test]
 fn a_request_access_call_reads_one_narrow_grant_and_refuses_the_rest() {
-    use crate::sandbox::policy::AccessGrant;
+    use kernel_sandbox::policy::AccessGrant;
     let read = |arguments: Value| live_call(REQUEST_ACCESS_TOOL, Some(&arguments)).unwrap();
     let kept = [
         (

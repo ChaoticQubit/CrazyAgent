@@ -1605,17 +1605,23 @@ fn boundary_check(
         eprintln!("plugin_check_boundary_refused cause=windows_network_limit");
         return Err(problem);
     }
-    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
-        .map(ProjectSandbox::as_job_folder)
-        .and_then(|sandbox| sandbox.keep_ports(kept))
-        .and_then(|sandbox| sandbox.guard_engine(root))
-        .and_then(|sandbox| sandbox.allow_read(reads))
-        .and_then(|sandbox| match install {
-            Some(install) => sandbox.allow_read(install),
-            None => Ok(sandbox),
-        })
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))
-        .map_err(boundary)?;
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &folders[0],
+        &folders[1],
+        &folders[2],
+        network,
+    )
+    .map(ProjectSandbox::as_job_folder)
+    .and_then(|sandbox| sandbox.keep_ports(kept))
+    .and_then(|sandbox| sandbox.guard_engine(root))
+    .and_then(|sandbox| sandbox.allow_read(reads))
+    .and_then(|sandbox| match install {
+        Some(install) => sandbox.allow_read(install),
+        None => Ok(sandbox),
+    })
+    .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))
+    .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);
     let mut process = sandbox.wrap(&server).map_err(boundary)?;
@@ -1662,27 +1668,9 @@ async fn receive_secret(stream: &mut Stream) -> Result<AccountSecret, EngineErro
     .map_err(|_| failure("server_secret_invalid"))?
 }
 
-/// The code a refused plugins request is answered with: the engine's code when it is plain
-/// lowercase words of at most 96 bytes, else `plugins_outcome_unknown`. A storage answer
-/// that did not come within the owner's wait, which the shared engine waits name after a
-/// native sign-in read, is this protocol's `plugins_outcome_unknown` too, so a plugins
-/// client is never told to read a sign-in operation. Input: the error. Output: the code.
-fn public_code(error: EngineError) -> String {
-    if error == crate::engine::owner::native_auth::outcome_unknown() {
-        return unknown().0;
-    }
-    if error.0.len() <= 96
-        && error
-            .0
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-    {
-        error.0
-    } else {
-        "plugins_outcome_unknown".into()
-    }
-}
-
 mod check_folders;
 #[cfg(test)]
 mod tests;
+
+mod refusal_code;
+use refusal_code::public_code;

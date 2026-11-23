@@ -131,9 +131,9 @@ pub(super) fn answer(
     if let Some(unreached) = runner.unreached(account) {
         return Err(Unwritten::Failed(unreached.line().to_owned()));
     }
-    let hidden = crate::sandbox::hidden_paths::load(db, project.as_str())
+    let hidden = crate::sandbox::access_store::hidden::load(db, project.as_str())
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
-    crate::sandbox::hidden_paths::none_tracked(root, &hidden)
+    kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, root, &hidden)
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
     let research = research(db, project, root).ok_or_else(|| failed(EVIDENCE_UNREADABLE))?;
     let tree = if root.join(".git").exists() {
@@ -149,7 +149,7 @@ pub(super) fn answer(
     let run = ReadOnlyRun {
         name: &name,
         agent: "overview",
-        kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+        kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
         project: Some(project),
         folder: root,
         prompt: &prompt,

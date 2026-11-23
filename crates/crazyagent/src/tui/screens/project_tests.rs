@@ -15,8 +15,8 @@ use crate::project_setup::{
     SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy, LevelView, PolicyView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy, LevelView, PolicyView};
 use std::os::unix::fs::PermissionsExt;
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -810,7 +810,7 @@ fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
     ];
     let mut missing = Vec::new();
     for source in [
-        include_str!("../../sandbox/policy.rs"),
+        include_str!("../../../../kernel/sandbox/src/policy.rs"),
         include_str!("../../project_setup.rs"),
         include_str!("../../storage.rs"),
     ] {
@@ -864,7 +864,7 @@ fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
 /// code is defined (TN-L1 r1).
 #[test]
 fn every_narrowing_stop_reads_the_same_sentence_in_both_uis() {
-    use crate::sandbox::policy::Narrowing;
+    use kernel_sandbox::policy::Narrowing;
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../apps/desktop/src/api.ts"
@@ -2651,7 +2651,7 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
 pub(super) fn access_view(access: AgentAccess, version: u64) -> PolicyView {
     PolicyView {
         access,
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         levels: AgentAccess::ALL
             .into_iter()
             .map(|level| LevelView {
@@ -2661,9 +2661,9 @@ pub(super) fn access_view(access: AgentAccess, version: u64) -> PolicyView {
                 gaps: Vec::new(),
             })
             .collect(),
-        networks: crate::sandbox::policy::AgentNetwork::ALL
+        networks: kernel_sandbox::policy::AgentNetwork::ALL
             .into_iter()
-            .map(|network| crate::sandbox::policy::NetworkView {
+            .map(|network| kernel_sandbox::policy::NetworkView {
                 network,
                 label: network.label().to_owned(),
                 gap: None,
@@ -2727,7 +2727,7 @@ fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
             home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
-            network: crate::sandbox::policy::AgentNetwork::default(),
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             ..Default::default()
         },
     };
@@ -4379,8 +4379,8 @@ fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
 #[test]
 fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window() {
     use super::project_access::{IDE_GIT_HOOKS_LINE, agent_files_help, network_help};
-    use crate::sandbox::policy::{AgentNetwork, IdeAgentFiles, ToolchainView};
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::policy::{AgentNetwork, IdeAgentFiles, ToolchainView};
+    use kernel_sandbox::toolchains::Toolchain;
     let opening = |help: &str| help.split(' ').take(5).collect::<Vec<_>>().join(" ");
     let project = ProjectId::new("access-help").unwrap();
     let mut screen = loaded(&project);
@@ -4435,8 +4435,8 @@ fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window()
 /// (`LINUX_UNAVAILABLE`), so there the level stays and Enter saves.
 #[test]
 fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
-    use crate::sandbox::policy::ToolchainView;
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::policy::ToolchainView;
+    use kernel_sandbox::toolchains::Toolchain;
     let project = ProjectId::new("access-short").unwrap();
     let mut screen = loaded(&project);
     screen.open(Tab::Settings);
@@ -5387,7 +5387,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_r_restarts_them(
 /// named under Hidden by kind, each once, with no key, and the line goes once none is left.
 #[test]
 fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
-    use crate::sandbox::hidden_paths::RunKind;
+    use kernel_sandbox::hidden_paths::RunKind;
     let look = Look::plain();
     let project = ProjectId::new("hidden-runs").unwrap();
     let mut screen = loaded(&project);
@@ -5436,7 +5436,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
 /// once.
 #[test]
 fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
-    use crate::sandbox::hidden_paths::RunKind;
+    use kernel_sandbox::hidden_paths::RunKind;
     let look = Look::plain();
     let project = ProjectId::new("hidden-runs-poll").unwrap();
     let mut screen = loaded(&project);
@@ -5668,7 +5668,7 @@ fn a_draft_that_does_not_fit_after_the_owners_text_leaves_the_input_as_typed() {
 #[test]
 fn the_windows_access_and_loopback_refusals_read_as_the_engine_words_them() {
     for code in [
-        crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
+        kernel_sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
         kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
     ] {
         assert_eq!(

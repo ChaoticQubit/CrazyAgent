@@ -3751,9 +3751,9 @@ fn project_other_git(
         .map(|settings| settings.linux_supervisor);
     drop(tx);
     let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
-    let other_git = crate::sandbox::policy::LevelView::other_git;
+    let other_git = kernel_sandbox::policy::LevelView::other_git;
     let folder = setup.map(|setup| setup.project_folder());
-    Ok(folder.is_none_or(|folder| other_git(host, &folder)))
+    Ok(folder.is_none_or(|folder| other_git(&crate::sandbox::POLICY_HOOKS, host, &folder)))
 }
 
 fn owner_read(
@@ -3767,7 +3767,7 @@ fn owner_read(
         query,
         OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
     ) {
-        crate::sandbox::policy::LevelView::refresh();
+        kernel_sandbox::policy::LevelView::refresh(&crate::sandbox::POLICY_HOOKS);
     }
     let other_git = match query {
         OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
@@ -3824,7 +3824,7 @@ fn owner_read(
         },
         OwnerRead::ProjectReadPaths { project_id } => OwnerData::ProjectReadPaths {
             project_id: project_id.clone(),
-            paths: crate::sandbox::extra_paths::load(&tx, project_id.as_str())
+            paths: crate::sandbox::access_store::read::load(&tx, project_id.as_str())
                 .map_err(error)?
                 .into_iter()
                 .map(|path| path.display().to_string())
@@ -3832,12 +3832,12 @@ fn owner_read(
             version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
         OwnerRead::ProjectHiddenPaths { project_id } => {
-            let saved =
-                crate::sandbox::hidden_paths::load(&tx, project_id.as_str()).map_err(error)?;
+            let saved = crate::sandbox::access_store::hidden::load(&tx, project_id.as_str())
+                .map_err(error)?;
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
-                runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
-                unavailable: crate::sandbox::HIDDEN_UNHELD,
+                runs: kernel_sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                unavailable: kernel_sandbox::profile::consts::HIDDEN_UNHELD,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())
@@ -3850,11 +3850,12 @@ fn owner_read(
             let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
                 return Err(error(no_setup_code(&tx, project_id)?));
             };
-            let homes = crate::sandbox::toolchains::ToolHomes::owner()
+            let homes = kernel_sandbox::toolchains::ToolHomes::owner()
                 .map_err(|_| error("agent_policy_unreadable"))?;
-            let mut policy = crate::sandbox::policy::load(&tx, project_id.as_str())
+            let mut policy = crate::sandbox::policy_store::load(&tx, project_id.as_str())
                 .map_err(error)?
                 .view(
+                    &crate::sandbox::POLICY_HOOKS,
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
@@ -3862,7 +3863,7 @@ fn owner_read(
                     other_git,
                 );
             policy.grant_log =
-                crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;
+                crate::sandbox::grants_store::history(&tx, project_id.as_str()).map_err(error)?;
             OwnerData::ProjectAgentPolicy {
                 project_id: project_id.clone(),
                 policy,

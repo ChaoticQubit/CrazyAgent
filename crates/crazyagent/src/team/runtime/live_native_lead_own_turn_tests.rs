@@ -1,8 +1,8 @@
 use super::super::managed_agent::{AGENT, NativeTeam, SignedIn};
 use super::super::{BACKGROUND_CUT, BACKGROUND_STOPPED, Order, Report, TurnEnd, TurnRules};
 use super::{STOP, TURN, answered, finished, native_worker, own_ended, own_started};
-use crate::sandbox::policy::AgentAccess;
 use crate::team::BackgroundAtEnd;
+use kernel_sandbox::policy::AgentAccess;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 

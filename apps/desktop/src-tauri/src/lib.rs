@@ -375,8 +375,10 @@ async fn desktop_restart_engine(
     let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
-    if crazyagent::restore::holds_restart(layout.root(), restore::service_running(&service)) {
-        return Err(engine_failure(crazyagent::restore::ENGINE_RESTORING));
+    if let Some(code) =
+        crazyagent::restore::restart_refusal(layout.root(), restore::service_running(&service))
+    {
+        return Err(engine_failure(code));
     }
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
@@ -411,6 +413,36 @@ async fn desktop_restore_pinned(
         return Err(engine_failure("storage_restore_unavailable"));
     }
     lock(&state).await?.restore_pinned(generation).await
+}
+
+/// Reads what the recovery screen offers for the default engine's restore that did not
+/// finish, writing nothing (L5).
+#[tauri::command]
+async fn desktop_restore_recovery(webview: Webview) -> Result<restore::RecoveryView, BridgeError> {
+    main_window(&webview)?;
+    let (layout, running) = restore::engine()?;
+    restore::blocking(move || restore::recovery(layout.root(), running)).await
+}
+
+/// Runs one recovery action on the default engine: `put_back`, `continue` or `finish` (L5).
+#[tauri::command]
+async fn desktop_restore_recover(webview: Webview, action: String) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let (layout, running) = restore::engine()?;
+    let settings = (layout.global_settings(), layout.project_settings());
+    restore::blocking(move || {
+        restore::recover(layout.root(), running, &action, (&settings.0, &settings.1))
+    })
+    .await
+}
+
+/// Opens the default engine's backups folder, which keeps the copies a restore left (L5).
+#[tauri::command]
+async fn desktop_restore_open_backups(webview: Webview) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let (layout, _) = restore::engine()?;
+    let folder = crazyagent::restore::backups(layout.root());
+    restore::blocking(move || crazyagent::platform::reveal(&folder)).await
 }
 
 #[tauri::command]
@@ -1012,7 +1044,7 @@ async fn desktop_project_agent_policy(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+) -> Result<kernel_sandbox::policy::PolicyView, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.project_agent_policy(&id).await
 }
@@ -1023,7 +1055,7 @@ async fn desktop_set_project_agent_policy(
     state: State<'_, NativeState>,
     id: String,
     version: u64,
-    policy: crazyagent::sandbox::policy::AgentPolicy,
+    policy: kernel_sandbox::policy::AgentPolicy,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
@@ -6332,6 +6364,9 @@ native_commands! {
     desktop_set_refused_tool,
     desktop_restore_status,
     desktop_restore_pinned,
+    desktop_restore_recovery,
+    desktop_restore_recover,
+    desktop_restore_open_backups,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,

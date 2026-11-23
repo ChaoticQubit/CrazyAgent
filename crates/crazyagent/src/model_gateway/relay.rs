@@ -1,5 +1,7 @@
 use crate::engine::EngineError;
+use kernel_common::relay_names::is_placeholder;
 use kernel_processes::fd_wait::{self, Wake};
+use kernel_security::relay_token::RelayToken;
 use kernel_security::secret::Piece::{Escaped, Plain};
 use kernel_security::secret::SecretString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,16 +12,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use subtle::ConstantTimeEq;
 
 pub mod chatgpt;
 use chatgpt::{CHATGPT_CODEX_BASE_URL, ChatGptSource, SIGN_IN_EXPIRED, SIGN_IN_EXPIRED_LINE};
 
-pub const TOKEN_PREFIX: &str = "crazyagent-relay-";
-pub const LOCAL_PLACEHOLDER: &str = "crazyagent-local";
-pub(crate) const TOKEN_HEX: usize = 64;
-/// The longest key the engine writes into an account's key file: a relay token.
-pub const KEY_BYTES_MAX: usize = TOKEN_PREFIX.len() + TOKEN_HEX;
 const CURL: &str = "/usr/bin/curl";
 const CONNECTIONS_MAX: usize = 16;
 const LINE_BYTES_MAX: u64 = 16 * 1024;
@@ -62,33 +58,8 @@ const RESPONSE_DROPPED: [&str; 6] = [
     "upgrade",
 ];
 
-/// Tells whether a model key value is a CrazyAgent placeholder rather than a provider key:
-/// the local placeholder for keyless endpoints, or a relay token (see [`is_relay_token`]).
-/// Input: the value. Output: true for a placeholder.
-pub fn is_placeholder(value: &str) -> bool {
-    value == LOCAL_PLACEHOLDER || is_relay_token(value)
-}
-
-/// Tells whether a model key value is a relay token `crazyagent-relay-<64 lowercase hex>`,
-/// the placeholder a harness on an engine key relay is given in place of the key.
-/// Input: the value. Output: true for a relay token.
-pub fn is_relay_token(value: &str) -> bool {
-    value.strip_prefix(TOKEN_PREFIX).is_some_and(|hex| {
-        hex.len() == TOKEN_HEX
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
-}
-
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
-}
-
-fn random_hex(bytes: usize) -> Result<String, EngineError> {
-    let mut buffer = vec![0_u8; bytes];
-    getrandom::fill(&mut buffer).map_err(|_| failure("model_relay_unavailable"))?;
-    Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Where a relay forwards: the provider origin, the base path the agent is confined to
@@ -146,7 +117,7 @@ enum Credential<'a> {
 struct Shared {
     upstream: Upstream,
     key: Key,
-    token: String,
+    token: RelayToken,
     open: Mutex<Vec<Open>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     stop: AtomicBool,
@@ -241,14 +212,14 @@ impl Shared {
 /// started one after another do not all try the same taken ports first.
 static NEXT_RELAY_PORT: AtomicUsize = AtomicUsize::new(0);
 
-/// Binds 127.0.0.1 on the first port of [`crate::sandbox::model_proxy::RELAY_PORTS`], going
+/// Binds 127.0.0.1 on the first port of [`kernel_sandbox::ports::RELAY_PORTS`], going
 /// round from a start that moves with each relay and process, that no socket holds, bound
 /// without `SO_REUSEADDR` so a wildcard listener of this user counts as holding it. Every
 /// Open-network sandbox denies binding the whole block, so no agent can take the port, not
 /// even after the relay ended while a kept pane still sends there (SA241 vid 9). Output:
 /// the listener, or the [`first_bound`] error.
 fn relay_listener() -> std::io::Result<TcpListener> {
-    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    let block = kernel_sandbox::ports::RELAY_PORTS;
     let ports: Vec<u16> = block.clone().collect();
     let start = NEXT_RELAY_PORT
         .fetch_add(1, Ordering::SeqCst)
@@ -318,8 +289,8 @@ impl Relay {
     fn begin(base_url: &str, key: Key) -> Result<Self, EngineError> {
         let upstream = upstream(base_url)?;
         handed_bodies()?;
-        let token = format!("{TOKEN_PREFIX}{}", random_hex(TOKEN_HEX / 2)?);
-        assert!(is_placeholder(&token));
+        let token = RelayToken::mint().map_err(|_| failure("model_relay_unavailable"))?;
+        assert!(is_placeholder(token.as_str()));
         let bound = relay_listener().and_then(|listener| {
             listener.set_nonblocking(true)?;
             let port = listener.local_addr()?.port();
@@ -395,7 +366,7 @@ impl Relay {
 
     /// The placeholder the harness sends as its key: `crazyagent-relay-<64 hex>`.
     pub fn token(&self) -> &str {
-        &self.shared.token
+        self.shared.token.as_str()
     }
 
     /// The base URL the harness uses instead of the provider's:
@@ -849,8 +820,8 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, u16> {
 /// harness sends both of the first two, as Claude Code's key helper does, `x-api-key` wins,
 /// since provider keys go there. Output: which header carried it, or none when the token is
 /// missing or wrong.
-pub(crate) fn authorized(incoming: &Incoming, token: &str) -> Option<KeyHeader> {
-    let matches = |value: &str| bool::from(value.as_bytes().ct_eq(token.as_bytes()));
+pub(crate) fn authorized(incoming: &Incoming, token: &RelayToken) -> Option<KeyHeader> {
+    let matches = |value: &str| token.matches(value);
     let presented = |wanted: &'static str| {
         incoming
             .headers

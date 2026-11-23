@@ -366,14 +366,14 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
     std::fs::copy(&shipped, root.join("tool")).unwrap();
     assert_eq!(check(&root.join("tool")), "server_batch_file");
     let server = std::env::current_exe().unwrap();
-    let helper = server.with_file_name(crate::sandbox::windows::HELPER_NAME);
+    let helper = server.with_file_name(kernel_sandbox::windows::HELPER_NAME);
     let checked = check(&server);
     if helper.is_file() {
         assert_eq!(checked, "server_exited");
     } else {
         assert_eq!(
             checked,
-            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+            crate::plugins::check_refused(kernel_sandbox::windows::APPCONTAINER_MISSING)
         );
     }
     for name in ["project", "home", "tmp"] {
@@ -427,11 +427,11 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     .unwrap_err();
     let helper = std::env::current_exe()
         .unwrap()
-        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+        .with_file_name(kernel_sandbox::windows::HELPER_NAME);
     if !helper.is_file() {
         assert_eq!(
             checked,
-            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+            crate::plugins::check_refused(kernel_sandbox::windows::APPCONTAINER_MISSING)
         );
         return;
     }
@@ -477,7 +477,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     let entries = access_list;
     let helper = std::env::current_exe()
         .unwrap()
-        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+        .with_file_name(kernel_sandbox::windows::HELPER_NAME);
     let mut programs = Vec::with_capacity(2);
     for id in [DEAD, LIVE] {
         let folder = base.join(format!("server-{id}"));
@@ -498,7 +498,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
         if !helper.is_file() {
             assert_eq!(
                 checked,
-                crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+                crate::plugins::check_refused(kernel_sandbox::windows::APPCONTAINER_MISSING)
             );
             return;
         }
@@ -624,6 +624,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
             std::fs::create_dir_all(folder).unwrap();
         }
         let sandbox = crate::sandbox::ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &folders[0],
             &folders[1],
             &folders[2],

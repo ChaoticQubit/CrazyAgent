@@ -5,9 +5,11 @@ use crate::harnesses::interactive::InteractiveCommand;
 use crate::terminal::FOLDER;
 #[cfg(target_os = "macos")]
 use crate::terminal::tmux::installed;
+#[cfg(target_os = "macos")]
 use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
@@ -447,7 +449,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let zero = text.replace("\"proxy\":49152", "\"proxy\":0");
     assert_eq!(PaneRecord::decode(&zero), None);
     let started = PaneRecord {
-        access: Some(crate::sandbox::policy::AgentAccess::OwnBranch),
+        access: Some(kernel_sandbox::policy::AgentAccess::OwnBranch),
         ..record.clone()
     };
     let leveled = started.encode().unwrap();
@@ -456,8 +458,8 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     assert!(!text.contains("toolchains"), "{text}");
     let granted = PaneRecord {
         toolchains: Some(vec![
-            crate::sandbox::toolchains::Toolchain::Rust,
-            crate::sandbox::toolchains::Toolchain::Node,
+            kernel_sandbox::toolchains::Toolchain::Rust,
+            kernel_sandbox::toolchains::Toolchain::Node,
         ]),
         ..record.clone()
     };
@@ -473,7 +475,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     );
     assert_eq!(PaneRecord::decode(&too_many), None);
     let narrowed = PaneRecord {
-        network: Some(crate::sandbox::policy::AgentNetwork::None),
+        network: Some(kernel_sandbox::policy::AgentNetwork::None),
         ..record.clone()
     };
     let networked = narrowed.encode().unwrap();
@@ -481,7 +483,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     assert_eq!(PaneRecord::decode(&networked), Some(narrowed));
     assert!(!text.contains("hidden"), "{text}");
     let secrets =
-        crate::sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
+        kernel_sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
     let hid = PaneRecord {
         hidden: Some(vec![secrets.clone()]),
         ..record.clone()
@@ -501,7 +503,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let nine = PaneRecord {
         hidden: Some(vec![
             secrets.clone();
-            crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
+            kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
         ]),
         ..record.clone()
     };
@@ -695,7 +697,7 @@ fn key_folder() -> tempfile::TempDir {
 fn longest_key() -> String {
     format!(
         "{}{}",
-        crate::model_gateway::relay::TOKEN_PREFIX,
+        kernel_common::relay_names::TOKEN_PREFIX,
         "a".repeat(64)
     )
 }
@@ -770,7 +772,7 @@ fn an_adopted_key_file_that_is_a_fifo_is_not_taken_and_never_blocks_adopt() {
 
 #[test]
 fn a_pane_record_keeps_its_lineage_token_and_refuses_a_malformed_one() {
-    let token = crate::harnesses::leftovers::LineageToken::new().unwrap();
+    let token = kernel_sandbox::profile::env::LineageToken::new().unwrap();
     let record = PaneRecord {
         lineage: Some(token.clone()),
         ..keyed(std::path::Path::new("/private/tmp/home/.key"))

@@ -4,8 +4,7 @@
 /// from the owner's and the model proxy's ports.
 #[test]
 fn a_refusing_port_lies_below_the_ports_the_system_hands_out() {
-    use super::OWNER_PORTS;
-    use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+    use crate::ports::{OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS};
     let held: Vec<_> = (0..4)
         .map(|_| kernel_processes::spawn_gate::refusing_tcp_port().unwrap())
         .collect();
@@ -24,8 +23,7 @@ fn a_refusing_port_lies_below_the_ports_the_system_hands_out() {
 /// listener of its own binds it, and the next call in this process names another port.
 #[test]
 fn a_low_free_port_is_outside_the_system_and_proxy_ranges_and_each_call_moves_on() {
-    use super::OWNER_PORTS;
-    use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+    use crate::ports::{OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS};
     use std::net::{Ipv4Addr, SocketAddr};
     let first = kernel_processes::spawn_gate::free_low_tcp_port().unwrap();
     let second = kernel_processes::spawn_gate::free_low_tcp_port().unwrap();

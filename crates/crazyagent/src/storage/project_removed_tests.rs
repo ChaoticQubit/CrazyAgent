@@ -127,14 +127,14 @@ fn seed(db: &mut Connection, project: &str, first: i64) {
         [project],
     )
     .unwrap();
-    crate::sandbox::hidden_paths::save(&tx, project, &[PathBuf::from("/hidden")]).unwrap();
-    crate::sandbox::policy::remove(&tx, project).unwrap();
+    crate::sandbox::access_store::hidden::save(&tx, project, &[PathBuf::from("/hidden")]).unwrap();
+    crate::sandbox::policy_store::remove(&tx, project).unwrap();
     tx.execute(
         "INSERT INTO project_agent_policy(project, body) VALUES (?1, '{}')",
         [project],
     )
     .unwrap();
-    crate::sandbox::grants::forget_project(&tx, project).unwrap();
+    crate::sandbox::grants_store::forget_project(&tx, project).unwrap();
     tx.execute(
         "INSERT INTO access_grant_log(project,at_ms,action,grant_json,by)
          VALUES (?1,1,'granted','{}','owner')",
@@ -161,7 +161,7 @@ fn seed(db: &mut Connection, project: &str, first: i64) {
     .unwrap();
     tx.commit().unwrap();
     let seers = BTreeSet::from([first, first + 1, first + 2]);
-    crate::sandbox::hidden_paths::set_seers(db, project, &seers).unwrap();
+    crate::sandbox::access_store::hidden::set_seers(db, project, &seers).unwrap();
 }
 
 /// The rows a project holds in each area of [`SEEDED`], its panes counted by its agent ids.

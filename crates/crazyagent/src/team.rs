@@ -3082,7 +3082,9 @@ fn perform(
             Err(code) => rejected(code),
         }),
         TeamAction::RestartHiddenSeers { .. } => {
-            if crate::sandbox::hidden_paths::ask_restart(tx, project.as_str()).map_err(error)? == 0
+            if crate::sandbox::access_store::hidden::ask_restart(tx, project.as_str())
+                .map_err(error)?
+                == 0
             {
                 return Ok(rejected("team_no_hidden_seers"));
             }
@@ -4432,10 +4434,10 @@ pub fn master_lands(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<MasterLands, EngineError> {
-    let access = crate::sandbox::policy::load(connection, project.as_str())
+    let access = crate::sandbox::policy_store::load(connection, project.as_str())
         .map_err(error)?
         .access;
-    if access != crate::sandbox::policy::AgentAccess::Full {
+    if access != kernel_sandbox::policy::AgentAccess::Full {
         return Ok(MasterLands::Waits);
     }
     saved_master_lands(connection, project)
@@ -4451,12 +4453,12 @@ fn offered_master_lands(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<(Option<MasterLands>, bool), EngineError> {
-    let access = match crate::sandbox::policy::load(connection, project.as_str()) {
+    let access = match crate::sandbox::policy_store::load(connection, project.as_str()) {
         Ok(policy) => policy.access,
         Err(rusqlite::Error::FromSqlConversionFailure(..)) => return Ok((None, true)),
         Err(failed) => return Err(error(failed)),
     };
-    if access != crate::sandbox::policy::AgentAccess::Full {
+    if access != kernel_sandbox::policy::AgentAccess::Full {
         return Ok((None, false));
     }
     saved_master_lands(connection, project).map(|lands| (Some(lands), false))
@@ -5738,7 +5740,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .map_err(error)?
     };
     let changed = crate::instruction_files::badges(connection, project).map_err(error)?;
-    let seers = crate::sandbox::hidden_paths::seers(connection, project.as_str()).map_err(error)?;
+    let seers =
+        crate::sandbox::access_store::hidden::seers(connection, project.as_str()).map_err(error)?;
     for agent in &mut agents {
         agent.owner_stopped = stopped.contains(&agent.id);
         agent.instructions_changed = changed.contains(&agent.id) && agent.status.live();

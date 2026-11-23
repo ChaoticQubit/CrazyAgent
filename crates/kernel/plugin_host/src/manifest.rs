@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use kernel_common::names::{is_dotted, is_snake, is_store_name};
+use kernel_common::names::{is_dotted, is_snake, is_store_account};
 use toml::{Table, Value};
 
 use crate::Refused;
@@ -381,7 +381,7 @@ fn net(section: &Value) -> Option<Net> {
 
 /// Reads a `[net.send]` table: each key a field some `[net.capture]` row names, each
 /// value a table of `hosts`, 1 to `SEND_HOSTS_MAX` distinct listed hosts, and an optional
-/// `keep_as` store name ([`is_store_name`]) used by no other row. Inputs: the table, the listed
+/// `keep_as` store account ([`is_store_account`]) used by no other row. Inputs: the table, the listed
 /// hosts and the capture rows. Output: the rows, or none for any other key, type or value.
 fn net_send(
     table: &Value,
@@ -405,7 +405,11 @@ fn net_send(
             })
             .collect::<Option<Vec<String>>>()?;
         let keep_as = match row.get("keep_as") {
-            Some(name) => Some(name.as_str().filter(|name| is_store_name(name))?.to_owned()),
+            Some(name) => Some(
+                name.as_str()
+                    .filter(|name| is_store_account(name))?
+                    .to_owned(),
+            ),
             None => None,
         };
         let distinct = to

@@ -641,7 +641,7 @@ pub fn answer(
     let how = How::Answer(&text, AnsweredBy::Owner);
     let settled = settle(&tx, question, how, &owner(), version)?;
     if settled == Settlement::Settled {
-        let allowed = crate::sandbox::grants::allows(&answer.picks);
+        let allowed = kernel_sandbox::grants::allows(&answer.picks);
         crate::sandbox::grants::decide(&tx, &project, &asker, allowed, now_ms())?;
         let approved = crate::github::proposals::approves(&answer.picks);
         crate::github::proposals::decide(&tx, &project, &asker, approved)?;
@@ -736,7 +736,7 @@ pub fn relay(
     let tx = immediate(db)?;
     let question = found(&tx, id)?;
     let owners = [
-        crate::sandbox::grants::ASKER_PREFIX,
+        kernel_sandbox::grants::ASKER_PREFIX,
         crate::github::proposals::ASKER_PREFIX,
     ];
     let owner_only = owners

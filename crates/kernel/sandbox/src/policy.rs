@@ -1,15 +1,8 @@
-use super::shared_folders::SharedFolders;
-use super::toolchains::{ToolHomes, Toolchain};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::host::LinuxHost;
+use crate::shared_folders::SharedFolders;
+use crate::toolchains::{ToolHomes, Toolchain};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-
-const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_agent_policy (
-    project TEXT PRIMARY KEY,
-    body TEXT NOT NULL
-)";
-
-const BODY_BYTES_MAX: usize = 16 * 1024;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_UNAVAILABLE: &str =
@@ -18,8 +11,10 @@ const WINDOWS_UNAVAILABLE: &str =
 #[cfg(target_os = "linux")]
 const LINUX_UNAVAILABLE: &str = "On Linux, agents run Sandboxed in this version.";
 
+/// Why Full access cannot run on Windows in this version, as the level list shows it.
 #[cfg(target_os = "windows")]
-const FULL_WINDOWS_UNAVAILABLE: &str = "Full access isn't available on Windows in this version.";
+pub const FULL_WINDOWS_UNAVAILABLE: &str =
+    "Full access isn't available on Windows in this version.";
 
 /// The code a level that cannot run here is refused with.
 pub const AGENT_ACCESS_UNAVAILABLE: &str = "agent_access_unavailable";
@@ -30,6 +25,18 @@ pub const SANDBOX_FULL_UNAVAILABLE_WINDOWS: &str = "sandbox_full_unavailable_win
 /// What a limited network cannot hold on Windows (DESIGN-0256 O2a): the AppContainer limits
 /// no host or port, and it cannot reach this computer's own network.
 pub const WINDOWS_NETWORK_WIDE_LINE: &str = "On Windows, network limits can't hold hosts or ports in this version: with Port 443 only or None, agents reach the whole internet, and a model on this computer, such as a local server or the relay, can't be reached.";
+
+/// What the agent policy reads from the machine and the engine, which the engine passes in:
+/// what this Linux holds, read again and as last kept, whether a project may hold another
+/// git repository, and the top-level folders a project offers to share. Inputs: the fields.
+/// Output: a value every view, level list and refresh takes.
+#[derive(Clone, Copy)]
+pub struct PolicyHooks {
+    pub linux_host: fn() -> Option<LinuxHost>,
+    pub linux_host_kept: fn() -> Option<LinuxHost>,
+    pub linux_other_git: fn(&Path) -> bool,
+    pub local_folders: fn(&Path) -> Vec<String>,
+}
 
 /// How free one project's agents are (DEC-102): Sandboxed writes only the agent's own
 /// worktree and never git; Own branch adds full git in the agent's own git folder and
@@ -157,10 +164,10 @@ impl AgentNetwork {
     /// model proxy: under None for a model off loopback, except on Windows, whose AppContainer
     /// cannot reach loopback (P6), so the agent reaches the model's port on any host instead
     /// (DEC-203 O2a). Inputs: the OS, whether tools are on, the model. Output: the answer.
-    pub fn proxied(self, os: &str, tools: bool, model: kernel_sandbox::net::SandboxRemote) -> bool {
+    pub fn proxied(self, os: &str, tools: bool, model: crate::net::SandboxRemote) -> bool {
         tools
             && self == Self::None
-            && !matches!(model, kernel_sandbox::net::SandboxRemote::Loopback(_))
+            && !matches!(model, crate::net::SandboxRemote::Loopback(_))
             && os != "windows"
     }
 
@@ -173,25 +180,25 @@ impl AgentNetwork {
         self,
         os: &str,
         tools: bool,
-        model: kernel_sandbox::net::SandboxRemote,
+        model: crate::net::SandboxRemote,
         proxy: Option<u16>,
-    ) -> Result<kernel_sandbox::net::SandboxNetwork, kernel_sandbox::error::SandboxError> {
+    ) -> Result<crate::net::SandboxNetwork, crate::error::SandboxError> {
         assert_eq!(
             proxy.is_some(),
             self.proxied(os, tools, model),
             "a proxy port is given exactly when the agent is proxied"
         );
-        if os == "windows" && matches!(model, kernel_sandbox::net::SandboxRemote::Loopback(_)) {
-            return Err(kernel_sandbox::error::SandboxError::Unavailable(
-                kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+        if os == "windows" && matches!(model, crate::net::SandboxRemote::Loopback(_)) {
+            return Err(crate::error::SandboxError::Unavailable(
+                crate::lines::MODEL_LOOPBACK_WINDOWS_LINE.into(),
             ));
         }
         Ok(match proxy {
-            Some(port) => kernel_sandbox::net::SandboxNetwork::Only(vec![
-                kernel_sandbox::net::SandboxRemote::Loopback(port),
-            ]),
+            Some(port) => {
+                crate::net::SandboxNetwork::Only(vec![crate::net::SandboxRemote::Loopback(port)])
+            }
             None if !tools || (self == Self::None && os == "windows") => {
-                kernel_sandbox::net::SandboxNetwork::Only(vec![model])
+                crate::net::SandboxNetwork::Only(vec![model])
             }
             None => self.sandbox(Some(model)),
         })
@@ -202,23 +209,18 @@ impl AgentNetwork {
     /// port 443 plus the model's port for Https, and for None the model only on loopback:
     /// a model on any host is reached under None only through a model proxy's loopback
     /// port, so no None path grants a host port or DNS (S4B-M1).
-    pub fn sandbox(
-        self,
-        model: Option<kernel_sandbox::net::SandboxRemote>,
-    ) -> kernel_sandbox::net::SandboxNetwork {
+    pub fn sandbox(self, model: Option<crate::net::SandboxRemote>) -> crate::net::SandboxNetwork {
         match self {
-            Self::Open => kernel_sandbox::net::SandboxNetwork::Open,
+            Self::Open => crate::net::SandboxNetwork::Open,
             Self::Https => {
-                let mut remotes = vec![kernel_sandbox::net::SandboxRemote::AnyHost(443)];
+                let mut remotes = vec![crate::net::SandboxRemote::AnyHost(443)];
                 remotes.extend(model);
-                kernel_sandbox::net::SandboxNetwork::Only(remotes)
+                crate::net::SandboxNetwork::Only(remotes)
             }
-            Self::None => kernel_sandbox::net::SandboxNetwork::Only(
+            Self::None => crate::net::SandboxNetwork::Only(
                 model
                     .into_iter()
-                    .filter(|remote| {
-                        matches!(remote, kernel_sandbox::net::SandboxRemote::Loopback(_))
-                    })
+                    .filter(|remote| matches!(remote, crate::net::SandboxRemote::Loopback(_)))
                     .collect(),
             ),
         }
@@ -300,16 +302,11 @@ impl HomeCaches {
 /// the project's network choice at Own branch through [`AgentNetwork::sandbox`], with no
 /// model port. A Full access process has no Seatbelt for a choice to limit, so it never
 /// asks. Inputs: the level and the choice. Output: the sandbox's network.
-pub fn ide_network(
-    level: AgentAccess,
-    choice: AgentNetwork,
-) -> kernel_sandbox::net::SandboxNetwork {
+pub fn ide_network(level: AgentAccess, choice: AgentNetwork) -> crate::net::SandboxNetwork {
     assert_ne!(level, AgentAccess::Full);
     match level {
         AgentAccess::OwnBranch => choice.sandbox(None),
-        AgentAccess::Sandboxed | AgentAccess::Full => {
-            kernel_sandbox::net::SandboxNetwork::Only(Vec::new())
-        }
+        AgentAccess::Sandboxed | AgentAccess::Full => crate::net::SandboxNetwork::Only(Vec::new()),
     }
 }
 
@@ -342,7 +339,7 @@ impl IdeAgentFiles {
 
 /// One project's agent folders choice as a Seatbelt profile holds it (DEC-124), with whether
 /// the older agents root `<project>/worktrees` still holds engine-made worktrees
-/// ([`crate::ide::workspace::older_agents`]). While it holds none, that folder may be the
+/// (read by the engine, which made them). While it holds none, that folder may be the
 /// owner's own, so the rule leaves it alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AgentFilesRule {
@@ -366,22 +363,18 @@ impl AgentFilesRule {
             IdeAgentFiles::NoDeleteOrRename => "file-write-unlink",
             IdeAgentFiles::ReadOnly => "file-write*",
         };
-        assert!(kernel_sandbox::paths::clean_absolute(root));
-        let root =
-            kernel_sandbox::paths::any_case(root.to_str().expect("a clean absolute path is text"));
-        let state = kernel_sandbox::paths::any_case("/.crazyagent");
+        assert!(crate::paths::clean_absolute(root));
+        let root = crate::paths::any_case(root.to_str().expect("a clean absolute path is text"));
+        let state = crate::paths::any_case("/.crazyagent");
         let layout = if self.older_agents {
             format!("({state})?")
         } else {
             state.clone()
         };
-        let agents = format!(
-            "{root}{layout}/{}",
-            kernel_sandbox::paths::any_case("worktrees")
-        );
+        let agents = format!("{root}{layout}/{}", crate::paths::any_case("worktrees"));
         format!(
             "(deny {operation}\n  {})\n(deny file-write-unlink\n  (regex #\"^{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n",
-            kernel_sandbox::paths::at_or_below(&format!("{agents}/[^/]+"))
+            crate::paths::at_or_below(&format!("{agents}/[^/]+"))
         )
     }
 }
@@ -605,13 +598,15 @@ impl AgentPolicy {
     /// choice with the top-level folders it can pick, and the policy's version, which a save
     /// names. Inputs: the project folder, the owner's tool homes, the version, the owner's
     /// sandbox settings, none when unreadable, and whether the project may hold another git
-    /// repository ([`LevelView::other_git`]). Output: the view.
+    /// repository ([`LevelView::other_git`]); the engine's hooks read this Linux and the
+    /// project's local folders. Output: the view.
     pub fn view(
         &self,
+        hooks: &PolicyHooks,
         project: &Path,
         homes: &ToolHomes,
         version: u64,
-        settings: Option<kernel_sandbox::settings::SandboxSettings>,
+        settings: Option<crate::settings::SandboxSettings>,
         other_git: bool,
     ) -> PolicyView {
         let allowed = self.allowed(project);
@@ -628,7 +623,7 @@ impl AgentPolicy {
             .collect();
         assert!(toolchains.len() <= Toolchain::ALL.len());
         let calls = settings.map(|settings| settings.linux_supervisor);
-        let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+        let host = (hooks.linux_host_kept)().map(|host| host.under(calls));
         let sockets = settings.map(|settings| settings.linux_sockets);
         PolicyView {
             access: self.access,
@@ -680,19 +675,19 @@ impl AgentPolicy {
                     label: grant.label(),
                 })
                 .collect(),
-            temp_folder: match super::grants::owner_temp_folder() {
+            temp_folder: match crate::grants::owner_temp_folder() {
                 Ok(folder) => TempFolderView {
                     path: Some(folder.display().to_string()),
                     unavailable: None,
                 },
                 Err(code) => TempFolderView {
                     path: None,
-                    unavailable: Some(super::grants::refusal_text(code).to_owned()),
+                    unavailable: Some(crate::grants::refusal_text(code).to_owned()),
                 },
             },
             grant_log: Vec::new(),
             shared_folders: self.shared_folders.clone(),
-            local_folders: super::shared_folders::local_folders(project),
+            local_folders: (hooks.local_folders)(project),
         }
     }
 
@@ -849,7 +844,7 @@ pub struct PolicyView {
     #[serde(default)]
     pub temp_folder: TempFolderView,
     #[serde(default)]
-    pub grant_log: Vec<super::grants::LogView>,
+    pub grant_log: Vec<crate::grants::LogView>,
     #[serde(default)]
     pub shared_folders: SharedFolders,
     #[serde(default)]
@@ -916,14 +911,14 @@ pub struct NetworkView {
 /// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
-    host: Option<crate::sandbox::LinuxHost>,
-    sockets: Option<kernel_sandbox::settings::LinuxSockets>,
+    host: Option<LinuxHost>,
+    sockets: Option<crate::settings::LinuxSockets>,
     grants: &[AccessGrant],
 ) -> Option<String> {
     let host = host?;
-    let tcp = sockets == Some(kernel_sandbox::settings::LinuxSockets::TcpOnly);
+    let tcp = sockets == Some(crate::settings::LinuxSockets::TcpOnly);
     let low = grants.iter().any(|grant| {
-        matches!(grant, AccessGrant::Port { port } if *port < kernel_sandbox::ports::BRIDGE_PORT_MIN)
+        matches!(grant, AccessGrant::Port { port } if *port < crate::ports::BRIDGE_PORT_MIN)
     });
     if host.routed && tcp && network == AgentNetwork::Https && !low {
         assert!(host.nested);
@@ -931,22 +926,20 @@ pub fn linux_network_gap(
     }
     if host.supervised && tcp && network != AgentNetwork::Open {
         return (network == AgentNetwork::Https)
-            .then(|| kernel_sandbox::lines::LINUX_DNS_ANY_HOST_LINE.to_owned());
+            .then(|| crate::lines::LINUX_DNS_ANY_HOST_LINE.to_owned());
     }
     let bridges = network == AgentNetwork::None && host.nested && tcp;
     if !bridges {
-        return Some(kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        return Some(crate::lines::LINUX_PORTS_ANY_HOST_LINE.to_owned());
     }
     grants
         .iter()
         .filter_map(|grant| match grant {
-            AccessGrant::Port { port } if *port < kernel_sandbox::ports::BRIDGE_PORT_MIN => {
-                Some(*port)
-            }
+            AccessGrant::Port { port } if *port < crate::ports::BRIDGE_PORT_MIN => Some(*port),
             _ => None,
         })
         .min()
-        .map(crate::sandbox::linux_unbridged_line)
+        .map(crate::lines::linux_unbridged_line)
 }
 
 /// What a network choice cannot hold on Windows, for the Agent access page: Port 443 only and
@@ -972,10 +965,10 @@ impl LevelView {
     /// confined, each with the reason it cannot run agents on this computer, from what
     /// [`LevelView::refresh`] last read of it under the owner's call supervisor setting; a
     /// repository may be anywhere in a project not made yet. Input: the setting, none when
-    /// unreadable. Output: one view for each level.
-    pub fn all(calls: Option<kernel_sandbox::settings::LinuxSupervisor>) -> Vec<Self> {
+    /// unreadable, and the engine's hooks. Output: one view for each level.
+    pub fn all(hooks: &PolicyHooks, calls: Option<crate::settings::LinuxSupervisor>) -> Vec<Self> {
         Self::on(
-            crate::sandbox::linux_host_kept().map(|host| host.under(calls)),
+            (hooks.linux_host_kept)().map(|host| host.under(calls)),
             true,
         )
     }
@@ -983,16 +976,16 @@ impl LevelView {
     /// Reads again what this computer holds once it is a minute old, which on Linux may
     /// start the sandbox helper and bubblewrap. A reader calls it before it opens its
     /// database transaction, so [`LevelView::all`] inside never waits on a program.
-    /// Takes nothing. Returns nothing.
-    pub fn refresh() {
-        crate::sandbox::linux_host();
+    /// Takes the engine's hooks. Returns nothing.
+    pub fn refresh(hooks: &PolicyHooks) {
+        (hooks.linux_host)();
     }
 
     /// Every access level as [`LevelView::all`] gives them, for a computer that holds
     /// `host`. Inputs: what a Linux holds under the setting, none on another system, and
     /// whether the project may hold another git repository ([`LevelView::other_git`]), read
     /// before any transaction. Output: one view for each level, with its [`linux_gaps`].
-    pub fn on(host: Option<crate::sandbox::LinuxHost>, other_git: bool) -> Vec<Self> {
+    pub fn on(host: Option<LinuxHost>, other_git: bool) -> Vec<Self> {
         let levels: Vec<Self> = AgentAccess::ALL
             .into_iter()
             .map(|access| Self {
@@ -1011,11 +1004,12 @@ impl LevelView {
 
     /// Tells whether a project may hold a git repository besides its own, as its Agent
     /// access lines need where the call supervisor runs: a bounded read of its folder
-    /// ([`crate::sandbox::linux_other_git`]), made only for a supervised host. A reader
+    /// ([`PolicyHooks::linux_other_git`]), made only for a supervised host. A reader
     /// calls it before its database transaction, so that read never holds one. Inputs:
-    /// what this Linux holds under the setting, none elsewhere, and the folder.
-    pub fn other_git(host: Option<crate::sandbox::LinuxHost>, project: &Path) -> bool {
-        host.is_some_and(|host| host.supervised) && crate::sandbox::linux_other_git(project)
+    /// the engine's hooks, what this Linux holds under the setting, none elsewhere, and
+    /// the folder.
+    pub fn other_git(hooks: &PolicyHooks, host: Option<LinuxHost>, project: &Path) -> bool {
+        host.is_some_and(|host| host.supervised) && (hooks.linux_other_git)(project)
     }
 }
 
@@ -1027,7 +1021,7 @@ impl LevelView {
 /// project may hold another repository.
 pub fn linux_gaps(
     access: AgentAccess,
-    host: Option<crate::sandbox::LinuxHost>,
+    host: Option<LinuxHost>,
     other_git: bool,
 ) -> Vec<&'static str> {
     let Some(host) = host else {
@@ -1040,23 +1034,23 @@ pub fn linux_gaps(
     }
     let mut lines = Vec::with_capacity(4);
     if host.root {
-        lines.push(kernel_sandbox::lines::LINUX_ROOT_LINE);
+        lines.push(crate::lines::LINUX_ROOT_LINE);
     }
     if host.supervised {
         if other_git {
-            lines.push(kernel_sandbox::lines::LINUX_KEPT_GIT_LINE);
+            lines.push(crate::lines::LINUX_KEPT_GIT_LINE);
         }
-        lines.push(kernel_sandbox::lines::LINUX_SUPERVISED_LINE);
+        lines.push(crate::lines::LINUX_SUPERVISED_LINE);
     } else {
-        lines.push(kernel_sandbox::lines::LINUX_NESTED_GIT_LINE);
+        lines.push(crate::lines::LINUX_NESTED_GIT_LINE);
     }
     if host.armored && !host.root {
-        lines.push(kernel_sandbox::lines::LINUX_APPARMOR_LINE);
+        lines.push(crate::lines::LINUX_APPARMOR_LINE);
     }
     if !host.nested && (host.scoped || host.supervised) {
-        lines.push(kernel_sandbox::lines::LINUX_PROCESS_LIST_LINE);
+        lines.push(crate::lines::LINUX_PROCESS_LIST_LINE);
     } else if !host.nested {
-        lines.push(kernel_sandbox::lines::LINUX_SIGNALS_LINE);
+        lines.push(crate::lines::LINUX_SIGNALS_LINE);
     }
     assert!((1..=4).contains(&lines.len()));
     lines
@@ -1093,78 +1087,6 @@ pub fn recorded_toolchains(project: &Path, homes: Option<&ToolHomes>) -> Vec<Too
         .collect();
     assert!(recorded.len() <= Toolchain::ALL.len());
     recorded
-}
-
-/// Whether a project's agent policy was ever saved. Inputs: the open connection or
-/// transaction and the project id. Output: the answer, or the database error.
-pub fn saved(connection: &Connection, project: &str) -> rusqlite::Result<bool> {
-    connection.execute(TABLE, [])?;
-    connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM project_agent_policy WHERE project=?1)",
-        [project],
-        |row| row.get(0),
-    )
-}
-
-/// Replaces a project's agent policy. Inputs: the open connection or transaction, the
-/// project id and a validated policy. Output: done, or the database error.
-pub fn save(connection: &Connection, project: &str, policy: &AgentPolicy) -> rusqlite::Result<()> {
-    assert!(policy.validate().is_ok());
-    let body = serde_json::to_string(policy)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    assert!(body.len() <= BODY_BYTES_MAX);
-    connection.execute(TABLE, [])?;
-    connection.execute(
-        "INSERT INTO project_agent_policy (project, body) VALUES (?1, ?2)
-         ON CONFLICT(project) DO UPDATE SET body=excluded.body",
-        params![project, body],
-    )?;
-    Ok(())
-}
-
-/// Reads a project's agent policy; the default (Sandboxed, no toolchain choice) when none
-/// was ever saved. Inputs: the open connection or transaction and the project id. Output:
-/// the policy, or the database error for an unreadable row.
-pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<AgentPolicy> {
-    let present: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_agent_policy')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !present {
-        return Ok(AgentPolicy::default());
-    }
-    let body: Option<String> = connection
-        .query_row(
-            "SELECT body FROM project_agent_policy WHERE project=?1",
-            [project],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(body) = body else {
-        return Ok(AgentPolicy::default());
-    };
-    let unreadable = |error: Box<dyn std::error::Error + Send + Sync>| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error)
-    };
-    if body.len() > BODY_BYTES_MAX {
-        return Err(unreadable("agent policy too long".into()));
-    }
-    let policy: AgentPolicy =
-        serde_json::from_str(&body).map_err(|error| unreadable(Box::new(error)))?;
-    policy.validate().map_err(|code| unreadable(code.into()))?;
-    Ok(policy)
-}
-
-/// Deletes a project's agent policy when the project is removed. Inputs: the open
-/// connection or transaction and the project id. Output: done, or the database error.
-pub fn remove(connection: &Connection, project: &str) -> rusqlite::Result<()> {
-    connection.execute(TABLE, [])?;
-    connection.execute(
-        "DELETE FROM project_agent_policy WHERE project=?1",
-        [project],
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]

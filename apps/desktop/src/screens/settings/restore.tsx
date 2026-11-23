@@ -25,6 +25,7 @@ export function restoreShown(view: RestoreView): { offer: boolean; line: string;
   const running = view.last?.kind === "pending";
   const failure = view.last?.kind === "failed" ? plainError(view.last.code) : null;
   if (running) return { offer: false, line: RESTORE_RUNNING, failure: null };
+  if (view.last?.kind === "restoring" || view.last?.kind === "broken") return { offer: false, line: plainError("engine_restore_broken"), failure: null };
   if (view.last?.kind === "restored") return { offer: false, line: plainError("engine_restored"), failure: null };
   if (view.until_ms === null) return { offer: false, line: RESTORE_NONE, failure };
   const until = new Date(view.until_ms).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });

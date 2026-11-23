@@ -320,6 +320,7 @@ impl Team {
             fs::create_dir_all(folder).unwrap();
         }
         let sandbox = crazyagent::sandbox::ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &self.project,
             &home,
             &tmp,

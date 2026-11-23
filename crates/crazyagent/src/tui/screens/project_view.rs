@@ -351,7 +351,7 @@ pub(in crate::tui) fn project_screen(
         if screen
             .agent_policy
             .as_ref()
-            .is_some_and(|view| view.access == crate::sandbox::policy::AgentAccess::Full)
+            .is_some_and(|view| view.access == kernel_sandbox::policy::AgentAccess::Full)
         {
             body.push(Row::default());
             body.extend(
