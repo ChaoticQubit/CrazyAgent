@@ -12,19 +12,14 @@ pub mod node;
 pub mod pack;
 #[cfg(unix)]
 pub mod pinned;
-#[cfg(unix)]
-pub(crate) mod process;
 pub mod progress;
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
-pub(crate) mod run;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows;
 
+use kernel_processes::run::{InstallError, Version};
 use serde::{Deserialize, Serialize};
 
 pub use pack::{PackGroup, PackKind};
-
-const VERSION_BYTES_MAX: usize = 32;
 
 /// The uv release setup installs on every system.
 pub const UV_VERSION: &str = "0.13.5";
@@ -162,64 +157,6 @@ impl Dependency {
             Self::Graphify => "Graphify command",
             Self::Node => "Node.js",
         }
-    }
-}
-
-/// A plain reason setup could not find or install something, as a stable code such as
-/// `setup_checksum_mismatch`. `plain_reason` turns the code into the sentence setup shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InstallError(pub &'static str);
-
-impl std::fmt::Display for InstallError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-
-impl std::error::Error for InstallError {}
-
-/// A tool version as the tool prints it, such as `3.5a` or `0.9.9`: 1 to 32 characters
-/// of letters, digits, `.`, `-` and `+`, starting with a letter or digit.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Version(String);
-
-impl Version {
-    /// Checks one version text. Input: the text. Output: the version, or
-    /// `setup_version_unreadable` when it is empty, too long or has other characters.
-    pub fn parse(text: &str) -> Result<Self, InstallError> {
-        let valid = !text.is_empty()
-            && text.len() <= VERSION_BYTES_MAX
-            && text
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_alphanumeric())
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+');
-        if !valid {
-            return Err(InstallError("setup_version_unreadable"));
-        }
-        Ok(Self(text.to_owned()))
-    }
-
-    /// Returns the version text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for Version {
-    type Error = InstallError;
-
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        Self::parse(&text)
-    }
-}
-
-impl From<Version> for String {
-    fn from(version: Version) -> Self {
-        version.0
     }
 }
 
@@ -831,7 +768,7 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
             if let Some((_, sha256)) = UV_RELEASES.iter().find(|(known, _)| *known == target) {
                 let name = format!("uv-{target}");
                 return Some(Pin::Release {
-                    version: Version(UV_VERSION.to_owned()),
+                    version: Version::parse(UV_VERSION).unwrap(),
                     url: format!(
                         "https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{name}.tar.gz"
                     ),
@@ -841,12 +778,12 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
             }
             WINGET_TARGETS.contains(&target).then(|| Pin::Winget {
                 id: UV_WINGET_ID.to_owned(),
-                version: Version(UV_VERSION.to_owned()),
+                version: Version::parse(UV_VERSION).unwrap(),
             })
         }
         Dependency::Graphify => Some(Pin::UvTool {
             package: GRAPHIFY_PACKAGE.to_owned(),
-            version: Version(GRAPHIFY_VERSION.to_owned()),
+            version: Version::parse(GRAPHIFY_VERSION).unwrap(),
             python: GRAPHIFY_PYTHON.to_owned(),
         }),
         Dependency::Tmux => Some(Pin::Homebrew {
@@ -862,7 +799,7 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
 fn node_pin(target: &str) -> Option<Pin> {
     let pinned = node::pin(target)?;
     Some(Pin::Archive {
-        version: Version(node::NODE_VERSION.to_owned()),
+        version: Version::parse(node::NODE_VERSION).unwrap(),
         url: pinned.url,
         sha256: pinned.sha256,
         top: pinned.top,
@@ -954,7 +891,7 @@ impl SetupAction {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use process::is_sha256;
+    use kernel_processes::run::is_sha256;
 
     const LINUX: [&str; 2] = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"];
 

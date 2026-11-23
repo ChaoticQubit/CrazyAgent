@@ -1,6 +1,7 @@
 use super::pinned::{PinnedInstaller, runnable, system_folders};
-use super::process::{private_folder, run};
-use super::{Dependency, InstallError, Installer, Pin, Version};
+use super::{Dependency, Installer, Pin};
+use kernel_processes::run::{InstallError, Version};
+use kernel_processes::run::{private_folder, run};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

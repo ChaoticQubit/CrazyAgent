@@ -9,10 +9,10 @@ use crate::setup::pack::PackManifestEntry;
 use crate::setup::pack::{PackKind, PackSource};
 use crate::setup::progress;
 use crate::setup::{
-    Dependency, DependencyState, DependencyStatus, InstallError, Installer, PackState, SETUP_JOB,
-    plain_reason,
+    Dependency, DependencyState, DependencyStatus, Installer, PackState, SETUP_JOB, plain_reason,
 };
 use crate::storage::setup::Command;
+use kernel_processes::run::InstallError;
 use tokio::sync::mpsc;
 
 #[cfg(unix)]
@@ -864,8 +864,8 @@ async fn run_setup(
 #[cfg(test)]
 mod install_tests {
     use super::*;
-    use crate::setup::Version;
     use kernel_processes::finding::permission_fix::{Report, TOOL_FIX_CHANGED, Target};
+    use kernel_processes::run::Version;
     use std::collections::BTreeSet;
 
     /// V243-SETUP-PARALLEL (DEC-199): a lone install or fix of one tool clears only that
