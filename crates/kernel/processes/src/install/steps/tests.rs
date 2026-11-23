@@ -476,6 +476,26 @@ fn a_step_past_its_limit_is_asked_to_stop_before_it_is_killed() {
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "stopped");
 }
 
+/// A step whose leader ends at once on TERM still gives the rest of its group the grace: a
+/// member that cleans up for a second on TERM writes its marker before the group is killed.
+#[test]
+fn a_step_whose_leader_ends_on_the_stop_request_leaves_its_group_the_grace() {
+    let folder = tempfile::tempdir().unwrap();
+    let marker = folder.path().join("cleaned");
+    let member = "trap '/bin/sleep 1; printf cleaned > \"$0\"; exit 0' TERM; /bin/sleep 30 & wait";
+    let line = format!("( {member} ) & /bin/sleep 30");
+    let started = std::time::Instant::now();
+    let ran = shell(&line, marker.to_str().unwrap(), Duration::from_secs(1));
+    let took = started.elapsed();
+    assert_eq!(ran, Err("setup_timeout"));
+    assert_eq!(
+        std::fs::read_to_string(&marker).ok().as_deref(),
+        Some("cleaned"),
+        "the member's cleanup ran within the grace"
+    );
+    assert!(took < Duration::from_secs(10), "{took:?}");
+}
+
 /// A step that ignores TERM is killed with its group once the grace after its bound has
 /// passed: the run ends as `setup_timeout` no sooner than the bound plus the grace, and
 /// well before the step's own end.
