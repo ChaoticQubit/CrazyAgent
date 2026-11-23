@@ -929,6 +929,7 @@ dependencies = [
 name = "crazyagent-bus-gateway"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-plugin-host",
  "crazyagent-sdk",
 ]
 
@@ -944,6 +945,7 @@ name = "crazyagent-capgen"
 version = "2.4.4"
 dependencies = [
  "crazyagent-cap",
+ "crazyagent-kernel-plugin-host",
  "wit-parser",
 ]
 

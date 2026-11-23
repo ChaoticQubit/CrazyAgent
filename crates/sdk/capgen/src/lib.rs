@@ -194,6 +194,8 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
     differing
 }
 
+#[cfg(test)]
+mod permissions_tests;
 mod rust;
 #[cfg(test)]
 mod tests;

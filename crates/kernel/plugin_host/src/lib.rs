@@ -17,6 +17,8 @@ pub mod views;
 #[cfg(all(test, feature = "store"))]
 mod embedding_tests;
 #[cfg(test)]
+mod permission_tests;
+#[cfg(test)]
 mod problem_tests;
 #[cfg(test)]
 mod tests;
