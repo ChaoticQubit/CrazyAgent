@@ -366,7 +366,8 @@ fn net_host(host: &str) -> bool {
     });
     let loopback = matches!(name, "127.0.0.1" | "[::1]");
     let last = name.rsplit('.').next().unwrap_or(name);
-    let numeric = last.starts_with("0x") || (!last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit()));
+    let numeric = last.starts_with("0x")
+        || (!last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit()));
     let dns = !numeric
         && name.len() <= HOST_BYTES_MAX
         && name.split('.').all(|label| {

@@ -585,5 +585,10 @@ fn a_hex_or_octal_ip_host_is_refused() {
     ] {
         refused_net(&format!("hosts = [\"{host}\"]\n"));
     }
-    assert!(manifest::parse(&net_text("hosts = [\"0xa9.example\", \"api2.example\", \"127.0.0.1\"]\n")).is_ok());
+    assert!(
+        manifest::parse(&net_text(
+            "hosts = [\"0xa9.example\", \"api2.example\", \"127.0.0.1\"]\n"
+        ))
+        .is_ok()
+    );
 }
