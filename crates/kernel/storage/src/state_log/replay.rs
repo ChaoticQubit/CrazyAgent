@@ -1,14 +1,12 @@
-use super::fence::{self, Fence};
 use super::{
-    Aggregate, BODY_BYTES_MAX, Chunk, SNAPSHOT_CHUNK, SNAPSHOT_DONE, SnapshotChunk, TOMBSTONE,
-    error, verify_snapshot,
+    AggregateName, BODY_BYTES_MAX, Chunk, FenceCheck, KnownName, SNAPSHOT_CHUNK, SNAPSHOT_DONE,
+    TOMBSTONE, error, read_chunk, verify_snapshot,
 };
-use crate::engine::EngineError;
+use crate::StorageError;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +30,7 @@ const _: () = assert!(CHECKPOINT_ATTEMPTS_MAX > 1);
 pub struct Logged {
     pub seq: u64,
     pub revision: u64,
-    pub aggregate: Aggregate,
+    pub aggregate: AggregateName,
     pub kind: String,
     pub schema: u16,
     pub at_ms: u64,
@@ -49,62 +47,24 @@ pub struct ProcessExited {
     pub signal: Option<i32>,
 }
 
-/// Where a writer reads the time it stamps on an event: the system clock, or a manual one a
-/// test sets. Replay never reads a clock; a projection takes time from each event's `at_ms`.
-#[derive(Debug)]
-pub enum Clock {
-    System,
-    Manual(AtomicU64),
-}
-
-impl Clock {
-    /// A manual clock reading the given time. Input: ms since the Unix epoch. Output: the
-    /// clock.
-    pub fn manual(at_ms: u64) -> Self {
-        Self::Manual(AtomicU64::new(at_ms))
-    }
-
-    /// The time now. Output: ms since the Unix epoch, 0 for a system time before it.
-    pub fn now_ms(&self) -> u64 {
-        match self {
-            Self::System => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |elapsed| {
-                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-                }),
-            Self::Manual(now) => now.load(Ordering::SeqCst),
-        }
-    }
-
-    /// Sets a manual clock. Input: ms since the Unix epoch. Output: Ok, or
-    /// `state_log_clock_system` for the system clock.
-    pub fn set_ms(&self, at_ms: u64) -> Result<(), EngineError> {
-        match self {
-            Self::System => Err(error("state_log_clock_system")),
-            Self::Manual(now) => {
-                now.store(at_ms, Ordering::SeqCst);
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Replays the log after `after` into one aggregate's projection. Every event is read, in
 /// batches of at most [`REPLAY_BATCH_MAX`]: each `seq` must be the previous plus one and no
 /// revision lower than the one before, across all aggregates. `apply` gets the aggregate's
 /// events in order, snapshot chunks included; a redacted event is skipped and a snapshot's
-/// closing event is verified, not applied. A store with no log replays nothing. Inputs: the
-/// connection, the aggregate, the last seq already applied and the projection. Output: the
+/// closing event is verified, not applied. A store with no log replays nothing; a stored
+/// name the engine's check does not read is refused. Inputs: the connection, the aggregate,
+/// the last seq already applied, the engine's name check and the projection. Output: the
 /// last seq read, or the first refusal, `apply`'s included.
-pub fn replay(
+pub fn replay<E: From<StorageError>>(
     db: &Connection,
-    aggregate: Aggregate,
+    aggregate: AggregateName,
     after: u64,
-    mut apply: impl FnMut(&Logged) -> Result<(), EngineError>,
-) -> Result<u64, EngineError> {
+    known: KnownName,
+    mut apply: impl FnMut(&Logged) -> Result<(), E>,
+) -> Result<u64, E> {
     let (mut last, mut revision) = (after, 0);
     loop {
-        let events = batch(db, last, revision)?;
+        let events = batch(db, last, revision, known)?;
         for event in events
             .iter()
             .filter(|event| event.aggregate == aggregate && event.body.as_slice() != TOMBSTONE)
@@ -128,19 +88,12 @@ pub fn replay(
 /// The table and rows a snapshot chunk event carries, for a projection rebuilding from a
 /// snapshot run. Input: the event. Output: the chunk, or `state_log_replay_chunk` for an
 /// event that is not a chunk of its own aggregate.
-pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
+pub fn chunk(event: &Logged) -> Result<Chunk, StorageError> {
     let refused = || error("state_log_replay_chunk");
     if event.kind != SNAPSHOT_CHUNK {
         return Err(refused());
     }
-    let chunk: SnapshotChunk = serde_json::from_slice(&event.body).map_err(|_| refused())?;
-    if chunk.aggregate != event.aggregate {
-        return Err(refused());
-    }
-    Ok(Chunk {
-        table: chunk.table,
-        rows: chunk.rows,
-    })
+    read_chunk(event.aggregate.name(), &event.body).ok_or_else(refused)
 }
 
 /// Redacts one logged event in place for an owner delete: its body becomes [`TOMBSTONE`]
@@ -152,8 +105,8 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
 /// delete's transaction, the seq and the fence. Output: Ok, a fence refusal, or
 /// `state_log_redact_missing`, `state_log_redact_snapshot` or
 /// `state_log_redact_secure_delete` for a mode SQLite does not name.
-pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
-    fence::check(tx, fence)?;
+pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &FenceCheck) -> Result<(), StorageError> {
+    fence(tx)?;
     let missing = || error("state_log_redact_missing");
     let seq = i64::try_from(seq).map_err(|_| missing())?;
     if !logged(tx)? {
@@ -229,14 +182,14 @@ fn checkpoint_with(db: &Connection, mut wait: impl FnMut()) -> bool {
 /// [`redact`] refusal, `state_log_redact_match` or `state_log_replay_row`.
 pub fn redact_matching(
     tx: &Transaction<'_>,
-    aggregates: &[Aggregate],
+    aggregates: &[AggregateName],
     kinds: Option<&[&str]>,
     field: &str,
     value: &str,
     keep: u64,
-    fence: &Fence,
-) -> Result<usize, EngineError> {
-    fence::check(tx, fence)?;
+    fence: &FenceCheck,
+) -> Result<usize, StorageError> {
+    fence(tx)?;
     if aggregates.is_empty()
         || kinds.is_some_and(|kinds| kinds.is_empty())
         || field.is_empty()
@@ -283,7 +236,7 @@ type Hit = (u64, String, String, Vec<u8>);
 /// [`REPLAY_BATCH_MAX`], in seq order, a body over [`BODY_BYTES_MAX`] refused before it is
 /// loaded. Inputs: the transaction, the last seq read and the needle. Output: each event's
 /// seq, aggregate name, kind and body, or `state_log_replay_row`.
-fn hits(tx: &Transaction<'_>, after: u64, needle: &[u8]) -> Result<Vec<Hit>, EngineError> {
+fn hits(tx: &Transaction<'_>, after: u64, needle: &[u8]) -> Result<Vec<Hit>, StorageError> {
     let row_error = || error("state_log_replay_row");
     let from = i64::try_from(after).map_err(|_| row_error())?;
     let mut statement = tx
@@ -318,7 +271,7 @@ fn hits(tx: &Transaction<'_>, after: u64, needle: &[u8]) -> Result<Vec<Hit>, Eng
 /// compare equal whatever order their rows were written in. Meant for replay rows in tests.
 /// Inputs: the connection and the table name (1 to 64 ASCII letters, digits and `_`).
 /// Output: the rows, or `state_log_replay_table`.
-pub fn rows(db: &Connection, table: &str) -> Result<Vec<Vec<Value>>, EngineError> {
+pub fn rows(db: &Connection, table: &str) -> Result<Vec<Vec<Value>>, StorageError> {
     if table.is_empty()
         || table.len() > TABLE_BYTES_MAX
         || !table
@@ -350,10 +303,16 @@ pub fn rows(db: &Connection, table: &str) -> Result<Vec<Vec<Value>>, EngineError
 
 /// Reads the next events after `after`, at most [`REPLAY_BATCH_MAX`], checking each `seq`
 /// is the previous plus one, no revision is lower than the one before, and every column is
-/// in range, a body over [`BODY_BYTES_MAX`] refused before it is loaded. Inputs: the connection, the last seq read and its revision (0 for
-/// none). Output: the events, or `state_log_replay_gap`, `state_log_replay_revision`,
-/// `state_log_replay_aggregate` or `state_log_replay_row`.
-fn batch(db: &Connection, after: u64, revision: u64) -> Result<Vec<Logged>, EngineError> {
+/// in range, a body over [`BODY_BYTES_MAX`] refused before it is loaded, and every name one
+/// the engine's check reads. Inputs: the connection, the last seq read, its revision (0 for
+/// none) and the name check. Output: the events, or `state_log_replay_gap`,
+/// `state_log_replay_revision`, `state_log_replay_aggregate` or `state_log_replay_row`.
+fn batch(
+    db: &Connection,
+    after: u64,
+    revision: u64,
+    known: KnownName,
+) -> Result<Vec<Logged>, StorageError> {
     let gap = || error("state_log_replay_gap");
     let from = i64::try_from(after).map_err(|_| gap())?;
     if !logged(db)? {
@@ -395,7 +354,7 @@ fn batch(db: &Connection, after: u64, revision: u64) -> Result<Vec<Logged>, Engi
             .filter(|revision| *revision >= floor)
             .ok_or_else(|| error("state_log_replay_revision"))?;
         let aggregate =
-            parse(&aggregate_name).ok_or_else(|| error("state_log_replay_aggregate"))?;
+            known(&aggregate_name).ok_or_else(|| error("state_log_replay_aggregate"))?;
         let row_error = || error("state_log_replay_row");
         let schema = u16::try_from(schema).map_err(|_| row_error())?;
         let at_ms = u64::try_from(at_ms).map_err(|_| row_error())?;
@@ -414,15 +373,9 @@ fn batch(db: &Connection, after: u64, revision: u64) -> Result<Vec<Logged>, Engi
     Ok(events)
 }
 
-/// The aggregate a stored name names, read through its serde name, which
-/// [`Aggregate::name`] matches. Input: the name. Output: the aggregate, none for another.
-fn parse(name: &str) -> Option<Aggregate> {
-    serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
-}
-
 /// Whether the store holds the log table yet, read without creating it. Input: the
 /// connection. Output: true once a transaction created it.
-fn logged(db: &Connection) -> Result<bool, EngineError> {
+fn logged(db: &Connection) -> Result<bool, StorageError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_log')",
         [],

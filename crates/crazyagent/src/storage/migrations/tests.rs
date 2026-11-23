@@ -8,12 +8,20 @@ use crate::memory::library::{LibraryAction, MemoryScope};
 use crate::protocol::{PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use crate::storage::{Job, Storage};
 use kernel_storage::migrations::{BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS_KEPT, CHECKED};
-use kernel_storage::migrations::{Texts, backup};
+use kernel_storage::migrations::{
+    BACKUPS, PINNED_DAYS, backup_time, backups_in, check_copy, pinned, stamp, stamp_time,
+};
+use kernel_storage::migrations::{Texts, backup, backup_failure};
+use kernel_storage::restore::{
+    REPLACED, RESTORE_AGENTS_RUNNING, RESTORE_BUSY, RESTORE_FAILED, RESTORE_UNAVAILABLE,
+    restorable_until, restore_pinned_at_for_test,
+};
 use kernel_storage::upgrade::{Backup, StepRun, upgrade_at_for_test};
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime};
 use tokio::sync::oneshot;
 
 const GLOBAL: &str = r#"version = 1
@@ -277,6 +285,26 @@ fn escaping(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch("DELETE FROM projects; CREATE TABLE migration_escaped_after (a);")
         .map_err(error)?;
     Ok(())
+}
+
+/// The version of record, as the kernel reads it. Input: the connection. Output:
+/// `PRAGMA user_version`.
+fn version(db: &Connection) -> Result<i64, StorageError> {
+    db.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|cause| StorageError(cause.to_string()))
+}
+
+/// The engine's pinned restore at a given time, which ages the pin, with the engine's own
+/// hooks. Inputs: the database path, the settings sources and the time. Output: as the
+/// engine's restore.
+fn restore_pinned_at(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+    now: SystemTime,
+) -> Result<PathBuf, EngineError> {
+    with_hooks(settings, |hooks| {
+        Ok(restore_pinned_at_for_test(path, hooks, now)?.kept)
+    })
 }
 
 /// The newest version a list of steps reaches, which the kernel checks is numbered from 2

@@ -1,32 +1,16 @@
 use crate::engine::EngineError;
 use fence::Fence;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use kernel_storage::StorageError;
+use kernel_storage::state_log::replay::Logged;
+use kernel_storage::state_log::{AggregateName, Appender, FenceCheck};
+use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// The write fence on append, one per writer class, and the engine hosts this process runs
 /// (v2.5 L3).
 pub mod fence;
-/// Replay of the log into projections, the compare of rebuilt tables, redaction in place, the
-/// writers' clock and the process exit event (v2.5 L2).
-pub mod replay;
 #[cfg(test)]
 mod tests;
-
-/// The most bytes one event body may hold; a snapshot chunk is one event, so it holds
-/// at most this many too (v2.5 plan section 3.2).
-pub const BODY_BYTES_MAX: usize = 65_536;
-/// The most bytes an event kind name may hold.
-pub const KIND_BYTES_MAX: usize = 64;
-/// The most events one appending transaction may hold, a snapshot run included.
-pub const TRANSACTION_EVENTS_MAX: usize = 65_536;
-/// The body a redacted event keeps in place of its own, so its seq and revision stay and
-/// replay skips it; no appended event may carry it.
-pub const TOMBSTONE: &[u8] = b"\0redacted\0";
-/// The kind of one chunk of a snapshot run.
-pub const SNAPSHOT_CHUNK: &str = "SnapshotChunk";
-/// The kind of the event that closes a snapshot run.
-pub const SNAPSHOT_DONE: &str = "SnapshotDone";
 
 /// The engine state groups the log orders events by (v2.5 plan section 3.1), a closed
 /// set: each name is stored in the log's `aggregate` column and in snapshot bodies.
@@ -67,339 +51,118 @@ impl Aggregate {
     }
 }
 
-/// One event a writer appends: its aggregate, kind name, body schema version, the time
-/// from the writer's clock and its body bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Draft<'b> {
-    pub aggregate: Aggregate,
-    pub kind: &'b str,
-    pub schema: u16,
-    pub at_ms: u64,
-    pub body: &'b [u8],
+/// A logged name equals an engine aggregate when it is that aggregate's stored name, so a
+/// decoder checks a replayed event's aggregate as it did before the move.
+impl PartialEq<Aggregate> for AggregateName {
+    fn eq(&self, other: &Aggregate) -> bool {
+        self.name() == other.name()
+    }
 }
 
-/// One chunk a snapshot run carries: rows of one table, as JSON values.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chunk {
-    pub table: String,
-    pub rows: Vec<serde_json::Value>,
+impl From<Aggregate> for AggregateName {
+    fn from(aggregate: Aggregate) -> Self {
+        AggregateName::new(aggregate.name())
+    }
 }
 
-/// The body of one snapshot chunk event, in run order from 0.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotChunk {
-    aggregate: Aggregate,
-    table: String,
-    seq: u32,
-    rows: Vec<serde_json::Value>,
-}
-
-/// The body of the event that closes a snapshot run: its chunk count and the sha256 of
-/// the chunk bodies in order.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotDone {
-    aggregate: Aggregate,
-    chunks: u32,
-    sha256: String,
-}
-
-/// Appends the events of one write transaction to `state_log` at that transaction's
-/// `state` revision, each with the next `seq`, behind the writer's fence.
-pub struct Appender<'a, 'c> {
+/// Starts appending in an owner request's transaction behind its fence, which the kernel
+/// checks first and again before each projection apply. Inputs: the transaction, the
+/// revision the request moved and the fence. Output: the appender, a fence refusal,
+/// `state_log_revision_stale` or `state_log_revision_not_newer`.
+pub fn owner<'a, 'c>(
     tx: &'a Transaction<'c>,
     revision: u64,
-    appended: usize,
     fence: Fence,
+) -> Result<Appender<'a, 'c>, EngineError> {
+    Ok(Appender::owner(tx, revision, hook(fence), known)?)
 }
 
-impl<'a, 'c> Appender<'a, 'c> {
-    /// Starts appending in an owner request's transaction, whose revision the request
-    /// already moved: it must be the `state` revision now and newer than the last logged
-    /// one, so each appending transaction brings its own and none goes back. The fence is
-    /// checked first, once for the transaction. Inputs: the transaction, that revision and
-    /// the fence. Output: the appender, a fence refusal, `state_log_revision_stale` or
-    /// `state_log_revision_not_newer`.
-    pub fn owner(
-        tx: &'a Transaction<'c>,
-        revision: u64,
-        fence: Fence,
-    ) -> Result<Self, EngineError> {
-        fence::check(tx, &fence)?;
-        Self::begin(tx, revision, fence)
-    }
-
-    /// Starts appending in a transaction of a writer on its own connection, moving the
-    /// `state` revision once for it after its fence is checked, and writing that revision's
-    /// `events` row so clients see the change (`publish`). Inputs: the transaction and
-    /// the fence. Output: the appender, a fence refusal, or `state_log_revision_exhausted`
-    /// when the revision is at its largest value.
-    pub fn own(tx: &'a Transaction<'c>, fence: Fence) -> Result<Self, EngineError> {
-        fence::check(tx, &fence)?;
-        let moved = tx
-            .execute(
-                "UPDATE state SET revision=revision+1 WHERE id=1 AND revision<?1",
-                [i64::MAX],
-            )
-            .map_err(error)?;
-        if moved != 1 {
-            return Err(error("state_log_revision_exhausted"));
-        }
-        let appender = Self::begin(tx, state_revision(tx)?, fence)?;
-        publish(tx, appender.revision())?;
-        Ok(appender)
-    }
-
-    /// Starts appending in a transaction of the storage open or one of its schema steps,
-    /// which write before any engine host of the store starts, so they bring the open's
-    /// proof in place of a host or owner fence (v2.5 L6). It moves the `state` revision
-    /// once, as [`Self::own`]. Inputs: the transaction and the proof. Output: the appender,
-    /// `state_log_opening_host_running` or `state_log_revision_exhausted`.
-    pub(crate) fn opening(
-        tx: &'a Transaction<'c>,
-        opening: crate::storage::opening::Opening,
-    ) -> Result<Self, EngineError> {
-        Self::own(tx, Fence::Opening(opening))
-    }
-
-    /// Runs one projection apply in the appender's transaction after checking the fence
-    /// again, the pair of the check at the start. Input: the apply. Output: its result, or
-    /// the fence refusal without running it.
-    pub fn project<T>(
-        &self,
-        apply: impl FnOnce(&Transaction<'c>) -> Result<T, EngineError>,
-    ) -> Result<T, EngineError> {
-        fence::check(self.tx, &self.fence)?;
-        apply(self.tx)
-    }
-
-    /// Opens the appender at a fenced revision: it must be the `state` revision now and
-    /// newer than the last logged one. Inputs: the transaction, the revision and the fence.
-    /// Output: the appender, or `state_log_revision_stale` or `state_log_revision_not_newer`.
-    fn begin(tx: &'a Transaction<'c>, revision: u64, fence: Fence) -> Result<Self, EngineError> {
-        ensure(tx)?;
-        if revision != state_revision(tx)? {
-            return Err(error("state_log_revision_stale"));
-        }
-        let last: Option<i64> = tx
-            .query_row(
-                "SELECT revision FROM state_log ORDER BY seq DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(error)?;
-        if revision == 0 || last.is_some_and(|last| revision <= last as u64) {
-            return Err(error("state_log_revision_not_newer"));
-        }
-        Ok(Self {
-            tx,
-            revision,
-            appended: 0,
-            fence,
-        })
-    }
-
-    /// The revision this transaction's events carry. Output: the revision.
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    /// Appends one event; the snapshot kinds are written only by [`Self::snapshot`]. Input:
-    /// the draft. Output: its `seq`, or `state_log_kind_reserved` or a bound's refusal.
-    pub fn append(&mut self, draft: &Draft<'_>) -> Result<u64, EngineError> {
-        if draft.kind == SNAPSHOT_CHUNK || draft.kind == SNAPSHOT_DONE {
-            return Err(error("state_log_kind_reserved"));
-        }
-        self.push(draft)
-    }
-
-    /// Appends a snapshot run of an aggregate: one chunk event per chunk, in order from 0,
-    /// closed by an event holding the chunk count and the sha256 of the chunk bodies in
-    /// order. Every chunk is checked under [`BODY_BYTES_MAX`] before any is appended.
-    /// Inputs: the aggregate, the time and the chunks. Output: the `seq` of the closing
-    /// event, or `state_log_chunk_bounds` or `state_log_transaction_full`.
-    pub fn snapshot(
-        &mut self,
-        aggregate: Aggregate,
-        at_ms: u64,
-        chunks: Vec<Chunk>,
-    ) -> Result<u64, EngineError> {
-        if chunks.len() >= TRANSACTION_EVENTS_MAX - self.appended {
-            return Err(error("state_log_transaction_full"));
-        }
-        let count = chunks.len() as u32;
-        let bodies = chunks
-            .into_iter()
-            .enumerate()
-            .map(|(seq, chunk)| {
-                serde_json::to_vec(&SnapshotChunk {
-                    aggregate,
-                    table: chunk.table,
-                    seq: seq as u32,
-                    rows: chunk.rows,
-                })
-                .map_err(error)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if bodies.iter().any(|body| body.len() > BODY_BYTES_MAX) {
-            return Err(error("state_log_chunk_bounds"));
-        }
-        let mut digest = Sha256::new();
-        for body in &bodies {
-            digest.update(body);
-            self.push(&Draft {
-                aggregate,
-                kind: SNAPSHOT_CHUNK,
-                schema: 1,
-                at_ms,
-                body,
-            })?;
-        }
-        let done = serde_json::to_vec(&SnapshotDone {
-            aggregate,
-            chunks: count,
-            sha256: format!("{:x}", digest.finalize()),
-        })
-        .map_err(error)?;
-        self.push(&Draft {
-            aggregate,
-            kind: SNAPSHOT_DONE,
-            schema: 1,
-            at_ms,
-            body: &done,
-        })
-    }
-
-    /// Appends one checked event at the next `seq`, refusing one past the transaction's
-    /// bound or past the last possible `seq`. Input: the draft. Output: its `seq`.
-    fn push(&mut self, draft: &Draft<'_>) -> Result<u64, EngineError> {
-        check(draft)?;
-        if self.appended >= TRANSACTION_EVENTS_MAX {
-            return Err(error("state_log_transaction_full"));
-        }
-        let previous: i64 = self
-            .tx
-            .prepare("SELECT COALESCE(MAX(seq), 0) FROM state_log")
-            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
-            .map_err(error)?;
-        let seq = previous
-            .checked_add(1)
-            .ok_or_else(|| error("state_log_seq_exhausted"))?;
-        self.tx
-            .prepare("INSERT INTO state_log VALUES (?1,?2,?3,?4,?5,?6,?7)")
-            .and_then(|mut statement| {
-                statement.execute(params![
-                    seq,
-                    self.revision as i64,
-                    draft.aggregate.name(),
-                    draft.kind,
-                    draft.schema,
-                    draft.at_ms as i64,
-                    draft.body
-                ])
-            })
-            .map_err(error)?;
-        self.appended += 1;
-        Ok(seq as u64)
-    }
+/// Starts appending in a transaction of a writer on its own connection: the kernel moves
+/// the `state` revision once after the fence and writes that revision's `events` row with
+/// the engine's body, so clients see the change. Inputs: the transaction and the fence.
+/// Output: the appender, a fence refusal, `state_log_revision_exhausted` or
+/// `state_log_body_bounds`.
+pub fn own<'a, 'c>(tx: &'a Transaction<'c>, fence: Fence) -> Result<Appender<'a, 'c>, EngineError> {
+    Ok(Appender::own(tx, hook(fence), known, engine_event)?)
 }
 
-/// Checks the snapshot run a closing event ends: the sha256 of the bodies of the events
-/// before it, as many as it counts, must match, and each must be a chunk of its aggregate
-/// in order from 0. A missing, changed or reordered chunk fails the hash; a count no run
-/// can hold is refused before any row is read, and a body over [`BODY_BYTES_MAX`] before
-/// it is loaded, as a log made without the table's checks can hold one. Inputs: the
-/// connection and the closing event's `seq`. Output: Ok, or `state_log_snapshot_missing`,
-/// `state_log_snapshot_invalid`, `state_log_snapshot_hash` or `state_log_snapshot_chunks`.
-pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
-    let missing = || error("state_log_snapshot_missing");
-    let invalid = || error("state_log_snapshot_invalid");
-    let seq = i64::try_from(done).map_err(|_| missing())?;
-    let cap = BODY_BYTES_MAX as i64;
-    let closing: Option<(String, Option<Vec<u8>>)> = db
-        .query_row(
-            "SELECT kind, CASE WHEN length(body) <= ?2 THEN body END FROM state_log WHERE seq=?1",
-            [seq, cap],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some((_, body)) = closing.filter(|(kind, _)| kind == SNAPSHOT_DONE) else {
-        return Err(missing());
-    };
-    let closed = body
-        .and_then(|body| serde_json::from_slice::<SnapshotDone>(&body).ok())
-        .filter(|closed| (closed.chunks as usize) < TRANSACTION_EVENTS_MAX)
-        .ok_or_else(invalid)?;
-    let mut statement = db
-        .prepare(
-            "SELECT kind, CASE WHEN length(body) <= ?3 THEN body END FROM state_log
-            WHERE seq>=?1 AND seq<?2 ORDER BY seq",
-        )
-        .map_err(error)?;
-    let rows = statement
-        .query_map([seq - i64::from(closed.chunks), seq, cap], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
-        })
-        .map_err(error)?;
-    let mut digest = Sha256::new();
-    let mut count: u32 = 0;
-    let mut in_order = true;
-    for row in rows {
-        let (kind, body) = row.map_err(error)?;
-        let body = body.ok_or_else(invalid)?;
-        digest.update(&body);
-        let chunk = (kind == SNAPSHOT_CHUNK)
-            .then(|| serde_json::from_slice::<SnapshotChunk>(&body).ok())
-            .flatten();
-        in_order &=
-            chunk.is_some_and(|chunk| chunk.aggregate == closed.aggregate && chunk.seq == count);
-        count = count.saturating_add(1);
-    }
-    if format!("{:x}", digest.finalize()) != closed.sha256 {
-        return Err(error("state_log_snapshot_hash"));
-    }
-    if !in_order || count != closed.chunks {
-        return Err(error("state_log_snapshot_chunks"));
-    }
-    Ok(())
+/// Starts appending in a transaction of the storage open or one of its schema steps,
+/// which write before any engine host of the store starts, so they bring the open's
+/// proof in place of a host or owner fence (v2.5 L6). It moves the `state` revision
+/// once, as [`own`]. Inputs: the transaction and the proof. Output: the appender,
+/// `state_log_opening_host_running` or `state_log_revision_exhausted`.
+pub(crate) fn opening<'a, 'c>(
+    tx: &'a Transaction<'c>,
+    opening: crate::storage::opening::Opening,
+) -> Result<Appender<'a, 'c>, EngineError> {
+    own(tx, Fence::Opening(opening))
 }
 
-/// Refuses a draft out of the log's bounds: a body over [`BODY_BYTES_MAX`] or equal to
-/// [`TOMBSTONE`], a kind that is not 1 to [`KIND_BYTES_MAX`] ASCII letters and digits,
-/// schema 0, or a time past the largest `i64`. Input: the draft. Output: Ok, or the refusal.
-fn check(draft: &Draft<'_>) -> Result<(), EngineError> {
-    if draft.body.len() > BODY_BYTES_MAX {
-        return Err(error("state_log_body_bounds"));
-    }
-    if draft.body == TOMBSTONE {
-        return Err(error("state_log_body_reserved"));
-    }
-    if draft.kind.is_empty()
-        || draft.kind.len() > KIND_BYTES_MAX
-        || !draft.kind.bytes().all(|byte| byte.is_ascii_alphanumeric())
-    {
-        return Err(error("state_log_kind"));
-    }
-    if draft.schema == 0 {
-        return Err(error("state_log_schema"));
-    }
-    if draft.at_ms > i64::MAX as u64 {
-        return Err(error("state_log_at_ms"));
-    }
-    Ok(())
+/// The engine's aggregate names for the kernel writer and replay: only the closed
+/// [`Aggregate`] set, read through its serde name, which [`Aggregate::name`] matches.
+/// Input: the stored name. Output: its kernel name, none for another.
+fn known(name: &str) -> Option<AggregateName> {
+    parse(name).map(AggregateName::from)
 }
 
-/// Reads the store's `state` revision. Input: the connection. Output: the revision.
-fn state_revision(db: &Connection) -> Result<u64, EngineError> {
-    let revision: i64 = db
-        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
-            row.get(0)
-        })
-        .map_err(error)?;
-    u64::try_from(revision).map_err(error)
+/// The aggregate a stored name names, read through its serde name. Input: the name.
+/// Output: the aggregate, none for another.
+fn parse(name: &str) -> Option<Aggregate> {
+    serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
+}
+
+/// Replays the log after `after` into one aggregate's projection through the kernel replay,
+/// reading names through the engine's set. Inputs: the connection, the aggregate, the last
+/// seq already applied and the projection. Output: the last seq read, or the first refusal.
+pub fn replay(
+    db: &Connection,
+    aggregate: Aggregate,
+    after: u64,
+    apply: impl FnMut(&Logged) -> Result<(), EngineError>,
+) -> Result<u64, EngineError> {
+    kernel_storage::state_log::replay::replay(db, aggregate.into(), after, known, apply)
+}
+
+/// Redacts one logged event for an owner delete through the kernel, behind the delete's
+/// fence. Inputs: the transaction, the seq and the fence. Output: as the kernel's redact.
+pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
+    Ok(kernel_storage::state_log::replay::redact(
+        tx,
+        seq,
+        &hook(fence.clone()),
+    )?)
+}
+
+/// Redacts every matching event of the given aggregates for an owner delete through the
+/// kernel, behind the delete's fence. Inputs: the transaction, the aggregates, the kinds
+/// (none for all), the field, the value, the kept seq and the fence. Output: how many were
+/// redacted, or the kernel's refusal.
+pub fn redact_matching(
+    tx: &Transaction<'_>,
+    aggregates: &[Aggregate],
+    kinds: Option<&[&str]>,
+    field: &str,
+    value: &str,
+    keep: u64,
+    fence: &Fence,
+) -> Result<usize, EngineError> {
+    let names: Vec<AggregateName> = aggregates.iter().map(|each| (*each).into()).collect();
+    assert_eq!(names.len(), aggregates.len());
+    Ok(kernel_storage::state_log::replay::redact_matching(
+        tx,
+        &names,
+        kinds,
+        field,
+        value,
+        keep,
+        &hook(fence.clone()),
+    )?)
+}
+
+/// The kernel hook for a writer's fence: [`fence::check`] on the appending transaction,
+/// its refusal text unchanged. Input: the fence. Output: the hook.
+fn hook(fence: Fence) -> FenceCheck {
+    Box::new(move |tx| fence::check(tx, &fence).map_err(|refused| StorageError(refused.0)))
 }
 
 /// The client an engine-own revision's `events` row names. The wire refuses every `owner:`
@@ -407,53 +170,26 @@ fn state_revision(db: &Connection) -> Result<u64, EngineError> {
 /// its own request.
 const ENGINE_CLIENT: &str = "owner:engine";
 
-/// The most `events` rows an engine-own write keeps: the top of the `events_retained`
-/// setting (1 to 256), so it never trims a row a client's setting keeps; the next owner
-/// request trims to the setting.
-const EVENTS_KEPT_MAX: i64 = 256;
-
-/// Writes the `events` row of a revision an engine-own write moved, in its transaction, so a
-/// client catching up from `events` moves to it and its next save is not `stale_revision`
-/// (v2.5 L6, fix11 L7 Q6). The row's topic is `unknown`: any writer may append here (S3a).
-/// Every store with a `state` table has `events`, from the same schema batch. Inputs: the
-/// transaction and the revision. Output: Ok or the store's refusal.
-fn publish(tx: &Transaction<'_>, revision: u64) -> Result<(), EngineError> {
+/// The body of the `events` row of a revision an engine-own write moved, so a client
+/// catching up from `events` moves to it and its next save is not `stale_revision` (v2.5
+/// L6, fix11 L7 Q6). The row's topic is `unknown`: any writer may append here (S3a).
+/// Input: the revision. Output: the JSON text, or the wire types' refusal.
+fn engine_event(revision: u64) -> Result<String, StorageError> {
     use crate::protocol::{ClientId, Cursor, Event, RequestId, Topic};
-    assert!(revision > 0, "an own write moved the revision");
+    assert!(revision > 0, "an own write moves the revision");
     let event = Event {
         cursor: Cursor::new(revision),
-        request_id: RequestId::new(format!("engine-{revision}")).map_err(error)?,
-        client_id: ClientId::new(ENGINE_CLIENT).map_err(error)?,
+        request_id: RequestId::new(format!("engine-{revision}")).map_err(storage_error)?,
+        client_id: ClientId::new(ENGINE_CLIENT).map_err(storage_error)?,
         topic: Topic::Unknown,
     };
-    let cursor = i64::try_from(revision).map_err(error)?;
-    let body = serde_json::to_string(&event).map_err(error)?;
-    tx.execute("INSERT INTO events VALUES (?1,?2)", params![cursor, body])
-        .map_err(error)?;
-    tx.execute(
-        "DELETE FROM events WHERE cursor<=?1",
-        [cursor.saturating_sub(EVENTS_KEPT_MAX)],
-    )
-    .map_err(error)?;
     assert_eq!(event.cursor.value(), revision);
-    Ok(())
+    serde_json::to_string(&event).map_err(storage_error)
 }
 
-/// Creates the log table inside the caller's transaction when it is absent, so it
-/// commits or rolls back with that transaction. Input: the connection. Output: any
-/// SQLite failure.
-fn ensure(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(&format!(
-        "CREATE TABLE IF NOT EXISTS state_log (
-            seq INTEGER PRIMARY KEY,
-            revision INTEGER NOT NULL CHECK(revision >= 1),
-            aggregate TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND {KIND_BYTES_MAX}),
-            schema INTEGER NOT NULL CHECK(schema >= 1),
-            at_ms INTEGER NOT NULL CHECK(at_ms >= 0),
-            body BLOB NOT NULL CHECK(length(body) <= {BODY_BYTES_MAX}))"
-    ))
-    .map_err(error)
+/// Builds a kernel error from a wire refusal. Input: the cause. Output: the error.
+fn storage_error(value: impl std::fmt::Display) -> StorageError {
+    StorageError(value.to_string())
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {

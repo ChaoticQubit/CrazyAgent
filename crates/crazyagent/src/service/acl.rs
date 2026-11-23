@@ -139,8 +139,8 @@ fn list(entries: &[&Path]) -> Vec<Option<bool>> {
         .arg("-lde")
         .arg("--")
         .args(&operands);
-    let text = match crate::setup::process::run_command(command, LIST_TIME) {
-        Ok((true, output)) if output.len() < crate::setup::process::OUTPUT_BYTES_MAX => {
+    let text = match kernel_processes::run::run_command(command, LIST_TIME) {
+        Ok((true, output)) if output.len() < kernel_processes::run::OUTPUT_BYTES_MAX => {
             String::from_utf8_lossy(&output).into_owned()
         }
         _ => return vec![None; entries.len()],

@@ -1,8 +1,8 @@
-use super::InstallError;
 use super::launch::{runnable, safe_relative, server_plan};
 use super::pack::{PackManifestEntry, PackSource, repo_key};
-use super::process::{private_folder, run, staging_folder};
 use crate::plugins::ServerSpec;
+use kernel_processes::run::InstallError;
+use kernel_processes::run::{private_folder, run, staging_folder};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -148,7 +148,9 @@ pub fn fetch_git(setup: &Path, repo: &str, commit: &str) -> Result<PathBuf, Inst
         }
         std::fs::remove_dir_all(&target).map_err(|_| InstallError("setup_store_unavailable"))?;
     }
-    let staging = staging_folder(&packs, "fetch")?;
+    let id =
+        crate::engine::owner::random_id().map_err(|_| InstallError("setup_store_unavailable"))?;
+    let staging = staging_folder(&packs, "fetch", &id)?;
     let result = (|| {
         let place = staging
             .to_str()

@@ -314,7 +314,6 @@
   "crates/crazyagent/src/tui/screens/project_plugins/tests.rs": 2,
   "crates/crazyagent/src/tui/screens/settings/pool_editor/engine_tests.rs": 4,
   "crates/crazyagent/src/tui/screens/settings_accounts/tests.rs": 3,
-  "crates/crazyagent/src/update/tests.rs": 1,
   "crates/crazyagent/src/usage/capture/tests.rs": 6,
   "crates/crazyagent/tests/acceptance_b18_tui.rs": 3,
   "crates/crazyagent/tests/acceptance_v2_owner_over_agent.rs": 1,
@@ -400,6 +399,7 @@
   "crates/crazyagent/tests/worker_engine_boundary.rs": 1,
   "crates/crazyagent/tests/worktree_ownership/checkouts.rs": 1,
   "crates/kernel/processes/src/finding/probe/tests.rs": 2,
+  "crates/kernel/processes/src/update/tests.rs": 1,
   "scripts/rcli/host.test.ts": 1,
   "scripts/trial/report.test.mjs": 2,
   "scripts/trial/run.test.mjs": 3
