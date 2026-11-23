@@ -1,7 +1,8 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
+use crate::state_log::Aggregate;
 use crate::state_log::replay::{self, Logged};
-use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 
@@ -493,7 +494,7 @@ pub(crate) fn record(tx: &Transaction<'_>, change: &Change) -> Result<u64, Engin
 /// seq, or the first refusal, which the caller rolls back.
 pub(crate) fn record_all(tx: &Transaction<'_>, changes: &[Change]) -> Result<u64, EngineError> {
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::own(tx, fence)?;
+    let mut appender = crate::state_log::own(tx, fence)?;
     let seq = append_all(&mut appender, changes)?;
     assert!(appender.revision() > 0, "own moved the revision");
     Ok(seq)
@@ -530,7 +531,7 @@ fn record_all_at(tx: &Transaction<'_>, next: u64, changes: &[Change]) -> Result<
         return Err(stale());
     }
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::owner(tx, next, fence)?;
+    let mut appender = crate::state_log::owner(tx, next, fence)?;
     let seq = append_all(&mut appender, changes)?;
     assert_eq!(
         appender.revision(),
@@ -737,7 +738,7 @@ pub(crate) fn record_requests_opening(
     if changes.is_empty() {
         return Ok(());
     }
-    let mut appender = Appender::opening(tx, opening)?;
+    let mut appender = crate::state_log::opening(tx, opening)?;
     for group in changes.chunks(kernel_storage::state_log::TRANSACTION_EVENTS_MAX) {
         append_all(&mut appender, group)?;
     }
@@ -996,7 +997,7 @@ pub(crate) fn first_run(
         return Ok(false);
     }
     let at_ms = opening.at_ms();
-    let mut appender = Appender::opening(tx, opening)?;
+    let mut appender = crate::state_log::opening(tx, opening)?;
     let done = snapshot(&mut appender, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     assert!(rows > 0);
@@ -1023,7 +1024,7 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
         "one chunk or more per table"
     );
     assert_eq!(chunks[0].table, CHANGE_SETS);
-    appender.snapshot(Aggregate::Landing, at_ms, chunks)
+    Ok(appender.snapshot(Aggregate::Landing, at_ms, chunks)?)
 }
 
 /// Every row of one landing table in column order, each as a JSON array of its cells; a

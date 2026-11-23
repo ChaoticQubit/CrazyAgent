@@ -311,7 +311,7 @@ fn an_ide_snapshot_run_replays_to_the_rows_it_was_taken_from() {
     );
     {
         let tx = begin(&db).unwrap();
-        let mut appender = Appender::own(&tx, Fence::Engine(host)).unwrap();
+        let mut appender = crate::state_log::own(&tx, Fence::Engine(host)).unwrap();
         appender.snapshot(Aggregate::Ide, 1, chunks).unwrap();
         drop(appender);
         tx.commit().unwrap();

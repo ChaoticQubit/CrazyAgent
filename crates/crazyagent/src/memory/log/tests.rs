@@ -1,9 +1,9 @@
 use super::*;
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{Outcome, ProjectId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::{engine, seed};
 use crate::state_log::replay::{redact, rows};
-use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::Draft;
 use rusqlite::Connection;
@@ -105,7 +105,7 @@ fn remove(db: &mut Connection, project: &str, kept: bool, writes: &str) {
     }
     .body()
     .unwrap();
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     log.append(&Draft {
         aggregate: Aggregate::Projects.into(),
         kind: removed::KIND,
