@@ -632,8 +632,8 @@ impl Places {
 
     /// Whether a path lies in a folder the engine names for agents ([`FindingHooks::registered_projects`]),
     /// which they can write whole. When those could not be read it fails closed: every path
-    /// outside the engine's data folder counts, under HOME and, on Unix, outside HOME too
-    /// unless it lies under an install root ([`INSTALL_ROOTS`]) or the app's folder, since a
+    /// outside the engine's data folder counts, under HOME and outside HOME too unless it
+    /// lies under an install root ([`Places::installed`]) or the app's folder, since a
     /// repository the engine registered may lie anywhere (C2-H8). Inputs: HOME's names
     /// ([`home_names`]) and the path. Output: the answer.
     fn in_set_up_project(&self, homes: &[PathBuf], path: &Path) -> bool {
@@ -642,26 +642,49 @@ impl Places {
             if self.engine_roots.iter().any(|root| path.starts_with(root)) {
                 return false;
             }
-            return homes.iter().any(|home| path.starts_with(home))
-                || (cfg!(unix) && !self.installed(path));
+            return homes.iter().any(|home| path.starts_with(home)) || !self.installed(path);
         };
         roots.iter().any(|root| path.starts_with(root))
     }
 
-    /// Whether a path lies under an install root ([`INSTALL_ROOTS`]), in either of its
-    /// macOS names ([`FindingHooks::data_twin`]), or in the app's folder. Input: the path.
-    /// Output: the answer.
+    /// Whether a path lies under an install root, in either of its macOS names
+    /// ([`FindingHooks::data_twin`]), or in the app's folder: [`INSTALL_ROOTS`] on Unix and
+    /// [`windows_install_roots`] on Windows. Input: the path. Output: the answer.
     fn installed(&self, path: &Path) -> bool {
+        let roots: Vec<PathBuf> = if cfg!(windows) {
+            windows_install_roots()
+        } else {
+            INSTALL_ROOTS.iter().map(PathBuf::from).collect()
+        };
         let under = |root: &Path| {
             path.starts_with(root)
                 || (self.seed.hooks.data_twin)(root).is_some_and(|twin| path.starts_with(twin))
         };
-        INSTALL_ROOTS.iter().any(|root| under(Path::new(root)))
+        roots.iter().any(|root| under(root))
             || self
                 .app_folder
                 .as_deref()
                 .is_some_and(|folder| path.starts_with(folder))
     }
+}
+
+/// The Windows folders whose tools stay usable while the set-up projects cannot be read: the
+/// engine's own `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)` and `ProgramW6432`, each
+/// kept only when it names an absolute folder. Output: the folders, at most 4.
+fn windows_install_roots() -> Vec<PathBuf> {
+    let roots: Vec<PathBuf> = [
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+    ]
+    .into_iter()
+    .filter_map(std::env::var_os)
+    .map(PathBuf::from)
+    .filter(|root| root.is_absolute())
+    .collect();
+    assert!(roots.len() <= 4);
+    roots
 }
 
 /// HOME's names: as given, with its links resolved, in its one spelling and, on macOS, that

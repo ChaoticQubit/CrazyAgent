@@ -724,3 +724,28 @@ fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     assert!(!read.agent_writable(Path::new("/srv/repo/bin/tool")));
     assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
 }
+
+/// C2-H8: when the set-up projects cannot be read, a repository the engine may have
+/// registered outside HOME still counts as agent-writable, so a tool in it is refused, while
+/// a system folder's tool does not.
+#[test]
+fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let outside = tempfile::Builder::new()
+        .prefix("tools-h8-repo-")
+        .tempdir()
+        .unwrap();
+    let repo = outside.path().canonicalize().unwrap();
+    assert!(!repo.starts_with(&home));
+    let tool = program(&repo.join("bin/tool"), "#!/bin/sh\n");
+    let places = Places {
+        projects: None,
+        ..stub_new(Vec::new(), Some(home.clone()))
+    };
+    assert!(places.agent_writable(&tool), "{}", tool.display());
+    assert_eq!(
+        check_place(&places, &tool),
+        Some(Err(Refusal::AgentsCanWrite))
+    );
+    assert!(!places.agent_writable(Path::new("/bin/sh")));
+}
