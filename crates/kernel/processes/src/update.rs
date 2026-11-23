@@ -314,32 +314,32 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, UpdateError> {
 }
 
 /// The Rust target this build's release archive is published under. Output: the triple, or
-/// None on a platform with no release build.
+/// None on a platform with no release build ([`target_for`]).
 pub fn target() -> Option<&'static str> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Some("aarch64-apple-darwin")
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Some("x86_64-apple-darwin")
-    } else if cfg!(all(
-        target_os = "linux",
-        target_arch = "x86_64",
-        target_env = "gnu"
-    )) {
-        Some("x86_64-unknown-linux-gnu")
-    } else if cfg!(all(
-        target_os = "linux",
-        target_arch = "aarch64",
-        target_env = "gnu"
-    )) {
-        Some("aarch64-unknown-linux-gnu")
-    } else if cfg!(all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc"
-    )) {
-        Some("x86_64-pc-windows-msvc")
+    let env = if cfg!(target_env = "gnu") {
+        "gnu"
+    } else if cfg!(target_env = "msvc") {
+        "msvc"
+    } else if cfg!(target_env = "musl") {
+        "musl"
     } else {
-        None
+        ""
+    };
+    target_for(std::env::consts::OS, std::env::consts::ARCH, env)
+}
+
+/// The Rust target a release archive is published under for an operating system, processor
+/// and C library or toolchain, as Rust names them: both Mac processors, glibc Linux on
+/// x86_64 and aarch64, and MSVC Windows on x86_64. Inputs: the three names. Output: the
+/// triple, or None for any other platform.
+fn target_for(os: &str, arch: &str, env: &str) -> Option<&'static str> {
+    match (os, arch, env) {
+        ("macos", "aarch64", _) => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64", _) => Some("x86_64-apple-darwin"),
+        ("linux", "x86_64", "gnu") => Some("x86_64-unknown-linux-gnu"),
+        ("linux", "aarch64", "gnu") => Some("aarch64-unknown-linux-gnu"),
+        ("windows", "x86_64", "msvc") => Some("x86_64-pc-windows-msvc"),
+        _ => None,
     }
 }
 
