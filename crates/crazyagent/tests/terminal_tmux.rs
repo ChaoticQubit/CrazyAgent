@@ -408,32 +408,6 @@ fn a_terminal_folder_too_long_for_a_socket_address_still_runs_agents() {
     assert!(!socket.exists());
 }
 
-#[test]
-fn a_shared_terminal_folder_is_refused() {
-    let root = root();
-    let tmux = tmux(root.path());
-    let folder = root.path().join(FOLDER);
-    std::fs::create_dir(&folder).unwrap();
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let host = Tmux::open(
-        Some(tmux),
-        &folder,
-        crazyagent::sandbox::confinement(),
-        crazyagent::terminal::tmux::tmux_hooks(),
-    );
-    let agent = AgentId::team(1).unwrap();
-    let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
-    assert_eq!(
-        host.spawn(
-            &agent,
-            &kernel_processes::terminal::PaneCommand::from(&command)
-        )
-        .unwrap_err()
-        .0,
-        "terminal_folder_unsafe"
-    );
-}
-
 fn option(tmux: &Path, socket: &Path, name: &str) -> String {
     let output = kernel_processes::spawn_gate::output(
         Command::new(tmux)
@@ -2847,3 +2821,6 @@ fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     );
     host.close(&[]).unwrap();
 }
+
+#[path = "terminal_tmux/shared_folder.rs"]
+mod shared_folder;
