@@ -193,7 +193,8 @@ const FROM_CAP: &str = "type From { at: u64, data: bytes, items: list<u64> }\n\
                                    capability conv.round(value: From, more: option<From>) -> From \
                                    tier: t1 needs: conv.use\n\
                                    capability conv.many(values: list<From>) -> list<From> \
-                                   tier: t1 needs: conv.use";
+                                   tier: t1 needs: conv.use \
+                                   emits: FromSaved { value: From, at: u64 }";
 
 /// Finds each `::from(` call in generated text that does not name `core::convert::From`.
 /// Input: the text. Output: the lines holding a bare call or a bare `impl From<`.
@@ -218,6 +219,11 @@ fn a_cap_type_named_from_still_compiles() {
         .find(|(path, _)| path == "envelope/conv.rs")
         .expect("the envelope is written");
     assert!(envelope.1.contains("pub struct From {"), "{}", envelope.1);
+    assert!(
+        envelope.1.contains("pub struct FromSavedWire {"),
+        "{}",
+        envelope.1
+    );
     for (path, text) in &files {
         assert_eq!(bare_from(text), Vec::<&str>::new(), "{path}");
     }
