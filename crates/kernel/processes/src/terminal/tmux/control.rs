@@ -819,3 +819,6 @@ pub(super) fn windows(control: &Control) -> Result<Vec<AgentId>, HostError> {
     agents.dedup();
     Ok(agents)
 }
+
+#[cfg(test)]
+mod tests;
