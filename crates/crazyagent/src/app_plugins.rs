@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::{PoisonError, RwLock};
 
 use kernel_plugin_host::Refused;
-use kernel_plugin_host::registry::Engine;
+use kernel_plugin_host::registry::{Engine, Switch};
 use kernel_plugin_host::store::{AccountKey, KeyFolder, KeyRef, Keys};
 use rusqlite::Connection;
 
@@ -106,9 +108,75 @@ fn error(refused: Refused) -> EngineError {
 }
 
 /// Creates the plugin store's tables when missing, as every engine open and migration step
-/// 12 need. Input: the engine connection. Output: Ok, or `app_plugins_unavailable`.
+/// 12 need, then loads the engine's off set from them. Input: the engine connection.
+/// Output: Ok, or `app_plugins_unavailable`.
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
-    kernel_plugin_host::store::initialize(db).map_err(error)
+    kernel_plugin_host::store::initialize(db).map_err(error)?;
+    switches().load(db);
+    Ok(())
+}
+
+/// The bundled code plugins the owner turned off, held in memory so the gateway reads no
+/// database per call. Until a load succeeds every plugin reads as off.
+pub(crate) struct OffSet {
+    off: RwLock<Option<BTreeSet<String>>>,
+}
+
+impl OffSet {
+    /// An off set not yet loaded, which reads every plugin as off. Output: the set.
+    pub(crate) const fn new() -> Self {
+        Self {
+            off: RwLock::new(None),
+        }
+    }
+
+    /// Replaces the set with the switch rows the database holds; a read that fails leaves
+    /// it unloaded. Input: the engine connection. Output: none.
+    pub(crate) fn load(&self, db: &Connection) {
+        let loaded = kernel_plugin_host::registry::off_code_plugins(db).ok();
+        *self.off.write().unwrap_or_else(PoisonError::into_inner) = loaded;
+    }
+
+    /// Switches a bundled code plugin and, once the switch has committed, loads the set
+    /// again. A connection inside an open transaction is refused before anything is
+    /// written, so the set never shows a switch that could still roll back. Inputs: the
+    /// engine connection, the engine facts, the plugin id and the switch. Output: Ok, the
+    /// plugin host's refusal code, or `app_plugins_unavailable`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the owner switch command is the first caller")
+    )]
+    pub(crate) fn switch(
+        &self,
+        db: &Connection,
+        engine: &Engine<'_>,
+        plugin: &str,
+        switch: Switch<'_>,
+    ) -> Result<(), EngineError> {
+        if !db.is_autocommit() {
+            return Err(EngineError("app_plugins_unavailable".into()));
+        }
+        kernel_plugin_host::registry::set_enabled(db, engine, plugin, switch).map_err(error)?;
+        assert!(db.is_autocommit());
+        self.load(db);
+        Ok(())
+    }
+}
+
+impl bus_gateway::Switches for OffSet {
+    fn is_on(&self, plugin: &str) -> bool {
+        match &*self.off.read().unwrap_or_else(PoisonError::into_inner) {
+            Some(off) => !off.contains(plugin),
+            None => false,
+        }
+    }
+}
+
+/// The engine's one off set, loaded by [`initialize`] when the engine opens its database.
+/// Output: the set.
+pub(crate) fn switches() -> &'static OffSet {
+    static OFF: OffSet = OffSet::new();
+    &OFF
 }
 
 /// Deletes what a crash left staged by the plugin store at the engine root. Input: the
