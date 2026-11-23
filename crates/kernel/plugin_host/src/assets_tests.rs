@@ -5,9 +5,9 @@ use std::os::unix::fs::MetadataExt;
 
 const WORDS: &[u8] = b"Use plain words.";
 
-/// The serde text of a fixed `(project, config, assets)` triple as the engine wrote it at
-/// f9e642e1a (assets.rs unchanged since c6936f38f): newtype ids as plain strings, `Global`
-/// as a bare string, `Project` as a one-key map, bytes as a number array.
+/// The serde text of a fixed `(project, config, assets)` triple: project `p`, config `c`,
+/// one project rules asset and one global skill asset, both holding `WORDS`. Ids are plain
+/// strings, `Global` a bare string, `Project` a one-key map and bytes a number array.
 const GOLDEN_TRIPLE: &str = concat!(
     r#"["p","c",[{"source":{"id":"rules","name":"rules","scope":{"Project":"p"},"#,
     r#""kind":"Rules","path":"/x/rules.md"},"#,
