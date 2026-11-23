@@ -9,6 +9,11 @@ pub const HOMEBREW_FOLDERS: [&str; 2] = super::HOMEBREW_FOLDERS;
 /// The most folders a probe keeps ([`super::probe::kept`]).
 pub const FOLDERS_MAX: usize = super::probe::FOLDERS_MAX;
 
+/// Linux package folders looked in before the system folders: Linuxbrew and the NixOS
+/// system and default profiles ([`super::Places::engine`]).
+#[cfg(target_os = "linux")]
+pub const LINUX_FOLDERS: [&str; 3] = super::LINUX_FOLDERS;
+
 /// A step a row runs once between reading an entry's real file and checking the entry.
 pub type Step = Box<dyn FnOnce() + Send>;
 

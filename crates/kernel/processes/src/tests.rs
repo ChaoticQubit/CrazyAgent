@@ -141,9 +141,13 @@ fn finding_test_support_exports_exactly_the_named_items() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/finding/test_support.rs"),
     )
     .unwrap();
-    let mut exported: Vec<&str> = text
-        .lines()
-        .filter_map(|line| line.strip_prefix("pub "))
+    let linux_only = "#[cfg(target_os = \"linux\")]";
+    let lines: Vec<&str> = text.lines().collect();
+    let mut exported: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| cfg!(target_os = "linux") || *at == 0 || lines[at - 1] != linux_only)
+        .filter_map(|(_, line)| line.strip_prefix("pub "))
         .map(|rest| {
             let rest = rest.split_once(' ').map_or(rest, |(_, name)| name);
             rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -168,8 +172,12 @@ fn finding_test_support_exports_exactly_the_named_items() {
         "with_projects",
         "with_temps",
     ];
+    if cfg!(target_os = "linux") {
+        named.push("LINUX_FOLDERS");
+    }
     named.sort_unstable();
     assert_eq!(exported, named);
+    assert!(text.contains(&format!("{linux_only}\npub const LINUX_FOLDERS:")));
     assert!(!text.contains("pub use") && !text.contains("pub mod") && !text.contains("pub struct"));
     assert!(!text.contains(&["STUB", "_HOOKS"].concat()));
 }
