@@ -325,34 +325,59 @@ fn identity(path: &Path) -> io::Result<Option<Identity>> {
 
 /// A path's parts with the identity of each leading run of them, top down: None from the
 /// first run that does not exist on, and None for a Windows drive prefix alone, which names
-/// the drive's current folder.
+/// the drive's current folder. `reached` holds the identities of the folders the deepest
+/// existing run resolves through once its links are followed, so a run that leads into a
+/// protected folder by a link is told too.
 struct Walk<'a> {
     path: &'a Path,
     parts: Vec<Component<'a>>,
     ids: Vec<Option<Identity>>,
+    reached: Vec<Identity>,
 }
 
 impl<'a> Walk<'a> {
-    /// Reads the identities of a path's leading runs. Input: the path. Output: the walk, or
-    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read fails other than not found.
+    /// Reads the identities of a path's leading runs, and of every folder above the deepest
+    /// existing run once its links are resolved. Input: the path. Output: the walk, or
+    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or the resolve fails other than
+    /// not found.
     fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
+        let refused = |_| invalid(SECRET_ROOT_REFUSED);
         let parts: Vec<Component<'a>> = path.components().collect();
         let mut ids = Vec::with_capacity(parts.len());
         let mut run = PathBuf::new();
+        let mut existing = None;
         let mut gone = false;
         for part in &parts {
             run.push(part);
-            let found = if gone || matches!(part, Component::Prefix(_)) {
+            let prefix = matches!(part, Component::Prefix(_));
+            let found = if gone || prefix {
                 None
             } else {
-                let found = identity(&run).map_err(|_| invalid(SECRET_ROOT_REFUSED))?;
-                gone = found.is_none();
-                found
+                identity(&run).map_err(refused)?
             };
+            if found.is_some() {
+                existing = Some(run.clone());
+            } else if !prefix {
+                gone = true;
+            }
             ids.push(found);
         }
+        let mut reached = Vec::new();
+        if let Some(existing) = existing {
+            let real = existing.canonicalize().map_err(refused)?;
+            for above in real.ancestors() {
+                if let Some(found) = identity(above).map_err(refused)? {
+                    reached.push(found);
+                }
+            }
+        }
         assert_eq!(ids.len(), parts.len());
-        Ok(Walk { path, parts, ids })
+        Ok(Walk {
+            path,
+            parts,
+            ids,
+            reached,
+        })
     }
 
     /// Tells whether this path equals or lies under `outer`: by text; or by entry, when
@@ -364,7 +389,7 @@ impl<'a> Walk<'a> {
             return true;
         }
         if let Some(Some(entry)) = outer.ids.last()
-            && self.ids.contains(&Some(*entry))
+            && (self.ids.contains(&Some(*entry)) || self.reached.contains(entry))
         {
             return true;
         }
