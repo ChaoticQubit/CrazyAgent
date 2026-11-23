@@ -101,7 +101,7 @@ fn compacted(
 
 /// The seqs of one aggregate's `SnapshotDone` events, oldest first. Inputs: the store and
 /// the aggregate. Output: the seqs.
-fn dones(db: &Connection, aggregate: AggregateName) -> Vec<u64> {
+fn dones(db: &Connection, aggregate: AggregateName) -> Vec<i64> {
     db.prepare("SELECT seq FROM state_log WHERE aggregate=?1 AND kind=?2 ORDER BY seq")
         .unwrap()
         .query_map(params![aggregate.name(), SNAPSHOT_DONE], |row| row.get(0))
@@ -111,7 +111,7 @@ fn dones(db: &Connection, aggregate: AggregateName) -> Vec<u64> {
 }
 
 /// Every log row as seq, aggregate, kind and body. Input: the store. Output: the rows.
-fn every_row(db: &Connection) -> Vec<(u64, String, String, Vec<u8>)> {
+fn every_row(db: &Connection) -> Vec<(i64, String, String, Vec<u8>)> {
     db.prepare("SELECT seq, aggregate, kind, body FROM state_log ORDER BY seq")
         .unwrap()
         .query_map([], |row| {
@@ -140,7 +140,7 @@ fn replayed(db: &Connection, aggregate: AggregateName) -> Result<Live, StorageEr
             live.count += 1;
             live.sum += live.count;
         }
-        Ok(())
+        Ok::<(), StorageError>(())
     })?;
     Ok(live)
 }
@@ -206,7 +206,7 @@ fn after_a_prune_replay_of_every_aggregate_passes() {
 fn a_really_removed_row_after_a_prune_still_gives_the_replay_gap() {
     let mut db = store();
     three_runs(&mut db);
-    let last: u64 = db
+    let last: i64 = db
         .query_row("SELECT MAX(seq) FROM state_log", [], |row| row.get(0))
         .unwrap();
     db.execute("DELETE FROM state_log WHERE seq=?1", [last - 1])
@@ -247,7 +247,9 @@ fn a_pruned_body_reads_as_a_tombstone_never_as_the_old_bytes() {
         .unwrap();
 
     let first: Vec<u8> = db
-        .query_row("SELECT body FROM state_log WHERE seq=1", [], |row| row.get(0))
+        .query_row("SELECT body FROM state_log WHERE seq=1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(first, TOMBSTONE);
     let file = std::fs::read(&path).unwrap();
