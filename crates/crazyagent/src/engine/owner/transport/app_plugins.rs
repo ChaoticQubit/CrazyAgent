@@ -437,16 +437,15 @@ async fn handle(
     } else {
         None
     };
-    {
-        let _barrier = engine.owner_egress.write().await;
-        if &authority.authenticate(packet)? != admission {
-            return Err(failure("owner_grant_stale_or_revoked"));
-        }
+    let barrier = engine.owner_egress.write().await;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
     }
     let command = command(action, key.map(AccountSecret::into_bytes));
     let done = engine
         .owner_job(|reply| Job::AppPlugins(command, reply))
         .await?;
+    drop(barrier);
     Ok(match done {
         Done::Page {
             listing,
