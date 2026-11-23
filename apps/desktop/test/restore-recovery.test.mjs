@@ -47,7 +47,7 @@ test("a restore with no usable copy offers no button but the folder path and the
 
 test("a restore that wrote the 2.4 data is finished, not offered back, and a refused action shows its code", () => {
   const finished = view({ kind: "finished", copy: "replaced-20261117T093000000Z" });
-  assert.ok(finished.includes(restore.RESTORE_RUNNING), finished);
+  assert.ok(finished.includes(restore.RESTORE_RUNNING.replaceAll("'", "&#x27;")), finished);
   assert.doesNotMatch(finished, button(recovery.PUT_BACK));
   assert.doesNotMatch(finished, button(recovery.CONTINUE));
   const refused = view({ kind: "put_back", copy: "replaced-20261117T093000000Z" }, { problem: "storage_putback_busy" });
