@@ -116,7 +116,7 @@ fn cargo_tree_is_the_allowlist() {
     tree.args(["tree", "-p", "crazyagent-kernel-sandbox", "-e", "normal"])
         .args(["--prefix", "none", "--offline", "--locked"])
         .current_dir(&root);
-    let output = kernel_processes::spawn_gate::output(&mut tree).unwrap();
+    let output = kernel_processes::spawn_gate::collected(&mut tree).unwrap();
     assert!(
         output.status.success(),
         "{}",
