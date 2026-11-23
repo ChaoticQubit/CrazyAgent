@@ -179,6 +179,7 @@ fn the_quit_gateway_never_opens_the_store() {
     let grants = Grants::new(&[("github", Tier::T1, &["secrets.find"])]).unwrap();
     let gateway = Gateway::new(&grants, &Unreached, &AllOn);
     let providers = Providers {
+        editor: &Absent,
         net: &Absent,
         process: &Absent,
         secrets: &Absent,

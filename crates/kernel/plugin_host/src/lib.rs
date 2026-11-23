@@ -41,6 +41,8 @@ mod permission_tests;
 mod problem_tests;
 #[cfg(all(test, feature = "store", unix))]
 mod registry_tests;
+#[cfg(all(test, feature = "store"))]
+mod sweep_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, feature = "store"))]

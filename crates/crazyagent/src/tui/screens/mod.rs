@@ -262,6 +262,7 @@ pub enum Place {
         project: Option<ProjectId>,
     },
     GitHubDefaults,
+    AppPlugins,
     ProjectGitHub {
         id: ProjectId,
         name: String,
@@ -441,7 +442,8 @@ pub trait Screen {
             | Place::CloneRepo
             | Place::Usage
             | Place::Demo
-            | Place::GitHubDefaults => None,
+            | Place::GitHubDefaults
+            | Place::AppPlugins => None,
         }
     }
 }
@@ -507,6 +509,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             ctx,
         )),
         Place::GitHubDefaults => Box::new(settings_github::GitHubDefaults::new()),
+        Place::AppPlugins => Box::new(settings::app_plugins::AppPluginsPage::new()),
         Place::ProjectGitHub { id, name } => {
             Box::new(project_github::ProjectGitHub::new(id.clone(), name.clone()))
         }

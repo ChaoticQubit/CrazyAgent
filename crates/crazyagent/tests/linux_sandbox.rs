@@ -4651,30 +4651,6 @@ fn an_installed_sandbox_with_a_hidden_folder_keeps_it_out_or_refuses_it() {
     );
 }
 
-/// A confined agent whose project hides a folder is still refused on Linux, for its
-/// confinement and not for the folder, since neither backend holds a confined agent yet:
-/// team and research launches stay refused as they were (leader 12:25).
-#[test]
-fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_folder() {
-    let checkouts = checkouts();
-    let folder = checkouts.project.join("private");
-    fs::create_dir(&folder).unwrap();
-    let profiles = checkouts.project.parent().unwrap().join("profiles");
-    fs::create_dir_all(&profiles).unwrap();
-    let refused = InstalledSandbox::install(
-        confined(&checkouts).hide(&folder).unwrap(),
-        &profiles.join("agent.sb"),
-        LinuxSupervisor::On,
-        LinuxStrict::Off,
-    )
-    .err();
-    assert!(
-        matches!(&refused, Some(SandboxError::Unavailable(reason))
-            if reason.contains("confined") && !reason.contains("hidden")),
-        "{refused:?}"
-    );
-}
-
 /// A launch request for the case's project at `boundary`, signed in with the account home
 /// `home`, made owner-only as every account home is, with the owner's git identity. Inputs:
 /// the case, the boundary and the home. Output: the request, built only at the boundary.

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 
 use crate::Refused;
+use crate::views::{Listing, PluginStatus};
 
 /// The most runs one plugin may be held by at once.
 pub const HOLDERS_MAX: usize = 128;
@@ -144,6 +145,26 @@ impl Usage {
             .insert(notice.plugin.clone(), notice.current_sha256.clone());
         state.pending.insert(notice.plugin.clone(), notice);
         true
+    }
+
+    /// Keeps one notice for each plugin a listing shows as changed since it was trusted, and
+    /// forgets the change noticed for each one it shows ready, so its next change notifies
+    /// again. Input: the listing. Output: none.
+    pub fn note_listed(&self, listing: &Listing) {
+        for view in &listing.plugins {
+            match &view.status {
+                PluginStatus::Changed { trusted_sha256 } => {
+                    assert_ne!(trusted_sha256, &view.sha256);
+                    self.note_change(ChangeNotice {
+                        plugin: view.name.clone(),
+                        trusted_sha256: trusted_sha256.clone(),
+                        current_sha256: view.sha256.clone(),
+                    });
+                }
+                PluginStatus::Ready => self.settled(&view.name),
+                _ => {}
+            }
+        }
     }
 
     /// Forgets the change noticed for a plugin that runs again, so its next change notifies
