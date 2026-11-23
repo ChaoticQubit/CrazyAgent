@@ -5,8 +5,9 @@ use super::*;
 use crate::master_session::SESSION_DELETED;
 use crate::state_log::Aggregate;
 use crate::state_log::fence::engine;
-use crate::state_log::replay::{Logged, redact_matching};
+use crate::state_log::redact_matching;
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::replay::Logged;
 use kernel_storage::state_log::{Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE};
 use rusqlite::Connection;
 use serde_json::json;
@@ -356,7 +357,7 @@ fn replay_refuses_a_turns_event_it_does_not_know() {
     let sessions = |kind: &str, body: serde_json::Value| Logged {
         seq: 1,
         revision: 1,
-        aggregate: Aggregate::Sessions,
+        aggregate: Aggregate::Sessions.into(),
         kind: kind.into(),
         schema: 1,
         at_ms: 1,

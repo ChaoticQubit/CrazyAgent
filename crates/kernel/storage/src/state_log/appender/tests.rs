@@ -57,14 +57,17 @@ fn refusing() -> FenceCheck {
     Box::new(|_| Err(StorageError("fence_refused".into())))
 }
 
-/// A name check that lets every shaped name through. Input: unused. Output: true.
-fn any(_: &str) -> bool {
-    true
+/// A name set holding the names these rows write. Input: the name. Output: it, or none.
+fn any(name: &str) -> Option<AggregateName> {
+    ["worktrees", "ide"]
+        .into_iter()
+        .find(|known| *known == name)
+        .map(AggregateName::new)
 }
 
-/// A name check that reads only `ide`. Input: the name. Output: whether it is `ide`.
-fn ide_only(name: &str) -> bool {
-    name == "ide"
+/// A name set that holds only `ide`. Input: the name. Output: `ide`, or none.
+fn ide_only(name: &str) -> Option<AggregateName> {
+    (name == "ide").then(|| AggregateName::new("ide"))
 }
 
 /// A fence that passes every check. Output: the hook.

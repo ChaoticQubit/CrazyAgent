@@ -2,10 +2,11 @@ use super::*;
 use crate::protocol::{ProjectId, SessionId, TaskId};
 use crate::state_log::Aggregate;
 use crate::state_log::fence::{engine, seed};
-use crate::state_log::replay::{Logged, redact, rows};
+use crate::state_log::redact;
 use crate::storage::opening::Opening;
 use crate::worktrees::{Admission, Identity, LeaseRecord, LeaseState, WorktreeLease};
 use kernel_storage::state_log::SNAPSHOT_CHUNK;
+use kernel_storage::state_log::replay::{Logged, rows};
 use rusqlite::types::Value;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -256,7 +257,7 @@ fn logged(kind: &str, schema: u16, body: &str) -> Logged {
     Logged {
         seq: 1,
         revision: 1,
-        aggregate: Aggregate::Worktrees,
+        aggregate: Aggregate::Worktrees.into(),
         kind: kind.into(),
         schema,
         at_ms: 1,

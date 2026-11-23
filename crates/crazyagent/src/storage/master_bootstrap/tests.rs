@@ -995,8 +995,8 @@ fn logged(db: &Connection) -> Vec<(u64, String)> {
 fn replays_to_live(db: &mut Connection) {
     let tables = |db: &Connection| {
         (
-            crate::state_log::replay::rows(db, "repository_admissions").unwrap(),
-            crate::state_log::replay::rows(db, "worktree_leases").unwrap(),
+            kernel_storage::state_log::replay::rows(db, "repository_admissions").unwrap(),
+            kernel_storage::state_log::replay::rows(db, "worktree_leases").unwrap(),
         )
     };
     let live = tables(db);

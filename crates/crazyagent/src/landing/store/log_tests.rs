@@ -5,7 +5,7 @@ use crate::landing_log::{
     OWNER_EDITS_SETTLED, PUBLISH_PROMPT_NEVER, PUBLISH_PROMPT_SNOOZED,
     WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
 };
-use crate::state_log::replay::rows;
+use kernel_storage::state_log::replay::rows;
 use serde_json::json;
 
 const BRANCH: &str = "crazyagent/task-one";
