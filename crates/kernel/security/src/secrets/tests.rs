@@ -233,7 +233,7 @@ fn a_failed_store_write_drops_the_new_handle() {
         secrets.put_from_owner("github", "token"),
         Err(StoreError::code("credential_store_unavailable"))
     );
-    assert!(handles.lock().unwrap().by_id.is_empty());
+    assert!(handles.lock().unwrap().total() == 0);
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn find_of_a_missing_name_is_none() {
     let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
     let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, None);
     assert_eq!(secrets.find("github", "token"), Ok(None));
-    assert!(handles.lock().unwrap().by_id.is_empty());
+    assert!(handles.lock().unwrap().total() == 0);
 }
 
 #[test]
@@ -311,7 +311,7 @@ fn find_twice_returns_the_same_handle() {
     for _ in 0..HANDLES_MAX + 1 {
         assert_eq!(secrets.find("github", "token").unwrap(), first);
     }
-    assert_eq!(handles.lock().unwrap().by_id.len(), 1);
+    assert_eq!(handles.lock().unwrap().total(), 1);
 }
 
 #[test]
