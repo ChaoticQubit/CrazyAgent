@@ -23,7 +23,7 @@ test("every engine refusal for a read-only folder has its own sentence", () => {
     "read_path_engine_data", "read_path_refused", "read_path_owner_unknown", "read_paths_too_many", "read_paths_invalid"]) {
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/extra_paths.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/extra_paths.rs", import.meta.url), "utf8");
   for (const code of engine.matchAll(/"(read_paths?_[a-z_]+)"/g)) assert.ok(api.KNOWN_ERROR_CODES.includes(code[1]), code[1]);
 });
 
