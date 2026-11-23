@@ -1409,6 +1409,34 @@ fn the_start_sweep_deletes_staged_leftovers_and_keeps_saved_keys_and_files() {
     assert_eq!(loaded.bindings.len(), 1);
 }
 
+/// Replacing a plugin whose old folder holds more than the sweep may delete still
+/// succeeds: the new plugin.toml is in place and listed, and the old folder is left aside
+/// under a retired name instead of failing the add after it was published.
+#[test]
+fn a_replace_over_an_old_folder_it_cannot_delete_still_succeeds() {
+    let case = case();
+    let old = drop_in(&case, "acme", ACME);
+    let mut deep = old.parent().unwrap().to_path_buf();
+    for level in 0..8 {
+        deep = deep.join(format!("level-{level}"));
+        std::fs::create_dir(&deep).unwrap();
+    }
+    std::fs::write(deep.join("note.txt"), b"deep").unwrap();
+    let text = ACME.replace("Acme embeddings", "Acme embeddings two");
+
+    add_text(&case, &text, true, 2).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&old).unwrap(), text);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").sha256, sha(&text));
+    let retired: Vec<String> = std::fs::read_dir(plugins_folder(&case))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".old-acme."))
+        .collect();
+    assert_eq!(retired.len(), 1, "{retired:?}");
+}
+
 /// A key the owner entered for a plugin is never readable through the plugin
 /// state read. The listing, its JSON, the three store tables and the loaded plugin hold no
 /// key byte; the key comes back only through `secret_value`.
