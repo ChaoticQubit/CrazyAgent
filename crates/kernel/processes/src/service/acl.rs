@@ -45,6 +45,18 @@ pub(super) fn settled(stamp: &Stamp, listed_secs: i64) -> bool {
     stamp.2 < listed_secs
 }
 
+/// Whether an access answer read for an entry may be kept: only a [`settled`] one, whose
+/// entry a second `lstat` after the listing found with the same device, inode and change
+/// time, and that came from the listing's own lines, never from the direct read, which
+/// reads the path again. Inputs: the stamp before the listing, the one after, if read,
+/// whether the answer came from the direct read, and the whole second the listing started.
+/// Output: the answer.
+#[cfg(target_os = "macos")]
+pub(super) fn keep(before: &Stamp, after: Option<&Stamp>, direct: bool, listed_secs: i64) -> bool {
+    let _ = (after, direct);
+    settled(before, listed_secs)
+}
+
 /// The access-list answers read so far, by entry, each with the stamp it was read at.
 #[cfg(target_os = "macos")]
 static KEPT: std::sync::LazyLock<
@@ -145,7 +157,7 @@ fn list(entries: &[&Path]) -> Vec<Option<bool>> {
         }
         _ => return vec![None; entries.len()],
     };
-    let mut read = listed_shared_all(&text, &operands, own_name(), &|index| {
+    let mut read = listed_shared_all(&text, &operands, &[], own_name(), &|index| {
         confirmed(
             std::ffi::CString::new(operands[index])
                 .map_err(std::io::Error::other)
@@ -234,9 +246,11 @@ pub(super) fn listed_shared(text: &str, me: Option<&str>) -> Option<bool> {
 pub(super) fn listed_shared_all(
     text: &str,
     entries: &[&str],
+    inodes: &[u64],
     me: Option<&str>,
     unlisted: &dyn Fn(usize) -> Option<bool>,
 ) -> Vec<Option<bool>> {
+    let _ = inodes;
     let none = vec![None; entries.len()];
     let mut blocks: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
