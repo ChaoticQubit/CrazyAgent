@@ -188,10 +188,12 @@ pub fn steps(recipe: &InstallRecipe, paths: &InstallPaths) -> Result<Vec<Step>, 
 }
 
 /// Runs one step outside the sandbox through the spawn gate with no input, only the base
-/// and step environment, and a time bound, then stops its whole process group. Inputs: the
-/// step, the caller's base environment, the absolute working folder and the bound. Output:
-/// 0 for a success exit and 1 for any other, with at most `run::OUTPUT_BYTES_MAX` bytes of
-/// standard output, or the run's code (`setup_timeout`, `setup_install_failed`).
+/// and step environment, and a time bound ([`crate::run::run_tails`]): past the bound its
+/// whole process group gets TERM, a grace, then KILL, and on every return the group is
+/// killed. Inputs: the step, the caller's base environment, the absolute working folder and
+/// the bound. Output: 0 for a success exit and 1 for any other, with the last
+/// `run::OUTPUT_BYTES_MAX` bytes of standard output and of standard error, or the run's code
+/// (`setup_timeout`, `setup_install_failed`).
 #[cfg(unix)]
 pub fn run(
     step: &Step,
@@ -207,13 +209,14 @@ pub fn run(
         .cloned()
         .chain(step.env.iter().cloned())
         .collect();
-    let (success, output) = crate::run::run(&step.program, &step.args, &env, cwd, limit)
+    let ran = crate::run::run_tails(&step.program, &step.args, &env, cwd, limit)
         .map_err(|crate::run::InstallError(code)| code)?;
-    assert!(output.len() <= crate::run::OUTPUT_BYTES_MAX);
+    assert!(ran.stdout.len() <= crate::run::OUTPUT_BYTES_MAX);
+    assert!(ran.stderr.len() <= crate::run::OUTPUT_BYTES_MAX);
     Ok(super::InstallResult {
-        code: u32::from(!success),
-        output,
-        stderr: Vec::new(),
+        code: u32::from(!ran.success),
+        output: ran.stdout,
+        stderr: ran.stderr,
     })
 }
 

@@ -20,7 +20,7 @@ pub use state::{
 };
 
 use crate::harnesses;
-use kernel_processes::install::{InstallRecipe, Verb};
+use kernel_processes::install::{InstallPaths, InstallRecipe, Verb};
 use recipes::{Brew, BrewKind, Npm, SelfUpdate, recipe};
 #[cfg(all(test, unix))]
 use recipes::{Recipe, install_names, table_names};
@@ -28,7 +28,7 @@ use recipes::{Recipe, install_names, table_names};
 use run::read_pointer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf, Prefix};
 
 pub const VERSION_BYTES_MAX: usize = 64;
@@ -491,12 +491,28 @@ fn own_recipe(program: &str, own: &SelfUpdate) -> InstallRecipe {
     }
 }
 
-/// Passes a built update or install command only when it is exactly the step the kernel's
-/// install template builds from its recipe. Inputs: the command and its recipe. Output: the
-/// same command, or `TOOL_UNSAFE`.
+/// Passes a built update or install command only when it is exactly the one step the
+/// kernel's install template builds from its recipe ([`kernel_processes::install::steps`]):
+/// the same absolute program and the same arguments in order, with npm's prefix as the
+/// template's prefix. Inputs: the command and its recipe. Output: the same command, or
+/// `TOOL_UNSAFE`.
 fn matched(fixed: Fixed, recipe: &InstallRecipe) -> Result<Fixed, &'static str> {
-    let _ = recipe;
-    Ok(fixed)
+    let absolute =
+        fixed.program.is_absolute() && fixed.prefix.as_deref().is_none_or(Path::is_absolute);
+    if !absolute {
+        return Err(TOOL_UNSAFE);
+    }
+    let paths = InstallPaths {
+        program: Some(fixed.program.clone()),
+        npm_prefix: fixed.prefix.clone(),
+        ..InstallPaths::default()
+    };
+    let built = kernel_processes::install::steps(recipe, &paths).map_err(|_| TOOL_UNSAFE)?;
+    let args: Vec<OsString> = fixed.args.iter().map(OsString::from).collect();
+    match built.as_slice() {
+        [step] if step.program == fixed.program && step.args == args => Ok(fixed),
+        _ => Err(TOOL_UNSAFE),
+    }
 }
 
 fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {

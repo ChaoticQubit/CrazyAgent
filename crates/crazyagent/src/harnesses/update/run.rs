@@ -1,9 +1,14 @@
 use super::{Fixed, OUTPUT_BYTES_MAX, POINTER_BYTES_MAX, Pointer};
+#[cfg(windows)]
 use std::io::Read;
 use std::path::Path;
+#[cfg(windows)]
 use std::process::{Child, ExitStatus};
+#[cfg(windows)]
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 pub const SHOWN_BYTES_MAX: usize = 4 * 1024;
 pub const VERSION_TIME: Duration = Duration::from_secs(10);
@@ -45,9 +50,10 @@ pub fn refused_user(effective_user: u32) -> Option<&'static str> {
 }
 
 /// Runs one fixed command with no shell, no input, a cleared environment and a search path of
-/// only its own folder and the system folders, and ends it with everything it started when it
-/// passes its time limit. Inputs: the command, the home folder and the limit.
-/// Output: the exit and the masked last lines, or a refusal code.
+/// only its own folder and the system folders, as one kernel install step: everything it
+/// started is ended when it returns, and past its time limit after TERM and a grace.
+/// Inputs: the command, the home folder and the limit. Output: the exit and the masked last
+/// lines, or a refusal code.
 pub fn run(fixed: &Fixed, home: &Path, limit: Duration) -> Result<Ran, &'static str> {
     let raw = run_raw(fixed, home, limit)?;
     let mut all = raw.stdout;
@@ -117,20 +123,26 @@ pub(super) fn version_raw(
     windows::version_raw(words, search, home, limit)
 }
 
+#[cfg(windows)]
 const POLL: Duration = Duration::from_millis(50);
+#[cfg(windows)]
 const DRAIN_TIME: Duration = Duration::from_secs(2);
+#[cfg(windows)]
 const CHUNK_BYTES: usize = 8192;
 const SEARCH_MAX: usize = 4;
 
+#[cfg(windows)]
 const _: () = assert!(CHUNK_BYTES <= STREAM_BYTES_MAX);
 
 /// The last bytes of one output pipe, read on its own thread so a chatty tool never
 /// blocks on a full pipe. `done` answers when the pipe reached its end.
+#[cfg(windows)]
 struct Tail {
     kept: Arc<Mutex<Vec<u8>>>,
     done: mpsc::Receiver<()>,
 }
 
+#[cfg(windows)]
 impl Tail {
     /// Starts reading a pipe to its end, keeping its last `STREAM_BYTES_MAX` bytes.
     /// Input: the pipe, present for a piped stream. Output: the handle to what is kept.
@@ -164,6 +176,7 @@ impl Tail {
 
 /// Reads a pipe to its end into a shared buffer that never holds more than twice the
 /// kept size. Inputs: the pipe and the buffer. Output: none.
+#[cfg(windows)]
 fn follow(mut pipe: impl Read, into: &Mutex<Vec<u8>>) {
     let mut chunk = [0_u8; CHUNK_BYTES];
     loop {
@@ -186,6 +199,7 @@ fn follow(mut pipe: impl Read, into: &Mutex<Vec<u8>>) {
 /// Waits for a child to end, polling, for at most a time limit.
 /// Inputs: the child and the limit. Output: its exit, None when it still runs or cannot
 /// be asked.
+#[cfg(windows)]
 fn waited(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + limit;
     loop {
@@ -205,41 +219,17 @@ fn waited(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
 
 #[cfg(unix)]
 mod unix {
-    use super::{
-        AS_ROOT, Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, Tail, refused_user,
-        waited,
-    };
+    use super::{AS_ROOT, Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, refused_user};
     use crate::harnesses::update::{ARGS_MAX, Fixed, TOOL_UNSAFE};
-    use rustix::process::{Pid, Signal};
+    use kernel_processes::install::Step;
     use std::ffi::OsString;
-    use std::os::unix::process::CommandExt;
     use std::path::Path;
-    use std::process::{Child, Command, Stdio};
     use std::time::Duration;
 
-    const STOP_GRACE: Duration = Duration::from_secs(2);
     /// The environment name npm reads its global prefix from, ahead of every npmrc file.
     const NPM_PREFIX: &str = "npm_config_prefix";
     const SYSTEM_PATH: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
     const LANGUAGE: &str = "C.UTF-8";
-
-    /// Waits for the tool to its limit; past it, asks its whole process group to stop, waits
-    /// a short grace, then kills the group and reaps the tool. A group that is already gone
-    /// is fine. Inputs: the child, its group and the limit. Output: whether it reported
-    /// success, None when it was ended for time.
-    fn ended(child: &mut Child, group: Pid, limit: Duration) -> Option<bool> {
-        if let Some(status) = waited(child, limit) {
-            return Some(status.success());
-        }
-        let _ = rustix::process::kill_process_group(group, Signal::TERM);
-        let stopped = waited(child, STOP_GRACE).is_some();
-        let _ = rustix::process::kill_process_group(group, Signal::KILL);
-        if !stopped {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        None
-    }
 
     /// The child's whole search path: the command's own folders, then the system folders.
     /// Input: the command. Output: the value, None when a folder cannot be on a search path.
@@ -256,33 +246,51 @@ mod unix {
             .map(|user| user.name)
     }
 
-    /// Builds the child: no shell, the fixed arguments only, an environment of exactly HOME,
-    /// USER, LOGNAME, LANG, TMPDIR and PATH, plus npm's global prefix for an npm command,
-    /// no input, its own process group.
-    /// Inputs: the command, the home folder and the search path. Output: the command to start.
-    fn command(fixed: &Fixed, home: &Path, path: OsString) -> Command {
-        let mut command = Command::new(&fixed.program);
-        command
-            .args(&fixed.args)
-            .env_clear()
-            .env("HOME", home)
-            .env("LANG", LANGUAGE)
-            .env("TMPDIR", std::env::temp_dir())
-            .env("PATH", path)
-            .current_dir(home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+    /// The child's whole environment: exactly HOME, LANG, TMPDIR and PATH, then USER and
+    /// LOGNAME when this user has a name. Inputs: the home folder and the search path.
+    /// Output: the pairs.
+    fn base(home: &Path, path: OsString) -> Vec<(&'static str, OsString)> {
+        let mut base = vec![
+            ("HOME", home.as_os_str().to_owned()),
+            ("LANG", OsString::from(LANGUAGE)),
+            ("TMPDIR", std::env::temp_dir().into_os_string()),
+            ("PATH", path),
+        ];
         if let Some(name) = user_name() {
-            command.env("USER", &name).env("LOGNAME", &name);
+            base.push(("USER", OsString::from(&name)));
+            base.push(("LOGNAME", OsString::from(name)));
         }
-        if let Some(prefix) = &fixed.prefix {
-            command.env(NPM_PREFIX, prefix);
-        }
-        command
+        assert!(base.len() <= 6);
+        base
     }
 
+    /// The harness code for a kernel install run's code: a run past its time, a program that
+    /// could not start, and any other refusal as unsafe. Input: the kernel code. Output: the
+    /// harness code.
+    fn harness_code(code: &'static str) -> &'static str {
+        match code {
+            "setup_timeout" => TIMEOUT,
+            "setup_install_failed" => START_FAILED,
+            _ => TOOL_UNSAFE,
+        }
+    }
+
+    /// The last [`STREAM_BYTES_MAX`] bytes of a stream tail. Input: the tail. Output: its end.
+    fn last(mut bytes: Vec<u8>) -> Vec<u8> {
+        if bytes.len() > STREAM_BYTES_MAX {
+            bytes.drain(..bytes.len() - STREAM_BYTES_MAX);
+        }
+        assert!(bytes.len() <= STREAM_BYTES_MAX);
+        bytes
+    }
+
+    /// Refuses the administrator account, then runs the command as one kernel install step
+    /// ([`kernel_processes::install::run`]): no shell, the fixed arguments only, the
+    /// [`base`] environment plus npm's global prefix for an npm command, the home folder as
+    /// its working folder, no input and its own process group, which gets TERM, a grace and
+    /// KILL past the limit and KILL on every return. Inputs: the command, the home folder,
+    /// the limit and the effective user id. Output: the exit and both stream tails, or a
+    /// refusal code.
     pub(super) fn run_raw(
         fixed: &Fixed,
         home: &Path,
@@ -298,21 +306,25 @@ mod unix {
         assert!(fixed.search.len() <= SEARCH_MAX);
         assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
         assert!(fixed.prefix.as_deref().is_none_or(Path::is_absolute));
+        if !home.is_absolute() {
+            return Err(TOOL_UNSAFE);
+        }
         let path = search_path(fixed).ok_or(TOOL_UNSAFE)?;
-        let mut child = kernel_processes::spawn_gate::spawn(&mut command(fixed, home, path))
-            .map_err(|_| START_FAILED)?;
-        let group = Pid::from_child(&child);
-        assert!(group.as_raw_nonzero().get() > 1);
-        let stdout = Tail::start(child.stdout.take());
-        let stderr = Tail::start(child.stderr.take());
-        let success = ended(&mut child, group, limit);
-        let (stdout, stderr) = (stdout.taken(), stderr.taken());
-        assert!(stdout.len() <= STREAM_BYTES_MAX && stderr.len() <= STREAM_BYTES_MAX);
-        let success = success.ok_or(TIMEOUT)?;
+        let step = Step {
+            program: fixed.program.clone(),
+            args: fixed.args.iter().map(OsString::from).collect(),
+            env: fixed
+                .prefix
+                .iter()
+                .map(|prefix| (NPM_PREFIX, prefix.as_os_str().to_owned()))
+                .collect(),
+        };
+        let ran = kernel_processes::install::run(&step, &base(home, path), home, limit)
+            .map_err(harness_code)?;
         Ok(Raw {
-            success,
-            stdout,
-            stderr,
+            success: ran.code == 0,
+            stdout: last(ran.output),
+            stderr: last(ran.stderr),
         })
     }
 }
