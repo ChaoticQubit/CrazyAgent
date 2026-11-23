@@ -268,3 +268,5 @@ pub fn run(args: &[OsString]) -> Result<String, UpdateError> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod lock_tests;
