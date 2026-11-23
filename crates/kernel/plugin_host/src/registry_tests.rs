@@ -923,6 +923,13 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
 /// folder all stay, so it is listed as it was, and the next removal goes through.
 #[test]
 fn a_removal_whose_folder_cannot_move_keeps_the_rows_and_the_key() {
+    fn no_ref() -> Result<String, &'static str> {
+        Err("app_plugin_folder_unavailable")
+    }
+    const NO_REF: Keys = Keys {
+        new_ref: no_ref,
+        ..KEYS
+    };
     let case = case();
     add_text(&case, ACME, false, 1).unwrap();
     set_key(
@@ -933,17 +940,17 @@ fn a_removal_whose_folder_cannot_move_keeps_the_rows_and_the_key() {
         b"sk-test-key-0001".to_vec(),
     )
     .unwrap();
-    let folder = plugins_folder(&case);
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let removed = remove(&case.db, &case.engine(), "acme");
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(removed.is_err(), "the folder could not move aside");
+    let stuck = Engine {
+        keys: &NO_REF,
+        ..case.engine()
+    };
+    assert!(remove(&case.db, &stuck, "acme").is_err());
     assert_eq!(plugin_keys(&case).len(), 1);
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
     remove(&case.db, &case.engine(), "acme").unwrap();
     assert!(plugin_keys(&case).is_empty());
-    assert!(!folder.join("acme").exists());
+    assert!(!plugins_folder(&case).join("acme").exists());
 }
 
 /// A removal whose rows cannot be deleted puts the folder back under its name and keeps the
