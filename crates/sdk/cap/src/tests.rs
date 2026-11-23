@@ -535,3 +535,87 @@ fn a_misshapen_foreign_typeref_is_refused() {
         at("cap_unknown_type", 1, 13)
     );
 }
+
+#[test]
+fn a_stem_that_is_not_snake_case_is_refused() {
+    let long = "a".repeat(NAME_BYTES_MAX + 1);
+    for stem in [
+        "Foo",
+        "a-b",
+        "a__b",
+        "a_",
+        "1a",
+        "a\nb",
+        "",
+        "a.b",
+        long.as_str(),
+    ] {
+        assert_eq!(
+            parse_as(stem, "enum A { a }"),
+            Err(ParseError {
+                line: 1,
+                column: 1,
+                code: "cap_stem",
+            }),
+            "{stem:?}"
+        );
+    }
+    let longest = "a".repeat(NAME_BYTES_MAX);
+    for stem in ["a", "a_2", "fixture_two", "x9", longest.as_str()] {
+        assert!(parse_as(stem, "enum A { a }").is_ok(), "{stem:?}");
+    }
+    assert!(parse("enum A { a }").is_ok());
+}
+
+/// Writes a chain of records `T0 { next: T1 }` .. `T<n-1> { end: u16 }`, declared in a
+/// given order. Inputs: the chain length and whether to declare it from the tail.
+/// Output: the source.
+fn record_chain(length: usize, from_tail: bool) -> String {
+    let mut items: Vec<String> = (0..length)
+        .map(|at| {
+            if at + 1 == length {
+                format!("type T{at} {{ end: u16 }}")
+            } else {
+                format!("type T{at} {{ next: list<T{}> }}", at + 1)
+            }
+        })
+        .collect();
+    if from_tail {
+        items.reverse();
+    }
+    items.join("\n")
+}
+
+#[test]
+fn a_record_chain_deeper_than_the_bound_is_refused() {
+    assert_eq!(RECORD_DEPTH_MAX, 8);
+    for from_tail in [false, true] {
+        let edge = record_chain(RECORD_DEPTH_MAX, from_tail);
+        assert!(parse(&edge).is_ok(), "{edge}");
+        let deep = record_chain(RECORD_DEPTH_MAX + 1, from_tail);
+        let error = refused(&deep);
+        assert_eq!(error.code, "cap_type_too_deep", "{deep}");
+        let line = if from_tail { RECORD_DEPTH_MAX + 1 } else { 1 };
+        assert_eq!(error.line as usize, line, "{deep}");
+    }
+    let mut wide = record_chain(RECORD_DEPTH_MAX, false);
+    wide.push_str("\ntype Side { a: T0, b: T3 }");
+    assert_eq!(refused(&wide).code, "cap_type_too_deep");
+}
+
+#[test]
+fn an_event_kind_named_like_an_item_is_refused() {
+    for item in ["type Saved { a: u16 }", "enum Saved { a }", "handle Saved"] {
+        let source = format!(
+            "{item}\ncapability s.go() -> unit tier: t1 needs: s.x emits: Saved {{ b: u16 }}"
+        );
+        assert_eq!(
+            refused(&source),
+            at("cap_duplicate_name", 2, 54),
+            "{source}"
+        );
+    }
+    let twice = "capability s.a() -> unit tier: t1 needs: s.x emits: Saved { b: u16 }\n\
+                 capability s.b() -> unit tier: t1 needs: s.x emits: Saved { b: u16 }";
+    assert!(parse(twice).is_ok());
+}

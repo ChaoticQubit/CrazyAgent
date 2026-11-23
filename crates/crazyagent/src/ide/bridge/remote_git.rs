@@ -371,7 +371,7 @@ pub(super) fn checked_folder(asked: &Path, project: &Path) -> Result<PathBuf, En
     if !asked.is_absolute() {
         return Err(refused());
     }
-    let asked = crate::sandbox::canonical(asked).map_err(|_| refused())?;
+    let asked = kernel_sandbox::paths::canonical(asked).map_err(|_| refused())?;
     if asked != project {
         return Err(refused());
     }
@@ -426,12 +426,14 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
         .iter()
         .copied()
         .chain(TEMP_FOLDERS.iter().map(Path::new))
-        .map(|folder| crate::sandbox::canonical(folder).unwrap_or_else(|_| folder.to_path_buf()))
+        .map(|folder| {
+            kernel_sandbox::paths::canonical(folder).unwrap_or_else(|_| folder.to_path_buf())
+        })
         .collect();
     let mut kept: Vec<PathBuf> = Vec::new();
     for real in std::env::split_paths(value)
         .filter(|entry| entry.is_absolute())
-        .filter_map(|entry| crate::sandbox::canonical(&entry).ok())
+        .filter_map(|entry| kernel_sandbox::paths::canonical(&entry).ok())
         .filter(|real| {
             real.is_dir()
                 && real.to_str().is_some_and(|text| !text.contains(':'))
@@ -751,7 +753,7 @@ fn placed_allowed(path: &Path, folder: &Path) -> bool {
     let placed = lexical(path);
     let own = [git.join("config"), git.join("config.worktree")].contains(&placed)
         && !path.components().any(|part| part == Component::ParentDir)
-        && crate::sandbox::canonical(path).is_ok_and(|real| real == placed);
+        && kernel_sandbox::paths::canonical(path).is_ok_and(|real| real == placed);
     own || !placed_inside(path, folder)
 }
 
@@ -792,7 +794,7 @@ fn placed_inside(path: &Path, folder: &Path) -> bool {
                 }
                 rest.extend(names(&target));
             }
-            Ok(_) => match crate::sandbox::canonical(&next) {
+            Ok(_) => match kernel_sandbox::paths::canonical(&next) {
                 Ok(real) if !real.starts_with(folder) => current = real,
                 _ => return true,
             },
@@ -885,7 +887,7 @@ fn hooks_off(entries: &[Entry], folder: &Path) -> Result<Vec<String>, String> {
             continue;
         };
         let inside = entry.origin.strip_prefix("file:").is_some_and(|file| {
-            crate::sandbox::canonical(&folder.join(file))
+            kernel_sandbox::paths::canonical(&folder.join(file))
                 .ok()
                 .is_none_or(|real| real.starts_with(folder))
         });

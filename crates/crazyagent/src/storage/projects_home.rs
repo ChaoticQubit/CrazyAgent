@@ -96,7 +96,7 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| error("runtime_parent_missing"))?;
-    Ok(crate::projects_home::one_spelling(
+    Ok(kernel_sandbox::paths::one_spelling(
         std::fs::canonicalize(parent).map_err(error)?,
     ))
 }
@@ -1580,7 +1580,7 @@ fn held_inside(
         return Ok(false);
     }
     let saved = home.to_path_buf();
-    let home = crate::projects_home::one_spelling(saved.clone());
+    let home = kernel_sandbox::paths::one_spelling(saved.clone());
     let names = [
         Some(saved),
         crate::projects_home::data_twin(&home),
@@ -1593,7 +1593,7 @@ fn held_inside(
             .flatten()
             .any(|name| crate::projects_home::inside(path, name))
             || std::fs::canonicalize(path).is_ok_and(|real| {
-                crate::projects_home::inside(&crate::projects_home::one_spelling(real), &home)
+                crate::projects_home::inside(&kernel_sandbox::paths::one_spelling(real), &home)
             })
     };
     let mut statement = tx.prepare(query).map_err(error)?;

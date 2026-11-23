@@ -32,7 +32,7 @@ fn agent_work_named_with_an_apostrophe_inside_the_projects_home_is_held_there() 
         let worktree = home.join(name).join("agent-1");
         std::fs::create_dir_all(&worktree).unwrap();
         let worktree =
-            crate::projects_home::one_spelling(std::fs::canonicalize(&worktree).unwrap());
+            kernel_sandbox::paths::one_spelling(std::fs::canonicalize(&worktree).unwrap());
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE team_worktrees (repository TEXT, worktree TEXT)")
             .unwrap();

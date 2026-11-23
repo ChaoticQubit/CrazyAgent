@@ -1487,8 +1487,9 @@ fn boundary_check(
     kept: &[u16],
     network: kernel_sandbox::net::SandboxNetwork,
 ) -> Result<Vec<String>, String> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, canonical};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
     use kernel_sandbox::error::SandboxError;
+    use kernel_sandbox::paths::canonical;
     assert!(valid_id(id));
     use crate::context_mode::ForCheck;
     let approved = ServerSpec::Stdio {

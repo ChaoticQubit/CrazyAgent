@@ -611,6 +611,9 @@ fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64
         appender.project(|tx| apply(tx, change))?;
     }
     assert!(last > 0, "a recorded landing event has a seq");
+    crate::state_log::compact_after(appender, Aggregate::Landing, Clock::System.now_ms(), |tx| {
+        chunks(tx)
+    })?;
     Ok(last)
 }
 
@@ -1011,20 +1014,27 @@ pub(crate) fn first_run(
 /// writer's clock. Output: the seq of the run's closing event, or `landing_log_snapshot_rows`,
 /// `landing_log_snapshot_cell`, `landing_log_row_too_large` or the log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = appender.project(|tx| chunks(tx))?;
+    Ok(appender.snapshot(Aggregate::Landing, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of every landing table as it stands, the kept tables first,
+/// for [`snapshot`] and for compaction. Input: the transaction. Output: the chunks, or the
+/// first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for table in KEPT_TABLES {
-        chunks.extend(pack(table, appender.project(|tx| kept_rows(tx, table))?)?);
+        chunks.extend(pack(table, kept_rows(db, table)?)?);
     }
     for (table, columns, _) in TABLES {
-        let rows = appender.project(|tx| table_rows(tx, table, columns))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table, columns)?)?);
     }
     assert!(
         chunks.len() >= KEPT_TABLES.len() + TABLES.len(),
         "one chunk or more per table"
     );
     assert_eq!(chunks[0].table, CHANGE_SETS);
-    Ok(appender.snapshot(Aggregate::Landing, at_ms, chunks)?)
+    Ok(chunks)
 }
 
 /// Every row of one landing table in column order, each as a JSON array of its cells; a

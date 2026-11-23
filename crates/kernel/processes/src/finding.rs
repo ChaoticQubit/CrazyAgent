@@ -120,10 +120,21 @@ const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 pub const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// The folders whose tools stay usable while the set-up projects cannot be read
 /// ([`Places::agent_writable`]): the system's, the Homebrew prefixes with their `Cellar` and
-/// `opt` folders (`/usr/local` lies under `/usr`), the Nix store, and on Linux Linuxbrew's
-/// prefix and the NixOS profiles. The normal path trusts every one of them too.
+/// `opt` folders (`/usr/local` lies under `/usr`), the Nix store, the system and default Nix
+/// profiles, on macOS the per-user profiles nix-darwin puts on the PATH, and on Linux
+/// Linuxbrew's prefix. Each is listed as the PATH spells it, since the check reads that form
+/// too. The normal path trusts every one of them, and every other check on a found file runs.
 #[cfg(not(target_os = "linux"))]
-const INSTALL_ROOTS: [&str; 5] = ["/usr", "/bin", "/sbin", "/opt/homebrew", "/nix/store"];
+const INSTALL_ROOTS: [&str; 8] = [
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/opt/homebrew",
+    "/nix/store",
+    "/run/current-system/sw",
+    "/etc/profiles/per-user",
+    "/nix/var/nix/profiles/default",
+];
 #[cfg(target_os = "linux")]
 const INSTALL_ROOTS: [&str; 8] = [
     "/usr",
@@ -163,6 +174,18 @@ const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
 /// The data root of the engine this process runs, recorded once at its start
 /// ([`record_engine_root`]).
 static ENGINE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The most data folders whose last good read of the set-up projects is kept.
+const LAST_GOOD_ROOTS_MAX: usize = 16;
+
+/// The most folders one read of the set-up projects names: every row engine.db may hold,
+/// in its recorded, real and one-spelling forms ([`FindingHooks::registered_projects`]).
+pub const PROJECT_ROOTS_MAX: usize = 3 * 1024 * (64 + 3);
+
+/// The last good read of the set-up projects per data folder, which a failed read of the
+/// same folder falls back to ([`Places::at_roots`]).
+static LAST_GOOD: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<PathBuf>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Records the data root of the engine this process runs, once, at its start, so a launch
 /// looks in the same places setup does ([`Places::from_environment`]). Only the engine
@@ -214,6 +237,7 @@ pub struct Places {
     refused_temp: Vec<PathBuf>,
     app_folder: Option<PathBuf>,
     projects: Option<Vec<PathBuf>>,
+    last_good: Vec<PathBuf>,
     seed: FindingSeed,
 }
 
@@ -232,6 +256,7 @@ impl PartialEq for Places {
             refused_temp,
             app_folder,
             projects,
+            last_good,
             seed,
         } = self;
         *folders == other.folders
@@ -243,6 +268,7 @@ impl PartialEq for Places {
             && *refused_temp == other.refused_temp
             && *app_folder == other.app_folder
             && *projects == other.projects
+            && *last_good == other.last_good
             && *seed == other.seed
     }
 }
@@ -1036,8 +1062,9 @@ struct Unreadable;
 /// and tabs: an absolute interpreter with its words, or `/usr/bin/env`, after one `-S` at
 /// most, with the program it names. An interpreter that is `env` anywhere else is refused
 /// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
-/// it cannot read, which the system still runs, and a line holding `#`, where the system
-/// ends it, are [`Unreadable`] (rv-sec2 B11 r2 F3, F4). Input: the real file. Output: the
+/// it cannot read, which the system still runs, a line holding `#`, where the system
+/// ends it, and an `-S` line with a word holding `$`, `\`, `"` or `'`, which `env` splits
+/// otherwise, are [`Unreadable`] (rv-sec2 B11 r2 F3, F4). Input: the real file. Output: the
 /// line, none for a file that is not a script, or [`Unreadable`] for any other first line.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
@@ -1089,7 +1116,10 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     let (program, arguments) = rest.split_first().ok_or(Unreadable)?;
     let plain = !program.starts_with('-')
         && !program.contains('=')
-        && !(split && program.contains(['$', '\\', '"', '\'']));
+        && !(split
+            && std::iter::once(program)
+                .chain(arguments)
+                .any(|word| word.contains(['$', '\\', '"', '\''])));
     if !plain {
         return Err(Unreadable);
     }

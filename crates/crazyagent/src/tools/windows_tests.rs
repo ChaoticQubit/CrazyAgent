@@ -13,7 +13,7 @@ fn a_windows_temp_folder_is_one_root_in_every_spelling_and_only_a_link_into_it_i
     let roots = temp_roots(&HOOKS);
     let owner = std::env::temp_dir();
     let verbatim = owner.canonicalize().unwrap();
-    let plain = crate::sandbox::canonical(&owner).unwrap();
+    let plain = kernel_sandbox::paths::canonical(&owner).unwrap();
     assert!(
         verbatim.to_str().unwrap().starts_with(r"\\?\"),
         "{verbatim:?}"
@@ -23,7 +23,7 @@ fn a_windows_temp_folder_is_one_root_in_every_spelling_and_only_a_link_into_it_i
         assert!(roots.contains(spelling), "{spelling:?} in {roots:?}");
     }
     let folder = tempfile::tempdir().unwrap();
-    let file = crate::sandbox::canonical(folder.path())
+    let file = kernel_sandbox::paths::canonical(folder.path())
         .unwrap()
         .join("tool.exe");
     std::fs::write(&file, "").unwrap();

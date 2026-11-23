@@ -37,7 +37,7 @@ fn program(file: &Path) {
 /// setup installs it. Output: the case, removed when dropped.
 fn case() -> Case {
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let links = base
         .join("local")
         .join("Microsoft")
