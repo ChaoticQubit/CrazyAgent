@@ -986,7 +986,9 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// of the release executables beside it ([`crate::update::BINARIES`]) in
 /// `<data root>/setup/bin`, which the tool resolver trusts so the bundled tmux there is used,
 /// one stable path across versions, each file refreshed by an atomic rename
-/// whenever it differs. The copy an older version kept in `<data root>/bin` stays, since a
+/// whenever it differs: every changed file is staged first, a staging failure removes what
+/// was staged and changes nothing, then the version file is raised, then the staged files
+/// are renamed in, so a stop leaves a version file never older than the copies. The copy an older version kept in `<data root>/bin` stays, since a
 /// login service may still name it; `service start` retires it after the service names this
 /// one ([`retire_old_copies`]). The version written goes in `<data root>/setup/bin-version`,
 /// and while a newer engine is known there ([`newer_engine_at`]) this user's private copy is
@@ -1028,28 +1030,46 @@ pub fn persistable(
     if newer_engine_at(root, hooks) && private_file(&installed) {
         return Ok(installed);
     }
+    let unstage = |staged: &[(PathBuf, PathBuf)]| {
+        for (file, _) in staged {
+            let _ = std::fs::remove_file(file);
+        }
+    };
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
     for name in &names {
         let copy = copies.join(name);
         if kept(&source.join(name), &copy) {
             continue;
         }
-        let fail = |error: std::io::Error| failure(format!("{}: {error}", copy.display()));
-        let staged = copies.join(format!(".{name}.{}", std::process::id()));
-        if std::fs::symlink_metadata(&staged).is_ok() {
-            std::fs::remove_file(&staged).map_err(fail)?;
+        let file = copies.join(format!(".{name}.{}", std::process::id()));
+        let made = std::fs::symlink_metadata(&file)
+            .map_or(Ok(()), |_| std::fs::remove_file(&file))
+            .and_then(|()| copy_private(&source.join(name), &file));
+        if let Err(error) = made {
+            let _ = std::fs::remove_file(&file);
+            unstage(&staged);
+            return Err(failure(format!("{}: {error}", copy.display())));
         }
-        copy_private(&source.join(name), &staged).map_err(fail)?;
-        std::fs::rename(&staged, &copy).map_err(fail)?;
+        staged.push((file, copy));
     }
     let recorded = copy_version_file(root);
     if bounded_text(&recorded).as_deref().map(str::trim) != Some(crate::version::VERSION) {
         let fail = |error: std::io::Error| failure(format!("{}: {error}", recorded.display()));
-        let staged = recorded.with_file_name(format!(".bin-version.{}", std::process::id()));
-        if std::fs::symlink_metadata(&staged).is_ok() {
-            std::fs::remove_file(&staged).map_err(fail)?;
+        let marker = recorded.with_file_name(format!(".bin-version.{}", std::process::id()));
+        let written = std::fs::symlink_metadata(&marker)
+            .map_or(Ok(()), |_| std::fs::remove_file(&marker))
+            .and_then(|()| std::fs::write(&marker, crate::version::VERSION))
+            .and_then(|()| std::fs::rename(&marker, &recorded));
+        if let Err(error) = written {
+            unstage(&staged);
+            return Err(fail(error));
         }
-        std::fs::write(&staged, crate::version::VERSION).map_err(fail)?;
-        std::fs::rename(&staged, &recorded).map_err(fail)?;
+    }
+    for (index, (file, copy)) in staged.iter().enumerate() {
+        if let Err(error) = std::fs::rename(file, copy) {
+            unstage(&staged[index..]);
+            return Err(failure(format!("{}: {error}", copy.display())));
+        }
     }
     assert!(installed.starts_with(&copies) && installed.is_file());
     Ok(installed)
