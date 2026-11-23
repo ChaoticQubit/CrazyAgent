@@ -1093,7 +1093,7 @@ mod own_turns {
     /// engine can still take it over after a crash (DEC-141).
     #[test]
     fn a_pane_on_the_local_placeholder_key_gets_no_lifeline() {
-        let local = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        let local = kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
         let pane = start_keyed("local-key", false, STAND_IN, Some(local));
         assert!(pane.session.lifeline.is_none());
     }
@@ -1149,7 +1149,7 @@ fn key_folder() -> tempfile::TempDir {
 fn longest_key() -> String {
     format!(
         "{}{}",
-        crate::model_gateway::relay::TOKEN_PREFIX,
+        kernel_sandbox::profile::env::TOKEN_PREFIX,
         "a".repeat(64)
     )
 }
@@ -1253,7 +1253,7 @@ fn keyed_listed(base: &Path) -> (PathBuf, LaunchRequest) {
     use crate::harnesses::launch::{AccountBinding, Secret};
     let account = crate::protocol::CredentialRef::new("account-1").unwrap();
     let home = crate::harnesses::home::prepare(base, "standin-acp", &account).unwrap();
-    let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    let placeholder = kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
     let request = LaunchRequest {
         harness: "standin-acp".into(),
         executable: base.join("standin-acp"),
@@ -1322,7 +1322,7 @@ fn a_listed_launch_s_key_file_sits_in_its_private_home_and_holds_its_key() {
     let metadata = std::fs::symlink_metadata(&path).unwrap();
     assert!(metadata.is_file());
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    let placeholder = kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
     assert_eq!(std::fs::read_to_string(&path).unwrap(), placeholder);
     drop(written);
 }
@@ -1342,7 +1342,7 @@ fn a_listed_launch_s_key_guard_never_removes_through_a_link_at_its_harness_folde
     for folder in [&base, &target, &kept] {
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    let placeholder = kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
     std::fs::write(kept.join(interactive::KEY_FILE), placeholder).unwrap();
     let (_home, request) = keyed_listed(&base);
     let guard = write_key_file(&request).unwrap();

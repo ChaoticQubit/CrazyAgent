@@ -4,7 +4,8 @@ use super::registry::Harness;
 use crate::app_plugins::yaml::Value;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::EngineError;
-use crate::model_gateway::relay::{LOCAL_PLACEHOLDER, Relay, is_placeholder, is_relay_token};
+use crate::model_gateway::relay::Relay;
+use kernel_sandbox::profile::env::{LOCAL_PLACEHOLDER, is_placeholder, is_relay_token};
 
 /// The most environment variables one `accounts` entry may set.
 pub const ENV_MAX: usize = 16;

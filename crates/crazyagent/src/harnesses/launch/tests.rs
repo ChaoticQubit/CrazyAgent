@@ -1236,7 +1236,7 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
     let token = format!(
         "{}{}",
-        crate::model_gateway::relay::TOKEN_PREFIX,
+        kernel_sandbox::profile::env::TOKEN_PREFIX,
         "a".repeat(64)
     );
     launch.request.executable = harness;

@@ -560,7 +560,7 @@ pub fn command_with(
     let (env, handed) = handed_apart(env, handover);
     if let Some(handover) = handover.filter(|_| !handed.is_empty()) {
         assert_eq!(argv[0], SANDBOX_EXEC);
-        let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        let placeholder = kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
         let (from, value) = match key_file.as_deref() {
             Some(file) => ("file", file),
             None => ("word", handover.token()),

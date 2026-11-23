@@ -2,17 +2,19 @@ use super::accounts::Handover;
 use super::drivers::acp::Acp;
 use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
-use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
+use super::leftovers::{Follower, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, EngineServer, Installed};
-use crate::model_gateway::relay::{Relay, is_placeholder};
+use crate::model_gateway::relay::Relay;
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
+use kernel_sandbox::profile::env::is_placeholder;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
@@ -51,7 +53,7 @@ const INPUT_RETRY: Duration = Duration::from_millis(20);
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-pub(super) const LOCAL_PLACEHOLDER_KEY: &str = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+pub(super) const LOCAL_PLACEHOLDER_KEY: &str = kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
 const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DURABLE_INPUT: &str = "input";
@@ -2378,7 +2380,7 @@ impl Session {
             || request
                 .account
                 .key()
-                .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
+                .is_some_and(|key| kernel_sandbox::profile::env::is_relay_token(key.reveal()));
         let mut session = Self {
             child,
             warden,

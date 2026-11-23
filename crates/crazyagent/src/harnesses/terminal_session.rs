@@ -5,14 +5,16 @@ use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
     validate,
 };
-use super::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use super::leftovers::{Follower, Lineage, Unstopped};
 use super::records::{self, Reader};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
-use crate::model_gateway::relay::{Relay, is_placeholder};
+use crate::model_gateway::relay::Relay;
 use kernel_processes::terminal::buffer::Chunk;
 use kernel_processes::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
+use kernel_sandbox::profile::env::is_placeholder;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -623,7 +625,7 @@ impl TerminalSession {
         let relayed = request
             .account
             .key()
-            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
+            .is_some_and(|key| kernel_sandbox::profile::env::is_relay_token(key.reveal()));
         if relayed {
             let lifeline = crate::research::runner::Lifeline::watch(self.pid)
                 .map_err(|_| failure("launch_spawn_failed"))?;

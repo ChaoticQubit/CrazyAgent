@@ -6,7 +6,7 @@ use super::json_rewrite::DOCUMENT_BYTES_MAX;
 use super::markdown_history::{SESSION_HEADER, USER_HEADING};
 use crate::adapters::{LINE_BYTES_MAX, clip_text};
 use crate::app_plugins::yaml::Value as Yaml;
-use crate::model_gateway::relay::{TOKEN_HEX, TOKEN_PREFIX, is_relay_token};
+use kernel_sandbox::profile::env::{TOKEN_HEX, TOKEN_PREFIX, is_relay_token};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};

@@ -1,5 +1,5 @@
 use super::*;
-use crate::model_gateway::relay::is_placeholder;
+use kernel_sandbox::profile::env::is_placeholder;
 
 const PROVIDER_KEY: &str = "sk-provider-key-never-in-the-agent";
 

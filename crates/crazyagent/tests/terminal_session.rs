@@ -127,7 +127,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
     let key_file = home.join(KEY_FILE);
     let placeholder = std::fs::read_to_string(&key_file).unwrap();
     assert!(
-        crazyagent::model_gateway::relay::is_placeholder(&placeholder),
+        kernel_sandbox::profile::env::is_placeholder(&placeholder),
         "the pane's key file holds the relay token, never the key"
     );
     assert!(!placeholder.contains(KEY));

@@ -14477,7 +14477,7 @@ fn listed_handover(
                 Some(&error.0),
             )
         })?;
-    assert!(crate::model_gateway::relay::is_placeholder(
+    assert!(kernel_sandbox::profile::env::is_placeholder(
         handover.token()
     ));
     Ok(Some(handover))
