@@ -36,9 +36,10 @@ fn timed(row: &str, mut step: impl FnMut()) -> u128 {
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
 fn profile_build_p95() {
-    use crazyagent::sandbox::{ProjectSandbox, agent_command};
+    use crazyagent::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::profile::command::SANDBOX_EXEC;
+    use kernel_sandbox::profile::env::agent_command;
     use std::ffi::OsStr;
     use std::path::Path;
     let temp = tempfile::tempdir().unwrap();

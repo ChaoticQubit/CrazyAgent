@@ -309,7 +309,7 @@ fn the_kernel_variable_gate_copy_refuses_the_names_the_sandbox_refuses() {
     ] {
         let value = OsStr::new("/private/tmp/planted");
         assert_eq!(
-            crate::sandbox::agent_variable_allowed(OsStr::new(name), value),
+            kernel_sandbox::profile::env::agent_variable_allowed(OsStr::new(name), value),
             copy(OsStr::new(name), value),
             "{name}"
         );

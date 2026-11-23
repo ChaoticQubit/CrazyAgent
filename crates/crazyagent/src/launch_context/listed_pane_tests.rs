@@ -169,7 +169,7 @@ fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
     for (name, value) in &built.env {
         assert!(!value.contains(relay.token()), "{name}");
         let (name, value) = (OsStr::new(name), OsStr::new(value));
-        let allowed = crate::sandbox::agent_variable_allowed(name, value);
+        let allowed = kernel_sandbox::profile::env::agent_variable_allowed(name, value);
         assert!(allowed, "{name:?}");
     }
     let at = built.argv.iter().position(|word| word == "-c").unwrap();
@@ -319,7 +319,7 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     let built = built.unwrap();
     for (name, value) in &built.env {
         let (name, value) = (OsStr::new(name), OsStr::new(value));
-        let allowed = crate::sandbox::agent_variable_allowed(name, value);
+        let allowed = kernel_sandbox::profile::env::agent_variable_allowed(name, value);
         assert!(allowed, "{name:?}");
     }
     let (sandbox, place) = (

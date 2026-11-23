@@ -1,6 +1,6 @@
 use super::super::LeadPaths;
 use super::{Confinement, TmuxHooks};
-use std::ffi::OsStr;
+use kernel_common::env_names::agent_env_refused;
 #[cfg(target_os = "macos")]
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -97,57 +97,6 @@ pub fn unkept_pane(argv: &[String]) -> Option<Vec<String>> {
     let mut plain = argv[KEEPER.len()..shim].to_vec();
     plain.extend_from_slice(&argv[program..]);
     (kept_pane(plain.clone(), None).as_deref() == Some(argv)).then_some(plain)
-}
-
-const REFUSED_VARIABLES: &[&str] = &[
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    "SSH_AUTH_SOCK",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "PERL5LIB",
-    "PERL5OPT",
-    "PERLLIB",
-    "PERL5DB",
-];
-
-const REFUSED_PREFIXES: &[&str] = &[
-    "GH_",
-    "GITHUB_",
-    "GIT_CONFIG_KEY_",
-    "GIT_CONFIG_VALUE_",
-    "AWS_",
-    "AZURE_",
-    "CRAZYAGENT_",
-];
-
-const REFUSED_SUFFIXES: &[&str] = &[
-    "_API_KEY",
-    "_TOKEN",
-    "_SECRET",
-    "_SECRET_KEY",
-    "_PASSWORD",
-    "_ACCESS_KEY",
-    "_CREDENTIALS",
-];
-
-/// Whether a variable name may never reach a pane. Input: the name. Output: true when
-/// refused.
-pub fn agent_env_refused(name: &OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return true;
-    };
-    let upper = name.to_ascii_uppercase();
-    REFUSED_VARIABLES.contains(&upper.as_str())
-        || REFUSED_PREFIXES
-            .iter()
-            .any(|prefix| upper.starts_with(prefix))
-        || REFUSED_SUFFIXES
-            .iter()
-            .any(|suffix| upper.ends_with(suffix))
 }
 
 /// Waits until every reaper a row's host started has ended its groups. Input: the host.

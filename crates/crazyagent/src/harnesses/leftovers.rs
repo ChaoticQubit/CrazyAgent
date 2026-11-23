@@ -2608,7 +2608,10 @@ pub(crate) mod tests {
         use std::ffi::OsStr;
         let token = LineageToken::new().unwrap();
         let allowed = |name: &str, value: &str| {
-            crate::sandbox::agent_variable_allowed(OsStr::new(name), OsStr::new(value))
+            kernel_sandbox::profile::env::agent_variable_allowed(
+                OsStr::new(name),
+                OsStr::new(value),
+            )
         };
         assert!(allowed(LINEAGE_VARIABLE, token.as_str()));
         assert!(!allowed(LINEAGE_VARIABLE, "not-a-token"));

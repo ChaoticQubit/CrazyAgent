@@ -1,4 +1,4 @@
-use super::{ProjectSandbox, Routed, agent_env};
+use super::ProjectSandbox;
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use kernel_sandbox::error::{SandboxError, invalid};
@@ -16,6 +16,7 @@ use kernel_sandbox::profile::consts::{
     LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
     LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, STORE_ALTERNATES,
 };
+use kernel_sandbox::profile::env::{Routed, agent_process_env};
 use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -2597,7 +2598,7 @@ impl Sandbox for LinuxSandbox {
         if self.sandbox.resolves_over_tcp() {
             base.push(("RES_OPTIONS", OsStr::new(DNS_OVER_TCP)));
         }
-        let env = agent_env(&base, harness.get_envs())?;
+        let env = agent_process_env(&base, harness.get_envs())?;
         command
             .arg("--")
             .arg(program)

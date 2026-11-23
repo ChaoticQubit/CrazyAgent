@@ -1,4 +1,4 @@
-use super::{ProjectSandbox, agent_env};
+use super::ProjectSandbox;
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -7,6 +7,7 @@ use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{canonical, clean_absolute};
 use kernel_sandbox::profile::command::Sandbox;
+use kernel_sandbox::profile::env::agent_process_env;
 use kernel_sandbox::windows::{
     GRANTS_FOLDER, container_for, existing_helper, helper_beside_engine,
 };
@@ -194,7 +195,7 @@ impl Sandbox for WindowsSandbox {
                 .iter()
                 .any(|pinned| name.eq_ignore_ascii_case(pinned))
         };
-        let env = agent_env(&base, harness.get_envs().filter(|&(name, _)| !pinned(name)))?;
+        let env = agent_process_env(&base, harness.get_envs().filter(|&(name, _)| !pinned(name)))?;
         let mut command = boundary_command(&self.helper, &self.profile, program, &env);
         command.args(harness.get_args()).current_dir(cwd);
         assert_eq!(command.get_program(), self.helper.as_os_str());
@@ -204,7 +205,7 @@ impl Sandbox for WindowsSandbox {
 }
 
 /// Builds a Windows agent command without a bound sandbox: the helper next to the engine's
-/// executable with `--profile <profile> -- <program>` and exactly [`agent_env`]. Inputs: an
+/// executable with `--profile <profile> -- <program>` and exactly [`agent_process_env`]. Inputs: an
 /// installed boundary profile, the absolute program and both environments. Output: the
 /// command, `Unavailable` without the helper, or `Invalid` for an unsafe input.
 pub fn agent_command<'a>(
@@ -220,7 +221,7 @@ pub fn agent_command<'a>(
     if !clean_absolute(program) {
         return Err(invalid("harness program must be an absolute plain path"));
     }
-    let env = agent_env(base, harness)?;
+    let env = agent_process_env(base, harness)?;
     let command = boundary_command(&helper, profile, program, &env);
     assert_eq!(command.get_envs().count(), env.len());
     Ok(command)

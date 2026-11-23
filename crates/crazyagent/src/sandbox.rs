@@ -18,6 +18,7 @@ use kernel_sandbox::ports::{
 use kernel_sandbox::profile::ProfileHooks;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
+use kernel_sandbox::profile::env::*;
 use kernel_sandbox::profile::seatbelt::*;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
@@ -33,8 +34,6 @@ use std::io;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -87,11 +86,6 @@ impl OwnerGit {
         match *self {}
     }
 }
-
-/// The variables that point an agent's tools at its tool cache (T8): uv's cache, and the
-/// pnpm store, the only store variable pnpm 12 reads (probe P5). [`agent_env`] keeps a
-/// harness from replacing either once the sandbox set it.
-pub(crate) const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 
 /// How the tmux host wraps a confined pane, built from this module's sandbox values: the
 /// runner, the keeper and pane shim words and variables, and which variables reach a pane.
@@ -169,304 +163,9 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     kernel_storage::migrations::BACKUPS,
 ];
 
-/// Tells whether an environment variable name may never reach an agent process: GitHub and
-/// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
-/// secrets, passwords, the perl variables that would make a pane's keeper, a perl outside
-/// the sandbox, load other code, and the engine's own `CRAZYAGENT_` settings, including the model key
-/// name `ANTHROPIC_API_KEY`, which passes only with the local placeholder (see
-/// [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
-pub fn agent_env_refused(name: &OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return true;
-    };
-    let upper = name.to_ascii_uppercase();
-    REFUSED_VARIABLES.contains(&upper.as_str())
-        || REFUSED_PREFIXES
-            .iter()
-            .any(|prefix| upper.starts_with(prefix))
-        || REFUSED_SUFFIXES
-            .iter()
-            .any(|suffix| upper.ends_with(suffix))
-}
-
-/// Tells whether one variable may reach an agent process with this value: a name
-/// [`agent_env_refused`] accepts, a fixed [`AGENT_GIT_ENV`] pair, a model key name holding the
-/// placeholder or the lineage token in its own variable; never a real key or relay token, which
-/// other owner processes can read, save a launch's own token in [`Handed`] names on macOS only
-/// (its profile denies those reads; Linux is refused). Inputs: name, value. Output: allowed.
-pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
-    let token = kernel_common::relay_names::TOKEN_PREFIX.as_bytes();
-    if value
-        .as_encoded_bytes()
-        .windows(token.len())
-        .any(|window| window == token)
-    {
-        return false;
-    }
-    if name == kernel_sandbox::profile::env::LINEAGE_VARIABLE {
-        return value
-            .to_str()
-            .is_some_and(kernel_sandbox::profile::env::LineageToken::valid);
-    }
-    if AGENT_GIT_ENV
-        .iter()
-        .chain(AGENT_HOME_ENV.iter())
-        .any(|(git, fixed)| name == *git && value == *fixed)
-    {
-        return true;
-    }
-    if name
-        .to_str()
-        .is_some_and(|name| AGENT_KEY_VARIABLES.contains(&name))
-    {
-        return value == kernel_common::relay_names::LOCAL_PLACEHOLDER;
-    }
-    !agent_env_refused(name)
-}
-
-/// The zsh temp-file prefix inside an agent's temp folder. zsh writes here-documents to
-/// `$TMPPREFIX`, `/tmp/zsh` by default, which no agent sandbox can write, so every agent
-/// shell gets its own. Input: the agent's temp folder. Output: the prefix path.
-pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
-    tmp.join("zsh")
-}
-
-/// Builds the environment of every agent process in launch order: `base`, then the
-/// harness's variables (a later value replaces an earlier one and None removes it, but
-/// `HOME`, `TMPDIR` and `TMPPREFIX`, and the tool cache's [`TOOL_CACHE_ENV`] when `base`
-/// sets them, always stay as `base` set them), then `TMPPREFIX` from
-/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`], [`AGENT_TLS_ENV`] and
-/// [`AGENT_HOME_ENV`].
-/// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
-/// one fails [`agent_variable_allowed`].
-pub fn agent_env<'a>(
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, harness, &AGENT_HOME_ENV, None)
-}
-
-/// One launch's exception to the agent variable guard (DEC-180 Task 20, rv-sa241 ruling
-/// t20-q1): the names a listed master's manifest gives its account key, each allowed to
-/// hold only this launch's own relay token or the keyless placeholder.
-#[derive(Clone, Copy)]
-pub struct Handed<'a> {
-    names: &'a [&'a str],
-    value: &'a str,
-}
-
-impl<'a> Handed<'a> {
-    /// Builds one launch's exception, on macOS only, where the agent profile keeps every
-    /// other sandbox from reading the launch's environment. Inputs: the names, from the
-    /// manifest's accounts entry for the account's wire format, and the one value they may
-    /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
-    /// nor the keyless placeholder, a name refused for more than a key suffix, and off macOS.
-    pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
-        let handed = kernel_common::relay_names::is_relay_token(value)
-            || value == kernel_common::relay_names::LOCAL_PLACEHOLDER;
-        if !cfg!(target_os = "macos") || !handed {
-            return Err(invalid("a launch hands only its own relay token"));
-        }
-        let other = |name: &&str| {
-            let upper = name.to_ascii_uppercase();
-            REFUSED_VARIABLES.contains(&upper.as_str())
-                || REFUSED_PREFIXES
-                    .iter()
-                    .any(|prefix| upper.starts_with(prefix))
-        };
-        if names.iter().any(other) {
-            return Err(invalid("a launch hands its value only under a key name"));
-        }
-        assert!(kernel_common::relay_names::is_placeholder(value));
-        Ok(Self { names, value })
-    }
-
-    /// Tells whether this launch lets one harness variable hold a value: a name it lists
-    /// holding exactly its one value. Inputs: the name and the value. Output: true when it
-    /// does.
-    fn allows(&self, name: &OsStr, value: &OsStr) -> bool {
-        value == self.value && self.names.iter().any(|known| name == *known)
-    }
-}
-
-/// Builds the environment [`agent_env`] does, letting the harness variables `handed` names
-/// hold its one value; every other variable meets [`agent_variable_allowed`], and the
-/// engine's fixed variables still come last and win. Inputs: the base and harness variables
-/// and the launch's exception. Output: the variables, or `Invalid`.
-pub fn agent_env_handing<'a>(
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Handed<'_>,
-) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, harness, &AGENT_HOME_ENV, Some(handed))
-}
-
-/// Tells whether one variable may reach an agent process of a launch with this exception:
-/// [`agent_variable_allowed`], or a name the exception lists holding its one value. Inputs:
-/// the launch's exception, if any, the name and the value. Output: true when allowed.
-fn handed_allowed(handed: Option<Handed<'_>>, name: &OsStr, value: &OsStr) -> bool {
-    agent_variable_allowed(name, value) || handed.is_some_and(|handed| handed.allows(name, value))
-}
-
-/// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
-/// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across
-/// terminals, so the global git config, Python user site and npm config the owner sets up
-/// there stay in use (RV-DS241-137 code r1 F3), and its profile leaves their files writable
-/// ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). Inputs: the base and terminal
-/// variables. Output: the variables, or `Invalid` when any one fails
-/// [`agent_variable_allowed`].
-pub fn owner_terminal_env<'a>(
-    base: &[(&str, &OsStr)],
-    terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, terminal, &[], None)
-}
-
-/// Builds the environment [`agent_env`] describes, setting `home` after the fixed git and
-/// TLS settings. Inputs: the base and harness variables, the home settings and the launch's
-/// exception, if any. Output: the variables, or `Invalid` when any one fails
-/// [`agent_variable_allowed`] and is no variable the exception lets through.
-fn built_env<'a>(
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    home: &[(&'static str, &'static str)],
-    handed: Option<Handed<'_>>,
-) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    let refused = || invalid("agent environment holds an owner secret");
-    let mut env: Vec<(OsString, OsString)> = Vec::new();
-    let set = |env: &mut Vec<(OsString, OsString)>, name: &OsStr, value: Option<&OsStr>| {
-        let at = env.iter().position(|(known, _)| known == name);
-        match (at, value) {
-            (Some(at), Some(value)) => env[at].1 = value.to_owned(),
-            (Some(at), None) => {
-                env.remove(at);
-            }
-            (None, Some(value)) => env.push((name.to_owned(), value.to_owned())),
-            (None, None) => {}
-        }
-    };
-    for (name, value) in base {
-        if !agent_variable_allowed(OsStr::new(name), value) {
-            return Err(refused());
-        }
-        set(&mut env, OsStr::new(name), Some(value));
-    }
-    for (name, value) in harness {
-        if value.is_some_and(|value| !handed_allowed(handed, name, value)) {
-            return Err(refused());
-        }
-        let pinned_cache = TOOL_CACHE_ENV.iter().any(|pinned| name == *pinned)
-            && base.iter().any(|(known, _)| name == *known);
-        if name == "HOME" || name == "TMPDIR" || name == "TMPPREFIX" || pinned_cache {
-            continue;
-        }
-        set(&mut env, name, value);
-    }
-    let prefix = env
-        .iter()
-        .find(|(name, _)| name == "TMPDIR")
-        .map(|(_, tmp)| shell_tmp_prefix(Path::new(tmp)));
-    if let Some(prefix) = prefix {
-        set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));
-    }
-    let fixed = AGENT_GIT_ENV
-        .into_iter()
-        .chain(AGENT_TLS_ENV)
-        .chain(home.iter().copied());
-    for (name, value) in fixed {
-        set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
-    }
-    if env.len() > AGENT_ENV_MAX {
-        return Err(invalid("agent environment holds too many variables"));
-    }
-    assert!(
-        env.iter()
-            .all(|(name, value)| handed_allowed(handed, name, value))
-    );
-    Ok(env)
-}
-
-/// Builds the one command every sandboxed headless agent process starts from: `-f
-/// <profile>`, the [`SESSION_SHIM`] and `<program>` under `sandbox-exec`, a cleared
-/// environment holding exactly [`agent_env`], and its own process group. Inputs: the
-/// installed profile, the absolute program, the base variables and the harness's variables
-/// (None removes one). Output: the command, or `Invalid` when a variable fails
-/// [`agent_variable_allowed`].
-#[cfg(unix)]
-pub fn agent_command<'a>(
-    profile: &Path,
-    program: &Path,
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-) -> Result<Command, SandboxError> {
-    let env = agent_env(base, harness)?;
-    Ok(confined_command(profile, program, env))
-}
-
-/// Builds the command [`agent_command`] does, with the environment [`agent_env_handing`]
-/// builds for one listed master's launch. Inputs: the installed profile, the absolute
-/// program, the base and harness variables and the launch's exception. Output: the command,
-/// or `Invalid` when a variable is refused.
-#[cfg(unix)]
-pub fn agent_command_handing<'a>(
-    profile: &Path,
-    program: &Path,
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Handed<'_>,
-) -> Result<Command, SandboxError> {
-    let env = agent_env_handing(base, harness, handed)?;
-    Ok(confined_command(profile, program, env))
-}
-
-/// Builds the command a Full access agent process starts from (DEC-102): the
-/// [`SESSION_SHIM`] and `<program>` with no `sandbox-exec` and no profile, so the agent has
-/// the owner's user permissions, yet the same cleared environment holding exactly
-/// [`agent_env`] and its own process group as a sandboxed agent. Inputs: the absolute
-/// program, the base variables and the harness's variables (None removes one). Output: the
-/// command, or `Invalid` when a variable fails [`agent_variable_allowed`].
-#[cfg(unix)]
-pub fn unconfined_command<'a>(
-    program: &Path,
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-) -> Result<Command, SandboxError> {
-    if !clean_absolute(program) {
-        return Err(invalid("agent program must be an absolute plain path"));
-    }
-    let env = agent_env(base, harness)?;
-    let mut command = Command::new(SESSION_SHIM[0]);
-    command
-        .args(&SESSION_SHIM[1..])
-        .arg(program)
-        .env_clear()
-        .envs(env.iter().map(|(name, value)| (name, value)))
-        .process_group(0);
-    assert_eq!(command.get_program(), SESSION_SHIM[0]);
-    assert_eq!(
-        command.get_args().nth(SESSION_SHIM.len() - 1),
-        Some(program.as_os_str())
-    );
-    assert_eq!(command.get_envs().count(), env.len());
-    Ok(command)
-}
-
-/// Refuses a Full access agent on Windows (DEC-102): the level is unavailable there, so no
-/// command starts without the Windows boundary. Inputs: as the Unix version. Output:
-/// always `Unavailable` with [`FULL_ACCESS_NEEDS_MACOS`].
-#[cfg(target_os = "windows")]
-pub fn unconfined_command<'a>(
-    program: &Path,
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-) -> Result<Command, SandboxError> {
-    let _ = (program, base, harness.into_iter().count());
-    Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()))
-}
-
 /// Builds the one command every Windows agent process starts from: the boundary helper next
 /// to the engine's executable with `--profile <profile> -- <program>`, and a cleared
-/// environment holding exactly [`agent_env`]. Inputs: the installed boundary profile, the
+/// environment holding exactly [`agent_process_env`]. Inputs: the installed boundary profile, the
 /// absolute program, the base variables and the harness's variables (None removes one).
 /// Output: the command, `Unavailable` without the helper, or `Invalid` for an unsafe input.
 #[cfg(target_os = "windows")]
@@ -596,16 +295,6 @@ pub fn linux_unbridged_notice(
 ) -> Option<String> {
     let host = linux_host_kept().map(|host| host.under(calls));
     linux_unbridged_notice_on(host, choice, sandbox)
-}
-
-/// The network a Linux that nests agents gives one limited to ports on any host
-/// ([`ProjectSandbox::routed`]): `any`, the ports it leaves through on any host, and
-/// `bridged`, the loopback ports carried to this computer as for a bridged agent, each list
-/// rising and each port once (DEC-179 SBX-2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Routed {
-    pub any: Vec<u16>,
-    pub bridged: Vec<u16>,
 }
 
 /// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
@@ -4223,88 +3912,6 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
         modules.join(first)
     };
     (program != package.as_path() && program.starts_with(&package)).then_some(package)
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod handed_tests {
-    use super::*;
-    use kernel_common::relay_names::LOCAL_PLACEHOLDER;
-
-    const NAMES: [&str; 1] = ["OPENAI_API_KEY"];
-
-    fn token(fill: char) -> String {
-        format!("crazyagent-relay-{}", fill.to_string().repeat(64))
-    }
-
-    /// Builds one launch's environment with one harness variable, with the launch's
-    /// exception or, as for a teammate, with none. Inputs: the exception, the name and the
-    /// value. Output: the variables, or the refusal.
-    fn with(
-        handed: Option<Handed<'_>>,
-        name: &str,
-        value: &str,
-    ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-        let base = [("HOME", OsStr::new("/agent/home"))];
-        let harness = [(OsStr::new(name), Some(OsStr::new(value)))];
-        match handed {
-            Some(handed) => agent_env_handing(&base, harness, handed),
-            None => agent_env(&base, harness),
-        }
-    }
-
-    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 6): a listed master's launch hands
-    /// its harness its own relay token only in the names its manifest lists. Another
-    /// launch's token, any other relay value, an unlisted key name and a launch with no
-    /// exception, such as a teammate's, are refused.
-    #[test]
-    fn a_launch_hands_its_own_relay_token_only_in_the_names_its_manifest_lists() {
-        let (own, other) = (token('a'), token('b'));
-        let handed = Handed::new(&NAMES, &own);
-        assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
-        let handed = handed.unwrap();
-        let given = with(Some(handed), "OPENAI_API_KEY", &own);
-        assert!(given.is_ok(), "{given:?}");
-        let pair = (OsString::from("OPENAI_API_KEY"), OsString::from(&own));
-        assert!(given.unwrap().contains(&pair));
-        let refused = [
-            ("OPENAI_API_KEY", other.as_str()),
-            ("OPENAI_API_KEY", "crazyagent-relay-0"),
-            ("OTHER_API_KEY", own.as_str()),
-        ];
-        for (name, value) in refused {
-            assert!(with(Some(handed), name, value).is_err(), "{name}={value}");
-        }
-        assert!(with(None, "OPENAI_API_KEY", &own).is_err());
-    }
-
-    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 3): a keyless launch hands only
-    /// the placeholder, and no exception is ever built for a saved key or a relay value that
-    /// is no token.
-    #[test]
-    fn a_keyless_launch_hands_only_the_placeholder_and_never_a_saved_key() {
-        let keyless = Handed::new(&NAMES, LOCAL_PLACEHOLDER);
-        assert!(keyless.is_ok(), "{:?}", keyless.as_ref().err());
-        let given = with(Some(keyless.unwrap()), "OPENAI_API_KEY", LOCAL_PLACEHOLDER);
-        assert!(given.is_ok(), "{given:?}");
-        assert!(with(None, "OPENAI_API_KEY", LOCAL_PLACEHOLDER).is_err());
-        for value in ["sk-saved", "crazyagent-relay-0", ""] {
-            assert!(Handed::new(&NAMES, value).is_err(), "{value}");
-        }
-    }
-
-    /// rv-sa241 M8 host guard N1: a launch hands its value only under key-shaped names; a
-    /// name the variable guard refuses for another reason, a credential setting, a perl
-    /// setting, a GitHub prefix or an engine variable, is refused when the exception is made.
-    #[test]
-    fn a_launch_never_hands_its_value_under_a_name_refused_for_another_reason() {
-        let others = ["PERL5OPT", "GIT_ASKPASS", "GH_HOST", "CRAZYAGENT_LINEAGE"];
-        for name in others {
-            let names = [name];
-            assert!(Handed::new(&names, LOCAL_PLACEHOLDER).is_err(), "{name}");
-        }
-        let keys = ["OPENAI_API_KEY", "STANDIN_TOKEN"];
-        assert!(Handed::new(&keys, LOCAL_PLACEHOLDER).is_ok());
-    }
 }
 
 #[cfg(test)]

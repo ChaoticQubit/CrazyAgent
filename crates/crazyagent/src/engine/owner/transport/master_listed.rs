@@ -173,7 +173,7 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
         .filter(|(_, value)| value == handover.token())
         .map(|(name, _)| name.as_str())
         .collect();
-    let handed = crate::sandbox::Handed::new(&names, handover.token())
+    let handed = kernel_sandbox::profile::env::Handed::new(&names, handover.token())
         .map_err(|_| failure("launch_environment_refused"))?;
     let command =
         listed_command(request, &arguments, &environment, handed).map_err(engine_error)?;

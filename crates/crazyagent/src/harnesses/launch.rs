@@ -892,7 +892,7 @@ fn sandboxed(
         .map(|(name, _)| name.as_str())
         .collect();
     let handed = handover
-        .map(|handover| crate::sandbox::Handed::new(&names, handover.token()))
+        .map(|handover| kernel_sandbox::profile::env::Handed::new(&names, handover.token()))
         .transpose()
         .map_err(|_| failure("launch_environment_refused"))?;
     assert_eq!(handed.is_some(), handover.is_some());
@@ -931,7 +931,7 @@ pub fn listed_command(
     request: &LaunchRequest,
     arguments: &[OsString],
     environment: &[(OsString, OsString)],
-    handed: crate::sandbox::Handed<'_>,
+    handed: kernel_sandbox::profile::env::Handed<'_>,
 ) -> Result<Command, LaunchError> {
     validate(request)?;
     let harness_env = environment
@@ -949,7 +949,7 @@ fn confined<'a>(
     installed: Option<&Installed>,
     arguments: &[OsString],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Option<crate::sandbox::Handed<'_>>,
+    handed: Option<kernel_sandbox::profile::env::Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     let home = request.account.home();
     let tool_home = installed.and_then(Installed::tool_home).unwrap_or(home);
@@ -1008,8 +1008,8 @@ fn confined<'a>(
 }
 
 /// Builds the harness command inside the request's boundary, in its working folder: on
-/// macOS the confined profile through [`crate::sandbox::agent_command`], with the launch's
-/// exception to the variable guard through [`crate::sandbox::agent_command_handing`], or the
+/// macOS the confined profile through [`kernel_sandbox::profile::env::agent_command`], with the launch's
+/// exception to the variable guard through [`kernel_sandbox::profile::env::agent_command_handing`], or the
 /// Full access session shim, which carries no exception; on Linux and Windows an installed
 /// sandbox with the account's home, through [`InstalledSandbox::wrap`], on Windows once
 /// [`home_containers`] passes, and never with an exception, which only macOS carries so far;
@@ -1023,18 +1023,24 @@ fn bounded<'a>(
     arguments: &[OsString],
     base: &[(&str, &OsStr)],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Option<crate::sandbox::Handed<'_>>,
+    handed: Option<kernel_sandbox::profile::env::Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     #[cfg(target_os = "macos")]
     {
         let mut command = match (request.boundary.confined_profile(), handed) {
-            (Some(profile), Some(handed)) => {
-                crate::sandbox::agent_command_handing(profile, program, base, harness_env, handed)
-            }
+            (Some(profile), Some(handed)) => kernel_sandbox::profile::env::agent_command_handing(
+                profile,
+                program,
+                base,
+                harness_env,
+                handed,
+            ),
             (Some(profile), None) => {
-                crate::sandbox::agent_command(profile, program, base, harness_env)
+                kernel_sandbox::profile::env::agent_command(profile, program, base, harness_env)
             }
-            (None, None) => crate::sandbox::unconfined_command(program, base, harness_env),
+            (None, None) => {
+                kernel_sandbox::profile::env::unconfined_command(program, base, harness_env)
+            }
             (None, Some(_)) => return Err(failure("launch_environment_refused")),
         }
         .map_err(|_| failure("launch_environment_refused"))?;

@@ -2399,7 +2399,7 @@ mod tests {
         expected.extend(kernel_sandbox::profile::consts::AGENT_GIT_ENV);
         expected.extend(kernel_sandbox::profile::consts::AGENT_TLS_ENV);
         expected.extend(kernel_sandbox::profile::consts::AGENT_HOME_ENV);
-        let prefix = crate::sandbox::shell_tmp_prefix(&tmp);
+        let prefix = kernel_sandbox::profile::env::shell_tmp_prefix(&tmp);
         expected.insert("TMPPREFIX", prefix.to_str().unwrap());
         let tools = kernel_sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
         expected.extend(
