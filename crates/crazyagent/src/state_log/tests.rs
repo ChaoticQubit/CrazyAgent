@@ -70,7 +70,7 @@ fn chunks() -> Vec<Chunk> {
         .collect()
 }
 
-/// H1 (CodeRabbit b01): the writer accepts only the names replay reads, the closed
+/// The writer accepts only the names replay reads, the closed
 /// [`Aggregate`] set, so a well-formed name such as `custom` is refused by an append and by a
 /// snapshot before any row is written, and replay of the log still reads every row.
 #[test]
