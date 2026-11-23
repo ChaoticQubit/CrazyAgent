@@ -1,7 +1,15 @@
 /// The validated aggregate name the log stores.
 pub mod aggregate;
 
+/// The appender of one write transaction, behind the writer's fence hook.
+mod appender;
+
+/// Replay of the log into projections, the compare of rebuilt tables, redaction in place and
+/// the process exit event (v2.5 L2), reading names through the engine's set.
+pub mod replay;
+
 pub use aggregate::{AGGREGATE_BYTES_MAX, AggregateName};
+pub use appender::{Appender, FenceCheck, KnownName};
 
 use crate::StorageError;
 use rusqlite::{Connection, OptionalExtension};

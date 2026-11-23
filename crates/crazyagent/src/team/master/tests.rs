@@ -147,9 +147,16 @@ fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     let master = AgentId::team(MASTER).unwrap();
     let other = AgentId::team(MASTER + 1).unwrap();
     let other_typed = fixture.base.join("other-typed");
-    host.spawn(&master, &app(&fixture.base.join("typed")))
-        .unwrap();
-    host.spawn(&other, &app(&other_typed)).unwrap();
+    host.spawn(
+        &master,
+        &crate::terminal::PaneCommand::from(&app(&fixture.base.join("typed"))),
+    )
+    .unwrap();
+    host.spawn(
+        &other,
+        &crate::terminal::PaneCommand::from(&app(&other_typed)),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &master);
     reads_keys(host.as_ref(), &other);
     fixture.live(Some(MASTER));
@@ -227,7 +234,8 @@ fn engine_input_asks_the_host_outside_its_write_transaction() {
         transcript: Transcript::Unavailable,
     };
     let pane = AgentId::team(MASTER).unwrap();
-    host.spawn(&pane, &command).unwrap();
+    host.spawn(&pane, &crate::terminal::PaneCommand::from(&command))
+        .unwrap();
     reads_keys(host.as_ref(), &pane);
     fixture.live(Some(MASTER));
     let tmux = fixture.tmux.clone().unwrap();
@@ -314,7 +322,8 @@ fn dropped_turn_on(fixture: &Fixture, host: &dyn Host, screen: &str) -> PathBuf 
         transcript: Transcript::Unavailable,
     };
     let master = AgentId::team(MASTER).unwrap();
-    host.spawn(&master, &command).unwrap();
+    host.spawn(&master, &crate::terminal::PaneCommand::from(&command))
+        .unwrap();
     reads_keys(host, &master);
     fixture.live(Some(MASTER));
     fixture.set("turn_open=1");
@@ -418,8 +427,11 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &crate::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     let input = |text: &str, now: i64| {
         master_input_at(
@@ -528,7 +540,8 @@ fn engine_input_waits_until_the_live_masters_app_reads_keys() {
         transcript: Transcript::Unavailable,
     };
     let pane = AgentId::team(MASTER).unwrap();
-    host.spawn(&pane, &command).unwrap();
+    host.spawn(&pane, &crate::terminal::PaneCommand::from(&command))
+        .unwrap();
     fixture.live(Some(MASTER));
     let input = |now: i64| {
         master_input_at(
@@ -591,8 +604,11 @@ fn engine_input_runs_its_step_only_right_before_it_types() {
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &crate::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     let input = |text: &str, now: i64, answer: Result<bool, EngineError>| {
         let ran = std::cell::Cell::new(false);
@@ -735,8 +751,11 @@ fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() 
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &crate::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     fixture.live(Some(MASTER));
     let typing = OwnerTyping::new(fixture.base.join("never-written.db"));
@@ -800,8 +819,11 @@ fn a_views_focus_and_mouse_reports_never_hold_an_answer_back() {
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &crate::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     fixture.live(Some(MASTER));
     let typing = OwnerTyping::new(fixture.base.join("never-written.db"));

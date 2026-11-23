@@ -1,10 +1,11 @@
 use super::*;
 use crate::engine::EngineError;
 use crate::master_session::{MasterSessionView, SESSION_DELETED};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::{engine, seed, test_owner};
-use crate::state_log::replay::{Logged, redact, rows};
-use crate::state_log::{Aggregate, Appender};
+use crate::state_log::redact;
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::replay::{Logged, rows};
 use kernel_storage::state_log::{Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE, TOMBSTONE};
 use rusqlite::Connection;
 use rusqlite::types::Value as Column;
@@ -231,7 +232,7 @@ fn every_marked_write_closes_into_events_whose_replay_equals_the_live_rows() {
     put_entry(&tx, "p1", 3, "message", 0, "Write the import guide");
     put_entry(&tx, "p1", 4, "brief", 1, "The brief");
     put_text(&tx, 7, "p1", "Keep answers short.\n");
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     assert_eq!(close(&mut log).unwrap(), 4);
     drop(log);
     tx.commit().unwrap();
@@ -259,7 +260,7 @@ fn every_marked_write_closes_into_events_whose_replay_equals_the_live_rows() {
     tx.execute("DELETE FROM agent_texts WHERE agent=7", [])
         .unwrap();
     mark(&tx, Table::Texts, "7", "p1").unwrap();
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     assert_eq!(close(&mut log).unwrap(), 3);
     let deleted = serde_json::to_vec(&json!({"project": "p1", "session": "s9"})).unwrap();
     log.append(&Draft {
@@ -327,7 +328,7 @@ fn every_marked_write_closes_into_events_whose_replay_equals_the_live_rows() {
 fn a_close_at_a_revision_another_writer_logged_leaves_its_marks_for_the_next_close() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut other = Appender::own(&tx, engine()).unwrap();
+    let mut other = crate::state_log::own(&tx, engine()).unwrap();
     other
         .append(&Draft {
             aggregate: Aggregate::Worktrees.into(),
@@ -398,7 +399,7 @@ fn dropped_keys_past_one_list_split_into_events_of_one_project_each() {
         mark_entry(&tx, "p1", cursor).unwrap();
     }
     mark_entry(&tx, "p2", 9_000).unwrap();
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     assert_eq!(close(&mut log).unwrap(), 3);
     drop(log);
     tx.commit().unwrap();
@@ -488,7 +489,7 @@ fn a_snapshot_run_and_the_events_after_it_replay_to_the_same_rows() {
         )
         .unwrap();
     }
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     let done = snapshot(&mut log, 9).unwrap();
     put_entry(&tx, "p1", 1_001, "brief", 1, "The brief");
     assert_eq!(close(&mut log).unwrap(), 1);
@@ -520,7 +521,7 @@ fn replay_refuses_a_sessions_event_it_does_not_know() {
     let logged = |aggregate: Aggregate, kind: &str, schema: u16, body: serde_json::Value| Logged {
         seq: 1,
         revision: 1,
-        aggregate,
+        aggregate: aggregate.into(),
         kind: kind.into(),
         schema,
         at_ms: 1,
@@ -610,7 +611,7 @@ fn a_demo_clear_tombstones_every_sessions_event_of_its_project_and_no_other() {
             "Keep answers short.\n",
         );
     }
-    let mut log = Appender::own(&tx, engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
     assert_eq!(close(&mut log).unwrap(), 6);
     drop(log);
     assert_eq!(forget_project(&tx, "p1", &engine()).unwrap(), 3);

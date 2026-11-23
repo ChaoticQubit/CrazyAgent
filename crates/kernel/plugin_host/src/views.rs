@@ -95,8 +95,9 @@ pub struct Listing {
 
 /// The trust screen of a manifest before it is added or trusted: what it is, how it runs,
 /// the hosts it reaches, the secrets it asks for by name, the SHA-256 of its exact bytes
-/// (the add or trust request must name it) and whether it replaces a user plugin of the
-/// same name.
+/// (the add or trust request must name it), whether it replaces a user plugin of the
+/// same name, and on a re-review whether the text changed since it was trusted and which
+/// hosts it reaches that the trusted version did not, false and empty otherwise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustView {
@@ -109,6 +110,8 @@ pub struct TrustView {
     pub secrets: Vec<String>,
     pub sha256: String,
     pub replaces: bool,
+    pub changed: bool,
+    pub grew_hosts: Vec<String>,
 }
 
 /// A manifest read for its trust screen: ready to add, or refused with the line or field.

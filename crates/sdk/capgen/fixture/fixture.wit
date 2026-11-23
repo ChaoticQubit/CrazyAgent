@@ -1,0 +1,80 @@
+package crazyagent:sdk;
+
+interface sdk-types {
+  record not-granted {
+    capability: string,
+    needs: string,
+  }
+
+  variant refusal {
+    not-granted(not-granted),
+    tier-too-high(string),
+    rejected(string),
+    failed(string),
+  }
+}
+
+interface fixture-types {
+  enum method {
+    get,
+    post,
+  }
+
+  type secret = u64;
+
+  record header {
+    name: string,
+    value: string,
+  }
+
+  record request {
+    method: method,
+    url: string,
+    headers: list<header>,
+    body: option<list<u8>>,
+    timeout-ms: option<u32>,
+  }
+
+  record reply {
+    status: u16,
+    body: list<u8>,
+  }
+
+  record pair {
+    secret: secret,
+    count: u16,
+  }
+
+  record keyed {
+    secret: secret,
+    label: string,
+  }
+
+  record envelope {
+    reply: reply,
+    tags: list<string>,
+    extra: option<header>,
+    grid: list<list<string>>,
+  }
+}
+
+interface fixture {
+  use sdk-types.{refusal};
+  use fixture-types.{envelope, header, keyed, pair as fixture-pair, reply, request, secret};
+
+  send: func(request: request) -> result<reply, refusal>;
+
+  reveal: func(secret: secret) -> result<option<string>, refusal>;
+
+  pair: func(pair: fixture-pair, keyed: keyed) -> result<_, refusal>;
+
+  count: func(%flags: list<bool>) -> result<u32, refusal>;
+
+  wrap: func(envelope: envelope) -> result<_, refusal>;
+
+  shadow: func(fits-reply: reply, fits-header: list<header>) -> result<_, refusal>;
+}
+
+world plugin {
+  import fixture;
+}

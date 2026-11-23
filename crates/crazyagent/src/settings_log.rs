@@ -10,12 +10,13 @@ use crate::protocol::{Command, Outcome, ProjectId};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::QuitSettings;
 use crate::roadmap_status::Refresh;
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Logged};
-use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
 use kernel_sandbox::settings::SandboxSettings;
+use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value as Column;
 use rusqlite::{
@@ -439,7 +440,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let mut removals = crate::worktrees::log::removals(tx)?.into_iter().peekable();
     clear(tx)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Settings, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Settings, 0, |logged| {
         while let Some((_, project)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_rows(tx, &project)?;
         }
@@ -477,7 +478,7 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
     chunks.extend(pack(PROFILE, profile)?);
     assert!(chunks.len() > TABLES.len(), "one chunk or more per table");
     assert_eq!(chunks[0].table, TABLES[0].0);
-    appender.snapshot(Aggregate::Settings, at_ms, chunks)
+    Ok(appender.snapshot(Aggregate::Settings, at_ms, chunks)?)
 }
 
 /// The profile's snapshot rows: none with no stored profile, else `[1, digest]`, its body
@@ -553,7 +554,7 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
         return Ok(false);
     }
     let at_ms = opening.at_ms();
-    let mut appender = Appender::opening(tx, opening)?;
+    let mut appender = crate::state_log::opening(tx, opening)?;
     let done = snapshot(&mut appender, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     assert!(rows > 0);
@@ -703,7 +704,7 @@ pub(crate) fn harness_update(db: &Connection, settings: UpdateSettings) -> Resul
 /// moved to, or the first refusal, which the caller rolls back.
 pub(crate) fn record_own(tx: &Transaction<'_>, event: &Event) -> Result<u64, EngineError> {
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::own(tx, fence)?;
+    let mut appender = crate::state_log::own(tx, fence)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     let revision = appender.revision();
     assert!(seq > 0, "a recorded event has a seq");
@@ -755,7 +756,7 @@ fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Result<(), Engin
         return Err(stale());
     }
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::owner(tx, next, fence)?;
+    let mut appender = crate::state_log::owner(tx, next, fence)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     assert!(seq > 0, "a recorded event has a seq");
     assert_eq!(appender.revision(), next);
@@ -778,7 +779,7 @@ pub(crate) fn forget_project(
         assert!(seq > 0, "the removal is logged before its redaction");
     }
     let kinds = [KIND_INSTRUCTION, KIND_ROADMAP];
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Settings],
         Some(&kinds),

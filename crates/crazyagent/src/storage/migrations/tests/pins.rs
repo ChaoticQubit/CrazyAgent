@@ -701,8 +701,8 @@ fn standing_of(db: &Connection) -> Standing {
     (
         count("SELECT revision FROM state WHERE id=1"),
         count("SELECT COUNT(*) FROM events"),
-        crate::state_log::replay::rows(db, "repository_admissions").unwrap(),
-        crate::state_log::replay::rows(db, "worktree_leases").unwrap(),
+        kernel_storage::state_log::replay::rows(db, "repository_admissions").unwrap(),
+        kernel_storage::state_log::replay::rows(db, "worktree_leases").unwrap(),
     )
 }
 
