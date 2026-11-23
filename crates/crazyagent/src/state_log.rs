@@ -205,10 +205,14 @@ impl<'a, 'c> Appender<'a, 'c> {
         })
     }
 
-    /// Appends one checked event at the next `seq`, refusing one past the transaction's
-    /// bound or past the last possible `seq`. Input: the draft. Output: its `seq`.
+    /// Appends one checked event at the next `seq`, refusing a name outside the closed
+    /// [`Aggregate`] set replay reads (H1), one past the transaction's bound or past the last
+    /// possible `seq`. Input: the draft. Output: its `seq`.
     fn push(&mut self, draft: &Draft<'_>) -> Result<u64, EngineError> {
         check(draft)?;
+        if replay::parse(draft.aggregate.name()).is_none() {
+            return Err(error("state_log_aggregate_unknown"));
+        }
         if self.appended >= TRANSACTION_EVENTS_MAX {
             return Err(error("state_log_transaction_full"));
         }
