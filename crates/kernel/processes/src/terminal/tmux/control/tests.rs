@@ -64,3 +64,26 @@ fn a_stop_ends_a_client_whose_write_blocks_on_a_full_pipe() {
         .expect("kill runs");
     assert!(!alive.success(), "the child {pid} is still running");
 }
+
+#[test]
+fn a_close_ends_a_client_whose_write_blocks_on_a_full_pipe() {
+    let control = Arc::new(deaf_client());
+    let writer = Arc::clone(&control);
+    let written = std::thread::spawn(move || {
+        let line = "a".repeat(1024 * 1024);
+        writer.send(&line, Pending::Startup)
+    });
+    assert!(input_held(&control), "the write never took the input");
+    let closer = Arc::clone(&control);
+    let (done, closed) = channel();
+    std::thread::spawn(move || {
+        closer.close();
+        let _ = done.send(());
+    });
+    assert!(
+        closed.recv_timeout(BOUND).is_ok(),
+        "the close waited on the blocked write"
+    );
+    assert!(control.child.lock().unwrap().is_none());
+    assert!(written.join().expect("the writer ended").is_err());
+}
