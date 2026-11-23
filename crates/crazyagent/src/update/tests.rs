@@ -168,26 +168,41 @@ fn update_arguments_take_check_and_one_channel() {
     }
 }
 
+/// Every `.rs` file below a folder at its real path, skipping `target`, `node_modules` and
+/// every link, so a linked folder never adds a file twice. Panics naming the path that
+/// could not be read. Inputs: the folder and the list to fill.
 fn rust_sources(folder: &Path, found: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(folder).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if path.is_dir() {
+    let entries =
+        std::fs::read_dir(folder).unwrap_or_else(|error| panic!("read {folder:?}: {error}"));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("entry in {folder:?}: {error}"));
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             if !["target", "node_modules"].contains(&name.as_str()) {
                 rust_sources(&path, found);
             }
         } else if name.ends_with(".rs") {
-            found.push(path.canonicalize().unwrap());
+            let real = path
+                .canonicalize()
+                .unwrap_or_else(|error| panic!("real path of {path:?}: {error}"));
+            found.push(real);
         }
     }
 }
 
-fn function_holding(text: &str, at: usize) -> &str {
+fn function_holding<'a>(path: &Path, text: &'a str, at: usize) -> &'a str {
     let start = ["\nfn ", "\npub fn ", "\nasync fn ", "\npub async fn "]
         .iter()
         .filter_map(|head| text[..at].rfind(head))
         .max()
-        .expect("every call sits inside a function");
+        .unwrap_or_else(|| panic!("{path:?} byte {at} sits inside no function"));
     &text[start..at]
 }
 
@@ -198,7 +213,7 @@ fn test_source(path: &Path) -> bool {
             .is_some_and(|name| name.to_string_lossy().ends_with("tests.rs"))
 }
 
-fn calls<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+fn calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
     let needle = format!("{name}(");
     text.match_indices(&needle)
         .filter(|(at, _)| {
@@ -209,7 +224,7 @@ fn calls<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
                 .is_some_and(|c| c == ' ' || c == '(' || c == '\n');
             (plain || before.ends_with("update::")) && !before.ends_with("fn ")
         })
-        .map(|(at, _)| function_holding(text, at))
+        .map(|(at, _)| function_holding(path, text, at))
         .collect()
 }
 
@@ -217,10 +232,7 @@ fn calls<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 /// holding each. Inputs: the source's path, its text and the step's name. Output: the
 /// holding functions' text up to each call.
 fn swap_calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
-    if !text.contains("kernel_processes::update") && !path.ends_with("src/update.rs") {
-        return Vec::new();
-    }
-    calls(text, name)
+    calls(path, text, name)
 }
 
 /// A folder that holds a link to a sibling folder gives each `.rs` file once, at its real
@@ -254,7 +266,10 @@ fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
 #[test]
 fn no_install_path_skips_verification() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = crate_root.join("../..").canonicalize().unwrap();
+    let root = crate_root
+        .join("../..")
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("real path of {crate_root:?}/../..: {error}"));
     let mut sources = Vec::new();
     rust_sources(&root.join("crates"), &mut sources);
     rust_sources(&root.join("apps/desktop/src-tauri/src"), &mut sources);
@@ -267,10 +282,11 @@ fn no_install_path_skips_verification() {
     let mut swaps = Vec::new();
     let mut engine_swaps = Vec::new();
     for path in sources.iter().filter(|path| !test_source(path)) {
-        let text = std::fs::read_to_string(path).unwrap();
+        let text =
+            std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
         for needle in &installs {
             for (at, _) in text.match_indices(needle.as_str()) {
-                desktop.push((path.clone(), function_holding(&text, at).to_owned()));
+                desktop.push((path.clone(), function_holding(path, &text, at).to_owned()));
             }
         }
         for body in swap_calls(path, &text, "swap") {
