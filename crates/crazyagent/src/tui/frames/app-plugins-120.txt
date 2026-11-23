@@ -1,0 +1,30 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  App plugins                                                                         
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Plugins CrazyAgent itself runs, such as the embedding models search ranks with. Each one shows what it reaches        
+  before you approve it.                                                                                                
+  When turned off: Refuse new calls                                                                                     
+                                                                                                                        
+  > OpenAI embeddings                                                                                     Bundled  Off  
+      openai, version 1. Bundled.                                                                                       
+      Reaches api.openai.com                                                                                            
+      Set a key for each secret it needs.                                                                               
+      api_key: Not set                                                                                                  
+    Ollama embeddings                                                                                      Bundled  On  
+      ollama, version 1. Bundled.                                                                                       
+      Reaches 127.0.0.1 (local, not encrypted)                                                                          
+    Dock embeddings                                                                                       Approved  On  
+      dock-embed, version 1. Added by you.                                                                              
+      Reaches 127.0.0.1 (local, not encrypted)                                                                          
+      api_key: Key you entered                                                                                          
+    Harbor embeddings                                                                                     Not approved  
+      harbor, version 1. Added by you.                                                                                  
+      Reaches api.harbor.invalid                                                                                        
+      Review this plugin before it runs.                                                                                
+      api_key: Key from Work OpenAI                                                                                     
+    Cove embeddings                                                                                   Changed - review  
+      cove, version 1. Added by you.                                                                                    
+      Reaches api.cove.invalid                                                                                          
+      Its plugin.toml changed since you approved it. Review it to use it again.                                         
+                                                                                                                        
+ Enter Review   Space Turn on   k Set key   a Add plugin   w When turned off   ↑↓ Move   r Read again                   
+ Esc Back                                                                                                        ? Help 

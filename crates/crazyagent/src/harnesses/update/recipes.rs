@@ -1,6 +1,7 @@
 use super::{ARGS_MAX, NPM_FLAGS_MAX, POINTER_BYTES_MAX, Pointer, PointerFormat};
 use crate::app_plugins::yaml::Value;
 use crate::harnesses::registry;
+use kernel_processes::install::{option, part, plain, scope_name, word};
 use std::sync::LazyLock;
 
 /// The most Homebrew names one recipe lists, those the app may install and those it only
@@ -15,7 +16,6 @@ const SCOPE: &str = "an npm scope such as @vendor";
 const PART: &str = "an npm name of lower-case letters, digits and . _ - that starts with a letter or a digit and does not end in .tgz, .tar or .gz";
 const VERSION: &str = "a version or a tag of lower-case letters, digits and . _ - that starts with a letter or a digit and does not end in .tgz, .tar or .gz";
 /// The endings npm reads as an archive file instead of a package name or a version.
-const ARCHIVES: [&str; 3] = [".tgz", ".tar", ".gz"];
 const OPTION: &str = "an option that starts with -- and holds lower-case letters, digits, - and =";
 const WORD: &str = "a word of lower-case letters, digits and dashes";
 const FIELD: &str = "a field name of lower-case letters, digits and _";
@@ -63,41 +63,6 @@ pub(super) struct Recipe {
     pub(super) brews: &'static [Brew],
     pub(super) npm: Option<Npm>,
     pub(super) guide: &'static str,
-}
-
-fn plain(text: &str) -> bool {
-    text.as_bytes()
-        .first()
-        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && text.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"@._-".contains(&byte)
-        })
-}
-
-/// Whether a text is one part of an npm package name, or a version or tag after it, that
-/// npm can only read as a registry name: plain characters without `@`, and no archive ending.
-/// Input: the text. Output: true when npm cannot read it as a folder, a file or an address.
-fn part(text: &str) -> bool {
-    plain(text) && !text.contains('@') && !ARCHIVES.iter().any(|end| text.ends_with(end))
-}
-
-fn scope_name(text: &str) -> bool {
-    text.strip_prefix('@').is_some_and(part)
-}
-
-fn option(text: &str) -> bool {
-    text.starts_with("--")
-        && text.len() > 2
-        && text.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'='
-        })
-}
-
-fn word(text: &str) -> bool {
-    !text.starts_with('-')
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn field(text: &str) -> bool {

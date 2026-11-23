@@ -19,7 +19,7 @@ export const NAME = PROJECT ? basename(PROJECT) : "";
 export const TEAM_MS = Number(process.env.TRIAL_TEAM_MS ?? 7200000);
 export const UI_MS = 30000;
 const OPEN_MS = 60000;
-const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin"];
+const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin", "app_plugin"];
 assert(Number.isFinite(TEAM_MS) && TEAM_MS > 0, "the team deadline is positive");
 
 /** The state the steps of one trial run share: desktop step count, the project id, the leads,

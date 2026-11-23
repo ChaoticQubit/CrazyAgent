@@ -19,8 +19,11 @@ pub use native_auth::{
     NativeAuthScope, NativeAuthStart, SignInWay, ends_operation,
 };
 
+pub use kernel_plugin_host::views::{Listing, Preview};
+pub use kernel_plugin_host::{grants::PluginGrants, usage::TurnOff};
 pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
+pub use transport::app_plugins::{APP_PLUGINS_CODES, AppPluginsPage, PluginUser, WhenTurnedOff};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::ide::IDE_CODES;
@@ -927,6 +930,7 @@ pub enum OwnerRead {
         after: Cursor,
     },
     Capabilities,
+    PluginGrants,
 }
 
 impl OwnerRead {
@@ -944,6 +948,7 @@ impl OwnerRead {
             | Self::Page { .. }
             | Self::Baseline { .. }
             | Self::Capabilities
+            | Self::PluginGrants
             | Self::ConversationHistory { .. }
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
@@ -1322,6 +1327,9 @@ pub enum OwnerData {
     },
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    PluginGrants {
+        plugins: Vec<kernel_plugin_host::grants::PluginGrants>,
     },
     ProviderRetry {
         settings: crate::provider_retry::ProviderRetryView,

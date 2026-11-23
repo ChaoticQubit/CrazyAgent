@@ -123,7 +123,7 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         "-f".to_owned(),
         work.path().join("project.sb").to_str().unwrap().to_owned(),
     ];
-    start.extend(crazyagent::sandbox::SESSION_SHIM.map(str::to_owned));
+    start.extend(kernel_sandbox::profile::command::SESSION_SHIM.map(str::to_owned));
     start.push(installed("codex").to_str().unwrap().to_owned());
     assert_eq!(args[..start.len()], start);
     let home_text = home.path().to_str().unwrap().to_owned();
@@ -165,8 +165,11 @@ fn a_full_access_agent_starts_without_seatbelt_but_with_the_same_cleared_environ
     };
     let built = command(&full).unwrap();
     assert_ne!(built.get_program(), "/usr/bin/sandbox-exec");
-    assert_eq!(built.get_program(), crazyagent::sandbox::SESSION_SHIM[0]);
-    let mut start: Vec<String> = crazyagent::sandbox::SESSION_SHIM[1..]
+    assert_eq!(
+        built.get_program(),
+        kernel_sandbox::profile::command::SESSION_SHIM[0]
+    );
+    let mut start: Vec<String> = kernel_sandbox::profile::command::SESSION_SHIM[1..]
         .iter()
         .map(|part| (*part).to_owned())
         .collect();
@@ -394,7 +397,7 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     assert_eq!(wrapped.get_program(), "/usr/bin/sandbox-exec");
     let args = arguments(&wrapped);
     let mut start = vec!["-f".to_owned(), profile.to_str().unwrap().to_owned()];
-    start.extend(crazyagent::sandbox::SESSION_SHIM.map(str::to_owned));
+    start.extend(kernel_sandbox::profile::command::SESSION_SHIM.map(str::to_owned));
     start.push(on.executable.to_str().unwrap().to_owned());
     assert_eq!(args[..start.len()], start);
     assert!(args.windows(2).any(|pair| pair == ["--tools", "default"]));
@@ -581,8 +584,8 @@ fn sandboxed_stand_in(
     prefix: &str,
     script: &str,
 ) -> (tempfile::TempDir, PathBuf, PathBuf, Session) {
-    use crazyagent::sandbox::ProjectSandbox;
     use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::profile::ProjectSandbox;
 
     let root = private_dir(prefix);
     let project = private_folder(root.path(), "project");

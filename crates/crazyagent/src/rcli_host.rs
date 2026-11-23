@@ -30,7 +30,7 @@ mod master_process {
         /// who to hold leftovers under, all unused. Returns `rcli_master_unavailable`.
         pub(super) fn spawn(
             _command: Command,
-            _check: crate::sandbox::LineageCheck,
+            _check: kernel_sandbox::profile::command::LineageCheck,
             _by: crate::harnesses::leftovers::HoldBy,
         ) -> Result<Self, ProtocolError> {
             Err(error("rcli_master_unavailable"))

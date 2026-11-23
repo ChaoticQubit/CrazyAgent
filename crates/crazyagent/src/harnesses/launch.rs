@@ -14,7 +14,7 @@ use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use kernel_processes::group::Ending;
-use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
+use kernel_sandbox::profile::env::{Handed, LINEAGE_VARIABLE, LineageToken};
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
@@ -328,9 +328,9 @@ impl LaunchBoundary {
     /// What a stop checks of the processes a run left outside its group: the installed
     /// sandbox's own check, or nothing for a Seatbelt profile, which ends them all. Output:
     /// the check.
-    pub fn lineage_check(&self) -> crate::sandbox::LineageCheck {
+    pub fn lineage_check(&self) -> kernel_sandbox::profile::command::LineageCheck {
         match self {
-            Self::Profile(_) => crate::sandbox::LineageCheck::Unneeded,
+            Self::Profile(_) => kernel_sandbox::profile::command::LineageCheck::Unneeded,
             Self::Installed(boundary) => boundary.lineage_check(),
         }
     }
@@ -858,7 +858,7 @@ fn sandboxed(
         .map(|(name, _)| name.as_str())
         .collect();
     let handed = handover
-        .map(|handover| crate::sandbox::Handed::new(&names, handover.token()))
+        .map(|handover| Handed::new(&names, handover.token()))
         .transpose()
         .map_err(|_| failure("launch_environment_refused"))?;
     assert_eq!(handed.is_some(), handover.is_some());
@@ -897,7 +897,7 @@ pub fn listed_command(
     request: &LaunchRequest,
     arguments: &[OsString],
     environment: &[(OsString, OsString)],
-    handed: crate::sandbox::Handed<'_>,
+    handed: Handed<'_>,
 ) -> Result<Command, LaunchError> {
     validate(request)?;
     let harness_env = environment
@@ -915,7 +915,7 @@ fn confined<'a>(
     installed: Option<&Installed>,
     arguments: &[OsString],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Option<crate::sandbox::Handed<'_>>,
+    handed: Option<Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     let home = request.account.home();
     let tool_home = installed.and_then(Installed::tool_home).unwrap_or(home);
@@ -961,7 +961,7 @@ fn confined<'a>(
     );
     #[cfg(target_os = "macos")]
     assert_eq!(
-        crate::sandbox::starts_at_boundary(command.get_program()),
+        kernel_sandbox::profile::command::starts_at_boundary(command.get_program()),
         !request.boundary.is_unconfined()
     );
     assert!(command.get_args().all(|argument| {
@@ -974,9 +974,10 @@ fn confined<'a>(
 }
 
 /// Builds the harness command inside the request's boundary, in its working folder: on
-/// macOS the confined profile through [`crate::sandbox::agent_command`], with the launch's
-/// exception to the variable guard through [`crate::sandbox::agent_command_handing`], or the
-/// Full access session shim, which carries no exception; on Linux and Windows an installed
+/// macOS the confined profile through [`kernel_sandbox::profile::env::agent_command`], with
+/// the launch's exception to the variable guard through
+/// [`kernel_sandbox::profile::env::agent_command_handing`], or the Full access session shim,
+/// which carries no exception; on Linux and Windows an installed
 /// sandbox with the account's home, through [`InstalledSandbox::wrap`], on Windows once
 /// [`home_containers`] passes, and never with an exception, which only macOS carries so far;
 /// anything else is `launch_sandbox_unavailable`. Inputs: the request, program, script
@@ -989,18 +990,19 @@ fn bounded<'a>(
     arguments: &[OsString],
     base: &[(&str, &OsStr)],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Option<crate::sandbox::Handed<'_>>,
+    handed: Option<Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     #[cfg(target_os = "macos")]
     {
+        use kernel_sandbox::profile::env::{
+            agent_command, agent_command_handing, unconfined_command,
+        };
         let mut command = match (request.boundary.confined_profile(), handed) {
             (Some(profile), Some(handed)) => {
-                crate::sandbox::agent_command_handing(profile, program, base, harness_env, handed)
+                agent_command_handing(profile, program, base, harness_env, handed)
             }
-            (Some(profile), None) => {
-                crate::sandbox::agent_command(profile, program, base, harness_env)
-            }
-            (None, None) => crate::sandbox::unconfined_command(program, base, harness_env),
+            (Some(profile), None) => agent_command(profile, program, base, harness_env),
+            (None, None) => unconfined_command(program, base, harness_env),
             (None, Some(_)) => return Err(failure("launch_environment_refused")),
         }
         .map_err(|_| failure("launch_environment_refused"))?;
@@ -1116,7 +1118,7 @@ fn launch_base(
 #[cfg(windows)]
 fn home_containers(
     home: &Path,
-    sandbox: &crate::sandbox::ProjectSandbox,
+    sandbox: &kernel_sandbox::profile::ProjectSandbox,
 ) -> Result<(), LaunchError> {
     use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     use std::os::windows::fs::OpenOptionsExt;
@@ -2761,51 +2763,6 @@ pub struct RunLogs {
     pub bytes_max: u64,
 }
 
-/// Hands each line of a harness's stdout to the session until the output ends. A line
-/// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
-/// skipped, so no amount of output ends the session. Takes the stdout and the sender.
-fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
-    forward_logged(stdout, sender, None);
-}
-
-/// [`forward`], with every byte read also going to the run's events log, when it keeps one,
-/// up to its cap (T19b 19b-4, QUESTION-0151). Takes the stdout, the sender and the log.
-fn forward_logged(stdout: ChildStdout, sender: SyncSender<Line>, mut log: Option<Capped>) {
-    let mut reader = BufReader::new(stdout);
-    let mut skipping = false;
-    loop {
-        let mut line = Vec::new();
-        let limit = u64::try_from(LINE_BYTES_MAX + 1).unwrap_or(u64::MAX);
-        match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => {
-                let _ = sender.send(Line::Closed);
-                return;
-            }
-            Ok(_) => {
-                if let Some(log) = log.as_mut() {
-                    log.write(&line);
-                }
-                let ended = line.last() == Some(&b'\n');
-                if skipping {
-                    skipping = !ended;
-                    continue;
-                }
-                if line.len() > LINE_BYTES_MAX && !ended {
-                    skipping = true;
-                    if sender.send(Line::Skipped).is_err() {
-                        return;
-                    }
-                    continue;
-                }
-                assert!(line.len() <= LINE_BYTES_MAX + 1);
-                if sender.send(Line::Bytes(line)).is_err() {
-                    return;
-                }
-            }
-        }
-    }
-}
-
 mod turn_session;
 pub use turn_session::TurnSession;
 
@@ -2822,4 +2779,4 @@ mod home_windows_tests;
 mod bounded_windows_tests;
 
 mod output_tail;
-use output_tail::tail;
+use output_tail::{forward, forward_logged, tail};

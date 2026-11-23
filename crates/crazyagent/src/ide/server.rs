@@ -400,7 +400,8 @@ impl Servers {
             let mut command = command_off_thread(launch, &info, output, &mut start).await?;
             let lineage = lineage_env(&mut command, policy.access)?;
             self.prepare_extensions(&build, &folder).await?;
-            self.spawn(project, &slot, &info, &mut command)
+            let required = editor::required(policy.access);
+            self.spawn(project, &slot, &info, &mut command, required)
                 .map(|child| (child, lineage))
         }
         .await;
@@ -674,37 +675,6 @@ impl Servers {
         })
         .await
         .map_err(|_| failure("ide_extension_install_failed"))?
-    }
-
-    /// Starts a launch's server: refuses once [`Servers::stop_all`] began (a stop that begins
-    /// after this check is caught by [`ready`]), issues the project's capability for the
-    /// built-in extension at the launch's capability path, replacing any earlier one, then
-    /// spawns; a spawn that fails revokes it again. Inputs: the project, its slot with no
-    /// launch, the launch's info and its command. Output: the leader, or a plain refusal.
-    fn spawn(
-        &self,
-        project: &ProjectId,
-        slot: &Slot,
-        info: &ServerInfo,
-        command: &mut Command,
-    ) -> Result<Child, EngineError> {
-        {
-            let state = locked(&slot.state);
-            assert!(state.is_none());
-            if self.closed.load(Ordering::SeqCst) {
-                return Err(failure("ide_servers_closed"));
-            }
-        }
-        let data = self
-            .folder
-            .parent()
-            .ok_or_else(|| failure("ide_state_unavailable"))?;
-        let capability = self.grants.issue(data, project)?;
-        assert_eq!(capability, info.capability_path);
-        kernel_processes::spawn_gate::spawn(command).map_err(|_| {
-            let _ = self.grants.revoke(project);
-            failure("ide_server_start_failed")
-        })
     }
 
     /// The engine data root this register's IDE folder sits in, which holds the database the
@@ -1149,7 +1119,7 @@ fn command(
     assert!(command.get_envs().count() <= env::ENV_MAX);
     assert_eq!(
         policy.access == AgentAccess::Full,
-        command.get_program() != crate::sandbox::SANDBOX_EXEC
+        command.get_program() != kernel_sandbox::profile::command::SANDBOX_EXEC
     );
     Ok(command)
 }
@@ -1621,6 +1591,8 @@ pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
     assert!(named.iter().all(|(pid, _)| *pid > 0));
     Ok(named)
 }
+
+mod editor;
 
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod tests;

@@ -3,6 +3,7 @@ use super::{
     keep_only,
 };
 use kernel_processes::finding::permission_fix;
+use kernel_processes::install::{self, InstallPaths, InstallRecipe, Step};
 use kernel_processes::run::{
     file_sha256, is_sha256, private_folder, run, staging_folder, version_from,
 };
@@ -12,11 +13,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-const CURL: &str = "/usr/bin/curl";
-const TAR: &str = "/usr/bin/tar";
-const ARCHIVE_BYTES_MAX: u64 = 128 * 1024 * 1024;
 const VERSION_TIME: Duration = Duration::from_secs(10);
-const DOWNLOAD_TIME: Duration = Duration::from_secs(300);
+const DOWNLOAD_TIME: Duration = Duration::from_secs(install::DOWNLOAD_SECS);
 const UV_TOOL_TIME: Duration = Duration::from_secs(900);
 const UV_RECEIPT: &str = "uv-receipt.toml";
 const NAME_BYTES_MAX: usize = 64;
@@ -240,12 +238,16 @@ impl PinnedInstaller {
         let staging = staging_folder(&self.setup, "download", &id)?;
         let result = (|| {
             let archive = staging.join("archive.tar.gz");
-            self.download(url, sha256, &archive, &staging)?;
             let out = staging.join("out");
+            let recipe = InstallRecipe::UvRelease {
+                version: version.as_str().to_owned(),
+                target: super::TARGET.to_owned(),
+                sha256: sha256.to_owned(),
+            };
+            let [fetch, unpack] = fetch_steps(&recipe, url, Some(member), &archive, &out)?;
+            self.download(&fetch, sha256, &archive, &staging)?;
             private_folder(&out)?;
-            let mut words = unpack_args(&archive, &out);
-            words.push(member.into());
-            let (unpacked, _) = run(Path::new(TAR), &words, &self.env(), &staging, DOWNLOAD_TIME)?;
+            let (unpacked, _) = ran(&unpack, &self.env(), &staging, DOWNLOAD_TIME)?;
             let program = out.join(member_path);
             let regular = std::fs::symlink_metadata(&program).is_ok_and(|m| m.is_file());
             if !unpacked || !regular {
@@ -263,33 +265,21 @@ impl PinnedInstaller {
         result
     }
 
-    /// Downloads one pinned archive with curl over https (or a local `file:///` source),
-    /// bounded in size and time, and keeps it only when its SHA-256 is the pinned one.
-    /// Inputs: the URL, the SHA-256, where to save it and the staging folder curl runs in.
-    /// Output: Ok, `setup_download_failed` or `setup_checksum_mismatch`.
+    /// Runs the kernel's curl step of one pinned archive, over https or a local `file:///`
+    /// source and bounded in size and time, and keeps the archive only when its SHA-256 is the
+    /// pinned one. Inputs: the curl step, the SHA-256, the archive it saves and the staging
+    /// folder curl runs in. Output: Ok, `setup_download_failed` or `setup_checksum_mismatch`.
     pub(super) fn download(
         &self,
-        url: &str,
+        fetch: &Step,
         sha256: &str,
         archive: &Path,
         staging: &Path,
     ) -> Result<(), InstallError> {
         assert!(is_sha256(sha256));
-        let (fetched, _) = run(
-            Path::new(CURL),
-            &[
-                "-q".into(),
-                "-fsSL".into(),
-                "--proto".into(),
-                "=https,file".into(),
-                "--max-filesize".into(),
-                ARCHIVE_BYTES_MAX.to_string().into(),
-                "--max-time".into(),
-                DOWNLOAD_TIME.as_secs().to_string().into(),
-                "-o".into(),
-                archive.as_os_str().to_owned(),
-                url.into(),
-            ],
+        assert!(fetch.program == Path::new(install::CURL));
+        let (fetched, _) = ran(
+            fetch,
             &self.env(),
             staging,
             DOWNLOAD_TIME + Duration::from_secs(5),
@@ -298,7 +288,7 @@ impl PinnedInstaller {
             .map(|metadata| metadata.is_file().then_some(metadata.len()))
             .ok()
             .flatten();
-        if !fetched || size.is_none_or(|size| size > ARCHIVE_BYTES_MAX) {
+        if !fetched || size.is_none_or(|size| size > install::ARCHIVE_BYTES_MAX) {
             return Err(InstallError("setup_download_failed"));
         }
         if file_sha256(archive)? != sha256 {
@@ -379,10 +369,21 @@ impl PinnedInstaller {
                 .and_then(|mut file| file.write_all(lock.requirements.as_bytes()))
                 .map_err(|_| InstallError("setup_store_unavailable"))?;
             let venv = staged.join("venv");
-            let commands =
-                super::locked_tool_args(python, &venv, &venv.join("bin/python"), &requirements);
-            for args in &commands {
-                let (ok, _) = run(&uv, args, &env, &self.setup, UV_TOOL_TIME)?;
+            let recipe = InstallRecipe::UvTool {
+                package: lock.package.to_owned(),
+                version: lock.version.to_owned(),
+                python: python.to_owned(),
+                lock: lock.requirements.to_owned(),
+            };
+            let paths = InstallPaths {
+                program: Some(uv.clone()),
+                venv: Some(venv.clone()),
+                venv_python: Some(venv.join("bin/python")),
+                requirements: Some(requirements.clone()),
+                ..InstallPaths::default()
+            };
+            for step in &pinned_steps(&recipe, &paths)? {
+                let (ok, _) = ran(step, &env, &self.setup, UV_TOOL_TIME)?;
                 if !ok {
                     return Err(InstallError("setup_install_failed"));
                 }
@@ -493,18 +494,49 @@ pub(super) fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
     })
 }
 
-/// The words that make tar unpack one archive into a folder, before any member names, as
-/// this user's files under this user's mode mask, never the archive's owners or modes, which
-/// tar keeps by default for root. Inputs: the archive and the folder. Output: tar's arguments.
-pub(super) fn unpack_args(archive: &Path, into: &Path) -> Vec<OsString> {
-    vec![
-        "--no-same-owner".into(),
-        "--no-same-permissions".into(),
-        "-xzf".into(),
-        archive.into(),
-        "-C".into(),
-        into.into(),
-    ]
+/// The kernel's steps of one recipe over setup's paths, any refusal read as an invalid pin.
+/// Inputs: the recipe and the paths. Output: the steps, or `setup_pin_invalid`.
+pub(super) fn pinned_steps(
+    recipe: &InstallRecipe,
+    paths: &InstallPaths,
+) -> Result<Vec<Step>, InstallError> {
+    install::steps(recipe, paths).map_err(|_| InstallError("setup_pin_invalid"))
+}
+
+/// The kernel's curl and tar steps of one pinned archive: curl saves it to `archive`, tar
+/// unpacks it into `out` as this user's files under this user's mode mask, never the
+/// archive's owners or modes, with the member last when one is named. Inputs: the recipe,
+/// the source, the member, the archive and the folder. Output: the two steps, or
+/// `setup_pin_invalid`.
+pub(super) fn fetch_steps(
+    recipe: &InstallRecipe,
+    source: &str,
+    member: Option<&str>,
+    archive: &Path,
+    out: &Path,
+) -> Result<[Step; 2], InstallError> {
+    let paths = InstallPaths {
+        archive: Some(archive.to_path_buf()),
+        out: Some(out.to_path_buf()),
+        source: Some(source.to_owned()),
+        member: member.map(str::to_owned),
+        ..InstallPaths::default()
+    };
+    <[Step; 2]>::try_from(pinned_steps(recipe, &paths)?)
+        .map_err(|_| InstallError("setup_pin_invalid"))
+}
+
+/// Runs one kernel step with setup's environment, as `run` does. Inputs: the step, the
+/// environment, the working folder and the bound. Output: whether it exited with success and
+/// its bounded output, or the run's code.
+pub(super) fn ran(
+    step: &Step,
+    env: &[(&str, OsString)],
+    cwd: &Path,
+    limit: Duration,
+) -> Result<(bool, Vec<u8>), InstallError> {
+    let result = install::run(step, env, cwd, limit).map_err(InstallError)?;
+    Ok((result.code == 0, result.output))
 }
 
 /// Tells whether a path is a regular file someone may run. Input: the path.

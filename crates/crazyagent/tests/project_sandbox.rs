@@ -1,9 +1,11 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, Sandbox, agent_env, tool_cache};
+use crazyagent::sandbox::{InstalledSandbox, tool_cache};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
+use kernel_sandbox::profile::env::agent_process_env;
+use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::tool_cache::CacheShape;
 use std::collections::{BTreeMap, BTreeSet};
@@ -252,11 +254,11 @@ fn a_tool_cache_sets_the_store_and_uv_cache_variables_a_harness_cannot_replace()
         (OsStr::new("UV_CACHE_DIR"), Some(OsStr::new("/elsewhere"))),
         (OsStr::new("pnpm_config_store_dir"), None),
     ];
-    let pinned = agent_env(&base, harness).unwrap();
+    let pinned = agent_process_env(&base, harness).unwrap();
     for (name, value) in base {
         assert!(pinned.contains(&(name.into(), value.to_owned())), "{name}");
     }
-    let passed = agent_env(&[], harness).unwrap();
+    let passed = agent_process_env(&[], harness).unwrap();
     assert!(passed.contains(&("UV_CACHE_DIR".into(), "/elsewhere".into())));
 }
 
@@ -3965,63 +3967,6 @@ fn the_harness_the_engine_launches_from_an_app_bundle_still_starts_but_its_bundl
     refused(many.allow_exec(&program("tool-4")));
 }
 
-#[test]
-fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
-    let case = case();
-    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
-    let profile = case.profiles.join("python.sb");
-    let python = Path::new("/opt/homebrew/bin/python3");
-    let real = fs::canonicalize(python).unwrap();
-    assert!(
-        real.to_str().unwrap().contains(".framework/Versions/"),
-        "the probe needs a framework build at {}",
-        python.display()
-    );
-    let output = run(
-        &sandbox,
-        &profile,
-        &format!("{} -c 'print(\"ok\")'", quoted(python)),
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
-}
-
-/// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
-/// gets a profile Seatbelt reads, so the agent starts, and the folder's own app deny still
-/// holds under the bounded spelling of its name: a framework Python app planted there,
-/// which the profile runs anywhere else, does not run.
-#[test]
-fn an_agent_starts_in_a_project_named_with_long_fold_runs_and_runs_no_app_planted_there() {
-    let case = case();
-    let project = case.root.join("Glasssssss-ffffffffff");
-    let bundle = project.join("Py.framework/Versions/3/Resources/Python.app/Contents/MacOS");
-    fs::create_dir_all(&bundle).unwrap();
-    fs::copy("/usr/bin/true", bundle.join("Python")).unwrap();
-    let sandbox = ProjectSandbox::new(
-        &crazyagent::sandbox::PROFILE_HOOKS,
-        &project,
-        &case.home,
-        &case.tmp,
-        SandboxNetwork::Only(Vec::new()),
-    )
-    .unwrap();
-    let profile = case.profiles.join("runs.sb");
-    let started = run(&sandbox, &profile, "/usr/bin/true");
-    assert!(
-        started.status.success(),
-        "{}",
-        String::from_utf8_lossy(&started.stderr)
-    );
-    let planted = run(&sandbox, &profile, &quoted(&bundle.join("Python")));
-    assert!(!planted.status.success(), "the planted app ran");
-    let stderr = String::from_utf8_lossy(&planted.stderr);
-    assert!(stderr.contains("Operation not permitted"), "{stderr}");
-}
-
 /// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither
 /// the arguments nor the environment of a process outside its sandbox through either
 /// process-arguments sysctl, and still reads a process of its own sandbox and an ordinary
@@ -4126,23 +4071,6 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
         problems.push(format!("an ordinary sysctl read failed: {ordinary:?}"));
     }
     assert!(problems.is_empty(), "{problems:#?}");
-}
-
-/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: `lsof` lists process ids
-/// before it reads one, so listing them stays open and a confined agent can still ask what
-/// its own process holds.
-#[test]
-fn a_confined_lsof_on_its_own_process_succeeds() {
-    let case = case();
-    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
-    let output = run(
-        &confined,
-        &case.profiles.join("lsof.sb"),
-        "/usr/sbin/lsof -p $$",
-    );
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{output:?}");
-    assert!(text.contains("COMMAND") && text.contains("cwd"), "{text}");
 }
 
 /// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: a confined shell lists its

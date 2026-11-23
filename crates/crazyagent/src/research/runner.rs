@@ -19,19 +19,19 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
+use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::Warden;
-use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
-use kernel_sandbox::hidden_paths::HiddenRun;
 use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+use kernel_sandbox::{hidden_paths::HiddenRun, profile::ProjectSandbox};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -4049,7 +4049,7 @@ fn codex_retry_limited(line: &str) -> bool {
 fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Result<(), RunError> {
     #[cfg(target_os = "macos")]
     if matches!(harness, ResearchHarness::ClaudeCode) {
-        crate::engine::keychain::fresh_profile_keychain(state, home, &[])
+        kernel_security::keychain::fresh_profile_keychain(state, home, &[])
             .map_err(|_| RunError::Account("agent_keychain_unavailable".into()))?;
     }
     #[cfg(not(target_os = "macos"))]

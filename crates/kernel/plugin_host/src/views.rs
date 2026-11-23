@@ -55,13 +55,15 @@ pub struct SecretView {
     pub binding: Binding,
 }
 
-/// Whether a plugin can be used: ready, a user file the owner has not reviewed since it
-/// changed, a plugin whose declared secrets are not all bound, or a file the engine refuses.
+/// Whether a plugin can be used: ready, a user file the owner never reviewed, a trusted user
+/// file whose text changed since, with the SHA-256 it was trusted at, a plugin whose
+/// declared secrets are not all bound, or a file the engine refuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginStatus {
     Ready,
     NeedsReview,
+    Changed { trusted_sha256: String },
     NeedsKey,
     Refused { problem: Problem },
 }

@@ -1,5 +1,6 @@
-use super::super::{ProjectSandbox, SandboxNetwork, SandboxRemote, agent_command};
-use kernel_sandbox::profile::ProfileHooks;
+use super::super::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::profile::env::agent_command;
+use kernel_sandbox::profile::{ProfileHooks, ProjectSandbox};
 use rustix::process::Pid;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;

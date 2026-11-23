@@ -1,14 +1,20 @@
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 
 use kernel_plugin_host::Refused;
-use kernel_plugin_host::registry::Engine;
-use kernel_plugin_host::store::{AccountKey, KeyFolder, KeyRef, Keys};
+use kernel_plugin_host::registry::{self, Engine, Switch};
+use kernel_plugin_host::store::{self, AccountKey, KeyFolder, KeyRef, Keys};
+use kernel_plugin_host::usage::{ChangeNotice, Holder, TurnOff, Usage};
+use kernel_plugin_host::views::{Listing, Preview};
 use rusqlite::Connection;
 
+use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::{self, ACCOUNT_KEYS, PLUGIN_KEYS};
 
+pub mod words;
 pub mod yaml;
 
 fn folder(folder: KeyFolder) -> &'static str {
@@ -106,15 +112,238 @@ fn error(refused: Refused) -> EngineError {
 }
 
 /// Creates the plugin store's tables when missing, as every engine open and migration step
-/// 12 need. Input: the engine connection. Output: Ok, or `app_plugins_unavailable`.
+/// 12 need, then loads the engine's off set from them. Input: the engine connection.
+/// Output: Ok, or `app_plugins_unavailable`.
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
-    kernel_plugin_host::store::initialize(db).map_err(error)
+    kernel_plugin_host::store::initialize(db).map_err(error)?;
+    switches().load(db);
+    Ok(())
+}
+
+/// The bundled code plugins the owner turned off, held in memory so the gateway reads no
+/// database per call. Until a load succeeds every plugin reads as off.
+pub(crate) struct OffSet {
+    off: RwLock<Option<BTreeSet<String>>>,
+}
+
+impl OffSet {
+    /// An off set not yet loaded, which reads every plugin as off. Output: the set.
+    pub(crate) const fn new() -> Self {
+        Self {
+            off: RwLock::new(None),
+        }
+    }
+
+    /// Replaces the set with the switch rows the database holds; a read that fails leaves
+    /// it unloaded. Input: the engine connection. Output: none.
+    pub(crate) fn load(&self, db: &Connection) {
+        let loaded = kernel_plugin_host::registry::off_code_plugins(db).ok();
+        *self.off.write().unwrap_or_else(PoisonError::into_inner) = loaded;
+    }
+
+    /// Switches a bundled code plugin and, once the switch has committed, loads the set
+    /// again. A connection inside an open transaction is refused before anything is
+    /// written, so the set never shows a switch that could still roll back. Inputs: the
+    /// engine connection, the engine facts, the plugin id and the switch. Output: Ok, the
+    /// plugin host's refusal code, or `app_plugins_unavailable`.
+    pub(crate) fn switch(
+        &self,
+        db: &Connection,
+        engine: &Engine<'_>,
+        plugin: &str,
+        switch: Switch<'_>,
+    ) -> Result<(), EngineError> {
+        if !db.is_autocommit() {
+            return Err(EngineError("app_plugins_unavailable".into()));
+        }
+        kernel_plugin_host::registry::set_enabled(db, engine, plugin, switch).map_err(error)?;
+        assert!(db.is_autocommit());
+        self.load(db);
+        Ok(())
+    }
+}
+
+impl bus_gateway::Switches for OffSet {
+    fn is_on(&self, plugin: &str) -> bool {
+        match &*self.off.read().unwrap_or_else(PoisonError::into_inner) {
+            Some(off) => !off.contains(plugin),
+            None => false,
+        }
+    }
+}
+
+/// The engine's one off set, loaded by [`initialize`] when the engine opens its database.
+/// Output: the set.
+pub(crate) fn switches() -> &'static OffSet {
+    static OFF: OffSet = OffSet::new();
+    &OFF
+}
+
+/// One App plugins owner request, run on the engine connection in the storage worker. It
+/// carries an entered key's bytes, so it has no Debug form.
+pub(crate) enum Command {
+    List,
+    Preview {
+        folder: PathBuf,
+    },
+    Review {
+        name: String,
+    },
+    Add {
+        folder: PathBuf,
+        sha256: String,
+        replace: bool,
+    },
+    Trust {
+        name: String,
+        sha256: String,
+    },
+    SetEnabled {
+        name: String,
+        enabled: bool,
+        when_off: Option<TurnOff>,
+    },
+    Users {
+        name: String,
+    },
+    Remove {
+        name: String,
+    },
+    BindAccount {
+        name: String,
+        secret: String,
+        account: String,
+    },
+    SetKey {
+        name: String,
+        secret: String,
+        key: Vec<u8>,
+    },
+    Unbind {
+        name: String,
+        secret: String,
+    },
+    SetWhenOff {
+        when_off: TurnOff,
+    },
+}
+
+/// What one App plugins request answers: the listing with the change notices drained after
+/// it and the turn-off choice in force, a trust screen, or the runs holding a plugin.
+#[derive(Debug)]
+pub(crate) enum Done {
+    Page {
+        listing: Listing,
+        notices: Vec<ChangeNotice>,
+        when_turned_off: TurnOff,
+        project_override: bool,
+    },
+    Preview(Preview),
+    Users(Vec<Holder>),
+}
+
+/// The engine's one record of which runs hold which plugin and of the change notices not
+/// yet shown. Output: the record.
+pub(crate) fn usage() -> &'static Usage {
+    static USAGE: std::sync::LazyLock<Usage> = std::sync::LazyLock::new(Usage::default);
+    &USAGE
+}
+
+/// Runs one App plugins request on the engine connection outside a transaction. A change
+/// answers with the listing after it. Turning a plugin off follows the owner's setting for
+/// runs holding it unless the request picks a choice for this one call. Inputs: the engine
+/// connection, the resolved settings and the command; saving the choice itself is the
+/// storage worker's. Output: the answer, or the plugin store's refusal code.
+pub(crate) fn execute(
+    db: &Connection,
+    config: &EffectiveConfig,
+    command: Command,
+) -> Result<Done, EngineError> {
+    let policy = &config.settings.plugins;
+    let root = crate::storage::trash::engine_root(db)?;
+    let engine = engine(root);
+    let now = crate::team::now_ms();
+    match command {
+        Command::List => {}
+        Command::Preview { folder } => {
+            return registry::preview(db, &engine, &folder)
+                .map(Done::Preview)
+                .map_err(error);
+        }
+        Command::Review { name } => {
+            return registry::review(db, &engine, &name)
+                .map(Done::Preview)
+                .map_err(error);
+        }
+        Command::Users { name } => return Ok(Done::Users(usage().users(&name))),
+        Command::Add {
+            folder,
+            sha256,
+            replace,
+        } => registry::add(db, &engine, &folder, &sha256, replace, now).map_err(error)?,
+        Command::Trust { name, sha256 } => {
+            kernel_plugin_host::trust::trust_file(db, &engine, &name, &sha256, now)
+                .map_err(error)?;
+        }
+        Command::SetEnabled {
+            name,
+            enabled,
+            when_off,
+        } => {
+            let switch = if enabled {
+                Switch::On
+            } else {
+                Switch::Off {
+                    usage: usage(),
+                    when_off: when_off.unwrap_or(policy.when_turned_off),
+                    essential_unlocked: policy.essential_unlocked,
+                }
+            };
+            switches().switch(db, &engine, &name, switch)?;
+        }
+        Command::Remove { name } => registry::remove(db, &engine, &name).map_err(error)?,
+        Command::BindAccount {
+            name,
+            secret,
+            account,
+        } => store::bind_account(db, &engine, &name, &secret, &account).map_err(error)?,
+        Command::SetKey { name, secret, key } => {
+            store::set_key(db, &engine, &name, &secret, key).map_err(error)?;
+        }
+        Command::Unbind { name, secret } => {
+            store::unbind(db, &engine, &name, &secret).map_err(error)?;
+        }
+        Command::SetWhenOff { .. } => {
+            return Err(EngineError("app_plugin_setting_unavailable".into()));
+        }
+    }
+    let listing = registry::list(db, &engine).map_err(error)?;
+    usage().note_listed(&listing);
+    Ok(Done::Page {
+        listing,
+        notices: usage().take_notices(),
+        when_turned_off: policy.when_turned_off,
+        project_override: config
+            .descriptors
+            .get("plugins.when_turned_off")
+            .is_some_and(|descriptor| descriptor.origin == crate::config::Origin::Project),
+    })
 }
 
 /// Deletes what a crash left staged by the plugin store at the engine root. Input: the
 /// engine root. Output: none.
 pub(crate) fn sweep_staged(root: &Path) {
     kernel_plugin_host::store::sweep_staged(&engine(root));
+}
+
+/// The owner read of every plugin with the capabilities it is granted, for the engine root
+/// the database sits in. Input: the engine connection. Output: the listing as owner data,
+/// or the plugin host's refusal code, or `file_trash_root_unknown` for an in-memory database.
+pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData, EngineError> {
+    let root = crate::storage::trash::engine_root(db)?;
+    let plugins = kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)?;
+    assert!(plugins.len() <= kernel_plugin_host::grants::GRANTS_MAX);
+    Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
 
 /// Runs the plugin store's start sweeps: what a crash left staged, then on Unix every
@@ -146,3 +375,10 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
 #[cfg(all(test, unix))]
 #[path = "app_plugins/host_tests.rs"]
 mod host_tests;
+
+#[cfg(test)]
+#[path = "app_plugins/switch_tests.rs"]
+mod switch_tests;
+#[cfg(test)]
+#[path = "app_plugins/words_tests.rs"]
+mod words_tests;

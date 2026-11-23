@@ -279,7 +279,7 @@ fn a_bearer_token_of_up_to_16_kib_is_held_but_the_keychain_refuses_to_store_it()
     let scratch = Scratch::new();
     let service = scratch.service("github");
     let long =
-        SecretString::bearer(vec![b'z'; kernel_security::secret::SECRET_BYTES_MAX + 1]).unwrap();
+        SecretString::bearer(vec![b'z'; kernel_security::secret::STORED_BYTES_MAX + 1]).unwrap();
     assert_eq!(
         scratch.store.put(&service, "token", &long).unwrap_err().0,
         "credential_secret_invalid"
@@ -314,4 +314,15 @@ fn keychain_uses_the_test_home_in_lib_tests() {
         "{}",
         store.path().display()
     );
+}
+
+#[test]
+fn a_namespace_outside_the_engine_root_is_refused_before_any_home_is_looked_up() {
+    for namespace in ["dev", "dev.crazyagent.", "com.example.app"] {
+        assert_eq!(
+            super::keychain(namespace).map(drop),
+            Err(StoreError::code("credential_namespace_refused")),
+            "{namespace}"
+        );
+    }
 }

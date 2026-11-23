@@ -515,3 +515,38 @@ fn every_bundled_npm_recipe_installs_the_one_package_it_names() {
     }
     assert_eq!(seen, 13);
 }
+
+/// Every bundled harness recipe passes the kernel's install validation as the install
+/// recipe the update builders make of it: each Homebrew name as an install and an update,
+/// the npm package with its spec's version or tag and the vendor's flags, and the self-update
+/// words under each program name the harness is found by, so no bundled manifest string is
+/// one the kernel would refuse.
+#[test]
+fn every_bundled_recipe_passes_validation() {
+    use super::super::{brew_recipe, npm_recipe, own_recipe};
+    use kernel_processes::install::{InstallRecipe, Verb, validate};
+    let mut built: Vec<(&str, InstallRecipe)> = Vec::new();
+    for recipe in recipes() {
+        for verb in [Verb::Install, Verb::Update] {
+            for brew in recipe.brews {
+                built.push((recipe.id, brew_recipe(brew, verb)));
+            }
+            if let Some(npm) = &recipe.npm {
+                let template = npm_recipe(npm, verb);
+                assert!(template.is_some(), "{}: {}", recipe.id, npm.spec);
+                built.extend(template.map(|template| (recipe.id, template)));
+            }
+        }
+        if let Some(own) = &recipe.own {
+            let binaries = crate::harnesses::spec(recipe.id).unwrap().binaries;
+            assert!(!binaries.is_empty(), "{}", recipe.id);
+            for binary in binaries {
+                built.push((recipe.id, own_recipe(binary, own)));
+            }
+        }
+    }
+    assert!(built.len() >= recipes().len(), "{}", built.len());
+    for (id, recipe) in &built {
+        assert_eq!(validate(recipe), Ok(()), "{id}: {recipe:?}");
+    }
+}

@@ -79,7 +79,7 @@ fn the_priming_process_holds_only_the_listed_environment() {
     let command = priming_command(folder, uv);
     assert_eq!(
         command.get_program(),
-        OsStr::new(crate::sandbox::SANDBOX_EXEC)
+        OsStr::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
     );
     let args: Vec<&OsStr> = command.get_args().collect();
     assert_eq!(args[0], "-p");

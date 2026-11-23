@@ -4,9 +4,11 @@ use crazyagent::sandbox::linux::{
     NEST_ARGS,
 };
 
-use crazyagent::sandbox::{ProjectSandbox, Sandbox};
+use kernel_sandbox::profile::ProjectSandbox;
+
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::profile::command::Sandbox;
 
 use std::fs;
 

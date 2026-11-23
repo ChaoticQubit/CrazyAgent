@@ -12,6 +12,8 @@ pub struct Refused {
 pub mod assets;
 #[cfg(feature = "store")]
 pub mod embedding;
+#[cfg(feature = "store")]
+pub mod grants;
 /// Tables capgen writes from the `.cap` files and the bundled plugins' manifests.
 pub mod generated {
     pub mod permissions;
@@ -31,12 +33,16 @@ pub mod views;
 
 #[cfg(all(test, feature = "store"))]
 mod embedding_tests;
+#[cfg(all(test, feature = "store", unix))]
+mod grants_tests;
 #[cfg(test)]
 mod permission_tests;
 #[cfg(all(test, feature = "store"))]
 mod problem_tests;
 #[cfg(all(test, feature = "store", unix))]
 mod registry_tests;
+#[cfg(all(test, feature = "store"))]
+mod sweep_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, feature = "store"))]

@@ -1,4 +1,3 @@
-use super::{ProjectSandbox, Sandbox, agent_env};
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -6,6 +5,9 @@ use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{canonical, clean_absolute};
+use kernel_sandbox::profile::ProjectSandbox;
+use kernel_sandbox::profile::command::Sandbox;
+use kernel_sandbox::profile::env::agent_process_env;
 use kernel_sandbox::windows::{
     GRANTS_FOLDER, container_for, existing_helper, helper_beside_engine,
 };
@@ -173,10 +175,10 @@ impl Sandbox for WindowsSandbox {
         }
         let cwd = harness
             .get_current_dir()
-            .unwrap_or(&self.sandbox.project_root);
+            .unwrap_or(self.sandbox.project_root());
         if !clean_absolute(cwd)
-            || !std::iter::once(&self.sandbox.project_root)
-                .chain(self.sandbox.worktrees.iter())
+            || !std::iter::once(self.sandbox.project_root())
+                .chain(self.sandbox.worktrees().iter().map(PathBuf::as_path))
                 .any(|root| cwd.starts_with(root))
         {
             return Err(invalid(
@@ -193,7 +195,7 @@ impl Sandbox for WindowsSandbox {
                 .iter()
                 .any(|pinned| name.eq_ignore_ascii_case(pinned))
         };
-        let env = agent_env(&base, harness.get_envs().filter(|&(name, _)| !pinned(name)))?;
+        let env = agent_process_env(&base, harness.get_envs().filter(|&(name, _)| !pinned(name)))?;
         let mut command = boundary_command(&self.helper, &self.profile, program, &env);
         command.args(harness.get_args()).current_dir(cwd);
         assert_eq!(command.get_program(), self.helper.as_os_str());
@@ -203,7 +205,7 @@ impl Sandbox for WindowsSandbox {
 }
 
 /// Builds a Windows agent command without a bound sandbox: the helper next to the engine's
-/// executable with `--profile <profile> -- <program>` and exactly [`agent_env`]. Inputs: an
+/// executable with `--profile <profile> -- <program>` and exactly [`agent_process_env`]. Inputs: an
 /// installed boundary profile, the absolute program and both environments. Output: the
 /// command, `Unavailable` without the helper, or `Invalid` for an unsafe input.
 pub fn agent_command<'a>(
@@ -219,7 +221,7 @@ pub fn agent_command<'a>(
     if !clean_absolute(program) {
         return Err(invalid("harness program must be an absolute plain path"));
     }
-    let env = agent_env(base, harness)?;
+    let env = agent_process_env(base, harness)?;
     let command = boundary_command(&helper, profile, program, &env);
     assert_eq!(command.get_envs().count(), env.len());
     Ok(command)
@@ -764,14 +766,16 @@ mod tests {
         let beside = tests.with_file_name(HELPER_NAME);
         let elsewhere = tests.parent().unwrap().with_file_name(HELPER_NAME);
         assert_ne!(beside, elsewhere);
-        assert!(crate::sandbox::starts_at_boundary(beside.as_os_str()));
+        assert!(kernel_sandbox::profile::command::starts_at_boundary(
+            beside.as_os_str()
+        ));
         for program in [
             cmd(),
             elsewhere,
-            PathBuf::from(crate::sandbox::SANDBOX_EXEC),
+            PathBuf::from(kernel_sandbox::profile::command::SANDBOX_EXEC),
         ] {
             assert!(
-                !crate::sandbox::starts_at_boundary(program.as_os_str()),
+                !kernel_sandbox::profile::command::starts_at_boundary(program.as_os_str()),
                 "{}",
                 program.display()
             );

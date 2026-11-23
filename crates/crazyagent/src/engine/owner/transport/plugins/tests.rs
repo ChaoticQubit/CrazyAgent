@@ -623,7 +623,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
         for folder in &folders {
             std::fs::create_dir_all(folder).unwrap();
         }
-        let sandbox = crate::sandbox::ProjectSandbox::new(
+        let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
             &crate::sandbox::PROFILE_HOOKS,
             &folders[0],
             &folders[1],

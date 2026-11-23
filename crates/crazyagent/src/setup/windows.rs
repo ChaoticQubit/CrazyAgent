@@ -1,7 +1,8 @@
 use super::{
     Dependency, InstallError, Installer, LOCK_FILE, Pin, UV_WINGET_ID, Version, keep_only,
-    locked_tool_args, tool_lock,
+    tool_lock,
 };
+use kernel_processes::install::{self, InstallPaths, InstallRecipe, Step};
 use kernel_processes::run::{reported_version, run_bounded};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,24 +79,33 @@ impl WindowsInstaller {
         if !plain(package) || !plain(python) {
             return Err(InstallError("setup_pin_invalid"));
         }
-        tool_lock(package, version.as_str()).ok_or(InstallError("setup_pin_unlocked"))?;
+        let lock =
+            tool_lock(package, version.as_str()).ok_or(InstallError("setup_pin_unlocked"))?;
         let data = self.app_data.join("uv");
         let venv = env.join("venv");
-        let args = locked_tool_args(
-            python,
-            &venv,
-            &venv.join("Scripts").join("python.exe"),
-            &env.join(LOCK_FILE),
-        );
-        Ok(args.map(|args| {
-            let mut command = Command::new(uv);
+        let recipe = InstallRecipe::UvTool {
+            package: package.to_owned(),
+            version: version.as_str().to_owned(),
+            python: python.to_owned(),
+            lock: lock.requirements.to_owned(),
+        };
+        let paths = InstallPaths {
+            program: Some(uv.to_path_buf()),
+            venv_python: Some(venv.join("Scripts").join("python.exe")),
+            venv: Some(venv),
+            requirements: Some(env.join(LOCK_FILE)),
+            ..InstallPaths::default()
+        };
+        let [venv_step, pip_step] = kernel_steps(&recipe, &paths)?;
+        Ok([venv_step, pip_step].map(|step| {
+            let mut command = Command::new(&step.program);
             for (name, _) in std::env::vars_os() {
                 if name.to_string_lossy().starts_with("UV_") {
                     command.env_remove(name);
                 }
             }
             command
-                .args(args)
+                .args(&step.args)
                 .env(
                     "PATH",
                     self.search_path(std::env::var_os("PATH").as_deref()),
@@ -186,25 +196,17 @@ impl WindowsInstaller {
             .winget_on(path)
             .ok_or(InstallError("setup_winget_missing"))?;
         assert!(winget.is_absolute());
-        let mut command = Command::new(winget);
-        command
-            .args([
-                "install",
-                "--id",
-                UV_WINGET_ID,
-                "--exact",
-                "--version",
-                version.as_str(),
-                "--source",
-                "winget",
-                "--scope",
-                "user",
-                "--silent",
-                "--disable-interactivity",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-            ])
-            .env("PATH", self.search_path(path));
+        let recipe = InstallRecipe::Winget {
+            id: UV_WINGET_ID.to_owned(),
+            version: version.as_str().to_owned(),
+        };
+        let paths = InstallPaths {
+            program: Some(winget),
+            ..InstallPaths::default()
+        };
+        let [step] = kernel_steps(&recipe, &paths)?;
+        let mut command = Command::new(&step.program);
+        command.args(&step.args).env("PATH", self.search_path(path));
         Ok(command)
     }
 
@@ -346,6 +348,17 @@ impl Installer for WindowsInstaller {
         }
         Ok(found)
     }
+}
+
+/// The kernel's steps of one recipe as exactly `N` steps, any refusal read as an invalid
+/// pin. Inputs: the recipe and the paths. Output: the steps, or `setup_pin_invalid`.
+fn kernel_steps<const N: usize>(
+    recipe: &InstallRecipe,
+    paths: &InstallPaths,
+) -> Result<[Step; N], InstallError> {
+    let invalid = InstallError("setup_pin_invalid");
+    let steps = install::steps(recipe, paths).map_err(|_| invalid)?;
+    <[Step; N]>::try_from(steps).map_err(|_| invalid)
 }
 
 #[cfg(test)]
@@ -494,7 +507,11 @@ mod tests {
             "--accept-package-agreements",
             "--accept-source-agreements",
         ]));
-        let uv_path = Path::new(r"C:\uv\uv.exe");
+        let uv_path = if cfg!(windows) {
+            Path::new(r"C:\uv\uv.exe")
+        } else {
+            Path::new("/uv/uv")
+        };
         let graphify_version = Version::parse("0.9.9").unwrap();
         let env = app.join("uv").join("tools").join("graphifyy").join("env-1");
         let [venv, pip] = installer
@@ -503,11 +520,29 @@ mod tests {
         let venv_folder = env.join("venv");
         let venv_python = venv_folder.join("Scripts").join("python.exe");
         let lock_file = env.join("requirements.txt");
-        let [venv_args, pip_args] =
-            crate::setup::locked_tool_args("3.12", &venv_folder, &venv_python, &lock_file);
-        for (command, args) in [(&venv, &venv_args), (&pip, &pip_args)] {
+        let venv_args = [
+            OsStr::new("venv"),
+            OsStr::new("--no-project"),
+            OsStr::new("--no-config"),
+            OsStr::new("--managed-python"),
+            OsStr::new("--python"),
+            OsStr::new("3.12"),
+            venv_folder.as_os_str(),
+        ];
+        let pip_args = [
+            OsStr::new("pip"),
+            OsStr::new("install"),
+            OsStr::new("--no-config"),
+            OsStr::new("--python"),
+            venv_python.as_os_str(),
+            OsStr::new("--require-hashes"),
+            OsStr::new("--no-build"),
+            OsStr::new("--requirements"),
+            lock_file.as_os_str(),
+        ];
+        for (command, args) in [(&venv, &venv_args[..]), (&pip, &pip_args[..])] {
             assert_eq!(command.get_program(), uv_path.as_os_str());
-            assert!(command.get_args().eq(args.iter()));
+            assert!(command.get_args().eq(args.iter().copied()));
             let envs: Vec<_> = command.get_envs().collect();
             let python = app.join("uv").join("python");
             assert!(envs.contains(&(

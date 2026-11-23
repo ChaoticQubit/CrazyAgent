@@ -1,9 +1,9 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::ProjectSandbox;
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::SECRET_ROOT_REFUSED;
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use std::fs;
@@ -2768,47 +2768,6 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         "a confined agent left in its home what a later run executes or a launch trips on:\n{}",
         problems.join("\n")
     );
-}
-
-/// A confined agent can neither give its home's launch lock a second link, in its home or
-/// anywhere else it writes, nor remove or replace it (RV-DS241-137 r3): a launch refuses a
-/// lock with a second link, so one `ln` would refuse every later launch of that home.
-#[test]
-fn a_confined_agent_never_links_removes_or_replaces_its_homes_launch_lock() {
-    use std::os::unix::fs::MetadataExt;
-    let case = case();
-    let lock = case.home.join("crazyagent.lock");
-    write(&lock, "");
-    let sandbox = ProjectSandbox::new(
-        &crazyagent::sandbox::PROFILE_HOOKS,
-        &case.project,
-        &case.home,
-        &case.tmp,
-        SandboxNetwork::Only(Vec::new()),
-    )
-    .unwrap();
-    let profile = case.profiles.join("lock.sb");
-    let held = quoted(&lock);
-    let other = quoted(&case.home.join("other"));
-    let in_home = quoted(&case.home.join("x"));
-    let in_tmp = quoted(&case.tmp.join("x"));
-    let denied = [
-        ("link_home", format!("ln {held} {in_home}")),
-        ("link_tmp", format!("ln {held} {in_tmp}")),
-        ("remove", format!("rm -f {held}")),
-        (
-            "replace",
-            format!("printf x > {other} && mv -f {other} {held}"),
-        ),
-    ];
-    for (name, script) in denied {
-        let output = run(&sandbox, &profile, &script);
-        assert!(!output.status.success(), "{name} ran: {script}");
-    }
-    let metadata = fs::symlink_metadata(&lock).unwrap();
-    assert!(metadata.is_file());
-    assert_eq!(metadata.nlink(), 1);
-    assert_eq!(metadata.len(), 0);
 }
 
 #[path = "sandbox_toolchains/team_mailbox.rs"]

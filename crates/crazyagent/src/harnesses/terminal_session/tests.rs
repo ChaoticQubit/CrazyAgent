@@ -187,7 +187,7 @@ mod own_turns {
         let boundary = if unconfined {
             let tmp = base.join("full-access-tmp");
             private(&tmp);
-            let sandbox = crate::sandbox::ProjectSandbox::new(
+            let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
                 &crate::sandbox::PROFILE_HOOKS,
                 &work,
                 &home,

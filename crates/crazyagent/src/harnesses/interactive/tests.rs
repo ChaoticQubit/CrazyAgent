@@ -115,7 +115,7 @@ fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
     let prefix = env
         .iter()
         .find(|(name, _)| name == "TMPDIR")
-        .map(|(_, tmp)| crate::sandbox::shell_tmp_prefix(Path::new(tmp)));
+        .map(|(_, tmp)| kernel_sandbox::profile::env::shell_tmp_prefix(Path::new(tmp)));
     if let Some(prefix) = prefix {
         env.push(("TMPPREFIX".to_owned(), prefix.to_str().unwrap().to_owned()));
     }

@@ -63,7 +63,7 @@ fn a_caller_runs_admit_and_its_checks_in_order_as_its_bound_plugin() {
     let grants = Grants::new(&[("low", Tier::T1, &["test.use"]), ("reader", Tier::T1, &[])])
         .expect("the table builds");
     let seen = Seen::default();
-    let gateway = Gateway::new(&grants, &seen);
+    let gateway = Gateway::new(&grants, &seen, &AllOn);
     let steps = RefCell::new(Vec::new());
     let low = gateway.bind("low");
     assert_eq!(low.plugin(), "low");

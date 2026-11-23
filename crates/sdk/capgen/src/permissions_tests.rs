@@ -99,9 +99,9 @@ fn the_permission_table_lists_every_capability() {
         "name:\"settings.save_quit\",tier:Tier::Kernel,needs:\"settings.write\",emits:&[\"AgentQuitSaved\"],"
     ));
     assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;1]"));
-    assert!(
-        flat.contains("plugin:\"agent-quit\",tier:Tier::T2,permissions:&[\"settings.write\"],")
-    );
+    assert!(flat.contains(
+        "plugin:\"agent-quit\",tier:Tier::T2,permissions:&[\"settings.write\"],essential:true,"
+    ));
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn bundled_grants_are_sorted_by_plugin_id_whatever_the_folders() {
     assert_eq!(ids, ["a-plugin", "b-plugin", "c-plugin"]);
     let flat: String = text.split_whitespace().collect();
     assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;3]"));
-    assert!(flat.contains("plugin:\"b-plugin\",tier:Tier::T3,permissions:&[],"));
+    assert!(flat.contains("plugin:\"b-plugin\",tier:Tier::T3,permissions:&[],essential:false,"));
     fs::remove_dir_all(&root).expect("the folder is removed");
 }
 
@@ -168,4 +168,26 @@ fn a_manifest_refusal_names_its_file_and_line() {
     assert!(error.file.ends_with("t2/p/plugin.toml"), "{error:?}");
     assert_eq!(error.detail, "line 2");
     fs::remove_dir_all(&root).expect("the folder is removed");
+}
+
+/// Every essential bundled code plugin is marked so in its own `plugin.toml`, and the
+/// generated table carries each file's mark: today exactly `agent-quit`.
+#[test]
+fn every_essential_plugin_is_marked_in_its_plugin_file() {
+    use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
+    let essential: Vec<&str> = BUNDLED_GRANTS
+        .iter()
+        .filter(|grant| grant.essential)
+        .map(|grant| grant.plugin)
+        .collect();
+    assert_eq!(essential, ["agent-quit"]);
+    for grant in &BUNDLED_GRANTS {
+        let dir = ["t1", "t2", "t3"]
+            .iter()
+            .map(|tier| repo("plugins").join(tier).join(grant.plugin))
+            .find(|dir| dir.join("plugin.toml").is_file())
+            .unwrap_or_else(|| panic!("no plugin folder for {}", grant.plugin));
+        let read = kernel_plugin_host::manifest::read(&dir).expect("the bundled manifest reads");
+        assert_eq!(read.essential, grant.essential, "{}", grant.plugin);
+    }
 }

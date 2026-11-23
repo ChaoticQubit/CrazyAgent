@@ -9,7 +9,6 @@ use std::time::Duration;
 /// The Node.js LTS release setup installs when no usable Node is found (DEC-157).
 pub const NODE_VERSION: &str = "26.13.1";
 
-const TAR: &str = "/usr/bin/tar";
 const UNPACK_TIME: Duration = Duration::from_secs(300);
 const VERSION_TIME: Duration = Duration::from_secs(10);
 const TOP_BYTES_MAX: usize = 64;
@@ -227,16 +226,16 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
     let staging = staging_folder(&setup, "node", &id)?;
     let result = (|| {
         let archive = staging.join("node.tar.gz");
-        installer.download(&pin.url, &pin.sha256, &archive, &staging)?;
         let out = staging.join("out");
+        let recipe = kernel_processes::install::InstallRecipe::NodeArchive {
+            version: NODE_VERSION.to_owned(),
+            target: super::TARGET.to_owned(),
+            sha256: pin.sha256.clone(),
+        };
+        let [fetch, unpack] = super::pinned::fetch_steps(&recipe, &pin.url, None, &archive, &out)?;
+        installer.download(&fetch, &pin.sha256, &archive, &staging)?;
         private_folder(&out)?;
-        let (unpacked, _) = run(
-            Path::new(TAR),
-            &super::pinned::unpack_args(&archive, &out),
-            &installer.env(),
-            &staging,
-            UNPACK_TIME,
-        )?;
+        let (unpacked, _) = super::pinned::ran(&unpack, &installer.env(), &staging, UNPACK_TIME)?;
         if !unpacked {
             return Err(InstallError("setup_install_failed"));
         }

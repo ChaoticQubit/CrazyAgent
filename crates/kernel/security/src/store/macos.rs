@@ -217,7 +217,10 @@ fn unavailable() -> StoreError {
     StoreError::code("credential_store_unavailable")
 }
 
-fn owned_namespace(namespace: &str) -> Result<&str, StoreError> {
+/// Checks one engine namespace: a store name under `dev.crazyagent.` with a leaf after it.
+/// Input: the namespace. Output: it, or `credential_name_invalid` /
+/// `credential_namespace_refused`.
+pub fn owned_namespace(namespace: &str) -> Result<&str, StoreError> {
     let namespace = checked_name(namespace)?;
     if !namespace.starts_with(NAMESPACE_ROOT) || namespace.len() == NAMESPACE_ROOT.len() {
         return Err(StoreError::code("credential_namespace_refused"));

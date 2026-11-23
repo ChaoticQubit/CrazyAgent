@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::ProjectSandbox;
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::profile::ProjectSandbox;
 use std::fs;
 use std::os::macos::fs::MetadataExt;
 use std::path::{Path, PathBuf};

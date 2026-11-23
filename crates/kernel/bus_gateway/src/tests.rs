@@ -59,7 +59,7 @@ fn a_t1_plugin_may_not_call_a_t2_capability() {
         needs: "test.use",
     };
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let refusal = Refusal::TierTooHigh {
         capability: "test.t2_only",
     };
@@ -187,7 +187,7 @@ fn bounded_call(
 #[test]
 fn an_input_over_its_bound_never_reaches_the_provider() {
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let ran = Cell::new(0);
     let over = "i".repeat(ROW_BYTES_MAX + 1);
     assert_eq!(
@@ -201,7 +201,7 @@ fn an_input_over_its_bound_never_reaches_the_provider() {
 #[test]
 fn an_input_at_its_bound_reaches_the_provider() {
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let ran = Cell::new(0);
     let at = "i".repeat(ROW_BYTES_MAX);
     assert_eq!(bounded_call(&gateway, &at, "ok", &ran), Ok("ok".to_owned()));
@@ -212,7 +212,7 @@ fn an_input_at_its_bound_reaches_the_provider() {
 #[test]
 fn an_output_over_its_bound_fails_with_cap_output_too_large() {
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let ran = Cell::new(0);
     let over = "o".repeat(ROW_BYTES_MAX + 1);
     assert_eq!(
@@ -229,7 +229,7 @@ fn an_output_over_its_bound_fails_with_cap_output_too_large() {
 #[test]
 fn an_ungranted_bounded_call_runs_no_check() {
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let checked = Cell::new(false);
     let refusal = Refusal::NotGranted {
         capability: "test.bounded",
@@ -293,7 +293,7 @@ fn owned_call(
 #[test]
 fn an_owned_input_over_its_bound_never_reaches_the_provider() {
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let ran = Cell::new(0);
     let (result, checked, provided) =
         owned_call(&gateway, "low", "u".repeat(ROW_BYTES_MAX + 1), &ran);
@@ -306,7 +306,7 @@ fn an_owned_input_over_its_bound_never_reaches_the_provider() {
 #[test]
 fn an_owned_input_at_its_bound_reaches_the_provider_as_the_value_checked() {
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let ran = Cell::new(0);
     let url = "u".repeat(ROW_BYTES_MAX);
     let sent = url.as_ptr() as usize;
@@ -320,7 +320,7 @@ fn an_owned_input_at_its_bound_reaches_the_provider_as_the_value_checked() {
 #[test]
 fn an_ungranted_plugin_with_an_oversized_input_is_refused_not_granted() {
     let (grants, refusals) = (grants(), RecordingRefusals::default());
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let ran = Cell::new(0);
     let refusal = Refusal::NotGranted {
         capability: "test.bounded",
@@ -340,4 +340,51 @@ fn an_ungranted_plugin_with_an_oversized_input_is_refused_not_granted() {
 fn the_settings_checks_are_the_generated_ones() {
     assert_eq!(settings::check_save_quit_input(&quit()), Ok(()));
     assert_eq!(settings::check_save_quit_output(&()), Ok(()));
+}
+
+/// The switch fake: every plugin it names reads as turned off, every other as on.
+struct OffFor(&'static [&'static str]);
+
+impl Switches for OffFor {
+    fn is_on(&self, plugin: &str) -> bool {
+        !self.0.contains(&plugin)
+    }
+}
+
+#[test]
+fn an_off_plugin_is_refused_with_plugin_off_before_its_grant_check() {
+    const USE: Capability = Capability {
+        name: "test.use",
+        tier: Tier::T1,
+        needs: "test.use",
+    };
+    let (grants, refusals) = (grants(), RecordingRefusals::default());
+    let switches = OffFor(&["low", "reader", "stranger"]);
+    let gateway = Gateway::new(&grants, &refusals, &switches);
+    let off = Refusal::PluginOff {
+        capability: "test.use",
+    };
+    assert_eq!(gateway.admit("low", &USE), Err(off.clone()));
+    assert_eq!(gateway.admit("reader", &USE), Err(off.clone()));
+    assert_eq!(gateway.admit("stranger", &USE), Err(off.clone()));
+    let ran = Cell::new(false);
+    assert_eq!(
+        gateway.call(
+            "low",
+            &USE,
+            (),
+            |_: &()| Ok(()),
+            |()| {
+                ran.set(true);
+                Ok(())
+            },
+            |_: &()| Ok(())
+        ),
+        Err(off.clone())
+    );
+    assert!(!ran.get());
+    assert_eq!(*refusals.seen.borrow(), vec![("low", "test.use", off)]);
+    let back_on = OffFor(&["reader"]);
+    let gateway = Gateway::new(&grants, &refusals, &back_on);
+    assert_eq!(gateway.admit("low", &USE), Ok(()));
 }

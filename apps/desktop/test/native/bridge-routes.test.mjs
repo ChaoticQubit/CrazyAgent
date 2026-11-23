@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { LIB, ROUTES, bridgeSource, commands, methods, plan, render } from "./bridge-routes.mjs";
+import { nativeSources } from "../native-commands.mjs";
+import { ROUTES, bridgeSource, commands, methods, plan, render } from "./bridge-routes.mjs";
 
-const lib = readFileSync(LIB, "utf8");
+const lib = nativeSources();
 const impls = methods(bridgeSource());
 
 const TWO_IMPLS = `impl NativeBridge {
@@ -128,6 +129,13 @@ test("only the canonical Tauri CommandArg body is followed, whatever its layout;
   for (const [shape, parts] of Object.entries(shapes)) {
     assert.throws(() => commands(limitsSource(parts)), /routes: Limits reads its fields in a way the generator cannot follow/, shape);
   }
+});
+
+test("the App plugins commands are read from their own file with the other native sources, each once", () => {
+  const names = commands(lib).map((command) => command.name);
+  assert.ok(names.includes("desktop_app_plugin_set_when_off"), "the App plugins commands are read from their own file");
+  assert.doesNotMatch(readFileSync(new URL("../../src-tauri/src/lib.rs", import.meta.url), "utf8"), /fn desktop_app_plugin/u, "lib.rs keeps none of them");
+  assert.equal(new Set(names).size, names.length, "each command is read once");
 });
 
 test("the end-to-end bridge routes match the app's commands", () => {

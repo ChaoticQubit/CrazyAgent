@@ -437,7 +437,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
     use crate::engine::owner::{HostStamp, NativeProfileBinding};
     use crate::protocol::{ConfigId, Cursor, SessionId};
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+    use crate::sandbox::InstalledSandbox;
     use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 
@@ -501,7 +501,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     let tmp = root.path().join("agent-tmp");
     fs::create_dir(&tmp).unwrap();
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
-    let sandbox = ProjectSandbox::new(
+    let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &fs::canonicalize(&project).unwrap(),
         &fs::canonicalize(&home).unwrap(),
@@ -2165,7 +2165,7 @@ exit 122
 #[tokio::test]
 async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
     use crate::engine::master_host_fixture::{HarnessProcesses, MasterFixture, RUN_FOLDER};
-    use crate::sandbox::LineageCheck;
+    use kernel_sandbox::profile::command::LineageCheck;
 
     let mut fixture = MasterFixture::new("claude");
     let check = {

@@ -36,8 +36,10 @@ fn timed(row: &str, mut step: impl FnMut()) -> u128 {
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
 fn profile_build_p95() {
-    use crazyagent::sandbox::{ProjectSandbox, SANDBOX_EXEC, agent_command};
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
+    use kernel_sandbox::profile::command::SANDBOX_EXEC;
+    use kernel_sandbox::profile::env::agent_command;
     use std::ffi::OsStr;
     use std::path::Path;
     let temp = tempfile::tempdir().unwrap();
@@ -95,8 +97,9 @@ fn policy_load_p95() {
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
 fn linux_policy_write_p95() {
     use crazyagent::sandbox::linux::LinuxSandbox;
-    use crazyagent::sandbox::{ProjectSandbox, Sandbox};
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
+    use kernel_sandbox::profile::command::Sandbox;
     use std::path::Path;
     use std::process::Command;
     let helper = Path::new(env!("CARGO_BIN_EXE_crazyagent-landlock"));

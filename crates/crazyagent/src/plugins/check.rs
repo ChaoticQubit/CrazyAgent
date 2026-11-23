@@ -64,7 +64,11 @@ pub fn check_stdio(
     for (name, value) in secrets {
         process.env(name, env_value(value)?);
     }
-    check_command(process, limit, crate::sandbox::LineageCheck::Unneeded)
+    check_command(
+        process,
+        limit,
+        kernel_sandbox::profile::command::LineageCheck::Unneeded,
+    )
 }
 
 /// A secret environment value as Unix takes it: its bytes. Input: the bytes. Output: the
@@ -107,10 +111,10 @@ fn start_refused(error: std::io::Error) -> &'static str {
 pub fn check_command(
     mut process: Command,
     limit: Duration,
-    check: crate::sandbox::LineageCheck,
+    check: kernel_sandbox::profile::command::LineageCheck,
 ) -> Result<Vec<String>, &'static str> {
     use crate::harnesses::leftovers::{self, Follower, HoldBy, Lineage, Unstopped};
-    use crate::sandbox::LineageCheck;
+    use kernel_sandbox::profile::command::LineageCheck;
     use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
     let token = match check {
         LineageCheck::Unneeded => None,
@@ -171,16 +175,19 @@ pub fn check_command(
 /// none of them keeps the secret environment values. The boundary's own job ends the
 /// agent's tree too, so a Windows check never follows a lineage.
 /// Inputs: the command with its arguments, environment and folder set, the time bound and
-/// the lineage check, always [`crate::sandbox::LineageCheck::Unneeded`] here. Output: the
+/// the lineage check, always [`kernel_sandbox::profile::command::LineageCheck::Unneeded`] here. Output: the
 /// tool names, or a plain rejection code.
 #[cfg(windows)]
 pub fn check_command(
     mut process: Command,
     limit: Duration,
-    check: crate::sandbox::LineageCheck,
+    check: kernel_sandbox::profile::command::LineageCheck,
 ) -> Result<Vec<String>, &'static str> {
     use std::os::windows::process::CommandExt;
-    assert_eq!(check, crate::sandbox::LineageCheck::Unneeded);
+    assert_eq!(
+        check,
+        kernel_sandbox::profile::command::LineageCheck::Unneeded
+    );
     process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -523,7 +530,7 @@ mod tests {
                 check_command(
                     run.command(&run.profile),
                     Duration::from_millis(1500),
-                    crate::sandbox::LineageCheck::Unneeded,
+                    kernel_sandbox::profile::command::LineageCheck::Unneeded,
                 )
             });
             (run.processes(), check.join().unwrap())
@@ -550,7 +557,7 @@ mod tests {
         let checked = check_command(
             command,
             Duration::from_millis(1500),
-            crate::sandbox::LineageCheck::Sandboxed,
+            kernel_sandbox::profile::command::LineageCheck::Sandboxed,
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         let child = loop {
