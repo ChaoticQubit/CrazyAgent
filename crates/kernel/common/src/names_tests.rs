@@ -44,7 +44,8 @@ fn an_identity_is_one_safe_component_of_at_most_128_bytes() {
     for value in [
         "acct-work",
         "Work.Acme_1",
-        "a:b",
+        "openai:work",
+        "ab:c",
         key.as_str(),
         &"x".repeat(128),
     ] {
@@ -52,6 +53,9 @@ fn an_identity_is_one_safe_component_of_at_most_128_bytes() {
     }
     for value in [
         "",
+        "a:b",
+        "Z:x",
+        "c:",
         "..",
         "a..b",
         "a/b",
@@ -65,7 +69,7 @@ fn an_identity_is_one_safe_component_of_at_most_128_bytes() {
     ] {
         assert_eq!(validate_identity(value), Err(IDENTITY_REFUSED), "{value:?}");
     }
-    assert!(single_component("a:b"));
+    assert!(single_component("ab:c"));
     assert!(!single_component("."));
     assert!(!single_component("a/b"));
 }

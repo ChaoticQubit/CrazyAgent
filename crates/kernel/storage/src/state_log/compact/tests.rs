@@ -93,7 +93,10 @@ fn compacted(
 ) -> u64 {
     let tx = db.transaction().unwrap();
     let mut log = own(&tx);
-    let pruned = compact(&mut log, compaction, aggregate, 2, || Ok(chunks(live))).unwrap();
+    let pruned = compact(&mut log, compaction, aggregate, 2, |_| {
+        Ok::<_, StorageError>(chunks(live))
+    })
+    .unwrap();
     drop(log);
     tx.commit().unwrap();
     pruned
@@ -269,9 +272,9 @@ fn off_writes_no_snapshot_and_deletes_no_row() {
 
     let tx = db.transaction().unwrap();
     let mut log = own(&tx);
-    let pruned = compact(&mut log, Compaction::Off, LEASES, 2, || {
+    let pruned = compact(&mut log, Compaction::Off, LEASES, 2, |_| {
         asked.set(true);
-        Ok(chunks(leases))
+        Ok::<_, StorageError>(chunks(leases))
     })
     .unwrap();
     drop(log);
@@ -312,7 +315,9 @@ fn a_failed_verify_prunes_nothing() {
 
     let tx = db.transaction().unwrap();
     let mut log = own(&tx);
-    let refused = compact(&mut log, Compaction::On, LEASES, 2, || Ok(chunks(leases)));
+    let refused = compact(&mut log, Compaction::On, LEASES, 2, |_| {
+        Ok::<_, StorageError>(chunks(leases))
+    });
     drop(log);
     drop(tx);
 
@@ -334,7 +339,10 @@ fn a_rollback_mid_prune_keeps_every_row() {
 
     let tx = db.transaction().unwrap();
     let mut log = own(&tx);
-    let pruned = compact(&mut log, Compaction::On, LEASES, 2, || Ok(chunks(leases))).unwrap();
+    let pruned = compact(&mut log, Compaction::On, LEASES, 2, |_| {
+        Ok::<_, StorageError>(chunks(leases))
+    })
+    .unwrap();
     assert!(pruned > 0, "the prune ran inside the transaction");
     drop(log);
     drop(tx);

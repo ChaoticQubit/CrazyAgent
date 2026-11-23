@@ -1,4 +1,4 @@
-use super::canonical;
+use kernel_sandbox::paths::canonical;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -307,7 +307,7 @@ pub fn runs_seeing(project: &str, saved: &[PathBuf]) -> Vec<RunKind> {
 /// folder, taken in its canonical form, that sits strictly inside the project root. A folder
 /// outside the project, the project root itself, or a path that is not a folder is refused,
 /// as is text that is not plain: on Windows a drive path joined by backslashes
-/// ([`crate::sandbox::windows_clean_text`]), elsewhere one with no quote or backslash.
+/// ([`kernel_sandbox::paths::windows_clean_text`]), elsewhere one with no quote or backslash.
 /// Inputs: the typed path and the project root. Output: the canonical folder, or a plain
 /// refusal code.
 pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str> {
@@ -320,7 +320,7 @@ pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str>
         .chars()
         .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'');
     #[cfg(not(unix))]
-    let plain = crate::sandbox::windows_clean_text(text);
+    let plain = kernel_sandbox::paths::windows_clean_text(text);
     if !plain {
         return Err("hidden_path_not_plain");
     }
@@ -393,7 +393,7 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     let paths = statement
         .query_map(params![project, HIDDEN_PATHS_MAX as i64], |row| {
             row.get::<_, String>(0)
-                .map(|text| crate::projects_home::one_spelling(PathBuf::from(text)))
+                .map(|text| kernel_sandbox::paths::one_spelling(PathBuf::from(text)))
         })?
         .collect::<rusqlite::Result<Vec<PathBuf>>>()?;
     assert!(paths.len() <= HIDDEN_PATHS_MAX);

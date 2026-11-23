@@ -339,7 +339,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
 fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
     const ID: &str = "mcp-0123456789abcdef01234567";
     let directory = tempfile::tempdir().unwrap();
-    let root = crate::sandbox::canonical(directory.path())
+    let root = kernel_sandbox::paths::canonical(directory.path())
         .unwrap()
         .join("engine");
     std::fs::create_dir_all(&root).unwrap();
@@ -406,7 +406,7 @@ fn access_list(folder: &Path) -> String {
 async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     const ID: &str = "mcp-0123456789abcdef01234568";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     let folder = base.join("server");
     std::fs::create_dir_all(&root).unwrap();
@@ -471,7 +471,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     const DEAD: &str = "mcp-0123456789abcdef0123456b";
     const LIVE: &str = "mcp-0123456789abcdef0123456c";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     std::fs::create_dir_all(&root).unwrap();
     let entries = access_list;
@@ -611,7 +611,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
     const BOUND: &str = "mcp-0123456789abcdef0123456f";
     const FORGED: &str = "mcp-0123456789abcdef01234570";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let checks = base.join("engine").join(CHECK_FOLDER);
     let grants = base.join("grants");
     std::fs::create_dir_all(checks.join(CHECK_PROFILES)).unwrap();

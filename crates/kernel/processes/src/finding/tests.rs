@@ -122,6 +122,38 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     }
 }
 
+/// Under `env -S` the system splits the arguments itself, honouring quotes, escapes and
+/// `$` expansions, so words split on spaces alone are not the ones that run: an `-S`
+/// argument holding `$`, `\`, `"` or `'` is refused as [`Refusal::FirstLine`], as the
+/// program is, while plain arguments still resolve.
+#[test]
+fn an_env_split_argument_holding_a_quote_escape_or_dollar_is_refused() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let places = home_only(&home);
+    let lines: Vec<(&str, &[u8])> = vec![
+        ("double", b"#!/usr/bin/env -S node --opt \"a b\"\n"),
+        ("single", b"#!/usr/bin/env -S node --opt 'a b'\n"),
+        ("escaped", b"#!/usr/bin/env -S node a\\ b\n"),
+        ("dollar", b"#!/usr/bin/env -S node ${HOME}\n"),
+    ];
+    for (name, line) in lines {
+        let script = script(&home, name, line, 0o755);
+        assert_eq!(
+            refusal_of(&script, &places),
+            Some((script, Refusal::FirstLine)),
+            "{name}"
+        );
+    }
+    let plain = script(
+        &home,
+        "plain",
+        b"#!/usr/bin/env -S node --no-warnings\n",
+        0o755,
+    );
+    assert!(resolve_entry(&plain, &places).is_ok());
+}
+
 /// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
 /// would keep past it are not the ones that run: a line holding `#` anywhere after `#!` is
 /// refused as [`Refusal::FirstLine`], an `env` program named `node#x` with an owner file of
@@ -728,6 +760,24 @@ fn a_system_tool_stays_usable_while_the_projects_cannot_be_read() {
     }
 }
 
+/// On a nix-darwin Mac the system profile, the per-user profiles and the default Nix profile
+/// hold the tools the PATH names, so a tool under each stays usable while the set-up
+/// projects cannot be read, in the form the PATH spells it. The names are made up, so no
+/// file on this computer is read.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn a_nix_darwin_profile_tool_stays_usable_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let places = with_canonical(&home, |path| Ok(path.to_path_buf()), None);
+    for tool in [
+        "/run/current-system/sw/bin/crazyagent-row-tool",
+        "/etc/profiles/per-user/someone/bin/crazyagent-row-tool",
+        "/nix/var/nix/profiles/default/bin/crazyagent-row-tool",
+    ] {
+        assert!(!places.agent_writable(Path::new(tool)), "{tool}");
+    }
+}
+
 /// The failed-read fallback never trusts more than a successful read with no project
 /// does: every path agents can write with the projects read is agents' to write without
 /// them, so the fallback only adds refusals.
@@ -842,4 +892,34 @@ fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
     std::fs::write(file, bytes).unwrap();
     std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
     file.to_path_buf()
+}
+
+/// A folder the engine named for agents under an install root still counts as one agents can
+/// write while engine.db cannot be read, when an earlier read of the same data folder named
+/// it: the failed read takes that data folder's last good read, so a tool planted there is
+/// refused, and a data folder with no good read gains nothing from another one's.
+#[test]
+fn a_registered_folder_under_an_install_root_stays_writable_after_a_failed_read() {
+    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let read = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let failed = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| None,
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let named = tempfile::tempdir().unwrap();
+    let root = named.path().canonicalize().unwrap();
+    assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
+    assert!(Places::at_roots(Some(&root), None, failed.clone()).agent_writable(tool));
+    let unread = tempfile::tempdir().unwrap();
+    let other = unread.path().canonicalize().unwrap();
+    assert!(!Places::at_roots(Some(&other), None, failed).agent_writable(tool));
 }

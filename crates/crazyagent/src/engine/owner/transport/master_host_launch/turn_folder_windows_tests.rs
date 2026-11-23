@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 /// temp folder, kept alive by the caller, and its plain path.
 fn plain_temp() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
-    let plain = crate::sandbox::canonical(temp.path()).unwrap();
+    let plain = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     (temp, plain)
 }
 

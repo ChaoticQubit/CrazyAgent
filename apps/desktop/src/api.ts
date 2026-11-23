@@ -600,6 +600,26 @@ export function getProviderRetry(): Promise<Result<ProviderRetryView>> {
   return call<ProviderRetryView>("desktop_provider_retry");
 }
 
+/** The event log compaction switch, the engine's `LogCompaction`. */
+export type LogCompaction = "off" | "on";
+
+/** The owner's read of the switch, the engine's `LogCompactionView`: the stored choice and
+ * whether this build is a dev build, the only build that shows the row. */
+export interface LogCompactionView {
+  choice: LogCompaction;
+  dev_build: boolean;
+}
+
+/** Reads the event log compaction switch. Output: the view, Off before the first save. */
+export function getLogCompaction(): Promise<Result<LogCompactionView>> {
+  return call<LogCompactionView>("desktop_log_compaction");
+}
+
+/** Saves the event log compaction switch. Input: the choice. Output: ok once saved. */
+export function saveLogCompaction(choice: LogCompaction): Promise<Result<void>> {
+  return change("desktop_set_log_compaction", { choice, generation: nextGeneration() });
+}
+
 /** Saves what harnesses do when a model provider can't be reached. Input: the option.
  * Output: ok once saved. */
 export function saveProviderRetry(choice: ProviderRetry): Promise<Result<void>> {

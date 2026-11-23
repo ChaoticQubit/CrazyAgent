@@ -339,7 +339,7 @@ fn top_names(root: &Path) -> Result<Vec<String>, &'static str> {
 /// engine's, the picked ones and each present one git tracks something in, so any other
 /// entry stays closed, one made later included. Takes the folder, the choice, the present
 /// names and git's untracked paths. Returns the names, sorted, each
-/// [`crate::sandbox::plain_top`].
+/// [`kernel_sandbox::paths::plain_top`].
 fn open_tops(
     root: &Path,
     shared: &SharedFolders,
@@ -365,7 +365,7 @@ fn open_tops(
                 .cloned(),
         )
         .chain(picked.cloned())
-        .filter(|name| crate::sandbox::plain_top(name))
+        .filter(|name| kernel_sandbox::paths::plain_top(name))
         .collect();
     open.sort();
     open.dedup();

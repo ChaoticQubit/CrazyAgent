@@ -203,7 +203,7 @@ fn code(home: &Path) -> String {
 #[test]
 fn a_private_home_passes_and_an_open_linked_or_relative_one_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let home = base.join("home");
     drop(private::dir(&home).unwrap());
     validate_home(&home).unwrap();
@@ -250,7 +250,7 @@ fn a_private_home_passes_and_an_open_linked_or_relative_one_is_refused() {
 #[test]
 fn the_profile_and_its_codex_and_claude_folders_are_forbidden_homes() {
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let owner = base.join("profile");
     drop(private::dir(&owner).unwrap());
     for name in [".codex", ".claude", "agent"] {
@@ -337,7 +337,7 @@ fn home_list(path: &Path) -> Vec<u8> {
 #[test]
 fn a_granted_home_passes_and_a_low_integrity_process_cannot_change_it() {
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let project = base.join("project");
     let home = base.join("agent").join("home");
     let tmp = base.join("agent").join("tmp");
@@ -431,7 +431,7 @@ fn junction(link: &Path, target: &Path) {
 #[test]
 fn a_held_home_is_judged_as_held_after_a_junction_above_it_moves() {
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let (first, second) = (base.join("first"), base.join("second"));
     for parent in [&first, &second] {
         drop(private::dir(parent).unwrap());
@@ -463,7 +463,7 @@ fn a_held_home_is_judged_as_held_after_a_junction_above_it_moves() {
 #[test]
 fn a_held_profile_folder_stays_forbidden_after_a_junction_above_it_moves() {
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let owner = base.join("profile");
     let other = base.join("other");
     for folder in [&owner, &other] {
