@@ -1632,7 +1632,7 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         "a link is saved as the folder it names, once"
     );
 
-    let owner_home = crate::sandbox::toolchains::ToolHomes::owner()
+    let owner_home = kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf();
@@ -2567,7 +2567,7 @@ async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_r
 #[tokio::test]
 async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refused() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let project = ProjectId::new("setup-pooled").unwrap();
@@ -2672,7 +2672,7 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
 #[tokio::test]
 async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let project = ProjectId::new("setup-pooled").unwrap();

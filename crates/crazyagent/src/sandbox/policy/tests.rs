@@ -792,7 +792,7 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
 
 #[test]
 fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
-    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::host::LinuxHost;
     use kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE;
     use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
@@ -836,7 +836,7 @@ fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
         assert_eq!(none(true, sockets, &[]), line, "{sockets:?}");
     }
     let named = none(true, tcp, &[port(8080), port(443), port(80)]).unwrap();
-    assert_eq!(named, crate::sandbox::linux_unbridged_line(80));
+    assert_eq!(named, kernel_sandbox::lines::linux_unbridged_line(80));
     assert!(named.contains("port 80 is below 1024"), "{named}");
     assert_eq!(
         none(false, tcp, &[port(80)]),
@@ -850,7 +850,7 @@ fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
 
 #[test]
 fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_https() {
-    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::host::LinuxHost;
     use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
     use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
@@ -889,7 +889,7 @@ fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_
 
 #[test]
 fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
-    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::host::LinuxHost;
     use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
     use kernel_sandbox::settings::LinuxSockets;
     let host = |supervised, routed| {
@@ -950,7 +950,7 @@ fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
 
 #[test]
 fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
-    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::host::LinuxHost;
     use kernel_sandbox::lines::{
         LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE,
     };
@@ -998,7 +998,7 @@ fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
 
 #[test]
 fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hold() {
-    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::host::LinuxHost;
     use kernel_sandbox::lines::{
         LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_ROOT_LINE,
         LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
@@ -1073,7 +1073,7 @@ fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hol
 /// does not cover, says nothing of AppArmor (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
 #[test]
 fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
-    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::host::LinuxHost;
     use kernel_sandbox::lines::{
         LINUX_APPARMOR_LINE, LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE,
         LINUX_ROOT_LINE, LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
@@ -1138,7 +1138,7 @@ fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
 /// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
 #[test]
 fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_takes_it() {
-    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::host::LinuxHost;
     use kernel_sandbox::lines::LINUX_KEPT_GIT_LINE;
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

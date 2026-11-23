@@ -1,8 +1,9 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::ProjectSandbox;
-use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope, apply};
+use crazyagent::sandbox::shared_folders::apply;
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};

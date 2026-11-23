@@ -627,7 +627,7 @@ pub(crate) fn start(
     let access = Some(AgentAccess::NEW_PROJECT)
         .filter(|level| level.unavailable().is_none())
         .unwrap_or_default();
-    let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
+    let homes = kernel_sandbox::toolchains::ToolHomes::owner().ok();
     let policy = AgentPolicy {
         access,
         toolchains: crate::sandbox::policy::recorded_toolchains(&repo, homes.as_ref()),

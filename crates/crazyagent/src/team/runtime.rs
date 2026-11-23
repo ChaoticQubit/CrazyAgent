@@ -40,13 +40,14 @@ use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
+use crate::sandbox::toolchains::{self};
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::settings::LinuxStrict;
+use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -9651,9 +9652,9 @@ impl TeamRuntime {
         let owner_tmp = policy
             .grants
             .contains(&AccessGrant::TempFolder)
-            .then(crate::sandbox::grants::owner_temp_folder)
+            .then(kernel_sandbox::grants::owner_temp_folder)
             .transpose()
-            .map_err(|code| with_code(crate::sandbox::grants::refusal_text(code), Some(code)))?;
+            .map_err(|code| with_code(kernel_sandbox::grants::refusal_text(code), Some(code)))?;
         let data = crate::sandbox::grants::data_root(&self.connection).unwrap_or_default();
         let held = crate::sandbox::grants::held_now(&policy.grants, &kept, &data);
         sandbox = sandbox

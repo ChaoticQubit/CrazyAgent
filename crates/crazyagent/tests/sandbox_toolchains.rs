@@ -1,10 +1,11 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::ProjectSandbox;
-use crazyagent::sandbox::toolchains::{self, ToolHomes, Toolchains};
+use crazyagent::sandbox::toolchains::{self};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::SECRET_ROOT_REFUSED;
+use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -716,7 +717,7 @@ fn an_agent_never_writes_the_owner_toolchains_or_reads_their_credentials() {
 
 #[test]
 fn a_toolchain_the_owner_switched_off_is_unreadable_and_one_switched_on_is_readable() {
-    use crazyagent::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let case = case();
     let homes = fake_tool_homes(&case.tools);
     write(&case.project.join("Cargo.toml"), "[package]\n");

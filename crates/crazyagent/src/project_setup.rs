@@ -3180,7 +3180,7 @@ pub(crate) fn record_new(
         crate::storage::reinstall::forget(tx, &staged.folder)?;
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
         if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
-            let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
+            let homes = kernel_sandbox::toolchains::ToolHomes::owner().ok();
             let policy = crate::sandbox::policy::AgentPolicy {
                 toolchains: crate::sandbox::policy::recorded_toolchains(
                     &staged.staging,

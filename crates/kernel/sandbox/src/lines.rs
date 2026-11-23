@@ -80,3 +80,13 @@ pub const LINUX_DNS_ANY_HOST_LINE: &str =
 /// the process or signals line it explains, with the deb package that adds the profile
 /// allowing it (DEC-179 SBX-3, addendum 7).
 pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from getting a process space of their own. CrazyAgent's .deb package adds the AppArmor profile that allows it: install it, or if it is installed, run sudo dpkg-reconfigure crazy-agent.";
+
+/// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
+/// computer's network on a Linux that could give them one of their own: on the project's
+/// Agent access page and in the agent's messages at its launch. Input: the port. Output:
+/// the sentences, the port named.
+pub fn linux_unbridged_line(port: u16) -> String {
+    format!(
+        "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
+    )
+}

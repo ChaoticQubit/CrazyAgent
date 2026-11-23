@@ -518,7 +518,7 @@ pub(super) fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd
 /// HFS+ by `\u{feff}.git` too (DS-148 F1). Input: the name. Output: the answer.
 #[cfg(unix)]
 fn left_out(name: &OsStr) -> bool {
-    crate::instruction_files::names_one_of(&name.to_string_lossy(), &SKIPPED)
+    kernel_sandbox::paths::names_one_of(&name.to_string_lossy(), &SKIPPED)
 }
 
 /// The path a link in the folder names, its `.` and `..` worked out as text, kept only when

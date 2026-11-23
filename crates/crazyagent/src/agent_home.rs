@@ -1377,7 +1377,7 @@ pub(crate) fn remove_shell_startup(home: &Path, engine_root: &Path) -> Result<()
 pub(crate) fn remove_home_code(
     home: &Path,
     engine_root: &Path,
-    homes: &crate::sandbox::toolchains::ToolHomes,
+    homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
     remove_shell_startup(home, engine_root)?;
     if home == engine_root || !home.starts_with(engine_root) {
@@ -1406,7 +1406,7 @@ pub(crate) fn remove_home_code(
 #[cfg(unix)]
 fn link_owner_crates(
     home: &Path,
-    homes: &crate::sandbox::toolchains::ToolHomes,
+    homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
     crate::sandbox::toolchains::prepare_cargo_home(home, homes)
         .map(drop)
@@ -1424,7 +1424,7 @@ fn link_owner_crates(
 #[cfg(not(unix))]
 fn link_owner_crates(
     _home: &Path,
-    _homes: &crate::sandbox::toolchains::ToolHomes,
+    _homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
     Ok(())
 }

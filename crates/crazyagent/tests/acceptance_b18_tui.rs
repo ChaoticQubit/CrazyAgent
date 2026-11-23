@@ -7,10 +7,10 @@ use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspac
 use crazyagent::protocol::ProjectId;
 #[cfg(target_os = "macos")]
 use crazyagent::sandbox::policy::AgentAccess;
-#[cfg(target_os = "macos")]
-use crazyagent::sandbox::toolchains::Toolchain;
 use crazyagent::terminal::tmux::installed;
 use e2e_support::{ENGINE, Engine, Owner, TMUX, git, profile, repository, scratch, stop_tmux};
+#[cfg(target_os = "macos")]
+use kernel_sandbox::toolchains::Toolchain;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

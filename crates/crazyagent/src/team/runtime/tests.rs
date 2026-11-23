@@ -579,7 +579,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
 #[cfg(target_os = "macos")]
 #[test]
 fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_is_stopped() {
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let fixture = Fixture::new(1);
     let host = fixture.host();
     crate::sandbox::policy::save(
@@ -715,7 +715,7 @@ fn an_unreadable_agent_access_offers_no_master_landing_and_says_why() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why() {
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let sandboxed = crate::sandbox::policy::AgentPolicy {
@@ -15618,7 +15618,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
         &crate::sandbox::policy::AgentPolicy {
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             toolchains: vec![crate::sandbox::policy::ToolchainChoice {
-                toolchain: crate::sandbox::toolchains::Toolchain::Rust,
+                toolchain: kernel_sandbox::toolchains::Toolchain::Rust,
                 allowed: false,
             }],
             ide_git_hooks: false,

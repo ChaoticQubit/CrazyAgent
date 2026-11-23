@@ -1301,7 +1301,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
             }
         })
     };
-    let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
+    let homes = kernel_sandbox::toolchains::ToolHomes::at(&account);
     let home = root.join("ide/home");
 
     let before = planted.load(Ordering::Relaxed);
@@ -1356,7 +1356,7 @@ fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_a
             std::os::unix::fs::symlink(&target, &moved).unwrap();
         });
         OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"c00".to_owned(), swap)));
-        let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
+        let homes = kernel_sandbox::toolchains::ToolHomes::at(&account);
 
         let _ = crate::sandbox::toolchains::prepare_cargo_home(&root.join("ide/home"), &homes);
         let swapped = OPEN_UP_STEP.with(|slot| slot.borrow_mut().take().is_none());

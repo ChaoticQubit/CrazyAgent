@@ -2361,7 +2361,7 @@ fn restricts(setting: Option<&str>) -> bool {
 /// AppArmor's user namespace restriction, which never covers root, is why nothing nests
 /// ([`restricts`]). Inputs: the helper and the engine's data folder, none where no probe
 /// may run. Output: the facts.
-pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
+pub fn read_host(helper: &Path, data: Option<&Path>) -> kernel_sandbox::host::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
     let held = usable && passes(Command::new(helper).arg(PROBE));
@@ -2382,7 +2382,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     assert!(!(root && supervised));
     assert!(!(armored && nested));
     assert!(!(armored && root));
-    super::LinuxHost {
+    kernel_sandbox::host::LinuxHost {
         nested,
         scoped,
         supervised,
@@ -2437,7 +2437,7 @@ pub(crate) fn holds_other_git(project: &Path) -> bool {
 const GIT_SEARCH_ENTRIES_MAX: usize = 4096;
 
 /// What is kept of this machine and when it was read.
-type KeptHost = Mutex<Option<(Instant, super::LinuxHost)>>;
+type KeptHost = Mutex<Option<(Instant, kernel_sandbox::host::LinuxHost)>>;
 
 /// What [`host_within`] last read of this machine, which a launch whose own probe failed
 /// marks unsupervised ([`forget_supervisor`]).
@@ -2448,7 +2448,7 @@ static HOST_READ: KeptHost = Mutex::new(None);
 /// when nothing is kept. The lock is not held while the helper runs, so a reader of what is
 /// kept never waits on it. Input: the age. Output: the facts, each false when it cannot be
 /// asked.
-fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
+fn host_within(age_max: Option<Duration>) -> kernel_sandbox::host::LinuxHost {
     let kept = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((at, host)) = kept
         && age_max.is_none_or(|age_max| at.elapsed() < age_max)
@@ -2479,14 +2479,14 @@ fn forget_supervisor(kept: &KeptHost) {
 /// What this machine holds, read again once what is kept is older than [`HOST_AGE_MAX`]:
 /// it may start the helper and bubblewrap, so it is not for a database transaction. No
 /// input. Output: the facts as [`read_host`] gives them.
-pub(crate) fn host_now() -> super::LinuxHost {
+pub(crate) fn host_now() -> kernel_sandbox::host::LinuxHost {
     host_within(Some(HOST_AGE_MAX))
 }
 
 /// What this machine holds as it was last read, however long ago, read now only when it
 /// never was: after [`host_now`] it starts nothing. No input. Output: the facts as
 /// [`read_host`] gives them.
-pub(crate) fn host_kept() -> super::LinuxHost {
+pub(crate) fn host_kept() -> kernel_sandbox::host::LinuxHost {
     host_within(None)
 }
 

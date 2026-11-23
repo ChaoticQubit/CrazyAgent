@@ -399,7 +399,7 @@ fn cancelling_running_research_stops_its_process_group() {
 #[test]
 fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
     use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice, save};
-    use crazyagent::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let connection = rusqlite::Connection::open(&case.database).unwrap();

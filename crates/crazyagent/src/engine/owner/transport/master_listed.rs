@@ -845,7 +845,7 @@ impl OwnerRuntimeHandle {
             Option<Hold>,
             super::master_host_launch::MasterRuntimeFolder,
         ),
-        granted: Vec<crate::sandbox::toolchains::Toolchain>,
+        granted: Vec<kernel_sandbox::toolchains::Toolchain>,
         generation: u64,
         turn: ListedTurn,
         (runtime_ref, capture_ref): (RequestId, RequestId),

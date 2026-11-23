@@ -135,12 +135,13 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 /// shell runs.
 #[cfg(target_os = "macos")]
 pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
-    use super::toolchains::{self, ToolHomes, Toolchains};
+    use super::toolchains::{self};
     use super::{
         ProjectSandbox, SANDBOX_EXEC, agent_variable_allowed, borrowed, owner_terminal_env,
     };
     use kernel_sandbox::error::invalid;
     use kernel_sandbox::paths::{canonical, clean_absolute};
+    use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
     if launch.level == AgentAccess::Full {
         return Err(invalid("a Full access terminal runs in the IDE server"));
     }

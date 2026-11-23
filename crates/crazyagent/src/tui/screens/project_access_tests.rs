@@ -10,12 +10,11 @@ use crate::sandbox::policy::{
     AgentAccess, AgentNetwork, HomeCaches, IdeAgentFiles, LevelView, NetworkView, PolicyView,
     ToolchainView,
 };
-use crate::sandbox::shared_folders::{
-    CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
-};
-use crate::sandbox::toolchains::Toolchain;
+use crate::sandbox::shared_folders::{OFF_MACOS_LINE, UNREACHABLE_SECRETS_LINE};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kernel_sandbox::lines::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
+use kernel_sandbox::shared_folders::{CHOSEN_MAX, SharedAccess, SharedFolders, SharedScope};
+use kernel_sandbox::toolchains::Toolchain;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)

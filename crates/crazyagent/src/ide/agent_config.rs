@@ -29,12 +29,12 @@ pub fn same_name(name: &str, ascii: &str) -> bool {
 /// non-ASCII code point on a real volume found no other one that opens a file named with
 /// one printable ASCII character, and none that APFS ignores. So every other character,
 /// composed or decomposed, stays itself and never equals one ASCII character. The code
-/// points an HFS+ volume ignores in names go ([`crate::instruction_files::HFS_IGNORED`],
+/// points an HFS+ volume ignores in names go ([`kernel_sandbox::paths::HFS_IGNORED`],
 /// RV-DS241-148). Input: the name. Output: the folded name, at most one character for each.
 fn fold(name: &str) -> String {
     let folded: String = name
         .chars()
-        .filter(|character| !crate::instruction_files::HFS_IGNORED.contains(character))
+        .filter(|character| !kernel_sandbox::paths::HFS_IGNORED.contains(character))
         .map(|character| match character {
             '\u{17f}' => 's',
             '\u{212a}' => 'k',

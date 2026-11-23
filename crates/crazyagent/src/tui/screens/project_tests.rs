@@ -4380,7 +4380,7 @@ fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
 fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window() {
     use super::project_access::{IDE_GIT_HOOKS_LINE, agent_files_help, network_help};
     use crate::sandbox::policy::{AgentNetwork, IdeAgentFiles, ToolchainView};
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let opening = |help: &str| help.split(' ').take(5).collect::<Vec<_>>().join(" ");
     let project = ProjectId::new("access-help").unwrap();
     let mut screen = loaded(&project);
@@ -4436,7 +4436,7 @@ fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window()
 #[test]
 fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     use crate::sandbox::policy::ToolchainView;
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let project = ProjectId::new("access-short").unwrap();
     let mut screen = loaded(&project);
     screen.open(Tab::Settings);

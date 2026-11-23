@@ -1,5 +1,5 @@
-use super::shared_folders::SharedFolders;
-use super::toolchains::{ToolHomes, Toolchain};
+use kernel_sandbox::shared_folders::SharedFolders;
+use kernel_sandbox::toolchains::{ToolHomes, Toolchain};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -680,14 +680,14 @@ impl AgentPolicy {
                     label: grant.label(),
                 })
                 .collect(),
-            temp_folder: match super::grants::owner_temp_folder() {
+            temp_folder: match kernel_sandbox::grants::owner_temp_folder() {
                 Ok(folder) => TempFolderView {
                     path: Some(folder.display().to_string()),
                     unavailable: None,
                 },
                 Err(code) => TempFolderView {
                     path: None,
-                    unavailable: Some(super::grants::refusal_text(code).to_owned()),
+                    unavailable: Some(kernel_sandbox::grants::refusal_text(code).to_owned()),
                 },
             },
             grant_log: Vec::new(),
@@ -849,7 +849,7 @@ pub struct PolicyView {
     #[serde(default)]
     pub temp_folder: TempFolderView,
     #[serde(default)]
-    pub grant_log: Vec<super::grants::LogView>,
+    pub grant_log: Vec<kernel_sandbox::grants::LogView>,
     #[serde(default)]
     pub shared_folders: SharedFolders,
     #[serde(default)]
@@ -916,7 +916,7 @@ pub struct NetworkView {
 /// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
-    host: Option<crate::sandbox::LinuxHost>,
+    host: Option<kernel_sandbox::host::LinuxHost>,
     sockets: Option<kernel_sandbox::settings::LinuxSockets>,
     grants: &[AccessGrant],
 ) -> Option<String> {
@@ -946,7 +946,7 @@ pub fn linux_network_gap(
             _ => None,
         })
         .min()
-        .map(crate::sandbox::linux_unbridged_line)
+        .map(kernel_sandbox::lines::linux_unbridged_line)
 }
 
 /// What a network choice cannot hold on Windows, for the Agent access page: Port 443 only and
@@ -992,7 +992,7 @@ impl LevelView {
     /// `host`. Inputs: what a Linux holds under the setting, none on another system, and
     /// whether the project may hold another git repository ([`LevelView::other_git`]), read
     /// before any transaction. Output: one view for each level, with its [`linux_gaps`].
-    pub fn on(host: Option<crate::sandbox::LinuxHost>, other_git: bool) -> Vec<Self> {
+    pub fn on(host: Option<kernel_sandbox::host::LinuxHost>, other_git: bool) -> Vec<Self> {
         let levels: Vec<Self> = AgentAccess::ALL
             .into_iter()
             .map(|access| Self {
@@ -1014,7 +1014,7 @@ impl LevelView {
     /// ([`crate::sandbox::linux_other_git`]), made only for a supervised host. A reader
     /// calls it before its database transaction, so that read never holds one. Inputs:
     /// what this Linux holds under the setting, none elsewhere, and the folder.
-    pub fn other_git(host: Option<crate::sandbox::LinuxHost>, project: &Path) -> bool {
+    pub fn other_git(host: Option<kernel_sandbox::host::LinuxHost>, project: &Path) -> bool {
         host.is_some_and(|host| host.supervised) && crate::sandbox::linux_other_git(project)
     }
 }
@@ -1027,7 +1027,7 @@ impl LevelView {
 /// project may hold another repository.
 pub fn linux_gaps(
     access: AgentAccess,
-    host: Option<crate::sandbox::LinuxHost>,
+    host: Option<kernel_sandbox::host::LinuxHost>,
     other_git: bool,
 ) -> Vec<&'static str> {
     let Some(host) = host else {

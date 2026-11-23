@@ -1561,7 +1561,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
     use crate::sandbox::policy::{
         AgentAccess, AgentPolicy, Narrowing, ToolchainChoice, narrowing, save,
     };
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     let read = || {
         case.command(MasterRuntimeCommand::Policy {
@@ -4813,7 +4813,7 @@ async fn each_console_master_turn_counts_one_turn_on_its_project_s_master_row() 
 #[tokio::test]
 async fn a_running_rcli_turn_stops_when_the_saved_policy_no_longer_covers_its_launch() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice, save};
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     case.register().await;
     let result = case

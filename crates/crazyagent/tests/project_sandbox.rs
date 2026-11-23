@@ -66,7 +66,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
 }
 
 fn owner_home() -> PathBuf {
-    crazyagent::sandbox::toolchains::ToolHomes::owner()
+    kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf()
@@ -4273,8 +4273,9 @@ fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets
 #[test]
 fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
     use crazyagent::sandbox::policy::AccessGrant;
-    use crazyagent::sandbox::shared_folders::{SharedFolders, apply};
-    use crazyagent::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crazyagent::sandbox::shared_folders::apply;
+    use kernel_sandbox::shared_folders::SharedFolders;
+    use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let case = case();
     let own = case.project.join(".crazyagent/worktrees/agent-1");
     let owner_tmp = case.root.join("otmp");
@@ -4387,7 +4388,8 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
 /// top of the project or deeper, can be read, while a plain file next to them can.
 #[test]
 fn every_secret_name_stays_denied_once_the_secret_rule_is_split() {
-    use crazyagent::sandbox::shared_folders::{SECRET_NAMES, SharedFolders, apply};
+    use crazyagent::sandbox::shared_folders::{SECRET_NAMES, apply};
+    use kernel_sandbox::shared_folders::SharedFolders;
     const SAMPLES: [&str; 25] = [
         ".env",
         ".git-credentials",

@@ -18,12 +18,12 @@ use crate::sandbox::policy::AgentAccess;
 #[cfg(unix)]
 use crate::sandbox::policy::AgentNetwork;
 use crate::sandbox::policy::AgentPolicy;
-#[cfg(unix)]
-use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+#[cfg(unix)]
+use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
@@ -3374,7 +3374,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let profile = sandbox.sandbox().profile();
-        let owner = crate::sandbox::toolchains::ToolHomes::owner()
+        let owner = kernel_sandbox::toolchains::ToolHomes::owner()
             .unwrap()
             .home()
             .to_path_buf();

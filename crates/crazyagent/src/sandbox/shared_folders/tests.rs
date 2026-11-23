@@ -1,5 +1,6 @@
 use super::*;
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use kernel_sandbox::shared_folders::{CHOSEN_MAX, INVALID, SECRETS_MAX};
 
 fn chosen(names: &[&str]) -> SharedFolders {
     SharedFolders {

@@ -167,7 +167,7 @@ fn worktrees_are_checked_bounded_and_kept_out_of_the_profile_location() {
     };
     let link = case.root.join("link");
     std::os::unix::fs::symlink(&case.worktree, &link).unwrap();
-    let owner = crazyagent::sandbox::toolchains::ToolHomes::owner()
+    let owner = kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf();

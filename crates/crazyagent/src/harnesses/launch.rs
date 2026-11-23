@@ -13,8 +13,9 @@ use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 #[cfg(not(windows))]
-use crate::sandbox::toolchains::{self, ToolHomes};
+use crate::sandbox::toolchains::{self};
 use crate::usage::capture::Tokens;
+use kernel_sandbox::toolchains::ToolHomes;
 use kernel_security::secret::SecretString;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};

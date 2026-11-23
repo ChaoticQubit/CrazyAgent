@@ -44,6 +44,7 @@ pub mod toolchains;
 pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
+use kernel_sandbox::host::LinuxHost;
 #[cfg(target_os = "windows")]
 pub use windows::owner_git::OwnerGit;
 
@@ -1091,16 +1092,6 @@ pub const GIT_FALLBACK: &str = ".git.git";
 /// (DEC-185 S2b).
 pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
 
-/// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
-/// computer's network on a Linux that could give them one of their own: on the project's
-/// Agent access page and in the agent's messages at its launch. Input: the port. Output:
-/// the sentences, the port named.
-pub fn linux_unbridged_line(port: u16) -> String {
-    format!(
-        "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
-    )
-}
-
 /// What a launch tells the owner in the agent's messages when a Linux that nests agents
 /// still leaves it on this computer's network: for an agent that could have a network of
 /// its own ([`ProjectSandbox::routed`]) on a host that does not route, [`LINUX_UNROUTED_LINE`]
@@ -1167,23 +1158,6 @@ pub fn linux_unbridged_notice(
     linux_unbridged_notice_on(host, choice, sandbox)
 }
 
-/// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
-/// when it starts agents in a process namespace of their own, `scoped` when the kernel
-/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
-/// `supervised` when the call supervisor holds every guard here, as launches start it,
-/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1),
-/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3), and
-/// `routed` when it gives an agent limited to ports on any host a network of its own (SBX-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LinuxHost {
-    pub nested: bool,
-    pub scoped: bool,
-    pub supervised: bool,
-    pub root: bool,
-    pub armored: bool,
-    pub routed: bool,
-}
-
 /// The network a Linux that nests agents gives one limited to ports on any host
 /// ([`ProjectSandbox::routed`]): `any`, the ports it leaves through on any host, and
 /// `bridged`, the loopback ports carried to this computer as for a bridged agent, each list
@@ -1192,24 +1166,6 @@ pub struct LinuxHost {
 pub struct Routed {
     pub any: Vec<u16>,
     pub bridged: Vec<u16>,
-}
-
-impl LinuxHost {
-    /// What this Linux holds under the owner's Linux call supervisor setting: supervised
-    /// only while it is On, and run as root only while it is not Off, so the root line says
-    /// why no supervisor runs. Input: the setting, none when it cannot be read, which shows
-    /// every line. Output: the facts the access lines read; what is kept is never changed.
-    pub fn under(self, calls: Option<LinuxSupervisor>) -> Self {
-        assert!(!(self.root && self.supervised));
-        let held = Self {
-            supervised: self.supervised && calls == Some(LinuxSupervisor::On),
-            root: self.root && calls != Some(LinuxSupervisor::Off),
-            ..self
-        };
-        assert!(self.supervised || !held.supervised);
-        assert!(!(held.root && held.supervised));
-        held
-    }
 }
 
 /// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
@@ -1410,7 +1366,7 @@ impl ProjectSandbox {
     /// limited (an open network reaches it already); and the temp folder grant as the
     /// owner's private temp folder, written as a root and handed over as `TMPDIR`, with every
     /// socket node in it kept unwritable. Inputs: the saved grants and the owner's temp
-    /// folder as [`grants::owner_temp_folder`] gives it, none when it cannot be given.
+    /// folder as [`kernel_sandbox::grants::owner_temp_folder`] gives it, none when it cannot be given.
     /// Output: the widened sandbox, or `Invalid`; sockets and the temp folder need Seatbelt.
     pub fn grant_access(
         mut self,
@@ -2131,12 +2087,15 @@ impl ProjectSandbox {
         self.allow_read(folder)?.allow_exec(engine)
     }
 
-    /// Grants a project's toolchains read-only (see [`toolchains::Toolchains::detect`]):
+    /// Grants a project's toolchains read-only (see [`kernel_sandbox::toolchains::Toolchains::detect`]):
     /// each folder as [`Self::allow_read`] checks it, with every credential name below it
     /// denied, and each file when it is a canonical regular file clear of
     /// [`Self::secret_paths`]. Only Seatbelt grants them; the Linux and Windows boundaries
     /// leave them out. Input: the toolchains. Output: the widened sandbox, or `Invalid`.
-    pub fn allow_tools(mut self, tools: &toolchains::Toolchains) -> Result<Self, SandboxError> {
+    pub fn allow_tools(
+        mut self,
+        tools: &kernel_sandbox::toolchains::Toolchains,
+    ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
         let secrets = self.secret_paths();
         for root in tools.roots() {
@@ -2228,7 +2187,7 @@ impl ProjectSandbox {
     /// Output: the canonical path, or None.
     pub fn tool_program(&self, name: &str) -> Option<PathBuf> {
         assert!(!name.is_empty() && !name.contains('/'));
-        let homes = toolchains::ToolHomes::at(&self.owner_home);
+        let homes = kernel_sandbox::toolchains::ToolHomes::at(&self.owner_home);
         let path = toolchains::agent_path(&homes, AGENT_PATH);
         let found = std::env::split_paths(&path)
             .map(|folder| folder.join(name))
@@ -2309,7 +2268,7 @@ impl ProjectSandbox {
     /// writable roots below it, its worktree or clone, never `root` itself. Each of `revealed`, the secrets the owner
     /// shared back, is readable again, never writable. The deny comes before every older
     /// deny in the profile, so none of those gives way. Inputs: a clean canonical folder the
-    /// sandbox already reads and at most [`shared_folders::SECRETS_MAX`] clean paths strictly
+    /// sandbox already reads and at most [`kernel_sandbox::shared_folders::SECRETS_MAX`] clean paths strictly
     /// inside it. Output: the sandbox, or `Invalid` for a second call or a path out of shape.
     pub fn keep_project_secrets(
         mut self,
@@ -2329,7 +2288,7 @@ impl ProjectSandbox {
                 "the folder whose secrets stay closed must be a canonical folder the sandbox reads",
             ));
         }
-        if revealed.len() > shared_folders::SECRETS_MAX
+        if revealed.len() > kernel_sandbox::shared_folders::SECRETS_MAX
             || !revealed.iter().all(|path| {
                 clean_absolute(path)
                     && path.starts_with(root)
@@ -3756,7 +3715,7 @@ impl ProjectSandbox {
     /// harness's PATH starts with the agent's own `getconf` and `git`
     /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
-        let homes = toolchains::ToolHomes::at(&self.owner_home);
+        let homes = kernel_sandbox::toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self
             .owner_tmp
             .as_ref()
@@ -4824,7 +4783,7 @@ pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
 /// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
 /// joiners. Output: the rule, ending in a line break.
 pub(crate) fn hfs_ignored_deny() -> String {
-    let ignored: Vec<String> = crate::instruction_files::HFS_IGNORED
+    let ignored: Vec<String> = kernel_sandbox::paths::HFS_IGNORED
         .iter()
         .map(char::to_string)
         .collect();

@@ -1,4 +1,5 @@
 use super::*;
+use kernel_sandbox::toolchains::Toolchain;
 
 #[test]
 fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_plain() {
@@ -649,38 +650,6 @@ fn without_the_command_line_tools_an_agent_uses_the_picked_xcode_compilers_and_s
         env.iter()
             .all(|(name, value)| *name != "SDKROOT" || *value != sdk.clone().into_os_string()),
         "the Command Line Tools win when they hold cc: {env:?}"
-    );
-}
-
-/// F26: the xcode-select link names an Xcode app's developer folder only when it leads to a
-/// real `<name>.app/Contents/Developer`; the Command Line Tools, another folder and a
-/// dangling link name none.
-#[cfg(unix)]
-#[test]
-fn the_xcode_select_link_names_only_an_xcode_app_developer_folder() {
-    let scratch = tempfile::tempdir().unwrap();
-    let root = scratch.path().canonicalize().unwrap();
-    let xcode = root
-        .join("Xcode-beta.app")
-        .join("Contents")
-        .join("Developer");
-    fs::create_dir_all(&xcode).unwrap();
-    let other = root.join("Tools").join("Developer");
-    fs::create_dir_all(&other).unwrap();
-    let link = |name: &str, target: &Path| {
-        let link = root.join(name);
-        std::os::unix::fs::symlink(target, &link).unwrap();
-        link
-    };
-    assert_eq!(xcode_from_link(&link("app", &xcode)), Some(xcode.clone()));
-    assert_eq!(xcode_from_link(&link("other", &other)), None);
-    assert_eq!(
-        xcode_from_link(&link("gone", &root.join("missing.app"))),
-        None
-    );
-    assert_eq!(
-        xcode_from_link(&link("command-line-tools", Path::new(DEVELOPER_TOOLS))),
-        None
     );
 }
 

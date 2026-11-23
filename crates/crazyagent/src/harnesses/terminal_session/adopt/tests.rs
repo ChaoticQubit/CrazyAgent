@@ -453,8 +453,8 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     assert!(!text.contains("toolchains"), "{text}");
     let granted = PaneRecord {
         toolchains: Some(vec![
-            crate::sandbox::toolchains::Toolchain::Rust,
-            crate::sandbox::toolchains::Toolchain::Node,
+            kernel_sandbox::toolchains::Toolchain::Rust,
+            kernel_sandbox::toolchains::Toolchain::Node,
         ]),
         ..record.clone()
     };

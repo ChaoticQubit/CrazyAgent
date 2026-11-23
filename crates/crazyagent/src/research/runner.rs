@@ -22,7 +22,7 @@ use crate::provider_reach::ProviderReach;
 use crate::sandbox::hidden_paths::HiddenRun;
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
+use crate::sandbox::toolchains::{self};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
@@ -31,6 +31,7 @@ use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -2103,10 +2104,10 @@ impl ResearchRunner {
                     .map_err(|_| RunError::Invalid("project agent policy unreadable".into()))?
                     .shared_folders
             }
-            None => crate::sandbox::shared_folders::SharedFolders::default(),
+            None => kernel_sandbox::shared_folders::SharedFolders::default(),
         };
-        let read_only = crate::sandbox::shared_folders::SharedFolders {
-            access: crate::sandbox::shared_folders::SharedAccess::ReadOnly,
+        let read_only = kernel_sandbox::shared_folders::SharedFolders {
+            access: kernel_sandbox::shared_folders::SharedAccess::ReadOnly,
             ..shared
         };
         sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &read_only)
@@ -6025,7 +6026,7 @@ mod tests {
         let project = ProjectId::new("alpha").unwrap();
         let connection = rusqlite::Connection::open(&root.database).unwrap();
         let policy = crate::sandbox::policy::AgentPolicy {
-            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+            shared_folders: kernel_sandbox::shared_folders::SharedFolders {
                 secrets: vec![".env".into()],
                 ..Default::default()
             },
@@ -6164,9 +6165,9 @@ mod tests {
         let project = ProjectId::new("alpha").unwrap();
         let connection = rusqlite::Connection::open(&root.database).unwrap();
         let policy = crate::sandbox::policy::AgentPolicy {
-            shared_folders: crate::sandbox::shared_folders::SharedFolders {
-                scope: crate::sandbox::shared_folders::SharedScope::Chosen,
-                access: crate::sandbox::shared_folders::SharedAccess::ReadWrite,
+            shared_folders: kernel_sandbox::shared_folders::SharedFolders {
+                scope: kernel_sandbox::shared_folders::SharedScope::Chosen,
+                access: kernel_sandbox::shared_folders::SharedAccess::ReadWrite,
                 chosen: vec!["notes".into()],
                 secrets: Vec::new(),
             },

@@ -114,7 +114,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
     pub(super) tool_record: Option<std::path::PathBuf>,
     pub(super) access: crate::sandbox::policy::AgentAccess,
-    pub(super) toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
+    pub(super) toolchains: Vec<kernel_sandbox::toolchains::Toolchain>,
 }
 
 pub(super) struct Capture {
@@ -137,7 +137,7 @@ struct ActiveMaster {
     provenance: Provenance,
     reported: Tokens,
     access: crate::sandbox::policy::AgentAccess,
-    toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
+    toolchains: Vec<kernel_sandbox::toolchains::Toolchain>,
 }
 
 impl MasterHost {
@@ -412,7 +412,7 @@ impl OwnerRuntimeHandle {
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         access: crate::sandbox::policy::AgentAccess,
-        toolchains: &[crate::sandbox::toolchains::Toolchain],
+        toolchains: &[kernel_sandbox::toolchains::Toolchain],
     ) -> Result<Option<crate::sandbox::policy::Narrowing>, EngineError> {
         let saved = match self
             .master_runtime_command(MasterRuntimeCommand::Policy {

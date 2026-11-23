@@ -46,7 +46,7 @@ struct ActiveRcliMaster {
     generation: u64,
     deadline: Option<Instant>,
     reported: crate::usage::capture::Tokens,
-    granted: Vec<crate::sandbox::toolchains::Toolchain>,
+    granted: Vec<kernel_sandbox::toolchains::Toolchain>,
 }
 
 fn require_rcli_connection(connection: &ModelConnection) -> Result<(), EngineError> {
@@ -262,7 +262,7 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        let homes = crate::sandbox::toolchains::ToolHomes::owner()
+        let homes = kernel_sandbox::toolchains::ToolHomes::owner()
             .map_err(|_| failure("master_sandbox_unavailable"))?;
         crate::agent_home::remove_home_code(&launch.home_dir, profile.engine_root(), &homes)
             .map_err(|error| EngineError(error.0))?;
@@ -476,7 +476,7 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-        granted: &[crate::sandbox::toolchains::Toolchain],
+        granted: &[kernel_sandbox::toolchains::Toolchain],
     ) -> Result<(), EngineError> {
         let access = prepared.agent_policy.access;
         match self

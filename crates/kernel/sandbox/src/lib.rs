@@ -6,6 +6,12 @@ pub mod elf;
 /// Why a project sandbox is refused: the one error type every sandbox build and install
 /// returns, with the plain reason a refused Windows read root reads as.
 pub mod error;
+/// The plain refusal sentences, the log row and the owner's private temp folder a grant
+/// of extra access reads.
+pub mod grants;
+/// What this Linux holds for an agent beyond its Landlock rules: namespaces, signal scope,
+/// the call supervisor, root, AppArmor and its own network.
+pub mod host;
 /// The plain lines and refusal codes a launch shows when a Linux or Windows sandbox cannot
 /// hold something, and the check that tells the Windows loopback refusal apart.
 pub mod lines;
@@ -25,6 +31,12 @@ pub mod qualification;
 /// the version of the read that showed it, as the engine saves them and every client reads
 /// them.
 pub mod settings;
+/// The project folders an agent shares: the scope, the access and the picked names and
+/// shared-back secrets, with the checks a client's choice is held to.
+pub mod shared_folders;
+/// The owner's toolchains an agent reads: the tool homes, the toolchain families and the
+/// read-only grants a project's choice gives.
+pub mod toolchains;
 
 #[cfg(test)]
 mod tests;

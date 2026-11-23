@@ -3836,7 +3836,7 @@ fn owner_read(
             let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
                 return Err(error(no_setup_code(&tx, project_id)?));
             };
-            let homes = crate::sandbox::toolchains::ToolHomes::owner()
+            let homes = kernel_sandbox::toolchains::ToolHomes::owner()
                 .map_err(|_| error("agent_policy_unreadable"))?;
             let mut policy = crate::sandbox::policy::load(&tx, project_id.as_str())
                 .map_err(error)?
