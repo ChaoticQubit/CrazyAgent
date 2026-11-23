@@ -20,7 +20,7 @@ const SECTION = "When a plugin is turned off";
 const STOP_CARD = "Stop runs using it Runs using the plugin are stopped.";
 const ESSENTIAL_NOTE = "This plugin stays on. CrazyAgent needs it to save what the agents were doing when the app quits.";
 const SHOWN = `(() => document.querySelector('input[type=radio][name="app-plugin-when-off"]:checked')?.value ?? null)()`;
-const LOCKED = `(() => [...document.querySelectorAll('ul[aria-label="Built-in code plugins"] input[id^="app-plugin-"]')].filter((input) => input.disabled).length)()`;
+const LOCKED = `(() => document.querySelectorAll('ul[aria-label="Built-in code plugins"] button[role=switch][id^="app-plugin-"][aria-disabled="true"][aria-checked="true"]').length)()`;
 
 /** Polls a read until it equals what is wanted, failing with the last value after one step's
  * time. Inputs: what is awaited, the wanted value and the read. Output: none. */
@@ -45,7 +45,8 @@ async function onEngine(t, prefix, steps) {
   const runtime = join(root, "engine");
   const evidence = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? join(process.env.E2E_EVIDENCE, prefix) : join(root, "evidence");
   const home = join(root, "home");
-  for (const folder of [runtime, evidence, home]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const projects = join(root, "projects");
+  for (const folder of [runtime, evidence, home, projects]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   const global = join(runtime, "global.toml");
   writeFileSync(global, GLOBAL, { mode: 0o600 });
   const env = { PATH: process.env.PATH, HOME: home, TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
@@ -60,6 +61,8 @@ async function onEngine(t, prefix, steps) {
     bridgeProcess = started.child;
     const bridge = { port: Number(started.match[1]), token: started.match[2] };
     assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects to the test engine");
+    assert.equal((await value(bridge, "desktop_save_owner_profile", { profile: { name: "E2E Owner" }, generation: 1 })).outcome, "applied");
+    assert.equal((await value(bridge, "desktop_set_projects_home", { path: projects, generation: 2 })).outcome, "applied");
     let starts = 0;
     const restart = async () => {
       starts += 1;
