@@ -4745,7 +4745,7 @@ mod harness_folder_tests {
 
     #[test]
     fn the_owner_secret_list_holds_every_harness_folder_where_the_three_stood_before() {
-        let places: Vec<&str> = credential_places(&PROFILE_HOOKS).collect();
+        let places: Vec<&str> = credential_places(&crate::sandbox::PROFILE_HOOKS).collect();
         let from = places.iter().position(|place| *place == ".kube").unwrap() + 1;
         let to = places
             .iter()
