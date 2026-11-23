@@ -434,6 +434,8 @@ WantedBy=default.target\n",
     }
 
     fn command(program: &str, args: &[&OsStr]) -> Vec<OsString> {
+        #[cfg(test)]
+        let program = uninstall_tests::program(program);
         std::iter::once(OsString::from(program))
             .chain(args.iter().map(|arg| arg.to_os_string()))
             .collect()
@@ -859,7 +861,8 @@ WantedBy=default.target\n",
     }
 
     /// Stops the engine, removes the service from the manager and deletes the definition.
-    /// A service that is not installed is left as it is.
+    /// A service that is not installed is left as it is. A Windows task still registered
+    /// after its deletion is an error, and its definition is kept for a retry.
     pub fn uninstall(&self) -> Result<(), ServiceError> {
         let loaded = self.loaded()?;
         let installed = self.definition.is_file();
@@ -871,8 +874,19 @@ WantedBy=default.target\n",
                 self.launchd_unload()?;
             }
         } else {
+            let mut refused = None;
             for command in self.unregister_commands(current_uid()) {
-                let _ = run_checked(&command);
+                if let Err(error) = run_checked(&command) {
+                    refused = Some(error.0);
+                }
+            }
+            if self.platform == Platform::Windows && self.loaded()? {
+                return Err(failure(format!(
+                    "the engine task {} is still registered, so its definition is kept for a \
+                     retry: {}",
+                    self.name,
+                    refused.unwrap_or_else(|| "no step reported an error".to_owned())
+                )));
             }
         }
         match std::fs::remove_file(&self.definition) {
@@ -1413,6 +1427,8 @@ mod acl;
 /// owners, modes, groups and access lists on Unix, access lists on Windows. Input: a path.
 /// Output: the first such entry, or none.
 mod changeable;
+#[cfg(test)]
+mod uninstall_tests;
 #[cfg(all(test, unix))]
 use changeable::{Part, first_changeable_part};
 pub use changeable::{changeable_by_others, changeable_past_sticky};
