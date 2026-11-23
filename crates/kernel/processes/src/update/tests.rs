@@ -135,10 +135,32 @@ fn manifests_parse_and_name_this_platform() {
     assert_eq!(code(parse_manifest(b"not json")), "update_manifest_invalid");
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     assert_eq!(target(), Some("aarch64-apple-darwin"));
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     assert_eq!(target(), Some("x86_64-unknown-linux-gnu"));
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
     assert_eq!(target(), Some("x86_64-pc-windows-msvc"));
+}
+
+/// Only the platforms a release archive is published for name a target: an operating
+/// system and processor with a published build but another C library or toolchain, such as
+/// musl Linux or GNU Windows, names none, so an update never fetches an archive built for
+/// another runtime.
+#[test]
+fn a_platform_with_no_release_build_names_no_target() {
+    for (os, arch, env, published) in [
+        ("macos", "aarch64", "", Some("aarch64-apple-darwin")),
+        ("macos", "x86_64", "", Some("x86_64-apple-darwin")),
+        ("linux", "x86_64", "gnu", Some("x86_64-unknown-linux-gnu")),
+        ("linux", "aarch64", "gnu", Some("aarch64-unknown-linux-gnu")),
+        ("windows", "x86_64", "msvc", Some("x86_64-pc-windows-msvc")),
+        ("linux", "x86_64", "musl", None),
+        ("linux", "aarch64", "musl", None),
+        ("windows", "x86_64", "gnu", None),
+        ("windows", "aarch64", "msvc", None),
+        ("freebsd", "x86_64", "", None),
+    ] {
+        assert_eq!(target_for(os, arch, env), published, "{os} {arch} {env}");
+    }
 }
 
 #[test]
@@ -686,6 +708,35 @@ fn channel_writers_at_the_same_moment_each_save_whole() {
         Channel::Stable | Channel::Dev
     ));
     let left: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["update.toml".to_owned()]);
+}
+
+/// A save while another program holds `update.toml` without delete sharing waits a bounded
+/// time, then reports the file busy and leaves no half-written file; once the file is let
+/// go the save goes through.
+#[cfg(windows)]
+#[test]
+fn a_channel_file_another_program_holds_is_busy_and_saves_once_let_go() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path();
+    write_channel(root, Channel::Stable).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(root.join("update.toml"))
+        .unwrap();
+    let started = Instant::now();
+    let busy = write_channel(root, Channel::Dev).unwrap_err();
+    assert_eq!(busy.code, "update_channel_busy", "{}", busy.message);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(held);
+    write_channel(root, Channel::Dev).unwrap();
+    assert_eq!(read_channel(root).unwrap(), Channel::Dev);
+    let left: Vec<String> = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();

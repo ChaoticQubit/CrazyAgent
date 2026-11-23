@@ -137,6 +137,27 @@ interface secrets {
   forget: func(secret: secret) -> result<_, refusal>;
 }
 
+interface service-types {
+  record service-state {
+    installed: bool,
+    running: bool,
+    current: bool,
+  }
+}
+
+interface service {
+  use sdk-types.{refusal};
+  use service-types.{service-state};
+
+  status: func() -> result<service-state, refusal>;
+
+  repair: func() -> result<_, refusal>;
+
+  install: func() -> result<_, refusal>;
+
+  uninstall: func() -> result<_, refusal>;
+}
+
 interface settings-types {
   enum on-quit {
     keep-running,
@@ -166,9 +187,25 @@ interface settings {
   save-quit: func(settings: quit-settings) -> result<_, refusal>;
 }
 
+interface update-types {
+  enum update-channel {
+    stable,
+    dev,
+  }
+}
+
+interface update {
+  use sdk-types.{refusal};
+  use update-types.{update-channel};
+
+  set-channel: func(channel: update-channel) -> result<_, refusal>;
+}
+
 world plugin {
   import net;
   import process;
   import secrets;
+  import service;
   import settings;
+  import update;
 }

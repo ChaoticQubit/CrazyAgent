@@ -11,7 +11,7 @@ fn tmux_output_octal_escapes_decode_to_the_exact_bytes() {
     assert_eq!(decode(b""), b"");
 }
 
-/// V243-PASTE-BUFFER: a request longer than one `send-keys` run is pasted through a tmux
+/// A request longer than one `send-keys` run is pasted through a tmux
 /// buffer unless it holds a NUL, which would end the buffer; a request of at most one run,
 /// or one holding a NUL, is typed as before.
 #[test]
@@ -38,7 +38,7 @@ fn a_request_is_pasted_only_above_one_run_and_without_a_nul() {
     }
 }
 
-/// V243-PASTE-BUFFER: every one of the 255 non-NUL bytes round-trips through the
+/// Every one of the 255 non-NUL bytes round-trips through the
 /// `set-buffer` quoting, which writes only ASCII letters, digits and `\ooo` escapes inside
 /// its double quotes, so tmux's parser expands no `$HOME`, `~` or `#{...}`; `paste-buffer`
 /// then pastes that buffer unchanged into the target and deletes it.
@@ -74,7 +74,7 @@ fn paste_quoting_round_trips_every_non_nul_byte_and_never_expands_a_dollar() {
     assert_eq!(decoded, bytes);
 }
 
-/// V243-PASTE-BUFFER: the engine pins `set-clipboard external` and `get-clipboard off` after
+/// The engine pins `set-clipboard external` and `get-clipboard off` after
 /// today's server options, which stay the same and in the same order, on the engine's server
 /// and on a confined lead's.
 #[test]

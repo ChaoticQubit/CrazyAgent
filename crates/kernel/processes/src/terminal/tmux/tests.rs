@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[path = "../../../../../crazyagent/tests/pgid_support/mod.rs"]
 mod pgid_support;
 
-/// V243-PASTE-CHUNKS: typed bytes go to tmux as `send-keys -H` commands of at most
+/// Typed bytes go to tmux as `send-keys -H` commands of at most
 /// `SEND_KEYS_BYTES_MAX` bytes for the one target, every byte once and in order, and no
 /// command for no bytes, so a paste never holds the server in one long command parse.
 #[test]
@@ -34,7 +34,7 @@ fn typed_bytes_go_as_send_keys_commands_of_at_most_256_bytes_in_order() {
     }
 }
 
-/// #359 r1 F1, RV-DS241-69 one layer down: no `send-keys` run ends inside a UTF-8
+/// No `send-keys` run ends inside a UTF-8
 /// character or inside the closing paste marker that ends the input, which `paste()` and
 /// the TUI keep whole for a program that reads them per read.
 #[test]
@@ -69,7 +69,7 @@ fn a_send_keys_run_never_cuts_a_character_or_the_paste_end_marker() {
     }
 }
 
-/// #359 r2: a paste end marker inside the input, as the desktop sends one when keys typed
+/// A paste end marker inside the input, as the desktop sends one when keys typed
 /// during a send join the paste's batch (`...\x1b[201~\r`), stays whole in one run too.
 #[test]
 fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
@@ -117,12 +117,12 @@ fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
     }
 }
 
-/// #359 r2, rv-code2 r2 F1: the desktop joins whole events into one input, and no
+/// The desktop joins whole events into one input, and no
 /// `send-keys` run ends inside one of them, so an app never reads half an escape sequence
-/// and takes its lone ESC for the Escape key. V243-PASTE-SS3-X10-UTF8: that holds for an SS3
+/// and takes its lone ESC for the Escape key. That holds for an SS3
 /// key whose final is a UTF-8 character, and for an X10 report past column or row 95, whose
-/// three bytes xterm.js sends raw, one byte per value up to 0xFF and never as UTF-8 (#398
-/// r1 F1), after any count of typed bytes.
+/// three bytes xterm.js sends raw, one byte per value up to 0xFF and never as UTF-8, after
+/// any count of typed bytes.
 #[test]
 fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
     let text = |times: usize| vec![&b"x"[..]; times];
@@ -189,7 +189,7 @@ fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
     }
 }
 
-/// #359 r2: a run moves its end back at most `RUN_CUT_BACK_BYTES_MAX` bytes to keep an escape
+/// A run moves its end back at most `RUN_CUT_BACK_BYTES_MAX` bytes to keep an escape
 /// sequence whole. A window title that starts further back than that is the one sequence a
 /// run cuts, at the run size.
 #[test]
@@ -219,7 +219,7 @@ fn typed_runs(lines: &[String]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// V243-PASTE-CHUNKS: a full input request sent into a real pane arrives whole and in order,
+/// A full input request sent into a real pane arrives whole and in order,
 /// now through one paste buffer, read back from what the pane's app received.
 #[cfg(target_os = "macos")]
 #[test]
@@ -233,7 +233,7 @@ fn a_full_input_request_reaches_the_pane_whole_and_in_order_across_its_commands(
     assert_eq!(received_bytes(&received, bytes.len()), bytes);
 }
 
-/// V243-PASTE-BUFFER: a full request whose `set-buffer` line is the longest one (every byte
+/// A full request whose `set-buffer` line is the longest one (every byte
 /// value once, then only bytes that need an escape, `$HOME` among them) is pasted to an
 /// agent's window target and reaches its pane byte-exact, with no buffer left behind.
 #[cfg(target_os = "macos")]
@@ -255,7 +255,7 @@ fn a_full_request_of_every_byte_value_is_pasted_byte_exact_with_no_buffer_left()
     assert_eq!(buffers_left(&host), 0);
 }
 
-/// V243-PASTE-BUFFER: a full request holding NULs is typed, not pasted, and still reaches
+/// A full request holding NULs is typed, not pasted, and still reaches
 /// the pane byte-exact.
 #[cfg(target_os = "macos")]
 #[test]
@@ -276,7 +276,7 @@ fn a_request_holding_a_nul_is_typed_byte_exact() {
     assert_eq!(received_bytes(&received, bytes.len()), bytes);
 }
 
-/// V243-PASTE-BUFFER: a 200 KB paste, sent as the app sends it in full input requests, each
+/// A 200 KB paste, sent as the app sends it in full input requests, each
 /// pasted through its own buffer, reaches the pane byte-exact with no buffer left behind.
 #[cfg(target_os = "macos")]
 #[test]
@@ -295,7 +295,7 @@ fn a_200_kb_paste_in_full_requests_arrives_byte_exact_with_no_buffer_left() {
     assert_eq!(buffers_left(&host), 0);
 }
 
-/// V243-PASTE-BUFFER (h4 22:08): while a paste's named buffer waits between `set-buffer`
+/// While a paste's named buffer waits between `set-buffer`
 /// and `paste-buffer`, a pane's OSC 52 clipboard query gets no reply even with
 /// `set-clipboard on`, since tmux answers that query only from an unnamed buffer; the same
 /// query does get an unnamed buffer back, which shows the row would see a leak.
@@ -329,7 +329,7 @@ fn a_pending_named_paste_buffer_is_not_read_by_a_panes_osc_52_query() {
     );
 }
 
-/// V243-PASTE-BUFFER (h4 MUX-RESULTS): a pane's OSC 52 query reads an unnamed buffer with
+/// A pane's OSC 52 query reads an unnamed buffer with
 /// `set-clipboard on` and `get-clipboard buffer`, but no longer once the engine's clipboard
 /// pins are applied, nor when `set-clipboard on` comes back after them, since
 /// `get-clipboard off` still refuses it.
@@ -502,7 +502,7 @@ fn buffers_left(host: &Tmux) -> usize {
     names.len()
 }
 
-/// V243-PASTE-INTERLEAVE-N0 R1: a prompt typed by name goes, keys and Enter, into the
+/// A prompt typed by name goes, keys and Enter, into the
 /// agent's own pane even when the active pane moves after its first command, as a focus
 /// change can move it in the middle of one request.
 #[cfg(target_os = "macos")]
@@ -533,7 +533,7 @@ fn a_prompt_stays_in_the_agents_pane_when_the_active_pane_moves_mid_request() {
     assert_eq!(typed[1], b"#", "nothing of the prompt reaches the teammate");
 }
 
-/// V243-PASTE-INTERLEAVE-N0 R2: one input request that needs several `send-keys` runs, here
+/// One input request that needs several `send-keys` runs, here
 /// 600 bytes holding a NUL, stays in the pane that was active at its start while the active
 /// pane moves after every run.
 #[cfg(target_os = "macos")]
@@ -570,7 +570,7 @@ fn a_multi_run_input_stays_in_one_pane_when_the_active_pane_moves() {
     );
 }
 
-/// V243-PASTE-INTERLEAVE-N0 R3 (Q1): a prompt into a pinned pane reads whether bracketed
+/// A prompt into a pinned pane reads whether bracketed
 /// paste is on in that pane, not in the window's active pane, so a teammate that turned it
 /// on never wraps the pinned pane's prompt in paste marks.
 #[cfg(target_os = "macos")]
@@ -618,7 +618,7 @@ fn a_prompt_by_name_reaches_the_leads_pane_not_the_active_teammate() {
     assert_eq!(typed[1], b"#", "the active teammate gets nothing of it");
 }
 
-/// V243-PASTE-INTERLEAVE-N0 R6: in a split window whose app pane an older engine left with
+/// In a split window whose app pane an older engine left with
 /// no tag, a prompt by name is refused and types nothing, never into the active pane; once
 /// the pane whose pid is the recorded one is tagged, the prompt reaches it.
 #[cfg(target_os = "macos")]
@@ -691,7 +691,7 @@ fn a_one_pane_window_with_no_app_tag_takes_the_prompt_and_is_tagged() {
     );
 }
 
-/// #686 r1 code F1: once a lead's tagged app pane closes beside the teammate it split off,
+/// Once a lead's tagged app pane closes beside the teammate it split off,
 /// the window lists one untagged pane, the teammate's. The window's mark says the engine
 /// tagged its app, so a prompt by name is refused as an unknown app pane of a live window
 /// and the teammate gets nothing, instead of being tagged as the lead's app.
@@ -910,7 +910,7 @@ fn mark_of(server: &Server, pane: &str) -> String {
 }
 
 /// Clears the app tag on one pane and the app mark on its window, as an engine from before
-/// V243-PASTE-INTERLEAVE-N0 left every pane and window of its own server. Takes the server
+/// app panes were tagged left every pane and window of its own server. Takes the server
 /// and the pane. Returns nothing; checks neither is left after.
 #[cfg(target_os = "macos")]
 fn untag(server: &Server, pane: &str) {
@@ -920,7 +920,7 @@ fn untag(server: &Server, pane: &str) {
     assert_eq!(mark_of(server, pane), "");
 }
 
-/// V243-PASTE-INTERLEAVE-N0: a request piece longer than one input request is a caller's
+/// A request piece longer than one input request is a caller's
 /// bug, caught before the host is asked, so no prompt is ever cut across two requests to
 /// two panes.
 #[test]
@@ -938,7 +938,7 @@ fn a_typed_piece_over_one_input_request_is_a_bug() {
     let _ = crate::terminal::type_piece(&host, &agent, None, &piece, stale);
 }
 
-/// #686 r1 F2: a stale pin answers only an unknown app pane, which refuses the request, or
+/// A stale pin answers only an unknown app pane, which refuses the request, or
 /// an unknown agent, which ends a view; any other code is a caller's bug, caught before the
 /// host is asked.
 #[test]
@@ -954,7 +954,7 @@ fn a_typed_piece_whose_stale_code_is_neither_refusal_is_a_bug() {
     let _ = crate::terminal::type_piece(&host, &agent, None, b"x", "terminal_unavailable");
 }
 
-/// #687 NOTE-0944 item 2: a pin under serial 0 is a bug, since control serials count from 1
+/// A pin under serial 0 is a bug, since control serials count from 1
 /// and `control_at` matches a pin to its connection by serial alone.
 #[test]
 #[should_panic(expected = "control serials start at 1")]
@@ -962,7 +962,7 @@ fn a_pin_under_control_serial_zero_is_a_bug() {
     let _ = pin_at("%1".to_owned(), 0);
 }
 
-/// #687 NOTE-0944 item 2: a pin that names a window target is a bug, since every pinned read
+/// A pin that names a window target is a bug, since every pinned read
 /// and send would then land on whichever pane is active.
 #[test]
 #[should_panic(expected = "a pin names a pane id, never a window target")]
@@ -970,7 +970,7 @@ fn a_pin_naming_a_window_target_is_a_bug() {
     let _ = pin_at("crazyagent:=team-1".to_owned(), 1);
 }
 
-/// #686 r1 code F1: marking a window target as an agent's app pane is a caller's bug, since
+/// Marking a window target as an agent's app pane is a caller's bug, since
 /// the tag would land on whichever pane is active, which may be a teammate's.
 #[cfg(target_os = "macos")]
 #[test]
@@ -982,7 +982,7 @@ fn marking_a_window_target_as_the_app_pane_is_a_bug() {
     let _ = Tmux::mark_app(&control, &target(&agent), &agent);
 }
 
-/// V243-PASTE-INTERLEAVE-N0: a pinned piece whose pin is a window target, not a pane id, is
+/// A pinned piece whose pin is a window target, not a pane id, is
 /// a caller's bug, since a window target names whichever pane is active and would undo the
 /// pin.
 #[test]
@@ -1003,7 +1003,7 @@ fn a_typed_piece_pinned_to_no_pane_id_is_a_bug() {
     let _ = crate::terminal::type_piece(&host, &agent, Some(&at), b"x", stale);
 }
 
-/// V243-PASTE-INTERLEAVE-N0: tagging the app pane by pid 0 or 1, which no pane record keeps
+/// Tagging the app pane by pid 0 or 1, which no pane record keeps
 /// for a pane tmux started, is a caller's bug, caught before the server is asked.
 #[test]
 #[should_panic(expected = "a pane record keeps a real pid")]
@@ -1232,7 +1232,7 @@ fn a_pane_command_with_a_perl_load_variable_is_refused() {
     }
 }
 
-/// DEC-158: a kept pane's keeper takes the engine's freeze record as the word before its
+/// A kept pane's keeper takes the engine's freeze record as the word before its
 /// `sandbox-exec`, so a kept freezable pane passes the pane gate with no variable of the
 /// engine's own; a record that is not one absolute line of at most 1001 bytes is refused.
 #[cfg(target_os = "macos")]
@@ -1277,7 +1277,7 @@ fn a_kept_pane_hands_its_keeper_the_freeze_record_as_an_argument() {
     }
 }
 
-/// DEC-158: a kept pane's keeper takes the engine's freeze record as an argument, so the
+/// A kept pane's keeper takes the engine's freeze record as an argument, so the
 /// pane variable gate stays as it was and still refuses a pane command that carries the
 /// keeper's own state variable.
 #[cfg(target_os = "macos")]
@@ -1321,7 +1321,7 @@ fn set_buffer_bytes(line: &str) -> Vec<u8> {
     decoded
 }
 
-/// Slice C (DEC-203 T7): an owner paste goes to tmux as one `set-buffer` per piece of at most
+/// An owner paste goes to tmux as one `set-buffer` per piece of at most
 /// `INPUT_BYTES_MAX` bytes, each piece after the first appended, then one `paste-buffer -d
 /// -p -r -S`, which brackets the whole only when the pane asked; the pieces decode back to
 /// the keys in order.
@@ -1346,7 +1346,7 @@ fn an_owner_paste_is_set_in_appended_pieces_then_pasted_once_with_p() {
     assert_eq!(decoded, keys);
 }
 
-/// Slice C (DEC-203 T7): a 200 KB owner paste into a pane whose app turned bracketed paste
+/// A 200 KB owner paste into a pane whose app turned bracketed paste
 /// on arrives once inside one bracket pair, byte-exact; into a pane that did not, it arrives
 /// unwrapped; no buffer is left behind either way.
 #[cfg(target_os = "macos")]
@@ -1384,7 +1384,7 @@ fn an_owner_paste_is_bracketed_once_only_when_the_pane_asked() {
     }
 }
 
-/// #477 r2 / #483: tmux 3.8 answers `display-message -t` for a gone window with success and
+/// tmux 3.8 answers `display-message -t` for a gone window with success and
 /// the current pane's values, so a terminal whose window is gone, on the engine's own server
 /// where no lookup runs first, must read as `terminal_agent_unknown`, never as that other
 /// pane's paste mode or activity; a live terminal still reads its own.
@@ -1426,10 +1426,10 @@ fn a_gone_window_reads_as_unknown_not_as_the_current_pane() {
     );
 }
 
-/// rv-code2 #488 r2 F1: a window name with spaces never shifts what `displayed` reads. On a
+/// A window name with spaces never shifts what `displayed` reads. On a
 /// lead's server the target is the agent's `%N` pane, and a harness there can rename its
 /// window, so a pane whose app turned bracketed paste on still reads it on, and its activity
-/// still reads a number, once its window is named with spaces (V243-NATIVE-FEED-FIXES).
+/// still reads a number, once its window is named with spaces.
 #[test]
 fn a_spaced_window_name_never_shifts_a_pane_targets_reading() {
     use std::os::unix::fs::PermissionsExt;
@@ -3294,7 +3294,7 @@ fn output_of(chunks: &mut super::super::buffer::Chunks) -> Vec<u8> {
     output
 }
 
-/// RV-DS241-192: an attach whose located reply tmux cut before both its row counts fails
+/// An attach whose located reply tmux cut before both its row counts fails
 /// with `REPLY_CUT`, so its caller asks again, and the reader drops every row of its capture up to the attach's
 /// own marker line. The control stays open: the request queued after it gets its own reply
 /// and another pane's view its live output, while a pane row shaped like a control line
@@ -3340,7 +3340,7 @@ fn a_capture_whose_row_count_is_unknown_fails_only_its_attach_and_forges_nothing
     );
 }
 
-/// RV-DS241-192: an attach's capture is followed by the block that prints its marker,
+/// An attach's capture is followed by the block that prints its marker,
 /// which the reader takes as the end of the attach, so the request queued after it gets
 /// its own reply and never the marker.
 #[test]
@@ -3366,7 +3366,7 @@ fn an_attach_takes_the_marker_block_after_its_capture_so_the_next_request_gets_i
     );
 }
 
-/// RV-DS241-192: the block after a whole capture holds no pane text, so the reader finds
+/// The block after a whole capture holds no pane text, so the reader finds
 /// its end by its guard whatever it printed; a marker tmux cut short there costs nothing,
 /// and the request queued after the attach still gets its own reply.
 #[test]
@@ -3393,7 +3393,7 @@ fn a_marker_cut_short_after_a_whole_capture_still_leaves_the_next_reply_its_own(
     );
 }
 
-/// RV-DS241-192: tmux still runs the capture and the marker after a located reply too
+/// tmux still runs the capture and the marker after a located reply too
 /// large to keep, so the reader drops both, the pane rows included, and a pane row shaped
 /// like a reply never answers the request queued after the attach.
 #[test]
@@ -3427,7 +3427,7 @@ fn a_located_reply_too_large_to_keep_drops_its_capture_and_forges_no_reply() {
     );
 }
 
-/// RV-DS241-192: a cut attach whose marker never comes within the rows a capture can hold
+/// A cut attach whose marker never comes within the rows a capture can hold
 /// closes the control as before, so no later request is answered from lines the reader
 /// could not place.
 #[test]
@@ -3456,7 +3456,7 @@ fn a_cut_attach_whose_marker_never_comes_within_a_capture_closes_the_control() {
     assert!(state.lock().unwrap().closed);
 }
 
-/// RV-DS241-192: a located reply tmux failed ends the attach there, since tmux skips the
+/// A located reply tmux failed ends the attach there, since tmux skips the
 /// rest of the command line after an error, so the next block is the queued request's own.
 #[test]
 fn a_failed_located_reply_ends_the_attach_and_the_next_block_answers_the_next_request() {
@@ -3665,7 +3665,7 @@ fn a_layout_names_the_panes_of_every_leaf_cell() {
     assert!(ids("not a layout").is_empty());
 }
 
-/// v242 typing C (BRIEF-typing-path): a pane view types its keys straight into the pane it
+/// A pane view types its keys straight into the pane it
 /// was attached to, with no pane listing per key while the control client that found that
 /// pane still serves it; a pane its attach did not find never takes the view's keys, and a
 /// pane found by another connection is typed into only after the usual lookup.

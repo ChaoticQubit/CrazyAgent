@@ -899,7 +899,6 @@ dependencies = [
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
- "keyring-core",
  "landlock",
  "libc",
  "minisign",
@@ -922,8 +921,6 @@ dependencies = [
  "trash",
  "url",
  "vt100",
- "windows-native-keyring-store",
- "zbus-secret-service-keyring-store",
  "zeroize",
 ]
 
@@ -1056,9 +1053,12 @@ version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-common",
  "form_urlencoded",
+ "keyring-core",
  "serde",
  "serde_json",
  "url",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
  "zeroize",
 ]
 
@@ -1129,6 +1129,7 @@ dependencies = [
 name = "crazyagent-win-sandbox"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
  "tempfile",
  "tokio",
  "windows-sys 0.61.2",

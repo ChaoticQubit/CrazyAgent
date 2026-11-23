@@ -186,6 +186,8 @@ fn a_granted_call_reaches_the_provider_once() {
         process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     assert_eq!(
         settings::save_quit(&Bound::new(gateway.bind("agent-quit"), &providers), quit()),
@@ -209,6 +211,8 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
         process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     let refusal = Refusal::NotGranted {
         capability: "settings.save_quit",
@@ -238,6 +242,8 @@ fn an_unknown_plugin_is_refused() {
         process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     let refusal = Refusal::NotGranted {
         capability: "settings.save_quit",
@@ -270,6 +276,8 @@ fn the_provider_rejection_comes_back_unchanged() {
         process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     assert_eq!(
         settings::save_quit(&Bound::new(gateway.bind("agent-quit"), &providers), quit()),
@@ -292,6 +300,8 @@ fn the_settings_provider_gets_the_bound_plugin_as_caller() {
         process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     assert_eq!(
         settings::save_quit(&Bound::new(gateway.bind("agent-quit"), &providers), quit()),
@@ -314,6 +324,8 @@ fn an_ungranted_secrets_call_never_reaches_the_provider() {
         process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     assert_eq!(
         secrets_calls(&gateway, &providers, "low"),
@@ -341,6 +353,8 @@ fn each_secrets_call_needs_its_own_grant() {
         process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     assert_eq!(
         secrets_calls(&gateway, &providers, "finder"),
@@ -368,6 +382,8 @@ fn the_caller_passed_to_the_secrets_provider_is_the_bound_plugin() {
         process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     assert_eq!(
         secrets_calls(&gateway, &providers, "keeper"),
@@ -398,6 +414,8 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
         process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     let host = Bound::new(gateway.bind("keeper"), &providers);
     let over = "n".repeat(TEXT_BYTES_MAX + 1);
@@ -418,6 +436,49 @@ struct UnusedNet;
 
 /// The one `UnusedNet` the rows pass.
 const UNUSED_NET: UnusedNet = UnusedNet;
+
+/// The service provider of rows that never reach it.
+struct UnusedService;
+
+/// The one `UnusedService` the rows pass.
+const UNUSED_SERVICE: UnusedService = UnusedService;
+
+impl sdk::generated::service::Provide for UnusedService {
+    fn status(
+        &self,
+        caller: &'static str,
+    ) -> Result<sdk::generated::service::ServiceState, Refusal> {
+        panic!("the service provider was reached by {caller}");
+    }
+
+    fn repair(&self, caller: &'static str) -> Result<(), Refusal> {
+        panic!("the service provider was reached by {caller}");
+    }
+
+    fn install(&self, caller: &'static str) -> Result<(), Refusal> {
+        panic!("the service provider was reached by {caller}");
+    }
+
+    fn uninstall(&self, caller: &'static str) -> Result<(), Refusal> {
+        panic!("the service provider was reached by {caller}");
+    }
+}
+
+/// The update provider of rows that never reach it.
+struct UnusedUpdate;
+
+/// The one `UnusedUpdate` the rows pass.
+const UNUSED_UPDATE: UnusedUpdate = UnusedUpdate;
+
+impl sdk::generated::update::Provide for UnusedUpdate {
+    fn set_channel(
+        &self,
+        caller: &'static str,
+        _: sdk::generated::update::UpdateChannel,
+    ) -> Result<(), Refusal> {
+        panic!("the update provider was reached by {caller}");
+    }
+}
 
 impl net::Provide for UnusedNet {
     fn request(&self, _: &'static str, _: net::Request) -> Result<net::Reply, Refusal> {
@@ -472,6 +533,8 @@ fn an_ungranted_net_request_never_reaches_egress_allows() {
         process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     for plugin in ["keeper", "low", "agent-quit", "unknown"] {
         let refused = net::request(
@@ -507,6 +570,8 @@ fn net_inputs_over_their_bounds_are_refused() {
         process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
+        service: &UNUSED_SERVICE,
+        update: &UNUSED_UPDATE,
     };
     let host = Bound::new(gateway.bind("fetcher"), &providers);
     let long = format!("https://api.github.com/{}", "a".repeat(TEXT_BYTES_MAX));

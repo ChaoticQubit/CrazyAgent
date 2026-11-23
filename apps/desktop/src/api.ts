@@ -36,6 +36,7 @@ const COPY: Record<string, string> = {
   engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
   engine_restoring: "CrazyAgent is bringing back your 2.4 data, so its engine stays stopped. Wait a minute, then reconnect.",
+  engine_restore_broken: "Restore did not finish. Your data is safe in a backup.",
   engine_restored: "Your 2.4 data is back. Install CrazyAgent 2.4.2 to use it. Restart engine goes back to 2.5, which updates that data again.",
   storage_restore_unavailable: "There's no 2.4 backup to bring back. CrazyAgent keeps it for 30 days after the update to 2.5.",
   storage_restore_agents_running: "Agents are running. Stop every agent and research run, then bring back your 2.4 data.",
