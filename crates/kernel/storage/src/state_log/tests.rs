@@ -48,19 +48,19 @@ fn chunk(aggregate: &str, seq: u32) -> Vec<u8> {
     .unwrap()
 }
 
-/// Plants a run of one chunk and its closing event, both in the column `column`, with the
-/// given body names, then verifies it. Inputs: the column, the chunk's and the closing
-/// body's names. Output: the verdict.
-fn one_chunk_run(column: &str, chunk_name: &str, closing_name: &str) -> Option<String> {
+/// Plants a run of one chunk and its closing event, each as a (column, body name) pair,
+/// then verifies it. Inputs: the chunk's and the closing event's column and body name.
+/// Output: the verdict.
+fn one_chunk_run(chunk_row: (&str, &str), closing_row: (&str, &str)) -> Option<String> {
     let db = db();
-    let body = chunk(chunk_name, 0);
-    plant(&db, 1, column, SNAPSHOT_CHUNK, &body);
+    let body = chunk(chunk_row.1, 0);
+    plant(&db, 1, chunk_row.0, SNAPSHOT_CHUNK, &body);
     plant(
         &db,
         2,
-        column,
+        closing_row.0,
         SNAPSHOT_DONE,
-        &closing(closing_name, 1, &[&body]),
+        &closing(closing_row.1, 1, &[&body]),
     );
     code(verify_snapshot(&db, 2))
 }
@@ -95,23 +95,22 @@ fn the_snapshot_bodies_are_the_bytes_the_engine_wrote_and_verify() {
 
 #[test]
 fn a_well_formed_aggregate_no_engine_knows_verifies_on_its_hash() {
-    assert_eq!(
-        one_chunk_run("plugin_notes", "plugin_notes", "plugin_notes"),
-        None
-    );
+    let notes = ("plugin_notes", "plugin_notes");
+    assert_eq!(one_chunk_run(notes, notes), None);
 }
 
 #[test]
 fn a_malformed_aggregate_name_in_a_snapshot_body_is_invalid() {
     let long = "a".repeat(AGGREGATE_BYTES_MAX + 1);
+    let worktrees = ("worktrees", "worktrees");
     for name in ["Bad-Name", long.as_str(), ""] {
         assert_eq!(
-            one_chunk_run(name, name, name),
+            one_chunk_run(worktrees, (name, name)),
             Some("state_log_snapshot_invalid".into()),
             "closing {name:?}"
         );
         assert_eq!(
-            one_chunk_run(name, name, "worktrees"),
+            one_chunk_run((name, name), worktrees),
             Some("state_log_snapshot_invalid".into()),
             "chunk {name:?}"
         );
@@ -121,19 +120,15 @@ fn a_malformed_aggregate_name_in_a_snapshot_body_is_invalid() {
 #[test]
 fn a_closing_body_naming_another_aggregate_than_its_row_is_invalid() {
     assert_eq!(
-        one_chunk_run("worktrees", "ide", "ide"),
+        one_chunk_run(("ide", "ide"), ("worktrees", "ide")),
         Some("state_log_snapshot_invalid".into())
     );
 }
 
 #[test]
 fn a_chunk_body_naming_another_aggregate_than_its_row_is_invalid() {
-    let db = db();
-    let body = chunk("ide", 0);
-    plant(&db, 1, "worktrees", SNAPSHOT_CHUNK, &body);
-    plant(&db, 2, "ide", SNAPSHOT_DONE, &closing("ide", 1, &[&body]));
     assert_eq!(
-        code(verify_snapshot(&db, 2)),
+        one_chunk_run(("worktrees", "ide"), ("ide", "ide")),
         Some("state_log_snapshot_invalid".into())
     );
 }
