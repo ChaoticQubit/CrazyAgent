@@ -2302,6 +2302,7 @@ fn apply(
             | Command::OwnerAgentCleanup { .. }
             | Command::OwnerAgentQuit { .. }
             | Command::OwnerProviderRetry { .. }
+            | Command::OwnerLogCompaction { .. }
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
@@ -2506,6 +2507,7 @@ fn execute(
         | Command::OwnerAgentCleanup { .. }
         | Command::OwnerAgentQuit { .. }
         | Command::OwnerProviderRetry { .. }
+        | Command::OwnerLogCompaction { .. }
         | Command::OwnerMasterSteps { .. }
         | Command::OwnerMasterTime { .. }
         | Command::OwnerMasterFrames { .. } => crate::settings_log::owner(tx, command, revision),
@@ -3954,6 +3956,7 @@ fn owner_read(
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
         OwnerRead::ProviderRetry => crate::provider_retry::read(&tx)?,
+        OwnerRead::LogCompaction => crate::log_compaction::read(&tx)?,
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
         OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,

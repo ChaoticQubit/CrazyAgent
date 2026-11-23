@@ -80,11 +80,12 @@ pub fn checked_name(name: &str) -> Result<&str, StoreError> {
 
 /// Names one stored item as `<service>:<account>`, refusing the shapes the engine's wire
 /// identity refuses, before any store writes: a trailing `.`, a Windows device name as the
-/// stem, and on Windows a one-letter service, which reads as a drive. Inputs: the service
+/// stem, and a one-letter service, which reads as a drive on Windows and is refused on every
+/// OS. Inputs: the service
 /// and account. Output: the reference, which holds no secret, or `credential_name_invalid`.
 pub fn reference(service: &str, account: &str) -> Result<SecretRef, StoreError> {
     let joined = format!("{}:{}", checked_name(service)?, checked_name(account)?);
-    let drive = cfg!(windows) && service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
+    let drive = service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
     if joined.ends_with(['.', ' ']) || kernel_common::windows_device(&joined) || drive {
         return Err(StoreError::code("credential_name_invalid"));
     }

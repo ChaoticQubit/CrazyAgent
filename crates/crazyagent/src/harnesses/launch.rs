@@ -1576,7 +1576,7 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
 }
 
 /// Checks an account home against a given owner HOME, as [`validate_home`] does with this
-/// process's, comparing both in their [`crate::sandbox::canonical`] spelling, so neither
+/// process's, comparing both in their [`kernel_sandbox::paths::canonical`] spelling, so neither
 /// can pass the other through the macOS data volume's name. Inputs: the home and the
 /// owner's HOME, none when unset. Output: Ok, or a plain `launch_account_home_*` refusal
 /// code.
@@ -1591,12 +1591,15 @@ fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchErro
     {
         return Err(failure("launch_account_home_unsafe"));
     }
-    let canonical =
-        crate::sandbox::canonical(home).map_err(|_| failure("launch_account_home_unavailable"))?;
+    let canonical = kernel_sandbox::paths::canonical(home)
+        .map_err(|_| failure("launch_account_home_unavailable"))?;
     if let Some(owner) = owner {
-        let folders = crate::sandbox::harness_folders().map(|folder| owner.join(folder));
+        let folders = crate::sandbox::harness_folders()
+            .into_iter()
+            .map(|folder| owner.join(folder));
         for forbidden in std::iter::once(owner.to_path_buf()).chain(folders) {
-            if crate::sandbox::canonical(&forbidden).is_ok_and(|forbidden| forbidden == canonical)
+            if kernel_sandbox::paths::canonical(&forbidden)
+                .is_ok_and(|forbidden| forbidden == canonical)
                 || forbidden == home
             {
                 return Err(failure("launch_account_home_forbidden"));
@@ -1667,7 +1670,7 @@ pub(crate) fn validate_held_home(home: &Path, held: &std::fs::File) -> Result<()
 /// Checks a held account home against a given owner profile folder. Its kind, owner, access
 /// list and label are read from the held handle. The profile folder and its `.codex` and
 /// `.claude` are each opened and refused when they are the held folder itself, read from
-/// both handles, and also when their [`crate::sandbox::canonical`] spelling names the home,
+/// both handles, and also when their [`kernel_sandbox::paths::canonical`] spelling names the home,
 /// ignoring letter case. Inputs: the home, the held folder and the profile folder, none
 /// when unknown. Output: Ok, or a plain `launch_account_home_*` refusal code.
 #[cfg(windows)]
@@ -1687,7 +1690,7 @@ fn validate_held_for(
     if !folder || judge_home(&facts, &user).is_err() {
         return Err(failure("launch_account_home_unsafe"));
     }
-    let canonical = crate::sandbox::canonical(home).map_err(unavailable)?;
+    let canonical = kernel_sandbox::paths::canonical(home).map_err(unavailable)?;
     assert!(canonical.is_absolute());
     if let Some(owner) = owner {
         for forbidden in [
@@ -1703,7 +1706,7 @@ fn validate_held_for(
             {
                 return Err(forbidden_home());
             }
-            let named = crate::sandbox::canonical(&forbidden).unwrap_or(forbidden);
+            let named = kernel_sandbox::paths::canonical(&forbidden).unwrap_or(forbidden);
             if named
                 .as_os_str()
                 .eq_ignore_ascii_case(canonical.as_os_str())

@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::parse::{Spot, Spots};
-use crate::{File, ITEMS_MAX, ParseError};
+use crate::{File, ITEMS_MAX, ParseError, RECORD_DEPTH_MAX};
 
-/// Checks a parsed file as a whole, each rule in source order: item names unique, every
-/// named type declared as an enum, type or handle, no type that contains itself, and no
-/// handle in an event body, directly or inside a named type.
+/// Checks a parsed file as a whole, each rule in source order: item names unique, no event
+/// kind named like an item, every named type declared as an enum, type or handle, no type
+/// that contains itself or nests more than `RECORD_DEPTH_MAX` records, and no handle in an
+/// event body, directly or inside a named type.
 /// Inputs: the file and its spots. Output: nothing, or the first refusal.
 pub(crate) fn check(file: &File, spots: &Spots) -> Result<(), ParseError> {
     assert_eq!(spots.fields_of_type.len(), file.types.len());
@@ -14,6 +15,13 @@ pub(crate) fn check(file: &File, spots: &Spots) -> Result<(), ParseError> {
         if !seen.insert(spot.name.as_str()) {
             return Err(spot.refuse("cap_duplicate_name"));
         }
+    }
+    if let Some(kind) = spots
+        .kinds
+        .iter()
+        .find(|kind| seen.contains(kind.name.as_str()))
+    {
+        return Err(kind.refuse("cap_duplicate_name"));
     }
     let types: BTreeMap<&str, usize> = file
         .types
@@ -85,8 +93,10 @@ fn holding_handles(
 }
 
 /// Walks the types depth first, in source order, and refuses the first field whose type
-/// is still on the walk's path. Inputs: type names to their index and each type's named
-/// field types. Output: nothing, or `cap_type_cycle` at the field that closes the cycle.
+/// is still on the walk's path, then, as each type finishes, a type whose chain of named
+/// records is deeper than `RECORD_DEPTH_MAX`. Inputs: type names to their index and each
+/// type's named field types. Output: nothing, `cap_type_cycle` at the field that closes
+/// the cycle, or `cap_type_too_deep` at the field that leads down the deepest chain.
 fn acyclic(types: &BTreeMap<&str, usize>, fields_of_type: &[Vec<Spot>]) -> Result<(), ParseError> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Mark {
@@ -96,6 +106,7 @@ fn acyclic(types: &BTreeMap<&str, usize>, fields_of_type: &[Vec<Spot>]) -> Resul
     }
     assert!(fields_of_type.len() <= ITEMS_MAX);
     let mut marks = vec![Mark::New; fields_of_type.len()];
+    let mut heights = vec![0usize; fields_of_type.len()];
     for root in 0..fields_of_type.len() {
         if marks[root] != Mark::New {
             continue;
@@ -105,6 +116,20 @@ fn acyclic(types: &BTreeMap<&str, usize>, fields_of_type: &[Vec<Spot>]) -> Resul
         while let Some(&(ty, next)) = path.last() {
             assert!(path.len() <= fields_of_type.len());
             let Some(spot) = fields_of_type[ty].get(next) else {
+                let mut deepest: Option<(&Spot, usize)> = None;
+                for spot in &fields_of_type[ty] {
+                    if let Some(&at) = types.get(spot.name.as_str())
+                        && deepest.is_none_or(|(_, height)| heights[at] > height)
+                    {
+                        deepest = Some((spot, heights[at]));
+                    }
+                }
+                let below = deepest.map_or(0, |(_, height)| height);
+                if let Some((spot, _)) = deepest.filter(|_| below >= RECORD_DEPTH_MAX) {
+                    return Err(spot.refuse("cap_type_too_deep"));
+                }
+                heights[ty] = 1 + below;
+                assert!(heights[ty] <= RECORD_DEPTH_MAX);
                 marks[ty] = Mark::Done;
                 path.pop();
                 continue;
