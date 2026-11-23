@@ -36,6 +36,7 @@ pub mod access_store;
 #[cfg(all(test, target_os = "macos"))]
 mod git_deny_tests;
 pub mod grants;
+pub mod grants_store;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;

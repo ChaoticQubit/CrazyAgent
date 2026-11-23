@@ -2764,7 +2764,7 @@ fn set_agent_policy(
     let before = crate::sandbox::policy_store::load(tx, project_id.as_str())
         .map(|saved| saved.grants)
         .unwrap_or_default();
-    let data = crate::sandbox::grants::data_root(tx).unwrap_or_default();
+    let data = crate::sandbox::grants_store::data_root(tx).unwrap_or_default();
     let mut kept = Vec::with_capacity(policy.grants.len());
     for grant in &policy.grants {
         if before.contains(grant) {
@@ -2788,7 +2788,7 @@ fn set_agent_policy(
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
     crate::sandbox::policy_store::save(tx, project_id.as_str(), &policy).map_err(error)?;
-    crate::sandbox::grants::log_changes(
+    crate::sandbox::grants_store::log_changes(
         tx,
         project_id.as_str(),
         &before,

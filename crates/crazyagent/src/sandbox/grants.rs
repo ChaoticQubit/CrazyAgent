@@ -1,8 +1,9 @@
+use super::grants_store::{data_root, log, requests_table};
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
 use crate::questions::{Ask, Asker, EngineSource, QuestionKind};
-use kernel_sandbox::grants::{GrantHooks, LogView, owner_temp_folder};
+use kernel_sandbox::grants::{GrantHooks, owner_temp_folder};
 use kernel_sandbox::paths::owner_secrets;
 use kernel_sandbox::paths::{canonical, owner_home};
 use kernel_sandbox::policy::{
@@ -12,10 +13,6 @@ use kernel_sandbox::ports::{OWNER_PORTS, PROXY_PORTS, RELAY_PORTS};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 
-/// The most log rows one project keeps; older ones are pruned on each write.
-pub const LOG_KEPT_MAX: i64 = 256;
-/// The most log rows a project's Agent access view lists, newest first.
-pub const LOG_LISTED_MAX: usize = 20;
 /// The most access requests one project has waiting for the owner at once.
 pub const REQUESTS_PENDING_MAX: i64 = 4;
 /// The longest reason an agent may give with an access request; a longer one is cut.
@@ -33,28 +30,6 @@ pub const ASKER_PREFIX: &str = "engine:access:";
 /// The one refusal code an agent's access request gets for every failed check of a socket
 /// path it wrote plainly (RV-DS241-87).
 const SOCKET_REFUSED: &str = "grant_socket_refused";
-const LOG_TABLE: &str = "CREATE TABLE IF NOT EXISTS access_grant_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project TEXT NOT NULL,
-    at_ms INTEGER NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('granted','revoked','allowed','denied')),
-    grant_json TEXT NOT NULL,
-    by TEXT NOT NULL
-)";
-
-const REQUESTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS access_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project TEXT NOT NULL,
-    asker TEXT NOT NULL,
-    grant_json TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    question INTEGER,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','allowed','denied')),
-    created_ms INTEGER NOT NULL,
-    identity TEXT
-)";
-
-const GRANT_JSON_BYTES_MAX: usize = 256;
 const LAUNCHD_LISTENERS: &str = "/private/tmp/com.apple.launchd.";
 #[cfg(unix)]
 const IDE_FOLDERS_SCANNED_MAX: usize = 256;
@@ -106,7 +81,6 @@ const SSH_MUX_HASH_HEX: usize = 40;
 const KEY_STARTS: [&str; 2] = ["gpg", "ssh"];
 const KEY_NAME_WORDS: [&str; 3] = ["agent", "gpg", "ssh"];
 
-const _: () = assert!(kernel_sandbox::policy::GRANT_SOCKET_BYTES_MAX + 64 <= GRANT_JSON_BYTES_MAX);
 const _: () =
     assert!(GRANT_SOCKETS_MAX + GRANT_PORTS_MAX + 1 == kernel_sandbox::policy::GRANTS_MAX);
 const _: () = assert!(REASON_BYTES_MAX < crate::questions::CONTEXT_BYTES_MAX / 2);
@@ -394,106 +368,6 @@ pub fn checked_all(
     Ok(kept)
 }
 
-/// The engine's data folder for a connection on `engine.db`: the folder holding it.
-/// Input: the connection. Output: the folder, or none for an in-memory database.
-pub fn data_root(connection: &Connection) -> Option<PathBuf> {
-    connection
-        .path()
-        .filter(|path| !path.is_empty())
-        .map(Path::new)
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-}
-
-/// Logs one grant change for a project and prunes the log to [`LOG_KEPT_MAX`] rows.
-/// Inputs: the connection or transaction, the project, the action (`granted`, `revoked`,
-/// `allowed` or `denied`), the grant, who made it and the time in ms. Output: done, or the
-/// database error.
-pub fn log(
-    connection: &Connection,
-    project: &str,
-    action: &str,
-    grant: &AccessGrant,
-    by: &str,
-    now: i64,
-) -> rusqlite::Result<()> {
-    assert!(matches!(
-        action,
-        "granted" | "revoked" | "allowed" | "denied"
-    ));
-    let body = serde_json::to_string(grant)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    assert!(body.len() <= GRANT_JSON_BYTES_MAX);
-    connection.execute(LOG_TABLE, [])?;
-    connection.execute(
-        "INSERT INTO access_grant_log(project,at_ms,action,grant_json,by) VALUES (?1,?2,?3,?4,?5)",
-        params![project, now, action, body, by],
-    )?;
-    connection.execute(
-        "DELETE FROM access_grant_log WHERE project=?1 AND id NOT IN (
-             SELECT id FROM access_grant_log WHERE project=?1 ORDER BY id DESC LIMIT ?2)",
-        params![project, LOG_KEPT_MAX],
-    )?;
-    Ok(())
-}
-
-/// Logs what an owner save changed in a project's grants: each grant only in the new list
-/// as granted and each only in the old one as revoked. Inputs: the connection, the project,
-/// the grants before and after, who saved and the time. Output: done, or the database error.
-pub fn log_changes(
-    connection: &Connection,
-    project: &str,
-    before: &[AccessGrant],
-    after: &[AccessGrant],
-    by: &str,
-    now: i64,
-) -> rusqlite::Result<()> {
-    for grant in after.iter().filter(|grant| !before.contains(grant)) {
-        log(connection, project, "granted", grant, by, now)?;
-    }
-    for grant in before.iter().filter(|grant| !after.contains(grant)) {
-        log(connection, project, "revoked", grant, by, now)?;
-    }
-    Ok(())
-}
-
-/// Reads a project's newest grant log rows, at most [`LOG_LISTED_MAX`]; none when nothing
-/// was ever logged. Inputs: the connection and the project. Output: the rows, newest first.
-pub fn history(connection: &Connection, project: &str) -> rusqlite::Result<Vec<LogView>> {
-    if !table_exists(connection, "access_grant_log")? {
-        return Ok(Vec::new());
-    }
-    let mut statement = connection.prepare(
-        "SELECT at_ms,action,grant_json,by FROM access_grant_log WHERE project=?1 ORDER BY id DESC LIMIT ?2",
-    )?;
-    let rows = statement
-        .query_map(params![project, LOG_LISTED_MAX as i64], |row| {
-            let body: String = row.get(2)?;
-            let grant = serde_json::from_str::<AccessGrant>(&body)
-                .map(|grant| grant.label())
-                .unwrap_or_else(|_| "An extra this version does not know".to_owned());
-            Ok(LogView {
-                at_ms: row.get(0)?,
-                action: row.get(1)?,
-                grant,
-                by: row.get(3)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    assert!(rows.len() <= LOG_LISTED_MAX);
-    Ok(rows)
-}
-
-/// Removes a project's grant log and requests when the project is removed. Inputs: the
-/// transaction and the project. Output: done, or the database error.
-pub fn forget_project(connection: &Connection, project: &str) -> rusqlite::Result<()> {
-    connection.execute(LOG_TABLE, [])?;
-    requests_table(connection)?;
-    connection.execute("DELETE FROM access_grant_log WHERE project=?1", [project])?;
-    connection.execute("DELETE FROM access_requests WHERE project=?1", [project])?;
-    Ok(())
-}
-
 /// Turns an agent's access request into a real owner question (F08): the grant is checked
 /// as a save checks it, one the policy already holds asks nothing, and otherwise the engine
 /// raises a question with the options [`ALLOW`] and [`DONT_ALLOW`], the words written by the
@@ -735,21 +609,6 @@ fn capital(text: &str) -> String {
     }
 }
 
-/// Makes the access requests table, and adds the `identity` column to one an older engine
-/// made, whose rows keep none. Input: the connection. Output: done, or the store error.
-fn requests_table(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute(REQUESTS_TABLE, [])?;
-    let kept: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('access_requests') WHERE name='identity')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !kept {
-        connection.execute("ALTER TABLE access_requests ADD COLUMN identity TEXT", [])?;
-    }
-    Ok(())
-}
-
 /// The identity of the socket file a checked socket grant names: its device and inode,
 /// read without following a link, so the file the owner was asked about can be told from
 /// one put at its path later. Input: the canonical path. Output: `device:inode`, or none
@@ -766,14 +625,6 @@ fn socket_identity(real: &Path) -> Option<String> {
 #[cfg(not(unix))]
 fn socket_identity(_real: &Path) -> Option<String> {
     None
-}
-
-fn table_exists(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
-    connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
-        [name],
-        |row| row.get(0),
-    )
 }
 
 #[cfg(all(test, unix))]

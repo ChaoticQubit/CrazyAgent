@@ -127,7 +127,7 @@ pub fn request(
         return Err("github_rule_invalid".into());
     }
     let why = plain_why(why).ok_or("github_rule_why_invalid")?;
-    let root = crate::sandbox::grants::data_root(db).ok_or(UNAVAILABLE)?;
+    let root = crate::sandbox::grants_store::data_root(db).ok_or(UNAVAILABLE)?;
     let folder = folder(db, project).map_err(|problem| problem.0)?;
     let repo = published(&root, &folder)
         .map_err(|_| UNAVAILABLE)?
@@ -249,7 +249,7 @@ pub type RuleSetter<'a> =
 pub fn apply_approved(db: &Connection, set: &mut RuleSetter<'_>) -> Result<usize, EngineError> {
     let _one = APPLYING.lock().unwrap_or_else(PoisonError::into_inner);
     table(db).map_err(|_| failure(UNAVAILABLE))?;
-    let root = crate::sandbox::grants::data_root(db).ok_or_else(|| failure(UNAVAILABLE))?;
+    let root = crate::sandbox::grants_store::data_root(db).ok_or_else(|| failure(UNAVAILABLE))?;
     let approved = rows(db, "status='approved'", [])?;
     assert!(approved.len() as i64 <= PASS_MAX);
     let mut ended = 0;

@@ -3849,7 +3849,7 @@ fn owner_read(
                     other_git,
                 );
             policy.grant_log =
-                crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;
+                crate::sandbox::grants_store::history(&tx, project_id.as_str()).map_err(error)?;
             OwnerData::ProjectAgentPolicy {
                 project_id: project_id.clone(),
                 policy,

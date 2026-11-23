@@ -151,7 +151,7 @@ pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError
     crate::sandbox::access_store::hidden::save(tx, project, &[]).map_err(failed)?;
     crate::sandbox::access_store::hidden::forget_seers(tx, project).map_err(failed)?;
     crate::sandbox::policy_store::remove(tx, project).map_err(failed)?;
-    crate::sandbox::grants::forget_project(tx, project).map_err(failed)?;
+    crate::sandbox::grants_store::forget_project(tx, project).map_err(failed)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
