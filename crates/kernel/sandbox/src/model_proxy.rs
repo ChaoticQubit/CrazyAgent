@@ -1,6 +1,6 @@
+use crate::ports::PROXY_PORTS;
 use kernel_processes::fd_wait::{self, Wake};
 use kernel_processes::spawn_gate;
-use kernel_sandbox::ports::PROXY_PORTS;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -792,7 +792,7 @@ fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::
 /// outside the sandbox: [`dialable`] and not held by this machine ([`on_this_machine`]). The
 /// one rule for the proxy's tunnels and the reach check before a run (DEC-163 addendum 8).
 /// Input: the address. Output: true when the engine may dial it.
-pub(crate) fn may_dial(address: IpAddr) -> bool {
+pub fn may_dial(address: IpAddr) -> bool {
     dialable(address) && !on_this_machine(address)
 }
 

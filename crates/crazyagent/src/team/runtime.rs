@@ -36,12 +36,12 @@ use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::toolchains;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
@@ -13889,7 +13889,7 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
             ));
         }
     };
-    assert!(!hosts.is_empty() && hosts.len() <= crate::sandbox::model_proxy::HOSTS_MAX);
+    assert!(!hosts.is_empty() && hosts.len() <= kernel_sandbox::model_proxy::HOSTS_MAX);
     Ok(hosts)
 }
 

@@ -95,7 +95,7 @@ impl ProviderReach {
 
     /// Tells whether a remote provider at these addresses can't be reached: of the at most
     /// [`ADDRESSES_MAX`] addresses, those the engine may dial
-    /// ([`crate::sandbox::model_proxy::may_dial`]) all refuse a connect, at least one of
+    /// ([`kernel_sandbox::model_proxy::may_dial`]) all refuse a connect, at least one of
     /// them. An address on this machine is never dialed, and any other connect error, a
     /// timeout included, names nothing (DEC-163 Q4). Input: the addresses. Output: the
     /// answer.
@@ -106,7 +106,7 @@ impl ProviderReach {
         let dialed: Vec<SocketAddr> = addresses
             .iter()
             .copied()
-            .filter(|address| crate::sandbox::model_proxy::may_dial(address.ip()))
+            .filter(|address| kernel_sandbox::model_proxy::may_dial(address.ip()))
             .collect();
         assert!(dialed.len() <= ADDRESSES_MAX);
         !dialed.is_empty()

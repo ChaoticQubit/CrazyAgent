@@ -37,9 +37,6 @@ pub mod grants;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(test)]
-mod low_ports_tests;
-pub mod model_proxy;
 pub mod policy_store;
 pub mod shared_folders;
 #[cfg(all(test, target_os = "macos"))]

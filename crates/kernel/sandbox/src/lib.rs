@@ -20,6 +20,9 @@ pub mod host;
 /// The plain lines and refusal codes a launch shows when a Linux or Windows sandbox cannot
 /// hold something, and the check that tells the Windows loopback refusal apart.
 pub mod lines;
+/// One agent's model proxy: the loopback CONNECT tunnel to the agent's listed model hosts,
+/// the variables that send a harness through it and the rule for which addresses it dials.
+pub mod model_proxy;
 /// A sandboxed agent's network reach: open, or only the listed loopback and any-host ports.
 pub mod net;
 /// Path checks and spellings every sandbox root is held to: one spelling per path, the
@@ -50,5 +53,7 @@ pub mod toolchains;
 /// plain refusals, the grants folder and the AppContainer name of one agent of one project.
 pub mod windows;
 
+#[cfg(test)]
+mod low_ports_tests;
 #[cfg(test)]
 mod tests;

@@ -547,7 +547,7 @@ pub fn command_with(
     }
     if let Some(port) = installed.and_then(Installed::model_proxy) {
         env.extend(
-            crate::sandbox::model_proxy::variables(port)
+            kernel_sandbox::model_proxy::variables(port)
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }

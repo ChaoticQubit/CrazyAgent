@@ -1015,7 +1015,7 @@ fn confined<'a>(
     }
     let mut owned = launch_base(home, tool_home, request.tools)?;
     let proxy = installed.and_then(Installed::model_proxy);
-    let proxy = proxy.map(crate::sandbox::model_proxy::variables);
+    let proxy = proxy.map(kernel_sandbox::model_proxy::variables);
     owned.extend(
         proxy
             .into_iter()

@@ -4,9 +4,9 @@ use crate::harnesses::launch::GitIdentity;
 use crate::harnesses::leftovers::LINEAGE_VARIABLE;
 use crate::harnesses::manifest::{VALUE, parse};
 use crate::harnesses::registry::Registry;
-use crate::sandbox::model_proxy;
 use crate::sandbox::toolchains::AUTO_INSTALL_ENV;
 use crate::sandbox::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, TOOL_CACHE_ENV};
+use kernel_sandbox::model_proxy;
 
 const SMALL: &str = "schema: 1\nkind: harness\nid: \"sample\"\nname: \"Sample\"\nbinaries:\n  - \"sample\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\n";
 
