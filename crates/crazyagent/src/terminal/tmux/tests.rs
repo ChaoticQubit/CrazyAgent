@@ -124,7 +124,7 @@ fn a_close_leaves_a_pane_group_another_path_holds_to_that_path() {
         .expect("no path holds the new pane's group");
 
     host.kill(&agent).unwrap();
-    host.join_reapers();
+    kernel_processes::terminal::tmux::test_seams::join_reapers(&host);
     let survived = rustix::process::test_kill_process(child).is_ok();
     let ended = crate::harnesses::launch::end_pane_group(pane.pid, Some(held));
     assert!(

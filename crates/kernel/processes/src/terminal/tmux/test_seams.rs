@@ -150,6 +150,11 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
             .any(|suffix| upper.ends_with(suffix))
 }
 
+/// Waits until every reaper a row's host started has ended its groups. Input: the host.
+pub fn join_reapers(host: &super::Tmux) {
+    host.join_reapers();
+}
+
 /// The confinement a row's host is opened with: the system sandbox runner, the keeper and
 /// shim words, the pane variable gate and the keeper's undo, copied from the sandbox the
 /// engine runs. Output: the value.
