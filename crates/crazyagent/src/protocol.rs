@@ -814,6 +814,10 @@ mod tests {
             kernel(&foreign).unwrap_err(),
             kernel_security::error::StoreError::code("credential_reference_invalid")
         );
+        assert_eq!(
+            CredentialRef::new("a:b:c".to_string()).is_err(),
+            cfg!(windows)
+        );
     }
 
     #[test]
