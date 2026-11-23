@@ -133,3 +133,23 @@ fn a_short_environment_value_is_not_redacted_at_an_edge() {
         output.into_bytes()
     );
 }
+
+#[test]
+fn an_output_inside_a_longer_value_cut_at_both_edges_is_covered_whole() {
+    let env: &[&[u8]] = &[b"AAAAsecret-partBBBB"];
+    let output = b"secret-part";
+    assert_eq!(
+        redact_edges(output, &[], env, true, true),
+        b"[REDACTED]".to_vec()
+    );
+    assert_eq!(redact_edges(output, &[], env, true, false), output.to_vec());
+}
+
+#[test]
+fn a_short_secret_part_is_marked_at_an_edge() {
+    let secrets: &[&[u8]] = &[b"pw1234"];
+    assert_eq!(
+        redact_edges(b"1234 ok", secrets, &[], true, false),
+        b"[REDACTED] ok".to_vec()
+    );
+}
