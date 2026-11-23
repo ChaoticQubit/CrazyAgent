@@ -641,7 +641,20 @@ fn a_send_host_outside_hosts_is_refused() {
     refused_net(&with_send(
         "access_token = { hosts = [\"uploads.github.com\"] }\n",
     ));
+}
+
+#[test]
+fn an_empty_send_host_list_is_refused() {
     refused_net(&with_send("access_token = { hosts = [] }\n"));
+}
+
+#[test]
+fn a_keep_as_the_store_refuses_is_refused_at_read() {
+    for name in ["nul", "con", "a.", "nul.token"] {
+        refused_net(&with_send(&format!(
+            "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
+        )));
+    }
 }
 
 #[test]
