@@ -45,6 +45,9 @@ pub mod shared_folders;
 /// The owner's toolchains an agent reads: the tool homes, the toolchain families and the
 /// read-only grants a project's choice gives.
 pub mod toolchains;
+/// The Windows boundary's names: the helper beside the engine and the checks it passes, the
+/// plain refusals, the grants folder and the AppContainer name of one agent of one project.
+pub mod windows;
 
 #[cfg(test)]
 mod tests;
