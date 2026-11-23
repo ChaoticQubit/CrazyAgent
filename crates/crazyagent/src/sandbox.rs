@@ -1122,7 +1122,6 @@ pub const GIT_FALLBACK: &str = ".git.git";
 /// (DEC-185 S2b).
 pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
 
-
 /// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
 /// computer's network on a Linux that could give them one of their own: on the project's
 /// Agent access page and in the agent's messages at its launch. Input: the port. Output:
