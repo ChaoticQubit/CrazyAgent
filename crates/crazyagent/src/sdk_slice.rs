@@ -8,6 +8,7 @@ use kernel_plugin_host::generated::permissions::{BUNDLED_GRANTS, PERMISSIONS};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use sdk::settings::{self as sdk_settings, Provide};
 use sdk::{Capability, Refusal};
+use sdk_host::{Bound, Providers};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::EngineError;
@@ -179,8 +180,13 @@ pub(crate) fn save_quit_with(
         sink: refusals,
         refused: Cell::new(false),
     };
-    let gateway = Gateway::new(grants, &provider, &crate::security_caps::Absent, &record);
-    let result = entry(&gateway.bind(BUNDLED_GRANTS[0].plugin), (*settings).into());
+    let gateway = Gateway::new(grants, &record);
+    let providers = Providers {
+        secrets: &crate::security_caps::Absent,
+        settings: &provider,
+    };
+    let host = Bound::new(gateway.bind(BUNDLED_GRANTS[0].plugin), &providers);
+    let result = entry(&host, (*settings).into());
     if record.refused.get() {
         return Err(EngineError("plugin_call_refused".to_owned()));
     }

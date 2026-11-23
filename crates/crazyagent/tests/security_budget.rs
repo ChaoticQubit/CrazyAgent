@@ -157,8 +157,12 @@ fn gateway_secrets_call_p95() {
     const BATCH: u32 = 1_000;
     let (budget, condition) = overhead_budget();
     let grants = bus_gateway::Grants::new(&[("budget", sdk::Tier::T1, &["secrets.find"])]).unwrap();
-    let gateway = bus_gateway::Gateway::new(&grants, &Unreached, &NoopSecrets, &Unreached);
-    let bound = gateway.bind("budget");
+    let gateway = bus_gateway::Gateway::new(&grants, &Unreached);
+    let providers = sdk_host::Providers {
+        secrets: &NoopSecrets,
+        settings: &Unreached,
+    };
+    let bound = sdk_host::Bound::new(gateway.bind("budget"), &providers);
     let mut direct = || {
         std::hint::black_box(NoopSecrets.find("budget", "token".to_owned())).unwrap();
     };

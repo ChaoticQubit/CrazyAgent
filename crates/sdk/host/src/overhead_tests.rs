@@ -1,9 +1,11 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use crate::{Gateway, Grants, Refusals};
+use bus_gateway::{Gateway, Grants, Refusals};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
+
+use crate::{Bound, Providers};
 
 /// The timed batches per path.
 const ROUNDS: usize = 1_000;
@@ -50,7 +52,7 @@ impl Refusals for Unreached {
     }
 }
 
-/// The OWNER Q4 budget for the overhead p95 in picoseconds, by the Mac's condition the
+/// The budget for the overhead p95 in picoseconds, by the Mac's condition the
 /// caller names in `OVERHEAD_MAC`: 1 us quiet, 5 us loaded. Output: the budget and the
 /// condition; panics when the condition is not named.
 fn budget() -> (u64, &'static str) {
@@ -93,8 +95,9 @@ fn report(name: &str, sorted: &[u64]) -> u64 {
     p95
 }
 
-/// Times the SDK call overhead against OWNER Q4, run on demand on a named Mac condition:
-/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-bus-gateway --lib overhead_tests:: -- --ignored --nocapture`
+/// Times the SDK call overhead through the generated binding and the gateway core against
+/// its budget, run on demand on a named Mac condition:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests:: -- --ignored --nocapture`
 /// (`OVERHEAD_MAC=loaded` on the loaded Mac). Prints p50, p95 and p99 ns per call for the
 /// direct call, the SDK call and their difference; fails when the difference's p95 is over.
 #[test]
@@ -104,8 +107,12 @@ fn overhead_per_sdk_call() {
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["settings.write"])]).unwrap();
     let provider = Noop;
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &provider, &NoSecrets, &refusals);
-    let bound = gateway.bind(PLUGIN);
+    let gateway = Gateway::new(&grants, &refusals);
+    let providers = Providers {
+        secrets: &NoSecrets,
+        settings: &provider,
+    };
+    let bound = Bound::new(gateway.bind(PLUGIN), &providers);
     let input = QuitSettings {
         on_quit: OnQuit::Stop,
         left_running: LeftRunning::Never,

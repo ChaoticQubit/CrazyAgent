@@ -1,5 +1,3 @@
-use sdk::secrets::{self, Secret};
-use sdk::settings::{self, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
 
 use crate::Grants;
@@ -12,35 +10,22 @@ pub trait Refusals {
 }
 
 /// The in-process bus gateway: it checks each SDK call against the caller's grants and
-/// hands an admitted call to the capability's provider.
+/// runs an admitted call through its bound checks and the provider the caller hands in.
 pub struct Gateway<'p> {
     grants: &'p Grants,
-    settings: &'p dyn settings::Provide,
-    secrets: &'p dyn secrets::Provide,
     refusals: &'p dyn Refusals,
 }
 
 impl<'p> Gateway<'p> {
-    /// Builds a gateway. Inputs: the grant table, the settings and secrets providers and
-    /// the refusal sink. Output: the gateway.
-    pub fn new(
-        grants: &'p Grants,
-        settings: &'p dyn settings::Provide,
-        secrets: &'p dyn secrets::Provide,
-        refusals: &'p dyn Refusals,
-    ) -> Self {
-        Self {
-            grants,
-            settings,
-            secrets,
-            refusals,
-        }
+    /// Builds a gateway. Inputs: the grant table and the refusal sink. Output: the gateway.
+    pub fn new(grants: &'p Grants, refusals: &'p dyn Refusals) -> Self {
+        Self { grants, refusals }
     }
 
-    /// Binds a host to one plugin id; the only way a caller's identity enters a call.
-    /// Input: the plugin id. Output: the host that plugin calls the SDK with.
-    pub fn bind(&self, plugin: &'static str) -> Bound<'_, 'p> {
-        Bound {
+    /// Binds a caller to one plugin id; the only way a caller's identity enters a call.
+    /// Input: the plugin id. Output: the caller that plugin's host calls the SDK through.
+    pub fn bind(&self, plugin: &'static str) -> Caller<'_> {
+        Caller {
             gateway: self,
             plugin,
         }
@@ -95,55 +80,39 @@ impl<'p> Gateway<'p> {
     }
 }
 
-/// A host bound to one plugin id by the gateway; its fields are private, so a plugin can
-/// neither build one nor change whose calls it makes.
-pub struct Bound<'g, 'p> {
-    gateway: &'g Gateway<'p>,
+/// A caller bound to one plugin id by the gateway; its fields are private, so code outside
+/// the gateway can neither build one nor change whose calls it makes.
+#[derive(Clone, Copy)]
+pub struct Caller<'g> {
+    gateway: &'g Gateway<'g>,
     plugin: &'static str,
 }
 
-impl sdk::Host for Bound<'_, '_> {
-    fn settings_save_quit(&self, settings: QuitSettings) -> Result<(), Refusal> {
-        self.gateway.call(
-            self.plugin,
-            &settings::SAVE_QUIT,
-            settings,
-            settings::check_save_quit_input,
-            |settings| self.gateway.settings.save_quit(self.plugin, settings),
-            settings::check_save_quit_output,
-        )
+impl Caller<'_> {
+    /// The plugin id the gateway bound. Output: the id.
+    pub fn plugin(&self) -> &'static str {
+        self.plugin
     }
 
-    fn secrets_put_from_owner(&self, name: String) -> Result<Secret, Refusal> {
+    /// Runs one call as the bound plugin: admit, the input check, the provider and the
+    /// output check, in that order, with the refusal sink on an admit refusal only. Inputs:
+    /// the capability, the input (several travel as one tuple), its check, the provider
+    /// call and the output check. Output: the provider's result, or the refusal.
+    pub fn call<I, T>(
+        &self,
+        capability: &Capability,
+        input: I,
+        check_input: impl FnOnce(&I) -> Result<(), Refusal>,
+        provide: impl FnOnce(I) -> Result<T, Refusal>,
+        check_output: impl FnOnce(&T) -> Result<(), Refusal>,
+    ) -> Result<T, Refusal> {
         self.gateway.call(
             self.plugin,
-            &secrets::PUT_FROM_OWNER,
-            name,
-            |name| secrets::check_put_from_owner_input(name),
-            |name| self.gateway.secrets.put_from_owner(self.plugin, name),
-            secrets::check_put_from_owner_output,
-        )
-    }
-
-    fn secrets_find(&self, name: String) -> Result<Option<Secret>, Refusal> {
-        self.gateway.call(
-            self.plugin,
-            &secrets::FIND,
-            name,
-            |name| secrets::check_find_input(name),
-            |name| self.gateway.secrets.find(self.plugin, name),
-            secrets::check_find_output,
-        )
-    }
-
-    fn secrets_forget(&self, secret: Secret) -> Result<(), Refusal> {
-        self.gateway.call(
-            self.plugin,
-            &secrets::FORGET,
-            secret,
-            secrets::check_forget_input,
-            |secret| self.gateway.secrets.forget(self.plugin, secret),
-            secrets::check_forget_output,
+            capability,
+            input,
+            check_input,
+            provide,
+            check_output,
         )
     }
 }

@@ -894,6 +894,7 @@ dependencies = [
  "crazyagent-plugin-agent-quit",
  "crazyagent-plugin-check",
  "crazyagent-sdk",
+ "crazyagent-sdk-host",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
@@ -1079,6 +1080,14 @@ version = "2.4.4"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "crazyagent-sdk-host"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-bus-gateway",
+ "crazyagent-sdk",
 ]
 
 [[package]]

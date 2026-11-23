@@ -7,6 +7,7 @@ members = [
     "crates/sdk/cap",
     "crates/sdk/capgen",
     "crates/sdk/rust",
+    "crates/sdk/host",
     "crates/kernel/bus_gateway",
     "crates/kernel/storage",
     "crates/kernel/processes",
