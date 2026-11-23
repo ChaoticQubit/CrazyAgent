@@ -73,6 +73,29 @@ fn chunks() -> Vec<Chunk> {
         .collect()
 }
 
+/// H1 (CodeRabbit b01): the writer accepts only the names replay reads, the closed
+/// [`Aggregate`] set, so a well-formed name such as `custom` is refused by an append and by a
+/// snapshot before any row is written, and replay of the log still reads every row.
+#[test]
+fn a_name_replay_cannot_read_is_refused_by_an_append_and_a_snapshot() {
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let custom = AggregateName::new("custom");
+
+    let appended = log.append(&Draft {
+        aggregate: custom,
+        ..draft(b"{}")
+    });
+    let snapshot = log.snapshot(custom, 7, chunks());
+
+    assert_eq!(code(appended), Some("state_log_aggregate_unknown".into()));
+    assert_eq!(code(snapshot), Some("state_log_aggregate_unknown".into()));
+    assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
+    tx.commit().unwrap();
+    assert_eq!(logged(&db).len(), 1);
+}
+
 #[test]
 fn each_own_transaction_moves_the_revision_once_and_numbers_its_events_after_the_last() {
     let mut db = db();

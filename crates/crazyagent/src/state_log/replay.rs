@@ -368,7 +368,7 @@ fn batch(db: &Connection, after: u64, revision: u64) -> Result<Vec<Logged>, Engi
 
 /// The aggregate a stored name names, read through its serde name, which
 /// [`Aggregate::name`] matches. Input: the name. Output: the aggregate, none for another.
-fn parse(name: &str) -> Option<Aggregate> {
+pub(super) fn parse(name: &str) -> Option<Aggregate> {
     serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
 }
 
