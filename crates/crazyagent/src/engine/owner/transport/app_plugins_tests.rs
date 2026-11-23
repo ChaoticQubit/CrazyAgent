@@ -149,7 +149,7 @@ fn the_protocol_refusals_are_listed_for_the_clients() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_revocation_waits_for_an_app_plugin_change_in_flight() {
-    use super::super::barrier_tests::revocation;
+    use super::super::barrier_tests::{revocation, storage_settled};
     use super::super::usage_tests::{IN_FLIGHT, Usage, busy_storage, hold_storage};
     use crate::engine::owner::OwnerClientKind;
     use std::time::Duration;
@@ -172,16 +172,35 @@ async fn a_revocation_waits_for_an_app_plugin_change_in_flight() {
         "the change holds the owner barrier while it waits"
     );
     let control = revocation(runtime, OwnerClientKind::Tui, "revoke-during-app-plugin");
-    let mut revoke = Box::pin(runtime.control(control));
+    let mut revoke = Box::pin(runtime.control(control.clone()));
     assert!(
         tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
         "a revocation waits for the change already in flight"
     );
     release.send(()).unwrap();
     let _ = tokio::time::timeout(settled, changed).await.unwrap();
+    let revoked = match tokio::time::timeout(settled, revoke).await.unwrap() {
+        Ok(reply) => reply,
+        Err(error) => {
+            assert_eq!(error.0, "access_change_pending");
+            storage_settled(&owner).await;
+            runtime.reconcile_control(control).await.unwrap().unwrap()
+        }
+    };
     assert!(
-        tokio::time::timeout(settled, revoke).await.is_ok(),
-        "the revocation goes on once the change is answered"
+        !revoked.active,
+        "the revocation committed once the change was answered"
+    );
+    assert!(
+        !runtime
+            .active_kinds()
+            .unwrap()
+            .contains(&OwnerClientKind::Tui),
+        "the owner state holds the TUI client revoked"
+    );
+    assert!(
+        owner.client.app_plugins().await.is_err(),
+        "the revoked client is refused"
     );
     owner.stop().await;
 }

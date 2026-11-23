@@ -133,7 +133,7 @@ async fn storage_queue_reaches(owner: &Usage, count: usize) -> bool {
 
 /// Waits until storage has answered every job queued before this call, so a change it ran
 /// after the owner stopped waiting is committed. Input: the engine.
-async fn storage_settled(owner: &Usage) {
+pub(super) async fn storage_settled(owner: &Usage) {
     let (send, settled) = oneshot::channel();
     owner
         .runtime()
