@@ -2,8 +2,9 @@ use super::{ProfileHooks, ProjectSandbox};
 use crate::access::AccessHooks;
 use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{any_case, canonical};
+use crate::policy::AccessGrant;
 use crate::ports::REMOTES_MAX;
-use crate::profile::seatbelt::sbpl_overlong;
+use crate::profile::seatbelt::{denies_follow_write_allows, root_pin, sbpl_overlong};
 use crate::toolchains::ToolchainHooks;
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
@@ -165,4 +166,58 @@ fn a_sandbox_on_stand_in_hooks_refuses_a_remote_list_past_its_bound() {
         )
         .is_err()
     );
+}
+
+/// A profile the kernel writes on stand-in hooks keeps each writable root's pin after every
+/// write allow, and the order check fails once a write allow follows the pins.
+#[test]
+fn a_sandbox_on_stand_in_hooks_keeps_its_root_pins_after_every_write_allow() {
+    let (_scratch, [project, home, tmp]) = folders();
+    let sandbox =
+        ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, SandboxNetwork::Open).unwrap();
+    let pins: Vec<String> = sandbox
+        .writable_roots()
+        .map(|root| root_pin(root))
+        .collect();
+    assert_eq!(pins.len(), 3);
+    let text = sandbox.profile();
+    assert!(denies_follow_write_allows(&text, &pins));
+    let allow = format!(
+        "(allow file-read* file-write* (subpath \"{}\"))\n",
+        home.display()
+    );
+    assert!(!denies_follow_write_allows(
+        &format!("{text}{allow}"),
+        &pins
+    ));
+}
+
+/// A sandbox the kernel builds on stand-in hooks refuses a temp folder grant when no owner
+/// temp folder is given, and keeps an open network open under a port grant.
+#[test]
+fn a_sandbox_on_stand_in_hooks_refuses_a_temp_folder_grant_without_the_owner_temp() {
+    let (_scratch, [project, home, tmp]) = folders();
+    let fresh = |network| ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, network).unwrap();
+    assert!(
+        fresh(SandboxNetwork::Only(Vec::new()))
+            .grant_access(&[AccessGrant::TempFolder], None)
+            .is_err()
+    );
+    let open = fresh(SandboxNetwork::Open)
+        .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
+        .unwrap();
+    assert_eq!(open.network(), &SandboxNetwork::Open);
+}
+
+/// A sandbox the kernel builds on stand-in hooks refuses a project root named through the
+/// data volume, whose rules Seatbelt would never match, and takes the same root by its short
+/// name.
+#[test]
+fn a_sandbox_on_stand_in_hooks_refuses_a_root_named_through_the_data_volume() {
+    let (_scratch, [project, home, tmp]) = folders();
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", project.display()));
+    assert!(long.is_dir());
+    let network = || SandboxNetwork::Only(Vec::new());
+    assert!(ProjectSandbox::new(&STAND_IN, &long, &home, &tmp, network()).is_err());
+    assert!(ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, network()).is_ok());
 }
