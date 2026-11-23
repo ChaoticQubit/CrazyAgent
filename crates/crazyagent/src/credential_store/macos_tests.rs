@@ -293,3 +293,21 @@ fn a_bearer_token_of_up_to_16_kib_is_held_but_the_keychain_refuses_to_store_it()
         "credential_missing"
     );
 }
+
+#[test]
+#[should_panic(expected = "has no temporary test keychain; lib tests never open the owner's")]
+fn a_lib_test_keychain_for_an_unserved_namespace_panics() {
+    let namespace = format!("dev.crazyagent.test-unserved-{}", suffix());
+    let _ = crate::credentials::keychain(&namespace);
+}
+
+#[test]
+fn keychain_uses_the_test_home_in_lib_tests() {
+    let namespace = format!("dev.crazyagent.test-{}", suffix());
+    let mut keychain = TestKeychain::temporary();
+    keychain.serve(&namespace);
+    let store = crate::credentials::keychain(&namespace).unwrap();
+    let home = crate::credentials::test_keychain::home_for(&namespace).unwrap();
+    assert_eq!(store.path(), keychain.path());
+    assert!(store.path().starts_with(&home), "{}", store.path().display());
+}
