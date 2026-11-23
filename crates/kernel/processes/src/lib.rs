@@ -13,6 +13,9 @@ pub mod socket_address;
 /// The one place the engine starts child processes and creates sockets, so no child
 /// inherits a pipe or socket another thread has not marked close-on-exec yet.
 pub mod spawn_gate;
+/// App self-update: release channel, signed download, verification and the executable swap
+/// that `crazyagent update` runs, with every engine stop and start left to the caller.
+pub mod update;
 pub mod version;
 
 #[cfg(test)]
