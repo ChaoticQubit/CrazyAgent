@@ -556,9 +556,10 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         Action::BindAccount { name, secret, .. }
         | Action::SetKey { name, secret }
         | Action::Unbind { name, secret } => vec![name, secret],
-        Action::List {} | Action::Preview { .. } | Action::Add { .. } | Action::SetWhenOff { .. } => {
-            Vec::new()
-        }
+        Action::List {}
+        | Action::Preview { .. }
+        | Action::Add { .. }
+        | Action::SetWhenOff { .. } => Vec::new(),
     };
     let folder_invalid =
         |folder: &PathBuf| !folder.is_absolute() || folder.as_os_str().len() > FOLDER_BYTES_MAX;
