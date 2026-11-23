@@ -5,7 +5,7 @@ pub mod aggregate;
 mod appender;
 
 pub use aggregate::{AGGREGATE_BYTES_MAX, AggregateName};
-pub use appender::{Appender, FenceCheck};
+pub use appender::{Appender, FenceCheck, KnownName};
 
 use crate::StorageError;
 use rusqlite::{Connection, OptionalExtension};

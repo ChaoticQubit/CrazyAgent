@@ -68,7 +68,7 @@ pub fn owner<'a, 'c>(
     revision: u64,
     fence: Fence,
 ) -> Result<Appender<'a, 'c>, EngineError> {
-    Ok(Appender::owner(tx, revision, hook(fence))?)
+    Ok(Appender::owner(tx, revision, hook(fence), known)?)
 }
 
 /// Starts appending in a transaction of a writer on its own connection: the kernel moves
@@ -77,7 +77,7 @@ pub fn owner<'a, 'c>(
 /// Output: the appender, a fence refusal, `state_log_revision_exhausted` or
 /// `state_log_body_bounds`.
 pub fn own<'a, 'c>(tx: &'a Transaction<'c>, fence: Fence) -> Result<Appender<'a, 'c>, EngineError> {
-    Ok(Appender::own(tx, hook(fence), engine_event)?)
+    Ok(Appender::own(tx, hook(fence), known, engine_event)?)
 }
 
 /// Starts appending in a transaction of the storage open or one of its schema steps,
@@ -90,6 +90,13 @@ pub(crate) fn opening<'a, 'c>(
     opening: crate::storage::opening::Opening,
 ) -> Result<Appender<'a, 'c>, EngineError> {
     own(tx, Fence::Opening(opening))
+}
+
+/// The engine's name check for the kernel writer: only the closed [`Aggregate`] set that
+/// replay reads may be written (CodeRabbit b01 H1). Input: the name. Output: whether replay
+/// reads it.
+fn known(name: &str) -> bool {
+    replay::parse(name).is_some()
 }
 
 /// The kernel hook for a writer's fence: [`fence::check`] on the appending transaction,

@@ -14,6 +14,11 @@ mod tests;
 /// transaction's borrow. Input: the transaction. Output: Ok, or the engine's refusal.
 pub type FenceCheck = Box<dyn Fn(&Transaction<'_>) -> Result<(), StorageError>>;
 
+/// The engine's check of an aggregate name before it is written: true only for a name its
+/// replay reads, so the log never holds a row replay refuses (CodeRabbit b01 H1). Input:
+/// the name. Output: whether it may be written.
+pub type KnownName = fn(&str) -> bool;
+
 /// The most `events` rows an own write keeps: the top of the engine's `events_retained`
 /// setting (1 to 256), so it never trims a row a client's setting keeps; the next owner
 /// request trims to the setting.
@@ -26,33 +31,37 @@ pub struct Appender<'a, 'c> {
     revision: u64,
     appended: usize,
     fence: FenceCheck,
+    known: KnownName,
 }
 
 impl<'a, 'c> Appender<'a, 'c> {
     /// Starts appending in an owner request's transaction, whose revision the request
     /// already moved: it must be the `state` revision now and newer than the last logged
     /// one, so each appending transaction brings its own and none goes back. The fence is
-    /// checked first, once for the transaction. Inputs: the transaction, that revision and
-    /// the fence. Output: the appender, the fence's refusal, `state_log_revision_stale` or
-    /// `state_log_revision_not_newer`.
+    /// checked first, once for the transaction. Inputs: the transaction, that revision, the
+    /// fence and the engine's name check. Output: the appender, the fence's refusal,
+    /// `state_log_revision_stale` or `state_log_revision_not_newer`.
     pub fn owner(
         tx: &'a Transaction<'c>,
         revision: u64,
         fence: FenceCheck,
+        known: KnownName,
     ) -> Result<Self, StorageError> {
         fence(tx)?;
-        Self::begin(tx, revision, fence)
+        Self::begin(tx, revision, fence, known)
     }
 
     /// Starts appending in a transaction of a writer on its own connection, moving the
     /// `state` revision once for it after its fence is checked, and writing that revision's
     /// `events` row so clients see the change. The engine builds the row's body for the new
     /// revision; it is refused over [`BODY_BYTES_MAX`] before any write. Inputs: the
-    /// transaction, the fence and the body builder. Output: the appender, the fence's
-    /// refusal, `state_log_revision_exhausted` or `state_log_body_bounds`.
+    /// transaction, the fence, the engine's name check and the body builder. Output: the
+    /// appender, the fence's refusal, `state_log_revision_exhausted` or
+    /// `state_log_body_bounds`.
     pub fn own(
         tx: &'a Transaction<'c>,
         fence: FenceCheck,
+        known: KnownName,
         event: impl FnOnce(u64) -> Result<String, StorageError>,
     ) -> Result<Self, StorageError> {
         fence(tx)?;
@@ -82,7 +91,7 @@ impl<'a, 'c> Appender<'a, 'c> {
         if moved != 1 {
             return Err(error("state_log_revision_exhausted"));
         }
-        let appender = Self::begin(tx, state_revision(tx)?, fence)?;
+        let appender = Self::begin(tx, state_revision(tx)?, fence, known)?;
         assert_eq!(appender.revision(), next, "the revision moved once");
         publish(tx, appender.revision(), &body)?;
         Ok(appender)
@@ -100,12 +109,14 @@ impl<'a, 'c> Appender<'a, 'c> {
     }
 
     /// Opens the appender at a fenced revision: it must be the `state` revision now and
-    /// newer than the last logged one. Inputs: the transaction, the revision and the fence.
-    /// Output: the appender, or `state_log_revision_stale` or `state_log_revision_not_newer`.
+    /// newer than the last logged one. Inputs: the transaction, the revision, the fence and
+    /// the name check. Output: the appender, or `state_log_revision_stale` or
+    /// `state_log_revision_not_newer`.
     fn begin(
         tx: &'a Transaction<'c>,
         revision: u64,
         fence: FenceCheck,
+        known: KnownName,
     ) -> Result<Self, StorageError> {
         ensure(tx)?;
         if revision != state_revision(tx)? {
@@ -127,6 +138,7 @@ impl<'a, 'c> Appender<'a, 'c> {
             revision,
             appended: 0,
             fence,
+            known,
         })
     }
 
@@ -178,10 +190,14 @@ impl<'a, 'c> Appender<'a, 'c> {
         })
     }
 
-    /// Appends one checked event at the next `seq`, refusing one past the transaction's
-    /// bound or past the last possible `seq`. Input: the draft. Output: its `seq`.
+    /// Appends one checked event at the next `seq`, refusing a name the engine's replay does
+    /// not read (`state_log_aggregate_unknown`), one past the transaction's bound or past the
+    /// last possible `seq`. Input: the draft. Output: its `seq`.
     fn push(&mut self, draft: &Draft<'_>) -> Result<u64, StorageError> {
         check(draft)?;
+        if !(self.known)(draft.aggregate.name()) {
+            return Err(error("state_log_aggregate_unknown"));
+        }
         if self.appended >= TRANSACTION_EVENTS_MAX {
             return Err(error("state_log_transaction_full"));
         }
