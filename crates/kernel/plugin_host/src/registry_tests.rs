@@ -1334,6 +1334,38 @@ fn a_plugin_on_a_handed_out_port_is_refused_and_left_out_of_the_kept_ports() {
     }
 }
 
+/// The handed-out range is read again when the owner confirms an add: a port the range
+/// took between the trust screen and the add is refused with nothing written, and a plugin
+/// on a port outside the range installs.
+#[test]
+fn an_add_rechecks_the_handed_out_range_before_writing() {
+    let case = case();
+    let range = 32_768..=60_999;
+    let engine = Engine {
+        handed_out: Some(range.clone()),
+        ..case.engine()
+    };
+    let text = near_on(*range.start());
+    let source = picked(&case, "handed", &text);
+    assert!(matches!(
+        preview(&case.db, &case.engine(), &source).unwrap(),
+        Preview::Ready { .. }
+    ));
+    let trust_before = cells(&case.db, "app_plugin_trust");
+    let state_before = cells(&case.db, "app_plugin_state");
+    assert_eq!(
+        code(add(&case.db, &engine, &source, &sha(&text), false, 1)),
+        "app_plugin_port_handed_out"
+    );
+    assert!(!case.root.join(FOLDER).join("handed").exists());
+    assert_eq!(cells(&case.db, "app_plugin_trust"), trust_before);
+    assert_eq!(cells(&case.db, "app_plugin_state"), state_before);
+    let allowed = near_on(9000);
+    let source = picked(&case, "allowed", &allowed);
+    add(&case.db, &engine, &source, &sha(&allowed), false, 2).unwrap();
+    assert!(case.root.join(FOLDER).join("handed").exists());
+}
+
 /// With no handed-out range (macOS keeps every loopback plugin port free of agents in
 /// its profile), a plugin on any port stays usable and listed for the sandbox.
 #[test]
