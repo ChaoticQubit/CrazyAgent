@@ -92,7 +92,7 @@ export function commandArgs(source) {
 export function commands(source) {
   const custom = commandArgs(source);
   const found = [];
-  const head = /#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*(?:<[^>]*>)?\(/g;
+  const head = /#\[tauri::command\]\s*(?:pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*(?:<[^>]*>)?\(/g;
   for (let match = head.exec(source); match; match = head.exec(source)) {
     let index = head.lastIndex;
     let depth = 1;
@@ -243,7 +243,7 @@ function imports(source) {
     const base = brace === -1 ? text.slice(0, text.lastIndexOf("::")) : text.slice(0, brace).replace(/::$/, "");
     const leaves = brace === -1 ? [text.slice(text.lastIndexOf("::") + 2)] : splitTop(text.slice(brace + 1, text.lastIndexOf("}")));
     const root = base.startsWith("bridge") ? `crazyagent_desktop::${base}` : base;
-    if (!/^(crazyagent|crazyagent_desktop|std)\b/.test(root)) continue;
+    if (!/^(crazyagent|crazyagent_desktop|std|kernel_\w+)\b/.test(root)) continue;
     for (const leaf of leaves) if (/^\w+$/.test(leaf)) paths.set(leaf, `${root}::${leaf}`);
   }
   return paths;

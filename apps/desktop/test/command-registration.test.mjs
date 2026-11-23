@@ -32,15 +32,17 @@ test("every command the window invokes is registered in all four native places",
   }
 });
 
-test("a command declared in commands/ meets the same rule as one in lib.rs", () => {
+test("a command declared in another src-tauri/src module meets the same rule as one in lib.rs", () => {
   const native = nativeSources();
   assert.ok(native.startsWith(read("src-tauri/src/lib.rs")), "lib.rs is read first");
-  assert.match(native, commandFn("desktop_restore_recovery"), "commands/restore.rs is read");
+  assert.match(native, commandFn("desktop_restore_recovery"), "restore.rs is read");
+  assert.doesNotMatch(read("src-tauri/src/lib.rs"), commandFn("desktop_restore_recovery"), "the restore commands live in restore.rs");
   const lib = read("src-tauri/src/lib.rs");
   const declared = (text) => `${lib}\n${text}`;
   assert.deepEqual(unbound(["desktop_trial"], declared("async fn desktop_trial(webview: Webview) {}")), ["desktop_trial"], "no attribute");
   assert.deepEqual(unbound(["desktop_trial"], declared("#[tauri::command]\n// moved\nfn desktop_trial() {}")), ["desktop_trial"], "attribute not on the fn");
-  assert.deepEqual(unbound(["desktop_trial"], declared("#[tauri::command]\npub(crate) async fn desktop_trial() {}")), ["desktop_trial"], "visibility is not the rule");
+  assert.deepEqual(unbound(["desktop_trial"], declared("#[tauri::command]\npub async fn desktop_trial() {}")), ["desktop_trial"], "pub is not the rule");
+  assert.deepEqual(unbound(["desktop_trial"], declared("#[tauri::command]\npub(crate) async fn desktop_trial() {}")), []);
   assert.deepEqual(unbound(["desktop_trial"], declared("#[tauri::command]\nasync fn desktop_trial() {}")), []);
 });
 

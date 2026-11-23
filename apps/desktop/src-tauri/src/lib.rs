@@ -380,8 +380,6 @@ async fn desktop_restart_engine(
     bridge.connect().await
 }
 
-include!("commands/restore.rs");
-
 #[tauri::command]
 async fn desktop_status(
     webview: Webview,
@@ -5941,23 +5939,37 @@ fn admit_pages<R: Runtime>(
     }
 }
 
+/// The name a window calls a command by: the last part of its path in `native_commands!`, so
+/// `restore::desktop_restore_status` and `desktop_status` give the bare function name.
+/// Input: a command function, bare or one module deep. Output: its name as a string literal.
+macro_rules! command_name {
+    ($module:ident :: $command:ident) => {
+        stringify!($command)
+    };
+    ($command:ident) => {
+        stringify!($command)
+    };
+}
+
 /// Declares the native commands once: their names for whoever must walk them and their
 /// handler behind the page check. The commands after the first `;` serve only the webview
 /// terminal, which a macOS build does not have (DEC-203), so they exist off macOS only; the
 /// ones after the second exist only in a macOS native-webdriver build, for its trials.
 /// Input: the command functions. Output: `NATIVE_COMMANDS` and `native_handler`.
 macro_rules! native_commands {
-    ($($command:ident,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
+    ($($head:ident $(:: $tail:ident)?,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
         #[cfg(all(test, not(target_os = "macos")))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($webview),)+];
+        const NATIVE_COMMANDS: &[&str] =
+            &[$(command_name!($head $(:: $tail)?),)+ $(stringify!($webview),)+];
         #[cfg(all(test, target_os = "macos", not(feature = "native-webdriver")))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+        const NATIVE_COMMANDS: &[&str] = &[$(command_name!($head $(:: $tail)?),)+];
         #[cfg(all(test, target_os = "macos", feature = "native-webdriver"))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($trial),)+];
+        const NATIVE_COMMANDS: &[&str] =
+            &[$(command_name!($head $(:: $tail)?),)+ $(stringify!($trial),)+];
 
         fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
             admit_pages::<tauri::Wry>(tauri::generate_handler![
-                $($command,)+
+                $($head $(:: $tail)?,)+
                 $(#[cfg(not(target_os = "macos"))] $webview,)+
                 $(#[cfg(all(target_os = "macos", feature = "native-webdriver"))] $trial,)+
             ])
@@ -6120,11 +6132,11 @@ native_commands! {
     desktop_install_dependency,
     desktop_fix_tool_permissions,
     desktop_set_refused_tool,
-    desktop_restore_status,
-    desktop_restore_pinned,
-    desktop_restore_recovery,
-    desktop_restore_recover,
-    desktop_restore_open_backups,
+    restore::desktop_restore_status,
+    restore::desktop_restore_pinned,
+    restore::desktop_restore_recovery,
+    restore::desktop_restore_recover,
+    restore::desktop_restore_open_backups,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,
@@ -6190,8 +6202,8 @@ native_commands! {
     desktop_set_quit_settings,
     desktop_provider_retry,
     desktop_set_provider_retry,
-    desktop_log_compaction,
-    desktop_set_log_compaction,
+    restore::desktop_log_compaction,
+    restore::desktop_set_log_compaction,
     desktop_learning_progress,
     desktop_set_learning_mark,
     desktop_master_step_settings,

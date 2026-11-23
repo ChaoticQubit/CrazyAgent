@@ -112,7 +112,7 @@ const PROJECT_WALL_COMMANDS: [&str; 7] = [
 const WALL_GUARD: &str = "terminal_window(&webview)?;";
 const PROJECT_WALL_GUARD: &str = "terminal_window_for(&webview, &id)?;";
 
-/// Every `#[tauri::command]` in lib.rs and the command files it includes with its name and
+/// Every `#[tauri::command]` in lib.rs and the other src modules with its name and
 /// body. Takes nothing. Returns the pairs in source order.
 fn command_bodies() -> Vec<(&'static str, &'static str)> {
     native_sources::native_sources()
