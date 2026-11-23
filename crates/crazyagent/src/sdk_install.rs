@@ -24,7 +24,9 @@ const ARGS: u16 = 1 << 8;
 const FLAGS: u16 = 1 << 9;
 
 /// What an executor ran for one recipe: the exit code, the output as read, and every
-/// environment value the run set, which the output is redacted against.
+/// environment value the run set, which the output is redacted against. The output is one
+/// stream as the kernel kept it, its last `run::OUTPUT_BYTES_MAX` bytes, never two streams
+/// joined, so a cut can only sit at its front or its back.
 pub(crate) struct Ran {
     pub(crate) code: u32,
     pub(crate) output: Vec<u8>,
