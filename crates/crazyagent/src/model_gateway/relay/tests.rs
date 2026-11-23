@@ -1402,8 +1402,14 @@ fn upstream_at_ticket_base(base_url: &str) -> Result<Upstream, EngineError> {
 
 #[test]
 fn the_relay_parse_is_byte_equal_on_todays_inputs() {
-    let long_path = format!("https://api.example.test/{}", "a".repeat(TARGET_BYTES_MAX / 2));
-    let fitting_path = format!("https://api.example.test/{}", "a".repeat(TARGET_BYTES_MAX / 2 - 1));
+    let long_path = format!(
+        "https://api.example.test/{}",
+        "a".repeat(TARGET_BYTES_MAX / 2)
+    );
+    let fitting_path = format!(
+        "https://api.example.test/{}",
+        "a".repeat(TARGET_BYTES_MAX / 2 - 1)
+    );
     let inputs = [
         "https://api.openai.com/v1/",
         "https://api.openai.com/v1",
