@@ -643,3 +643,41 @@ fn a_url_with_brackets_and_braces_reaches_the_server_as_written() {
     assert!(path.contains("[1-2]"), "{path}");
     assert_eq!(server.join().unwrap(), format!("GET {path} HTTP/1.1"));
 }
+
+/// Writers of the update channel at the same moment never clobber each other: each of 8
+/// threads saves stable or dev 50 times and every save succeeds, `update.toml` then reads
+/// as one of the two channels, and no half-written file is left in the folder.
+#[test]
+fn channel_writers_at_the_same_moment_each_save_whole() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().to_path_buf();
+    let writers: Vec<_> = (0..8)
+        .map(|n| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let channel = if n % 2 == 0 {
+                    Channel::Stable
+                } else {
+                    Channel::Dev
+                };
+                (0..50)
+                    .map(|_| write_channel(&root, channel))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    for writer in writers {
+        for saved in writer.join().unwrap() {
+            assert!(saved.is_ok(), "{:?}", saved.err().map(|error| error.code));
+        }
+    }
+    assert!(matches!(
+        read_channel(&root).unwrap(),
+        Channel::Stable | Channel::Dev
+    ));
+    let left: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["update.toml".to_owned()]);
+}
