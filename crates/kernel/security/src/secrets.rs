@@ -300,17 +300,25 @@ impl<'r> Secrets<'r> {
     }
 
     /// Keeps a value the kernel captured under a name of the calling plugin. Inputs: the
-    /// plugin, the name and the value. Output: the handle id, or a refusal; a refused scope,
-    /// name or full handle table comes before the store write.
+    /// plugin, the name and the value. Output: the handle id and whether this call minted
+    /// it, or a refusal; a refused scope, name or full handle table comes before the store
+    /// write.
     pub fn keep(
         &self,
         caller: &'static str,
         name: &str,
         value: &SecretString,
-    ) -> Result<u64, StoreError> {
+    ) -> Result<(u64, bool), StoreError> {
         let (service, found) = self.reference_of(caller, name)?;
-        let reserved = self.lock().reserve(caller, &found)?;
-        self.save(caller, (&service, name, &found), reserved, value)
+        let (id, fresh) = self.lock().reserve(caller, &found)?;
+        let saved = self.save(caller, (&service, name, &found), (id, fresh), value)?;
+        Ok((saved, fresh))
+    }
+
+    /// Drops one handle of the calling plugin without touching the store: a held value is
+    /// gone, a kept item stays under its name. Inputs: the plugin and the id. Output: none.
+    pub fn release(&self, caller: &'static str, id: u64) {
+        self.lock().drop_id(caller, id);
     }
 
     /// Holds a captured value for the calling plugin for this engine run, never stored.
