@@ -305,12 +305,186 @@ pub fn run_command(mut command: Command, limit: Duration) -> Result<(bool, Vec<u
 
 #[cfg(unix)]
 fn stop(pid: u32) {
+    signal_group(pid, rustix::process::Signal::KILL);
+}
+
+/// Sends a signal to a run's whole process group; a group that is already gone is fine.
+/// Inputs: the group leader's id and the signal.
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: rustix::process::Signal) {
     if let Some(pid) = i32::try_from(pid)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
     {
         assert!(pid.as_raw_nonzero().get() > 1);
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        let _ = rustix::process::kill_process_group(pid, signal);
+    }
+}
+
+/// The time a program past its bound has to end after its group is asked to stop, before
+/// the group is killed.
+#[cfg(unix)]
+const STOP_GRACE: Duration = Duration::from_secs(2);
+/// The longest a run waits for a stream's end once the program is gone, so a descendant
+/// that left the group and still holds the pipe cannot hold the run.
+#[cfg(unix)]
+const DRAIN_TIME: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const CHUNK_BYTES: usize = 8192;
+#[cfg(unix)]
+const _: () = assert!(CHUNK_BYTES <= OUTPUT_BYTES_MAX);
+
+/// How one program run ended: whether it exited with success, and the last
+/// [`OUTPUT_BYTES_MAX`] bytes of its standard output and of its standard error.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tails {
+    pub success: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[cfg(unix)]
+/// Runs one program like [`run`], keeping the last bytes of both its streams. Past its bound
+/// its whole group is asked to stop with TERM, given [`STOP_GRACE`] to end, then killed; on
+/// every return the group is killed, so nothing the program started outlives the run.
+/// Inputs: the absolute program, its arguments, the environment pairs, the working folder
+/// and the bound. Output: the exit and both tails, or `setup_timeout` or
+/// `setup_install_failed`.
+pub fn run_tails(
+    program: &Path,
+    args: &[OsString],
+    env: &[(&str, OsString)],
+    cwd: &Path,
+    limit: Duration,
+) -> Result<Tails, InstallError> {
+    assert!(program.is_absolute());
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env_clear()
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let mut child =
+        crate::spawn_gate::spawn(&mut command).map_err(|_| InstallError("setup_install_failed"))?;
+    let pid = child.id();
+    let stdout = Tail::start(child.stdout.take());
+    let stderr = Tail::start(child.stderr.take());
+    let success = match waited(&mut child, limit) {
+        Some(status) => Some(status.success()),
+        None => {
+            signal_group(pid, rustix::process::Signal::TERM);
+            let _ = waited(&mut child, STOP_GRACE);
+            None
+        }
+    };
+    stop(pid);
+    let _ = child.kill();
+    let _ = child.wait();
+    let (stdout, stderr) = (stdout.taken(), stderr.taken());
+    assert!(stdout.len() <= OUTPUT_BYTES_MAX);
+    assert!(stderr.len() <= OUTPUT_BYTES_MAX);
+    let success = success.ok_or(InstallError("setup_timeout"))?;
+    Ok(Tails {
+        success,
+        stdout,
+        stderr,
+    })
+}
+
+/// Waits for a child to end, polling from a short pause up to [`POLL`], for at most a time
+/// limit. Inputs: the child and the limit. Output: its exit, none when it still runs or
+/// cannot be asked.
+#[cfg(unix)]
+fn waited(child: &mut std::process::Child, limit: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    let mut pause = PAUSE_MIN;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                std::thread::sleep(pause.min(left));
+                pause = (pause * 2).min(POLL);
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// The last bytes of one output pipe, read on its own thread so a chatty program never
+/// blocks on a full pipe. `done` answers when the pipe reached its end.
+#[cfg(unix)]
+struct Tail {
+    kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(unix)]
+impl Tail {
+    /// Starts reading a pipe to its end, keeping its last [`OUTPUT_BYTES_MAX`] bytes.
+    /// Input: the pipe, present for a piped stream. Output: the handle to what is kept.
+    fn start(pipe: Option<impl Read + Send + 'static>) -> Self {
+        let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sender, done) = std::sync::mpsc::channel();
+        if let Some(pipe) = pipe {
+            let into = kept.clone();
+            let reader = std::thread::Builder::new().name("crazyagent-install-output".into());
+            let _ = reader.spawn(move || {
+                follow(pipe, &into);
+                let _ = sender.send(());
+            });
+        }
+        Self { kept, done }
+    }
+
+    /// Waits at most [`DRAIN_TIME`] for the pipe's end, then takes what was kept so far.
+    /// Output: the last bytes.
+    fn taken(self) -> Vec<u8> {
+        let _ = self.done.recv_timeout(DRAIN_TIME);
+        let mut kept = self
+            .kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut bytes = std::mem::take(&mut *kept);
+        if bytes.len() > OUTPUT_BYTES_MAX {
+            bytes.drain(..bytes.len() - OUTPUT_BYTES_MAX);
+        }
+        assert!(bytes.len() <= OUTPUT_BYTES_MAX);
+        bytes
+    }
+}
+
+/// Reads a pipe to its end into a shared buffer that never holds more than twice the kept
+/// size. Inputs: the pipe and the buffer.
+#[cfg(unix)]
+fn follow(mut pipe: impl Read, into: &std::sync::Mutex<Vec<u8>>) {
+    let mut chunk = [0_u8; CHUNK_BYTES];
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut kept = into
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        kept.extend_from_slice(&chunk[..read]);
+        if kept.len() > OUTPUT_BYTES_MAX * 2 {
+            let extra = kept.len() - OUTPUT_BYTES_MAX;
+            kept.drain(..extra);
+        }
+        assert!(kept.len() <= OUTPUT_BYTES_MAX * 2);
     }
 }
 
