@@ -2154,7 +2154,7 @@ impl ProjectSandbox {
             .is_some_and(|root| folder.parent() == Some(root.as_path()));
         let kept_read_only = match (self.project_secrets.as_ref(), folder.file_name()) {
             (Some(root), Some(name)) => name.to_str().is_none_or(|name| {
-                kernel_sandbox::shared_folders::never_written(&ACCESS_HOOKS, root, name)
+                kernel_sandbox::shared_folders::never_written(self.hooks.access, root, name)
             }),
             _ => true,
         };
