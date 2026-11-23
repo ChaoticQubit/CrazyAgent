@@ -197,7 +197,7 @@ impl<'r> Requests<'r> {
                 self.secrets.check_name(caller, name)?;
             }
         }
-        if fields.len() > self.secrets.free_handles() {
+        if fields.len() > self.secrets.free_handles(caller) {
             return Err(StoreError::code("secret_handles_full"));
         }
         let bearer = match request.bearer {

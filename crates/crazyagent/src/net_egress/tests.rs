@@ -232,7 +232,10 @@ fn the_curl_config_is_byte_equal_to_todays_github_request() {
         "dev.crazyagent.e0123456789ab",
         &scopes,
         &handles,
-        Some(("github", SecretString::new(TOKEN.as_bytes().to_vec()).unwrap())),
+        Some((
+            "github",
+            SecretString::new(TOKEN.as_bytes().to_vec()).unwrap(),
+        )),
     );
     let bearer = secrets.put_from_owner("github", "token").unwrap();
     let rules = CaptureRules::new(&[]).unwrap();

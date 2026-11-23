@@ -138,7 +138,13 @@ fn a_forged_handle_id_is_refused() {
 #[test]
 fn put_from_owner_moves_the_paste_and_returns_only_a_handle() {
     let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
-    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, Some(("github", paste())));
+    let secrets = Secrets::for_request(
+        &store,
+        NAMESPACE,
+        &scopes,
+        &handles,
+        Some(("github", paste())),
+    );
     let id = secrets.put_from_owner("github", "token").unwrap();
     let service = format!("{NAMESPACE}.github");
     assert_eq!(store.held(&service, "token").as_deref(), Some(PASTE));
@@ -165,7 +171,13 @@ fn put_from_owner_without_an_entry_is_refused() {
 #[test]
 fn a_refused_name_keeps_the_owner_entry() {
     let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
-    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, Some(("github", paste())));
+    let secrets = Secrets::for_request(
+        &store,
+        NAMESPACE,
+        &scopes,
+        &handles,
+        Some(("github", paste())),
+    );
     for refused in ["", "Token", "a b", ".token", &"t".repeat(64)] {
         assert_eq!(
             secrets.put_from_owner("github", refused),
@@ -188,7 +200,13 @@ fn a_full_handle_table_refuses_the_put_before_the_store_write() {
         let found = reference(&format!("{NAMESPACE}.notes"), &format!("n{index}")).unwrap();
         handles.lock().unwrap().mint("notes", found).unwrap();
     }
-    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, Some(("github", paste())));
+    let secrets = Secrets::for_request(
+        &store,
+        NAMESPACE,
+        &scopes,
+        &handles,
+        Some(("github", paste())),
+    );
     assert_eq!(
         secrets.put_from_owner("github", "token"),
         Err(StoreError::code("secret_handles_full"))
@@ -204,7 +222,13 @@ fn a_failed_store_write_drops_the_new_handle() {
         scopes(),
         Mutex::new(Handles::new()),
     );
-    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, Some(("github", paste())));
+    let secrets = Secrets::for_request(
+        &store,
+        NAMESPACE,
+        &scopes,
+        &handles,
+        Some(("github", paste())),
+    );
     assert_eq!(
         secrets.put_from_owner("github", "token"),
         Err(StoreError::code("credential_store_unavailable"))
@@ -365,9 +389,15 @@ fn one_plugin_cannot_take_the_handles_another_needs() {
     );
     assert_eq!(handles.free("notes"), PLUGIN_HANDLES_MAX);
     let notes = reference("svc.notes", "n0").unwrap();
-    let id = handles.mint("notes", notes.clone()).expect("notes keeps its own share");
+    let id = handles
+        .mint("notes", notes.clone())
+        .expect("notes keeps its own share");
     assert_eq!(handles.resolve("notes", id), Ok(&notes));
-    assert!(handles.hold("notes", SecretString::new(b"held".to_vec()).unwrap()).is_ok());
+    assert!(
+        handles
+            .hold("notes", SecretString::new(b"held".to_vec()).unwrap())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -378,7 +408,10 @@ fn a_plugin_learns_nothing_from_the_gap_between_its_ids() {
         .unwrap();
     for index in 0..10 {
         handles
-            .mint("notes", reference("svc.notes", &format!("n{index}")).unwrap())
+            .mint(
+                "notes",
+                reference("svc.notes", &format!("n{index}")).unwrap(),
+            )
             .unwrap();
         handles
             .hold("notes", SecretString::new(b"held".to_vec()).unwrap())
@@ -389,21 +422,33 @@ fn a_plugin_learns_nothing_from_the_gap_between_its_ids() {
         .unwrap();
     assert_eq!(second, first + 1);
     let mut alone = Handles::new();
-    let first_alone = alone.mint("github", reference("svc.github", "a").unwrap()).unwrap();
-    let second_alone = alone.mint("github", reference("svc.github", "b").unwrap()).unwrap();
+    let first_alone = alone
+        .mint("github", reference("svc.github", "a").unwrap())
+        .unwrap();
+    let second_alone = alone
+        .mint("github", reference("svc.github", "b").unwrap())
+        .unwrap();
     assert_eq!((first, second), (first_alone, second_alone));
 }
 
 #[test]
 fn a_second_plugin_in_the_same_request_gets_secret_owner_entry_missing() {
     let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
-    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, Some(("github", paste())));
+    let secrets = Secrets::for_request(
+        &store,
+        NAMESPACE,
+        &scopes,
+        &handles,
+        Some(("github", paste())),
+    );
     assert_eq!(
         secrets.put_from_owner("notes", "token"),
         Err(StoreError::code("secret_owner_entry_missing"))
     );
     assert_eq!(*store.calls.lock().unwrap(), 0);
-    let id = secrets.put_from_owner("github", "token").expect("the addressed plugin takes the paste");
+    let id = secrets
+        .put_from_owner("github", "token")
+        .expect("the addressed plugin takes the paste");
     let service = format!("{NAMESPACE}.github");
     assert_eq!(store.held(&service, "token").as_deref(), Some(PASTE));
     assert!(secrets.value("github", id).is_ok());
@@ -476,4 +521,23 @@ fn a_held_value_is_refused_for_another_plugin_and_never_resolves_to_a_reference(
     assert!(handles.lock().unwrap().resolve("github", id).is_err());
     assert_eq!(*store.calls.lock().unwrap(), 0);
     assert!(secrets.value("github", id).is_ok());
+}
+
+#[test]
+fn a_dropped_id_is_never_given_again() {
+    let mut handles = Handles::new();
+    let first = handles
+        .hold("github", SecretString::new(b"held".to_vec()).unwrap())
+        .unwrap();
+    handles.drop_id("github", first);
+    assert_eq!(handles.total(), 0);
+    assert_eq!(handles.free("github"), PLUGIN_HANDLES_MAX);
+    let second = handles
+        .hold("github", SecretString::new(b"held".to_vec()).unwrap())
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        handles.resolve("github", first),
+        Err(StoreError::code("secret_handle_refused"))
+    );
 }
