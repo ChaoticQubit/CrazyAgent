@@ -292,6 +292,31 @@ fn a_start_after_a_failed_rollback_refuses_and_leaves_engine_db_unmigrated() {
     );
 }
 
+/// H10 (CodeRabbit b01, leader 23:3x): a record left at `restoring`, by a crash or a failed
+/// outcome write after the restore started, refuses the next start without migrating, and
+/// the start keeps the record.
+#[test]
+fn a_start_after_a_restore_left_at_restoring_refuses_and_leaves_engine_db_unmigrated() {
+    use crate::restore::{ENGINE_RESTORE_BROKEN, RECORD_RESTORING};
+    let (root, path, mut db) = database(true);
+    recorded(root.path(), RECORD_RESTORING);
+    let before = std::fs::read(&path).unwrap();
+
+    let refused = upgrade(&mut db, &path, &no_texts, &steps(&[added]))
+        .unwrap_err()
+        .0;
+
+    assert!(refused.starts_with(ENGINE_RESTORE_BROKEN), "{refused}");
+    assert!(!holds(&db, "added"));
+    assert_eq!(version(&db).unwrap(), 0);
+    assert!(backups(root.path()).is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        crate::restore::read_restore_record(root.path()).as_deref(),
+        Some(RECORD_RESTORING)
+    );
+}
+
 #[test]
 fn a_start_after_a_restore_that_rolled_back_still_migrates() {
     use crate::restore::{RECORD_FAILED, RESTORE_FAILED};
