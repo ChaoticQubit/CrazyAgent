@@ -220,25 +220,34 @@ pub(crate) fn drop_binding(
     source: &str,
     reference: &str,
 ) -> Result<(), Refused> {
-    db.execute(
-        "DELETE FROM app_plugin_secrets WHERE plugin=?1 AND secret=?2",
-        [plugin, secret],
-    )
-    .map_err(sqlite)?;
+    crate::store_log::record(
+        db,
+        crate::store_log::Event::Unbound {
+            plugin: plugin.to_owned(),
+            secret: secret.to_owned(),
+        },
+    )?;
     forget_key_file(db, engine, source, reference);
     Ok(())
 }
 
 /// Deletes the key file a removed or replaced binding row named, only once that change is
-/// committed: when the connection holds no open transaction. Under an open transaction, or
-/// when the delete fails, the file stays and the start sweep deletes it once no row names
-/// it. Inputs: database, engine facts and the old row's source and reference. Output: none.
+/// committed: at once when the connection holds no open transaction, after the commit when
+/// a plugin store capture holds the transaction's changes. Under any other open
+/// transaction, or when the delete fails, the file stays and the start sweep deletes it
+/// once no row names it. Inputs: database, engine facts and the old row's source and
+/// reference. Output: none.
 pub(crate) fn forget_key_file(db: &Connection, engine: &Engine<'_>, source: &str, reference: &str) {
-    if source == KEY
-        && db.is_autocommit()
-        && let Some(key) = plugin_key(reference)
-    {
+    if source != KEY {
+        return;
+    }
+    let Some(key) = plugin_key(reference) else {
+        return;
+    };
+    if db.is_autocommit() {
         let _ = (engine.keys.remove)(engine.root, KeyFolder::Plugin, &key);
+    } else {
+        let _ = crate::store_log::forget_after_commit(key);
     }
 }
 
@@ -284,13 +293,22 @@ fn save_binding(
     reference: &str,
 ) -> Result<(), Refused> {
     let old = binding_row(db, plugin, secret)?;
-    db.execute(
-        "INSERT INTO app_plugin_secrets (plugin, secret, source, reference) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(plugin, secret) DO UPDATE SET source=excluded.source,
-         reference=excluded.reference",
-        [plugin, secret, source, reference],
-    )
-    .map_err(sqlite)?;
+    if old.as_ref().is_some_and(|(old_source, old_reference)| {
+        old_source == source && old_reference == reference
+    }) {
+        return Ok(());
+    }
+    let source_word = crate::store_log::Source::from_word(source)
+        .expect("a binding is saved from an account or an entered key");
+    crate::store_log::record(
+        db,
+        crate::store_log::Event::Bound {
+            plugin: plugin.to_owned(),
+            secret: secret.to_owned(),
+            source: source_word,
+            reference: reference.to_owned(),
+        },
+    )?;
     if let Some((old_source, old_reference)) = old
         && (old_source != source || old_reference != reference)
     {

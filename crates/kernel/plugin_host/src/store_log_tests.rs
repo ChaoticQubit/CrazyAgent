@@ -81,7 +81,8 @@ fn text(value: &str) -> Value {
 }
 
 /// Each kind reads back from its own body, and a body outside its closed shape or its
-/// bounds is refused, both when written and when read.
+/// bounds is refused, both when written and when read: a switch never names a code plugin
+/// and a trust record never names a bundled one.
 #[test]
 fn every_store_event_decodes_only_its_closed_body() {
     let events = every();
@@ -155,7 +156,7 @@ fn every_store_event_decodes_only_its_closed_body() {
         Some(REFUSED)
     );
 
-    for name in [QUIT, "openai", "../acme", ""] {
+    for name in [QUIT, "../acme", ""] {
         let switched = Event::Switched {
             plugin: name.into(),
             enabled: true,
@@ -167,6 +168,23 @@ fn every_store_event_decodes_only_its_closed_body() {
             Some(REFUSED),
             "Switched {name:?}"
         );
+    }
+    let bundled = Event::Switched {
+        plugin: "openai".into(),
+        enabled: false,
+    };
+    assert!(
+        bundled.body().is_ok(),
+        "a bundled plugin switches by its name"
+    );
+    for name in ["openai", QUIT] {
+        let trusted = Event::Trusted {
+            plugin: name.into(),
+            sha256: SHA.into(),
+            hosts: Vec::new(),
+            trusted_ms: 1,
+        };
+        assert_eq!(code(trusted.body()), Some(REFUSED), "Trusted {name}");
     }
     for name in ["acme", "openai"] {
         let switched = Event::CodeSwitched {
