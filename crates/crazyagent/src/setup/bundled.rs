@@ -1,5 +1,5 @@
-use super::InstallError;
-use super::process::{private_folder, staging_folder};
+use kernel_processes::run::InstallError;
+use kernel_processes::run::{private_folder, staging_folder};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -319,7 +319,9 @@ pub fn hook_folder(setup: &Path, id: &str) -> Option<PathBuf> {
 fn unpack(setup: &Path, name: &str, files: &[(&str, &[u8])]) -> Result<PathBuf, InstallError> {
     private_folder(setup)?;
     let target = setup.join(name);
-    let staging = staging_folder(setup, name)?;
+    let id =
+        crate::engine::owner::random_id().map_err(|_| InstallError("setup_store_unavailable"))?;
+    let staging = staging_folder(setup, name, &id)?;
     let result = (|| {
         for (path, bytes) in files {
             let relative = Path::new(path);

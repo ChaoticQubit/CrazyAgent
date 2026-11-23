@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
 pub mod migrations;
+/// The owner's restore of the pinned 2.4 backup, with the engine's parts as hooks, and the
+/// private record that says how the last restore stands while no engine answers.
+#[cfg(unix)]
+pub mod restore;
 pub mod state_log;
 /// The engine.db upgrade runner: the version of record, the forward steps run in one
 /// transaction after a checked backup, and the recovery when a step fails.

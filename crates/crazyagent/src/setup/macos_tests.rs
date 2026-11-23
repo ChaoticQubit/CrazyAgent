@@ -1,6 +1,6 @@
 use super::*;
 use crate::setup::plain_reason;
-use crate::setup::process::{file_sha256, is_sha256};
+use kernel_processes::run::{file_sha256, is_sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 

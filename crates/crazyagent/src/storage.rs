@@ -28,7 +28,6 @@ pub(crate) use master_session::{
     close_master_for_removal, master_resolve_ready, member_request, native_sign_in,
     validate_configured_initial_conversation_receipt, validate_listed_initial_conversation_receipt,
 };
-pub use migrations::backup_failure;
 pub(crate) mod agent_text;
 mod events;
 pub(crate) mod narrowing;
@@ -1783,7 +1782,7 @@ fn open_actor_database(
         .busy_timeout(std::time::Duration::from_millis(250))
         .map_err(error)?;
     if readonly {
-        migrations::check(&connection, migrations::STEPS)?;
+        kernel_storage::upgrade::check(&connection, migrations::STEPS)?;
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
@@ -1864,7 +1863,7 @@ fn open_actor_database(
         .busy_timeout(std::time::Duration::from_millis(250))
         .map_err(error)?;
     if readonly {
-        migrations::check(&connection, migrations::STEPS)?;
+        kernel_storage::upgrade::check(&connection, migrations::STEPS)?;
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
@@ -3381,7 +3380,7 @@ fn owner_apply_request(
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
     assert!(redacted == 0 || changed, "only an applied removal redacts");
-    if redacted > 0 && !crate::state_log::replay::checkpoint(db) {
+    if redacted > 0 && !kernel_storage::state_log::replay::checkpoint(db) {
         eprintln!("state_log_redact_checkpoint_busy");
     }
     if changed

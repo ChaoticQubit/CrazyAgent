@@ -2,7 +2,7 @@ use super::*;
 use crate::landing_log::{
     self, AgentBranch, Approved, Base, Change, OwnerEdit, Project, Snoozed, Worktree,
 };
-use crate::state_log::TOMBSTONE;
+use kernel_storage::state_log::TOMBSTONE;
 
 /// The project-keyed landing tables the row compares live against a landing rebuild.
 const LANDING_TABLES: [&str; 2] = ["github_publish_prompt", "verification_current"];

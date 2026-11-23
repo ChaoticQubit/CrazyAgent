@@ -208,7 +208,12 @@ impl Fixture {
             transcript: Transcript::ClaudeSession { file },
         };
         let since = SystemTime::now();
-        let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
+        let pane = host
+            .spawn(
+                &AgentId::team(id).unwrap(),
+                &crate::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         PaneRecord {
             access: Some(AgentAccess::Sandboxed),
             toolchains: Some(Vec::new()),
@@ -5885,7 +5890,8 @@ fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
         .map(|at| AgentId::new(&format!("viewers-held-{at}")).unwrap())
         .collect();
     for pane in &held {
-        host.spawn(pane, &command).unwrap();
+        host.spawn(pane, &crate::terminal::PaneCommand::from(&command))
+            .unwrap();
     }
     let (fresh, filled) = held.split_last().unwrap();
     let mut viewers = Vec::new();
@@ -30373,7 +30379,9 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         ],
         transcript: Transcript::ClaudeSession { file: session },
     };
-    let placed = host.spawn_own_server(&lead, &command).unwrap();
+    let placed = host
+        .spawn_own_server(&lead, &crate::terminal::PaneCommand::from(&command))
+        .unwrap();
     assert!(crate::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");

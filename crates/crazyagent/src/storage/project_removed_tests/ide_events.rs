@@ -2,7 +2,7 @@ use super::*;
 use crate::ide::log::{
     self, Change, FileUnlocked, IdeAsked, RunModeSet, WorkspaceForgotten, WorkspaceWritten,
 };
-use crate::state_log::TOMBSTONE;
+use kernel_storage::state_log::TOMBSTONE;
 use rusqlite::types::Value;
 
 /// The four ide tables, each compared live against an ide-only rebuild of the log.
