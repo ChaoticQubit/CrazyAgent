@@ -119,10 +119,10 @@ const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 pub const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// The folders whose tools stay usable while the set-up projects cannot be read
 /// ([`Places::agent_writable`]): the system's, the Homebrew prefixes with their `Cellar` and
-/// `opt` folders (`/usr/local` lies under `/usr`), and on Linux Linuxbrew's prefix, the Nix
-/// store and the NixOS profiles. The normal path trusts every one of them too.
+/// `opt` folders (`/usr/local` lies under `/usr`), the Nix store, and on Linux Linuxbrew's
+/// prefix and the NixOS profiles. The normal path trusts every one of them too.
 #[cfg(not(target_os = "linux"))]
-const INSTALL_ROOTS: [&str; 4] = ["/usr", "/bin", "/sbin", "/opt/homebrew"];
+const INSTALL_ROOTS: [&str; 5] = ["/usr", "/bin", "/sbin", "/opt/homebrew", "/nix/store"];
 #[cfg(target_os = "linux")]
 const INSTALL_ROOTS: [&str; 8] = [
     "/usr",
@@ -670,9 +670,12 @@ impl Places {
 
 /// The Windows folders whose tools stay usable while the set-up projects cannot be read: the
 /// engine's own `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)` and `ProgramW6432`, each
-/// kept only when it names an absolute folder. Output: the folders, at most 4.
+/// kept only when it names an absolute folder, as given and in the verbatim spelling
+/// `canonicalize` gives, so every form of a tool under one meets a root in its own spelling
+/// ([`Places::agent_writable`]). Output: the folders, at most 8.
 fn windows_install_roots() -> Vec<PathBuf> {
-    let roots: Vec<PathBuf> = [
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for root in [
         "SystemRoot",
         "ProgramFiles",
         "ProgramFiles(x86)",
@@ -682,8 +685,15 @@ fn windows_install_roots() -> Vec<PathBuf> {
     .filter_map(std::env::var_os)
     .map(PathBuf::from)
     .filter(|root| root.is_absolute())
-    .collect();
-    assert!(roots.len() <= 4);
+    {
+        let resolved = root.canonicalize().ok();
+        for name in std::iter::once(root).chain(resolved) {
+            if !roots.contains(&name) {
+                roots.push(name);
+            }
+        }
+    }
+    assert!(roots.len() <= 8);
     roots
 }
 
