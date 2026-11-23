@@ -24,6 +24,22 @@ pub struct Settings {
     pub knowledge: crate::memory::KnowledgePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_access: Option<ModelAccess>,
+    #[serde(default, skip_serializing_if = "PluginsPolicy::is_default")]
+    pub plugins: PluginsPolicy,
+}
+
+/// The owner's plugin settings: what turning a plugin off does to runs holding it.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PluginsPolicy {
+    pub when_turned_off: kernel_plugin_host::usage::TurnOff,
+}
+
+impl PluginsPolicy {
+    /// Whether every plugin setting holds its default. No input. Output: the answer.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl Default for Settings {
@@ -39,6 +55,7 @@ impl Default for Settings {
             routing: RoutingPolicy::default(),
             knowledge: crate::memory::KnowledgePolicy::default(),
             model_access: None,
+            plugins: PluginsPolicy::default(),
         }
     }
 }
@@ -336,11 +353,22 @@ impl EffectiveConfig {
             .descriptors
             .keys()
             .any(|name| name.starts_with("knowledge."));
+        let plugins = self
+            .descriptors
+            .keys()
+            .any(|name| name.starts_with("plugins."));
         let model_access = self.settings.model_access.is_some();
-        let defaults = setting_values(&Settings::default(), routing, knowledge, model_access);
-        let values = setting_values(&self.settings, routing, knowledge, model_access);
+        let shown = Shown {
+            routing,
+            knowledge,
+            plugins,
+            model_access,
+        };
+        let defaults = setting_values(&Settings::default(), shown);
+        let values = setting_values(&self.settings, shown);
         if (!routing && !self.settings.routing.is_default())
             || (!knowledge && !self.settings.knowledge.is_default())
+            || (!plugins && !self.settings.plugins.is_default())
             || self.descriptors.len() != values.len()
             || self.descriptors.iter().any(|(name, descriptor)| {
                 descriptor.name != *name
@@ -385,6 +413,13 @@ struct ConfigFile {
     routing: Option<RoutingFile>,
     knowledge: Option<KnowledgeFile>,
     model_access: Option<ModelAccess>,
+    plugins: Option<PluginsFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginsFile {
+    when_turned_off: Option<kernel_plugin_host::usage::TurnOff>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -447,9 +482,16 @@ fn resolve_files(global: ConfigFile, project: ConfigFile) -> Result<EffectiveCon
     }
     validate_settings(&settings)?;
     let knowledge = origins.keys().any(|name| name.starts_with("knowledge."));
+    let plugins = origins.keys().any(|name| name.starts_with("plugins."));
     let model_access = settings.model_access.is_some();
-    let defaults = setting_values(&Settings::default(), true, knowledge, model_access);
-    let values = setting_values(&settings, true, knowledge, model_access);
+    let shown = Shown {
+        routing: true,
+        knowledge,
+        plugins,
+        model_access,
+    };
+    let defaults = setting_values(&Settings::default(), shown);
+    let values = setting_values(&settings, shown);
     let descriptors = values
         .iter()
         .map(|(name, value)| {
@@ -466,6 +508,7 @@ fn resolve_files(global: ConfigFile, project: ConfigFile) -> Result<EffectiveCon
                 n if n.starts_with("routing.") => EffectTiming::NewTask,
                 "knowledge.processing_destinations" => EffectTiming::Immediate,
                 n if n.starts_with("knowledge.") => EffectTiming::NewTask,
+                "plugins.when_turned_off" => EffectTiming::Immediate,
                 _ => EffectTiming::Restart,
             };
             (
@@ -484,7 +527,7 @@ fn resolve_files(global: ConfigFile, project: ConfigFile) -> Result<EffectiveCon
     assert!(origins.len() <= values.len());
     assert_eq!(
         values.len(),
-        17 + 8 * usize::from(knowledge) + usize::from(model_access)
+        17 + 8 * usize::from(knowledge) + usize::from(plugins) + usize::from(model_access)
     );
     from_settings(settings, descriptors)
 }
@@ -1114,14 +1157,29 @@ fn apply_file(
             asset_sources_max
         );
     }
+    if let Some(when_turned_off) = file.plugins.and_then(|plugins| plugins.when_turned_off) {
+        settings.plugins.when_turned_off = when_turned_off;
+        origins.insert("plugins.when_turned_off".into(), origin.clone());
+    }
 }
 
-fn setting_values(
-    settings: &Settings,
-    include_routing: bool,
-    include_knowledge: bool,
-    include_model_access: bool,
-) -> BTreeMap<String, serde_json::Value> {
+/// Which setting groups an effective config lists one by one: routing, knowledge and
+/// plugins only when set in a file, model access when present.
+#[derive(Debug, Clone, Copy)]
+struct Shown {
+    routing: bool,
+    knowledge: bool,
+    plugins: bool,
+    model_access: bool,
+}
+
+fn setting_values(settings: &Settings, shown: Shown) -> BTreeMap<String, serde_json::Value> {
+    let Shown {
+        routing: include_routing,
+        knowledge: include_knowledge,
+        plugins: include_plugins,
+        model_access: include_model_access,
+    } = shown;
     let mut values = serde_json::to_value(settings)
         .unwrap()
         .as_object()
@@ -1130,6 +1188,13 @@ fn setting_values(
     values.remove("routing");
     values.remove("knowledge");
     values.remove("model_access");
+    values.remove("plugins");
+    if include_plugins {
+        values.insert(
+            "plugins.when_turned_off".into(),
+            serde_json::to_value(settings.plugins.when_turned_off).unwrap(),
+        );
+    }
     if include_model_access {
         values.insert(
             "model_access".into(),
@@ -1181,7 +1246,7 @@ fn from_settings(
     let id = ConfigId::new(format!("{:x}", Sha256::digest(bytes)))
         .map_err(|e| ConfigError(e.to_string()))?;
     assert_eq!(id.as_str().len(), 64);
-    assert!(descriptors.len() <= 25 + usize::from(settings.model_access.is_some()));
+    assert!(descriptors.len() <= 26 + usize::from(settings.model_access.is_some()));
     Ok(EffectiveConfig {
         id,
         settings,
@@ -2017,5 +2082,53 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         );
         std::fs::write(&global, format!("version = {SETTINGS_VERSION}\n")).unwrap();
         assert!(resolve_config(&global, &project).is_ok());
+    }
+
+    /// `plugins.when_turned_off` is a working owner setting: absent it reads
+    /// `refuse_new_calls`, adds no descriptor and keeps the config id; set in the global or
+    /// a project file it reads `stop_runs`, takes effect at once and names its origin.
+    #[test]
+    fn plugins_when_turned_off_is_a_working_setting() {
+        use kernel_plugin_host::usage::TurnOff;
+        let version = format!("version = {SETTINGS_VERSION}\n");
+        let plain = resolve_config_bytes(&version, "").unwrap();
+        assert_eq!(
+            plain.settings.plugins.when_turned_off,
+            TurnOff::RefuseNewCalls
+        );
+        assert!(!plain.descriptors.contains_key("plugins.when_turned_off"));
+        assert_eq!(
+            plain.id,
+            from_settings(Settings::default(), plain.descriptors.clone())
+                .unwrap()
+                .id
+        );
+        let set = format!("{version}[plugins]\nwhen_turned_off = \"stop_runs\"\n");
+        for (global, project, origin) in [
+            (set.as_str(), "", Origin::Global),
+            (
+                version.as_str(),
+                "[plugins]\nwhen_turned_off = \"stop_runs\"\n",
+                Origin::Project,
+            ),
+        ] {
+            let config = resolve_config_bytes(global, project).unwrap();
+            assert_eq!(config.settings.plugins.when_turned_off, TurnOff::StopRuns);
+            let descriptor = &config.descriptors["plugins.when_turned_off"];
+            assert_eq!(descriptor.value, serde_json::json!("stop_runs"));
+            assert_eq!(descriptor.default, serde_json::json!("refuse_new_calls"));
+            assert_eq!(descriptor.origin, origin);
+            assert_eq!(descriptor.effect_timing, EffectTiming::Immediate);
+            assert_ne!(config.id, plain.id);
+            config.validate().unwrap();
+        }
+        assert!(
+            resolve_config_bytes(
+                &format!("{version}[plugins]\nwhen_turned_off = \"stop\"\n"),
+                ""
+            )
+            .is_err()
+        );
+        assert!(resolve_config_bytes(&format!("{version}[plugins]\nother = 1\n"), "").is_err());
     }
 }
