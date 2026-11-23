@@ -1,7 +1,7 @@
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
-use crate::sandbox::SandboxError;
-use crate::setup::InstallError;
 use base64::Engine;
+use kernel_processes::run::InstallError;
+use kernel_sandbox::error::SandboxError;
 use os::{
     NODE, lock, lock_shared, npm_ready, open_plain, private_folder, run_command, run_quiet,
     runnable, staging_folder, try_lock,
@@ -441,7 +441,8 @@ fn node_command(
     bin: &Path,
 ) -> Result<std::process::Command, InstallError> {
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+    use kernel_sandbox::net::SandboxNetwork;
     let canonical = |path: &Path| crate::sandbox::canonical(path).map_err(refused);
     let mut folders = Vec::with_capacity(3);
     for name in ["project", "home", "tmp"] {

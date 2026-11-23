@@ -109,3 +109,8 @@ fn check_permissions_reports_drift_and_write_permissions_clears_it() {
     assert_eq!(short.status.code(), Some(2), "{short:?}");
     fs::remove_dir_all(&copy).expect("the copy is removed");
 }
+
+#[test]
+fn check_host_reports_drift_and_write_host_clears_it() {
+    drift_then_write("host", "host/src/generated", "mod.rs");
+}

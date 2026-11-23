@@ -564,7 +564,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         &case.folder,
         &grants,
         45_733,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         &[],
         crate::sandbox::policy::AgentFilesRule::default(),
     )

@@ -4,10 +4,10 @@ use crazyagent::sandbox::linux::{
     NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS, loader_variable,
 };
 
-use crazyagent::sandbox::{
-    InstalledSandbox, LinuxSockets, LinuxStrict, LinuxSupervisor, ProjectSandbox, Sandbox,
-    SandboxError, SandboxNetwork, SandboxRemote,
-};
+use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, Sandbox};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 
 use crazyagent::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest,
@@ -963,7 +963,7 @@ fn the_strict_setting_refuses_a_launch_without_the_call_supervisor_and_off_start
     let refused = install(LinuxStrict::On).err();
     assert!(
         matches!(&refused, Some(SandboxError::Unavailable(reason))
-            if reason == crazyagent::sandbox::LINUX_NOT_FULL_LINE),
+            if reason == kernel_sandbox::lines::LINUX_NOT_FULL_LINE),
         "strict On must refuse an unsupervised launch: {refused:?}"
     );
     let started = install(LinuxStrict::Off).unwrap();

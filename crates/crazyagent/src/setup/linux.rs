@@ -1,5 +1,6 @@
-use super::run::run_bounded;
-use super::{Dependency, InstallError, Installer, Pin, Version};
+use super::{Dependency, Installer, Pin};
+use kernel_processes::run::run_bounded;
+use kernel_processes::run::{InstallError, Version};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -68,7 +69,7 @@ pub fn tmux_command(
         return Err(InstallError("setup_pin_invalid"));
     }
     if let Some(brew) = brew.filter(|_| !root) {
-        if crate::service::changeable_past_sticky(brew).is_some() {
+        if kernel_processes::service::changeable_past_sticky(brew).is_some() {
             return Err(InstallError("setup_homebrew_unsafe"));
         }
         let mut command = kept_environment(brew);
@@ -197,7 +198,7 @@ mod tests {
         let installer = LinuxInstaller::new(Box::new(shared));
         assert_eq!(installer.find(Dependency::Uv), Ok(None));
         let uv = root.path().join("setup/bin/uv");
-        crate::setup::process::private_folder(uv.parent().unwrap()).unwrap();
+        kernel_processes::run::private_folder(uv.parent().unwrap()).unwrap();
         std::fs::write(&uv, "#!/bin/sh\necho \"uv 0.13.5 (fixture)\"\n").unwrap();
         std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(

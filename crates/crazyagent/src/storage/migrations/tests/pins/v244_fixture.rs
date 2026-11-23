@@ -73,7 +73,7 @@ fn an_upgrade_of_the_2_4_4_fixture_replays_to_the_rows_it_held() {
     let done: Vec<(i64, String)> = db
         .prepare("SELECT seq, aggregate FROM state_log WHERE kind=?1 ORDER BY seq")
         .unwrap()
-        .query_map([crate::state_log::SNAPSHOT_DONE], |row| {
+        .query_map([kernel_storage::state_log::SNAPSHOT_DONE], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .unwrap()
@@ -82,7 +82,7 @@ fn an_upgrade_of_the_2_4_4_fixture_replays_to_the_rows_it_held() {
     let aggregates: Vec<&str> = done.iter().map(|(_, name)| name.as_str()).collect();
     assert_eq!(aggregates, ["worktrees"], "one run, for the only rows held");
     for (seq, _) in &done {
-        crate::state_log::verify_snapshot(&db, *seq as u64).unwrap();
+        kernel_storage::state_log::verify_snapshot(&db, *seq as u64).unwrap();
     }
     let tx = db.transaction().unwrap();
     crate::worktrees::log::rebuild(&tx).unwrap();
@@ -117,4 +117,25 @@ fn a_failure_in_step_12_leaves_the_2_4_4_fixture_byte_identical() {
     assert_eq!(std::fs::read(root.database()).unwrap(), bytes);
     assert_eq!(names(&root).len(), 1);
     assert!(root.backups()[0].join(CHECKED).is_file());
+}
+
+#[test]
+fn an_upgrade_of_the_2_4_4_fixture_adds_an_empty_plugin_records_table() {
+    let (root, _) = fixture_v244();
+    let sources = sources(&root);
+    let mut db = root.connection();
+    assert_eq!(plugin_records(&db), None);
+
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        STEPS,
+        SystemTime::now(),
+        backup,
+    )
+    .unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    assert_eq!(plugin_records(&db), Some(0));
 }

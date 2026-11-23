@@ -8,8 +8,8 @@ use crate::master_time_limit::MasterTimeSettings;
 use crate::projects_home::ProjectsHome;
 use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
-use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::SetupStatus;
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 
 /// One request from the setup page: setup status and runs, one tool installed alone, a refused
 /// tool's confirmed permission fix and what setup offers for one (DEC-162), default-pack
@@ -568,13 +568,13 @@ mod tests {
         };
         assert_eq!(
             sandbox.settings.linux_sockets,
-            crate::sandbox::LinuxSockets::TcpOnly
+            kernel_sandbox::settings::LinuxSockets::TcpOnly
         );
         let mut version = sandbox.version;
         for (generation, linux_sockets) in [
-            (3, crate::sandbox::LinuxSockets::TcpPorts),
-            (4, crate::sandbox::LinuxSockets::Refuse),
-            (5, crate::sandbox::LinuxSockets::TcpOnly),
+            (3, kernel_sandbox::settings::LinuxSockets::TcpPorts),
+            (4, kernel_sandbox::settings::LinuxSockets::Refuse),
+            (5, kernel_sandbox::settings::LinuxSockets::TcpOnly),
         ] {
             let settings = SandboxSettings {
                 linux_sockets,

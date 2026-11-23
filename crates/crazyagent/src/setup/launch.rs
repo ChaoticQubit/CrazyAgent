@@ -1,6 +1,7 @@
 use super::pack::PackManifestEntry;
-use super::{InstallError, Installer, PLATFORM_UNSUPPORTED};
+use super::{Installer, PLATFORM_UNSUPPORTED};
 use crate::plugins::ServerSpec;
+use kernel_processes::run::InstallError;
 use std::path::{Component, Path, PathBuf};
 
 const PATH_BYTES_MAX: usize = 256;

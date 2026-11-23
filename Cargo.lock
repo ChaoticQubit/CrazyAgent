@@ -887,6 +887,7 @@ dependencies = [
  "crazyagent-kernel-common",
  "crazyagent-kernel-plugin-host",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-sandbox",
  "crazyagent-kernel-security",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
@@ -894,6 +895,7 @@ dependencies = [
  "crazyagent-plugin-agent-quit",
  "crazyagent-plugin-check",
  "crazyagent-sdk",
+ "crazyagent-sdk-host",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
@@ -904,7 +906,6 @@ dependencies = [
  "minisign-verify",
  "nix",
  "notify",
- "portable-pty",
  "ratatui",
  "rusqlite",
  "rustix 1.1.5",
@@ -955,12 +956,16 @@ name = "crazyagent-desktop"
 version = "2.4.4"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.22.1",
  "bytemuck",
  "crazyagent",
+ "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-sandbox",
  "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",
+ "minisign",
  "notify",
  "objc2 0.6.5",
  "objc2-app-kit",
@@ -1011,14 +1016,37 @@ dependencies = [
 name = "crazyagent-kernel-processes"
 version = "2.4.4"
 dependencies = [
+ "base64 0.22.1",
  "crazyagent-kernel-common",
  "crazyagent-win-sandbox",
  "getrandom 0.4.3",
+ "minisign",
+ "minisign-verify",
  "nix",
+ "portable-pty",
  "rustix 1.1.5",
+ "semver",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
+ "url",
+ "vt100",
+]
+
+[[package]]
+name = "crazyagent-kernel-sandbox"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-kernel-processes",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -1029,6 +1057,7 @@ dependencies = [
  "form_urlencoded",
  "serde",
  "serde_json",
+ "url",
  "zeroize",
 ]
 
@@ -1036,11 +1065,13 @@ dependencies = [
 name = "crazyagent-kernel-storage"
 version = "2.4.4"
 dependencies = [
+ "base64 0.22.1",
  "crazyagent-win-sandbox",
  "rusqlite",
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
@@ -1083,6 +1114,14 @@ version = "2.4.4"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "crazyagent-sdk-host"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-bus-gateway",
+ "crazyagent-sdk",
 ]
 
 [[package]]

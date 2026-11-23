@@ -2,8 +2,9 @@ use super::*;
 use crate::agent_git::Layout;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::runtime::{TeamLimits, TeamRuntime};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -143,7 +144,11 @@ impl Case {
             env: Vec::new(),
             transcript: Transcript::ClaudeSession { file },
         };
-        host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
+        host.spawn(
+            &AgentId::team(id).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
 }
 

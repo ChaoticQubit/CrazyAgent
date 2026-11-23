@@ -434,7 +434,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
         .tempdir_in(build.parent().unwrap())
         .unwrap();
     let prefix = outside.path().canonicalize().unwrap();
-    if let Some(open) = crate::service::changeable_by_others(&prefix) {
+    if let Some(open) = kernel_processes::service::changeable_by_others(&prefix) {
         panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
     }
     let bin = prefix.join("bin");
@@ -465,7 +465,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
         crate::harnesses::node_prefix(&program).as_deref(),
         Some(prefix.as_path()),
         "the grant takes this prefix as npm's; changeable: {:?}",
-        crate::service::changeable_by_others(&bin.join("node"))
+        kernel_processes::service::changeable_by_others(&bin.join("node"))
     );
     let case = case("/usr/bin/false");
     case.store();
@@ -512,7 +512,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
         .tempdir_in(build.parent().unwrap())
         .unwrap();
     let base = outside.path().canonicalize().unwrap();
-    if let Some(open) = crate::service::changeable_by_others(&base) {
+    if let Some(open) = kernel_processes::service::changeable_by_others(&base) {
         panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
     }
     let root = base.join("engine");
@@ -1230,8 +1230,8 @@ fn an_agent_launch_runs_the_checked_shared_install_or_no_context_mode_never_npx(
 /// Linux; off Linux they take the defaults, strict off, which those boundaries ignore.
 #[test]
 fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     #[cfg(target_os = "linux")]
     assert_eq!(
@@ -1263,8 +1263,8 @@ fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
 /// Off Linux strict changes nothing.
 #[test]
 fn the_node_check_and_npm_refuse_under_stored_strict_when_linux_cannot_hold_fully() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
     crate::sandbox_settings::initialize(&connection).unwrap();

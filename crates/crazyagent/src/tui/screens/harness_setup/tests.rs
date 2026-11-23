@@ -1,7 +1,7 @@
 use super::*;
 use crate::harnesses::update::{HarnessNeeds, LastUpdate, Latest, Method};
 use crate::harnesses::{Search, catalog};
-use crate::setup::{Dependency, DependencyStatus, SetupStatus, Version};
+use crate::setup::{Dependency, DependencyStatus, SetupStatus};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::client::settings::SettingsJob;
@@ -9,6 +9,7 @@ use crate::tui::screens::settings_accounts::tests::{bar_rows, ctx, render};
 use crate::tui::screens::settings_harnesses::update_copy;
 use crate::tui::seam::Request;
 use crate::tui::shell::Shell;
+use kernel_processes::run::Version;
 use std::os::unix::fs::PermissionsExt;
 
 const LINE: &str = "/opt/homebrew/bin/npm install -g @openai/codex";

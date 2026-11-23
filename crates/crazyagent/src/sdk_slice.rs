@@ -8,14 +8,16 @@ use kernel_plugin_host::generated::permissions::{BUNDLED_GRANTS, PERMISSIONS};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use sdk::settings::{self as sdk_settings, Provide};
 use sdk::{Capability, Refusal};
+use sdk_host::{Bound, Providers};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::{Cursor, Outcome};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::{Aggregate, Appender, Draft};
+use kernel_storage::state_log::Draft;
 
 #[cfg(test)]
 mod tests;
@@ -97,7 +99,7 @@ fn append_refusals(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| failure("plugin_refusal_log_begin"))?;
     let revision = {
-        let mut appender = Appender::own(&tx, Fence::Engine(host.clone()))?;
+        let mut appender = crate::state_log::own(&tx, Fence::Engine(host.clone()))?;
         let at_ms = u64::try_from(crate::team::now_ms()).unwrap_or(0);
         for (plugin, capability, needs) in queued {
             let body = serde_json::to_vec(&CallRefused {
@@ -111,7 +113,7 @@ fn append_refusals(
                 "the engine names only its own ids"
             );
             appender.append(&Draft {
-                aggregate: Aggregate::Plugins,
+                aggregate: Aggregate::Plugins.into(),
                 kind: KIND_CALL_REFUSED,
                 schema: CALL_REFUSED_SCHEMA,
                 at_ms,
@@ -179,8 +181,14 @@ pub(crate) fn save_quit_with(
         sink: refusals,
         refused: Cell::new(false),
     };
-    let gateway = Gateway::new(grants, &provider, &crate::security_caps::Absent, &record);
-    let result = entry(&gateway.bind(BUNDLED_GRANTS[0].plugin), (*settings).into());
+    let gateway = Gateway::new(grants, &record);
+    let providers = Providers {
+        net: &crate::security_caps::Absent,
+        secrets: &crate::security_caps::Absent,
+        settings: &provider,
+    };
+    let host = Bound::new(gateway.bind(BUNDLED_GRANTS[0].plugin), &providers);
+    let result = entry(&host, (*settings).into());
     if record.refused.get() {
         return Err(EngineError("plugin_call_refused".to_owned()));
     }

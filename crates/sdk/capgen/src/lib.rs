@@ -52,6 +52,20 @@ pub fn wit(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError>
     wit::files(files)
 }
 
+/// Writes the SDK host crate's generated binding, `mod.rs` (`Providers`, `Bound` and
+/// `impl sdk::Host for Bound` over the bus gateway's `Caller`), after every check the Rust
+/// SDK runs, laid out by rustfmt. Input: stems with parsed files, any order. Output: the one
+/// file, or the first refusal (`capgen_no_capability`, ...).
+pub fn binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
+    rust::binding(files)?
+        .into_iter()
+        .map(|(path, text)| {
+            let formatted = rustfmt(&path, &text)?;
+            Ok((path, formatted))
+        })
+        .collect()
+}
+
 /// Writes plugin_host's permission table and bundled grants, `permissions.rs`, after every
 /// check the Rust SDK runs, laid out by rustfmt. Inputs: stems with parsed files, any
 /// order, and the plugins folder of `t1`/`t2`/`t3` tier folders. Output: the one file, or
@@ -190,8 +204,9 @@ pub fn load(caps: &Path) -> Result<Vec<(String, File)>, CapgenError> {
     Ok(loaded)
 }
 
-/// Compares generated files with a folder's files. Inputs: the folder and the generated
-/// files. Output: every path that differs, is missing or is extra in the folder, sorted.
+/// Compares generated files with a folder's files, the folder's subfolders read one level
+/// deep with paths `<subfolder>/<file>`. Inputs: the folder and the generated files.
+/// Output: every path that differs, is missing or is extra in the folder, sorted.
 pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
     let mut differing = Vec::new();
     for (path, text) in files {
@@ -199,27 +214,60 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
             differing.push(path.clone());
         }
     }
-    if let Ok(entries) = fs::read_dir(generated) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !files.iter().any(|(path, _)| *path == name) {
-                differing.push(name);
-            }
+    let mut present = Vec::new();
+    for (name, is_folder) in entries(generated) {
+        if !is_folder {
+            present.push(name);
+            continue;
+        }
+        let inner = entries(&generated.join(&name));
+        for (file, _) in &inner {
+            present.push(format!("{name}/{file}"));
+        }
+        if inner.is_empty() {
+            present.push(name);
+        }
+    }
+    for name in present {
+        if !files.iter().any(|(path, _)| *path == name) {
+            differing.push(name);
         }
     }
     differing.sort();
+    assert!(differing.windows(2).all(|pair| pair[0] != pair[1]));
     differing
 }
 
+/// Lists one folder's entries. Input: the folder. Output: each entry's name with whether
+/// it is a folder, empty when the folder does not read.
+fn entries(folder: &Path) -> Vec<(String, bool)> {
+    let Ok(read) = fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    read.flatten()
+        .map(|entry| {
+            let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            (entry.file_name().to_string_lossy().into_owned(), is_folder)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod binding_tests;
+#[cfg(test)]
+mod events_tests;
 mod permissions;
 #[cfg(test)]
 mod permissions_tests;
 mod rust;
+mod rust_wire;
 #[cfg(test)]
 mod tests;
 mod ts;
 #[cfg(test)]
 mod ts_tests;
+#[cfg(test)]
+mod wire_tests;
 mod wit;
 #[cfg(test)]
 mod wit_tests;

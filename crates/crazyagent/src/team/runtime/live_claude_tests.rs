@@ -2,8 +2,9 @@ use super::managed_agent::{Closing, ManagedAgent, SignedIn, claude, real_claude}
 use super::{BACKGROUND_STOPPED, Report, TurnEnd};
 use crate::harnesses::terminal_session::Resume;
 use crate::team::{AgentRole, BackgroundAtEnd};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{FOLDER, Host};
+use kernel_processes::terminal::Host;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

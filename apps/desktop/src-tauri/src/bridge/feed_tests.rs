@@ -531,8 +531,9 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
     use crazyagent::engine::bootstrap::EngineService;
     use crazyagent::engine::owner::OwnerClientKind;
     use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
+    use crazyagent::terminal::FOLDER;
     use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-    use crazyagent::terminal::{FOLDER, Host};
+    use kernel_processes::terminal::Host;
     use std::os::unix::fs::PermissionsExt;
     struct Server {
         tmux: std::path::PathBuf,
@@ -576,7 +577,12 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
     };
     let _launcher = {
         let launcher = Tmux::open(Some(tmux), &folder);
-        launcher.spawn(&agent, &command).unwrap();
+        launcher
+            .spawn(
+                &agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         launcher
     };
     let (_stop, stopped) = tokio::sync::watch::channel(false);

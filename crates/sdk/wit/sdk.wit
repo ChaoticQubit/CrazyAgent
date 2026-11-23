@@ -14,6 +14,64 @@ interface sdk-types {
   }
 }
 
+interface net-types {
+  use secrets-types.{secret};
+
+  enum method {
+    get,
+    post,
+    put,
+    patch,
+    delete,
+  }
+
+  record field {
+    name: string,
+    value: string,
+  }
+
+  record secret-field {
+    name: string,
+    secret: secret,
+  }
+
+  record capture {
+    field: string,
+    keep-as: option<string>,
+  }
+
+  record request {
+    method: method,
+    url: string,
+    headers: list<field>,
+    bearer: option<secret>,
+    form: list<field>,
+    secret-form: list<secret-field>,
+    json: option<list<u8>>,
+    reply-headers: list<string>,
+    capture: list<capture>,
+  }
+
+  record captured {
+    field: string,
+    secret: secret,
+  }
+
+  record reply {
+    status: u16,
+    body: list<u8>,
+    headers: list<field>,
+    captured: list<captured>,
+  }
+}
+
+interface net {
+  use sdk-types.{refusal};
+  use net-types.{reply, request as net-request};
+
+  request: func(request: net-request) -> result<reply, refusal>;
+}
+
 interface secrets-types {
   type secret = u64;
 }
@@ -45,6 +103,10 @@ interface settings-types {
     left-running: left-running,
     hours: u16,
   }
+
+  record agent-quit-saved {
+    settings: quit-settings,
+  }
 }
 
 interface settings {
@@ -55,6 +117,7 @@ interface settings {
 }
 
 world plugin {
+  import net;
   import secrets;
   import settings;
 }

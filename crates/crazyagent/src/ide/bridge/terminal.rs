@@ -4,14 +4,15 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::ipc::{OwnedWriteHalf, Stream};
 use crate::protocol::{ProjectId, encode_frame};
-use crate::sandbox::SandboxError;
 use crate::sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
 use crate::sandbox::policy::AgentAccess;
-use crate::terminal::buffer::Chunk;
-use crate::terminal::{
-    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame,
-    TerminalRequest, TerminalStream, attach_again,
+use crate::terminal::{TerminalFrame, TerminalRequest};
+use kernel_processes::terminal::attach_again;
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::{
+    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalStream,
 };
+use kernel_sandbox::error::SandboxError;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -274,7 +275,10 @@ fn start(
     command: &InteractiveCommand,
     (cols, rows): (u16, u16),
 ) -> Result<TerminalStream, EngineError> {
-    host.spawn(name, command)?;
+    host.spawn(
+        name,
+        &kernel_processes::terminal::PaneCommand::from(command),
+    )?;
     let attached = host
         .resize(name, cols, rows)
         .and_then(|()| host.attach(name));

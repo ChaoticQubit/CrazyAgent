@@ -262,7 +262,7 @@ impl Search {
             });
         for folder in system {
             if !directories.contains(folder)
-                && crate::service::changeable_by_others(folder).is_none()
+                && kernel_processes::service::changeable_by_others(folder).is_none()
             {
                 directories.push(folder.clone());
             }
@@ -466,7 +466,8 @@ impl Search {
     /// Output: the search.
     pub fn with_engine(mut self, engine_root: &Path) -> Self {
         let folder = crate::setup::harness_prefix(engine_root).join("bin");
-        let kept = usable_path(&folder) && crate::service::changeable_by_others(&folder).is_none();
+        let kept = usable_path(&folder)
+            && kernel_processes::service::changeable_by_others(&folder).is_none();
         self.engine = kept.then_some(folder);
         assert!(self.engine.iter().all(|engine| engine.is_absolute()));
         self
@@ -646,7 +647,7 @@ pub fn node_prefix(program: &Path) -> Option<PathBuf> {
         && node.is_file()
         && !in_crazyagent_folder(program)
         && std::fs::canonicalize(&node).is_ok_and(|real| !in_crazyagent_folder(&real))
-        && crate::service::changeable_by_others(&node).is_none();
+        && kernel_processes::service::changeable_by_others(&node).is_none();
     usable.then(|| prefix.to_path_buf())
 }
 

@@ -246,16 +246,15 @@ impl Restart {
     ) -> (
         crate::team::runtime::TeamRuntime,
         crate::project_setup::StoredSetup,
-        Arc<dyn crate::terminal::Host>,
+        Arc<dyn kernel_processes::terminal::Host>,
     ) {
         let (team, setup) = self.team();
         let base = self.root.path().canonicalize().unwrap();
         let tmux = crate::terminal::tmux::installed(&base)
             .expect("tmux must be installed on this machine");
-        let host: Arc<dyn crate::terminal::Host> = Arc::new(crate::terminal::tmux::Tmux::open(
-            Some(tmux),
-            &base.join(crate::terminal::FOLDER),
-        ));
+        let host: Arc<dyn kernel_processes::terminal::Host> = Arc::new(
+            crate::terminal::tmux::Tmux::open(Some(tmux), &base.join(crate::terminal::FOLDER)),
+        );
         let team = team
             .with_reproof(reproving)
             .with_terminal(host.clone())

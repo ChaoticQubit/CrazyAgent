@@ -50,6 +50,9 @@ pub mod master_step_limit;
 pub mod master_time_limit;
 pub mod memory;
 pub mod model_gateway;
+/// `net.request` egress through the system curl and today's GitHub exchange, with the
+/// static host and capture tables of the bundled plugins.
+pub mod net_egress;
 pub mod onboarding;
 pub mod owner_profile;
 pub mod owner_texts;
@@ -65,7 +68,6 @@ pub mod projects_home;
 pub mod protocol;
 pub mod provider_reach;
 pub mod provider_retry;
-pub mod qualification;
 pub mod questions;
 pub mod quit_settings;
 pub mod rcli_host;

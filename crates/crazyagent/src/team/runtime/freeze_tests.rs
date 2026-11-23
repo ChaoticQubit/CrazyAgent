@@ -142,7 +142,12 @@ impl Proxied {
         };
         let agent = AgentId::team(id).unwrap();
         let since = SystemTime::now();
-        let pane = host.spawn(&agent, &command).unwrap();
+        let pane = host
+            .spawn(
+                &agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         let record = PaneRecord {
             access: Some(AgentAccess::Sandboxed),
             toolchains: Some(Vec::new()),
@@ -919,19 +924,24 @@ impl Host for ListFails {
     fn spawn(
         &self,
         agent: &AgentId,
-        command: &InteractiveCommand,
-    ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
+        command: &kernel_processes::terminal::PaneCommand,
+    ) -> Result<kernel_processes::terminal::PaneRef, kernel_processes::terminal::HostError> {
         self.0.spawn(agent, command)
     }
 
     fn attach(
         &self,
         agent: &AgentId,
-    ) -> Result<crate::terminal::TerminalStream, crate::terminal::HostError> {
+    ) -> Result<kernel_processes::terminal::TerminalStream, kernel_processes::terminal::HostError>
+    {
         self.0.attach(agent)
     }
 
-    fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), crate::terminal::HostError> {
+    fn input(
+        &self,
+        agent: &AgentId,
+        bytes: &[u8],
+    ) -> Result<(), kernel_processes::terminal::HostError> {
         self.0.input(agent, bytes)
     }
 
@@ -940,16 +950,18 @@ impl Host for ListFails {
         agent: &AgentId,
         cols: u16,
         rows: u16,
-    ) -> Result<(), crate::terminal::HostError> {
+    ) -> Result<(), kernel_processes::terminal::HostError> {
         self.0.resize(agent, cols, rows)
     }
 
-    fn kill(&self, agent: &AgentId) -> Result<(), crate::terminal::HostError> {
+    fn kill(&self, agent: &AgentId) -> Result<(), kernel_processes::terminal::HostError> {
         self.0.kill(agent)
     }
 
-    fn alive(&self) -> Result<Vec<AgentId>, crate::terminal::HostError> {
-        Err(crate::terminal::HostError("terminal_list_failed".into()))
+    fn alive(&self) -> Result<Vec<AgentId>, kernel_processes::terminal::HostError> {
+        Err(kernel_processes::terminal::HostError(
+            "terminal_list_failed".into(),
+        ))
     }
 }
 

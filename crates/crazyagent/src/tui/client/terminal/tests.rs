@@ -1,10 +1,11 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
-use crate::terminal::{FOLDER, Host};
 use crate::tui::terminal_pane::TerminalPane;
 use crate::tui::theme::Depth;
+use kernel_processes::terminal::Host;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::os::unix::fs::PermissionsExt;
@@ -202,7 +203,12 @@ fn spawn_shell(tmux: PathBuf, folder: &Path, root: &Path, agent: &AgentId) -> Tm
         transcript: Transcript::Unavailable,
     };
     let launcher = Tmux::open(Some(tmux), folder);
-    launcher.spawn(agent, &command).unwrap();
+    launcher
+        .spawn(
+            agent,
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     launcher
 }
 

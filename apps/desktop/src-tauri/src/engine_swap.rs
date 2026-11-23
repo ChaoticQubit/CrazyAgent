@@ -11,7 +11,7 @@ pub(crate) static ENGINE_UPDATE_UNTOLD: AtomicBool = AtomicBool::new(false);
 /// it on its own at launch (DEC-134 addendum 1). Inputs: both versions. Output: true only
 /// when both read as versions and the app's is newer; equal, newer and unreadable give false.
 pub(crate) fn engine_older(engine: &str, app: &str) -> bool {
-    crazyagent::update::is_newer(app, engine).unwrap_or(false)
+    kernel_processes::update::is_newer(app, engine).unwrap_or(false)
 }
 
 /// Whether the launch may replace the engine that answered without the owner's confirm: it
@@ -22,7 +22,7 @@ pub(crate) fn engine_older(engine: &str, app: &str) -> bool {
 pub(crate) fn swap_on_launch(
     engine: &str,
     app: &str,
-    service: &crazyagent::service::Status,
+    service: &kernel_processes::service::Status,
 ) -> bool {
     service.installed && service.running && engine_older(engine, app)
 }

@@ -105,8 +105,11 @@ impl Fixture {
             env: Vec::new(),
             transcript: Transcript::Unavailable,
         };
-        host.spawn(&AgentId::team(agent).unwrap(), &command)
-            .unwrap();
+        host.spawn(
+            &AgentId::team(agent).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
 }
 
@@ -314,7 +317,8 @@ fn the_watch_reads_only_the_visible_screen_of_an_agent_with_long_scrollback_and_
     );
     until("the long output", || printed.exists());
     let name = AgentId::team(agent).unwrap();
-    let viewers: Vec<crate::terminal::TerminalStream> = (0..crate::terminal::VIEWERS_MAX)
+    let viewers: Vec<kernel_processes::terminal::TerminalStream> = (0
+        ..kernel_processes::terminal::VIEWERS_MAX)
         .map(|_| host.attach(&name).unwrap())
         .collect();
     assert!(

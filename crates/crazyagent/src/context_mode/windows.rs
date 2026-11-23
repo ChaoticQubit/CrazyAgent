@@ -1,7 +1,9 @@
 use super::refused;
-use crate::sandbox::{InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork};
-use crate::setup::InstallError;
-use crate::setup::run::run_bounded;
+use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+use kernel_processes::run::InstallError;
+use kernel_processes::run::run_bounded;
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::settings::LinuxSupervisor;
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -168,10 +170,10 @@ pub(super) fn run_quiet(mut command: Command, limit: Duration) -> Result<bool, I
 /// reads them (DEC-185). Input: the engine root, unread. Output: the defaults.
 pub(super) fn boundary_settings(
     _root: &Path,
-) -> Result<crate::sandbox_settings::SandboxSettings, InstallError> {
-    Ok(crate::sandbox_settings::SandboxSettings {
+) -> Result<kernel_sandbox::settings::SandboxSettings, InstallError> {
+    Ok(kernel_sandbox::settings::SandboxSettings {
         linux_supervisor: LinuxSupervisor::On,
-        linux_strict: crate::sandbox::LinuxStrict::Off,
+        linux_strict: kernel_sandbox::settings::LinuxStrict::Off,
         ..Default::default()
     })
 }

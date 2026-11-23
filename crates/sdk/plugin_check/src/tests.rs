@@ -115,6 +115,7 @@ fn a_manifest_permission_list_is_read() {
             kind: "setting".to_owned(),
             version: 1,
             permissions: vec!["settings.write".to_owned()],
+            net: None,
         })
     );
     assert_eq!(

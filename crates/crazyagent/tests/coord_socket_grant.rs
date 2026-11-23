@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
+use crazyagent::sandbox::ProjectSandbox;
 use kernel_processes::spawn_gate;
+use kernel_sandbox::net::SandboxNetwork;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};

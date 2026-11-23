@@ -1,8 +1,9 @@
 use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER};
+use kernel_processes::terminal::AgentId;
 use rusqlite::params;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -96,8 +97,11 @@ impl Fixture {
             env: Vec::new(),
             transcript: Transcript::Unavailable,
         };
-        host.spawn(&AgentId::team(agent).unwrap(), &command)
-            .unwrap();
+        host.spawn(
+            &AgentId::team(agent).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
 }
 

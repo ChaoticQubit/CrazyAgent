@@ -125,8 +125,8 @@ impl Fixture {
         let file = self.base.join(format!("script-{agent}.sh"));
         std::fs::write(&file, script).unwrap();
         host.spawn(
-            &crate::terminal::AgentId::team(agent).unwrap(),
-            &InteractiveCommand {
+            &kernel_processes::terminal::AgentId::team(agent).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&InteractiveCommand {
                 argv: vec![
                     "/bin/sh".into(),
                     file.to_str().unwrap().into(),
@@ -135,7 +135,7 @@ impl Fixture {
                 cwd: self.base.clone(),
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
-            },
+            }),
         )
         .unwrap();
     }
@@ -916,7 +916,7 @@ fn tmux_quiet_grows_while_a_pane_is_silent_and_resets_on_output() {
     let agent = fixture.agent("sub", "codex", "idle", None);
     let out = fixture.base.join("out.txt");
     fixture.pane(&host, agent, READ_ONE_LINE, &out);
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("three quiet seconds", || {
         host.quiet(&pane).unwrap().unwrap() >= Duration::from_secs(3)
     });
@@ -937,7 +937,7 @@ fn the_bridge_is_given_the_agents_own_pane_from_the_host() {
     let paneless = fixture.agent("sub", "codex", "idle", None);
     fixture.pane(&host, agent, READ_ONE_LINE, &fixture.base.join("out.txt"));
     let shown = host
-        .pane_pid(&crate::terminal::AgentId::team(agent).unwrap())
+        .pane_pid(&kernel_processes::terminal::AgentId::team(agent).unwrap())
         .unwrap();
     assert!(shown.is_some());
     let asleep = BTreeSet::new();
@@ -958,7 +958,7 @@ fn typing_waits_while_a_dropped_turn_holds_input_on_an_unknown_screen() {
     let agent = fixture.agent("master", "codex", "idle", None);
     let out = fixture.base.join("typed.txt");
     fixture.pane(&host, agent, READ_ONE_LINE, &out);
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1020,7 +1020,7 @@ fn typing_waits_for_an_idle_quiet_pane_the_owner_left_alone() {
     );
     crate::coord::set_waiting(&fixture.db, agent, None, now).unwrap();
 
-    let asker_pane = crate::terminal::AgentId::team(asker).unwrap();
+    let asker_pane = kernel_processes::terminal::AgentId::team(asker).unwrap();
     until("the question on screen", || {
         crate::team::events::question(&host.screen(&asker_pane).unwrap()).is_some()
     });
@@ -1029,7 +1029,7 @@ fn typing_waits_for_an_idle_quiet_pane_the_owner_left_alone() {
         Typing::Held("coord_agent_waiting")
     );
 
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     if host.quiet(&pane).unwrap().unwrap() < typing::APP_QUIET {
         assert_eq!(
             try_type(agent, Some(&owner), now),
@@ -1084,7 +1084,7 @@ fn auto_types_only_claude_code_messages_past_the_grace_into_an_idle_pane() {
         "New work",
         now - 1_000,
     );
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1151,7 +1151,7 @@ fn an_owner_notice_alone_is_not_typed_into_an_idle_lead_until_a_waking_message()
     let notice = waiting[0].id;
     assert!(waiting[0].body.contains(crate::team::events::OWNER_WOKE));
     assert!(!waking(&fixture.db, lead).unwrap());
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1223,7 +1223,7 @@ fn a_teammate_note_alone_is_still_typed_into_an_idle_awake_agent() {
         1,
     );
     assert!(!waking(&fixture.db, lead).unwrap());
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1293,7 +1293,7 @@ fn a_full_window_of_owner_notices_never_holds_a_later_prompt() {
             .len(),
         PENDING_MAX
     );
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     let awake = BTreeSet::new();
     let reached = reach(
         Some(&host as &dyn Host),
@@ -1407,7 +1407,7 @@ fn a_cut_never_types_an_owner_notice_alone_ahead_of_a_long_prompt() {
     let waiting = crate::coord::pending(&fixture.db, lead, PENDING_MAX).unwrap();
     let (_, whole) = lines(&fixture.db, &waiting, PROMPT_BYTES_MAX).unwrap();
     assert_eq!(whole, [notice], "the prompt does not fit behind the notice");
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1644,7 +1644,7 @@ fn a_listed_agents_message_is_typed_into_its_stand_in_pane_under_auto_and_typing
             "Check the gate",
             now,
         );
-        let pane = crate::terminal::AgentId::team(agent).unwrap();
+        let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
         until("a quiet pane", || {
             host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
         });
@@ -1704,7 +1704,7 @@ fn native_only_keeps_a_tools_off_codex_agents_messages_sent_until_auto_types_the
         "Check the gate",
         now,
     );
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });

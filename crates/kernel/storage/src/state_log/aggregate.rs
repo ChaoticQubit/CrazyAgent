@@ -10,6 +10,25 @@ pub const AGGREGATE_BYTES_MAX: usize = 64;
 pub struct AggregateName(&'static str);
 
 impl AggregateName {
+    /// Whether text has an aggregate name's shape: 1 to [`AGGREGATE_BYTES_MAX`] bytes of
+    /// `[a-z0-9_]`, as [`AggregateName::new`] demands, without panicking. Input: the text.
+    /// Output: the answer.
+    pub const fn shaped(name: &str) -> bool {
+        if name.is_empty() || name.len() > AGGREGATE_BYTES_MAX {
+            return false;
+        }
+        let bytes = name.as_bytes();
+        let mut at = 0;
+        while at < bytes.len() {
+            let byte = bytes[at];
+            if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
+                return false;
+            }
+            at += 1;
+        }
+        true
+    }
+
     /// Checks and keeps one aggregate name. Input: the name. Output: the name; a name out
     /// of bounds or with another byte panics, at compile time in a `const`.
     pub const fn new(name: &'static str) -> Self {

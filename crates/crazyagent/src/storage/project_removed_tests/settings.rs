@@ -1,7 +1,7 @@
 use super::*;
 use crate::cleanup_settings::{CleanupMode, CleanupSettings};
-use crate::sandbox_settings::SandboxSettings;
 use crate::settings_log::{self, Event, ProjectSaved};
+use kernel_sandbox::settings::SandboxSettings;
 
 /// The two per-project settings tables a removal clears.
 const PROJECT_TABLES: [&str; 2] = ["agent_instruction_settings", "roadmap_status_settings"];
@@ -25,7 +25,7 @@ fn a_removal_tombstones_its_project_s_settings_and_their_replay_brings_none_back
     settings_log::initialize(&s.db).unwrap();
     let engine = || fence::Fence::Engine(s.started.host.clone());
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     for project in [REMOVED, OTHER] {
         let project = ProjectId::new(project).unwrap();
         let instruction = Event::Instruction(ProjectSaved {
@@ -42,7 +42,7 @@ fn a_removal_tombstones_its_project_s_settings_and_their_replay_brings_none_back
     drop(appender);
     tx.commit().unwrap();
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     settings_log::snapshot(&mut appender, 2).unwrap();
     drop(appender);
     tx.commit().unwrap();
@@ -61,8 +61,8 @@ fn a_removal_tombstones_its_project_s_settings_and_their_replay_brings_none_back
         .map(|(_, _, _, _, body)| body)
         .collect();
     assert_eq!(saved.len(), 4);
-    assert_eq!(saved[0].as_slice(), crate::state_log::TOMBSTONE);
-    assert_eq!(saved[1].as_slice(), crate::state_log::TOMBSTONE);
+    assert_eq!(saved[0].as_slice(), kernel_storage::state_log::TOMBSTONE);
+    assert_eq!(saved[1].as_slice(), kernel_storage::state_log::TOMBSTONE);
     assert!(String::from_utf8_lossy(saved[2]).contains("\"other\""));
     assert!(String::from_utf8_lossy(saved[3]).contains("\"other\""));
 
@@ -112,7 +112,7 @@ fn an_owner_settings_save_logs_its_event_at_the_request_s_revision_and_a_stale_o
     assert_eq!(published, 1, "the request's own events row");
 
     let fresh = SandboxSettings {
-        linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+        linux_sockets: kernel_sandbox::settings::LinuxSockets::TcpPorts,
         ..SandboxSettings::default()
     };
     let stale = request(

@@ -389,14 +389,16 @@ pub(in crate::tui) mod tests {
     use crate::pools::{MemberKind, MemberStatus, PoolMember};
     use crate::protocol::CredentialRef;
     use crate::protocol::ProjectId;
-    use crate::setup::{Dependency, DependencyStatus, Version};
-    use crate::terminal::{AgentId, TerminalFrame};
+    use crate::setup::{Dependency, DependencyStatus};
+    use crate::terminal::TerminalFrame;
     use crate::tui::client::OwnerEvent;
     use crate::tui::client::app_setup::AppSetupEvent;
     use crate::tui::client::learning::{LearningEvent, LearningReply};
     use crate::tui::client::settings::SettingsEvent;
     use crate::tui::screens::settings_accounts::tests::{ctx, render};
     use crate::tui::shell::Shell;
+    use kernel_processes::run::Version;
+    use kernel_processes::terminal::AgentId;
 
     fn pool(name: &str, statuses: &[MemberStatus]) -> PoolSummary {
         PoolSummary {

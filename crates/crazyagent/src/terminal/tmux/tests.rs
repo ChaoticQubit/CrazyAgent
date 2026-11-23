@@ -1,5 +1,6 @@
 use super::*;
-use crate::terminal::PASTE_CLOSE;
+use crate::harnesses::interactive::InteractiveCommand;
+use kernel_processes::terminal::PASTE_CLOSE;
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
@@ -527,7 +528,11 @@ fn cat_pane(
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !ready.exists() {
         assert!(
@@ -732,7 +737,7 @@ fn a_split_window_with_no_app_tag_takes_no_prompt_until_its_app_pane_is_tagged()
     untag(&server, &app);
     tmux_client(&server, &["select-pane", "-t", &mate]);
     let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
-    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    let unknown = HostError(kernel_processes::terminal::APP_PANE_UNKNOWN.to_owned());
     assert_eq!(
         refused,
         Err(unknown),
@@ -807,7 +812,7 @@ fn a_window_whose_tagged_app_pane_closed_hands_its_teammate_no_prompt() {
     let left = tmux_client(&server, &["list-panes", "-t", &window, "-F", "#{pane_id}"]);
     assert_eq!(left, mate, "the window lives on with the teammate alone");
     let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
-    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    let unknown = HostError(kernel_processes::terminal::APP_PANE_UNKNOWN.to_owned());
     assert_eq!(
         refused,
         Err(unknown),
@@ -856,7 +861,7 @@ fn an_app_closing_while_its_window_is_tagged_hands_its_teammate_no_prompt() {
         "the window lives on with the teammate alone: {mate}"
     );
     let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
-    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    let unknown = HostError(kernel_processes::terminal::APP_PANE_UNKNOWN.to_owned());
     assert_eq!(
         refused,
         Err(unknown),
@@ -1026,7 +1031,7 @@ fn a_typed_piece_over_one_input_request_is_a_bug() {
     let host = Tmux::open(None, Path::new("/nonexistent"));
     let agent = AgentId::team(1).unwrap();
     let piece = vec![b'x'; INPUT_BYTES_MAX + 1];
-    let stale = crate::terminal::APP_PANE_UNKNOWN;
+    let stale = kernel_processes::terminal::APP_PANE_UNKNOWN;
     let _ = crate::terminal::type_piece(&host, &agent, None, &piece, stale);
 }
 
@@ -1081,7 +1086,7 @@ fn a_typed_piece_pinned_to_no_pane_id_is_a_bug() {
         serial: 1,
     };
     let agent = AgentId::team(1).unwrap();
-    let stale = crate::terminal::APP_PANE_UNKNOWN;
+    let stale = kernel_processes::terminal::APP_PANE_UNKNOWN;
     let _ = crate::terminal::type_piece(&host, &agent, Some(&at), b"x", stale);
 }
 
@@ -1327,7 +1332,14 @@ fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
         env: vec![],
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    let line = |argv: Vec<String>| confined_line(&agent, &command(argv), profile, &[]);
+    let line = |argv: Vec<String>| {
+        confined_line(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&command(argv)),
+            profile,
+            &[],
+        )
+    };
     let lead = plain("/private/tmp/lead.sb");
     let kept = kept_pane(lead.clone(), None).unwrap();
     assert_eq!(
@@ -1386,10 +1398,20 @@ fn a_pane_command_with_a_perl_load_variable_is_refused() {
         env: vec![(name.into(), "/private/tmp/planted".into())],
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    assert!(spawn_line(&agent, &command("TERM")).is_ok());
+    assert!(
+        spawn_line(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&command("TERM"))
+        )
+        .is_ok()
+    );
     for name in ["PERL5LIB", "PERL5OPT", "PERLLIB", "PERL5DB", "perl5opt"] {
         assert_eq!(
-            spawn_line(&agent, &command(name)).map_err(|error| error.0),
+            spawn_line(
+                &agent,
+                &kernel_processes::terminal::PaneCommand::from(&command(name))
+            )
+            .map_err(|error| error.0),
             Err("terminal_command_invalid".to_owned()),
             "{name}"
         );
@@ -1424,7 +1446,13 @@ fn a_kept_pane_hands_its_keeper_the_freeze_record_as_an_argument() {
         env: vec![],
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    assert!(spawn_line(&agent, &command).is_ok());
+    assert!(
+        spawn_line(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&command)
+        )
+        .is_ok()
+    );
     let longest = format!("/{}", "a".repeat(1000));
     assert!(kept_pane(plain.clone(), Some(Path::new(&longest))).is_some());
     let longer = format!("/{}", "a".repeat(1001));
@@ -1459,7 +1487,11 @@ fn a_pane_command_with_the_keeper_state_variable_is_still_refused() {
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
     assert_eq!(
-        spawn_line(&agent, &command).map_err(|error| error.0),
+        spawn_line(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&command)
+        )
+        .map_err(|error| error.0),
         Err("terminal_command_invalid".to_owned())
     );
 }
@@ -1574,7 +1606,11 @@ fn a_gone_window_reads_as_unknown_not_as_the_current_pane() {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     assert_eq!(host.input_live(&agent).map_err(|error| error.0), Ok(false));
     assert!(host.quiet(&agent).unwrap().is_some());
     let gone = AgentId::team(9).unwrap();
@@ -1616,7 +1652,11 @@ fn a_spaced_window_name_never_shifts_a_pane_targets_reading() {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     let control = host.live_control().unwrap();
     let pane = Tmux::displayed(&control, &target(&agent), "#{pane_id}").unwrap();
     assert!(pane_id_valid(&pane), "{pane:?}");
@@ -1653,7 +1693,11 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
     assert_eq!(
-        spawn_line(&agent, &command).unwrap(),
+        spawn_line(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&command)
+        )
+        .unwrap(),
         "new-window -d -P -F '#{pane_id} #{pane_pid} end' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"COLORTERM=truecolor\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
     );
     let mut own_terminal = command.clone();
@@ -1662,7 +1706,12 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
         .env
         .insert(1, ("COLORTERM".into(), "24bit".into()));
     assert!(
-        spawn_line(&agent, &own_terminal).unwrap().contains(
+        spawn_line(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&own_terminal)
+        )
+        .unwrap()
+        .contains(
             " -- /usr/bin/env -i \"TERM=dumb\" \"COLORTERM=24bit\" \"FOO=bar baz\" \"/bin/sh\""
         ),
         "a command's own terminal settings replace the defaults"
@@ -1670,7 +1719,9 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
     let refused = |change: fn(&mut InteractiveCommand)| {
         let mut bad = command.clone();
         change(&mut bad);
-        spawn_line(&agent, &bad).unwrap_err().0
+        spawn_line(&agent, &kernel_processes::terminal::PaneCommand::from(&bad))
+            .unwrap_err()
+            .0
     };
     let changes: [fn(&mut InteractiveCommand); 12] = [
         |c| c.argv.clear(),
@@ -1785,7 +1836,11 @@ fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_secs(3));
     let windows = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
@@ -1833,7 +1888,11 @@ fn an_attach_to_a_full_screen_app_reports_the_wheel_to_it_on_its_alternate_scree
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     let stream = loop {
         let stream = host.attach(&agent).unwrap();
@@ -1893,7 +1952,11 @@ fn an_attach_puts_the_pane_history_into_the_view_scrollback() {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     let stream = loop {
         let stream = host.attach(&agent).unwrap();
@@ -1974,7 +2037,11 @@ fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
     let agent = AgentId::team(1).unwrap();
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     let pid = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")
@@ -2019,7 +2086,10 @@ fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
             let mut problems = Vec::new();
             for id in 2..=STARTED {
                 let started = AgentId::team(id).unwrap();
-                match host.spawn(&started, &command) {
+                match host.spawn(
+                    &started,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                ) {
                     Ok(pane) if pane.agent == started && pane.pid > 0 => {}
                     other => problems.push(format!("spawn {id}: {other:?}")),
                 }
@@ -2099,8 +2169,16 @@ fn kill_pane_ends_only_that_pane_and_refuses_the_last_and_a_foreign_one() {
     };
     let lead = AgentId::team(1).unwrap();
     let other = AgentId::team(2).unwrap();
-    host.spawn(&lead, &sleeper()).unwrap();
-    host.spawn(&other, &sleeper()).unwrap();
+    host.spawn(
+        &lead,
+        &kernel_processes::terminal::PaneCommand::from(&sleeper()),
+    )
+    .unwrap();
+    host.spawn(
+        &other,
+        &kernel_processes::terminal::PaneCommand::from(&sleeper()),
+    )
+    .unwrap();
     let first = host.panes(&lead).unwrap();
     assert_eq!(first.len(), 1, "{first:?}");
     let kept = first[0].id.clone();
@@ -2268,8 +2346,14 @@ fn kill_ends_every_process_in_the_agent_pane_group() {
     };
     let started = home.path().join("child.pid");
     let agent = AgentId::team(1).unwrap();
-    host.spawn(&agent, &hangup_ignored_agent(home.path(), &started))
-        .unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&hangup_ignored_agent(
+            home.path(),
+            &started,
+        )),
+    )
+    .unwrap();
     let pane = host.panes(&agent).unwrap().remove(0);
     let (group, child) = left_in_group(pane.pid, &started);
 
@@ -2301,7 +2385,11 @@ fn kill_pane_ends_every_process_in_that_pane_group() {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&lead, &sleeper).unwrap();
+    host.spawn(
+        &lead,
+        &kernel_processes::terminal::PaneCommand::from(&sleeper),
+    )
+    .unwrap();
     let kept = host.panes(&lead).unwrap().remove(0).id;
     let started = home.path().join("child.pid");
     split(&server, &kept, &hangup_ignored(&started));
@@ -2344,7 +2432,11 @@ fn close_ends_every_process_in_the_server_pane_groups() {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &sleeper).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&sleeper),
+    )
+    .unwrap();
     let started = home.path().join("child.pid");
     let opened = kernel_processes::spawn_gate::output(
         Command::new(&server.tmux)
@@ -2465,8 +2557,14 @@ fn stops_in_a_row_wait_less_than_one_hangup_grace() {
     for id in 1..=3 {
         let agent = AgentId::team(id).unwrap();
         let pid_file = home.path().join(format!("child-{id}.pid"));
-        host.spawn(&agent, &hangup_ignored_agent(home.path(), &pid_file))
-            .unwrap();
+        host.spawn(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&hangup_ignored_agent(
+                home.path(),
+                &pid_file,
+            )),
+        )
+        .unwrap();
         let pane = host.panes(&agent).unwrap().remove(0);
         started.push((agent, left_in_group(pane.pid, &pid_file)));
     }
@@ -2505,8 +2603,14 @@ fn close_waits_one_hangup_grace_for_all_its_panes() {
     for id in 1..=3 {
         let agent = AgentId::team(id).unwrap();
         let pid_file = home.path().join(format!("child-{id}.pid"));
-        host.spawn(&agent, &hangup_ignored_agent(home.path(), &pid_file))
-            .unwrap();
+        host.spawn(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&hangup_ignored_agent(
+                home.path(),
+                &pid_file,
+            )),
+        )
+        .unwrap();
         let pane = host.panes(&agent).unwrap().remove(0);
         started.push(left_in_group(pane.pid, &pid_file));
     }
@@ -2551,8 +2655,14 @@ fn a_close_leaves_a_pane_group_another_path_holds_to_that_path() {
     };
     let started = home.path().join("child.pid");
     let agent = AgentId::team(1).unwrap();
-    host.spawn(&agent, &hangup_ignored_agent(home.path(), &started))
-        .unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&hangup_ignored_agent(
+            home.path(),
+            &started,
+        )),
+    )
+    .unwrap();
     let pane = host.panes(&agent).unwrap().remove(0);
     let (group, child) = left_in_group(pane.pid, &started);
     let held = crate::harnesses::launch::Ending::claim(pane.pid)
@@ -2593,10 +2703,20 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
     };
     let lead = AgentId::team(1).unwrap();
     let other = AgentId::team(2).unwrap();
-    host.spawn(&lead, &shell("echo lead-own-screen; exec /bin/cat"))
-        .unwrap();
-    host.spawn(&other, &shell("echo other-lead-screen; exec /bin/sleep 30"))
-        .unwrap();
+    host.spawn(
+        &lead,
+        &kernel_processes::terminal::PaneCommand::from(&shell(
+            "echo lead-own-screen; exec /bin/cat",
+        )),
+    )
+    .unwrap();
+    host.spawn(
+        &other,
+        &kernel_processes::terminal::PaneCommand::from(&shell(
+            "echo other-lead-screen; exec /bin/sleep 30",
+        )),
+    )
+    .unwrap();
     let client = |args: &[&str]| {
         let output = kernel_processes::spawn_gate::output(
             Command::new(&tmux)
@@ -2654,7 +2774,7 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
             std::thread::sleep(Duration::from_millis(100));
         }
     };
-    let view = crate::terminal::pane_view(host.clone(), &teammate).unwrap();
+    let view = kernel_processes::terminal::pane_view(host.clone(), &teammate).unwrap();
     let screen = shows(&*view, "teammate-pane-ready");
     assert!(
         !screen.contains("lead-own-screen"),
@@ -2669,14 +2789,14 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
     );
     let unknown = Err("terminal_pane_unknown".to_owned());
     assert_eq!(
-        crate::terminal::pane_view(host.clone(), "lead")
+        kernel_processes::terminal::pane_view(host.clone(), "lead")
             .map(drop)
             .map_err(|problem| problem.0),
         unknown,
         "an invalid pane id is refused before any call"
     );
     for pane in [elsewhere.as_str(), "%99999"] {
-        let view = crate::terminal::pane_view(host.clone(), pane).unwrap();
+        let view = kernel_processes::terminal::pane_view(host.clone(), pane).unwrap();
         assert_eq!(
             view.attach(&lead).map(drop).map_err(|problem| problem.0),
             unknown,
@@ -2756,10 +2876,20 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
     };
     let lead = AgentId::team(1).unwrap();
     let other = AgentId::team(2).unwrap();
-    host.spawn(&lead, &shell("echo lead-own-screen; exec /bin/cat"))
-        .unwrap();
-    host.spawn(&other, &shell("echo other-lead-screen; exec /bin/cat"))
-        .unwrap();
+    host.spawn(
+        &lead,
+        &kernel_processes::terminal::PaneCommand::from(&shell(
+            "echo lead-own-screen; exec /bin/cat",
+        )),
+    )
+    .unwrap();
+    host.spawn(
+        &other,
+        &kernel_processes::terminal::PaneCommand::from(&shell(
+            "echo other-lead-screen; exec /bin/cat",
+        )),
+    )
+    .unwrap();
     let client = |args: &[&str]| {
         let output = kernel_processes::spawn_gate::output(
             Command::new(&tmux)
@@ -2812,7 +2942,7 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
             std::thread::sleep(Duration::from_millis(100));
         }
     };
-    let view = crate::terminal::pane_view(shared.clone(), &teammate).unwrap();
+    let view = kernel_processes::terminal::pane_view(shared.clone(), &teammate).unwrap();
     shows(&*view, &lead, "teammate-pane-ready");
     let attached = view.attach(&lead).unwrap();
     assert!(
@@ -2823,9 +2953,9 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
     let typed = "q".repeat(KEYS);
     let before = listed(&host);
     for _ in 0..KEYS {
-        crate::terminal::type_into(&*view, attached.at.as_ref(), &lead, b"q").unwrap();
+        kernel_processes::terminal::type_into(&*view, attached.at.as_ref(), &lead, b"q").unwrap();
     }
-    crate::terminal::type_into(&*view, attached.at.as_ref(), &lead, b"\r").unwrap();
+    kernel_processes::terminal::type_into(&*view, attached.at.as_ref(), &lead, b"\r").unwrap();
     assert_eq!(
         listed(&host),
         before,
@@ -2843,18 +2973,18 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
         .clone()
         .expect("a pane view's stream names the pane it was attached to");
     assert_eq!(at.pane, teammate);
-    let forged = crate::terminal::PaneAt {
+    let forged = kernel_processes::terminal::PaneAt {
         pane: elsewhere.clone(),
         serial: at.serial,
     };
-    crate::terminal::type_into(&*view, Some(&forged), &lead, b"forged-pane\r").unwrap();
+    kernel_processes::terminal::type_into(&*view, Some(&forged), &lead, b"forged-pane\r").unwrap();
     shows(&*view, &lead, "forged-pane");
-    let stale = crate::terminal::PaneAt {
+    let stale = kernel_processes::terminal::PaneAt {
         pane: teammate.clone(),
         serial: at.serial.wrapping_add(1),
     };
     let before = listed(&host);
-    crate::terminal::type_into(&*view, Some(&stale), &lead, b"stale-serial\r").unwrap();
+    kernel_processes::terminal::type_into(&*view, Some(&stale), &lead, b"stale-serial\r").unwrap();
     assert!(
         listed(&host) > before,
         "a pane found by another connection is typed into only after the lookup"
@@ -2871,7 +3001,7 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
     );
 
     let chain = crate::terminal::tmux_host(home.path(), Some(tmux.clone()));
-    let routed = crate::terminal::pane_view(chain, &teammate).unwrap();
+    let routed = kernel_processes::terminal::pane_view(chain, &teammate).unwrap();
     let through = routed
         .attach(&lead)
         .unwrap()
@@ -2942,7 +3072,11 @@ fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server, u64) {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(agent, &command).unwrap();
+    host.spawn(
+        agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     assert_eq!(host.alive().unwrap(), vec![agent.clone()]);
     assert!(
         holds_reading_control(&host),
@@ -2985,7 +3119,11 @@ fn fast_deadline(home: &Path, agent: &AgentId) -> (Tmux, Server) {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(agent, &command).unwrap();
+    host.spawn(
+        agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     assert_eq!(host.alive().unwrap(), vec![agent.clone()]);
     (host, server)
 }
@@ -3107,7 +3245,11 @@ fn a_live_server_keeps_its_socket_when_a_probe_of_it_fails_without_a_refusal() {
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(
+        &agent,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     let bound = socket_inode(&host).expect("the server bound its socket");
     let ran = kernel_processes::spawn_gate::status(
         Command::new(std::env::current_exe().unwrap())
@@ -3336,7 +3478,10 @@ fn a_spawn_refuses_a_first_process_the_listener_did_not_start() {
 
     let spawned = stand_in
         .host
-        .spawn(&AgentId::team(2).unwrap(), &command)
+        .spawn(
+            &AgentId::team(2).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
         .map(|pane| pane.pid)
         .map_err(|problem| problem.0);
 
@@ -3506,7 +3651,11 @@ fn host_with_agents(home: &Path, ids: &[i64]) -> (Tmux, Server) {
             env: Vec::new(),
             transcript: crate::harnesses::interactive::Transcript::Unavailable,
         };
-        host.spawn(&AgentId::team(*id).unwrap(), &command).unwrap();
+        host.spawn(
+            &AgentId::team(*id).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
     (host, server)
 }
@@ -3933,7 +4082,9 @@ fn a_capture_cut_after_its_row_counts_is_read_as_data_and_the_control_reads_on()
     assert_eq!(later.unwrap(), vec![b"next".to_vec()]);
     assert_eq!(
         chunks.try_recv().ok(),
-        Some(crate::terminal::buffer::Chunk::Output(b"real".to_vec())),
+        Some(kernel_processes::terminal::buffer::Chunk::Output(
+            b"real".to_vec()
+        )),
         "the view lost later output or a pane row forged some"
     );
 }

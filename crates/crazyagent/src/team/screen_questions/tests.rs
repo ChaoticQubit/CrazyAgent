@@ -66,8 +66,11 @@ impl Fixture {
             env: Vec::new(),
             transcript: Transcript::Unavailable,
         };
-        host.spawn(&AgentId::team(agent).unwrap(), &command)
-            .unwrap();
+        host.spawn(
+            &AgentId::team(agent).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
 }
 

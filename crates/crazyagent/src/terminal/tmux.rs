@@ -5,8 +5,8 @@ use super::{
     PASTE_BYTES_MAX, PaneAt, PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
     TEAMMATES_SERVER_REPLACED, TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
-use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::Ending;
+use kernel_processes::terminal::PaneCommand;
 pub use servers::Servers;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -299,7 +299,7 @@ fn runs_within(tmux: &kernel_processes::finding::Resolved, time: Duration) -> bo
     };
     let mut arguments = rest.to_vec();
     arguments.push("-V".into());
-    let version = crate::setup::process::run(
+    let version = kernel_processes::run::run(
         Path::new(program),
         &arguments,
         &[],
@@ -307,9 +307,9 @@ fn runs_within(tmux: &kernel_processes::finding::Resolved, time: Duration) -> bo
         time,
     );
     let running = match version {
-        Err(crate::setup::InstallError(code)) => code == "setup_timeout",
+        Err(kernel_processes::run::InstallError(code)) => code == "setup_timeout",
         Ok((false, _)) => false,
-        Ok((true, output)) => crate::setup::process::version_from(&output)
+        Ok((true, output)) => kernel_processes::run::version_from(&output)
             .is_ok_and(|found| supported(found.as_str()) == Some(true)),
     };
     if running {
@@ -800,7 +800,7 @@ impl Tmux {
     pub(super) fn anchor_for(
         &self,
         lead: &AgentId,
-        command: &InteractiveCommand,
+        command: &PaneCommand,
     ) -> Result<Vec<(String, String)>, HostError> {
         assert!(
             self.starts_in.is_some(),
@@ -861,7 +861,7 @@ impl Tmux {
     /// the lead's own checked variables, so the lead and every teammate pane it splits off
     /// get those and the tmux variables, and nothing of the engine's. Takes the control
     /// client and the command. Returns Ok, or `terminal_environment_unclean`.
-    fn lead_environment(control: &Control, command: &InteractiveCommand) -> Result<(), HostError> {
+    fn lead_environment(control: &Control, command: &PaneCommand) -> Result<(), HostError> {
         clear_environment(control)?;
         let defaults = TERMINAL_DEFAULTS
             .iter()
@@ -1341,7 +1341,7 @@ fn target(agent: &AgentId) -> String {
 /// folder, a first word tmux cannot read as an option or assignment, and variables an agent
 /// may carry. Takes the command. Returns its working folder as text, or
 /// `terminal_command_invalid`.
-fn checked(command: &InteractiveCommand) -> Result<&str, HostError> {
+fn checked(command: &PaneCommand) -> Result<&str, HostError> {
     let invalid = || failure("terminal_command_invalid");
     let cwd = command.cwd.to_str().ok_or_else(invalid)?;
     let first = command.argv.first().ok_or_else(invalid)?;
@@ -1370,7 +1370,7 @@ fn checked(command: &InteractiveCommand) -> Result<&str, HostError> {
     Ok(cwd)
 }
 
-fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, HostError> {
+fn spawn_line(agent: &AgentId, command: &PaneCommand) -> Result<String, HostError> {
     let invalid = || failure("terminal_command_invalid");
     let cwd = checked(command)?;
     let mut line = format!(
@@ -1411,7 +1411,7 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
 /// or `terminal_command_invalid` for any other command or a variable name not plain.
 fn confined_line(
     agent: &AgentId,
-    command: &InteractiveCommand,
+    command: &PaneCommand,
     profile: &Path,
     pane_env: &[(String, String)],
 ) -> Result<String, HostError> {
@@ -2348,7 +2348,7 @@ impl Tmux {
     pub(super) fn spawn_with(
         &self,
         agent: &AgentId,
-        command: &InteractiveCommand,
+        command: &PaneCommand,
         pane_env: &[(String, String)],
     ) -> Result<PaneRef, HostError> {
         let line = match &self.confined {
@@ -2411,7 +2411,7 @@ impl Tmux {
 }
 
 impl Host for Tmux {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(&self, agent: &AgentId, command: &PaneCommand) -> Result<PaneRef, HostError> {
         self.spawn_with(agent, command, &[])
     }
 

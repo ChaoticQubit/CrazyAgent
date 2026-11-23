@@ -4,7 +4,7 @@ use super::super::{
 };
 use super::super::{keep_servers_deadline, teammates_socket};
 use super::{ServerPin, Tmux, harness_socket, renew_socket, user};
-use crate::harnesses::interactive::InteractiveCommand;
+use kernel_processes::terminal::PaneCommand;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -864,7 +864,7 @@ impl Servers {
 }
 
 impl Host for Servers {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(&self, agent: &AgentId, command: &PaneCommand) -> Result<PaneRef, HostError> {
         if let Some(server) = self.own(agent)?
             && server.alive()?.contains(agent)
         {
@@ -876,7 +876,7 @@ impl Host for Servers {
     fn spawn_own_server(
         &self,
         agent: &AgentId,
-        command: &InteractiveCommand,
+        command: &PaneCommand,
     ) -> Result<PaneRef, HostError> {
         if !cfg!(target_os = "macos") || self.program.is_none() {
             return Err(failure(OWN_SERVER_UNAVAILABLE));
