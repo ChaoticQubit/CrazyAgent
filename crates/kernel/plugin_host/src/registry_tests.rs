@@ -862,6 +862,22 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
 }
 
+/// A plugin entry that is a link is removed as the link itself: the folder it points to
+/// and the plugin.toml inside stay untouched.
+#[test]
+fn remove_deletes_a_link_entry_and_leaves_its_target() {
+    let case = case();
+    let target = picked(&case, "target", NEAR);
+    let linked = plugins_folder(&case).join("linked");
+    std::os::unix::fs::symlink(&target, &linked).unwrap();
+    remove(&case.db, &case.engine(), "linked").unwrap();
+    assert!(std::fs::symlink_metadata(&linked).is_err());
+    assert_eq!(
+        std::fs::read_to_string(target.join(MANIFEST_FILE)).unwrap(),
+        NEAR
+    );
+}
+
 #[test]
 fn bundled_plugins_turn_on_and_off_and_unknown_names_are_refused() {
     let case = case();
