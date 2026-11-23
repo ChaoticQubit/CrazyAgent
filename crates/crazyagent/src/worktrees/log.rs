@@ -3,9 +3,11 @@ use crate::engine::owner::HostStamp;
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{ProjectId, TaskId};
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+use crate::state_log::replay::{self, Logged};
+use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -218,21 +220,21 @@ pub fn record(
     let aggregate = Aggregate::Worktrees;
     let seq = match event {
         Event::Admitted(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ADMITTED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Reserved(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RESERVED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Saved(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_SAVED,
             schema: SCHEMA,
             at_ms,

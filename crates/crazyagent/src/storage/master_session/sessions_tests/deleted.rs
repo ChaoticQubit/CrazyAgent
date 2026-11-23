@@ -2,7 +2,8 @@ use super::*;
 use crate::master_session::{SESSION_DELETED, SessionDeleted};
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::replay;
-use crate::state_log::{Aggregate, Appender, Draft, TOMBSTONE};
+use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::{Draft, TOMBSTONE};
 use serde_json::json;
 
 const TEAM: &str = "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1";
@@ -87,7 +88,7 @@ fn plant(case: &Case, events: &[(Aggregate, serde_json::Value)]) -> Vec<u64> {
         .map(|(aggregate, body)| {
             let body = serde_json::to_vec(body).unwrap();
             log.append(&Draft {
-                aggregate: *aggregate,
+                aggregate: (*aggregate).into(),
                 kind: "Noted",
                 schema: 1,
                 at_ms: 1,

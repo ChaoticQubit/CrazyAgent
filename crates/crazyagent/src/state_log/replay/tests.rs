@@ -1,5 +1,6 @@
 use super::*;
-use crate::state_log::{Appender, Draft, ensure};
+use crate::state_log::Appender;
+use kernel_storage::state_log::{Draft, ensure};
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::path::Path;
@@ -104,7 +105,7 @@ fn record(
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let draft = Draft {
-        aggregate,
+        aggregate: aggregate.into(),
         kind,
         schema: 1,
         at_ms,
@@ -171,14 +172,6 @@ fn logged_rows(db: &Connection) -> Vec<(i64, i64, String, String)> {
         .unwrap()
         .map(Result::unwrap)
         .collect()
-}
-
-/// The milliseconds since the Unix epoch now, read from the system. Output: the time.
-fn system_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
 }
 
 /// Moves every WAL frame into the database file and empties the WAL, failing when a reader
@@ -286,7 +279,7 @@ fn replay_reads_at_most_its_batch_and_a_store_without_a_log_replays_nothing() {
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let tick = Draft {
-        aggregate: Aggregate::Ide,
+        aggregate: Aggregate::Ide.into(),
         kind: "Tick",
         schema: 1,
         at_ms: 1,
@@ -344,7 +337,7 @@ fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
         Aggregate::Ide,
     ] {
         log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: "Tick",
             schema: 1,
             at_ms: 1,
@@ -445,25 +438,6 @@ fn an_apply_error_stops_the_replay_and_is_returned() {
     });
     assert_eq!(code(result), Some("projection_failed".into()));
     assert_eq!(calls, 2);
-}
-
-#[test]
-fn a_manual_clock_reads_what_it_was_set_to_and_the_system_clock_cannot_be_set() {
-    let clock = Clock::manual(5);
-    assert_eq!(clock.now_ms(), 5);
-    clock.set_ms(9).unwrap();
-    assert_eq!(clock.now_ms(), 9);
-    let before = system_ms();
-    let now = Clock::System.now_ms();
-    let after = system_ms();
-    assert!(
-        before <= now && now <= after,
-        "{before} <= {now} <= {after}"
-    );
-    assert_eq!(
-        code(Clock::System.set_ms(1)),
-        Some("state_log_clock_system".into())
-    );
 }
 
 #[test]
@@ -702,7 +676,7 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
     let done = log.snapshot(Aggregate::Ide, 1, run).unwrap();
     assert_eq!(
         code(log.append(&Draft {
-            aggregate: Aggregate::Ide,
+            aggregate: Aggregate::Ide.into(),
             kind: "Tick",
             schema: 1,
             at_ms: 1,
@@ -736,7 +710,7 @@ fn redact_puts_back_the_secure_delete_mode_it_found_fast_included() {
         let seq = Appender::own(&tx, fence::engine())
             .unwrap()
             .append(&Draft {
-                aggregate: Aggregate::Worktrees,
+                aggregate: Aggregate::Worktrees.into(),
                 kind: "Secret",
                 schema: 1,
                 at_ms: 1,
@@ -784,7 +758,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let seq = log
         .append(&Draft {
-            aggregate: Aggregate::Worktrees,
+            aggregate: Aggregate::Worktrees.into(),
             kind: "Secret",
             schema: 1,
             at_ms: 1,
@@ -837,7 +811,7 @@ fn a_checkpoint_after_a_redact_tries_again_past_a_held_reader_up_to_its_bound() 
     let seq = Appender::own(&tx, fence::engine())
         .unwrap()
         .append(&Draft {
-            aggregate: Aggregate::Worktrees,
+            aggregate: Aggregate::Worktrees.into(),
             kind: "Secret",
             schema: 1,
             at_ms: 1,
@@ -1153,9 +1127,9 @@ fn redact_matching_reads_past_a_full_batch_of_hits_it_does_not_redact() {
         body,
     };
     for _ in 0..REPLAY_BATCH_MAX {
-        log.append(&draft(Aggregate::Worktrees)).unwrap();
+        log.append(&draft(Aggregate::Worktrees.into())).unwrap();
     }
-    let last = log.append(&draft(Aggregate::Sessions)).unwrap();
+    let last = log.append(&draft(Aggregate::Sessions.into())).unwrap();
     assert_eq!(last, REPLAY_BATCH_MAX as u64 + 1);
     assert_eq!(
         redact_matching(

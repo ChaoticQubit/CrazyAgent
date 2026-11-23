@@ -11,7 +11,7 @@ use kernel_storage::migrations::{BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS_KEP
 use kernel_storage::migrations::{
     BACKUPS, PINNED_DAYS, backup_time, backups_in, check_copy, pinned, stamp, stamp_time,
 };
-use kernel_storage::migrations::{Texts, backup};
+use kernel_storage::migrations::{Texts, backup, backup_failure};
 use kernel_storage::restore::{
     REPLACED, RESTORE_AGENTS_RUNNING, RESTORE_BUSY, RESTORE_FAILED, RESTORE_UNAVAILABLE,
     restorable_until, restore_pinned_at_for_test,

@@ -4,7 +4,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, OwnerRuntimeHandle, failure};
 use crate::ide::log::{self, Change, RunModeSet};
 use crate::protocol::{ProjectId, RequestId};
-use crate::state_log::replay::Clock;
+use kernel_storage::state_log::Clock;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 

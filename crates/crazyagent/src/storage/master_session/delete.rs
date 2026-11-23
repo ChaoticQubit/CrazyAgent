@@ -2,7 +2,8 @@ use super::*;
 use crate::master_session::{SESSION_DELETED, SessionDeleted};
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{Logged, redact_matching};
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::Draft;
 
 /// Deletes a project's master session that is not live, for the owner's Delete: first the
 /// harness transcript it kept is removed from its master's private home, then a parked
@@ -76,7 +77,7 @@ pub(super) fn log_deleted(
     .map_err(error)?;
     let at_ms = now_ms()?;
     let seq = log.append(&Draft {
-        aggregate: Aggregate::Sessions,
+        aggregate: Aggregate::Sessions.into(),
         kind: SESSION_DELETED,
         schema: 1,
         at_ms,
