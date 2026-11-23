@@ -1,75 +1,7 @@
 use super::*;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-use std::io::{Read, Write};
-use std::net::TcpStream;
-
-struct Signer {
-    pair: minisign::KeyPair,
-    key: String,
-}
-
-fn signer() -> Signer {
-    let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-    let key = STANDARD.encode(pair.pk.to_box().unwrap().into_string());
-    Signer { pair, key }
-}
-
-impl Signer {
-    fn sign(&self, bytes: &[u8], trusted: &str) -> String {
-        let signature = minisign::sign(
-            Some(&self.pair.pk),
-            &self.pair.sk,
-            std::io::Cursor::new(bytes),
-            Some(trusted),
-            None,
-        )
-        .unwrap();
-        STANDARD.encode(signature.into_string())
-    }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn code<T: std::fmt::Debug>(result: Result<T, UpdateError>) -> &'static str {
-    result.unwrap_err().code
-}
-
-fn read_request(stream: &mut TcpStream) {
-    let mut request = Vec::new();
-    let mut byte = [0_u8; 1];
-    while !request.ends_with(b"\r\n\r\n") {
-        if stream.read(&mut byte).unwrap_or(0) == 0 {
-            return;
-        }
-        request.push(byte[0]);
-    }
-}
-
-fn serve(responses: Vec<Vec<u8>>, hold: Duration) -> (String, std::thread::JoinHandle<()>) {
-    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        for response in responses {
-            let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp_std(&listener).unwrap();
-            read_request(&mut stream);
-            std::thread::sleep(hold);
-            let _ = stream.write_all(&response);
-        }
-    });
-    (format!("http://{address}/release"), server)
-}
-
-fn response(head: &str, body: &[u8]) -> Vec<u8> {
-    let mut bytes = head.as_bytes().to_vec();
-    bytes.extend_from_slice(body);
-    bytes
-}
+use kernel_processes::update::test_support::{code, response, said, serve};
+use std::path::PathBuf;
+use std::time::Duration;
 
 #[test]
 fn the_channel_file_defaults_to_stable_round_trips_and_refuses_bad_values() {
@@ -129,369 +61,6 @@ fn saving_the_channel_creates_a_missing_data_folder_the_engine_accepts() {
 }
 
 #[test]
-fn channels_name_their_release_manifests() {
-    assert_eq!(Channel::parse("stable"), Some(Channel::Stable));
-    assert_eq!(Channel::parse("dev"), Some(Channel::Dev));
-    assert_eq!(Channel::parse("Dev"), None);
-    assert_eq!(Channel::Dev.as_str(), "dev");
-    assert_eq!(
-        Channel::Stable.desktop_manifest_url(),
-        "https://github.com/ChaoticQubit/CrazyAgent/releases/latest/download/latest.json"
-    );
-    assert_eq!(
-        Channel::Dev.desktop_manifest_url(),
-        "https://github.com/ChaoticQubit/CrazyAgent/releases/download/dev/latest.json"
-    );
-    assert_eq!(
-        Channel::Stable.cli_manifest_url(),
-        "https://github.com/ChaoticQubit/CrazyAgent/releases/latest/download/cli-latest.json"
-    );
-    assert_eq!(
-        Channel::Dev.cli_manifest_url(),
-        "https://github.com/ChaoticQubit/CrazyAgent/releases/download/dev/cli-latest.json"
-    );
-}
-
-#[test]
-fn the_data_root_follows_the_release_contract() {
-    #[cfg(unix)]
-    const CUSTOM: &str = "/srv/crazy";
-    #[cfg(not(unix))]
-    const CUSTOM: &str = r"C:\srv\crazy";
-    let vars = |pairs: &'static [(&'static str, &'static str)]| {
-        move |name: &str| {
-            pairs
-                .iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| OsString::from(value))
-        }
-    };
-    assert_eq!(
-        data_root_from(vars(&[
-            ("CRAZYAGENT_HOME", CUSTOM),
-            ("HOME", "/Users/mira")
-        ])),
-        Some(PathBuf::from(CUSTOM))
-    );
-    #[cfg(target_os = "macos")]
-    {
-        assert_eq!(
-            data_root_from(vars(&[
-                ("CRAZYAGENT_HOME", "relative"),
-                ("HOME", "/Users/mira")
-            ])),
-            Some(PathBuf::from(
-                "/Users/mira/Library/Application Support/CrazyAgent/engine"
-            ))
-        );
-        assert_eq!(data_root_from(vars(&[("HOME", "relative")])), None);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        assert_eq!(
-            data_root_from(vars(&[("HOME", "/home/mira")])),
-            Some(PathBuf::from("/home/mira/.local/share/crazyagent/engine"))
-        );
-        assert_eq!(
-            data_root_from(vars(&[("HOME", "/home/mira"), ("XDG_DATA_HOME", "/data")])),
-            Some(PathBuf::from("/data/crazyagent/engine"))
-        );
-    }
-    #[cfg(target_os = "windows")]
-    assert_eq!(
-        data_root_from(vars(&[("LOCALAPPDATA", "C:\\Users\\mira\\AppData\\Local")])),
-        Some(PathBuf::from(
-            "C:\\Users\\mira\\AppData\\Local\\CrazyAgent\\engine"
-        ))
-    );
-    assert_eq!(data_root_from(vars(&[])), None);
-}
-
-#[test]
-fn manifests_parse_and_name_this_platform() {
-    let manifest = parse_manifest(
-        br#"{"version":"0.2.0-dev.202610251600","channel":"dev","commit":"abc1234","pub_date":"2026-10-25T16:00:00Z",
-        "platforms":{"aarch64-apple-darwin":{"url":"https://example.com/a.tar.gz","sha256":"00","signature":"c2ln"}}}"#,
-    )
-    .unwrap();
-    assert_eq!(manifest.version, "0.2.0-dev.202610251600");
-    assert_eq!(
-        manifest.platforms["aarch64-apple-darwin"].url,
-        "https://example.com/a.tar.gz"
-    );
-    assert_eq!(
-        code(parse_manifest(br#"{"version":"two","platforms":{}}"#)),
-        "update_manifest_invalid"
-    );
-    assert_eq!(
-        code(parse_manifest(br#"{"version":"0.2.0"}"#)),
-        "update_manifest_invalid"
-    );
-    assert_eq!(code(parse_manifest(b"not json")), "update_manifest_invalid");
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    assert_eq!(target(), Some("aarch64-apple-darwin"));
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    assert_eq!(target(), Some("x86_64-unknown-linux-gnu"));
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    assert_eq!(target(), Some("x86_64-pc-windows-msvc"));
-}
-
-#[test]
-fn versions_compare_as_semver_with_dev_builds_below_their_stable() {
-    assert!(is_newer("0.2.0-dev.202610251600", "0.2.0-dev.202610241200").unwrap());
-    assert!(is_newer("0.2.0", "0.2.0-dev.202610251600").unwrap());
-    assert!(is_newer("0.3.0-dev.202611010000", "0.2.0").unwrap());
-    assert!(!is_newer("0.2.0-dev.202610251600", "0.2.0").unwrap());
-    assert!(!is_newer("0.2.0", "0.2.0").unwrap());
-    assert!(!is_newer("0.1.0", "0.2.0").unwrap());
-    assert_eq!(code(is_newer("latest", "0.2.0")), "update_manifest_invalid");
-}
-
-#[test]
-fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
-    let folder = tempfile::tempdir().unwrap();
-    let archive = folder.path().join("crazyagent.tar.gz");
-    let bytes: Vec<u8> = (0..70_000_u32).map(|value| (value % 251) as u8).collect();
-    std::fs::write(&archive, &bytes).unwrap();
-    let owner = signer();
-    let signed = owner.sign(
-        &bytes,
-        "timestamp:1761400000\tfile:crazyagent.tar.gz\tversion:0.2.0",
-    );
-    let sha = sha256_hex(&bytes);
-    verify_file(&archive, &sha, &signed, &owner.key, "0.2.0").unwrap();
-    verify_file(&archive, &sha.to_uppercase(), &signed, &owner.key, "v0.2.0").unwrap();
-
-    let mut tampered = bytes.clone();
-    tampered[40_000] ^= 0x01;
-    std::fs::write(&archive, &tampered).unwrap();
-    assert_eq!(
-        code(verify_file(&archive, &sha, &signed, &owner.key, "0.2.0")),
-        "update_checksum_mismatch"
-    );
-    assert_eq!(
-        code(verify_file(
-            &archive,
-            &sha256_hex(&tampered),
-            &signed,
-            &owner.key,
-            "0.2.0"
-        )),
-        "update_signature_invalid"
-    );
-
-    std::fs::write(&archive, &bytes).unwrap();
-    let stranger = signer();
-    assert_eq!(
-        code(verify_file(&archive, &sha, &signed, &stranger.key, "0.2.0")),
-        "update_signature_invalid"
-    );
-    assert_eq!(
-        code(verify_file(&archive, &sha, &signed, &owner.key, "0.3.0")),
-        "update_signed_version_mismatch"
-    );
-    let unversioned = owner.sign(&bytes, "timestamp:1761400000\tfile:crazyagent.tar.gz");
-    assert_eq!(
-        code(verify_file(
-            &archive,
-            &sha,
-            &unversioned,
-            &owner.key,
-            "0.2.0"
-        )),
-        "update_signature_unversioned"
-    );
-    assert_eq!(
-        code(verify_file(
-            &archive,
-            &sha,
-            "not base64!",
-            &owner.key,
-            "0.2.0"
-        )),
-        "update_signature_invalid"
-    );
-    assert_eq!(
-        code(verify_file(&archive, "abc", &signed, &owner.key, "0.2.0")),
-        "update_checksum_mismatch"
-    );
-    assert_eq!(
-        code(verify_file(
-            &archive,
-            &sha,
-            &signed,
-            "REPLACE_WITH_LEADER_PUBKEY",
-            "0.2.0"
-        )),
-        "update_key_missing"
-    );
-}
-
-/// A trusted comment that names a field twice is refused before its version is read, so the
-/// updater and the release asset check can never read different versions from one signature
-/// (RV-DS241-35).
-#[test]
-fn a_trusted_comment_that_names_a_field_twice_is_refused() {
-    let folder = tempfile::tempdir().unwrap();
-    let archive = folder.path().join("crazyagent.tar.gz");
-    let bytes = b"release archive bytes".to_vec();
-    std::fs::write(&archive, &bytes).unwrap();
-    let owner = signer();
-    let sha = sha256_hex(&bytes);
-    for trusted in [
-        "timestamp:1761400000\tfile:crazyagent.tar.gz\tversion:0.2.0\tversion:0.3.0",
-        "timestamp:1761400000\tfile:crazyagent.tar.gz\tversion:0.3.0\tversion:0.2.0",
-        "timestamp:1761400000\tfile:crazyagent.tar.gz\tfile:other.tar.gz\tversion:0.2.0",
-    ] {
-        let signed = owner.sign(&bytes, trusted);
-        assert_eq!(
-            code(verify_file(&archive, &sha, &signed, &owner.key, "0.2.0")),
-            "update_signature_ambiguous",
-            "{trusted}"
-        );
-    }
-}
-
-#[test]
-fn the_desktop_config_names_only_the_stable_manifest_and_each_channel_has_its_own() {
-    let config: serde_json::Value = serde_json::from_str(DESKTOP_CONFIG).unwrap();
-    assert_eq!(
-        config.pointer("/plugins/updater/endpoints").unwrap(),
-        &serde_json::json!([Channel::Stable.desktop_manifest_url()])
-    );
-    for channel in [Channel::Stable, Channel::Dev] {
-        for url in [channel.desktop_manifest_url(), channel.cli_manifest_url()] {
-            let parsed = allowed_url(url).unwrap();
-            assert_eq!(parsed.host_str(), Some("github.com"), "{url}");
-            assert!(
-                parsed
-                    .path()
-                    .starts_with("/ChaoticQubit/CrazyAgent/releases/"),
-                "{url}"
-            );
-            let tagged = parsed.path().contains("/releases/download/dev/");
-            assert_eq!(tagged, channel == Channel::Dev, "{url}");
-            let latest = parsed.path().contains("/releases/latest/download/");
-            assert_eq!(latest, channel == Channel::Stable, "{url}");
-        }
-    }
-}
-
-#[test]
-fn the_compiled_in_key_comes_from_the_desktop_updater_config() {
-    let owner = signer();
-    let config = format!(
-        r#"{{"plugins":{{"updater":{{"pubkey":"{}"}}}}}}"#,
-        owner.key
-    );
-    assert_eq!(key_from_config(&config).unwrap(), owner.key);
-    assert_eq!(
-        code(key_from_config(
-            r#"{"plugins":{"updater":{"pubkey":"REPLACE_WITH_LEADER_PUBKEY"}}}"#
-        )),
-        "update_key_missing"
-    );
-    assert_eq!(
-        code(key_from_config(r#"{"plugins":{}}"#)),
-        "update_key_missing"
-    );
-    let shipped = public_key();
-    let config: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../apps/desktop/src-tauri/tauri.conf.json"
-    ))
-    .unwrap();
-    let configured = config["plugins"]["updater"]["pubkey"].as_str().unwrap();
-    if configured == "REPLACE_WITH_LEADER_PUBKEY" {
-        assert_eq!(code(shipped), "update_key_missing");
-    } else {
-        assert_eq!(shipped.unwrap(), configured);
-    }
-}
-
-#[test]
-fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() {
-    let body: Vec<u8> = (0..3000_u32).map(|value| (value % 256) as u8).collect();
-    let oversize = vec![b'x'; 10_000];
-    let (url, server) = serve(
-        vec![
-            response(
-                &format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                ),
-                &body,
-            ),
-            response(
-                &format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    oversize.len()
-                ),
-                &oversize,
-            ),
-            response("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", &oversize),
-            response(
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                b"",
-            ),
-        ],
-        Duration::ZERO,
-    );
-    let timeout = Duration::from_secs(30);
-    let mut received = Vec::new();
-    assert_eq!(download(&url, &mut received, 4096, timeout).unwrap(), 3000);
-    assert_eq!(received, body);
-
-    let mut received = Vec::new();
-    assert_eq!(
-        code(download(&url, &mut received, 4096, timeout)),
-        "update_too_large"
-    );
-    assert!(received.len() <= 4096);
-
-    let mut received = Vec::new();
-    assert_eq!(
-        code(download(&url, &mut received, 4096, timeout)),
-        "update_too_large"
-    );
-    assert!(received.len() <= 4096);
-
-    let mut received = Vec::new();
-    assert_eq!(
-        code(download(&url, &mut received, 4096, timeout)),
-        "update_download_missing"
-    );
-    assert!(received.is_empty());
-    server.join().unwrap();
-}
-
-#[test]
-fn a_slow_server_is_cut_off_at_the_timeout() {
-    let (url, server) = serve(
-        vec![response(
-            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n",
-            b"ok",
-        )],
-        Duration::from_secs(4),
-    );
-    let started = Instant::now();
-    let mut received = Vec::new();
-    let error = download(&url, &mut received, 4096, Duration::from_secs(1)).unwrap_err();
-    assert_eq!(
-        (error.code, error.message.as_str()),
-        (
-            "update_download_failed",
-            "The update server didn't answer in time. Check your connection and try again."
-        )
-    );
-    assert!(started.elapsed() < Duration::from_secs(4));
-    server.join().unwrap();
-}
-
-fn said(error: UpdateError) -> (&'static str, String) {
-    (error.code, error.message)
-}
-
-#[test]
 fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
     let missing = || {
         response(
@@ -499,7 +68,7 @@ fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
             b"Not Found",
         )
     };
-    let (url, server) = serve(vec![missing(), missing()], Duration::ZERO);
+    let (url, server) = serve(vec![missing(), missing()]);
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -532,14 +101,11 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         "update_manifest_invalid",
         "The release information from the update server can't be read. Try again later.".to_owned(),
     );
-    let (url, server) = serve(
-        vec![
-            answered("500 Internal Server Error", b"curl: (22) oops"),
-            answered("200 OK", b"<html>no</html>"),
-            answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
-        ],
-        Duration::ZERO,
-    );
+    let (url, server) = serve(vec![
+        answered("500 Internal Server Error", b"curl: (22) oops"),
+        answered("200 OK", b"<html>no</html>"),
+        answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
+    ]);
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -562,7 +128,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
     let mut received = Vec::new();
     assert_eq!(
         said(
-            download(
+            kernel_processes::update::download(
                 &format!("http://{address}/release"),
                 &mut received,
                 4096,
@@ -575,105 +141,6 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
             "Couldn't reach the update server. Check your connection and try again.".to_owned()
         )
     );
-}
-
-#[test]
-fn an_http_error_is_read_from_curl_whatever_its_exit_code() {
-    assert_eq!(
-        said(download_failure(
-            Some(56),
-            b"curl: (56) The requested URL returned error: 404\n"
-        )),
-        (
-            "update_download_missing",
-            "The update server doesn't have this download. Try again later.".to_owned()
-        )
-    );
-    assert_eq!(
-        said(download_failure(
-            Some(56),
-            b"curl: (56) The requested URL returned error: 502\n"
-        )),
-        (
-            "update_download_failed",
-            "The update server answered with an error. Try again later.".to_owned()
-        )
-    );
-    assert_eq!(
-        said(download_failure(
-            Some(6),
-            b"curl: (6) Could not resolve host: github.com\n"
-        )),
-        (
-            "update_download_failed",
-            "Couldn't reach the update server. Check your connection and try again.".to_owned()
-        )
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_failed_service_step_reads_as_one_plain_sentence_without_its_usage_text() {
-    use std::os::unix::fs::PermissionsExt;
-    let folder = tempfile::tempdir().unwrap();
-    let executable = folder.path().join("crazyagent");
-    std::fs::write(
-        &executable,
-        "#!/bin/sh\necho 'Usage: crazyagent service <install|start|stop>'\necho 'error: unrecognized subcommand' >&2\nexit 2\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(
-        said(service_command(&executable, "stop").unwrap_err()),
-        (
-            "update_service_failed",
-            "Couldn't stop the engine for the update, so nothing changed.".to_owned()
-        )
-    );
-    assert_eq!(
-        said(service_command(&executable, "start").unwrap_err()),
-        (
-            "update_service_failed",
-            "The engine didn't start. Start it with: crazyagent service start".to_owned()
-        )
-    );
-}
-
-#[test]
-fn only_https_or_this_computer_is_downloaded_from() {
-    let mut received = Vec::new();
-    for url in [
-        "http://example.com/release",
-        "ftp://127.0.0.1/release",
-        "file:///etc/passwd",
-        "not a url",
-    ] {
-        assert_eq!(
-            code(download(url, &mut received, 4096, Duration::from_secs(1))),
-            "update_url_refused",
-            "{url}"
-        );
-    }
-    assert!(received.is_empty());
-}
-
-#[test]
-fn executables_inside_an_installed_app_are_not_replaced() {
-    assert!(inside_app_bundle(Path::new(
-        "/Applications/CrazyAgent.app/Contents/MacOS/crazyagent"
-    )));
-    assert!(inside_app_bundle(Path::new(
-        "/tmp/.mount_CrazyAb1c2d/usr/bin/crazyagent"
-    )));
-    assert!(!inside_app_bundle(Path::new(
-        "/Users/mira/.local/bin/crazyagent"
-    )));
-    let install = tempfile::tempdir().unwrap();
-    let executable = install.path().join("crazyagent.exe");
-    std::fs::write(&executable, b"").unwrap();
-    assert!(!inside_app_bundle(&executable));
-    std::fs::write(install.path().join("uninstall.exe"), b"").unwrap();
-    assert!(inside_app_bundle(&executable));
 }
 
 #[test]
@@ -701,53 +168,110 @@ fn update_arguments_take_check_and_one_channel() {
     }
 }
 
-#[cfg(unix)]
-#[test]
-fn a_helper_that_leaves_a_process_holding_its_output_still_returns() {
-    let started = Instant::now();
-    let output = run_bounded(
-        std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 6 & echo started; echo warned >&2"),
-        Duration::from_secs(5),
-        "update_service_failed",
-    )
-    .unwrap();
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "started");
-    assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "warned");
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        started.elapsed()
-    );
+fn rust_sources(folder: &Path, found: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(folder).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if !["target", "node_modules"].contains(&name.as_str()) {
+                rust_sources(&path, found);
+            }
+        } else if name.ends_with(".rs") {
+            found.push(path.canonicalize().unwrap());
+        }
+    }
 }
 
-#[cfg(unix)]
+fn function_holding(text: &str, at: usize) -> &str {
+    let start = ["\nfn ", "\npub fn ", "\nasync fn ", "\npub async fn "]
+        .iter()
+        .filter_map(|head| text[..at].rfind(head))
+        .max()
+        .expect("every call sits inside a function");
+    &text[start..at]
+}
+
+fn test_source(path: &Path) -> bool {
+    path.components().any(|part| part.as_os_str() == "tests")
+        || path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with("tests.rs"))
+}
+
+fn calls<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+    let needle = format!("{name}(");
+    text.match_indices(&needle)
+        .filter(|(at, _)| {
+            let before = &text[..*at];
+            let plain = before
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == ' ' || c == '(' || c == '\n');
+            (plain || before.ends_with("update::")) && !before.ends_with("fn ")
+        })
+        .map(|(at, _)| function_holding(text, at + needle.len()))
+        .collect()
+}
+
+/// Every install step that writes a release over the running app is reached only after its
+/// signature check: the desktop installs only the bytes `update.download` verified, and the
+/// command line swaps only inside `swap_around_engine`, which only `install_release` runs,
+/// after `verify_file`.
 #[test]
-fn a_helper_past_its_time_limit_is_stopped_and_its_output_is_bounded() {
-    let started = Instant::now();
-    let result = run_bounded(
-        std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 30"),
-        Duration::from_secs(1),
-        "update_service_failed",
-    );
-    assert_eq!(code(result), "update_service_failed");
+fn no_install_path_skips_verification() {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = crate_root.join("../..").canonicalize().unwrap();
+    let mut sources = Vec::new();
+    rust_sources(&root.join("crates"), &mut sources);
+    rust_sources(&root.join("apps/desktop/src-tauri/src"), &mut sources);
+    assert!(sources.len() > 100, "{}", sources.len());
+    let installs = [
+        ["update", ".install("].concat(),
+        ["install", "(&bytes"].concat(),
+    ];
+    let mut desktop = Vec::new();
+    let mut swaps = Vec::new();
+    let mut engine_swaps = Vec::new();
+    for path in sources.iter().filter(|path| !test_source(path)) {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut sites = std::collections::BTreeSet::new();
+        for needle in &installs {
+            let call = needle.find("install(").expect(needle) + "install(".len();
+            for (at, _) in text.match_indices(needle.as_str()) {
+                sites.insert(at + call);
+            }
+        }
+        for site in sites {
+            desktop.push((path.clone(), function_holding(&text, site).to_owned()));
+        }
+        if !text.contains("kernel_processes::update") && !path.ends_with("src/update.rs") {
+            continue;
+        }
+        for body in calls(&text, "swap") {
+            swaps.push((path.clone(), body.to_owned()));
+        }
+        for body in calls(&text, "swap_around_engine") {
+            engine_swaps.push((path.clone(), body.to_owned()));
+        }
+    }
+    assert_eq!(desktop.len(), 1, "{desktop:?}");
+    let (path, body) = &desktop[0];
     assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        started.elapsed()
+        path.ends_with("apps/desktop/src-tauri/src/updates.rs"),
+        "{path:?}"
     );
-    let output = run_bounded(
-        std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("head -c 1000000 /dev/zero"),
-        Duration::from_secs(10),
-        "update_service_failed",
-    )
-    .unwrap();
-    assert!(output.status.success());
-    assert_eq!(output.stdout.len() as u64, OUTPUT_BYTES_MAX);
+    let downloaded = body.find("update.download(").expect(body);
+    assert!(Some(downloaded) < body.find(&installs[0]), "{body}");
+    let glue = root.join("crates/crazyagent/src/update.rs");
+    assert!(!swaps.is_empty() && !engine_swaps.is_empty());
+    for (path, body) in &swaps {
+        assert!(path == &glue, "{path:?}");
+        assert!(body.starts_with("\npub fn swap_around_engine("), "{body}");
+    }
+    assert_eq!(engine_swaps.len(), 1, "{engine_swaps:?}");
+    let (path, body) = &engine_swaps[0];
+    assert!(path == &glue, "{path:?}");
+    assert!(body.starts_with("\nfn install_release("), "{body}");
+    let verified = body.find("verify_file(").expect(body);
+    assert!(Some(verified) < body.find("swap_around_engine("), "{body}");
 }

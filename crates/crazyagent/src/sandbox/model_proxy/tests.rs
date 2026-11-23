@@ -648,7 +648,7 @@ fn a_tunnel_dials_no_cloud_metadata_service() {
     let parsed: Vec<IpAddr> = listed.iter().map(|text| text.parse().unwrap()).collect();
     assert_eq!(
         parsed,
-        super::super::CLOUD_METADATA,
+        kernel_common::net::CLOUD_METADATA,
         "the list as its sources write it"
     );
     for address in listed

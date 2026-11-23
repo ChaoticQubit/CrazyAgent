@@ -48,7 +48,15 @@ fn settings_cap_generates_the_checked_in_files() {
             .iter()
             .map(|(path, _)| path.as_str())
             .collect::<Vec<_>>(),
-        vec!["host.rs", "mod.rs", "settings.rs"]
+        vec![
+            "envelope/mod.rs",
+            "envelope/secrets.rs",
+            "envelope/settings.rs",
+            "host.rs",
+            "mod.rs",
+            "secrets.rs",
+            "settings.rs"
+        ]
     );
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
@@ -66,7 +74,8 @@ fn a_renamed_field_changes_the_output() {
     let source = fs::read_to_string(sdk("caps/settings.cap")).expect("settings.cap reads");
     let renamed = source.replace("hours: u16", "hour_count: u16");
     assert_ne!(renamed, source);
-    let files = rust(&parsed(&[("settings", &renamed)])).expect("generates");
+    let secrets = fs::read_to_string(sdk("caps/secrets.cap")).expect("secrets.cap reads");
+    let files = rust(&parsed(&[("secrets", &secrets), ("settings", &renamed)])).expect("generates");
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
         vec!["settings.rs".to_owned()]
@@ -276,35 +285,38 @@ fn wrapped_types_use_alloc_and_core_paths() {
 }
 
 #[test]
-fn bound_checks_are_written_only_where_a_field_is_bounded() {
+fn bound_checks_are_written_for_every_capability_in_both_directions() {
     let module = fixture_module();
-    for present in [
-        "pub fn check_send_input(",
-        "pub fn check_send_output(",
-        "pub fn check_reveal_output(",
-        "pub fn check_pair_input(",
-        "pub fn check_count_input(",
-    ] {
-        assert!(module.contains(present), "{present}");
+    for function in ["send", "reveal", "pair", "count", "wrap", "shadow"] {
+        for direction in ["input", "output"] {
+            let head = format!("pub fn check_{function}_{direction}(");
+            assert_eq!(module.matches(&head).count(), 1, "{head}");
+        }
     }
-    for absent in [
-        "check_reveal_input",
-        "check_pair_output",
-        "check_count_output",
+    for unbounded in [
+        "pub fn check_reveal_input(_secret: &Secret) -> Result<(), Refusal> {\n    Ok(())\n}\n",
+        "pub fn check_pair_output(_output: &()) -> Result<(), Refusal> {\n    Ok(())\n}\n",
+        "pub fn check_count_output(_output: &u32) -> Result<(), Refusal> {\n    Ok(())\n}\n",
     ] {
-        assert!(!module.contains(absent), "{absent}");
+        assert!(module.contains(unbounded), "{unbounded}");
     }
+    assert!(
+        module.contains(
+            "pub fn check_pair_input(_pair: &Pair, keyed: &Keyed) -> Result<(), Refusal> {\n"
+        ),
+        "{module}"
+    );
     let settings = generated_from_caps()
         .into_iter()
         .find(|(path, _)| path == "settings.rs")
         .expect("settings.rs")
         .1;
-    assert!(!settings.contains("check_"), "{settings}");
+    assert_eq!(settings.matches("pub fn check_").count(), 2, "{settings}");
     assert!(!settings.contains("alloc::"), "{settings}");
 }
 
 #[test]
-fn settings_changes_only_by_the_caller_and_the_tier() {
+fn settings_changes_only_by_the_caller_the_tier_and_its_checks() {
     let settings = generated_from_caps()
         .into_iter()
         .find(|(path, _)| path == "settings.rs")
@@ -319,6 +331,12 @@ fn settings_changes_only_by_the_caller_and_the_tier() {
     ));
     assert!(settings.contains(
         "#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(deny_unknown_fields)]\npub struct QuitSettings {"
+    ));
+    assert!(settings.contains(
+        "pub fn check_save_quit_input(_settings: &QuitSettings) -> Result<(), Refusal> {\n    Ok(())\n}\n"
+    ));
+    assert!(settings.contains(
+        "pub fn check_save_quit_output(_output: &()) -> Result<(), Refusal> {\n    Ok(())\n}\n"
     ));
 }
 
@@ -360,6 +378,13 @@ fn a_capability_named_like_a_generated_check_is_refused() {
         )]),
         "capgen_name_collision"
     );
+    assert_eq!(
+        refused(&[(
+            "s",
+            "capability s.a(x: u16) -> unit tier: t1 needs: s.w\ncapability s.check_a_output() -> unit tier: t1 needs: s.w"
+        )]),
+        "capgen_name_collision"
+    );
 }
 
 fn chain(leaf: &str) -> String {
@@ -396,7 +421,10 @@ fn a_deep_chain_of_shared_types_generates_without_blowing_up() {
         "{plain}"
     );
     assert!(!plain.contains("fn fits_t40("), "{plain}");
-    assert!(!plain.contains("fn check_a_input("), "{plain}");
+    assert!(
+        plain.contains("pub fn check_a_input(_t: &T40) -> Result<(), Refusal> {\n    Ok(())\n}\n"),
+        "{plain}"
+    );
     let bounded = generated_within(chain("text"), 30);
     assert!(
         !derive_of(&bounded, "pub struct T40").contains("Copy"),
@@ -414,6 +442,12 @@ fn generated(sources: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 /// The text of one generated file. Inputs: the files and the path. Output: the text.
+/// Text with every run of whitespace made one space, so a check reads the same before and
+/// after rustfmt wraps a line. Input: the text. Output: the flattened text.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn file_text<'f>(files: &'f [(String, String)], path: &str) -> &'f str {
     &files
         .iter()
@@ -572,22 +606,27 @@ fn a_call_taking_a_foreign_handle_writes_its_checks_and_traits() {
         ("secrets", "handle Secret"),
     ]);
     let net = file_text(&files, "net.rs");
+    let flat_net = flat(net);
     assert!(
-        net.contains("keys: &[super::secrets::Secret], ring: &Ring"),
+        flat_net.contains(&flat("keys: &[super::secrets::Secret], ring: &Ring")),
         "{net}"
     );
     assert!(
-        net.contains("keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"),
+        flat_net.contains(&flat(
+            "keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"
+        )),
         "{net}"
     );
     assert!(
-        net.contains(
+        flat_net.contains(&flat(
             "fn fits_ring(value: &Ring) -> bool {\n    value.keys.len() <= crate::LIST_ITEMS_MAX\n}"
-        ),
+        )),
         "{net}"
     );
     assert!(
-        net.contains("s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"),
+        flat_net.contains(&flat(
+            "s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"
+        )),
         "{net}"
     );
     assert_eq!(

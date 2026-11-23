@@ -182,7 +182,7 @@ pub(crate) fn save_quit_with(
         sink: refusals,
         refused: Cell::new(false),
     };
-    let gateway = Gateway::new(grants, &provider, &record);
+    let gateway = Gateway::new(grants, &provider, &crate::security_caps::Absent, &record);
     let result = entry(&gateway.bind(BUNDLED[0].0), (*settings).into());
     if record.refused.get() {
         return Err(EngineError("plugin_call_refused".to_owned()));

@@ -1,6 +1,5 @@
 use super::TerminalSession;
 use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
-use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::{
     AccountBinding, LaunchBoundary, LaunchError, LaunchLimits, LaunchRequest,
 };
@@ -225,7 +224,11 @@ struct FirstLookFails {
 }
 
 impl Host for FirstLookFails {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(
+        &self,
+        agent: &AgentId,
+        command: &crate::terminal::PaneCommand,
+    ) -> Result<PaneRef, HostError> {
         self.real.spawn(agent, command)
     }
 
@@ -328,7 +331,11 @@ struct TagRefused {
 }
 
 impl Host for TagRefused {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(
+        &self,
+        agent: &AgentId,
+        command: &crate::terminal::PaneCommand,
+    ) -> Result<PaneRef, HostError> {
         self.real.spawn(agent, command)
     }
 
