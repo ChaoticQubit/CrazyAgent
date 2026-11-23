@@ -7,6 +7,7 @@ use super::{
 use super::{LeadPaths, PaneCommand};
 use crate::group::Ending;
 use control::*;
+#[cfg(test)]
 use groups::*;
 use lines::*;
 pub use servers::Servers;

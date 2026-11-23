@@ -11,7 +11,8 @@ pub(super) struct Control {
 
 /// The serial the next control client gets, unique within the process, so a pane id found
 /// through one client is never used through a client of another server (`Tmux::input_at`).
-pub(super) static CONTROL_SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub(super) static CONTROL_SERIALS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Default)]
 pub(super) struct State {
@@ -127,11 +128,12 @@ pub(super) fn pinned(control: &Control, pin: &ServerPin) -> Result<(), HostError
         .lock()
         .map_err(|_| failure("terminal_unavailable"))?;
     if kept.is_none() {
-        *kept = super::teammates_server_pid(&pin.root, &pin.lead, &pin.socket, &pin.hooks.lead)?;
+        *kept =
+            super::super::teammates_server_pid(&pin.root, &pin.lead, &pin.socket, &pin.hooks.lead)?;
     }
     match *kept {
         None => {
-            super::keep_teammates_server_pid(
+            super::super::keep_teammates_server_pid(
                 &pin.root,
                 &pin.lead,
                 &pin.socket,
@@ -148,7 +150,7 @@ pub(super) fn pinned(control: &Control, pin: &ServerPin) -> Result<(), HostError
 }
 
 impl Drop for Control {
-    pub(super) fn drop(&mut self) {
+    fn drop(&mut self) {
         self.close();
     }
 }

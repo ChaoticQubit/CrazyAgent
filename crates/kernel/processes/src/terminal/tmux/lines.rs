@@ -220,7 +220,13 @@ pub(super) struct Modes {
     pub(super) mouse_sgr: bool,
 }
 
-pub(super) fn render(screen: &[Vec<u8>], cols: u16, rows: u16, cursor: (u16, u16), modes: Modes) -> Vec<u8> {
+pub(super) fn render(
+    screen: &[Vec<u8>],
+    cols: u16,
+    rows: u16,
+    cursor: (u16, u16),
+    modes: Modes,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     for (on, sequence) in [
         (modes.alternate_screen, ALTERNATE_SCREEN_ON),
@@ -481,7 +487,7 @@ pub(super) fn paste_buffer_name() -> String {
 /// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
 /// bytes, so none cuts a character or an escape sequence, and none for no bytes.
 pub(super) fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
-    let lines: Vec<String> = super::input_runs(bytes, SEND_KEYS_BYTES_MAX)
+    let lines: Vec<String> = super::super::input_runs(bytes, SEND_KEYS_BYTES_MAX)
         .into_iter()
         .map(|run| {
             let mut line = format!("send-keys -t {target} -H");
@@ -492,7 +498,7 @@ pub(super) fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
         })
         .collect();
     assert!(lines.len() >= bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
-    assert!(lines.len() <= super::input_runs_max(bytes.len(), SEND_KEYS_BYTES_MAX));
+    assert!(lines.len() <= super::super::input_runs_max(bytes.len(), SEND_KEYS_BYTES_MAX));
     lines
 }
 

@@ -166,7 +166,10 @@ pub(super) fn end_groups_with(
 /// Keeps the holds whose group still answers `left` and marks every other one gone, so
 /// its number stays refused to later paths once dropped (CB-2 r1 F1). Takes the holds and
 /// the test.
-pub(super) fn keep_left(groups: &mut Vec<Ending>, left: &mut impl FnMut(rustix::process::Pid) -> bool) {
+pub(super) fn keep_left(
+    groups: &mut Vec<Ending>,
+    left: &mut impl FnMut(rustix::process::Pid) -> bool,
+) {
     groups.retain_mut(|group| {
         let answers = left(group.pid());
         if !answers {
