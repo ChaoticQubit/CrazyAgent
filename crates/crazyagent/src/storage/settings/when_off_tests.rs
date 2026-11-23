@@ -176,3 +176,26 @@ fn setting_refusals_map_to_listed_app_plugin_codes() {
         );
     }
 }
+
+/// A turn-off choice storage cannot record leaves the global file as it was, so the files
+/// still resolve to the config the worker holds.
+#[test]
+fn a_turn_off_choice_storage_cannot_record_leaves_the_file_as_it_was() {
+    let fixture = Fixture::new();
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY, body BLOB)",
+    )
+    .unwrap();
+    let mut config = fixture.sources.config().unwrap();
+    let held = config.id.clone();
+    let command = crate::app_plugins::Command::SetWhenOff {
+        when_off: TurnOff::StopRuns,
+    };
+    let saved = app_plugins(&db, &mut config, (false, Some(&fixture.sources), command));
+    assert!(saved.is_err(), "storage could not record the new config");
+    assert_eq!(config.id, held);
+    assert_eq!(std::fs::read_to_string(&fixture.global).unwrap(), GLOBAL);
+    assert!(verified_source_hash(&config, Some(&fixture.sources)).is_ok());
+    assert!(!fixture.staged_left());
+}
