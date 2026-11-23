@@ -296,7 +296,9 @@ fn a_system_tmux_in_place_of_the_bundled_one_reads_found_with_its_note_under_it(
         let mut status = first_run_status();
         status.dependencies[0].state = DependencyState::System {
             version: version("3.5a"),
-            note: crate::tools::BundleNote::CannotRun.line().to_owned(),
+            note: kernel_processes::finding::BundleNote::CannotRun
+                .line()
+                .to_owned(),
         };
         let mut shell = Shell::with(ctx(width, height), Box::new(AppSetup::new(true)));
         assert!(matches!(jobs(&mut shell).as_slice(), [AppSetupJob::Status]));
@@ -2436,7 +2438,8 @@ fn a_failed_permission_fix_shows_its_sentence_on_the_row_and_as_the_message() {
     fix_sent(&mut shell);
     shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
     jobs(&mut shell);
-    let failed = crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_FAILED);
+    let failed =
+        crate::setup::plain_reason(kernel_processes::finding::permission_fix::TOOL_FIX_FAILED);
     let mut after = refused_status(crate::setup::RefusedTool::FixButton);
     if let DependencyState::Refused { fix_failed, .. } = &mut after.dependencies[2].state {
         *fix_failed = Some(failed.to_owned());
@@ -2463,7 +2466,7 @@ fn command_only_shows_the_command_and_p_sends_nothing() {
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(
         lead(&shell),
-        crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_OFF)
+        crate::setup::plain_reason(kernel_processes::finding::permission_fix::TOOL_FIX_OFF)
     );
 }
 

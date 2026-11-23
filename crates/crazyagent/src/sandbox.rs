@@ -2227,14 +2227,14 @@ impl ProjectSandbox {
     }
 
     /// Lets a script harness's interpreters run as the tool resolver found them
-    /// ([`crate::tools::Resolved::grants`]), such as the `node` an npm-built Codex asks `env`
+    /// ([`kernel_processes::finding::Resolved::grants`]), such as the `node` an npm-built Codex asks `env`
     /// for from nvm, volta or Homebrew: each interpreter's folder becomes readable as a
     /// toolchain folder unless a system or granted folder covers it. Input: the resolved
     /// harness. Output: the sandbox, or a refusal for an interpreter in the project or in a
     /// folder the agent can write.
     pub fn allow_interpreters(
         mut self,
-        resolved: &crate::tools::Resolved,
+        resolved: &kernel_processes::finding::Resolved,
     ) -> Result<Self, SandboxError> {
         for file in resolved.grants().into_iter().skip(1) {
             let folder = file
@@ -4168,7 +4168,7 @@ impl InstalledSandbox {
             #[cfg(target_os = "linux")]
             let linux = {
                 let helper = linux::helper_beside_engine()?;
-                let data = crate::tools::engine_root();
+                let data = kernel_processes::finding::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
             #[cfg(target_os = "linux")]

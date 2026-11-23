@@ -810,7 +810,7 @@ fn typed_reason(line: &str, tools: &[&str]) -> bool {
         .strip_prefix(LIVE_OFF_START)
         .and_then(|rest| rest.strip_suffix(LIVE_OFF_END))
         .unwrap_or(line);
-    let tmux = tools.contains(&"tmux") && reason == crazyagent::tools::TMUX_MISSING;
+    let tmux = tools.contains(&"tmux") && reason == kernel_processes::finding::TMUX_MISSING;
     let named = tools
         .iter()
         .filter(|tool| **tool != "tmux")

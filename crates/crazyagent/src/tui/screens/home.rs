@@ -650,7 +650,9 @@ pub(in crate::tui) mod tests {
         let mut status = tools(&[]);
         status.dependencies[0].state = DependencyState::System {
             version: Version::parse("3.5a").unwrap(),
-            note: crate::tools::BundleNote::Missing.line().to_owned(),
+            note: kernel_processes::finding::BundleNote::Missing
+                .line()
+                .to_owned(),
         };
         assert_eq!(missing_tools(&status), Vec::<String>::new());
     }
