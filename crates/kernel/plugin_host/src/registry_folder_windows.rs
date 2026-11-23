@@ -12,10 +12,12 @@ const DELETE: u32 = 0x0001_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 const FILE_LIST_DIRECTORY: u32 = 0x0001;
 const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
 const FILE_SHARE_READ: u32 = 0x1;
 const FILE_SHARE_WRITE: u32 = 0x2;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 /// A folder held open by its handle, which never shares delete, so it is neither renamed
@@ -158,15 +160,29 @@ pub(super) fn open_manifest(folder: &Dir, owned: bool) -> Result<Option<File>, (
 }
 
 /// Deletes one entry through its own handle, a link or junction itself and never its
-/// target, the handle opened, marked and closed in this call. Inputs: the held folder and
-/// the name. Output: whether it was there, or Err.
+/// target, the handle opened, marked and closed in this call. An entry the delete refuses
+/// for its read-only attribute has that attribute cleared through the same handle and is
+/// deleted again. Inputs: the held folder and the name. Output: whether it was there, or
+/// Err.
 pub(super) fn unlink(directory: &Dir, name: &OsStr) -> Result<bool, ()> {
-    let entry = match opened(&directory.path.join(name), DELETE | FILE_READ_ATTRIBUTES) {
+    let entry = match opened(
+        &directory.path.join(name),
+        DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+    ) {
         Ok(entry) => entry,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(_) => return Err(()),
     };
-    private::delete(&entry).map_err(|_| ())?;
+    if private::delete(&entry).is_err() {
+        let read_only = entry
+            .metadata()
+            .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_READONLY != 0);
+        if !read_only {
+            return Err(());
+        }
+        private::clear_read_only(&entry).map_err(|_| ())?;
+        private::delete(&entry).map_err(|_| ())?;
+    }
     drop(entry);
     Ok(true)
 }
