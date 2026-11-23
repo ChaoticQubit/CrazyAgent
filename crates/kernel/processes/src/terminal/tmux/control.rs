@@ -271,14 +271,14 @@ impl Control {
         }
     }
 
+    /// Ends the client at once: marks it closed, kills and reaps the child, then drops the
+    /// input. The child goes first, since a write blocked on a full pipe holds the input
+    /// until the child's end of the pipe closes.
     pub(super) fn stop(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
             state.pending.clear();
             state.viewers.clear();
-        }
-        if let Ok(mut input) = self.input.lock() {
-            *input = None;
         }
         if let Ok(mut child) = self.child.lock()
             && let Some(mut child) = child.take()
@@ -286,13 +286,31 @@ impl Control {
             let _ = child.kill();
             let _ = child.wait();
         }
-    }
-
-    pub(super) fn close(&self) {
         if let Ok(mut input) = self.input.lock() {
             *input = None;
         }
+    }
+
+    /// Ends the client gently: drops the input so tmux sees the end of its commands and
+    /// waits for it to exit, then stops it, all within `CLOSE_TIME`. A write that still holds
+    /// the input at the deadline is blocked on a full pipe, so the client is stopped then.
+    pub(super) fn close(&self) {
         let deadline = Instant::now() + CLOSE_TIME;
+        loop {
+            match self.input.try_lock() {
+                Ok(mut input) => {
+                    *input = None;
+                    break;
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => break,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() >= deadline => {
+                    return self.stop();
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
         if let Ok(mut slot) = self.child.lock()
             && let Some(child) = slot.as_mut()
         {
@@ -819,3 +837,6 @@ pub(super) fn windows(control: &Control) -> Result<Vec<AgentId>, HostError> {
     agents.dedup();
     Ok(agents)
 }
+
+#[cfg(test)]
+mod tests;
