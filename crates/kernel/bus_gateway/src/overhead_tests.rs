@@ -174,8 +174,8 @@ impl sdk::secrets::Provide for Found {
     }
 }
 
-/// Times one `secrets.find` call's gateway overhead against OWNER Q4 the way the quit save
-/// row does: the SDK call through a bound host minus the direct provider call. Run:
+/// Times one `secrets.find` call's gateway overhead against the overhead budget the way the
+/// quit save row does: the SDK call through a bound host minus the direct provider call. Run:
 /// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-bus-gateway --lib overhead_tests::gateway_secrets_call_p95 -- --ignored --nocapture`
 /// (`OVERHEAD_MAC=loaded` on the loaded Mac).
 #[test]
