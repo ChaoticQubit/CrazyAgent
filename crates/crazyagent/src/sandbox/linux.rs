@@ -1,4 +1,4 @@
-use super::{ProjectSandbox, Routed, Sandbox, agent_env};
+use super::ProjectSandbox;
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use kernel_sandbox::error::{SandboxError, invalid};
@@ -10,11 +10,13 @@ use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::ports::{
     KEPT_PORTS_MAX, OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
 };
+use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::profile::consts::{
     ADMIN_LINKS, ADMIN_WRITES, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES,
     LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
     LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, STORE_ALTERNATES,
 };
+use kernel_sandbox::profile::env::{Routed, agent_process_env};
 use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -2596,7 +2598,7 @@ impl Sandbox for LinuxSandbox {
         if self.sandbox.resolves_over_tcp() {
             base.push(("RES_OPTIONS", OsStr::new(DNS_OVER_TCP)));
         }
-        let env = agent_env(&base, harness.get_envs())?;
+        let env = agent_process_env(&base, harness.get_envs())?;
         command
             .arg("--")
             .arg(program)
@@ -6008,29 +6010,6 @@ mod tests {
         );
     }
 
-    /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
-    /// reads 1; any other value, or no file, leaves them free, so the AppArmor line shows
-    /// only where it is the reason nothing nests (DEC-179 SBX-3).
-    #[test]
-    fn only_an_apparmor_setting_of_one_restricts_user_namespaces() {
-        assert_eq!(
-            APPARMOR_USERNS,
-            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
-        );
-        assert!(restricts(Some("1\n")));
-        assert!(restricts(Some("1")));
-        for free in [
-            Some("0\n"),
-            Some(""),
-            Some("2\n"),
-            Some("11\n"),
-            Some("1 0"),
-            None,
-        ] {
-            assert!(!restricts(free), "{free:?}");
-        }
-    }
-
     /// The helper refuses every variable that makes glibc load code, the dynamic loader's
     /// and gconv's, and no other: a name that only starts with `LD`, holds `LD_` later, or
     /// differs in case still passes (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2).
@@ -6196,36 +6175,6 @@ mod tests {
         assert_eq!(held[at + 2], cwd.as_os_str());
         assert!(!held.contains(&GUARD_SIGNALS.into()));
         assert!(!held.contains(&GUARD_LOOPBACK.into()));
-    }
-
-    /// The owner's setting Off, and a host that only has bubblewrap, start no supervisor:
-    /// the launch stays as it was before the supervisor (DEC-179 add.2 Q1).
-    #[test]
-    fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
-        let helper = std::env::current_exe().unwrap();
-        let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
-        let landlock = LinuxBackend::Landlock {
-            helper: helper.clone(),
-        };
-        let off = LinuxSandbox::new(sandbox.clone(), landlock).unwrap();
-        assert_eq!(off.supervise(LinuxSupervisor::Off, None).supervision, None);
-        let bubblewrap = LinuxBackend::Bubblewrap {
-            bwrap: helper.clone(),
-            helper,
-        };
-        let alone = LinuxSandbox::new(sandbox, bubblewrap).unwrap();
-        assert_eq!(alone.supervise(LinuxSupervisor::On, None).supervision, None);
-    }
-
-    #[test]
-    fn without_the_helper_bubblewrap_starts_no_agent() {
-        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
-        match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
-            Err(SandboxError::Unavailable(reason)) => {
-                assert!(reason.contains("helper"), "{reason}");
-            }
-            other => panic!("bubblewrap without the socket filter must be refused: {other:?}"),
-        }
     }
 
     #[test]

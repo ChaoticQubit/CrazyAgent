@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use bus_gateway::{Gateway, Grants, Refusals};
+use bus_gateway::{Gateway, Grants, Refusals, Switches};
 use crazyagent_plugin_agent_quit as agent_quit;
 use kernel_plugin_host::generated::permissions::{BUNDLED_GRANTS, PERMISSIONS};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -139,9 +139,9 @@ pub(crate) const REFUSALS_PENDING_MAX: usize = 1_024;
 pub(crate) type Entry = fn(&dyn sdk::Host, sdk_settings::QuitSettings) -> Result<(), Refusal>;
 
 /// Saves the owner's agents-on-quit choice through the bundled agent-quit plugin, the
-/// generated SDK and the bus gateway's grant check. Inputs: the request transaction, the
-/// signed revision and the settings. Output: the same outcome or error as a direct save,
-/// or `plugin_call_refused`.
+/// generated SDK and the bus gateway's switch and grant checks. Inputs: the request
+/// transaction, the signed revision and the settings. Output: the same outcome or error as
+/// a direct save, or `plugin_call_refused`.
 pub(crate) fn save_quit(
     tx: &Transaction<'_>,
     revision: u64,
@@ -150,6 +150,7 @@ pub(crate) fn save_quit(
     save_quit_with(
         agent_quit::save,
         bundled_grants(),
+        crate::app_plugins::switches(),
         engine_refusals(),
         tx,
         revision,
@@ -157,14 +158,16 @@ pub(crate) fn save_quit(
     )
 }
 
-/// Saves the quit settings through a plugin entry with a given grant table and refusal
-/// sink. The plugin's result is input: a refusal the gateway recorded in this call is
-/// `plugin_call_refused`, one admitted host call whose result the plugin returns is that
-/// result, and every other shape is `plugin_call_invalid`. Inputs: the entry, the grants,
-/// the sink, the request transaction, the signed revision and the settings.
+/// Saves the quit settings through a plugin entry with a given grant table, plugin switches
+/// and refusal sink. The plugin's result is input: a refusal the gateway recorded in this
+/// call is `plugin_call_refused`, one admitted host call whose result the plugin returns is
+/// that result, and every other shape is `plugin_call_invalid`. Inputs: the entry, the
+/// grants, the switches, the sink, the request transaction, the signed revision and the
+/// settings.
 pub(crate) fn save_quit_with(
     entry: Entry,
     grants: &Grants,
+    switches: &dyn Switches,
     refusals: &EngineRefusals,
     tx: &Transaction<'_>,
     revision: u64,
@@ -181,10 +184,10 @@ pub(crate) fn save_quit_with(
         sink: refusals,
         refused: Cell::new(false),
     };
-    let gateway = Gateway::new(grants, &record);
+    let gateway = Gateway::new(grants, &record, switches);
     let providers = Providers {
         net: &crate::security_caps::Absent,
-        process: &crate::security_caps::Absent,
+        process: &crate::sdk_install::InstallCaps::UNREGISTERED,
         secrets: &crate::security_caps::Absent,
         settings: &provider,
         service: &crate::security_caps::Absent,
@@ -244,8 +247,10 @@ pub(crate) fn engine_refusals() -> &'static EngineRefusals {
 }
 
 /// The engine's refusal sink: one diagnostic line per refused call, a per-plugin count,
-/// the (plugin, capability) pairs first refused in this run, bounded by
-/// `REFUSALS_PENDING_MAX`, and the queue of those not yet logged. Static ids only.
+/// the (plugin, capability) pairs first refused in this run for a reason other than the
+/// plugin being off, bounded by `REFUSALS_PENDING_MAX`, and the queue of those not yet
+/// logged. A plugin the owner turned off is the owner's choice, not a permission it lacks,
+/// so it is counted and never queued. Static ids only.
 pub(crate) struct EngineRefusals {
     counts: Mutex<BTreeMap<&'static str, u64>>,
     pending: Mutex<BTreeSet<(&'static str, &'static str)>>,
@@ -298,14 +303,25 @@ impl Refusals for EngineRefusals {
             Refusal::NotGranted { needs, .. } => needs,
             _ => capability.needs,
         };
-        eprintln!(
-            "plugin_call_refused plugin={plugin} capability={} needs={needs}",
-            capability.name
-        );
+        let off = matches!(refusal, Refusal::PluginOff { .. });
+        if off {
+            eprintln!(
+                "plugin_call_refused plugin={plugin} capability={} off",
+                capability.name
+            );
+        } else {
+            eprintln!(
+                "plugin_call_refused plugin={plugin} capability={} needs={needs}",
+                capability.name
+            );
+        }
         let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
         let count = counts.entry(plugin).or_insert(0);
         *count = count.saturating_add(1);
         drop(counts);
+        if off {
+            return;
+        }
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         if pending.len() < REFUSALS_PENDING_MAX && pending.insert((plugin, capability.name)) {
             let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);

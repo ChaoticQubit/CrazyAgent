@@ -1,10 +1,10 @@
 use super::*;
 use crate::ide::workspace::{IdePolicy, ide_policy};
 use crate::sandbox::ProjectSandbox;
-use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
 };
+use kernel_sandbox::{net::SandboxNetwork, profile::command::SANDBOX_EXEC};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2174,7 +2174,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         writer,
     )
     .unwrap();
-    assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert_eq!(command.get_program(), SANDBOX_EXEC);
     let profile = folder.join(sandbox::PROFILE);
     let expected: Vec<OsString> = [
         OsString::from("-f"),
@@ -2929,7 +2929,7 @@ fn a_full_access_launch_runs_the_launcher_with_no_seatbelt() {
     let root = fs::canonicalize(checkout.path()).unwrap();
     set_level(data.path(), &project("full"), AgentAccess::Full);
     let (built, _) = built_server(&servers, &project("full"), &root);
-    assert_ne!(built.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert_ne!(built.get_program(), SANDBOX_EXEC);
     assert!(built.get_program().to_string_lossy().ends_with(LAUNCHER));
 }
 

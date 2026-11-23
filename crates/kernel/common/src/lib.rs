@@ -2,6 +2,9 @@
 
 use sha2::{Digest, Sha256};
 
+/// The variable names that never reach an agent process or a pane, and the check that tells
+/// them.
+pub mod env_names;
 pub mod names;
 pub mod net;
 /// The relay token and local placeholder names a model key value is told by, and the

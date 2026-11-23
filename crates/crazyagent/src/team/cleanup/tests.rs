@@ -2893,4 +2893,5 @@ fn removing_a_deleted_agent_s_files_removes_what_it_shut_and_pinned_in_its_home(
     assert!(!left, "the agent folder stayed");
 }
 
+#[cfg(target_os = "macos")]
 mod run_folder_tests;

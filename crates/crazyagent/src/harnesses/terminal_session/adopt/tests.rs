@@ -5,9 +5,11 @@ use crate::harnesses::interactive::InteractiveCommand;
 use crate::terminal::FOLDER;
 #[cfg(target_os = "macos")]
 use crate::terminal::tmux::installed;
+#[cfg(target_os = "macos")]
 use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
