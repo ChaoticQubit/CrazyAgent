@@ -1055,9 +1055,11 @@ version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-common",
  "form_urlencoded",
+ "getrandom 0.4.3",
  "keyring-core",
  "serde",
  "serde_json",
+ "subtle",
  "url",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
