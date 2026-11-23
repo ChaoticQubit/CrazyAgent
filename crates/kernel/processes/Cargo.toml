@@ -33,6 +33,8 @@ sha2 = "=0.10.9"
 
 [target.'cfg(windows)'.dependencies]
 crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
+portable-pty = "=0.9.0"
+vt100 = "=0.15.2"
 
 [dev-dependencies]
 minisign = "=0.10.0"
