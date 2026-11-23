@@ -1,8 +1,10 @@
 use super::*;
 
 /// Links the running `crazyagent` into a folder on the user's PATH so a shell finds it:
-/// `~/.local/bin/crazyagent` on macOS and Linux. A link already there is replaced; any
-/// other file is refused. Inputs: the executable and the bin folder. Output: the link.
+/// `~/.local/bin/crazyagent` on macOS and Linux. An absent name gets the link made in
+/// place, which never replaces a file that arrived first; a link already there is swapped
+/// for the new one in one step ([`replace_link`]); any other file is refused and kept.
+/// Inputs: the executable and the bin folder. Output: the link.
 #[cfg(unix)]
 pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> {
     let fail = |path: &Path, error: std::io::Error| failure(format!("{}: {error}", path.display()));
@@ -18,10 +20,7 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
     if let Ok(metadata) = std::fs::symlink_metadata(&link)
         && !metadata.file_type().is_symlink()
     {
-        return Err(failure(format!(
-            "{}: a file that is not a link is already there; move it away first",
-            link.display()
-        )));
+        return Err(not_a_link(&link));
     }
     #[cfg(test)]
     BEFORE_PUBLISH.with(|step| {
@@ -29,18 +28,105 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
             step(&link);
         }
     });
-    let staged = bin.join(format!(".crazyagent.link.{}", std::process::id()));
-    let _ = std::fs::remove_file(&staged);
-    std::os::unix::fs::symlink(executable, &staged).map_err(|error| fail(&staged, error))?;
-    std::fs::rename(&staged, &link).map_err(|error| fail(&link, error))?;
-    Ok(link)
+    for _ in 0..PUBLISH_ROUNDS_MAX {
+        match std::os::unix::fs::symlink(executable, &link) {
+            Ok(()) => return Ok(link),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(fail(&link, error)),
+        }
+        if replace_link(executable, &link)? {
+            return Ok(link);
+        }
+    }
+    Err(not_a_link(&link))
 }
+
+/// The most rounds [`link_cli`] tries to publish when the name keeps going away between
+/// its make and its swap, before it refuses.
+#[cfg(unix)]
+const PUBLISH_ROUNDS_MAX: usize = 3;
+#[cfg(unix)]
+const _: () = assert!(PUBLISH_ROUNDS_MAX >= 1 && PUBLISH_ROUNDS_MAX <= 8);
+
+/// The refusal for a name that holds something other than a link. Input: the name.
+/// Output: the error.
+#[cfg(unix)]
+fn not_a_link(link: &Path) -> ServiceError {
+    failure(format!(
+        "{}: a file that is not a link is already there; move it away first",
+        link.display()
+    ))
+}
+
+/// Swaps a new link for whatever is at `link` in one step (`RENAME_SWAP` on macOS,
+/// `RENAME_EXCHANGE` on Linux), then reads what came out: a link is removed, anything else
+/// is swapped back and refused, so a file another installer wrote is never lost; when the
+/// swap back fails, the error names where that file now sits. A file system that cannot
+/// swap refuses with the staged link removed. Inputs: the executable and the link's name.
+/// Output: true when published, false when the name went away before the swap, or the
+/// refusal.
+#[cfg(unix)]
+fn replace_link(executable: &Path, link: &Path) -> Result<bool, ServiceError> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+    let folder = link.parent().expect("a link name has a folder");
+    let staged = folder.join(format!(".crazyagent.link.{}", std::process::id()));
+    let fail = |path: &Path, error: std::io::Error| failure(format!("{}: {error}", path.display()));
+    let drop_staged = || {
+        if std::fs::symlink_metadata(&staged)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            let _ = std::fs::remove_file(&staged);
+        }
+    };
+    drop_staged();
+    std::os::unix::fs::symlink(executable, &staged).map_err(|error| fail(&staged, error))?;
+    match renameat_with(CWD, &staged, CWD, link, RenameFlags::EXCHANGE) {
+        Ok(()) => {}
+        Err(Errno::NOENT) => {
+            drop_staged();
+            return Ok(false);
+        }
+        Err(Errno::INVAL | Errno::NOTSUP | Errno::NOSYS) => {
+            drop_staged();
+            return Err(failure(format!(
+                "this file system cannot swap the link in one step; remove the link at {} first",
+                link.display()
+            )));
+        }
+        Err(errno) => {
+            drop_staged();
+            return Err(fail(link, errno.into()));
+        }
+    }
+    let old = std::fs::symlink_metadata(&staged);
+    if old.is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        std::fs::remove_file(&staged).map_err(|error| fail(&staged, error))?;
+        return Ok(true);
+    }
+    match renameat_with(CWD, &staged, CWD, link, RenameFlags::EXCHANGE) {
+        Ok(()) => {
+            drop_staged();
+            Err(not_a_link(link))
+        }
+        Err(errno) => Err(failure(format!(
+            "{}: a file that is not a link arrived there and is kept at {}: {}",
+            link.display(),
+            staged.display(),
+            std::io::Error::from(errno)
+        ))),
+    }
+}
+
+/// A step a test row runs on the link's name.
+#[cfg(all(test, unix))]
+type PublishStep = Box<dyn FnOnce(&Path)>;
 
 #[cfg(all(test, unix))]
 thread_local! {
     /// A step one test row runs on the link's name after [`link_cli`] checks it and before
     /// it publishes the link.
-    static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+    static BEFORE_PUBLISH: std::cell::RefCell<Option<PublishStep>> =
         const { std::cell::RefCell::new(None) };
 }
 
