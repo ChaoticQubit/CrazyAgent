@@ -721,25 +721,6 @@ fn an_unrelated_empty_file_on_the_lead_line_does_not_hold_a_worker_s_empty_file(
     assert!(team.owner_listed().contains(&worker_set));
 }
 
-/// While Lands is Lead, the owner's Changes list leaves out a lead's workers' sets, since
-/// the lead merges them; with Lands set to Owner it shows them (fix/hand-merged-set
-/// 8f98740a).
-#[test]
-fn owner_list_leaves_out_lead_workers() {
-    let team = Team::new();
-    let fix = team.worker(2, &team.lead, "fix");
-    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
-    let worker_set = team.turn_end(&fix);
-    team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
-    let lead_set = team.turn_end(&team.lead);
-    assert_eq!(team.owner_listed(), vec![lead_set.clone()]);
-    assert_eq!(landing::list(&team.db, &team.id).unwrap().len(), 2);
-    team.lands("owner");
-    let mut both = vec![lead_set, worker_set];
-    both.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    assert_eq!(team.owner_listed(), both);
-}
-
 /// A lead's discarded set discards its workers' pending sets while the lead merges them
 /// (Lands = Lead), since no one else would; with Lands = Owner they stay for the owner
 /// (fix/changes-vs-owner-branch, DEC-107 orphans).
@@ -1691,3 +1672,6 @@ fn a_land_the_owner_did_not_press_is_refused_while_a_worker_set_conflicts_or_upd
         assert_eq!(team.state(&worker_set).0, held);
     }
 }
+
+#[path = "sub_agent_landing/owner_list.rs"]
+mod owner_list;

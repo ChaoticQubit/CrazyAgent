@@ -239,7 +239,7 @@ fn a_listed_pane_at_full_access_is_refused_its_hand_over() {
     let unused = work.join("project.sb");
     let mut request = pane_request("standin-jsonl-append", &home, &work, &unused);
     let scratch = work.parent().unwrap().to_path_buf();
-    request.boundary = crate::harnesses::launch::full_access_for_test(&work, &scratch);
+    request.boundary = crate::harnesses::launch::tests::full_access_for_test(&work, &scratch);
 
     let refused = command_with(&request, Some(&installed), &run, Some(&settings));
 

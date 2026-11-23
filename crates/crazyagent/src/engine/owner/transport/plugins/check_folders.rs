@@ -1,5 +1,6 @@
-use super::{CHECKS_MAX, CheckSlot};
+use super::{CHECKS_MAX, EngineError, failure};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The servers whose checks run now, one entry per running check, and the servers removed
 /// while one of their checks ran, whose check folder is cleared when their last check ends.
@@ -111,4 +112,25 @@ pub(super) fn remove_check_folder(checks: &Path, id: &str) -> tokio::task::JoinH
             eprintln!("plugin_check_folder_not_removed cause={problem}");
         }
     })
+}
+
+static CHECKS: AtomicUsize = AtomicUsize::new(0);
+
+pub(super) struct CheckSlot;
+
+impl CheckSlot {
+    pub(super) fn take() -> Result<Self, EngineError> {
+        if CHECKS.fetch_add(1, Ordering::SeqCst) >= CHECKS_MAX {
+            CHECKS.fetch_sub(1, Ordering::SeqCst);
+            return Err(failure("server_check_busy"));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for CheckSlot {
+    fn drop(&mut self) {
+        let before = CHECKS.fetch_sub(1, Ordering::SeqCst);
+        assert!(before > 0);
+    }
 }
