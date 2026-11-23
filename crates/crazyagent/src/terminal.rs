@@ -18,8 +18,6 @@ mod kept;
 pub(crate) use kept::KEPT_MAX;
 #[cfg(unix)]
 pub mod tmux;
-#[cfg(target_os = "windows")]
-pub mod windows;
 
 pub const FOLDER: &str = "terminal";
 pub const HARNESS_SOCKET: &str = "tmux.sock";
@@ -650,7 +648,11 @@ pub(crate) fn tmux_host_checking(
 /// Returns that the host can run, and the host.
 #[cfg(target_os = "windows")]
 pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
-    let host: Arc<dyn Host> = Arc::new(kept::LastScreenHost::new(windows::ConptyHost::new()));
+    let host: Arc<dyn Host> = Arc::new(kept::LastScreenHost::new(
+        kernel_processes::terminal::windows::ConptyHost::new(
+            crate::sandbox::agent_variable_allowed,
+        ),
+    ));
     (true, host)
 }
 
