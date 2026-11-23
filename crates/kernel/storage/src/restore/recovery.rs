@@ -214,7 +214,7 @@ fn code(cause: &StorageError) -> &str {
     cause.0.split(':').next().unwrap_or(&cause.0)
 }
 
-/// Puts the copy the record names back over engine.db (L5 recovery), checked as
+/// Puts the copy the record names back over engine.db, checked as
 /// [`put_back_with`] says with `check_copy`. Input: the database path. Output: the folder
 /// that keeps the data it replaced.
 pub fn put_back(path: &Path) -> Result<PathBuf, StorageError> {
