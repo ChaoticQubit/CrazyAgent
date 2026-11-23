@@ -12,7 +12,6 @@ use crate::profile::consts::{
 use crate::profile::consts::{MACH_SERVICES, METADATA_LITERALS, SYSTEM_READ_ROOTS};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-#[cfg(unix)]
 use std::io;
 #[cfg(unix)]
 use std::path::Component;
