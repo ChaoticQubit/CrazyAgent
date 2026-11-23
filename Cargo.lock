@@ -1026,6 +1026,7 @@ dependencies = [
  "form_urlencoded",
  "serde",
  "serde_json",
+ "url",
  "zeroize",
 ]
 
