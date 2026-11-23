@@ -122,6 +122,28 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     }
 }
 
+/// A program name holding `:` is not looked up: on Windows a drive prefix (`C:node`)
+/// replaces the folder it is joined to and `name:stream` names an alternate data stream, so
+/// the file reached would lie outside every searched folder. Each such name is not found,
+/// even with a file of that name in a searched folder, and an `env` line naming one is
+/// refused as [`Refusal::FirstLine`].
+#[test]
+fn a_program_name_holding_a_drive_prefix_or_stream_is_refused() {
+    let (_folder, home) = scratch();
+    let places = home_only(&home);
+    for name in ["C:node", "c:tool", "node:stream"] {
+        program(&home.join(".local/bin").join(name), NODE);
+        let missing = resolve(name, &places).unwrap_err();
+        assert_eq!(missing.reason, Reason::NotFound, "{name}");
+        assert!(missing.refused.is_none(), "{name}");
+    }
+    let named = script(&home, "named", b"#!/usr/bin/env C:node\n", 0o755);
+    assert_eq!(
+        refusal_of(&named, &places),
+        Some((named, Refusal::FirstLine))
+    );
+}
+
 /// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
 /// would keep past it are not the ones that run: a line holding `#` anywhere after `#!` is
 /// refused as [`Refusal::FirstLine`], an `env` program named `node#x` with an owner file of
