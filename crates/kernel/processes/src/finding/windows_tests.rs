@@ -29,10 +29,9 @@ fn node_folder() -> (tempfile::TempDir, PathBuf, Places) {
     (folder, real, places)
 }
 
-/// V243-WIN-HARNESS-SEARCH: the `.cmd` npm wrote for Codex resolves to the script it names,
-/// started by the `node.exe` the places hold, never through cmd.exe: the entry stays the
-/// `.cmd`, the program and pin is the script's real file, and the words are node then the
-/// script.
+/// The `.cmd` npm wrote for Codex resolves to the script it names, started by the `node.exe`
+/// the places hold, never through cmd.exe: the entry stays the `.cmd`, the program and pin is
+/// the script's real file, and the words are node then the script.
 #[test]
 fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
     let (_folder, real, places) = node_folder();
@@ -111,7 +110,7 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     }
 }
 
-/// #341 addendum: npm's `npx.cmd` runs by its layout when its folder is off the engine's
+/// npm's `npx.cmd` runs by its layout when its folder is off the engine's
 /// PATH, as a portable Node is, since `npx-cli.js` looks its `node` up beside npx.cmd only.
 #[test]
 fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
@@ -182,7 +181,7 @@ fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
     );
 }
 
-/// #333 r1 sec F1: on Windows a launcher found under another spelling is still a launcher. A
+/// On Windows a launcher found under another spelling is still a launcher. A
 /// first line asking `env` for `Env` finds `env.exe`, which is refused as one, and the name
 /// check reads `.exe` and case away, so `ENV.EXE` and `BusyBox.exe` count and `node.exe` not.
 #[test]
@@ -203,7 +202,7 @@ fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
     }
 }
 
-/// V243-WIN-HARNESS-SEARCH: no batch file is ever started on Windows. Every spelling Windows
+/// No batch file is ever started on Windows. Every spelling Windows
 /// reads as a `.cmd` or `.bat` file counts as one, and the spawn gate refuses it before
 /// cmd.exe could run it, so a batch file that would leave a marker leaves none.
 #[test]
@@ -237,7 +236,7 @@ fn no_batch_file_is_ever_started_on_windows() {
 
 /// A program is fixed only when it is absolute or a bare file name. A root-relative,
 /// drive-relative, folder-relative or empty program resolves against a drive or folder the
-/// engine did not choose, so it is not (V244-WIN-ROOT-RELATIVE-PROGRAM).
+/// engine did not choose, so it is not.
 #[test]
 fn a_program_is_fixed_only_when_absolute_or_a_bare_file_name() {
     for name in [

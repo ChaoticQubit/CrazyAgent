@@ -62,8 +62,7 @@ pub fn batch_file(file: &Path) -> bool {
 /// Whether a program names a file no other local user can plant: an absolute path, or a bare
 /// file name Windows looks up only where it searches. A root-relative (`\x`), drive-relative
 /// (`C:x`) or folder-relative (`sub\x`, `.\x`) program resolves against a drive or folder the
-/// engine did not choose (V244-WIN-ROOT-RELATIVE-PROGRAM). Input: the program. Output: the
-/// answer, false for an empty one.
+/// engine did not choose. Input: the program. Output: the answer, false for an empty one.
 #[cfg(windows)]
 pub fn fixed_program(program: &Path) -> bool {
     let mut parts = program.components();
@@ -76,8 +75,8 @@ pub fn fixed_program(program: &Path) -> bool {
 
 /// Whether a file name is a batch file as Windows reads it: `.cmd` or `.bat` in any case once
 /// the trailing dots and spaces Windows drops are gone, or any name with a `:` stream part,
-/// which no program the engine starts has, so it fails closed (#333 r1 N3/N5). Input: the
-/// name. Output: the answer.
+/// which no program the engine starts has, so it fails closed. Input: the name. Output: the
+/// answer.
 fn batch_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let name = name.trim_end_matches(['.', ' ']);
@@ -96,7 +95,7 @@ pub fn program_file(file: &Path) -> bool {
 /// Whether a file name is one Windows starts directly as a program: `.exe` or `.com` in any
 /// case once the trailing dots and spaces Windows drops are gone, with no `:` stream part. A
 /// name with no extension or another one is not, since a launcher may complete it from
-/// `PATHEXT` with a `.cmd` beside it (#341 sec F1). Input: the name. Output: the answer.
+/// `PATHEXT` with a `.cmd` beside it. Input: the name. Output: the answer.
 fn program_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let name = name.trim_end_matches(['.', ' ']);
@@ -128,8 +127,8 @@ fn shim_parts(cmd: &Path) -> Option<(PathBuf, PathBuf)> {
 
 /// The real file an npm cmd-shim starts, which is the pin of a harness found as one, as the
 /// real file of npm's link is on Unix. npx, any other batch file and a shim whose target is
-/// itself a batch file give none (#333 r1 N6). Input: the shim's real file. Output: the
-/// target's real file.
+/// itself a batch file give none. Input: the shim's real file. Output: the target's real
+/// file.
 #[cfg(windows)]
 pub fn cmd_shim_real(cmd: &Path) -> Option<PathBuf> {
     shim_target(cmd)?
@@ -195,10 +194,10 @@ use crate::finding::{INTERPRETER_DEPTH_MAX, Kind, Missing, Places, Refusal, Reso
 /// by the `<program>.exe` beside the shim when one is there, as the shim's text prefers it,
 /// and a refused one is refused, never passed over for one on PATH;
 /// npm's own `npx.cmd` as the `node.exe` and `npx-cli.js` beside it, read by where they sit
-/// and never by its text (leader 04:09); any other `.cmd` or `.bat` refused. A shim's
+/// and never by its text; any other `.cmd` or `.bat` refused. A shim's
 /// target and npx's files pass every check an entry passes ([`entry_at`]), one level
 /// deeper, so a batch file leading to another stays bounded; `npx-cli.js` looks its `node`
-/// up beside npx.cmd only, so npx runs off the engine's PATH too (#341). Inputs: the entry,
+/// up beside npx.cmd only, so npx runs off the engine's PATH too. Inputs: the entry,
 /// its checked real file, the places, the depth and how a refusal reads. Output: none when
 /// the real file is no batch file, else the tool or why it cannot run.
 #[cfg(windows)]
@@ -268,9 +267,8 @@ mod tests {
 
     const NATIVE: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\"%dp0%\\node_modules\\native\\bin\\tool.exe\"   %*\r\n";
 
-    /// V243-WIN-HARNESS-SEARCH: the `.cmd` npm 11's cmd-shim 8.0.0 wrote for Codex (made with
-    /// the real generator, byte for byte) names the package's script below the shim's
-    /// folder.
+    /// The `.cmd` npm 11's cmd-shim 8.0.0 wrote for Codex (made with the real generator, byte
+    /// for byte) names the package's script below the shim's folder.
     #[test]
     fn an_npm_cmd_shim_names_the_script_it_starts() {
         assert_eq!(
@@ -286,9 +284,9 @@ mod tests {
         );
     }
 
-    /// #333 r1 N3/N5: a file name is a batch file as Windows reads it: `.cmd` or `.bat` in any
-    /// case with trailing dots and spaces dropped, and any name with a `:` stream part, even
-    /// one whose part before the stream is a program.
+    /// A file name is a batch file as Windows reads it: `.cmd` or `.bat` in any case with
+    /// trailing dots and spaces dropped, and any name with a `:` stream part, even one whose
+    /// part before the stream is a program.
     #[test]
     fn a_batch_name_is_read_as_windows_reads_it() {
         for name in [
@@ -308,9 +306,9 @@ mod tests {
         }
     }
 
-    /// #341 sec F1: only `.exe` or `.com` in any case, trailing dots and spaces dropped, is a
-    /// program Windows starts directly; a name with no extension, a dotted one such as
-    /// `tool.v2`, a batch file, a script or any stream part is not.
+    /// Only `.exe` or `.com` in any case, trailing dots and spaces dropped, is a program
+    /// Windows starts directly; a name with no extension, a dotted one such as `tool.v2`, a
+    /// batch file, a script or any stream part is not.
     #[test]
     fn a_program_name_is_read_as_windows_reads_it() {
         for name in [
