@@ -222,7 +222,7 @@ pub(super) async fn serve(
         .map_err(|_| failure("harness_catalog_unavailable"))?;
     let root = super::changes::engine_root(authority)?;
     let entries = tokio::task::spawn_blocking(move || {
-        let places = crate::tools::Places::from_environment(Some(&root));
+        let places = crate::tools::tools_places(Some(&root));
         crate::harnesses::with_needs(entries, &places)
     })
     .await

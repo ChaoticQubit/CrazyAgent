@@ -1,5 +1,7 @@
 use super::*;
+
 use std::os::unix::fs::PermissionsExt;
+
 use std::time::Instant;
 
 /// A scratch folder, its real path, so kept folders compare equal.
@@ -12,16 +14,16 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
     (folder, real)
 }
 
-/// A scratch folder no other user can change, its real path, for rows that need a folder
-/// kept: the probe drops every folder others can change (`probe.rs:659`), and [`scratch`]
-/// sits in the shared `/tmp` on Linux. Output: the folder and its real path.
+/// A scratch folder for rows that need a folder kept, its real path. The stub hooks count no
+/// folder as one others can change ([`crate::finding::stub::STUB_HOOKS`]), so any temp folder
+/// is kept here; the crazyagent rows on the real hooks use a private one. Output: the folder
+/// and its real path.
 fn private_scratch() -> (tempfile::TempDir, PathBuf) {
     let folder = tempfile::Builder::new()
         .prefix("tools-probe-")
-        .tempdir_in(crate::harnesses::finding::private_root())
+        .tempdir()
         .unwrap();
     let real = folder.path().canonicalize().unwrap();
-    assert_eq!(crate::service::changeable_by_others(&real), None);
     (folder, real)
 }
 
@@ -31,10 +33,6 @@ fn program(file: &Path, text: &str) -> PathBuf {
     std::fs::write(file, text).unwrap();
     std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
     file.to_path_buf()
-}
-
-fn joined(folders: &[PathBuf]) -> OsString {
-    std::env::join_paths(folders).unwrap()
 }
 
 #[test]
@@ -114,49 +112,6 @@ fn a_login_shell_run_gives_the_path_its_startup_files_set_and_a_hang_gives_none(
 }
 
 #[test]
-fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_folders() {
-    let (_folder, home) = private_scratch();
-    let tools = home.join("tools");
-    let project = home.join("projects/app");
-    let shared = home.join("shared");
-    let inside = home.join("x/.crazyagent/bin");
-    for folder in [&tools, &project.join(".crazyagent"), &shared, &inside] {
-        std::fs::create_dir_all(folder).unwrap();
-    }
-    std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
-    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
-    let file = home.join("plain-file");
-    std::fs::write(&file, "x").unwrap();
-    let path = joined(&[
-        tools.clone(),
-        PathBuf::from("relative/bin"),
-        home.join("missing"),
-        tools.clone(),
-        project.join("node_modules/.bin"),
-        project.clone(),
-        inside,
-        shared,
-        file,
-    ]);
-    assert_eq!(kept(&path, Some(&home)), [tools]);
-    assert_eq!(kept(OsStr::new(""), Some(&home)), Vec::<PathBuf>::new());
-    std::fs::create_dir_all(home.join(".crazyagent")).unwrap();
-    assert_eq!(
-        kept(&joined(&[home.join("tools")]), Some(&home)),
-        [home.join("tools")],
-        "a .crazyagent folder in HOME itself makes no project of HOME"
-    );
-    let many: Vec<PathBuf> = (0..FOLDERS_MAX + 10)
-        .map(|index| {
-            let folder = home.join(format!("many/{index}"));
-            std::fs::create_dir_all(&folder).unwrap();
-            folder
-        })
-        .collect();
-    assert_eq!(kept(&joined(&many), Some(&home)).len(), FOLDERS_MAX);
-}
-
-#[test]
 fn the_npm_prefix_bin_comes_from_the_found_npm_asked_with_a_cleared_environment() {
     assert_eq!(
         prefix_bin(b"/opt/homebrew\n"),
@@ -170,8 +125,8 @@ fn the_npm_prefix_bin_comes_from_the_found_npm_asked_with_a_cleared_environment(
         &home.join("npm"),
         "#!/bin/sh\necho \"$HOME/p-$1-$2-${CARGO_PKG_NAME:-clear}\"\n",
     );
-    let places = crate::tools::Places::new(Vec::new(), Some(home.clone()));
-    let resolved = crate::tools::resolve_entry(&npm, &places).expect("a script npm resolves");
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
+    let resolved = crate::finding::resolve_entry(&npm, &places).expect("a script npm resolves");
     assert_eq!(
         npm_bin(&resolved, &home, "owner", NPM_LIMIT),
         Some(home.join("p-prefix--g-clear/bin")),
@@ -189,7 +144,7 @@ fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders(
         std::fs::create_dir_all(folder).unwrap();
     }
     let npm = program(&tools.join("npm"), "#!/bin/sh\necho \"$HOME/global\"\n");
-    let places = || crate::tools::Places::new(Vec::new(), Some(home.clone()));
+    let places = || crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
     assert_eq!(
         probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
         (vec![global, tools.clone(), other.clone()], true)
@@ -380,9 +335,13 @@ fn a_folder_run_that_panics_is_recorded_as_failed_so_a_later_one_can_start() {
 /// `<program>.go`, written once the run has ended, prints to the output and writes
 /// `<program>.late` as "open" or "closed"; it gives up after 30 seconds.
 const DAEMON: &str = r#"#!/bin/sh
+
 /usr/bin/perl -MPOSIX -e 'POSIX::setsid() or exit 1; $SIG{PIPE} = "IGNORE"; $| = 1; open(my $r, ">", "$ARGV[0].ready") or exit 1; close $r; my $tries = 0; until (-e "$ARGV[0].go") { exit 1 if ++$tries > 1500; select(undef, undef, undef, 0.02) } my $open = print STDOUT "late\n"; open(my $f, ">", "$ARGV[0].part") or exit 1; print $f ($open ? "open" : "closed"); close $f; rename("$ARGV[0].part", "$ARGV[0].late") or exit 1' "$0" &
+
 while [ ! -e "$0.ready" ]; do /bin/sleep 0.02; done
+
 echo done
+
 "#;
 
 #[test]
@@ -430,19 +389,26 @@ fn a_version_is_the_first_word_with_a_digit_and_a_program_reports_its_own() {
     let (_folder, root) = scratch();
     let tool = program(&root.join("tool"), "#!/bin/sh\necho \"tool v1.2.$#$1\"\n");
     assert_eq!(
-        probe_version(&tool, VERSION_LIMIT).as_deref(),
+        probe_version(&tool, VERSION_LIMIT, crate::finding::stub::stub_seed()).as_deref(),
         Some("1.2.1--version"),
         "asked with --version alone"
     );
     let tmux = program(&root.join("tmux"), "#!/bin/sh\necho \"tmux 3.$#$1\"\n");
     assert_eq!(
-        probe_version(&tmux, VERSION_LIMIT).as_deref(),
+        probe_version(&tmux, VERSION_LIMIT, crate::finding::stub::stub_seed()).as_deref(),
         Some("3.1-V"),
         "tmux is asked with -V, which it answers, not --version"
     );
     let hanging = program(&root.join("hangs"), "#!/bin/sh\nexec /bin/sleep 30\n");
     let started = Instant::now();
-    assert_eq!(probe_version(&hanging, Duration::from_millis(300)), None);
+    assert_eq!(
+        probe_version(
+            &hanging,
+            Duration::from_millis(300),
+            crate::finding::stub::stub_seed()
+        ),
+        None
+    );
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
@@ -452,7 +418,7 @@ fn answered(tool: &Path) -> Option<String> {
     let mut found = None;
     while found.is_none() && started.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(20));
-        found = version(tool);
+        found = version(tool, crate::finding::stub::stub_seed);
     }
     found
 }
@@ -472,26 +438,33 @@ fn version_answers_at_once_then_from_its_cache_until_the_file_is_updated_in_plac
     let (_folder, root) = scratch();
     let tool = program(&root.join("tool"), "#!/bin/sh\necho \"tool 4.5.6\"\n");
     let started = Instant::now();
-    assert_eq!(version(&tool), None, "unknown until the probe ran");
+    assert_eq!(
+        version(&tool, crate::finding::stub::stub_seed),
+        None,
+        "unknown until the probe ran"
+    );
     assert!(started.elapsed() < Duration::from_secs(1), "never waits");
     assert_eq!(answered(&tool).as_deref(), Some("4.5.6"));
     let modified = std::fs::metadata(&tool).unwrap().modified().unwrap();
     std::fs::write(&tool, "#!/bin/sh\necho \"tool 9.9.9\"\n").unwrap();
     modified_at(&tool, modified);
     assert_eq!(
-        version(&tool).as_deref(),
+        version(&tool, crate::finding::stub::stub_seed).as_deref(),
         Some("4.5.6"),
         "the same file, size and time answer from the cache"
     );
     std::fs::write(&tool, "#!/bin/sh\necho \"tool 10.0.0\"\n").unwrap();
     modified_at(&tool, modified + Duration::from_secs(5));
     assert_eq!(
-        version(&tool),
+        version(&tool, crate::finding::stub::stub_seed),
         None,
         "a file updated in place is probed again"
     );
     assert_eq!(answered(&tool).as_deref(), Some("10.0.0"));
-    assert_eq!(version(Path::new("relative/tool")), None);
+    assert_eq!(
+        version(Path::new("relative/tool"), crate::finding::stub::stub_seed),
+        None
+    );
 }
 
 #[test]
@@ -595,7 +568,7 @@ fn the_probe_mark_moves_when_the_first_run_ends_and_whenever_the_folders_change(
 /// the mark is read and never leaves the mark pending behind it.
 #[test]
 fn the_module_mark_starts_a_due_run_first_as_folders_does() {
-    let mark = mark();
+    let mark = mark(crate::finding::stub::stub_seed);
     assert!(!mark.first_run_pending);
     assert!(lock(&FOLDERS).last.is_some());
 }

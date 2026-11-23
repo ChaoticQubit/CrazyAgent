@@ -102,14 +102,14 @@ impl Roots {
     /// Homebrew prefixes, casks only on macOS and the resolver's places with no engine root.
     /// Output: the roots; an unknown home is an empty home.
     pub fn system() -> Self {
-        Self::on(crate::tools::Places::from_environment(None))
+        Self::on(crate::tools::tools_places(None))
     }
 
     /// The roots of this machine with the given resolver places: the engine's own home
     /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS and no npm yet.
     /// Input: the places. Output: the roots; an unknown home is an empty home that matches
     /// nothing.
-    fn on(places: crate::tools::Places) -> Self {
+    fn on(places: kernel_processes::finding::Places) -> Self {
         let home = home_folder().unwrap_or_default();
         Self {
             home,
@@ -125,7 +125,7 @@ impl Roots {
     /// places, and the engine's own prefix `<engine root>/setup/harnesses`. Nothing is run.
     /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
     pub fn engine(engine_root: &Path) -> Self {
-        let mut roots = Self::on(crate::tools::Places::from_environment(Some(engine_root)));
+        let mut roots = Self::on(crate::tools::tools_places(Some(engine_root)));
         roots.npm = engine_npm(engine_root, &roots.places);
         roots
     }
@@ -135,7 +135,10 @@ impl Roots {
 /// places. Inputs: the engine root and those places. Output: the npm, or none with no
 /// usable Node.
 #[cfg(unix)]
-fn engine_npm(engine_root: &Path, places: &crate::tools::Places) -> Option<super::NpmInstall> {
+fn engine_npm(
+    engine_root: &Path,
+    places: &kernel_processes::finding::Places,
+) -> Option<super::NpmInstall> {
     engine_npm_at(engine_root, places)
 }
 
@@ -146,7 +149,7 @@ fn engine_npm(engine_root: &Path, places: &crate::tools::Places) -> Option<super
 #[cfg(unix)]
 pub(crate) fn engine_npm_at(
     engine_root: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> Option<super::NpmInstall> {
     let found = crate::setup::node::usable(places)?;
     let named = crate::setup::harness_prefix(engine_root);
@@ -163,7 +166,10 @@ pub(crate) fn engine_npm_at(
 /// Finds no npm where setup has no Node. Inputs: the engine root and the places, unused.
 /// Output: none.
 #[cfg(not(unix))]
-fn engine_npm(_engine_root: &Path, _places: &crate::tools::Places) -> Option<super::NpmInstall> {
+fn engine_npm(
+    _engine_root: &Path,
+    _places: &kernel_processes::finding::Places,
+) -> Option<super::NpmInstall> {
     None
 }
 
@@ -215,22 +221,30 @@ fn version_command(executable: &Path) -> Option<Fixed> {
 /// Runs a version command, bounded like every other run. Inputs: the command, the home
 /// folder and the resolver's places, unused here. Output: the version it printed, or none.
 #[cfg(unix)]
-fn version_ran(fixed: &Fixed, home: &Path, _places: &crate::tools::Places) -> Option<String> {
+fn version_ran(
+    fixed: &Fixed,
+    home: &Path,
+    _places: &kernel_processes::finding::Places,
+) -> Option<String> {
     let raw = version_raw(fixed, home, VERSION_TIME).ok()?;
     installed_version(&String::from_utf8_lossy(&raw.stdout))
         .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
 }
 
 /// Runs a version command on Windows, which runs no script by its first line: the checked
-/// real file is resolved once more ([`crate::tools::resolve_entry`]), refused unless that
+/// real file is resolved once more ([`kernel_processes::finding::resolve_entry`]), refused unless that
 /// gives the same file and every file it runs passes [`owner_only`] (the script and each
-/// interpreter, [`crate::tools::Resolved::grants`]), and that same value's words start with
+/// interpreter, [`kernel_processes::finding::Resolved::grants`]), and that same value's words start with
 /// the version arguments, bounded like every other run. Inputs: the command, the home
 /// folder and the resolver's places. Output: the version it printed, or none.
 #[cfg(windows)]
-fn version_ran(fixed: &Fixed, home: &Path, places: &crate::tools::Places) -> Option<String> {
+fn version_ran(
+    fixed: &Fixed,
+    home: &Path,
+    places: &kernel_processes::finding::Places,
+) -> Option<String> {
     assert!(fixed.prefix.is_none());
-    let tool = crate::tools::resolve_entry(&fixed.program, places).ok()?;
+    let tool = kernel_processes::finding::resolve_entry(&fixed.program, places).ok()?;
     if tool.program != fixed.program {
         return None;
     }
@@ -269,13 +283,16 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
 
 /// What an installed harness lacks before it can run, read as a launch reads it: the program
 /// its first line asks for when the tool resolver finds none, or the resolver's refusal of the
-/// file, its interpreter or its own npm prefix's `node` ([`crate::tools::own_node_refused`]),
+/// file, its interpreter or its own npm prefix's `node` ([`kernel_processes::finding::own_node_refused`]),
 /// with the resolver's owner line. Any other read leaves the file to run as it is. Nothing is
 /// run. Inputs: the catalog's file and the resolver's places. Output: the need, or none.
-pub(crate) fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
-    use crate::tools::Reason;
-    let missing = match crate::tools::resolve_entry(executable, places) {
-        Ok(tool) => crate::tools::own_node_refused(&tool, places)?,
+pub(crate) fn needs(
+    executable: &Path,
+    places: &kernel_processes::finding::Places,
+) -> Option<HarnessNeeds> {
+    use kernel_processes::finding::Reason;
+    let missing = match kernel_processes::finding::resolve_entry(executable, places) {
+        Ok(tool) => kernel_processes::finding::own_node_refused(&tool, places)?,
         Err(missing) => missing,
     };
     matches!(missing.reason, Reason::NeedsInterpreter | Reason::Refused).then(|| HarnessNeeds {
@@ -348,7 +365,7 @@ fn updated(
     fixed: &Fixed,
     executable: &Path,
     home: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> LastUpdate {
     let from = version_if_runs(executable, home, places);
     let ran = run(fixed, home, UPDATE_TIME);
@@ -374,7 +391,7 @@ pub(super) fn home_folder() -> Option<PathBuf> {
 /// trust to start, as an update's program must be ([`super::trusted`]). Inputs: the harness
 /// file and the resolver's places, unused. Output: Some when it may start.
 #[cfg(unix)]
-fn version_gate(executable: &Path, _places: &crate::tools::Places) -> Option<()> {
+fn version_gate(executable: &Path, _places: &kernel_processes::finding::Places) -> Option<()> {
     super::trusted(executable).ok()
 }
 
@@ -385,7 +402,7 @@ fn version_gate(executable: &Path, _places: &crate::tools::Places) -> Option<()>
 /// update refused. Inputs: the harness file and the resolver's places. Output: Some when it
 /// may start.
 #[cfg(windows)]
-fn version_gate(executable: &Path, places: &crate::tools::Places) -> Option<()> {
+fn version_gate(executable: &Path, places: &kernel_processes::finding::Places) -> Option<()> {
     let launched = crate::harnesses::interactive::launch_tool(executable, places).ok()?;
     owner_only(executable)?;
     owner_only(&launched.program)
@@ -429,7 +446,7 @@ fn owner_only(program: &Path) -> Option<()> {
 pub(super) fn version_if_runs(
     executable: &Path,
     home: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> Option<String> {
     version_gate(executable, places)?;
     let entry = version_command(executable)?;
@@ -476,7 +493,7 @@ fn between_vetted_and_run(entry: &Path) -> Option<Step> {
 fn installed_now(
     fixed: &Fixed,
     home: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
     after: impl FnOnce() -> Option<PathBuf>,
 ) -> LastUpdate {
     assert!(fixed.args.first() == Some(&"install"));
@@ -814,8 +831,8 @@ impl Updates {
             UpdateMode::CheckAndUpdate => {}
         }
         let executable = entry.executable.clone().ok_or(NOT_INSTALLED)?;
-        if let Err(missing) = crate::tools::resolve_entry(&executable, &roots.places)
-            && missing.reason == crate::tools::Reason::Refused
+        if let Err(missing) = kernel_processes::finding::resolve_entry(&executable, &roots.places)
+            && missing.reason == kernel_processes::finding::Reason::Refused
         {
             return Err(super::TOOL_UNSAFE);
         }
@@ -1004,7 +1021,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1047,7 +1064,7 @@ mod windows_tests {
         let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
             .join("curl.exe");
-        let places = crate::tools::Places::from_environment(None);
+        let places = crate::tools::tools_places(None);
         let version = version_if_runs(&curl, &home, &places).unwrap();
         assert!(super::super::plain_version(&version), "{version}");
     }
@@ -1059,7 +1076,7 @@ mod windows_tests {
     #[test]
     fn a_windows_program_another_account_can_change_tells_no_version() {
         let home = home_folder().unwrap();
-        let places = crate::tools::Places::from_environment(None);
+        let places = crate::tools::tools_places(None);
         let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
             .join("curl.exe");
@@ -1099,7 +1116,7 @@ mod windows_tests {
         std::fs::copy(&shipped, node.join("node.exe")).unwrap();
         let script = package.join("codex.js");
         std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
-        let places = crate::tools::Places::new(vec![node.clone()], None);
+        let places = crate::tools::tools_new(vec![node.clone()], None);
         assert!(version_if_runs(&script, &home, &places).is_some());
 
         let step: Step = Box::new(move || {

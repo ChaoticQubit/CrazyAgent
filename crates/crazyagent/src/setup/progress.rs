@@ -28,7 +28,7 @@ pub struct Progress {
     pub hooks: BTreeMap<String, String>,
     pub checking: bool,
     pub checked: Option<Checked>,
-    pub fixes: BTreeMap<Dependency, crate::tools::permission_fix::Target>,
+    pub fixes: BTreeMap<Dependency, kernel_processes::finding::permission_fix::Target>,
     pub fix_failed: BTreeMap<Dependency, String>,
 }
 
@@ -38,14 +38,18 @@ pub struct Progress {
 pub struct Checked {
     pub at: Instant,
     pub found: Vec<(Dependency, crate::setup::Lookup)>,
-    pub probe: crate::tools::probe::Mark,
+    pub probe: kernel_processes::finding::probe::Mark,
 }
 
 /// Whether a status read starts a new version check: none ended yet, the last one is
 /// [`RECHECK_AFTER`] old, or the probes' mark moved since it was read, so a tool the login
 /// shell's PATH holds shows on the next read. Inputs: the last check, the mark now and now.
 /// Output: the answer.
-pub fn check_due(checked: Option<&Checked>, mark: crate::tools::probe::Mark, now: Instant) -> bool {
+pub fn check_due(
+    checked: Option<&Checked>,
+    mark: kernel_processes::finding::probe::Mark,
+    now: Instant,
+) -> bool {
     checked.is_none_or(|checked| {
         checked.probe != mark || now.saturating_duration_since(checked.at) >= RECHECK_AFTER
     })
@@ -141,15 +145,17 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
 /// cannot run and the progress. Output: the Refused state, or none for another reason.
 fn refused_row(
     dep: Dependency,
-    missing: &crate::tools::Missing,
+    missing: &kernel_processes::finding::Missing,
     progress: &Progress,
 ) -> Option<DependencyState> {
-    if missing.reason != crate::tools::Reason::Refused {
+    if missing.reason != kernel_processes::finding::Reason::Refused {
         return None;
     }
     let refused = missing.refused.as_deref()?;
     let part = match &refused.why {
-        crate::tools::Refusal::OthersCanChange(part) => Some(part.display().to_string()),
+        kernel_processes::finding::Refusal::OthersCanChange(part) => {
+            Some(part.display().to_string())
+        }
         _ => None,
     };
     Some(DependencyState::Refused {
@@ -218,7 +224,7 @@ pub fn source_label(source: &super::pack::PackSource) -> String {
 mod tests {
     use super::*;
     use crate::setup::{InstallError, Located, Version};
-    use crate::tools::probe::Mark;
+    use kernel_processes::finding::probe::Mark;
     use std::time::Duration;
 
     /// The mark of a probe whose first run ended, so a tool not found reads Missing.
@@ -269,7 +275,7 @@ mod tests {
         assert_eq!(
             ended[0].state,
             DependencyState::Missing {
-                line: crate::tools::TMUX_MISSING.to_owned()
+                line: kernel_processes::finding::TMUX_MISSING.to_owned()
             }
         );
         assert_eq!(ended[1].state, pending[1].state);
@@ -344,7 +350,7 @@ mod tests {
     /// that says why, which clients read as `{"state":"system","version":...,"note":...}`.
     #[test]
     fn a_system_tmux_used_in_place_of_the_bundled_one_carries_its_note_on_the_wire() {
-        use crate::tools::BundleNote;
+        use kernel_processes::finding::BundleNote;
         for note in [BundleNote::Missing, BundleNote::CannotRun] {
             let progress = Progress {
                 checked: Some(Checked {
@@ -416,9 +422,9 @@ mod tests {
     /// needs it says, such as the live master's tmux line.
     #[test]
     fn a_missing_tool_row_shows_the_resolvers_line_for_its_reason() {
-        let needs = crate::tools::Missing {
+        let needs = kernel_processes::finding::Missing {
             tool: "graphify".into(),
-            reason: crate::tools::Reason::NeedsInterpreter,
+            reason: kernel_processes::finding::Reason::NeedsInterpreter,
             needs: Some("python3".into()),
             found: None,
             looked: Vec::new(),
@@ -447,7 +453,7 @@ mod tests {
         assert_eq!(
             rows[0].state,
             DependencyState::Missing {
-                line: crate::tools::TMUX_MISSING.to_owned()
+                line: kernel_processes::finding::TMUX_MISSING.to_owned()
             }
         );
         assert!(matches!(rows[1].state, DependencyState::Found { .. }));
@@ -464,24 +470,26 @@ mod tests {
     /// can fix has no part or fix. A tool not found still reads Missing.
     #[test]
     fn a_found_but_refused_tool_reads_refused_with_its_file_part_and_fix_not_missing() {
-        let refused = |why| crate::tools::Missing {
+        let refused = |why| kernel_processes::finding::Missing {
             tool: "graphify".into(),
-            reason: crate::tools::Reason::Refused,
+            reason: kernel_processes::finding::Reason::Refused,
             needs: None,
             found: None,
             looked: Vec::new(),
-            refused: Some(Box::new(crate::tools::Refused {
+            refused: Some(Box::new(kernel_processes::finding::Refused {
                 file: PathBuf::from("/Users/me/.local/share/uv/tools/graphifyy/bin/python3"),
                 why,
             })),
         };
         let part = PathBuf::from("/Users/me/.local/share/uv/python/cpython-3.13.1/bin/python3.13");
-        let others = refused(crate::tools::Refusal::OthersCanChange(part.clone()));
-        let target = crate::tools::permission_fix::Target {
+        let others = refused(kernel_processes::finding::Refusal::OthersCanChange(
+            part.clone(),
+        ));
+        let target = kernel_processes::finding::permission_fix::Target {
             path: PathBuf::from("/Users/me/.local/share/uv/python/cpython-3.13.1"),
             recursive: true,
         };
-        let progress = |graphify: crate::tools::Missing| Progress {
+        let progress = |graphify: kernel_processes::finding::Missing| Progress {
             checked: Some(Checked {
                 at: Instant::now(),
                 found: vec![
@@ -534,7 +542,7 @@ mod tests {
         );
         assert!(fix.is_some());
 
-        let mut agents = progress(refused(crate::tools::Refusal::AgentsCanWrite));
+        let mut agents = progress(refused(kernel_processes::finding::Refusal::AgentsCanWrite));
         agents.fixes.clear();
         let DependencyState::Refused {
             part, fix, line, ..

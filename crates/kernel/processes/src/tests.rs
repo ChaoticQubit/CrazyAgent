@@ -107,3 +107,77 @@ fn test_support_is_enabled_only_by_crazyagent_dev_dependencies() {
         ["crates/crazyagent/Cargo.toml [dev-dependencies]"]
     );
 }
+
+/// The stub hooks are named only in the kernel's own sources, so no crate outside it can
+/// build places on hooks that answer nothing. The name is spelled in parts here, so this row
+/// is not its own hit; at least one hit inside the sources shows the search reads them.
+#[test]
+fn the_stub_hooks_are_named_only_inside_the_kernel_sources() {
+    let name = ["STUB", "_HOOKS"].concat();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .canonicalize()
+        .unwrap();
+    let mut files = Vec::new();
+    files_named(
+        &workspace_root(),
+        &|path| path.extension().is_some_and(|e| e == "rs"),
+        &mut files,
+    );
+    assert!(files.len() >= 100, "{}", files.len());
+    let (inside, outside): (Vec<&PathBuf>, Vec<&PathBuf>) = files
+        .iter()
+        .filter(|path| std::fs::read_to_string(path).unwrap().contains(&name))
+        .partition(|path| path.canonicalize().unwrap().starts_with(&source));
+    assert!(!inside.is_empty(), "the search found no stub hooks at all");
+    assert!(outside.is_empty(), "named outside the kernel: {outside:?}");
+}
+
+/// `finding::test_support` holds exactly the items crazyagent's rows need and nothing else:
+/// a new export fails this row until it is named here.
+#[test]
+fn finding_test_support_exports_exactly_the_named_items() {
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/finding/test_support.rs"),
+    )
+    .unwrap();
+    let linux_only = "#[cfg(target_os = \"linux\")]";
+    let lines: Vec<&str> = text.lines().collect();
+    let mut exported: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| cfg!(target_os = "linux") || *at == 0 || lines[at - 1] != linux_only)
+        .filter_map(|(_, line)| line.strip_prefix("pub "))
+        .map(|rest| {
+            let rest = rest.split_once(' ').map_or(rest, |(_, name)| name);
+            rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap()
+        })
+        .collect();
+    exported.sort_unstable();
+    let mut named = vec![
+        "FOLDERS_MAX",
+        "HOMEBREW_FOLDERS",
+        "Step",
+        "allowed",
+        "at_roots",
+        "below",
+        "entry_at",
+        "kept",
+        "last_run_finished",
+        "log_own_node_passed_over",
+        "run_between_program_and_check",
+        "with_app_folder",
+        "with_projects",
+        "with_temps",
+    ];
+    if cfg!(target_os = "linux") {
+        named.push("LINUX_FOLDERS");
+    }
+    named.sort_unstable();
+    assert_eq!(exported, named);
+    assert!(text.contains(&format!("{linux_only}\npub const LINUX_FOLDERS:")));
+    assert!(!text.contains("pub use") && !text.contains("pub mod") && !text.contains("pub struct"));
+    assert!(!text.contains(&["STUB", "_HOOKS"].concat()));
+}
