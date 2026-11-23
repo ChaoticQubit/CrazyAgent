@@ -75,13 +75,16 @@ fn an_identity_is_one_safe_component_of_at_most_128_bytes() {
 }
 
 #[test]
-fn a_store_name_is_lowercase_bounded_and_never_a_device_or_a_trailing_dot() {
+fn a_store_name_is_lowercase_and_bounded() {
     use crate::names::{STORE_NAME_BYTES_MAX, is_store_name};
     for good in [
         "token",
         "a",
         "github.token",
         "a-b_c.d1",
+        "a.",
+        "nul",
+        "com1.token",
         &"t".repeat(STORE_NAME_BYTES_MAX),
     ] {
         assert!(is_store_name(good), "{good:?}");
@@ -93,12 +96,20 @@ fn a_store_name_is_lowercase_bounded_and_never_a_device_or_a_trailing_dot() {
         "-token",
         "a..b",
         "a b",
-        "a.",
-        "nul",
         "CON",
-        "com1.token",
         &"t".repeat(STORE_NAME_BYTES_MAX + 1),
     ] {
         assert!(!is_store_name(bad), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_store_account_is_a_store_name_without_a_trailing_dot() {
+    use crate::names::is_store_account;
+    for good in ["token", "nul", "con", "nul.token", "a.b"] {
+        assert!(is_store_account(good), "{good:?}");
+    }
+    for bad in ["a.", "token.", "", "Token", "a b"] {
+        assert!(!is_store_account(bad), "{bad:?}");
     }
 }
