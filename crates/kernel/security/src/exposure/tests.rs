@@ -65,8 +65,14 @@ fn a_value_at_the_buffers_end_is_redacted() {
 fn an_empty_value_is_ignored() {
     let output = b"nothing secret here";
     assert_eq!(redact(output, &[b""], &[b""]), output.to_vec());
-    assert_eq!(redact(output, &[b"", b"secret"], &[]), b"nothing [REDACTED] here".to_vec());
-    assert_eq!(redact(b"", &[b"secret"], &[b"longer-env"]), Vec::<u8>::new());
+    assert_eq!(
+        redact(output, &[b"", b"secret"], &[]),
+        b"nothing [REDACTED] here".to_vec()
+    );
+    assert_eq!(
+        redact(b"", &[b"secret"], &[b"longer-env"]),
+        Vec::<u8>::new()
+    );
 }
 
 #[test]
@@ -75,7 +81,10 @@ fn a_seven_byte_env_value_is_kept() {
     assert_eq!(value.len() + 1, ENV_VALUE_MIN);
     let output = b"pid 1234567 started";
     assert_eq!(redact(output, &[], &[value]), output.to_vec());
-    assert_eq!(redact(output, &[value], &[]), b"pid [REDACTED] started".to_vec());
+    assert_eq!(
+        redact(output, &[value], &[]),
+        b"pid [REDACTED] started".to_vec()
+    );
     assert_eq!(
         redact(b"pid 12345678 started", &[], &[b"12345678"]),
         b"pid [REDACTED] started".to_vec()
