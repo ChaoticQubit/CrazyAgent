@@ -1018,6 +1018,10 @@ dependencies = [
 name = "crazyagent-kernel-security"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
+ "form_urlencoded",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
