@@ -134,7 +134,7 @@ fn seed(db: &mut Connection, project: &str, first: i64) {
         [project],
     )
     .unwrap();
-    crate::sandbox::grants::forget_project(&tx, project).unwrap();
+    crate::sandbox::grants_store::forget_project(&tx, project).unwrap();
     tx.execute(
         "INSERT INTO access_grant_log(project,at_ms,action,grant_json,by)
          VALUES (?1,1,'granted','{}','owner')",

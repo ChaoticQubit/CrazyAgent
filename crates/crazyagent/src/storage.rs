@@ -3823,7 +3823,7 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: kernel_sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
-                unavailable: crate::sandbox::HIDDEN_UNHELD,
+                unavailable: kernel_sandbox::profile::consts::HIDDEN_UNHELD,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())
@@ -3849,7 +3849,7 @@ fn owner_read(
                     other_git,
                 );
             policy.grant_log =
-                crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;
+                crate::sandbox::grants_store::history(&tx, project_id.as_str()).map_err(error)?;
             OwnerData::ProjectAgentPolicy {
                 project_id: project_id.clone(),
                 policy,

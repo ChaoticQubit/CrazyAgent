@@ -1,6 +1,12 @@
 use crate::error::SandboxError;
 use crate::ports::BRIDGE_PORT_MIN;
 
+/// The Linux helper's exit code when its call supervisor could not take back an entry a
+/// case-folding folder read as a held name, and so stopped the run. The supervisor crate
+/// keeps its own copy, tied to this one in the Linux sandbox; 125 is its other stops, and
+/// 126 and up are the shell's and the signals'.
+pub const HELD_NOT_PUT_BACK_EXIT: i32 = 122;
+
 /// Why `InstalledSandbox::install` refuses a Linux launch under `LinuxStrict::On`: it
 /// does not hold the full Linux sandbox (`linux_holds_fully`).
 pub const LINUX_NOT_FULL_LINE: &str = "this Linux does not hold the full sandbox for this launch, and the setting 'Refuse agents without the full Linux sandbox' is on";

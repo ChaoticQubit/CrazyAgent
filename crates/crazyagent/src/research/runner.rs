@@ -19,7 +19,6 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
-use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
@@ -27,6 +26,7 @@ use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::hidden_paths::HiddenRun;
+use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
@@ -1460,7 +1460,7 @@ impl ResearchRunner {
         };
         launch.current_dir(&worktree);
         if let Some(port) = installed.model_proxy() {
-            launch.envs(crate::sandbox::model_proxy::variables(port));
+            launch.envs(kernel_sandbox::model_proxy::variables(port));
         }
         let mut command = if unconfined {
             sandbox.wrap_unconfined(&launch)?
@@ -3233,7 +3233,7 @@ pub(crate) fn add_worktree(
     _worktree: &Path,
 ) -> Result<(), RunError> {
     Err(RunError::Sandbox(SandboxError::Unavailable(
-        crate::sandbox::windows::SEATBELT_MISSING.into(),
+        kernel_sandbox::windows::SEATBELT_MISSING.into(),
     )))
 }
 

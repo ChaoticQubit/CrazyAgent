@@ -1,3 +1,4 @@
+use crate::ports::PROXY_PORTS;
 use kernel_processes::fd_wait::{self, Wake};
 use kernel_processes::spawn_gate;
 use std::io::{self, Read, Write};
@@ -17,48 +18,6 @@ pub const TUNNELS_MAX: usize = 16;
 pub const IDLE_TIME: Duration = Duration::from_secs(600);
 /// The most hosts one proxy lets its agent reach.
 pub const HOSTS_MAX: usize = 8;
-/// The loopback ports a model proxy takes when no saved port is given (S4B-2W1). The block is
-/// fixed, so every Open-network sandbox, whenever it started, denies binding all of it: no
-/// sandboxed agent can take a proxy's port, not even while the engine that held it is down.
-/// It lies below the ports the system hands out by itself ([`PICKED_PORTS_START`]).
-#[cfg(not(target_os = "linux"))]
-pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 41_300..=41_427;
-/// The same block on Linux, which hands out ports from 32768 up by itself: a bind to port 0
-/// or a listen with no bind gets such a port with no Landlock check, so the block lies
-/// below them (LPF1-M1), and below the 30000 to 32767 that Kubernetes node ports use.
-#[cfg(target_os = "linux")]
-pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 29_300..=29_427;
-/// The loopback ports a model key relay listens on, the block right after [`PROXY_PORTS`]
-/// (SA241 vid 9). Every Open-network sandbox denies binding all of it, as it does the proxy
-/// block, so no sandboxed agent can take a relay's port, not even after the relay ended
-/// while a kept pane still sends its requests there.
-#[cfg(not(target_os = "linux"))]
-pub const RELAY_PORTS: std::ops::RangeInclusive<u16> = 41_428..=41_555;
-/// The same block on Linux, right after its proxy block, below the ports Linux hands out by
-/// itself and the 30000 up that Kubernetes node ports use.
-#[cfg(target_os = "linux")]
-pub const RELAY_PORTS: std::ops::RangeInclusive<u16> = 29_428..=29_555;
-/// Where the ports the system hands out by itself start unless an administrator moved
-/// them: 49152 on macOS and Windows, 32768 on Linux.
-#[cfg(not(target_os = "linux"))]
-pub const PICKED_PORTS_START: u16 = 49_152;
-/// Where the ports Linux hands out by itself start unless an administrator moved them.
-#[cfg(target_os = "linux")]
-pub const PICKED_PORTS_START: u16 = 32_768;
-const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < PICKED_PORTS_START);
-const _: () = assert!(
-    *RELAY_PORTS.start() == *PROXY_PORTS.end() + 1 && *RELAY_PORTS.end() < PICKED_PORTS_START
-);
-const _: () = {
-    let mut index = 0;
-    while index < super::OWNER_PORTS.len() {
-        let port = super::OWNER_PORTS[index];
-        assert!(port < *PROXY_PORTS.start() || port > *PROXY_PORTS.end());
-        assert!(port < *RELAY_PORTS.start() || port > *RELAY_PORTS.end());
-        index += 1;
-    }
-};
-
 const RECORD_BYTES_MAX: usize = 5 + 16 * 1024;
 const POLL: Duration = Duration::from_millis(250);
 const ACCEPT_POLL: Duration = Duration::from_millis(5);
@@ -833,7 +792,7 @@ fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::
 /// outside the sandbox: [`dialable`] and not held by this machine ([`on_this_machine`]). The
 /// one rule for the proxy's tunnels and the reach check before a run (DEC-163 addendum 8).
 /// Input: the address. Output: true when the engine may dial it.
-pub(crate) fn may_dial(address: IpAddr) -> bool {
+pub fn may_dial(address: IpAddr) -> bool {
     dialable(address) && !on_this_machine(address)
 }
 

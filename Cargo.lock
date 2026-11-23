@@ -1037,6 +1037,7 @@ dependencies = [
 name = "crazyagent-kernel-sandbox"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
  "nix",
  "rustix 1.1.5",
@@ -1044,6 +1045,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "url",
 ]
 

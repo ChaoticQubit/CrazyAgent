@@ -136,7 +136,7 @@ pub(in crate::tui) async fn assert_no_host_model_server(global: &std::path::Path
         let url = url::Url::parse(url).unwrap();
         let port = url.port_or_known_default().unwrap();
         assert!(
-            !crate::sandbox::OWNER_PORTS.contains(&port),
+            !kernel_sandbox::ports::OWNER_PORTS.contains(&port),
             "{url} names a port the owner's tools listen on"
         );
         let host: std::net::IpAddr = url.host_str().unwrap().parse().unwrap();

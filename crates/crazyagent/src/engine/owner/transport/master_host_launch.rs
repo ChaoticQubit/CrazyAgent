@@ -2379,9 +2379,9 @@ mod tests {
             ("PATH", "/usr/bin:/bin"),
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
-        expected.extend(crate::sandbox::AGENT_GIT_ENV);
-        expected.extend(crate::sandbox::AGENT_TLS_ENV);
-        expected.extend(crate::sandbox::AGENT_HOME_ENV);
+        expected.extend(kernel_sandbox::profile::consts::AGENT_GIT_ENV);
+        expected.extend(kernel_sandbox::profile::consts::AGENT_TLS_ENV);
+        expected.extend(kernel_sandbox::profile::consts::AGENT_HOME_ENV);
         let prefix = crate::sandbox::shell_tmp_prefix(&tmp);
         expected.insert("TMPPREFIX", prefix.to_str().unwrap());
         let tools = kernel_sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
@@ -2447,9 +2447,9 @@ mod tests {
             ("TERM", "dumb"),
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
-        expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
-        expected_claude.extend(crate::sandbox::AGENT_TLS_ENV);
-        expected_claude.extend(crate::sandbox::AGENT_HOME_ENV);
+        expected_claude.extend(kernel_sandbox::profile::consts::AGENT_GIT_ENV);
+        expected_claude.extend(kernel_sandbox::profile::consts::AGENT_TLS_ENV);
+        expected_claude.extend(kernel_sandbox::profile::consts::AGENT_HOME_ENV);
         expected_claude.insert("TMPPREFIX", prefix.to_str().unwrap());
         expected_claude.extend(
             tools

@@ -616,7 +616,7 @@ mod launch {
         assert_eq!(env(&pairs, "OPENAI_BASE_URL"), Some(handover.base_url()));
         let home = turn.request.account.home().to_str().unwrap();
         assert_eq!(env(&pairs, "HOME"), Some(home));
-        let roots = crate::sandbox::AGENT_TLS_ENV[0].1;
+        let roots = kernel_sandbox::profile::consts::AGENT_TLS_ENV[0].1;
         assert_eq!(env(&pairs, "SSL_CERT_FILE"), Some(roots));
         assert_eq!(env(&pairs, "GIT_CONFIG_GLOBAL"), Some("/dev/null"));
         let given = args(&launch);

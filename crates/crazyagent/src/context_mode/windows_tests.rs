@@ -560,7 +560,7 @@ fn container_files(name: &str) -> (PathBuf, PathBuf) {
     let grants = crate::paths::Layout::current()
         .unwrap()
         .root()
-        .join(crate::sandbox::windows::GRANTS_FOLDER);
+        .join(kernel_sandbox::windows::GRANTS_FOLDER);
     let packages = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Packages");
     assert!(name.starts_with("crazyagent."));
     (
@@ -624,7 +624,7 @@ fn the_release_takes_back_what_the_npm_job_was_granted() {
     let home = kernel_sandbox::paths::canonical(&work)
         .unwrap()
         .join("home");
-    let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
+    let (record, package) = container_files(&kernel_sandbox::windows::container_for(&job, &home));
     let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
     let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
     assert!(!ran.status.success(), "{}", shown(&ran));
@@ -664,7 +664,7 @@ fn a_refused_release_reports_false_and_keeps_the_profile() {
     )
     .unwrap();
     let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
-    let derived = crate::sandbox::windows::container_for(&folders[0], &folders[1]);
+    let derived = kernel_sandbox::windows::container_for(&folders[0], &folders[1]);
     assert_eq!(forged.container, derived);
     forged.container = format!("crazyagent.{}", "0".repeat(32));
     let profile = base.join("forged.sb");
@@ -681,7 +681,7 @@ fn crashed_probe(case: &Case) -> (PathBuf, PathBuf, PathBuf) {
     let npm = case.root.join("setup").join("npm");
     let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
     let base = kernel_sandbox::paths::canonical(&scratch).unwrap();
-    let name = crate::sandbox::windows::container_for(&base.join("project"), &base.join("home"));
+    let name = kernel_sandbox::windows::container_for(&base.join("project"), &base.join("home"));
     let (record, package) = container_files(&name);
     let mut command = node_command(&case.root, &scratch, &case.bin).unwrap();
     let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
@@ -760,7 +760,7 @@ fn an_npm_install_releases_the_container_a_crashed_install_left() {
     let home = kernel_sandbox::paths::canonical(&work)
         .unwrap()
         .join("home");
-    let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
+    let (record, package) = container_files(&kernel_sandbox::windows::container_for(&job, &home));
     let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
     let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
     assert!(record.is_file(), "{}", shown(&ran));
@@ -823,7 +823,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
     let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
     assert_eq!(
         forged.container,
-        crate::sandbox::windows::container_for(&job, &home)
+        kernel_sandbox::windows::container_for(&job, &home)
     );
     forged.container = format!("crazyagent.{}", "0".repeat(32));
     let profile = npm_profile(&npm, VERSION);

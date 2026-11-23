@@ -357,7 +357,7 @@ test("F08: Agent access shows the extras with what each means, the apply choice 
   assert.match(access.REMOVING_EXTRA_STOPS_AGENTS, /stops every agent holding it at once/);
   assert.match(access.GRANT_MEANINGS.socket, /never replace or remove it/);
   assert.match(access.GRANT_MEANINGS.temp_folder, /other apps' temp files/);
-  const grants = ["crazyagent/src/sandbox/grants.rs", "kernel/sandbox/src/grants.rs"].map((file) => readFileSync(new URL(`../../../crates/${file}`, import.meta.url), "utf8")).join("\n");
+  const grants = readFileSync(new URL("../../../crates/kernel/sandbox/src/grants.rs", import.meta.url), "utf8");
   const body = grants.slice(grants.indexOf("pub fn refusal_text"), grants.indexOf("\n}\n", grants.indexOf("pub fn refusal_text")));
   const pairs = [...body.matchAll(/"([a-z_]+)" => \{?\s*"((?:[^"\\]|\\.)*)"/g)];
   assert.ok(pairs.length >= 17, `${pairs.length} refusals`);

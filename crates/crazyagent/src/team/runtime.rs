@@ -36,11 +36,11 @@ use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
@@ -406,7 +406,7 @@ impl Plan {
         let boundary = if unconfined {
             let full = self.full_access.clone().ok_or_else(|| {
                 with_code(
-                    crate::sandbox::FULL_ACCESS_NEEDS_MACOS,
+                    kernel_sandbox::profile::consts::FULL_ACCESS_NEEDS_MACOS,
                     Some("sandbox_unavailable"),
                 )
             })?;
@@ -1131,7 +1131,7 @@ fn prepare_mates_home(
     let mates = crate::launch_context::mates_home(home);
     private_directory(&mates)?;
     crate::agent_home::reset_mates_home(&mates).map_err(|e| EngineError(e.0))?;
-    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         let shared = home.join(folder);
         match std::fs::DirBuilder::new().mode(0o700).create(&shared) {
             Ok(()) => {}
@@ -9678,8 +9678,13 @@ impl TeamRuntime {
             .then(kernel_sandbox::grants::owner_temp_folder)
             .transpose()
             .map_err(|code| with_code(kernel_sandbox::grants::refusal_text(code), Some(code)))?;
-        let data = crate::sandbox::grants::data_root(&self.connection).unwrap_or_default();
-        let held = crate::sandbox::grants::held_now(&policy.grants, &kept, &data);
+        let data = crate::sandbox::grants_store::data_root(&self.connection).unwrap_or_default();
+        let held = kernel_sandbox::grants::held_now(
+            &crate::sandbox::GRANT_HOOKS,
+            &policy.grants,
+            &kept,
+            &data,
+        );
         sandbox = sandbox
             .grant_access(&held, owner_tmp.as_deref())
             .map_err(sandboxed)?;
@@ -13910,7 +13915,7 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
             ));
         }
     };
-    assert!(!hosts.is_empty() && hosts.len() <= crate::sandbox::model_proxy::HOSTS_MAX);
+    assert!(!hosts.is_empty() && hosts.len() <= kernel_sandbox::model_proxy::HOSTS_MAX);
     Ok(hosts)
 }
 

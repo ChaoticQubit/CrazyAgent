@@ -7,6 +7,11 @@ use std::sync::{Mutex, PoisonError};
 
 /// The most folders one project may keep its agents out of.
 pub const HIDDEN_PATHS_MAX: usize = 8;
+/// The most folders one sandbox hides: every hidden folder a project saves
+/// ([`HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the graph step's
+/// `.crazyagent/`, or a native lead's part of the relay mailbox and its own temp folder,
+/// which its teammates' sandbox hides.
+pub const HIDDEN_MAX: usize = HIDDEN_PATHS_MAX + 2;
 
 /// The length of one hidden folder's digest as an agent's launch records it, in hex.
 pub const DIGEST_HEX_LEN: usize = 32;

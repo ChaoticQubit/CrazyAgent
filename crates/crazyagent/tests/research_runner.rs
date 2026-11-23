@@ -1410,7 +1410,10 @@ fn stand_in_profile(case: &Case, kind: &str, tools: bool) -> (String, u16) {
     let id = jobs.enqueue("project-a", kind, "codex", tools).unwrap();
     let provider = listening_provider();
     let port = provider.local_addr().unwrap().port();
-    assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
+    assert!(
+        !kernel_sandbox::ports::OWNER_PORTS.contains(&port),
+        "{port}"
+    );
     let run = ResearchRunner::new(
         &case.database,
         &case.state,

@@ -1,7 +1,8 @@
-use super::{ADMIN_LINKS, ADMIN_WRITES, ProjectSandbox, sbpl_overlong, seatbelt_pattern};
+use super::{ProjectSandbox, sbpl_overlong, seatbelt_pattern};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::any_case;
 use kernel_sandbox::policy::AccessGrant;
+use kernel_sandbox::profile::consts::{ADMIN_LINKS, ADMIN_WRITES};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -637,11 +638,15 @@ fn the_widest_profile_under_a_long_root_keeps_a_tenth_of_the_cap_free() {
     let case = long_case(150);
     let (sandbox, _, _) = widened(&case);
     let text = sandbox.profile();
-    assert!(text.len() > super::PROFILE_BYTES_MAX / 2, "{}", text.len());
     assert!(
-        text.len() <= super::PROFILE_BYTES_MAX * 9 / 10,
+        text.len() > kernel_sandbox::profile::consts::PROFILE_BYTES_MAX / 2,
+        "{}",
+        text.len()
+    );
+    assert!(
+        text.len() <= kernel_sandbox::profile::consts::PROFILE_BYTES_MAX * 9 / 10,
         "{} of {} bytes",
         text.len(),
-        super::PROFILE_BYTES_MAX
+        kernel_sandbox::profile::consts::PROFILE_BYTES_MAX
     );
 }

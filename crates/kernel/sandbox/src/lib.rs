@@ -23,6 +23,9 @@ pub mod host;
 /// The plain lines and refusal codes a launch shows when a Linux or Windows sandbox cannot
 /// hold something, and the check that tells the Windows loopback refusal apart.
 pub mod lines;
+/// One agent's model proxy: the loopback CONNECT tunnel to the agent's listed model hosts,
+/// the variables that send a harness through it and the rule for which addresses it dials.
+pub mod model_proxy;
 /// A sandboxed agent's network reach: open, or only the listed loopback and any-host ports.
 pub mod net;
 /// Path checks and spellings every sandbox root is held to: one spelling per path, the
@@ -32,8 +35,12 @@ pub mod paths;
 /// A project's agent policy: the access level, network, toolchains, caches, agent files,
 /// grants and shared folders, with the views clients show and the hooks the engine passes.
 pub mod policy;
-/// The lowest port a sandbox bridge may take.
+/// The ports and port counts every sandbox holds: the owner's fixed ports, the model proxy
+/// and relay blocks, where picked ports start, the lowest bridge port and the most remotes.
 pub mod ports;
+/// The project sandbox profile: the limits, lists, notices and fixed agent variables every
+/// Seatbelt, Linux and Windows boundary is built from.
+pub mod profile;
 /// Boundary qualification: the signed report a release build carries for each sandbox
 /// capability, read and checked against the artifacts it names before the engine admits a
 /// boundary as qualified.
@@ -52,6 +59,11 @@ pub mod tool_cache;
 /// The owner's toolchains an agent reads: the tool homes, the toolchain families and the
 /// read-only grants a project's choice gives.
 pub mod toolchains;
+/// The Windows boundary's names: the helper beside the engine and the checks it passes, the
+/// plain refusals, the grants folder and the AppContainer name of one agent of one project.
+pub mod windows;
 
+#[cfg(test)]
+mod low_ports_tests;
 #[cfg(test)]
 mod tests;

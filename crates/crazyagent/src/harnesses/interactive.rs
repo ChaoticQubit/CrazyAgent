@@ -548,7 +548,7 @@ pub fn command_with(
     }
     if let Some(port) = installed.and_then(Installed::model_proxy) {
         env.extend(
-            crate::sandbox::model_proxy::variables(port)
+            kernel_sandbox::model_proxy::variables(port)
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }
@@ -632,7 +632,7 @@ pub(crate) fn catalog_settings(harness: &str) -> Result<TerminalSettings, Launch
 /// process's, with a listed harness's home block variables and account hand-over after them
 /// as its piped launch has them, the hand-over's placeholder the one exception to the guard.
 /// Inputs: the variables, the home block's and the hand-over. Output: the variables with
-/// [`crate::sandbox::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
+/// [`kernel_sandbox::profile::consts::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
 fn agent_env(
     env: &[(String, String)],
     listed: &[(OsString, OsString)],

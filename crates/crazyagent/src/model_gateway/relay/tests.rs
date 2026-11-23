@@ -752,10 +752,7 @@ fn a_relay_listens_only_on_a_reserved_relay_port() {
         .collect();
     let mut ports: Vec<u16> = relays.iter().map(Relay::port).collect();
     for port in &ports {
-        assert!(
-            crate::sandbox::model_proxy::RELAY_PORTS.contains(port),
-            "{port}"
-        );
+        assert!(kernel_sandbox::ports::RELAY_PORTS.contains(port), "{port}");
     }
     ports.sort_unstable();
     ports.dedup();
@@ -769,7 +766,7 @@ fn a_relay_listens_only_on_a_reserved_relay_port() {
 #[test]
 fn an_open_agent_never_listens_on_a_model_relay_port() {
     let agent = crate::sandbox::test_agent::TestAgent::open();
-    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    let block = kernel_sandbox::ports::RELAY_PORTS;
     for port in [*block.start(), *block.end()] {
         for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
             let output = agent.run(&format!(
