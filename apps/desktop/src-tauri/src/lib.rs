@@ -4063,7 +4063,9 @@ async fn desktop_app_plugin_add(
     replace: bool,
 ) -> Result<AppPluginsPage, BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_add(folder, sha256, replace)?;
+    let call = lock(&state)
+        .await?
+        .app_plugin_add(folder, sha256, replace)?;
     call.await
 }
 
@@ -4088,7 +4090,9 @@ async fn desktop_app_plugin_set_enabled(
     when_off: Option<TurnOff>,
 ) -> Result<AppPluginsPage, BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_set_enabled(name, enabled, when_off)?;
+    let call = lock(&state)
+        .await?
+        .app_plugin_set_enabled(name, enabled, when_off)?;
     call.await
 }
 
@@ -4123,7 +4127,9 @@ async fn desktop_app_plugin_bind_account(
     account: String,
 ) -> Result<AppPluginsPage, BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_bind_account(name, secret, account)?;
+    let call = lock(&state)
+        .await?
+        .app_plugin_bind_account(name, secret, account)?;
     call.await
 }
 
