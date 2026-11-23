@@ -6,10 +6,11 @@ mod keychain_support;
 
 use crazyagent::paths::Layout;
 use crazyagent::restore::{ENGINE_RESTORED, RestoreState};
-use crazyagent::service::{LAUNCHD_LABEL, answering};
+use crazyagent::service::answering;
 use crazyagent::terminal::tmux::installed;
 use e2e_support::{TMUX, scratch, stop_tmux};
 use golden_support::{Record, wait_until};
+use kernel_processes::service::LAUNCHD_LABEL;
 use keychain_support::TemporaryKeychain;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeMap;

@@ -103,6 +103,10 @@ interface settings-types {
     left-running: left-running,
     hours: u16,
   }
+
+  record agent-quit-saved {
+    settings: quit-settings,
+  }
 }
 
 interface settings {

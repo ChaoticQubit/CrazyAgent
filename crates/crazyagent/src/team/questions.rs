@@ -6,7 +6,7 @@ use super::{
 use crate::coord::{self, MessageKind, Party, QuestionFor, Receipt, Severity, Waiting};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use crate::terminal::AgentId;
+use kernel_processes::terminal::AgentId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 

@@ -19,7 +19,10 @@ fn owned_root() -> tempfile::TempDir {
     let beside = std::env::current_exe().unwrap();
     let root = tempfile::tempdir_in(beside.parent().unwrap()).unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(crate::service::changeable_by_others(root.path()), None);
+    assert_eq!(
+        kernel_processes::service::changeable_by_others(root.path()),
+        None
+    );
     root
 }
 

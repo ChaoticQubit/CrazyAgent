@@ -127,6 +127,32 @@ pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData,
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
 
+/// Runs the plugin store's start sweeps: what a crash left staged, then on Unix every
+/// entered plugin key file in `plugin-keys` that no binding row names, as a committed
+/// removal or a crash between a binding change and its file delete leaves it. Off Unix no
+/// plugin key file is ever saved. Inputs: the engine connection and root. Output: none.
+pub(crate) fn sweep_at_start(db: &Connection, root: &Path) {
+    sweep_staged(root);
+    #[cfg(unix)]
+    sweep_unnamed_keys(db, root);
+    #[cfg(not(unix))]
+    let _ = db;
+}
+
+/// Deletes every entered plugin key file in `plugin-keys` that no binding row names. A name
+/// that is no entered plugin key and the account key folder are never touched, and when the
+/// binding rows do not read, no key is deleted. Inputs: the engine connection and root.
+/// Output: none.
+#[cfg(unix)]
+fn sweep_unnamed_keys(db: &Connection, root: &Path) {
+    let Ok(named) = kernel_plugin_host::store::named_keys(db) else {
+        return;
+    };
+    let kept =
+        |name: &str| Ok(!kernel_plugin_host::store::is_entered_key(name) || named.contains(name));
+    let _ = accounts::settle_unkept_in(root, PLUGIN_KEYS, root, kept, |_| Ok(false));
+}
+
 #[cfg(all(test, unix))]
 #[path = "app_plugins/host_tests.rs"]
 mod host_tests;

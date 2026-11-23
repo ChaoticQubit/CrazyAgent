@@ -1,4 +1,5 @@
-use super::{ProjectSandbox, SandboxNetwork};
+use super::ProjectSandbox;
+use kernel_sandbox::net::SandboxNetwork;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

@@ -87,7 +87,7 @@ fn listening_agent(case: &mut Case) -> (Server, Arc<dyn Host>, Agent, PathBuf) {
     let listened = case.root.join("heard.txt");
     host.spawn(
         &team(agent.id),
-        &InteractiveCommand {
+        &kernel_processes::terminal::PaneCommand::from(&InteractiveCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -98,7 +98,7 @@ fn listening_agent(case: &mut Case) -> (Server, Arc<dyn Host>, Agent, PathBuf) {
             cwd: agent.worktree.clone(),
             env: Vec::new(),
             transcript: Transcript::Unavailable,
-        },
+        }),
     )
     .unwrap();
     assert!(heard(&listened).is_empty());

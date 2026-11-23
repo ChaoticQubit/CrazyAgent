@@ -1,4 +1,5 @@
-use super::{SandboxError, canonical, owner_home};
+use super::{canonical, owner_home};
+use kernel_sandbox::error::SandboxError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;

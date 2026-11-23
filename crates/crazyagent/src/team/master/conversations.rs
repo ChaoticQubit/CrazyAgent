@@ -1,6 +1,6 @@
 use super::*;
 use crate::master_session::{SESSION_DELETED, SessionDeleted};
-use crate::state_log::replay::Logged;
+use kernel_storage::state_log::replay::Logged;
 
 /// The harness conversation a master session continues: the team agent whose home keeps
 /// the record, its harness and account, and the id and record the harness resumes by.

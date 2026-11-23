@@ -346,8 +346,9 @@ fn net(section: &Value) -> Option<Net> {
 /// Whether one `[net]` host fits: a lowercase DNS name of at most `HOST_BYTES_MAX` bytes
 /// whose labels are 1 to 63 letters, digits or inner hyphens, or the loopback address
 /// `127.0.0.1` or `[::1]`, then an optional `:port` from 1 to 65535 without a leading zero.
-/// No scheme, path, query, wildcard, userinfo or other IP literal. Input: the host. Output:
-/// the answer.
+/// No scheme, path, query, wildcard, userinfo or other IP literal: a name whose last label
+/// is all digits or starts with `0x` is an IPv4 form a URL parser reads as an address, so it
+/// is refused. Input: the host. Output: the answer.
 fn net_host(host: &str) -> bool {
     let (name, port) = match host.rsplit_once(':') {
         Some((name, port))
@@ -364,9 +365,9 @@ fn net_host(host: &str) -> bool {
             && port.parse::<u16>().is_ok_and(|port| port >= 1)
     });
     let loopback = matches!(name, "127.0.0.1" | "[::1]");
-    let numeric = name
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || byte == b'.');
+    let last = name.rsplit('.').next().unwrap_or(name);
+    let numeric = last.starts_with("0x")
+        || (!last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit()));
     let dns = !numeric
         && name.len() <= HOST_BYTES_MAX
         && name.split('.').all(|label| {

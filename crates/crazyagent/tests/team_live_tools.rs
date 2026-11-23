@@ -11,8 +11,9 @@ use crazyagent::team::names;
 use crazyagent::team::tool::{
     INSPECT_WORK_TOOL, LIVE_SERVER_COMMAND, MAILBOX_FOLDER, SPAWN_TOOL, UPDATE_WORK_TOOL,
 };
+use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -156,7 +157,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let typed = base.join("typed.txt");
     host.spawn(
         &AgentId::team(writer).unwrap(),
-        &InteractiveCommand {
+        &kernel_processes::terminal::PaneCommand::from(&InteractiveCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -165,7 +166,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
             cwd: base.clone(),
             env: Vec::new(),
             transcript: Transcript::Unavailable,
-        },
+        }),
     )
     .unwrap();
 

@@ -8,9 +8,9 @@ use crazyagent::engine::owner::{
     OwnerClientKind, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
 };
 use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
-use crazyagent::sandbox::LinuxSockets;
-use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use e2e_support::{Engine, Owner, result};
+use kernel_sandbox::settings::LinuxSockets;
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 use std::time::Duration;
 
 const ATTACH_TIME: Duration = Duration::from_secs(10);

@@ -4,10 +4,10 @@ use crate::project_setup::removed::event as removed;
 use crate::protocol::{ProjectId, TaskId};
 use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Logged};
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -331,7 +331,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let mut removals = removals(tx)?.into_iter().peekable();
     clear(tx)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Worktrees, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Worktrees, 0, |logged| {
         while let Some((_, project)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_admissions(tx, &project)?;
         }
@@ -560,7 +560,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// `worktrees_log_event_invalid` for a removal body that is not one.
 pub(crate) fn removals(db: &Connection) -> Result<Vec<(u64, String)>, EngineError> {
     let mut found = Vec::new();
-    replay::replay(db, Aggregate::Projects, 0, |logged| {
+    crate::state_log::replay(db, Aggregate::Projects, 0, |logged| {
         if logged.kind != removed::KIND {
             return Ok(());
         }
@@ -679,7 +679,7 @@ pub(crate) fn forget_project(
         assert!(seq > 0, "the removal is logged before its redaction");
     }
     let kinds = [KIND_ADMITTED];
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Worktrees],
         Some(&kinds),

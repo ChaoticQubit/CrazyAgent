@@ -1,16 +1,14 @@
 use crate::engine::EngineError;
 use fence::Fence;
 use kernel_storage::StorageError;
+use kernel_storage::state_log::replay::Logged;
 use kernel_storage::state_log::{AggregateName, Appender, FenceCheck};
-use rusqlite::Transaction;
+use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
 
 /// The write fence on append, one per writer class, and the engine hosts this process runs
 /// (v2.5 L3).
 pub mod fence;
-/// Replay of the log into projections, the compare of rebuilt tables, redaction in place, the
-/// writers' clock and the process exit event (v2.5 L2).
-pub mod replay;
 #[cfg(test)]
 mod tests;
 
@@ -53,6 +51,14 @@ impl Aggregate {
     }
 }
 
+/// A logged name equals an engine aggregate when it is that aggregate's stored name, so a
+/// decoder checks a replayed event's aggregate as it did before the move.
+impl PartialEq<Aggregate> for AggregateName {
+    fn eq(&self, other: &Aggregate) -> bool {
+        self.name() == other.name()
+    }
+}
+
 impl From<Aggregate> for AggregateName {
     fn from(aggregate: Aggregate) -> Self {
         AggregateName::new(aggregate.name())
@@ -92,11 +98,65 @@ pub(crate) fn opening<'a, 'c>(
     own(tx, Fence::Opening(opening))
 }
 
-/// The engine's name check for the kernel writer: only the closed [`Aggregate`] set that
-/// replay reads may be written. Input: the name. Output: whether replay
-/// reads it.
-fn known(name: &str) -> bool {
-    replay::parse(name).is_some()
+/// The engine's aggregate names for the kernel writer and replay: only the closed
+/// [`Aggregate`] set, read through its serde name, which [`Aggregate::name`] matches.
+/// Input: the stored name. Output: its kernel name, none for another.
+fn known(name: &str) -> Option<AggregateName> {
+    parse(name).map(AggregateName::from)
+}
+
+/// The aggregate a stored name names, read through its serde name. Input: the name.
+/// Output: the aggregate, none for another.
+fn parse(name: &str) -> Option<Aggregate> {
+    serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
+}
+
+/// Replays the log after `after` into one aggregate's projection through the kernel replay,
+/// reading names through the engine's set. Inputs: the connection, the aggregate, the last
+/// seq already applied and the projection. Output: the last seq read, or the first refusal.
+pub fn replay(
+    db: &Connection,
+    aggregate: Aggregate,
+    after: u64,
+    apply: impl FnMut(&Logged) -> Result<(), EngineError>,
+) -> Result<u64, EngineError> {
+    kernel_storage::state_log::replay::replay(db, aggregate.into(), after, known, apply)
+}
+
+/// Redacts one logged event for an owner delete through the kernel, behind the delete's
+/// fence. Inputs: the transaction, the seq and the fence. Output: as the kernel's redact.
+pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
+    Ok(kernel_storage::state_log::replay::redact(
+        tx,
+        seq,
+        &hook(fence.clone()),
+    )?)
+}
+
+/// Redacts every matching event of the given aggregates for an owner delete through the
+/// kernel, behind the delete's fence. Inputs: the transaction, the aggregates, the kinds
+/// (none for all), the field, the value, the kept seq and the fence. Output: how many were
+/// redacted, or the kernel's refusal.
+pub fn redact_matching(
+    tx: &Transaction<'_>,
+    aggregates: &[Aggregate],
+    kinds: Option<&[&str]>,
+    field: &str,
+    value: &str,
+    keep: u64,
+    fence: &Fence,
+) -> Result<usize, EngineError> {
+    let names: Vec<AggregateName> = aggregates.iter().map(|each| (*each).into()).collect();
+    assert_eq!(names.len(), aggregates.len());
+    Ok(kernel_storage::state_log::replay::redact_matching(
+        tx,
+        &names,
+        kinds,
+        field,
+        value,
+        keep,
+        &hook(fence.clone()),
+    )?)
 }
 
 /// The kernel hook for a writer's fence: [`fence::check`] on the appending transaction,

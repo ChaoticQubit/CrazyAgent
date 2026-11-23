@@ -5,7 +5,7 @@ use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sdk_slice::{self, EngineRefusals, KIND_CALL_REFUSED};
 use crate::state_log::Aggregate;
 use crate::state_log::fence;
-use crate::state_log::replay::replay;
+use crate::state_log::replay;
 use bus_gateway::{Grants, Refusals};
 use crazyagent_plugin_agent_quit as agent_quit;
 use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;

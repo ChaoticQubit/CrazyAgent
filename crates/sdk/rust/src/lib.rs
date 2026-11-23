@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod generated;
+pub mod wire;
 pub use generated::CAPABILITIES;
 pub use generated::host::Host;
 pub use generated::net;
@@ -53,8 +54,12 @@ pub const BYTES_MAX: usize = 4_194_304;
 pub const LIST_ITEMS_MAX: usize = 64;
 
 #[cfg(test)]
+mod events_tests;
+#[cfg(test)]
 pub mod fixture_generated;
 #[cfg(test)]
 pub mod fixture_two;
+#[cfg(test)]
+pub mod fixture_wire;
 #[cfg(test)]
 mod tests;

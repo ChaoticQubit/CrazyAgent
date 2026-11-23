@@ -4,6 +4,15 @@ pub mod aggregate;
 /// The appender of one write transaction, behind the writer's fence hook.
 mod appender;
 
+/// Compaction of the log: a snapshot run per aggregate every [`compact::COMPACT_EVERY`]
+/// events, the bodies behind its second-newest run tombstoned, behind a switch that is Off
+/// by default.
+pub mod compact;
+
+/// Replay of the log into projections, the compare of rebuilt tables, redaction in place and
+/// the process exit event (v2.5 L2), reading names through the engine's set.
+pub mod replay;
+
 pub use aggregate::{AGGREGATE_BYTES_MAX, AggregateName};
 pub use appender::{Appender, FenceCheck, KnownName};
 
@@ -278,6 +287,6 @@ impl Clock {
 }
 
 /// Builds a log error. Input: the cause. Output: the error with its text.
-fn error(value: impl std::fmt::Display) -> StorageError {
+pub(crate) fn error(value: impl std::fmt::Display) -> StorageError {
     StorageError(value.to_string())
 }

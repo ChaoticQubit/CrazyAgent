@@ -1200,7 +1200,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
             status_label: None,
             account: None,
             branch: None,
-            terminal: Some(crate::terminal::AgentId::new("team-1").unwrap()),
+            terminal: Some(kernel_processes::terminal::AgentId::new("team-1").unwrap()),
             questions: None,
             agent: Some(1),
             pane: None,
@@ -5669,7 +5669,7 @@ fn a_draft_that_does_not_fit_after_the_owners_text_leaves_the_input_as_typed() {
 fn the_windows_access_and_loopback_refusals_read_as_the_engine_words_them() {
     for code in [
         crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
-        crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
+        kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
     ] {
         assert_eq!(
             plain_problem(code),

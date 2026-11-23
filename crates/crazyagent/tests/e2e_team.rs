@@ -7,8 +7,9 @@ use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::NodeKind;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host, TerminalFrame};
+use crazyagent::terminal::{FOLDER, TerminalFrame};
 use e2e_support::{Engine, Owner, TMUX, hex, scratch};
+use kernel_processes::terminal::{AgentId, Host};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -93,7 +94,12 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            launcher
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
+                .unwrap();
             launcher
         })
         .await
@@ -291,7 +297,12 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             for agent in &agents {
-                launcher.spawn(agent, &command).unwrap();
+                launcher
+                    .spawn(
+                        agent,
+                        &kernel_processes::terminal::PaneCommand::from(&command),
+                    )
+                    .unwrap();
             }
             launcher
         })

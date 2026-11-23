@@ -5,7 +5,8 @@ use super::{
 use crate::coord::{AgentState, Party, Presence, Receipt, Snapshot, Waiting};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use crate::terminal::{AGENT_ID_BYTES_MAX, AgentId, KEPT_MAX, PANES_PER_PROJECT_MAX};
+use crate::terminal::{KEPT_MAX, PANES_PER_PROJECT_MAX};
+use kernel_processes::terminal::{AGENT_ID_BYTES_MAX, AgentId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

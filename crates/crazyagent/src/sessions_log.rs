@@ -6,11 +6,11 @@ use crate::owner_texts::TextDigest;
 use crate::protocol::{Outcome, ProjectId, SessionId};
 use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Logged};
 use crate::storage::opening::Opening;
 use crate::storage::versioned::{Refusal, Writer};
 use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -987,7 +987,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     crate::storage::agent_text::ensure(tx)?;
     clear(tx)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Sessions, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Sessions, 0, |logged| {
         if logged.kind == SESSION_DELETED {
             let deleted: SessionDeleted = serde_json::from_slice(&logged.body)
                 .map_err(|_| error("sessions_log_event_invalid"))?;
@@ -1087,7 +1087,7 @@ pub(crate) fn forget_project(
     project: &str,
     fence: &Fence,
 ) -> Result<usize, EngineError> {
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Sessions],
         None,

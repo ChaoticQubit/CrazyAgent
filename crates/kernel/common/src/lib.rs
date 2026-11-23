@@ -10,6 +10,24 @@ mod names_tests;
 #[cfg(test)]
 mod net_tests;
 
+/// The three desktop platforms the data root and services are defined for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    MacOs,
+    Linux,
+    Windows,
+}
+
+impl Platform {
+    pub const CURRENT: Self = if cfg!(target_os = "macos") {
+        Self::MacOs
+    } else if cfg!(windows) {
+        Self::Windows
+    } else {
+        Self::Linux
+    };
+}
+
 /// Hashes bytes with SHA-256, the digest the engine keys socket names, profile references
 /// and stored records by. Input: the bytes. Output: the digest as 64 lowercase hex digits.
 pub fn hash(bytes: &[u8]) -> String {
@@ -40,6 +58,17 @@ pub fn windows_device(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn platform_current_matches_this_build() {
+        #[cfg(target_os = "macos")]
+        let expected = super::Platform::MacOs;
+        #[cfg(target_os = "windows")]
+        let expected = super::Platform::Windows;
+        #[cfg(target_os = "linux")]
+        let expected = super::Platform::Linux;
+        assert_eq!(super::Platform::CURRENT, expected);
+    }
+
     #[test]
     fn hash_is_the_lowercase_hex_sha256() {
         assert_eq!(

@@ -4022,7 +4022,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
         assert!(node.status.is_some_and(AgentStatus::live), "{node:?}");
         assert_eq!(
             node.terminal,
-            Some(crate::terminal::AgentId::team(*id).unwrap())
+            Some(kernel_processes::terminal::AgentId::team(*id).unwrap())
         );
         assert_eq!(node.parent.as_deref(), Some("master"));
     }

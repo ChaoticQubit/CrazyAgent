@@ -1,11 +1,11 @@
 use super::TerminalSession;
 use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
-use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::{
     AccountBinding, LaunchBoundary, LaunchError, LaunchLimits, LaunchRequest,
 };
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host, HostError, PaneRef, TerminalStream};
+use kernel_processes::terminal::{AgentId, Host, HostError, PaneRef, TerminalStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -225,7 +225,11 @@ struct FirstLookFails {
 }
 
 impl Host for FirstLookFails {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(
+        &self,
+        agent: &AgentId,
+        command: &kernel_processes::terminal::PaneCommand,
+    ) -> Result<PaneRef, HostError> {
         self.real.spawn(agent, command)
     }
 
@@ -328,7 +332,11 @@ struct TagRefused {
 }
 
 impl Host for TagRefused {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(
+        &self,
+        agent: &AgentId,
+        command: &kernel_processes::terminal::PaneCommand,
+    ) -> Result<PaneRef, HostError> {
         self.real.spawn(agent, command)
     }
 

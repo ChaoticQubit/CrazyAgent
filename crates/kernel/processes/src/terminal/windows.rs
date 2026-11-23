@@ -1,9 +1,8 @@
 use super::buffer::{Feed, buffer};
 use super::{
-    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PaneRef, SIZE_MAX, SIZE_MIN,
-    TerminalStream, VIEWERS_MAX, failure,
+    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PaneCommand, PaneRef, SIZE_MAX,
+    SIZE_MIN, TerminalStream, VIEWERS_MAX, failure,
 };
-use crate::harnesses::interactive::InteractiveCommand;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -38,10 +37,12 @@ const BASE_ENV: &[&str] = &[
 /// process because Windows has no tmux. A terminal parser per agent keeps the current
 /// screen, so a viewer that attaches gets the screen and then every later output chunk with
 /// nothing lost or repeated. Terminals end with the engine, unlike tmux on macOS and Linux.
-#[derive(Default)]
+/// The host is built with the filter that decides which pane variables may reach an agent,
+/// and has no default one, so a host never starts a pane without it.
 pub struct ConptyHost {
     panes: Mutex<BTreeMap<AgentId, Pane>>,
     next_pane: AtomicU64,
+    variable_allowed: fn(&OsStr, &OsStr) -> bool,
 }
 
 struct Pane {
@@ -78,9 +79,15 @@ impl Pane {
 }
 
 impl ConptyHost {
-    /// An empty host with no terminals yet.
-    pub fn new() -> Self {
-        Self::default()
+    /// An empty host with no terminals yet. Input: the filter each pane variable must pass,
+    /// given its name and value; a pane asking for a variable it refuses is not started.
+    /// Output: the host.
+    pub fn new(variable_allowed: fn(&OsStr, &OsStr) -> bool) -> Self {
+        Self {
+            panes: Mutex::new(BTreeMap::new()),
+            next_pane: AtomicU64::new(0),
+            variable_allowed,
+        }
     }
 
     /// The host's own reference for one agent terminal, such as `conpty-3`, or none.
@@ -99,7 +106,7 @@ impl Drop for ConptyHost {
 }
 
 impl Host for ConptyHost {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(&self, agent: &AgentId, command: &PaneCommand) -> Result<PaneRef, HostError> {
         let (program, args) = command
             .argv
             .split_first()
@@ -107,11 +114,12 @@ impl Host for ConptyHost {
         if command.argv.len() > ARGV_MAX
             || command.env.len() > ENV_MAX
             || !Path::new(program).is_absolute()
-            || kernel_processes::batch::batch_file(Path::new(program))
+            || crate::batch::batch_file(Path::new(program))
             || !command.cwd.is_absolute()
-            || command.env.iter().any(|(name, value)| {
-                !crate::sandbox::agent_variable_allowed(OsStr::new(name), OsStr::new(value))
-            })
+            || command
+                .env
+                .iter()
+                .any(|(name, value)| !(self.variable_allowed)(OsStr::new(name), OsStr::new(value)))
         {
             return Err(failure("terminal_command_invalid"));
         }
@@ -288,7 +296,7 @@ fn size(cols: u16, rows: u16) -> PtySize {
 /// ConPTY, made with `PSUEDOCONSOLE_INHERIT_CURSOR` by portable-pty, first asks for the
 /// cursor position (`ESC[6n`) and draws nothing until it is answered, so the first query
 /// is answered here with the top-left cell the empty screen starts at, and is kept from the
-/// screen and the viewers (W2). Inputs: the output, the view and the input to answer on.
+/// screen and the viewers. Inputs: the output, the view and the input to answer on.
 fn pump(mut reader: Box<dyn Read + Send>, view: &Mutex<View>, mut answer: Option<Writer>) {
     let mut buffer = vec![0u8; CHUNK_BYTES_MAX];
     loop {
@@ -328,7 +336,7 @@ fn end_tree(pid: u32) {
         .map(PathBuf::from)
         .filter(|root| root.is_absolute())
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let _ = kernel_processes::spawn_gate::status(
+    let _ = crate::spawn_gate::status(
         Command::new(root.join("System32").join("taskkill.exe"))
             .arg("/PID")
             .arg(pid.to_string())

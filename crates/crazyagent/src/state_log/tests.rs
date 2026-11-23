@@ -1,4 +1,5 @@
 use super::*;
+use kernel_storage::state_log::replay;
 use kernel_storage::state_log::{
     BODY_BYTES_MAX, Chunk, Draft, KIND_BYTES_MAX, SNAPSHOT_CHUNK, SNAPSHOT_DONE,
     TRANSACTION_EVENTS_MAX, verify_snapshot,
@@ -819,7 +820,7 @@ fn sessions_body_is_closed(kind: &str) {
         sessions::decode(&replay::Logged {
             seq: 1,
             revision: 1,
-            aggregate: Aggregate::Sessions,
+            aggregate: Aggregate::Sessions.into(),
             kind: kind.into(),
             schema: 1,
             at_ms: 1,
@@ -948,7 +949,7 @@ fn settings_body_is_closed(kind: &str) {
         settings::decode(&replay::Logged {
             seq: 1,
             revision: 1,
-            aggregate: Aggregate::Settings,
+            aggregate: Aggregate::Settings.into(),
             kind: kind.into(),
             schema: 1,
             at_ms: 1,
@@ -959,7 +960,7 @@ fn settings_body_is_closed(kind: &str) {
     let value = |settings: serde_json::Value| json!({"settings": settings});
     let (sample, keys): (serde_json::Value, &[&str]) = match kind {
         settings::KIND_SANDBOX => (
-            value(json!(crate::sandbox_settings::SandboxSettings::default())),
+            value(json!(kernel_sandbox::settings::SandboxSettings::default())),
             &["settings"],
         ),
         settings::KIND_CLEANUP => (
@@ -1145,7 +1146,7 @@ fn landing_body_is_closed(kind: &str) {
         let logged = replay::Logged {
             seq: 1,
             revision: 1,
-            aggregate: Aggregate::Landing,
+            aggregate: Aggregate::Landing.into(),
             kind: kind.to_owned(),
             schema: crate::landing_log::SCHEMA,
             at_ms: 0,
@@ -1389,4 +1390,26 @@ fn no_two_aggregates_share_a_name() {
         .map(|(aggregate, _)| kernel_storage::state_log::AggregateName::from(aggregate).name());
     let distinct = names.iter().collect::<std::collections::HashSet<_>>();
     assert_eq!(distinct.len(), names.len());
+}
+
+#[test]
+fn every_aggregate_is_read_back_under_its_stored_name() {
+    for aggregate in [
+        Aggregate::Worktrees,
+        Aggregate::Ide,
+        Aggregate::Memory,
+        Aggregate::Projects,
+        Aggregate::Landing,
+        Aggregate::Settings,
+        Aggregate::Plugins,
+        Aggregate::Sessions,
+        Aggregate::Intake,
+        Aggregate::Engine,
+        Aggregate::Accounts,
+        Aggregate::Team,
+    ] {
+        assert_eq!(parse(aggregate.name()), Some(aggregate), "{aggregate:?}");
+    }
+    assert_eq!(parse("Worktrees"), None);
+    assert_eq!(parse(""), None);
 }

@@ -674,7 +674,7 @@ fn searchable(hooks: &super::FindingHooks, folder: &Path, real_home: Option<&Pat
     real.is_dir()
         && !(hooks.in_crazyagent_folder)(&real)
         && !super::in_project(hooks, &super::home_names(hooks, real_home), &real)
-        && (hooks.changeable_by_others)(folder).is_none()
+        && crate::service::changeable_by_others(folder).is_none()
 }
 
 /// The `bin` folder of the npm global prefix npm prints. Input: npm's output. Output: the
