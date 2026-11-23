@@ -2,11 +2,11 @@
 
 use crazyagent::projects_home::*;
 use crazyagent::protocol::ProjectId;
-use std::fs;
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
+use std::{fs, process::Command};
 
 struct Case {
     _temp: tempfile::TempDir,

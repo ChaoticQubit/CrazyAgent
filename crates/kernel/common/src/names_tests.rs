@@ -113,3 +113,12 @@ fn a_store_account_is_a_store_name_without_a_trailing_dot() {
         assert!(!is_store_account(bad), "{bad:?}");
     }
 }
+
+#[test]
+fn the_project_state_folder_and_the_null_device_have_one_kernel_home() {
+    assert_eq!(crate::names::CRAZYAGENT_DIRECTORY, ".crazyagent");
+    #[cfg(not(windows))]
+    assert_eq!(crate::names::NULL_DEVICE, "/dev/null");
+    #[cfg(windows)]
+    assert_eq!(crate::names::NULL_DEVICE, "NUL");
+}

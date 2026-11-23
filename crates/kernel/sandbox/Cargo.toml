@@ -33,5 +33,11 @@ crazyagent-linux-supervisor = { path = "../../crazyagent-linux-supervisor" }
 landlock = "=0.4.2"
 seccompiler = { version = "=0.5.0", default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
+
 [dev-dependencies]
 tempfile = "=3.27.0"
+
+[target.'cfg(windows)'.dev-dependencies]
+crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox", features = ["test-principals"] }

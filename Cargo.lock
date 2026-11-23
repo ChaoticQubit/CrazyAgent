@@ -1040,6 +1040,7 @@ dependencies = [
  "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
  "crazyagent-linux-supervisor",
+ "crazyagent-win-sandbox",
  "getrandom 0.4.3",
  "landlock",
  "libc",

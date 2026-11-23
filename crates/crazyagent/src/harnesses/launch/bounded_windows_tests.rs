@@ -3,7 +3,7 @@ use super::{
     claude_invocation, codex_invocation,
 };
 use crate::sandbox::InstalledSandbox;
-use crate::sandbox::windows::container_name;
+use kernel_sandbox::windows::profile::container_name;
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
 use kernel_sandbox::net::SandboxNetwork;

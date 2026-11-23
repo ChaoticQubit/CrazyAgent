@@ -20,9 +20,7 @@ pub use intake::{
     Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
 pub(crate) use layout::append_lines;
-pub use layout::{
-    CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
-};
+pub use layout::{EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout};
 pub(crate) use move_project::holds as project_move_holds;
 pub(crate) use move_project::lands as project_move_lands;
 pub(crate) use move_project::{
@@ -33,6 +31,7 @@ pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use kernel_sandbox::paths::one_spelling;
 #[cfg(target_os = "macos")]
 use kernel_sandbox::paths::{DATA_VOLUME, same_entry};

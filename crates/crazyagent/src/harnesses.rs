@@ -669,7 +669,7 @@ pub(crate) fn npm_prefix(program: &Path) -> Option<&Path> {
 /// Input: the path. Output: the answer.
 pub fn in_crazyagent_folder(path: &Path) -> bool {
     path.components()
-        .any(|part| part.as_os_str() == crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .any(|part| part.as_os_str() == kernel_common::names::CRAZYAGENT_DIRECTORY)
 }
 
 fn usable_path(path: &Path) -> bool {

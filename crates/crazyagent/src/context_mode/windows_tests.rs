@@ -664,7 +664,7 @@ fn a_refused_release_reports_false_and_keeps_the_profile() {
         kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap();
-    let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+    let mut forged = kernel_sandbox::windows::profile::boundary_profile(&sandbox, &grants).unwrap();
     let derived = kernel_sandbox::windows::container_for(&folders[0], &folders[1]);
     assert_eq!(forged.container, derived);
     forged.container = format!("crazyagent.{}", "0".repeat(32));
@@ -822,7 +822,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
         kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap();
-    let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+    let mut forged = kernel_sandbox::windows::profile::boundary_profile(&sandbox, &grants).unwrap();
     assert_eq!(
         forged.container,
         kernel_sandbox::windows::container_for(&job, &home)

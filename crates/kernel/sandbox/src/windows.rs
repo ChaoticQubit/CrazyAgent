@@ -65,5 +65,12 @@ pub fn existing_helper(helper: &Path) -> Result<PathBuf, SandboxError> {
     Ok(helper.to_path_buf())
 }
 
+#[cfg(windows)]
+pub mod owner_git;
+#[cfg(not(windows))]
+#[path = "windows/owner_git_none.rs"]
+pub mod owner_git;
+#[cfg(windows)]
+pub mod profile;
 #[cfg(test)]
 mod tests;

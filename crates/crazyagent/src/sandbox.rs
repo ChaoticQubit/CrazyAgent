@@ -14,6 +14,7 @@ use kernel_sandbox::paths::clean_absolute;
 use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
+#[cfg(unix)]
 use kernel_sandbox::profile::env::*;
 #[cfg(all(test, unix))]
 use kernel_sandbox::profile::linux_holds_fully;
@@ -28,7 +29,7 @@ use kernel_sandbox::tool_cache::ToolCacheHooks;
 use kernel_sandbox::toolchains::ToolchainHooks;
 #[cfg(target_os = "windows")]
 use std::ffi::OsStr;
-#[cfg(all(test, unix))]
+#[cfg(any(all(test, unix), target_os = "windows"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,35 +51,14 @@ pub mod tool_cache;
 #[cfg(all(test, unix))]
 mod toolchains_tests;
 #[cfg(target_os = "windows")]
-pub mod windows;
-#[cfg(target_os = "windows")]
-pub use windows::owner_git::OwnerGit;
-
-/// Owner git's own container, which only Windows has (V244-WIN-GIT-UNC-SIBLINGS): elsewhere
-/// this type has no value, so a publish or `@` list there never routes its git anywhere and
-/// runs it as the owner, as before.
-#[cfg(not(target_os = "windows"))]
-#[derive(Debug)]
-pub enum OwnerGit {}
-
-#[cfg(not(target_os = "windows"))]
-impl OwnerGit {
-    /// Never runs: no value of this type exists outside Windows. Input: the command.
-    /// Output: none.
-    pub fn wrap(&self, _git: &Command) -> Result<Command, SandboxError> {
-        match *self {}
-    }
-
-    /// Never runs: no value of this type exists outside Windows. Output: none.
-    pub fn tmp(&self) -> &Path {
-        match *self {}
-    }
-
-    /// Never runs: no value of this type exists outside Windows. Output: none.
-    pub fn git(&self) -> &Path {
-        match *self {}
-    }
-}
+use kernel_sandbox::windows::{GRANTS_FOLDER, profile as windows};
+/// What the share-stop rows share on the test farm: the shares and the runner user that
+/// `.github/farm/unc-share-setup.ps1` sets up, the server session that is the measure (P1),
+/// and the planted shapes that point git at those shares (V244-WIN-GIT-UNC-SIBLINGS N1).
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) mod windows_farm;
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests;
 
 /// How the tmux host wraps a confined pane, built from this module's sandbox values: the
 /// runner, the keeper and pane shim words and variables, and which variables reach a pane.
@@ -311,7 +291,7 @@ pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
     launch_state: crate::launch_context::STATE,
     launch_lock: crate::launch_context::LOCK,
     codex_system_skills: crate::launch_context::CODEX_SYSTEM_SKILLS,
-    crazyagent_directory: crate::projects_home::CRAZYAGENT_DIRECTORY,
+    crazyagent_directory: kernel_common::names::CRAZYAGENT_DIRECTORY,
     #[cfg(unix)]
     binding_path: crate::team::caller::binding_path,
     mailbox_folder: crate::team::tool::MAILBOX_FOLDER,
@@ -487,7 +467,7 @@ impl InstalledSandbox {
         }
         #[cfg(target_os = "windows")]
         {
-            let grants = plain_grants(windows::grants_folder()?)?;
+            let grants = plain_grants(grants_folder()?)?;
             Self::install_with_grants(sandbox, profile, calls, &grants)
         }
         #[cfg(not(target_os = "windows"))]
@@ -1080,4 +1060,17 @@ mod linux_sockets_tests {
             );
         }
     }
+}
+
+/// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
+/// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
+/// I/O error.
+#[cfg(target_os = "windows")]
+pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
+    let layout =
+        crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
+    let grants = layout.root().join(GRANTS_FOLDER);
+    fs::create_dir_all(&grants)?;
+    assert!(grants.is_dir());
+    Ok(grants)
 }

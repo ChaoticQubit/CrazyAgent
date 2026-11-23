@@ -55,7 +55,7 @@ impl Case {
         for folder in [&repo, &home, &engine] {
             std::fs::create_dir(folder).unwrap();
         }
-        std::fs::create_dir(repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        std::fs::create_dir(repo.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         git_in(&home, &repo, &["init", "-q", "--template=", "-b", "main"]);
         git_in(&home, &repo, &["config", "user.name", "Repo Owner"]);
         git_in(
@@ -1954,7 +1954,7 @@ fn a_worktree_git_removes_only_part_way_is_finished_without_following_a_link_out
 fn an_agent_whose_cleanup_stopped_after_its_claim_keeps_the_older_root_in_the_git_ceiling() {
     let case = Case::new();
     let engine = case.team.parent().unwrap().to_path_buf();
-    let state = case.repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = case.repo.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     std::fs::remove_dir(&state).unwrap();
     let older = || crate::ide::workspace::older_agents(&engine, &case.project, &case.repo);
     assert!(!older().unwrap(), "no engine-made worktree yet");

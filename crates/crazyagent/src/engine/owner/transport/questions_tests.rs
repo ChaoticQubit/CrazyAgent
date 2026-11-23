@@ -21,7 +21,7 @@ fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
     for path in [&root, &folder] {
         std::fs::create_dir(path).unwrap();
     }
-    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let db = questions::open(&root).unwrap();
     crate::storage::initialize_authority_schemas(&db).unwrap();
     crate::team::initialize(&db).unwrap();

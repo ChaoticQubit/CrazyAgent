@@ -1,11 +1,11 @@
 use super::platform::open_append;
 use super::{real_folder, refused};
 use crate::engine::EngineError;
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const CRAZYAGENT_DIRECTORY: &str = ".crazyagent";
 pub const LAYOUT: [&str; 4] = ["setup", "research", "context", "worktrees"];
 pub const EXCLUDES: [&str; 2] = [".crazyagent/", "graphify-out/"];
 const EXCLUDE_BYTES_MAX: u64 = 1024 * 1024;

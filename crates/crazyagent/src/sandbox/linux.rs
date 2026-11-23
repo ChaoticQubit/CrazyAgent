@@ -1173,7 +1173,7 @@ impl Grants {
         mounts_hold(sandbox)?;
         let project = sandbox.project_root();
         let git = project.join(".git");
-        let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = project.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
         let protected = sandbox.protected_paths();
         let objects = git.join("objects");
         let objects_info = objects.join("info");
@@ -1493,7 +1493,7 @@ fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     let mut kids = Vec::new();
     if sandbox.adds_worktrees() {
         let project = sandbox.project_root();
-        let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = project.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
         kids.extend([project.join("worktrees"), state.join("worktrees")]);
     }
     if let Some(setup) = sandbox.teammates_setup() {
@@ -3962,7 +3962,7 @@ mod tests {
         let lease = temp.path().canonicalize().unwrap().join("lease");
         fs::create_dir(&lease).unwrap();
         let worked = sandbox.allow_worktree(&lease).unwrap().adding_worktrees();
-        let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = project.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
         let expected = GitOwn {
             trees: vec![project.clone(), lease],
             kids: vec![project.join("worktrees"), state.join("worktrees")],
