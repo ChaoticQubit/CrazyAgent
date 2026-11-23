@@ -112,6 +112,23 @@ const _: () = assert!(WINDOWS_PATH_BYTES_MAX < 8191);
 /// inside quotes, or `"`, and every folder from the first one past
 /// [`WINDOWS_PATH_BYTES_MAX`] on. Input: the service PATH. Output: the folders joined by `;`,
 /// or none when no folder is left.
-pub(super) fn windows_task_path(_path: &OsStr) -> Option<String> {
-    None
+pub(super) fn windows_task_path(path: &OsStr) -> Option<String> {
+    let text = path.to_string_lossy();
+    let mut kept = String::new();
+    for folder in text.split(';') {
+        if folder.is_empty() || folder.contains(['%', '"', char::REPLACEMENT_CHARACTER]) {
+            continue;
+        }
+        let joined = kept.len() + usize::from(!kept.is_empty()) + folder.len();
+        if joined > WINDOWS_PATH_BYTES_MAX {
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push(';');
+        }
+        kept.push_str(folder);
+        assert_eq!(kept.len(), joined);
+    }
+    assert!(kept.len() <= WINDOWS_PATH_BYTES_MAX);
+    (!kept.is_empty()).then_some(kept)
 }

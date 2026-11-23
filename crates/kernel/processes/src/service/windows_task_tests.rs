@@ -2,9 +2,6 @@ use super::markup::{WINDOWS_PATH_BYTES_MAX, windows_task_path};
 use super::test_support::service;
 use super::*;
 
-/// The most characters cmd reads in one command line.
-const CMD_LINE_CHARS_MAX: usize = 8191;
-
 /// The Windows service at Windows paths, or at their Unix spelling on a host where a drive
 /// path is not absolute, with the given PATH. Input: the PATH. Output: the service.
 fn windows(path: &str) -> Service {

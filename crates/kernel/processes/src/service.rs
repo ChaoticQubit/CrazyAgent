@@ -30,6 +30,8 @@ pub const SYSTEMCTL: &str = "systemctl";
 /// The Task Scheduler command a Windows service runs.
 pub const SCHTASKS: &str = "schtasks";
 const WINDOWS_SHELL: &str = r"%SystemRoot%\System32\cmd.exe";
+/// The most characters cmd reads in one command line, the Windows task's included.
+const CMD_LINE_CHARS_MAX: usize = 8191;
 const SERVICE_PATH_EXTRAS: [&str; 6] = [
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -307,7 +309,8 @@ impl Service {
     /// Task Scheduler XML document. It runs `<executable> engine --home <root>` with the
     /// service PATH (and on macOS the defining HOME), appends output to
     /// `<root>/logs/engine.log` (through `cmd.exe` on Windows, whose task has no output
-    /// redirection) and restarts after a crash.
+    /// redirection or environment, so cmd sets the PATH there) and restarts after a crash.
+    /// A Windows task line past cmd's limit is refused.
     pub fn definition_text(&self) -> Result<String, ServiceError> {
         self.checked()?;
         let executable = self.executable.to_string_lossy();
@@ -389,6 +392,22 @@ WantedBy=default.target\n",
                     .as_deref()
                     .map(|user| format!("<UserId>{}</UserId>", xml(user)))
                     .unwrap_or_default();
+                let line = format!(
+                    "/d /s /c \"{}{} engine --home {} >> {} 2>&1\"",
+                    windows_task_path(&self.path)
+                        .map(|path| format!("set \"PATH={path}\" && "))
+                        .unwrap_or_default(),
+                    windows_quoted(&executable),
+                    windows_quoted(&root),
+                    windows_quoted(&log),
+                );
+                if WINDOWS_SHELL.len() + 1 + line.encode_utf16().count() >= CMD_LINE_CHARS_MAX {
+                    return Err(failure(format!(
+                        "the Windows logon task line is longer than cmd's \
+                         {CMD_LINE_CHARS_MAX} characters; move CrazyAgent or set \
+                         CRAZYAGENT_HOME to a shorter folder"
+                    )));
+                }
                 format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n\
 <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n\
@@ -398,15 +417,7 @@ WantedBy=default.target\n",
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure><Hidden>true</Hidden></Settings>\r\n\
   <Actions Context=\"Author\"><Exec><Command>{WINDOWS_SHELL}</Command><Arguments>{arguments}</Arguments></Exec></Actions>\r\n\
 </Task>\r\n",
-                    arguments = xml(&format!(
-                        "/d /s /c \"{}{} engine --home {} >> {} 2>&1\"",
-                        windows_task_path(&self.path)
-                            .map(|path| format!("set \"PATH={path}\" && "))
-                            .unwrap_or_default(),
-                        windows_quoted(&executable),
-                        windows_quoted(&root),
-                        windows_quoted(&log),
-                    )),
+                    arguments = xml(&line),
                 )
             }
         };
