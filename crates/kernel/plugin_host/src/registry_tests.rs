@@ -919,6 +919,41 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
 }
 
+/// A removal storage cannot commit changes nothing: its transaction ends, the plugin and its
+/// key stay, and the same removal goes through once storage is free.
+#[test]
+fn a_removal_storage_cannot_commit_ends_its_transaction_and_keeps_the_plugin() {
+    let mut case = case();
+    let file = case.temp.path().join("store.db");
+    case.db = rusqlite::Connection::open(&file).unwrap();
+    initialize(&case.db).unwrap();
+    case.db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    let reader = rusqlite::Connection::open(&file).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let tables: i64 = reader
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+        .unwrap();
+    assert!(tables > 0, "the reader holds the database");
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+    assert!(case.db.is_autocommit(), "the failed removal ended its transaction");
+    reader.execute_batch("COMMIT").unwrap();
+    assert!(case.root.join(FOLDER).join("acme").exists());
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().any(|plugin| plugin.name == "acme"));
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    assert!(plugin_keys(&case).is_empty());
+}
+
 /// A plugin entry that is a link is removed as the link itself: the folder it points to
 /// and the plugin.toml inside stay untouched.
 #[test]
