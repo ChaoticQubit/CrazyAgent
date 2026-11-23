@@ -72,11 +72,14 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
 /// `..` in it leaves, in the order the resolution meets them. A missing part ends the walk,
 /// since nothing past it exists to follow. Input: an absolute path. Output: those places,
 /// or the entry that makes the path changeable: one that cannot be read, or the link past
-/// [`LINK_HOPS_MAX`].
+/// [`LINK_HOPS_MAX`]. A relative path is changeable as a whole, since what it names
+/// depends on the working folder.
 #[cfg(unix)]
 fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
     use std::path::Component;
-    assert!(path.is_absolute());
+    if !path.is_absolute() {
+        return Err(path.to_path_buf());
+    }
     let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
         for part in from.components().rev() {
             match part {
