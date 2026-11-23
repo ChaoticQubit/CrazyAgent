@@ -61,7 +61,7 @@ async fn a_running_rcli_turn_stops_when_the_saved_policy_no_longer_covers_its_la
         .await
         .expect_err("a toolchain granted at launch and turned off now stops it, marker or not");
     assert_eq!(lowered.0, "agent_toolchain_lowered");
-    let source = include_str!("../master_rcli.rs");
+    let source = include_str!("../../master_rcli.rs");
     let start = source.find("async fn collect_rcli_master_turn(").unwrap();
     let end = start
         + source[start..]
