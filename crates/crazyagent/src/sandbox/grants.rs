@@ -1,9 +1,10 @@
 use super::policy::{AccessGrant, AgentAccess, AgentPolicy, GRANT_PORTS_MAX, GRANT_SOCKETS_MAX};
-use super::{OWNER_PORTS, canonical, owner_home, owner_secrets};
+use super::{OWNER_PORTS, owner_secrets};
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
 use crate::questions::{Ask, Asker, EngineSource, QuestionKind};
+use kernel_sandbox::paths::{canonical, owner_home};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

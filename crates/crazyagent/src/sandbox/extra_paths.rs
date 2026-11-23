@@ -1,4 +1,5 @@
-use super::{canonical, clear_of_secrets, granted_root, owner_home, owner_secrets};
+use super::{clear_of_secrets, granted_root, owner_secrets};
+use kernel_sandbox::paths::{canonical, owner_home};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
@@ -99,7 +100,7 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     let paths = statement
         .query_map(params![project, EXTRA_PATHS_MAX as i64], |row| {
             row.get::<_, String>(0)
-                .map(|text| crate::projects_home::one_spelling(PathBuf::from(text)))
+                .map(|text| kernel_sandbox::paths::one_spelling(PathBuf::from(text)))
         })?
         .collect::<rusqlite::Result<Vec<PathBuf>>>()?;
     assert!(paths.len() <= EXTRA_PATHS_MAX);

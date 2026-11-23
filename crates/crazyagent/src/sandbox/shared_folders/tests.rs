@@ -573,7 +573,7 @@ fn an_empty_folder_plans_without_git_and_keeps_later_entries_closed() {
 #[test]
 fn a_wider_choice_is_refused_off_macos() {
     let temp = tempfile::tempdir().unwrap();
-    let root = crate::sandbox::canonical(temp.path()).unwrap();
+    let root = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let home = root.join("home");
     let tmp = root.join("tmp");
     let project = root.join("project");

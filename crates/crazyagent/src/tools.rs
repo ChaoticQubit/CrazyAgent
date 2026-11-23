@@ -25,8 +25,8 @@ pub const HOOKS: FindingHooks = FindingHooks {
     registered_projects,
     projects_marker: crate::projects_home::CRAZYAGENT_DIRECTORY,
     data_twin: crate::projects_home::data_twin,
-    one_spelling: crate::projects_home::one_spelling,
-    canonical: crate::sandbox::canonical,
+    one_spelling: kernel_sandbox::paths::one_spelling,
+    canonical: kernel_sandbox::paths::canonical,
     in_agent_tmp: crate::sandbox::toolchains::in_agent_tmp,
     changeable_past_sticky: crate::service::changeable_past_sticky,
     changeable_by_others: crate::service::changeable_by_others,
@@ -112,7 +112,7 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     let mut seen = std::collections::HashSet::new();
     for folder in named.into_iter().filter(|folder| folder.is_absolute()) {
         let real = folder.canonicalize().ok();
-        let plain = crate::sandbox::canonical(&folder).ok();
+        let plain = kernel_sandbox::paths::canonical(&folder).ok();
         for root in std::iter::once(folder).chain(real).chain(plain) {
             if seen.insert(root.clone()) {
                 roots.push(root);

@@ -375,7 +375,7 @@ fn placed(db: &Connection, project: &ProjectId, place: &Place) -> Result<bool, E
     let Ok(folder) = stored
         .project_folder()
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
     else {
         return Ok(false);
     };

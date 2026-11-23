@@ -1172,7 +1172,7 @@ impl TeamRuntime {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         private_directory(state)?;
-        if crate::projects_home::one_spelling(state.canonicalize().map_err(error)?) != state {
+        if kernel_sandbox::paths::one_spelling(state.canonicalize().map_err(error)?) != state {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         for directory in ["agents", "profiles"] {
@@ -4250,7 +4250,7 @@ impl TeamRuntime {
             .project_folder()
             .canonicalize()
             .ok()
-            .map(crate::projects_home::one_spelling);
+            .map(kernel_sandbox::paths::one_spelling);
         for id in stale {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             let running =
@@ -8592,7 +8592,7 @@ impl TeamRuntime {
         let sandbox = ProjectSandbox::new(
             &repository
                 .canonicalize()
-                .map(crate::projects_home::one_spelling)
+                .map(kernel_sandbox::paths::one_spelling)
                 .map_err(|_| "lead_sandbox_unavailable")?,
             &agent_home(&self.state, lead),
             &self.agent_folder(lead).join("tmp"),
@@ -9409,7 +9409,7 @@ impl TeamRuntime {
         let root = stored
             .project_folder()
             .canonicalize()
-            .map(crate::projects_home::one_spelling)
+            .map(kernel_sandbox::paths::one_spelling)
             .map_err(|e| with_code("the project folder could not be opened", Some(io_code(&e))))?;
         if root.starts_with(&self.state) {
             return Err("project folder overlaps engine state".into());
@@ -14770,7 +14770,7 @@ pub fn start_for_engine(
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;

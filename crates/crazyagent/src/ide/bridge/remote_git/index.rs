@@ -89,7 +89,7 @@ pub(crate) async fn answer(
         let project_folder = crate::ide::workspace::folder(&root, &project)?;
         let folder = super::checked_folder(Path::new(&folder), &project_folder)?;
         let engine =
-            crate::sandbox::canonical(&root.join(crate::ide::FOLDER).join(project.as_str()))
+            kernel_sandbox::paths::canonical(&root.join(crate::ide::FOLDER).join(project.as_str()))
                 .map_err(|_| failure("ide_folder_unavailable"))?;
         let private = engine
             .join(crate::ide::server::SERVER_DATA)

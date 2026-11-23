@@ -555,7 +555,7 @@ mod windows_tests {
     fn a_version_run_past_its_limit_ends_with_every_process_it_started() {
         use crate::plugins::check::windows_tests::{HOLDER_REQUEST, grandchild_holder};
         let folder = tempfile::tempdir().unwrap();
-        let home = crate::sandbox::canonical(folder.path()).unwrap();
+        let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         std::fs::write(home.join(HOLDER_REQUEST), "").unwrap();
         let (holder, args) = grandchild_holder();
         let search = [holder.parent().unwrap().to_path_buf()];
