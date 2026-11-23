@@ -190,14 +190,52 @@ pub fn blocks_start(root: &Path, running: bool) -> Option<&'static str> {
     }
 }
 
-/// Whether the owner's explicit restart of the engine at `root` must wait: a restore still
-/// runs, and a restart would stop its process in the middle of the copy. After a restore it
-/// never waits; that restart is the way back to 2.5. Inputs: the engine root and whether its
-/// login service still runs a process. Output: the answer.
-pub fn holds_restart(root: &Path, running: bool) -> bool {
-    let held = blocks_start(root, running) == Some(ENGINE_RESTORING);
-    assert!(!held || running);
-    held
+/// Why the owner's explicit restart of the engine at `root` must not start it: a restore
+/// still runs, and a restart would stop its process in the middle of the copy, or a restore
+/// did not finish, whose start the engine refuses, so the login service must not run it.
+/// After a restore that brought the 2.4 data back it runs; that restart is the way back to
+/// 2.5. Inputs: the root and whether its login service still runs a process. Output: the code.
+pub fn restart_refusal(root: &Path, running: bool) -> Option<&'static str> {
+    let refused = blocks_start(root, running).filter(|code| *code != ENGINE_RESTORED);
+    assert!(refused != Some(ENGINE_RESTORING) || running);
+    refused
+}
+
+/// Whether an engine start ended on purpose: the engine refused to open data a restore left
+/// unfinished, so the login service must not start it again. Input: the start's error text.
+/// Output: the answer.
+pub fn stops_on_purpose(error: &str) -> bool {
+    error
+        .split(|c: char| c != '_' && !c.is_ascii_lowercase())
+        .any(|word| word == ENGINE_RESTORE_BROKEN)
+}
+
+/// The codes a recovery action refuses with, as a client shows them.
+const RECOVERY_CODES: [&str; 6] = [
+    RECOVERY_BUSY,
+    "storage_putback_copy_missing",
+    "storage_putback_copy_failed",
+    "storage_putback_check_failed",
+    "storage_restore_busy",
+    "storage_restore_unavailable",
+];
+
+/// The code a recovery refusal reaches a client by: the known code its text starts with, else
+/// the restore's plain failure. Input: the refusal's text. Output: the code.
+pub fn recovery_code(text: &str) -> &'static str {
+    let word = text
+        .split(|c: char| c != '_' && !c.is_ascii_lowercase())
+        .next();
+    RECOVERY_CODES
+        .into_iter()
+        .find(|code| word == Some(*code))
+        .unwrap_or("storage_restore_failed")
+}
+
+/// The folder beside engine.db that holds the backups and the kept copies of the engine at
+/// `root`, which the recovery screen names. Input: the root. Output: the folder.
+pub fn backups(root: &Path) -> std::path::PathBuf {
+    root.join(kernel_storage::migrations::BACKUPS)
 }
 
 /// Whether the engine's login service still runs a process, as a restore's pending record is

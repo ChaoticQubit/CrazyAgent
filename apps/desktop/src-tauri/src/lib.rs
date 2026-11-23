@@ -374,8 +374,10 @@ async fn desktop_restart_engine(
     let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
-    if crazyagent::restore::holds_restart(layout.root(), restore::service_running(&service)) {
-        return Err(engine_failure(crazyagent::restore::ENGINE_RESTORING));
+    if let Some(code) =
+        crazyagent::restore::restart_refusal(layout.root(), restore::service_running(&service))
+    {
+        return Err(engine_failure(code));
     }
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
@@ -410,6 +412,33 @@ async fn desktop_restore_pinned(
         return Err(engine_failure("storage_restore_unavailable"));
     }
     lock(&state).await?.restore_pinned(generation).await
+}
+
+/// Reads what the recovery screen offers for the default engine's restore that did not
+/// finish, writing nothing (L5).
+#[tauri::command]
+async fn desktop_restore_recovery(webview: Webview) -> Result<restore::RecoveryView, BridgeError> {
+    let (layout, running) = restore::engine(&webview)?;
+    restore::blocking(move || restore::recovery(layout.root(), running)).await
+}
+
+/// Runs one recovery action on the default engine: `put_back`, `continue` or `finish` (L5).
+#[tauri::command]
+async fn desktop_restore_recover(webview: Webview, action: String) -> Result<(), BridgeError> {
+    let (layout, running) = restore::engine(&webview)?;
+    let settings = (layout.global_settings(), layout.project_settings());
+    restore::blocking(move || {
+        restore::recover(layout.root(), running, &action, (&settings.0, &settings.1))
+    })
+    .await
+}
+
+/// Opens the default engine's backups folder, which keeps the copies a restore left (L5).
+#[tauri::command]
+async fn desktop_restore_open_backups(webview: Webview) -> Result<(), BridgeError> {
+    let (layout, _) = restore::engine(&webview)?;
+    let folder = crazyagent::restore::backups(layout.root());
+    restore::blocking(move || crazyagent::platform::reveal(&folder)).await
 }
 
 #[tauri::command]
@@ -6175,6 +6204,9 @@ native_commands! {
     desktop_set_refused_tool,
     desktop_restore_status,
     desktop_restore_pinned,
+    desktop_restore_recovery,
+    desktop_restore_recover,
+    desktop_restore_open_backups,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,

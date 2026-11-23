@@ -300,7 +300,7 @@ fn drive(
     let mut shift_enter = shell.ctx.shift_enter;
     while !stopped.load(Ordering::Relaxed) && !shell.quitting() {
         while let Some(event) = connection.poll_owner().map_err(TuiError)? {
-            shell.arrive(owner_arrival(event));
+            shell.arrive(owner_arrival(connection.held(event)));
             dirty = true;
         }
         if let Some(result) = connection.poll().map_err(TuiError)? {

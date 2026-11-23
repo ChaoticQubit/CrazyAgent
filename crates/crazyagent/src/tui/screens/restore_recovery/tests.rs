@@ -23,7 +23,10 @@ fn a_named_copy_that_passes_its_check_is_offered_back_with_the_backups_folder() 
         copy: "replaced-20261117T093000000Z".into(),
     }));
     let lines = lines(&shown, None);
-    assert!(lines.iter().any(|line| line == RECOVERY_BROKEN), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == RECOVERY_BROKEN),
+        "{lines:?}"
+    );
     assert!(lines.iter().any(|line| line.contains(FOLDER)), "{lines:?}");
     assert_eq!(keys(&shown), vec!['p']);
     assert_eq!(actions(&shown)[0].1, PUT_BACK);
@@ -33,7 +36,10 @@ fn a_named_copy_that_passes_its_check_is_offered_back_with_the_backups_folder() 
 fn a_restore_that_changed_nothing_offers_to_continue_with_the_2_5_data() {
     let shown = read(Some(Recovery::Continue));
     let lines = lines(&shown, None);
-    assert!(lines.iter().any(|line| line == RECOVERY_CONTINUE), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == RECOVERY_CONTINUE),
+        "{lines:?}"
+    );
     assert_eq!(keys(&shown), vec!['n']);
     assert_eq!(actions(&shown)[0].1, CONTINUE);
 }
@@ -44,7 +50,10 @@ fn a_restore_with_no_usable_copy_offers_nothing_but_the_folder_and_the_code() {
         code: "storage_putback_copy_missing".into(),
     }));
     let lines = lines(&shown, None);
-    assert!(lines.iter().any(|line| line == RECOVERY_BROKEN), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == RECOVERY_BROKEN),
+        "{lines:?}"
+    );
     assert!(lines.iter().any(|line| line.contains(FOLDER)), "{lines:?}");
     assert!(
         lines

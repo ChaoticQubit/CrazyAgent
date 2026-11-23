@@ -161,7 +161,11 @@ fn a_restart_is_refused_in_every_restore_state_a_start_would_break() {
     assert_eq!(restart_refusal(dir.path(), false), None);
     let cases: [(&str, Option<&str>, Option<&str>); 7] = [
         ("pending", Some(ENGINE_RESTORING), None),
-        ("restoring", Some(ENGINE_RESTORING), Some(ENGINE_RESTORE_BROKEN)),
+        (
+            "restoring",
+            Some(ENGINE_RESTORING),
+            Some(ENGINE_RESTORE_BROKEN),
+        ),
         (
             "restoring replaced-20261117T001500000Z",
             Some(ENGINE_RESTORING),
@@ -244,7 +248,10 @@ fn a_broken_or_abandoned_restore_holds_every_start_for_the_recovery_screen() {
         assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORING));
         assert_eq!(blocks_start(dir.path(), false), Some(ENGINE_RESTORE_BROKEN));
         assert_eq!(restart_refusal(dir.path(), true), Some(ENGINE_RESTORING));
-        assert_eq!(restart_refusal(dir.path(), false), Some(ENGINE_RESTORE_BROKEN));
+        assert_eq!(
+            restart_refusal(dir.path(), false),
+            Some(ENGINE_RESTORE_BROKEN)
+        );
     }
 }
 
@@ -297,7 +304,10 @@ fn a_recovery_refusal_reaches_a_client_as_its_known_code() {
         assert_eq!(recovery_code(&format!("{code}: more")), code);
     }
     assert_eq!(recovery_code("disk I/O error"), "storage_restore_failed");
-    assert_eq!(recovery_code("storage_putback_bogus"), "storage_restore_failed");
+    assert_eq!(
+        recovery_code("storage_putback_bogus"),
+        "storage_restore_failed"
+    );
     let dir = root();
     assert_eq!(backups(dir.path()), dir.path().join("backups"));
 }
