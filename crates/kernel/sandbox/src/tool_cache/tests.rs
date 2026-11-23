@@ -28,6 +28,10 @@ fn an_agents_own_cache_goes_only_through_the_hooks_removal() {
     .unwrap();
     let cache = project_folder(runtime.path(), "project").join(key);
     std::fs::create_dir_all(&cache).unwrap();
+    for folder in cache.ancestors().skip(1).take(2) {
+        std::fs::set_permissions(folder, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+    }
     let refused = remove_agent(&hooks, runtime.path(), "project", "mate").unwrap_err();
     assert_eq!(refused.to_string(), "kept by the stand-in");
     assert!(cache.is_dir());
