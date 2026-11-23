@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 
-use bus_gateway::{Gateway, Grants, Refusals};
+use bus_gateway::{AllOn, Gateway, Grants, Refusals};
 use sdk::net;
 use sdk::secrets::{self, Secret};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
@@ -164,7 +164,7 @@ fn a_granted_call_reaches_the_provider_once() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
@@ -188,7 +188,7 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
@@ -218,7 +218,7 @@ fn an_unknown_plugin_is_refused() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
@@ -251,7 +251,7 @@ fn the_provider_rejection_comes_back_unchanged() {
         CountingProvider::answering(Err(rejection.clone())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
@@ -274,7 +274,7 @@ fn the_settings_provider_gets_the_bound_plugin_as_caller() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &UNUSED_SECRETS,
@@ -297,7 +297,7 @@ fn an_ungranted_secrets_call_never_reaches_the_provider() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &secrets,
@@ -325,7 +325,7 @@ fn each_secrets_call_needs_its_own_grant() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &secrets,
@@ -353,7 +353,7 @@ fn the_caller_passed_to_the_secrets_provider_is_the_bound_plugin() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &secrets,
@@ -384,7 +384,7 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &UNUSED_NET,
         secrets: &secrets,
@@ -502,7 +502,7 @@ fn an_ungranted_net_request_never_reaches_egress_allows() {
         RecordingRefusals::default(),
     );
     let fetch = CountingNet::default();
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &fetch,
         secrets: &UNUSED_SECRETS,
@@ -538,7 +538,7 @@ fn net_inputs_over_their_bounds_are_refused() {
         RecordingRefusals::default(),
     );
     let fetch = CountingNet::default();
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &fetch,
         secrets: &UNUSED_SECRETS,

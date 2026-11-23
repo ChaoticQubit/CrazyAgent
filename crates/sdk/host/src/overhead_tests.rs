@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use bus_gateway::{Gateway, Grants, Refusals};
+use bus_gateway::{AllOn, Gateway, Grants, Refusals};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
 
@@ -150,7 +150,7 @@ fn overhead_per_sdk_call() {
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["settings.write"])]).unwrap();
     let provider = Noop;
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
         secrets: &NoSecrets,
@@ -230,7 +230,7 @@ fn gateway_secrets_call_p95() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T1, &["secrets.find"])]).unwrap();
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
         secrets: &Found,
@@ -281,7 +281,7 @@ fn gateway_update_set_channel_p95() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["update.write"])]).unwrap();
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
         secrets: &NoSecrets,
@@ -347,7 +347,7 @@ fn gateway_service_status_p95() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["service.read"])]).unwrap();
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
         secrets: &NoSecrets,

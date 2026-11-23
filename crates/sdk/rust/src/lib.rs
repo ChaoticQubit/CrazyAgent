@@ -10,8 +10,9 @@ pub use generated::net;
 pub use generated::secrets;
 pub use generated::settings;
 
-/// Why the bus did not complete a call: no grant, a tier above the caller's, the provider's
-/// rejection, or its failure. Rejected and Failed carry the provider's code unchanged.
+/// Why the bus did not complete a call: no grant, a tier above the caller's, the caller
+/// turned off by the owner, the provider's rejection, or its failure. Rejected and Failed
+/// carry the provider's code unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     NotGranted {
@@ -19,6 +20,9 @@ pub enum Refusal {
         needs: &'static str,
     },
     TierTooHigh {
+        capability: &'static str,
+    },
+    PluginOff {
         capability: &'static str,
     },
     Rejected {

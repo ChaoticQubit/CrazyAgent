@@ -7,7 +7,7 @@ use rusqlite::OptionalExtension;
 use crate::Refused;
 use crate::registry::{
     Engine, FOLDER, MANIFEST_FILE, Switch, USER_PLUGINS_MAX, add, bundled, hold, list,
-    loopback_ports, preview, ready, remove, review, set_enabled,
+    loopback_ports, off_code_plugins, preview, ready, remove, review, set_enabled,
 };
 use crate::store::{
     Bound, KeyFolder, KeyRef, Keys, bind_account, initialize, secret_value, set_key, sweep_staged,
@@ -39,7 +39,7 @@ Authorization = "Bearer {{secret.api_key}}"
 input = "{{inputs}}"
 "#;
 
-const NEAR: &str = r#"plugin = "near"
+pub(crate) const NEAR: &str = r#"plugin = "near"
 tier = "t2"
 kind = "embedding"
 version = 1
@@ -152,14 +152,14 @@ const KEYS: Keys = Keys {
     new_ref: test_new_ref,
 };
 
-struct Case {
-    temp: tempfile::TempDir,
-    root: PathBuf,
-    db: rusqlite::Connection,
+pub(crate) struct Case {
+    pub(crate) temp: tempfile::TempDir,
+    pub(crate) root: PathBuf,
+    pub(crate) db: rusqlite::Connection,
 }
 
 impl Case {
-    fn engine(&self) -> Engine<'_> {
+    pub(crate) fn engine(&self) -> Engine<'_> {
         Engine {
             root: &self.root,
             keys: &KEYS,
@@ -168,7 +168,7 @@ impl Case {
     }
 }
 
-fn case() -> Case {
+pub(crate) fn case() -> Case {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("engine");
     std::fs::create_dir(&root).unwrap();
@@ -236,11 +236,12 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// Turning a plugin off with the default setting and no run holding it.
-fn off() -> Switch<'static> {
+pub(crate) fn off() -> Switch<'static> {
     static IDLE: std::sync::OnceLock<Usage> = std::sync::OnceLock::new();
     Switch::Off {
         usage: IDLE.get_or_init(Usage::default),
         when_off: TurnOff::RefuseNewCalls,
+        essential_unlocked: false,
     }
 }
 
@@ -274,7 +275,7 @@ fn add_text(case: &Case, text: &str, replace: bool, now_ms: i64) -> Result<(), R
     )
 }
 
-fn trusted(case: &Case, text: &str) {
+pub(crate) fn trusted(case: &Case, text: &str) {
     add_text(case, text, false, 1).unwrap();
 }
 
@@ -1613,6 +1614,7 @@ fn turning_off_refuses_the_next_call_and_lets_a_running_one_finish() {
         Switch::Off {
             usage: &usage,
             when_off: TurnOff::RefuseNewCalls,
+            essential_unlocked: false,
         },
     )
     .unwrap();
@@ -1672,6 +1674,7 @@ fn stop_runs_calls_each_holders_stop_once() {
     let stop_runs = Switch::Off {
         usage: &usage,
         when_off: TurnOff::StopRuns,
+        essential_unlocked: false,
     };
     set_enabled(&case.db, &case.engine(), "near", stop_runs).unwrap();
     assert_eq!(near_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -1727,4 +1730,73 @@ fn a_changed_plugin_notifies_once_per_change() {
     drop(call().unwrap());
     assert!(usage.take_notices().is_empty());
     assert!(usage.users("near").is_empty());
+}
+
+/// Turning a bundled code plugin off with the setting `unlocked`. Input: whether the
+/// essential lock is lifted. Output: the switch.
+fn code_off(unlocked: bool) -> Switch<'static> {
+    static IDLE: std::sync::OnceLock<Usage> = std::sync::OnceLock::new();
+    Switch::Off {
+        usage: IDLE.get_or_init(Usage::default),
+        when_off: TurnOff::RefuseNewCalls,
+        essential_unlocked: unlocked,
+    }
+}
+
+/// An essential bundled code plugin cannot be turned off while the lock holds: the switch
+/// is refused with `app_plugin_essential` and no off state is written.
+#[test]
+fn an_essential_plugin_cannot_be_turned_off_while_locked() {
+    let case = case();
+    assert_eq!(
+        code(set_enabled(
+            &case.db,
+            &case.engine(),
+            "agent-quit",
+            code_off(false)
+        )),
+        "app_plugin_essential"
+    );
+    assert!(off_code_plugins(&case.db).unwrap().is_empty());
+    assert!(cells(&case.db, "app_plugin_state").is_empty());
+}
+
+/// With the lock lifted an essential bundled code plugin turns off, is listed in the off
+/// set under its plugin id, turns back on, and never shows as an app plugin.
+#[test]
+fn an_unlocked_essential_plugin_turns_off_and_back_on() {
+    let case = case();
+    set_enabled(&case.db, &case.engine(), "agent-quit", code_off(true)).unwrap();
+    assert_eq!(
+        off_code_plugins(&case.db)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["agent-quit"]
+    );
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().all(|view| view.name != "agent-quit"));
+    set_enabled(&case.db, &case.engine(), "agent-quit", Switch::On).unwrap();
+    assert!(off_code_plugins(&case.db).unwrap().is_empty());
+}
+
+/// A user plugin named like a bundled code plugin is refused, so it never shares that
+/// plugin's on and off state: adding it is `app_plugin_name_taken`, and one dropped into
+/// the folder lists with that problem.
+#[test]
+fn a_user_plugin_named_like_a_code_plugin_is_refused() {
+    let case = case();
+    let named = ACME.replace("plugin = \"acme\"", "plugin = \"agent-quit\"");
+    assert_ne!(named, ACME);
+    assert_eq!(
+        code(add_text(&case, &named, false, 1)),
+        "app_plugin_name_taken"
+    );
+    drop_in(&case, "agent-quit", &named);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(
+        refused_code(plugin(&listing, "agent-quit")),
+        "app_plugin_name_taken"
+    );
+    assert!(off_code_plugins(&case.db).unwrap().is_empty());
 }
