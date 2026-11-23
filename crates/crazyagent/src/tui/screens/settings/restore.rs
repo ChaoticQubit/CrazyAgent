@@ -43,6 +43,7 @@ const BUSY: &str = "Something else had CrazyAgent's data open, so your 2.4 data 
     back. Close other CrazyAgent windows, then try again.";
 const FAILED: &str =
     "Your 2.4 data wasn't brought back, and CrazyAgent went on with your 2.5 data. Try again.";
+const BROKEN: &str = "Restore did not finish. Your data is safe in a backup.";
 const BUTTON: &str = "Bring back 2.4 data";
 const COMPACTION_UNSAVED: &str = "The compaction switch wasn't saved. Try again.";
 const TEXT_WIDTH: usize = 72;
@@ -54,6 +55,7 @@ pub fn plain(code: &str) -> &'static str {
     let said = match code {
         "engine_restoring" => RESTORING,
         "engine_restored" => RESTORED,
+        "engine_restore_broken" => BROKEN,
         "storage_restore_unavailable" => RESTORE_NONE,
         "storage_restore_agents_running" => AGENTS_RUNNING,
         "storage_restore_busy" => BUSY,
@@ -66,7 +68,7 @@ pub fn plain(code: &str) -> &'static str {
 /// The problem a failed connect to the TUI's own engine shows: the restore that holds the
 /// engine, as the desktop's connect names it (L5 F1), else the problem unchanged. Inputs:
 /// the problem, the engine root and whether its login service still runs a process.
-/// Output: `engine_restoring`, `engine_restored` or the problem.
+/// Output: `engine_restoring`, `engine_restored`, `engine_restore_broken` or the problem.
 pub fn held(problem: String, root: &Path, running: bool) -> String {
     assert!(!problem.is_empty(), "a failed connect names its problem");
     let Some(code) = crate::restore::blocks_start(root, running) else {
@@ -79,7 +81,9 @@ pub fn held(problem: String, root: &Path, running: bool) -> String {
 /// Whether a code is one a restore holds the engine with, which the TUI shows in the
 /// restore's own sentence. Input: the code. Output: the answer.
 pub fn holds(code: &str) -> bool {
-    code == crate::restore::ENGINE_RESTORING || code == crate::restore::ENGINE_RESTORED
+    code == crate::restore::ENGINE_RESTORING
+        || code == crate::restore::ENGINE_RESTORED
+        || code == crate::restore::ENGINE_RESTORE_BROKEN
 }
 
 /// What the page shows: whether the button is offered, the line under the tabs and the last
