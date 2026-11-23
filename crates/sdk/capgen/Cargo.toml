@@ -14,3 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 crazyagent-cap = { path = "../cap" }
+
+[dev-dependencies]
+wit-parser = "=0.263.0"
