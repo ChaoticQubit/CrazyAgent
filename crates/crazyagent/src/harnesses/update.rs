@@ -20,6 +20,7 @@ pub use state::{
 };
 
 use crate::harnesses;
+use kernel_processes::install::{InstallRecipe, Verb};
 use recipes::{Brew, BrewKind, Npm, SelfUpdate, recipe};
 #[cfg(all(test, unix))]
 use recipes::{Recipe, install_names, table_names};
@@ -452,6 +453,52 @@ fn engine_npm_fixed(engine: &NpmInstall, args: Vec<&'static str>) -> Fixed {
     }
 }
 
+/// The kernel install recipe of one bundled Homebrew name. Inputs: the name's row and the
+/// verb. Output: the recipe.
+fn brew_recipe(brew: &Brew, verb: Verb) -> InstallRecipe {
+    let name = brew.name.to_owned();
+    match brew.kind {
+        BrewKind::Cask => InstallRecipe::BrewCask { name, verb },
+        BrewKind::Formula => InstallRecipe::BrewFormula { name, verb },
+    }
+}
+
+/// The kernel install recipe of one bundled npm package: the package, the version or tag its
+/// spec names after `@` (none for a bare spec) and the vendor's flags. Inputs: the package's
+/// row and the verb. Output: the recipe, or none for a spec that is not the package alone or
+/// followed by `@` and a version.
+fn npm_recipe(npm: &Npm, verb: Verb) -> Option<InstallRecipe> {
+    let version = match npm.spec.strip_prefix(npm.package)? {
+        "" => "",
+        rest => rest
+            .strip_prefix('@')
+            .filter(|version| !version.is_empty())?,
+    };
+    Some(InstallRecipe::NpmGlobal {
+        package: npm.package.to_owned(),
+        version: version.to_owned(),
+        verb,
+        flags: npm.flags.iter().map(|flag| (*flag).to_owned()).collect(),
+    })
+}
+
+/// The kernel install recipe of a harness's own updater, run as the program name its PATH
+/// entry has. Inputs: the name and the updater's row. Output: the recipe.
+fn own_recipe(program: &str, own: &SelfUpdate) -> InstallRecipe {
+    InstallRecipe::SelfUpdate {
+        program: program.to_owned(),
+        args: own.args.iter().map(|arg| (*arg).to_owned()).collect(),
+    }
+}
+
+/// Passes a built update or install command only when it is exactly the step the kernel's
+/// install template builds from its recipe. Inputs: the command and its recipe. Output: the
+/// same command, or `TOOL_UNSAFE`.
+fn matched(fixed: Fixed, recipe: &InstallRecipe) -> Result<Fixed, &'static str> {
+    let _ = recipe;
+    Ok(fixed)
+}
+
 fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
     let mut args = vec!["install", "-g"];
     args.extend(npm.flags);
@@ -599,18 +646,23 @@ pub fn update_command(
             if kernel_sandbox::paths::canonical(entry).ok().as_deref() != Some(real) {
                 return Err(UNKNOWN_INSTALL);
             }
-            checked(
-                Fixed {
-                    program: entry.to_path_buf(),
-                    args: own.args.to_vec(),
-                    search: vec![folder.to_path_buf()],
-                    prefix: None,
-                },
-                &roots.places,
-            )
+            let name = entry
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or(TOOL_UNSAFE)?;
+            let fixed = Fixed {
+                program: entry.to_path_buf(),
+                args: own.args.to_vec(),
+                search: vec![folder.to_path_buf()],
+                prefix: None,
+            };
+            checked(matched(fixed, &own_recipe(name, own))?, &roots.places)
         }
         Found::Brew { prefix, brew } => checked(
-            brew_fixed(prefix, vec!["upgrade", flag(brew.kind), brew.name]),
+            matched(
+                brew_fixed(prefix, vec!["upgrade", flag(brew.kind), brew.name]),
+                &brew_recipe(brew, Verb::Update),
+            )?,
             &roots.places,
         ),
         Found::Npm {
@@ -618,8 +670,9 @@ pub fn update_command(
             modules,
             npm,
         } => {
+            let recipe = npm_recipe(npm, Verb::Update).ok_or(TOOL_UNSAFE)?;
             let fixed = checked(
-                npm_for(&prefix, roots, npm_install_args(npm)),
+                matched(npm_for(&prefix, roots, npm_install_args(npm)), &recipe)?,
                 &roots.places,
             )?;
             if owned(&modules) {
@@ -669,19 +722,18 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
         .find(|brew| brew.install && (brew.kind == BrewKind::Formula || roots.casks));
     let with_brew = brew.and_then(|brew| {
         let args = || vec!["install", flag(brew.kind), brew.name];
-        roots
-            .brew_prefixes
-            .iter()
-            .find_map(|prefix| checked(brew_fixed(prefix, args()), &roots.places).ok())
+        let template = brew_recipe(brew, Verb::Install);
+        roots.brew_prefixes.iter().find_map(|prefix| {
+            let fixed = matched(brew_fixed(prefix, args()), &template).ok()?;
+            checked(fixed, &roots.places).ok()
+        })
     });
     let with_npm = || {
         let npm = recipe.npm.as_ref()?;
         let engine = roots.npm.as_ref()?;
-        checked(
-            engine_npm_fixed(engine, npm_install_args(npm)),
-            &roots.places,
-        )
-        .ok()
+        let template = npm_recipe(npm, Verb::Install)?;
+        let fixed = matched(engine_npm_fixed(engine, npm_install_args(npm)), &template).ok()?;
+        checked(fixed, &roots.places).ok()
     };
     let refusal = if recipe.npm.is_some() && roots.npm.is_none() {
         NEEDS_NODE

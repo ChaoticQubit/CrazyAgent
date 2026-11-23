@@ -67,7 +67,21 @@ pub fn run(fixed: &Fixed, home: &Path, limit: Duration) -> Result<Ran, &'static 
 /// tails, or a refusal code.
 #[cfg(unix)]
 pub(super) fn run_raw(fixed: &Fixed, home: &Path, limit: Duration) -> Result<Raw, &'static str> {
-    unix::run_raw(fixed, home, limit)
+    unix::run_raw(fixed, home, limit, rustix::process::geteuid().as_raw())
+}
+
+/// Runs one fixed command exactly as [`run_raw`] does for the given effective user, so a row
+/// can ask for the administrator account without being it. Inputs: the command, the home
+/// folder, the limit and the effective user id. Output: the exit and both stream tails, or a
+/// refusal code.
+#[cfg(all(test, unix))]
+pub(super) fn run_raw_as(
+    fixed: &Fixed,
+    home: &Path,
+    limit: Duration,
+    user: u32,
+) -> Result<Raw, &'static str> {
+    unix::run_raw(fixed, home, limit, user)
 }
 
 /// Refuses every run where the engine cannot end a tool with everything it started.
@@ -273,8 +287,9 @@ mod unix {
         fixed: &Fixed,
         home: &Path,
         limit: Duration,
+        user: u32,
     ) -> Result<Raw, &'static str> {
-        if let Some(code) = refused_user(rustix::process::geteuid().as_raw()) {
+        if let Some(code) = refused_user(user) {
             assert!(code == AS_ROOT);
             return Err(code);
         }

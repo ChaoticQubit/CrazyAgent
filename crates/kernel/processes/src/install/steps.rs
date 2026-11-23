@@ -213,6 +213,7 @@ pub fn run(
     Ok(super::InstallResult {
         code: u32::from(!success),
         output,
+        stderr: Vec::new(),
     })
 }
 
