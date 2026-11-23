@@ -6,7 +6,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
-use crazyagent::terminal::{INPUT_BYTES_MAX, PASTE_BYTES_MAX, SIZE_MAX, SIZE_MIN};
+use kernel_processes::terminal::{INPUT_BYTES_MAX, PASTE_BYTES_MAX, SIZE_MAX, SIZE_MIN};
 
 /// The largest pane side accepted, in cells: the engine transport's own bound.
 pub const GRID_MAX: usize = SIZE_MAX as usize;

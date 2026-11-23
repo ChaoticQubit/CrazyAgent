@@ -2377,12 +2377,12 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
     );
     let tmux =
         crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
-    let host: std::sync::Arc<dyn crate::terminal::Host> = std::sync::Arc::new(
+    let host: std::sync::Arc<dyn kernel_processes::terminal::Host> = std::sync::Arc::new(
         crate::terminal::tmux::Tmux::open(Some(tmux), &root.join(crate::terminal::FOLDER)),
     );
     let pane = crate::harnesses::terminal_session::TerminalSession::start(
         host,
-        crate::terminal::AgentId::team(1).unwrap(),
+        kernel_processes::terminal::AgentId::team(1).unwrap(),
         request(),
         Some(context()),
     );
@@ -2404,8 +2404,8 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
 struct LeftPane {
     _directory: tempfile::TempDir,
     config: PathBuf,
-    host: std::sync::Arc<dyn crate::terminal::Host>,
-    agent: crate::terminal::AgentId,
+    host: std::sync::Arc<dyn kernel_processes::terminal::Host>,
+    agent: kernel_processes::terminal::AgentId,
     record: crate::harnesses::terminal_session::PaneRecord,
     tmux: PathBuf,
     socket: PathBuf,
@@ -2482,12 +2482,12 @@ impl LeftPane {
         let socket = root
             .join(crate::terminal::FOLDER)
             .join(crate::terminal::tmux::SOCKET);
-        let host: std::sync::Arc<dyn crate::terminal::Host> =
+        let host: std::sync::Arc<dyn kernel_processes::terminal::Host> =
             std::sync::Arc::new(crate::terminal::tmux::Tmux::open(
                 Some(tmux.clone()),
                 &root.join(crate::terminal::FOLDER),
             ));
-        let agent = crate::terminal::AgentId::team(team).unwrap();
+        let agent = kernel_processes::terminal::AgentId::team(team).unwrap();
         let config = home.join("config.toml");
         let session = crate::harnesses::terminal_session::TerminalSession::start(
             host.clone(),

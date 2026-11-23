@@ -5,8 +5,8 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::team::master::OwnerTyping;
 use crate::team::{MessageAuthor, MessageState};
-use crate::terminal::{Host, PROMPT_BYTES_MAX};
 use codex::Bridged;
+use kernel_processes::terminal::{Host, PROMPT_BYTES_MAX};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -408,7 +408,7 @@ fn note_refusal(
 /// Reads the first process of an agent's pane, whose process group the agent's app-server
 /// runs in. Takes the reach and the agent. Returns its id, none with no host or no pane.
 fn pane_of(reach: &Reach<'_>, agent: AgentId) -> Option<u32> {
-    let pane = crate::terminal::AgentId::team(agent).ok()?;
+    let pane = kernel_processes::terminal::AgentId::team(agent).ok()?;
     reach.host?.pane_pid(&pane).ok().flatten()
 }
 

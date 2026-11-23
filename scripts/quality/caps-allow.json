@@ -118,7 +118,6 @@
   "crates/crazyagent/src/team/tests.rs": 8277,
   "crates/crazyagent/src/team/tool.rs": 2363,
   "crates/crazyagent/src/team/tool/tests.rs": 1956,
-  "crates/crazyagent/src/terminal.rs": 1701,
   "crates/crazyagent/src/terminal/tmux.rs": 2868,
   "crates/crazyagent/src/terminal/tmux/tests.rs": 4004,
   "crates/crazyagent/src/tools/tests.rs": 1791,

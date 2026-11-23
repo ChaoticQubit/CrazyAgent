@@ -44,7 +44,8 @@ use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{
     InstalledSandbox, LinuxStrict, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
-use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
+use crate::terminal::PANES_PER_PROJECT_MAX;
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -2188,7 +2189,7 @@ impl TeamRuntime {
             if !panes.iter().any(|pane| pane.pid == lead.pid) {
                 continue;
             }
-            let team: Vec<&crate::terminal::PaneInfo> = panes
+            let team: Vec<&kernel_processes::terminal::PaneInfo> = panes
                 .iter()
                 .filter(|pane| pane.pid != lead.pid && !pane.dead)
                 .collect();
@@ -2237,7 +2238,7 @@ impl TeamRuntime {
         &self,
         project: &ProjectId,
         agent: i64,
-        team: &[&crate::terminal::PaneInfo],
+        team: &[&kernel_processes::terminal::PaneInfo],
         at: i64,
     ) -> Result<(), EngineError> {
         for pane in team {
@@ -2290,7 +2291,7 @@ impl TeamRuntime {
         host: &dyn Host,
         project: &ProjectId,
         agent: i64,
-        team: &[&crate::terminal::PaneInfo],
+        team: &[&kernel_processes::terminal::PaneInfo],
         cap: Option<u8>,
         at: i64,
     ) -> Result<Option<String>, EngineError> {
@@ -2770,7 +2771,7 @@ impl TeamRuntime {
                     params![
                         project.as_str(),
                         lead,
-                        crate::terminal::PANES_LISTED_MAX as i64
+                        kernel_processes::terminal::PANES_LISTED_MAX as i64
                     ],
                     |row| row.get(0),
                 )
@@ -9309,7 +9310,7 @@ impl TeamRuntime {
             .ok_or_else(|| {
                 with_code(
                     "native teammates need tmux",
-                    Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
+                    Some(kernel_processes::terminal::OWN_SERVER_UNAVAILABLE),
                 )
             })?;
         let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
@@ -9376,7 +9377,7 @@ impl TeamRuntime {
     ) -> Result<(ProjectSandbox, ProjectSandbox, PathBuf), String> {
         Err(with_code(
             "Native teammates are not available on Windows in this version",
-            Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
+            Some(kernel_processes::terminal::OWN_SERVER_UNAVAILABLE),
         ))
     }
 
@@ -12871,7 +12872,7 @@ const UNKNOWN_LOOK_PAUSE: Duration = Duration::from_millis(200);
 
 /// One native teammate's end that ran on a thread of its own: the agent and the host's
 /// answer, whether its pane was proven gone, or the host's failure.
-type PaneEnd = (i64, Result<bool, crate::terminal::HostError>);
+type PaneEnd = (i64, Result<bool, kernel_processes::terminal::HostError>);
 
 /// Who learns of a native teammate's end once its row is marked: the owner's side stop, by
 /// its project and maker, or the lead whose cap it was over, by project, lead and cap.
@@ -12919,7 +12920,7 @@ fn end_teammate(
     host: &dyn Host,
     agent: &AgentId,
     mates: Option<&Path>,
-) -> Result<bool, crate::terminal::HostError> {
+) -> Result<bool, kernel_processes::terminal::HostError> {
     let stays = || mates.is_some_and(socket_refuses);
     for look in 1..=UNKNOWN_LOOKS_MAX {
         match end_left_pane(host, agent, "team") {
@@ -12959,7 +12960,7 @@ fn socket_refuses(_: &Path) -> bool {
 fn end_reported(
     id: i64,
     sender: Sender<PaneEnd>,
-    end: impl FnOnce() -> Result<bool, crate::terminal::HostError>,
+    end: impl FnOnce() -> Result<bool, kernel_processes::terminal::HostError>,
 ) -> bool {
     let mut guard = EndGuard {
         id,
@@ -12976,7 +12977,7 @@ fn end_reported(
 /// Whether a native teammate's end settled its row: it ran, or the host no longer knows the
 /// agent. Takes the end's outcome. Returns whether the cleanup was confirmed when it
 /// settled, or None when another host failure leaves the row to a later tick.
-fn end_settled(outcome: &Result<bool, crate::terminal::HostError>) -> Option<bool> {
+fn end_settled(outcome: &Result<bool, kernel_processes::terminal::HostError>) -> Option<bool> {
     match outcome {
         Ok(confirmed) => Some(*confirmed),
         Err(problem) if problem.0 == "terminal_agent_unknown" => Some(true),
@@ -14262,7 +14263,7 @@ fn pane_member(
     lead: i64,
     (pane, pid): (&str, u32),
 ) -> Option<PaneMember> {
-    if !crate::terminal::pane_id_valid(pane) {
+    if !kernel_processes::terminal::pane_id_valid(pane) {
         return None;
     }
     let teammate: Option<(i64, Option<i64>)> = connection

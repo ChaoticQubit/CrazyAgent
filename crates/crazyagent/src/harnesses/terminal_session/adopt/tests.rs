@@ -77,7 +77,10 @@ impl Fixture {
         };
         let since = SystemTime::now();
         let pane = host
-            .spawn(agent, &crate::terminal::PaneCommand::from(&command))
+            .spawn(
+                agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
             .unwrap();
         PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
     }
