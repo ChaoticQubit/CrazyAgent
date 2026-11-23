@@ -18,6 +18,7 @@ use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::ports::REMOTES_MAX;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
+#[cfg(unix)]
 use kernel_sandbox::profile::env::*;
 #[cfg(all(test, unix))]
 use kernel_sandbox::profile::linux_holds_fully;
@@ -36,7 +37,7 @@ use kernel_sandbox::tool_cache::ToolCacheHooks;
 use kernel_sandbox::toolchains::ToolchainHooks;
 #[cfg(target_os = "windows")]
 use std::ffi::OsStr;
-#[cfg(all(test, unix))]
+#[cfg(any(all(test, unix), target_os = "windows"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

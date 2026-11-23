@@ -750,13 +750,13 @@ mod profile_rows {
 }
 
 mod owner_git_rows {
+    use crate::sandbox::windows_farm as farm;
     use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard, check_container};
     use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
     use kernel_sandbox::error::SandboxError;
     use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::paths::canonical;
     use kernel_sandbox::profile::ProjectSandbox;
-    use kernel_sandbox::profile::command::Sandbox;
     use kernel_sandbox::windows::GRANTS_FOLDER;
     use kernel_sandbox::windows::owner_git::*;
     use kernel_sandbox::windows::profile::container_name;
