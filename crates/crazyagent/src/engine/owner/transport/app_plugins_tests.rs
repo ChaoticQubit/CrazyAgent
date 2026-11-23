@@ -1,0 +1,145 @@
+use super::{APP_PLUGINS_CODES, Action, parse};
+use kernel_plugin_host::usage::TurnOff;
+use std::path::PathBuf;
+
+fn code<T: std::fmt::Debug>(result: Result<T, crate::engine::EngineError>) -> String {
+    result.unwrap_err().0
+}
+
+fn folder() -> String {
+    if cfg!(windows) {
+        r"C:\\Users\\owner\\acme".into()
+    } else {
+        "/Users/owner/acme".into()
+    }
+}
+
+/// Each action reads from its JSON shape; a turn off may carry a one-time choice of what
+/// happens to runs holding the plugin, and without one it follows the owner's setting.
+#[test]
+fn every_action_reads_from_its_json_shape() {
+    let folder = folder();
+    let cases = [
+        (r#"{"kind":"list"}"#.to_string(), Action::List),
+        (
+            format!(r#"{{"kind":"preview","folder":"{folder}"}}"#),
+            Action::Preview {
+                folder: PathBuf::from(folder.replace(r"\\", r"\")),
+            },
+        ),
+        (
+            format!(r#"{{"kind":"add","folder":"{folder}","sha256":"ab","replace":false}}"#),
+            Action::Add {
+                folder: PathBuf::from(folder.replace(r"\\", r"\")),
+                sha256: "ab".into(),
+                replace: false,
+            },
+        ),
+        (
+            r#"{"kind":"set_enabled","name":"acme","enabled":false,"when_off":"stop_runs"}"#
+                .to_string(),
+            Action::SetEnabled {
+                name: "acme".into(),
+                enabled: false,
+                when_off: Some(TurnOff::StopRuns),
+            },
+        ),
+        (
+            r#"{"kind":"set_enabled","name":"acme","enabled":false}"#.to_string(),
+            Action::SetEnabled {
+                name: "acme".into(),
+                enabled: false,
+                when_off: None,
+            },
+        ),
+        (
+            r#"{"kind":"users","name":"acme"}"#.to_string(),
+            Action::Users {
+                name: "acme".into(),
+            },
+        ),
+        (
+            r#"{"kind":"set_when_off","when_off":"stop_runs"}"#.to_string(),
+            Action::SetWhenOff {
+                when_off: TurnOff::StopRuns,
+            },
+        ),
+    ];
+    for (action, expected) in cases {
+        let body = format!(r#"{{"app_plugins":{action},"secret_present":false}}"#);
+        assert_eq!(
+            parse(body.as_bytes()).unwrap(),
+            (expected, false),
+            "{action}"
+        );
+    }
+}
+
+/// A key frame is announced by `set_key` and by nothing else, and `set_key` must
+/// announce it.
+#[test]
+fn only_set_key_announces_a_key_frame() {
+    let set_key = r#"{"app_plugins":{"kind":"set_key","name":"acme","secret":"api_key"},"secret_present":true}"#;
+    assert!(parse(set_key.as_bytes()).unwrap().1);
+    for body in [
+        r#"{"app_plugins":{"kind":"set_key","name":"acme","secret":"api_key"},"secret_present":false}"#,
+        r#"{"app_plugins":{"kind":"list"},"secret_present":true}"#,
+    ] {
+        assert_eq!(code(parse(body.as_bytes())), "app_plugin_request_invalid");
+    }
+}
+
+/// Empty or long names, an empty or long account, a relative folder, an unknown field and
+/// an unknown action are refused before the engine runs anything; an oversized body is
+/// refused for its size.
+#[test]
+fn bad_requests_are_refused_before_anything_runs() {
+    let long = "a".repeat(65);
+    let account = "a".repeat(129);
+    let bodies = [
+        r#"{"kind":"review","name":""}"#.to_string(),
+        format!(r#"{{"kind":"remove","name":"{long}"}}"#),
+        format!(r#"{{"kind":"bind_account","name":"acme","secret":"k","account":"{account}"}}"#),
+        r#"{"kind":"bind_account","name":"acme","secret":"k","account":""}"#.to_string(),
+        r#"{"kind":"preview","folder":"relative/acme"}"#.to_string(),
+        r#"{"kind":"add","folder":"acme","sha256":"ab","replace":true}"#.to_string(),
+        r#"{"kind":"list","extra":1}"#.to_string(),
+        r#"{"kind":"search"}"#.to_string(),
+        r#"{"kind":"set_when_off"}"#.to_string(),
+        r#"{"kind":"set_when_off","when_off":"later"}"#.to_string(),
+    ];
+    for action in bodies {
+        let body = format!(r#"{{"app_plugins":{action},"secret_present":false}}"#);
+        assert_eq!(
+            code(parse(body.as_bytes())),
+            "app_plugin_request_invalid",
+            "{action}"
+        );
+    }
+    let huge = vec![b' '; crate::protocol::FRAME_BYTES_MAX + 1];
+    assert_eq!(code(parse(&huge)), "app_plugin_request_bounds");
+}
+
+/// Every refusal this protocol's own code can answer is listed for the clients.
+#[test]
+fn the_protocol_refusals_are_listed_for_the_clients() {
+    for listed in [
+        "app_plugin_request_invalid",
+        "app_plugin_request_bounds",
+        "app_plugin_key_invalid",
+        "app_plugin_outcome_unknown",
+        "app_plugins_readonly",
+        "app_plugin_essential",
+        "app_plugin_past_cap",
+        "app_plugin_port_handed_out",
+        "app_plugin_setting_unavailable",
+        "app_plugin_setting_unreadable",
+        "app_plugin_setting_unsafe",
+    ] {
+        assert!(APP_PLUGINS_CODES.contains(&listed), "{listed}");
+    }
+    let mut sorted = APP_PLUGINS_CODES.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted, APP_PLUGINS_CODES);
+}
