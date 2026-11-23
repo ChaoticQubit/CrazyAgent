@@ -17,16 +17,28 @@ impl Places {
     /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.
     /// Output: the bounded places.
     pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>, seed: FindingSeed) -> Self {
-        Self::kept(folders, home, Vec::new(), false, Some(Vec::new()), seed)
+        Self::kept(
+            folders,
+            Vec::new(),
+            home,
+            Vec::new(),
+            false,
+            Some(Vec::new()),
+            seed,
+        )
     }
 
-    /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
-    /// one agents can write, at most [`PLACES_MAX`], and sets aside one of those in an engine
-    /// `setup` folder ([`Places::in_engine_setup`]). Inputs: the folders, HOME, the engine
-    /// data folders, whether probed temp folders are refused and the set-up projects' folders,
-    /// none when they could not be read, and the seed. Output: the bounded places.
+    /// Keeps the folders in order, then the fallback folders, dropping relative, oversized
+    /// and repeated ones and every one agents can write, at most [`PLACES_MAX`], and sets
+    /// aside one of those in an engine `setup` folder ([`Places::in_engine_setup`]). The
+    /// ordinary folders fill only the room the fallback folders leave, so those are always
+    /// kept, last. Inputs: the folders, the fallback folders (the system's, then the
+    /// engine's), HOME, the engine data folders, whether probed temp folders are refused and
+    /// the set-up projects' folders, none when they could not be read, and the seed. Output:
+    /// the bounded places.
     pub(super) fn kept(
         folders: Vec<PathBuf>,
+        tail: Vec<PathBuf>,
         home: Option<PathBuf>,
         engine_roots: Vec<PathBuf>,
         temp_refused: bool,
@@ -53,9 +65,14 @@ impl Places {
             projects,
             seed,
         };
-        for folder in folders {
-            if places.folders.len() == PLACES_MAX {
-                break;
+        assert!(tail.len() <= SYSTEM_FOLDERS.len() + 3 * 2);
+        let room = PLACES_MAX - tail.len();
+        let ordinary = folders.into_iter().map(|folder| (folder, room));
+        let last = tail.into_iter().map(|folder| (folder, PLACES_MAX));
+        for (folder, cap) in ordinary.chain(last) {
+            if places.folders.len() == cap {
+                assert!(cap == room);
+                continue;
             }
             if !usable(&folder) || places.folders.contains(&folder) {
                 continue;
@@ -156,8 +173,8 @@ impl Places {
         }
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
-        folders.extend(system);
-        folders.extend(
+        let mut tail = system;
+        tail.extend(
             engine_root
                 .into_iter()
                 .flat_map(|root| engine_folders(&hooks, root)),
@@ -168,6 +185,7 @@ impl Places {
                 .map(Path::to_path_buf),
             ..Self::kept(
                 folders,
+                tail,
                 home,
                 engine_roots(&hooks, engine_root),
                 true,
@@ -253,12 +271,12 @@ impl Places {
             .filter(|folder| !tail.contains(folder))
             .partition(|folder| temp_refused && in_temp(&self.seed.hooks, folder));
         folders.extend(probed);
-        folders.extend(last);
         let set_aside = self.refused_setup;
         let carried = self.refused_temp;
         let app_folder = self.app_folder;
         let mut places = Self::kept(
             folders,
+            last,
             self.home,
             self.engine_roots,
             temp_refused,
