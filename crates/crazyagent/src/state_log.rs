@@ -206,7 +206,7 @@ impl<'a, 'c> Appender<'a, 'c> {
     }
 
     /// Appends one checked event at the next `seq`, refusing a name outside the closed
-    /// [`Aggregate`] set replay reads (H1), one past the transaction's bound or past the last
+    /// [`Aggregate`] set replay reads, one past the transaction's bound or past the last
     /// possible `seq`. Input: the draft. Output: its `seq`.
     fn push(&mut self, draft: &Draft<'_>) -> Result<u64, EngineError> {
         check(draft)?;
