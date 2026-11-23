@@ -201,7 +201,7 @@ pub fn runs_seeing(project: &str, saved: &[PathBuf]) -> Vec<RunKind> {
 /// folder, taken in its canonical form, that sits strictly inside the project root. A folder
 /// outside the project, the project root itself, or a path that is not a folder is refused,
 /// as is text that is not plain: on Windows a drive path joined by backslashes
-/// ([`kernel_sandbox::paths::windows_clean_text`]), elsewhere one with no quote or backslash.
+/// ([`crate::paths::windows_clean_text`]), elsewhere one with no quote or backslash.
 /// Inputs: the typed path and the project root. Output: the canonical folder, or a plain
 /// refusal code.
 pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str> {
@@ -214,7 +214,7 @@ pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str>
         .chars()
         .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'');
     #[cfg(not(unix))]
-    let plain = kernel_sandbox::paths::windows_clean_text(text);
+    let plain = crate::paths::windows_clean_text(text);
     if !plain {
         return Err("hidden_path_not_plain");
     }
