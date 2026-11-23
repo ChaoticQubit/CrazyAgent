@@ -3,6 +3,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[cfg(all(test, unix))]
+mod last_good_tests;
+#[cfg(all(test, unix))]
 mod permission_fix_tests;
 #[cfg(all(test, unix))]
 mod probe_tests;
