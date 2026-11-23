@@ -520,8 +520,16 @@ fn a_missing_part_a_link_leads_to_is_checked_where_it_would_sit() {
     std::os::unix::fs::symlink(shared.join("gone"), &dangling).unwrap();
     let shared = std::fs::canonicalize(&shared).unwrap();
     for path in [leads.join("missing").join(".."), dangling] {
-        assert_eq!(changeable_by_others(&path), Some(shared.clone()), "{path:?}");
-        assert_eq!(changeable_past_sticky(&path), Some(shared.clone()), "{path:?}");
+        assert_eq!(
+            changeable_by_others(&path),
+            Some(shared.clone()),
+            "{path:?}"
+        );
+        assert_eq!(
+            changeable_past_sticky(&path),
+            Some(shared.clone()),
+            "{path:?}"
+        );
     }
 }
 
