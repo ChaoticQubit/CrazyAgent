@@ -259,3 +259,57 @@ fn a_report_holder_past_the_limit_is_ended_with_its_command_on_windows() {
         "the holder {pid} outlived its command"
     );
 }
+
+/// On Windows, a process a setup command starts is ended with the command even when the
+/// command exits cleanly inside its limit: the call returns its empty report and the
+/// `PING.EXE` it started, which would run 60 s, is gone soon after. A PowerShell loop
+/// bounded by `run_bounded` watches it, so no row sleeps.
+#[cfg(windows)]
+#[test]
+fn a_process_left_by_a_clean_setup_command_is_ended_with_it_on_windows() {
+    let folder = tempfile::tempdir().unwrap();
+    let holder = folder.path().join("holder");
+    let quoted = holder.display().to_string().replace('\'', "''");
+    let start = format!(
+        "$i = New-Object System.Diagnostics.ProcessStartInfo \
+         ([IO.Path]::Combine($env:SystemRoot, 'System32', 'PING.EXE')), '-n 60 127.0.0.1'; \
+         $i.UseShellExecute = $false; \
+         $p = [System.Diagnostics.Process]::Start($i); \
+         Set-Content -LiteralPath '{quoted}' -Value $p.Id"
+    );
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                start.as_str()
+            ]),
+            Duration::from_secs(10),
+            false
+        ),
+        Ok(Vec::new())
+    );
+    let pid = std::fs::read_to_string(&holder)
+        .unwrap_or_else(|error| panic!("{}: {error}", holder.display()));
+    let pid = pid.trim();
+    assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 4), "{pid}");
+    let gone = format!(
+        "while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) \
+         {{ Start-Sleep -Milliseconds 50 }}"
+    );
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                gone.as_str()
+            ]),
+            Duration::from_secs(10),
+            false
+        ),
+        Ok(Vec::new()),
+        "the process {pid} outlived its clean command"
+    );
+}
