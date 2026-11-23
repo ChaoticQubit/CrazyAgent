@@ -551,7 +551,7 @@ fn spell_stretch(
 
 /// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
 /// without a quote or backslash. Output: the pattern text, without anchors.
-fn regex_escape(text: &str) -> String {
+pub fn regex_escape(text: &str) -> String {
     assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);
     for character in text.chars() {
