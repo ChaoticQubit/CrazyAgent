@@ -225,7 +225,9 @@ async fn the_engine_private_tmux_server_runs_a_pane_and_never_touches_the_defaul
     let (host, pane) = {
         let agent = agent.clone();
         tokio::task::spawn_blocking(move || {
-            let pane = host.spawn(&agent, &command).unwrap();
+            let pane = host
+                .spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+                .unwrap();
             (host, pane)
         })
         .await

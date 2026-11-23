@@ -135,7 +135,9 @@ async fn attach_sized_mid_session_is_refused() {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            launcher
+                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .unwrap();
             launcher
         })
         .await
@@ -376,7 +378,7 @@ impl Host for Holding {
     fn spawn(
         &self,
         _: &AgentId,
-        _: &InteractiveCommand,
+        _: &crate::terminal::PaneCommand,
     ) -> Result<crate::terminal::PaneRef, HostError> {
         Err(HostError("terminal_unavailable".into()))
     }
@@ -603,7 +605,9 @@ async fn fifty_typed_keys_echo_back_within_budget() {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            launcher
+                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .unwrap();
             launcher
         })
         .await
@@ -736,7 +740,7 @@ impl Host for Recording {
     fn spawn(
         &self,
         _: &AgentId,
-        _: &InteractiveCommand,
+        _: &crate::terminal::PaneCommand,
     ) -> Result<crate::terminal::PaneRef, HostError> {
         Err(HostError("terminal_unavailable".into()))
     }
@@ -1059,7 +1063,9 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            launcher
+                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .unwrap();
             launcher
         })
         .await
@@ -1197,8 +1203,10 @@ fn a_live_agent_s_unit_is_its_window_and_an_ended_one_keeps_its_own_key() {
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&named, &command).unwrap();
-    host.spawn(&other, &command).unwrap();
+    host.spawn(&named, &crate::terminal::PaneCommand::from(&command))
+        .unwrap();
+    host.spawn(&other, &crate::terminal::PaneCommand::from(&command))
+        .unwrap();
     let live = host.unit(&named).unwrap();
     let (server, window) = live.rsplit_once(" @").expect("a socket and a window id");
     assert_eq!(server, socket.display().to_string());
@@ -1254,7 +1262,9 @@ async fn a_follower_sizes_its_window_only_while_no_sizer_is_open() {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            launcher
+                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .unwrap();
             launcher
         })
         .await
@@ -1462,7 +1472,9 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &first).unwrap();
+            launcher
+                .spawn(&agent, &crate::terminal::PaneCommand::from(&first))
+                .unwrap();
             Arc::new(launcher)
         })
         .await
@@ -1508,7 +1520,9 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
         let (launcher, agent) = (launcher.clone(), agent.clone());
         tokio::task::spawn_blocking(move || {
             launcher.kill(&agent).unwrap();
-            launcher.spawn(&agent, &second).unwrap();
+            launcher
+                .spawn(&agent, &crate::terminal::PaneCommand::from(&second))
+                .unwrap();
         })
         .await
         .unwrap();
@@ -1817,7 +1831,9 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &stand_in).unwrap();
+            launcher
+                .spawn(&agent, &crate::terminal::PaneCommand::from(&stand_in))
+                .unwrap();
             Arc::new(launcher)
         })
         .await

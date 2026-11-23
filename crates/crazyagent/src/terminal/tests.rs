@@ -332,7 +332,7 @@ struct PinRefused {
 }
 
 impl Host for PinRefused {
-    fn spawn(&self, _: &AgentId, _: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(&self, _: &AgentId, _: &crate::terminal::PaneCommand) -> Result<PaneRef, HostError> {
         Err(failure("terminal_unavailable"))
     }
 
