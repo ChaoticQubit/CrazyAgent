@@ -1,6 +1,6 @@
 use super::super::{SandboxNetwork, SandboxRemote};
-use kernel_sandbox::profile::ProjectSandbox;
-use kernel_sandbox::profile::env::agent_command;
+use crate::profile::env::agent_command;
+use crate::profile::{ProfileHooks, ProjectSandbox};
 use rustix::process::Pid;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
@@ -19,17 +19,18 @@ exec /bin/sleep 30
 
 /// A private project, home and temp folder under the canonical `/tmp` with the agent profile every
 /// project agent gets installed for them, for tests that start a detaching run in it.
-pub(crate) struct DetachingRun {
+pub struct DetachingRun {
     _root: Option<tempfile::TempDir>,
-    pub(crate) project: PathBuf,
-    pub(crate) profile: PathBuf,
+    pub project: PathBuf,
+    pub profile: PathBuf,
     home: PathBuf,
     tmp: PathBuf,
 }
 
 impl DetachingRun {
-    /// Makes the folders and installs the profile. Takes nothing. Returns the run.
-    pub(crate) fn new() -> Self {
+    /// Makes the folders and installs the profile under the given profile hooks. Takes the
+    /// hooks. Returns the run.
+    pub fn new(hooks: &'static ProfileHooks) -> Self {
         let root = tempfile::Builder::new()
             .prefix("crazyagent-warden-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -43,7 +44,7 @@ impl DetachingRun {
         let (project, home, tmp) = (folder("project"), folder("home"), folder("tmp"));
         let profile = root.path().join("agent.sb");
         ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
+            hooks,
             &project,
             &home,
             &tmp,
@@ -64,7 +65,7 @@ impl DetachingRun {
     /// A second run under this run's profile, home and temp folder, working in a new folder
     /// `name` inside this run's project, as two agents launched from one profile file are.
     /// Takes the folder name. Returns the run, whose folders are removed with this run's.
-    pub(crate) fn beside(&self, name: &str) -> Self {
+    pub fn beside(&self, name: &str) -> Self {
         let project = self.project.join(name);
         std::fs::create_dir(&project).unwrap();
         Self {
@@ -78,7 +79,7 @@ impl DetachingRun {
 
     /// The detaching run as the one sandboxed agent command, under `profile`, with null stdio.
     /// Takes the profile. Returns the command.
-    pub(crate) fn command(&self, profile: &Path) -> Command {
+    pub fn command(&self, profile: &Path) -> Command {
         let mut command = agent_command(
             profile,
             Path::new("/bin/sh"),
@@ -101,7 +102,7 @@ impl DetachingRun {
 
     /// Waits up to ten seconds for a process id file in the project. Takes its name.
     /// Returns the process.
-    pub(crate) fn written(&self, name: &str) -> Pid {
+    pub fn written(&self, name: &str) -> Pid {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(process) = self.read(name) {
@@ -122,7 +123,7 @@ impl DetachingRun {
 
     /// Waits up to ten seconds for the run's three ids and checks the two detached processes
     /// left its group and are alive. Takes nothing. Returns the harness, session and orphan.
-    pub(crate) fn processes(&self) -> [Pid; 3] {
+    pub fn processes(&self) -> [Pid; 3] {
         let read = |name: &str| self.read(name);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -145,7 +146,7 @@ impl DetachingRun {
 
 /// Waits up to `wait` for a child to be reaped. Takes the child and the wait. Returns true
 /// once it is.
-pub(crate) fn reaped_within(child: &mut Child, wait: Duration) -> bool {
+pub fn reaped_within(child: &mut Child, wait: Duration) -> bool {
     let deadline = Instant::now() + wait;
     loop {
         if child.try_wait().unwrap().is_some() {
@@ -160,7 +161,7 @@ pub(crate) fn reaped_within(child: &mut Child, wait: Duration) -> bool {
 
 /// Waits up to `wait` for processes to be gone, then kills any left. Takes the processes and
 /// the wait. Returns those that were still alive.
-pub(crate) fn survivors(processes: [Pid; 3], wait: Duration) -> Vec<Pid> {
+pub fn survivors(processes: [Pid; 3], wait: Duration) -> Vec<Pid> {
     let deadline = Instant::now() + wait;
     loop {
         let alive: Vec<Pid> = processes
@@ -181,7 +182,7 @@ pub(crate) fn survivors(processes: [Pid; 3], wait: Duration) -> Vec<Pid> {
 
 /// This user's processes whose command line contains `needle`, read with `ps`. Input: the
 /// text. Output: their ids and command lines.
-pub(crate) fn processes_naming(needle: &str) -> Vec<(i32, String)> {
+pub fn processes_naming(needle: &str) -> Vec<(i32, String)> {
     let listing = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-A", "-ww", "-o", "pid=,uid=,command="])
@@ -207,7 +208,7 @@ pub(crate) fn processes_naming(needle: &str) -> Vec<(i32, String)> {
 /// Picks from a `ps -o pid=,uid=,command=` listing the processes of `user` other than `own`
 /// whose command line contains `needle`. Inputs: the listing, the user id, this process's id
 /// and the text. Output: their ids and command lines.
-pub(crate) fn naming(listing: &str, user: &str, own: i32, needle: &str) -> Vec<(i32, String)> {
+pub fn naming(listing: &str, user: &str, own: i32, needle: &str) -> Vec<(i32, String)> {
     listing
         .lines()
         .filter_map(|line| {
@@ -223,10 +224,7 @@ pub(crate) fn naming(listing: &str, user: &str, own: i32, needle: &str) -> Vec<(
 /// Waits until `deadline` for no process of this user to name any of `needles`, then kills
 /// by id whatever still does, so a failing run leaves nothing behind. Inputs: the deadline
 /// and the texts. Output: the processes that outlived it.
-pub(crate) fn detached_survivors(
-    deadline: std::time::Instant,
-    needles: &[&str],
-) -> Vec<(i32, String)> {
+pub fn detached_survivors(deadline: std::time::Instant, needles: &[&str]) -> Vec<(i32, String)> {
     loop {
         let left: Vec<(i32, String)> = needles
             .iter()
@@ -272,7 +270,7 @@ fn still_naming(pid: i32, needles: &[&str]) -> bool {
 /// the child the session shim forked, which keeps the shim's command line naming the harness
 /// after the shim itself became the harness, as an agent that killed its own warden leaves
 /// the run. Input: the harness path, unique to the test. Output: the wardens killed.
-pub(crate) fn kill_wardens_of(harness: &str) -> Vec<i32> {
+pub fn kill_wardens_of(harness: &str) -> Vec<i32> {
     let listing = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-ww", "-o", "pid=,uid=,command="])

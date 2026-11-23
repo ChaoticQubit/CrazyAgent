@@ -1,12 +1,13 @@
 use super::fixture::{DetachingRun, reaped_within, survivors};
 use super::*;
+use crate::test_hooks::STAND_IN;
 use rustix::process::Pid;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
 #[test]
 fn the_profile_every_agent_gets_confines_its_signals_and_a_looser_one_does_not() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let generated = std::fs::read_to_string(&run.profile).unwrap();
     assert!(confines_signals(&generated));
     for looser in [
@@ -22,7 +23,7 @@ fn the_profile_every_agent_gets_confines_its_signals_and_a_looser_one_does_not()
 
 #[test]
 fn only_the_session_shim_under_a_confining_profile_gets_a_warden() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     assert!(wardable(&run.command(&run.profile)).unwrap());
     let loose = run.project.join("loose.sb");
     std::fs::write(&loose, "(version 1)\n(allow default)\n").unwrap();
@@ -35,7 +36,7 @@ fn only_the_session_shim_under_a_confining_profile_gets_a_warden() {
 
 #[test]
 fn a_fired_warden_stops_every_process_its_run_detached_and_reports_it() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
     let processes = run.processes();
     let warden = warden.unwrap();
@@ -79,7 +80,7 @@ fn unarmed_run(run: &DetachingRun) -> (std::process::Child, std::os::unix::net::
 
 #[test]
 fn a_warden_that_can_signal_the_process_that_started_it_does_not_arm() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let (mut child, engine) = unarmed_run(&run);
     assert_eq!(
         Warden::reported(engine, ARM_TIME).fire(FIRE_TIME),
@@ -95,7 +96,7 @@ fn a_warden_that_can_signal_the_process_that_started_it_does_not_arm() {
 
 #[test]
 fn an_unarmed_warden_that_already_exited_is_still_reported_unarmed() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let (mut child, engine) = unarmed_run(&run);
     let warden = Warden::reported(engine, ARM_TIME);
     assert_eq!(warden.report, b"U");
@@ -115,7 +116,7 @@ fn an_unarmed_warden_that_already_exited_is_still_reported_unarmed() {
 
 #[test]
 fn a_warden_stops_its_run_when_the_engine_holding_its_end_is_killed() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
     let processes = run.processes();
     let Warden { engine, .. } = warden.unwrap();
@@ -140,7 +141,7 @@ fn a_warden_stops_its_run_when_the_engine_holding_its_end_is_killed() {
 
 #[test]
 fn a_group_signal_right_after_spawn_cannot_reach_the_warden() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
     rustix::process::kill_process_group(
         rustix::process::Pid::from_child(&child),
@@ -153,7 +154,7 @@ fn a_group_signal_right_after_spawn_cannot_reach_the_warden() {
 
 #[test]
 fn a_warden_that_fired_and_closed_before_the_engine_reads_is_confirmed() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
     let processes = run.processes();
     let warden = warden.unwrap();
@@ -258,7 +259,7 @@ fn each_warden_ends_only_its_own_run(runs: [&DetachingRun; 3]) {
 
 #[test]
 fn runs_started_together_from_one_profile_file_are_each_ended_only_by_their_own_warden() {
-    let run = DetachingRun::new();
+    let run = DetachingRun::new(&STAND_IN);
     let runs = [
         run.beside("fired"),
         run.beside("orphaned"),
@@ -271,9 +272,9 @@ fn runs_started_together_from_one_profile_file_are_each_ended_only_by_their_own_
 #[test]
 fn runs_started_together_from_their_own_profiles_are_each_ended_only_by_their_own_warden() {
     let runs = [
-        DetachingRun::new(),
-        DetachingRun::new(),
-        DetachingRun::new(),
+        DetachingRun::new(&STAND_IN),
+        DetachingRun::new(&STAND_IN),
+        DetachingRun::new(&STAND_IN),
     ];
     assert_ne!(runs[0].profile, runs[1].profile);
     assert_ne!(runs[1].profile, runs[2].profile);

@@ -10,7 +10,7 @@ name = "kernel_sandbox"
 path = "src/lib.rs"
 
 [features]
-test-support = []
+test-support = ["dep:tempfile"]
 
 [dependencies]
 crazyagent-kernel-common = { path = "../common" }
@@ -21,6 +21,7 @@ serde_json = "=1.0.154"
 sha2 = "=0.10.9"
 tokio = { version = "=1.53.2", features = ["net", "rt", "time"] }
 url = "=2.5.8"
+tempfile = { version = "=3.27.0", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"

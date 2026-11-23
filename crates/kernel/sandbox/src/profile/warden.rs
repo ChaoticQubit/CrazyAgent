@@ -85,12 +85,12 @@ fn wardable(command: &Command) -> io::Result<bool> {
     use std::io::Read;
 
     let arguments: Vec<&std::ffi::OsStr> = command.get_args().collect();
-    let shim = arguments.get(2..2 + kernel_sandbox::profile::command::SESSION_SHIM.len());
-    if command.get_program() != kernel_sandbox::profile::command::SANDBOX_EXEC
+    let shim = arguments.get(2..2 + crate::profile::command::SESSION_SHIM.len());
+    if command.get_program() != crate::profile::command::SANDBOX_EXEC
         || arguments.first().copied() != Some(std::ffi::OsStr::new("-f"))
         || shim.is_none_or(|shim| {
             shim.iter()
-                .zip(kernel_sandbox::profile::command::SESSION_SHIM)
+                .zip(crate::profile::command::SESSION_SHIM)
                 .any(|(at, part)| *at != part)
         })
     {
@@ -239,7 +239,7 @@ pub fn fire_reported(warden: Option<Warden>, owner: &str) -> Result<(), &'static
     fired
 }
 
-#[cfg(all(test, target_os = "macos"))]
-pub(crate) mod fixture;
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub mod fixture;
 #[cfg(all(test, target_os = "macos"))]
 mod tests;

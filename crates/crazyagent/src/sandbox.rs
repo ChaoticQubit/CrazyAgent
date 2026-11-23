@@ -45,13 +45,10 @@ pub mod policy_store;
 #[cfg(all(test, target_os = "macos"))]
 mod profile_engine_tests;
 pub mod shared_folders;
-#[cfg(all(test, target_os = "macos"))]
-pub(crate) mod test_agent;
 #[cfg(target_os = "macos")]
 pub mod tool_cache;
 #[cfg(all(test, unix))]
 mod toolchains_tests;
-pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
