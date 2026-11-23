@@ -1,7 +1,7 @@
 use kernel_common::Platform;
 use markup::{
-    bounded_text, plist_string, systemd_environment_quoted, systemd_quoted, systemd_specifiers,
-    systemd_unquoted, windows_quoted, windows_task_path, xml,
+    bounded_definition, bounded_text, plist_string, systemd_environment_quoted, systemd_quoted,
+    systemd_specifiers, systemd_unquoted, windows_quoted, windows_task_path, xml,
 };
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -752,18 +752,27 @@ WantedBy=default.target\n",
 
     /// Whether the installed definition runs another program than this service's engine, as
     /// an install script's layout or an older app location does: the line of
-    /// [`Self::definition_text`] naming the executable, as written there, is not in the file.
-    /// A different PATH or setting does not count. Output: false when nothing readable is
+    /// [`Self::definition_text`] naming the executable, as written there, is not in the file,
+    /// read in its manager's encoding ([`bounded_definition`]). A Windows task, whose line
+    /// also sets the PATH, is judged by the quoted executable before ` engine --home `. A
+    /// different PATH or setting does not count. Output: false when nothing readable is
     /// installed.
     pub fn runs_another_program(&self) -> bool {
         let Ok(text) = self.definition_text() else {
             return false;
         };
+        let Some(installed) = bounded_definition(&self.definition, self.platform) else {
+            return false;
+        };
         let written = self.written_executable();
+        if self.platform == Platform::Windows {
+            let engine = format!("{written} engine --home ");
+            assert!(text.contains(&engine), "a task names its engine");
+            return !installed.contains(&engine);
+        }
         let own = text.lines().find(|line| line.contains(written.as_str()));
         assert!(own.is_some(), "a definition names its executable");
-        std::fs::read_to_string(&self.definition)
-            .is_ok_and(|installed| !installed.lines().any(|line| Some(line) == own))
+        !installed.lines().any(|line| Some(line) == own)
     }
 
     /// Whether `service start` may replace an installed definition that runs another program

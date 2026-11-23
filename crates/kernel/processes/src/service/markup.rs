@@ -1,3 +1,4 @@
+use kernel_common::Platform;
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -34,6 +35,29 @@ pub(super) fn bounded_text(path: &Path) -> Option<String> {
         .read_to_string(&mut text)
         .ok()?;
     (text.len() as u64 <= PLIST_BYTES_MAX).then_some(text)
+}
+
+/// Reads a definition file in the encoding its manager reads: UTF-16LE after a byte order
+/// mark for a Windows task ([`super::write_definition`]), UTF-8 elsewhere ([`bounded_text`]).
+/// Inputs: the path and the platform. Output: the text, or none when it is missing, larger
+/// than [`PLIST_BYTES_MAX`] or not in that encoding.
+pub(super) fn bounded_definition(path: &Path, platform: Platform) -> Option<String> {
+    use std::io::Read;
+    if platform != Platform::Windows {
+        return bounded_text(path);
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(PLIST_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let (pairs, rest) = bytes.strip_prefix(&[0xff, 0xfe])?.as_chunks::<2>();
+    if bytes.len() as u64 > PLIST_BYTES_MAX || !rest.is_empty() {
+        return None;
+    }
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    String::from_utf16(&units).ok()
 }
 
 /// The text of a one-line plist `<string>` element, with XML's five escapes undone. Input:
