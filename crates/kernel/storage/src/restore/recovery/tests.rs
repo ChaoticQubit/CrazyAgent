@@ -198,7 +198,7 @@ fn a_put_back_whose_result_fails_its_check_keeps_the_record_and_both_copies() {
     let (root, path, kept) = broken(true);
     let line = read_restore_record(root.path());
 
-    let refused = put_back_with(&path, always_fails).unwrap_err().0;
+    let refused = put_back_with(&path, always_fails, |_| {}).unwrap_err().0;
 
     assert!(refused.starts_with(PUTBACK_CHECK_FAILED), "{refused}");
     assert_eq!(read_restore_record(root.path()), line);
@@ -316,4 +316,38 @@ fn any_other_record_needs_no_recovery() {
             "{line}: {refused}"
         );
     }
+}
+
+#[test]
+fn a_record_cleared_before_the_put_back_takes_the_lock_is_read_again_under_it() {
+    let (root, path, _kept) = broken(true);
+    let bytes = std::fs::read(&path).unwrap();
+    let copies = replaced(root.path());
+
+    let refused = put_back_with(&path, check_copy, |root| {
+        std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).unwrap();
+    })
+    .unwrap_err()
+    .0;
+
+    assert!(refused.starts_with(PUTBACK_COPY_MISSING), "{refused}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(replaced(root.path()), copies);
+    assert_eq!(read_restore_record(root.path()), None);
+}
+
+#[test]
+fn a_record_rewritten_before_continue_takes_the_lock_is_read_again_under_it() {
+    let (root, path) = upgraded(true);
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
+    let line = format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}");
+
+    let refused = continue_2_5_with(&path, |root| {
+        write_restore_record(root, &format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}")).unwrap();
+    })
+    .unwrap_err()
+    .0;
+
+    assert!(refused.starts_with(PUTBACK_CHECK_FAILED), "{refused}");
+    assert_eq!(read_restore_record(root.path()), Some(line));
 }
