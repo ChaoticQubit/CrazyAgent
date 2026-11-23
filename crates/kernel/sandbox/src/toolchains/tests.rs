@@ -190,3 +190,31 @@ fn without_the_command_line_tools_an_agent_uses_the_picked_xcode_compilers_and_s
         "the Command Line Tools win when they hold cc: {env:?}"
     );
 }
+
+/// A lead's copy of the agent's own `git` runs the git the hooks name: the script written to
+/// `bin/git` of the agent's temp folder holds that path, marks the lead's copy, and is a
+/// 0700 file of this user.
+#[test]
+fn a_leads_copy_runs_the_git_the_hooks_name() {
+    use std::os::unix::fs::PermissionsExt;
+    fn refuse(
+        _folder: std::os::fd::BorrowedFd<'_>,
+        _name: &str,
+        otherwise: &'static str,
+    ) -> Result<(), &'static str> {
+        Err(otherwise)
+    }
+    let hooks = ToolchainHooks {
+        remove_home_entry: refuse,
+        sandboxed_git: || Path::new("/opt/stand-in/bin/git"),
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let tmp = canonical(scratch.path()).unwrap();
+    lead_git(&hooks, &tmp, false).unwrap();
+    let written = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let script = fs::read_to_string(&written).unwrap();
+    assert!(script.contains("git='/opt/stand-in/bin/git'\nlead=1\nfree=0\nmain=0\n"));
+    let metadata = fs::symlink_metadata(&written).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.permissions().mode() & 0o7777, 0o700);
+}
