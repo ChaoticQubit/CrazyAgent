@@ -4,8 +4,10 @@ use kernel_processes::terminal::kept::LastScreenHost;
 use kernel_processes::terminal::tmux::{Servers, Tmux};
 use kernel_processes::terminal::{
     APP_PANE_UNKNOWN, AgentId, CHUNK_BYTES_MAX, Host, HostError, PROMPT_BYTES_MAX, PaneAt,
-    PaneCommand, PaneInfo, PaneRef, RENEW_EVERY, TerminalStream,
+    PaneCommand, PaneInfo, PaneRef, TerminalStream,
 };
+#[cfg(unix)]
+use kernel_processes::terminal::RENEW_EVERY;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
