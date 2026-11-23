@@ -14,7 +14,6 @@ use kernel_sandbox::paths::clean_absolute;
 use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
-use kernel_sandbox::profile::env::*;
 #[cfg(all(test, unix))]
 use kernel_sandbox::profile::linux_holds_fully;
 #[cfg(test)]
