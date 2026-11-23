@@ -142,6 +142,12 @@ impl<'a, 'c> Appender<'a, 'c> {
         })
     }
 
+    /// The transaction the appender writes in, for a kernel step that reads or rewrites the
+    /// log in the same transaction. Output: the transaction.
+    pub(crate) fn tx(&self) -> &'a Transaction<'c> {
+        self.tx
+    }
+
     /// The revision this transaction's events carry. Output: the revision.
     pub fn revision(&self) -> u64 {
         self.revision

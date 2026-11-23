@@ -4,6 +4,11 @@ pub mod aggregate;
 /// The appender of one write transaction, behind the writer's fence hook.
 mod appender;
 
+/// Compaction of the log: a snapshot run per aggregate every [`compact::COMPACT_EVERY`]
+/// events, the bodies behind its second-newest run tombstoned, behind a switch that is Off
+/// by default.
+pub mod compact;
+
 /// Replay of the log into projections, the compare of rebuilt tables, redaction in place and
 /// the process exit event (v2.5 L2), reading names through the engine's set.
 pub mod replay;
