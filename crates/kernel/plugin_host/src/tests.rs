@@ -234,11 +234,18 @@ fn a_kind_or_permission_outside_the_character_rule_is_refused() {
 
 /// The dependencies of every dependency table in a `Cargo.toml` text, the `target.*`
 /// tables included: the table, the entry's key and the crate behind it, which is the
-/// `package` a renamed entry names, else the key (a `workspace = true` entry names its root
-/// entry by the key). Input: the text. Output: (table, key, crate), in table then key order.
-fn dependency_names(text: &str, _root: &str) -> Vec<(String, String, String)> {
+/// `package` a renamed entry names, else the key. A `workspace = true` entry is read from
+/// the root's `[workspace.dependencies]` entry of the same key, and an empty crate stands
+/// for a key the root does not hold. Inputs: the member text and the root text. Output:
+/// (table, key, crate), in table then key order.
+fn dependency_names(text: &str, root: &str) -> Vec<(String, String, String)> {
     const SECTIONS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
     let cargo: toml::Table = text.parse().expect("Cargo.toml parses");
+    let root: toml::Table = root.parse().expect("root Cargo.toml parses");
+    let inherited = root
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table);
     let mut tables: Vec<(String, &toml::Table)> = vec![(String::new(), &cargo)];
     if let Some(targets) = cargo.get("target").and_then(toml::Value::as_table) {
         for (cfg, table) in targets {
@@ -252,14 +259,21 @@ fn dependency_names(text: &str, _root: &str) -> Vec<(String, String, String)> {
         for section in SECTIONS {
             if let Some(deps) = table.get(section).and_then(toml::Value::as_table) {
                 for (key, entry) in deps {
-                    let package = entry
-                        .get("package")
-                        .map(|package| package.as_str().unwrap_or("").to_owned());
-                    names.push((
-                        format!("{prefix}{section}"),
-                        key.clone(),
-                        package.unwrap_or_else(|| key.clone()),
-                    ));
+                    let from_root =
+                        entry.get("workspace").and_then(toml::Value::as_bool) == Some(true);
+                    let entry = if from_root {
+                        inherited.and_then(|table| table.get(key))
+                    } else {
+                        Some(entry)
+                    };
+                    let krate = match entry {
+                        None => String::new(),
+                        Some(entry) => entry.get("package").map_or_else(
+                            || key.clone(),
+                            |package| package.as_str().unwrap_or("").to_owned(),
+                        ),
+                    };
+                    names.push((format!("{prefix}{section}"), key.clone(), krate));
                 }
             }
         }
@@ -366,11 +380,7 @@ fn the_allowlist_judges_the_crate_behind_an_inherited_entry() {
     assert_eq!(
         outside_allowlist(member, root),
         vec![
-            (
-                "dependencies".to_owned(),
-                "serde".to_owned(),
-                String::new()
-            ),
+            ("dependencies".to_owned(), "serde".to_owned(), String::new()),
             (
                 "dependencies".to_owned(),
                 "toml".to_owned(),
