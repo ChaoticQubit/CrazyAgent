@@ -38,6 +38,9 @@ pub mod policy;
 /// The ports and port counts every sandbox holds: the owner's fixed ports, the model proxy
 /// and relay blocks, where picked ports start, the lowest bridge port and the most remotes.
 pub mod ports;
+/// The project sandbox profile: the limits, lists, notices and fixed agent variables every
+/// Seatbelt, Linux and Windows boundary is built from.
+pub mod profile;
 /// Boundary qualification: the signed report a release build carries for each sandbox
 /// capability, read and checked against the artifacts it names before the engine admits a
 /// boundary as qualified.
