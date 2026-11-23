@@ -647,20 +647,14 @@ pub(in crate::engine) async fn dispatch(
     let (input, mut cause) = match streams {
         Ok(streams) => streams,
         Err(error) => {
-            custody::cleanup_direct_child(
-                &mut child,
-                std::time::Instant::now() + HANDOVER_CLEANUP,
-            )
-            .map_err(io_error)?;
+            custody::cleanup_direct_child(&mut child, std::time::Instant::now() + HANDOVER_CLEANUP)
+                .map_err(io_error)?;
             return Err(error);
         }
     };
     if let Err((error, mut child)) = host.retain_child(child) {
-        custody::cleanup_direct_child(
-            &mut child,
-            std::time::Instant::now() + HANDOVER_CLEANUP,
-        )
-        .map_err(io_error)?;
+        custody::cleanup_direct_child(&mut child, std::time::Instant::now() + HANDOVER_CLEANUP)
+            .map_err(io_error)?;
         return Err(error);
     }
     launch.write_bootstrap(input)?;
