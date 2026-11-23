@@ -9,10 +9,10 @@ use crate::store::{NAME_BYTES_MAX, SecretRef, Store, checked_name, reference};
 pub const HANDLES_MAX: usize = 4_096;
 /// The most bytes of one plugin's scope leaf, so `<namespace>.<leaf>` stays a store name.
 pub const SCOPE_LEAF_BYTES_MAX: usize = 34;
-/// The bytes of an engine namespace, `dev.crazyagent.e<12 hex>`.
-pub const NAMESPACE_BYTES: usize = 28;
+/// The most bytes of an engine namespace: `dev.crazyagent.e<12 hex>` is exactly this.
+pub const NAMESPACE_BYTES_MAX: usize = 28;
 
-const _: () = assert!(NAMESPACE_BYTES + 1 + SCOPE_LEAF_BYTES_MAX <= NAME_BYTES_MAX);
+const _: () = assert!(NAMESPACE_BYTES_MAX + 1 + SCOPE_LEAF_BYTES_MAX <= NAME_BYTES_MAX);
 
 /// Which store service each plugin's secrets live under: `<namespace>.<leaf>`, so the
 /// bundled GitHub connector's leaf `github` finds today's item byte-equal.
@@ -100,6 +100,19 @@ impl Handles {
         Ok(id)
     }
 
+    /// The handle one plugin holds for a reference, minting it when there is none yet.
+    /// Inputs: the plugin and the reference. Output: the id and whether it is new, or
+    /// `secret_handles_full`.
+    fn reserve(
+        &mut self,
+        caller: &'static str,
+        reference: &SecretRef,
+    ) -> Result<(u64, bool), StoreError> {
+        let before = self.by_id.len();
+        let id = self.mint(caller, reference.clone())?;
+        Ok((id, self.by_id.len() > before))
+    }
+
     /// The reference behind a handle id, only for the plugin it was minted for.
     /// Output: the reference, or `secret_handle_refused` for an unknown id or another plugin's.
     pub fn resolve(&self, caller: &'static str, id: u64) -> Result<&SecretRef, StoreError> {
@@ -135,7 +148,7 @@ impl<'r> Secrets<'r> {
         handles: &'r Mutex<Handles>,
         owner_entry: Option<SecretString>,
     ) -> Self {
-        assert!(namespace.len() == NAMESPACE_BYTES);
+        assert!(!namespace.is_empty() && namespace.len() <= NAMESPACE_BYTES_MAX);
         Self {
             store,
             namespace,
@@ -158,19 +171,33 @@ impl<'r> Secrets<'r> {
     }
 
     /// Saves the owner's paste under a name of the calling plugin, once per request.
-    /// Inputs: the plugin and the name. Output: the handle id, or a refusal; a refused
-    /// scope or name leaves the paste for a later call.
+    /// Inputs: the plugin and the name. Output: the handle id, or a refusal. Every refusal
+    /// comes before the store write: a refused scope, name or full handle table leaves the
+    /// paste for a later call and the store untouched.
     pub fn put_from_owner(&self, caller: &'static str, name: &str) -> Result<u64, StoreError> {
         let (service, found) = self.reference_of(caller, name)?;
-        let entry = self
+        let mut owner = self
             .owner_entry
             .lock()
-            .expect("the owner entry lock is never poisoned")
-            .take()
-            .ok_or_else(|| StoreError::code("secret_owner_entry_missing"))?;
-        let saved = self.store.put(&service, name, &entry)?;
-        assert_eq!(saved, found);
-        self.lock().mint(caller, saved)
+            .expect("the owner entry lock is never poisoned");
+        if owner.is_none() {
+            return Err(StoreError::code("secret_owner_entry_missing"));
+        }
+        let (id, fresh) = self.lock().reserve(caller, &found)?;
+        let entry = owner.take().expect("the entry was checked just above");
+        drop(owner);
+        match self.store.put(&service, name, &entry) {
+            Ok(saved) => {
+                assert_eq!(saved, found);
+                Ok(id)
+            }
+            Err(error) => {
+                if fresh {
+                    self.lock().drop_id(id);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Finds a name of the calling plugin. Inputs: the plugin and the name. Output: its

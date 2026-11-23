@@ -182,6 +182,37 @@ fn a_refused_name_keeps_the_owner_entry() {
 }
 
 #[test]
+fn a_full_handle_table_refuses_the_put_before_the_store_write() {
+    let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
+    for index in 0..HANDLES_MAX {
+        let found = reference(&format!("{NAMESPACE}.notes"), &format!("n{index}")).unwrap();
+        handles.lock().unwrap().mint("notes", found).unwrap();
+    }
+    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, Some(paste()));
+    assert_eq!(
+        secrets.put_from_owner("github", "token"),
+        Err(StoreError::code("secret_handles_full"))
+    );
+    assert_eq!(*store.calls.lock().unwrap(), 0);
+    assert!(secrets.owner_entry.lock().unwrap().is_some());
+}
+
+#[test]
+fn a_failed_store_write_drops_the_new_handle() {
+    let (store, scopes, handles) = (
+        FakeStore::failing("credential_store_unavailable"),
+        scopes(),
+        Mutex::new(Handles::new()),
+    );
+    let secrets = Secrets::for_request(&store, NAMESPACE, &scopes, &handles, Some(paste()));
+    assert_eq!(
+        secrets.put_from_owner("github", "token"),
+        Err(StoreError::code("credential_store_unavailable"))
+    );
+    assert!(handles.lock().unwrap().by_id.is_empty());
+}
+
+#[test]
 fn the_github_scope_names_todays_service_and_account() {
     let (store, scopes, handles) = (FakeStore::default(), scopes(), Mutex::new(Handles::new()));
     let id = put(&store, &scopes, &handles, "github", "token");
