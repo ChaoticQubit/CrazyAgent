@@ -56,17 +56,13 @@ impl ConfiguredInitialConversationFixture {
         self.storage
             .sender
             .try_send(Job::OwnerStop(self.host, send))
-            .unwrap_or_else(|_| {
-                panic!("actual configured fixture owner stop queue unavailable")
-            });
+            .unwrap_or_else(|_| panic!("actual configured fixture owner stop queue unavailable"));
         receive.await.unwrap().unwrap();
         let (send, receive) = oneshot::channel();
         self.storage
             .sender
             .try_send(Job::Close(send))
-            .unwrap_or_else(|_| {
-                panic!("actual configured fixture actor close queue unavailable")
-            });
+            .unwrap_or_else(|_| panic!("actual configured fixture actor close queue unavailable"));
         receive.await.unwrap().unwrap();
         self.db.close().map_err(|(_, error)| error).unwrap();
         assert!(self.root.path().is_dir());
@@ -110,14 +106,12 @@ async fn apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMu
             },
             send,
         ))
-        .unwrap_or_else(|_| {
-            panic!("actual configured fixture owner mutation queue unavailable")
-        });
+        .unwrap_or_else(|_| panic!("actual configured fixture owner mutation queue unavailable"));
     assert_eq!(receive.await.unwrap().unwrap().result, OwnerResult::Applied);
 }
 
-pub(crate) async fn configured_initial_conversation_fixture()
--> ConfiguredInitialConversationFixture {
+pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredInitialConversationFixture
+{
     let root = tempfile::Builder::new()
         .prefix("ca-cgf-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
