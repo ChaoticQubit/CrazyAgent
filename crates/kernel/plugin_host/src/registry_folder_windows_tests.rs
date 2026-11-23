@@ -162,17 +162,40 @@ fn names(folder: &Path) -> Vec<String> {
     names
 }
 
-/// Makes a junction at `link` to the folder `target` with `mklink /J`, both paths with
-/// backslashes only, since mklink reads a forward slash as a switch.
-fn junction(link: &Path, target: &Path) {
-    assert!(!link.to_string_lossy().contains('/') && !target.to_string_lossy().contains('/'));
-    let status = Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
+/// Runs `mklink` through cmd.exe with each path as its own quoted argument. A path with a
+/// forward slash, which mklink reads as a switch, a quote or a character cmd.exe acts on is
+/// refused before cmd.exe starts, so a path is never read as a command. Inputs: the switch,
+/// if any, the link and the target. Output: whether mklink made the link.
+fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    let quoted = |path: &Path| {
+        let text = path.to_str().unwrap();
+        assert!(
+            !text.contains(['/', '"', '&', '|', '^', '<', '>', '%', '!', '(', ')']),
+            "{text}"
+        );
+        format!("\"{text}\"")
+    };
+    let mut command = Command::new("cmd");
+    command.args(["/D", "/C", "mklink"]);
+    if let Some(switch) = switch {
+        command.arg(switch);
+    }
+    command
+        .raw_arg(quoted(link))
+        .raw_arg(quoted(target))
         .status()
-        .unwrap();
-    assert!(status.success(), "junction {}", link.display());
+        .unwrap()
+        .success()
+}
+
+/// Makes a junction at `link` to the folder `target` with `mklink /J`.
+fn junction(link: &Path, target: &Path) {
+    assert!(
+        mklink(Some("/J"), link, target),
+        "junction {}",
+        link.display()
+    );
 }
 
 /// Makes a symbolic link at `link` to `target`, a folder or a file, falling back to
@@ -184,13 +207,8 @@ fn symlink(link: &Path, target: &Path, folder: bool) {
         std::os::windows::fs::symlink_file(target, link)
     };
     if made.is_err() {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "mklink"]);
-        if folder {
-            command.arg("/D");
-        }
-        let status = command.arg(link).arg(target).status().unwrap();
-        assert!(status.success(), "symlink {}", link.display());
+        let switch = folder.then_some("/D");
+        assert!(mklink(switch, link, target), "symlink {}", link.display());
     }
 }
 
