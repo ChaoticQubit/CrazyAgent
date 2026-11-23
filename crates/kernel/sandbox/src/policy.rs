@@ -11,8 +11,9 @@ const WINDOWS_UNAVAILABLE: &str =
 #[cfg(target_os = "linux")]
 const LINUX_UNAVAILABLE: &str = "On Linux, agents run Sandboxed in this version.";
 
+/// Why Full access cannot run on Windows in this version, as the level list shows it.
 #[cfg(target_os = "windows")]
-const FULL_WINDOWS_UNAVAILABLE: &str = "Full access isn't available on Windows in this version.";
+pub const FULL_WINDOWS_UNAVAILABLE: &str = "Full access isn't available on Windows in this version.";
 
 /// The code a level that cannot run here is refused with.
 pub const AGENT_ACCESS_UNAVAILABLE: &str = "agent_access_unavailable";
