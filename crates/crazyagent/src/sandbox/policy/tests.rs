@@ -756,18 +756,21 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
     };
     assert_eq!(rule(IdeAgentFiles::AllowAll, false), "");
     assert_eq!(rule(IdeAgentFiles::AllowAll, true), "");
-    let root_text = super::super::any_case("/tmp/ca-proj");
+    let root_text = kernel_sandbox::paths::any_case("/tmp/ca-proj");
     let new = format!(
         "^{root_text}{}/{}",
-        super::super::any_case("/.crazyagent"),
-        super::super::any_case("worktrees")
+        kernel_sandbox::paths::any_case("/.crazyagent"),
+        kernel_sandbox::paths::any_case("worktrees")
     );
     let both = format!(
         "^{root_text}({})?/{}",
-        super::super::any_case("/.crazyagent"),
-        super::super::any_case("worktrees")
+        kernel_sandbox::paths::any_case("/.crazyagent"),
+        kernel_sandbox::paths::any_case("worktrees")
     );
-    let state = format!("^{root_text}{}$", super::super::any_case("/.crazyagent"));
+    let state = format!(
+        "^{root_text}{}$",
+        kernel_sandbox::paths::any_case("/.crazyagent")
+    );
     for (older_agents, agents) in [(false, &new), (true, &both)] {
         let keep_root = format!("(deny file-write-unlink\n  (regex #\"{agents}$\"))\n");
         assert_eq!(
