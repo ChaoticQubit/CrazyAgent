@@ -1279,6 +1279,10 @@ impl ConfigState {
 }
 
 #[cfg(test)]
+#[path = "config/when_off_tests.rs"]
+mod when_off_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
