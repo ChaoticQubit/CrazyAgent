@@ -323,8 +323,13 @@ impl<'f> Index<'f> {
             (Item::Handle, false) => {
                 Leaf::Kernel(format!("{}::from_kernel", self.sdk_path(owner, name)))
             }
-            (Item::Mirrored, true) => Leaf::Call(format!("{name}::from")),
-            (Item::Mirrored, false) => Leaf::Call(format!("{}::from", self.sdk_path(owner, name))),
+            (Item::Mirrored, true) => {
+                Leaf::Call(format!("<{name} as core::convert::From<_>>::from"))
+            }
+            (Item::Mirrored, false) => Leaf::Call(format!(
+                "<{} as core::convert::From<_>>::from",
+                self.sdk_path(owner, name)
+            )),
             (Item::Enum | Item::Plain, _) => unreachable!("an unwired leaf is not converted"),
         }
     }
@@ -512,7 +517,7 @@ fn mirror(text: &mut String, stem: &str, index: &Index<'_>, item: &crazyagent_ca
                 "from its wire form"
             }
         ));
-        text.push_str(&format!("impl From<{from}> for {to} {{\n"));
+        text.push_str(&format!("impl core::convert::From<{from}> for {to} {{\n"));
         text.push_str("    /// Input: the value. Output: the same value in the other form.\n");
         text.push_str(&format!(
             "    fn from(value: {from}) -> Self {{\n        Self {{\n"
@@ -591,7 +596,9 @@ fn output(text: &mut String, stem: &str, index: &Index<'_>, capability: &Capabil
     text.push_str("#[derive(Serialize)]\n");
     let Some(ty) = capability.output.as_ref() else {
         text.push_str(&format!("pub struct {pascal}Output;\n"));
-        text.push_str(&format!("\nimpl From<()> for {pascal}Output {{\n"));
+        text.push_str(&format!(
+            "\nimpl core::convert::From<()> for {pascal}Output {{\n"
+        ));
         text.push_str("    /// Input: the unit output. Output: the envelope.\n");
         text.push_str("    fn from(_value: ()) -> Self {\n        Self\n    }\n}\n");
         return;
@@ -601,7 +608,7 @@ fn output(text: &mut String, stem: &str, index: &Index<'_>, capability: &Capabil
         index.wire_type(ty)
     ));
     text.push_str(&format!(
-        "\nimpl From<{}> for {pascal}Output {{\n",
+        "\nimpl core::convert::From<{}> for {pascal}Output {{\n",
         index.sdk_type(ty)
     ));
     text.push_str("    /// Input: the SDK output. Output: the envelope.\n");
