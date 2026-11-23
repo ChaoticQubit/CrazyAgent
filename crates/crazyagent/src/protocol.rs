@@ -711,11 +711,10 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_drive_prefix_is_not_an_identity() {
-        for text in ["c:", "c:x", "z:"] {
-            assert!(!single_component(text), "{text}");
+        for text in ["c:", "c:x", "z:", "C:x"] {
+            assert_eq!(single_component(text), !cfg!(windows), "{text}");
             assert!(ProjectId::new(text).is_err(), "{text}");
         }
         assert!(ClientId::new("owner:abc").is_ok());
@@ -789,10 +788,7 @@ mod tests {
             kernel(&foreign).unwrap_err(),
             kernel_security::error::StoreError::code("credential_reference_invalid")
         );
-        assert_eq!(
-            CredentialRef::new("a:b:c".to_string()).is_err(),
-            cfg!(windows)
-        );
+        assert!(CredentialRef::new("a:b:c".to_string()).is_err());
     }
 
     #[test]
