@@ -1,6 +1,7 @@
-use crate::credentials::Store;
 use crate::engine::EngineError;
+use crate::protocol::{kernel, wire};
 use kernel_security::secret::SecretString;
+use kernel_security::store::Store;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -421,16 +422,18 @@ impl GitHub {
             .unwrap_or((false, None));
         paused_at(&self.root, Pause::InStatus);
         let status = match state::load(&self.root) {
-            Ok(Some(saved)) => match self.store.get(&saved.credential) {
-                Ok(_) => GitHubStatus {
-                    signed_in: true,
-                    login: Some(saved.login),
-                    method: saved.method,
-                    waiting,
-                    problem: last,
-                },
-                Err(error) => self.signed_out(waiting, Some(problem(&error.0))),
-            },
+            Ok(Some(saved)) => {
+                match kernel(&saved.credential).and_then(|found| self.store.get(&found)) {
+                    Ok(_) => GitHubStatus {
+                        signed_in: true,
+                        login: Some(saved.login),
+                        method: saved.method,
+                        waiting,
+                        problem: last,
+                    },
+                    Err(error) => self.signed_out(waiting, Some(problem(&error.0))),
+                }
+            }
             Ok(None) => {
                 let setup = state::client_id(&self.root)
                     .err()
@@ -542,7 +545,7 @@ impl GitHub {
         if device.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
             return Err(failure("github_sign_in_cancelled"));
         }
-        let credential = self.store.put(&self.service(), TOKEN_ACCOUNT, token)?;
+        let credential = wire(&self.store.put(&self.service(), TOKEN_ACCOUNT, token)?);
         state::save(
             &self.root,
             &state::Saved {
@@ -565,7 +568,7 @@ impl GitHub {
         let mut pending = pending();
         cancel_waiting(&mut pending, &self.root);
         if let Some(saved) = state::load(&self.root)? {
-            self.store.delete(&saved.credential)?;
+            self.store.delete(&kernel(&saved.credential)?)?;
         }
         state::forget(&self.root)?;
         drop(pending);
@@ -579,7 +582,7 @@ impl GitHub {
     /// Lists one page of the owner's repositories. Input: a page from 1 to 100.
     /// Output: the page, or `github_not_signed_in`.
     pub fn repos(&self, page: u32) -> Result<GitHubRepoPage, EngineError> {
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self.store.get(&kernel(&self.saved()?.credential)?)?;
         api::repos(&self.endpoints, &token, page)
     }
 
@@ -599,21 +602,21 @@ impl GitHub {
     /// Lists the accounts a new repository can go under, the owner's own account first.
     /// Output: the accounts and a problem sentence, or `github_not_signed_in`.
     pub fn owners(&self) -> Result<GitHubOwners, EngineError> {
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self.store.get(&kernel(&self.saved()?.credential)?)?;
         api::owners(&self.endpoints, &token)
     }
 
     /// Checks whether `owner/name` is still free on GitHub. Inputs: the account and the
     /// name. Output: true when free, or `github_repo_name_invalid`, `github_not_signed_in`.
     pub fn name_free(&self, owner: &str, name: &str) -> Result<bool, EngineError> {
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self.store.get(&kernel(&self.saved()?.credential)?)?;
         api::name_free(&self.endpoints, &token, owner, name)
     }
 
     /// Makes an empty repository on GitHub with CrazyAgent's standard settings.
     /// Input: the repository to make. Output: what GitHub made, or the refusal code.
     pub fn create_repo(&self, repo: &GitHubNewRepo) -> Result<GitHubCreated, EngineError> {
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self.store.get(&kernel(&self.saved()?.credential)?)?;
         api::create(&self.endpoints, &token, repo)
     }
 
@@ -626,7 +629,7 @@ impl GitHub {
         on: &BTreeSet<GitHubRule>,
         facts: &GitHubRepoFacts,
     ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self.store.get(&kernel(&self.saved()?.credential)?)?;
         self.with_record(full_name, |made| {
             rules::apply(&self.endpoints, &token, full_name, on, facts, made)
         })
@@ -657,7 +660,7 @@ impl GitHub {
         on: &BTreeSet<GitHubRule>,
         facts: &GitHubRepoFacts,
     ) -> Result<GitHubRuleOutcome, EngineError> {
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self.store.get(&kernel(&self.saved()?.credential)?)?;
         self.with_record(full_name, |made| {
             rules::set(&self.endpoints, &token, full_name, rule, on, facts, made)
         })
@@ -721,7 +724,7 @@ impl GitHub {
         let author = match publish::configured_author(&git, owner_home, home.path(), project) {
             Some(author) => author,
             None => {
-                let token = self.store.get(&self.saved()?.credential)?;
+                let token = self.store.get(&kernel(&self.saved()?.credential)?)?;
                 let (login, id) = api::identity(&self.endpoints, &token)?;
                 publish::noreply_author(&login, id)
             }
@@ -741,7 +744,7 @@ impl GitHub {
         let saved = self.saved()?;
         let helper = self
             .store
-            .git_credential_helper(&saved.credential, clone::GIT_USER)?;
+            .git_credential_helper(&kernel(&saved.credential)?, clone::GIT_USER)?;
         let git = publish::git()?;
         let home = publish::GitHome::new(&self.root)?;
         publish::push(

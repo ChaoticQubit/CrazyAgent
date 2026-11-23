@@ -3,7 +3,7 @@ use super::workspace::WorkspaceSettings;
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::ProjectId;
-use crate::state_log::replay::Clock;
+use kernel_storage::state_log::Clock;
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// The most files the owner may unlock in one agent's worktree during one agent turn.

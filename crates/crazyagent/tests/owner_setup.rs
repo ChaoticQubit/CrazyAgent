@@ -795,7 +795,7 @@ async fn a_signed_in_style_claude_account_can_be_the_project_master() {
     case.close().await;
 }
 
-/// OC04: the owner's three sandbox options read through the engine after the types moved
+/// The owner's three sandbox options read through the engine after the types moved
 /// into kernel/sandbox are the same values and words as before: a fresh engine shows the
 /// defaults, a saved non-default choice of all three reads back equal with the 2.4.4 JSON,
 /// and it survives a restart.

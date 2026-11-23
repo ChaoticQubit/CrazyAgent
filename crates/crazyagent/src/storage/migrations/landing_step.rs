@@ -10,7 +10,7 @@ pub(super) fn landing_on_the_log(tx: &Transaction<'_>) -> Result<(), StorageErro
         !tx.is_autocommit(),
         "a step runs inside the upgrade transaction"
     );
-    let at_ms = crate::state_log::replay::Clock::System.now_ms();
+    let at_ms = kernel_storage::state_log::Clock::System.now_ms();
     let opening = crate::storage::opening::Opening::new(at_ms);
     crate::landing_log::first_run(tx, opening)?;
     assert!(

@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     /// A fresh engine's three Linux options are TCP-only sockets, the call supervisor on and
-    /// strict refusal off (S036-S038), the defaults the owner's settings screen shows before
+    /// strict refusal off, the defaults the owner's settings screen shows before
     /// the first save.
     #[test]
     fn defaults_are_tcp_only_supervisor_on_strict_off() {

@@ -5,8 +5,9 @@ use super::*;
 use crate::master_session::SESSION_DELETED;
 use crate::state_log::fence::engine;
 use crate::state_log::replay::{Logged, redact_matching};
-use crate::state_log::{Aggregate, Appender, Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE};
+use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::{Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE};
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -221,7 +222,7 @@ fn a_delete_replays_to_no_turn_or_preparation_and_keeps_the_resolve_and_receipt(
     let deleted = serde_json::to_vec(&json!({"project": "p1", "session": "s1"})).unwrap();
     let seq = log
         .append(&Draft {
-            aggregate: Aggregate::Sessions,
+            aggregate: Aggregate::Sessions.into(),
             kind: SESSION_DELETED,
             schema: 1,
             at_ms: 1,

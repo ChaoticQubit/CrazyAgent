@@ -1,8 +1,8 @@
-use super::Piece::{Hex, Plain};
-use super::{Store, checked_name, parts, reference};
-use crate::protocol::CredentialRef;
 use kernel_security::error::StoreError;
+use kernel_security::secret::Piece::{Hex, Plain};
+use kernel_security::secret::sized;
 use kernel_security::secret::{SECRET_BYTES_MAX, SecretString};
+use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -78,10 +78,7 @@ impl Keychain {
         Ok(service)
     }
 
-    fn owned_parts<'a>(
-        &self,
-        reference: &'a CredentialRef,
-    ) -> Result<(&'a str, &'a str), StoreError> {
+    fn owned_parts<'a>(&self, reference: &'a SecretRef) -> Result<(&'a str, &'a str), StoreError> {
         let (service, account) = parts(reference)?;
         Ok((self.owned(service)?, account))
     }
@@ -99,14 +96,14 @@ impl Store for Keychain {
         service: &str,
         account: &str,
         secret: &SecretString,
-    ) -> Result<CredentialRef, StoreError> {
+    ) -> Result<SecretRef, StoreError> {
         if secret.expose().len() > SECRET_BYTES_MAX {
             return Err(StoreError::code("credential_secret_invalid"));
         }
         let service = self.owned(service)?;
         let account = checked_name(account)?;
         let found = reference(service, account)?;
-        let mut line = super::sized(&[
+        let mut line = sized(&[
             Plain("add-generic-password -U -s \""),
             Plain(service),
             Plain("\" -a \""),
@@ -126,7 +123,7 @@ impl Store for Keychain {
         Ok(found)
     }
 
-    fn get(&self, reference: &CredentialRef) -> Result<SecretString, StoreError> {
+    fn get(&self, reference: &SecretRef) -> Result<SecretString, StoreError> {
         let (service, account) = self.owned_parts(reference)?;
         let mut ran = run(
             &[
@@ -155,7 +152,7 @@ impl Store for Keychain {
         found
     }
 
-    fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+    fn delete(&self, reference: &SecretRef) -> Result<(), StoreError> {
         let (service, account) = self.owned_parts(reference)?;
         let ran = run(
             &[
@@ -177,7 +174,7 @@ impl Store for Keychain {
 
     fn git_credential_helper(
         &self,
-        reference: &CredentialRef,
+        reference: &SecretRef,
         username: &str,
     ) -> Result<String, StoreError> {
         let (service, account) = self.owned_parts(reference)?;

@@ -223,8 +223,9 @@ pub fn source_label(source: &super::pack::PackSource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::setup::{InstallError, Located, Version};
+    use crate::setup::Located;
     use kernel_processes::finding::probe::Mark;
+    use kernel_processes::run::{InstallError, Version};
     use std::time::Duration;
 
     /// The mark of a probe whose first run ended, so a tool not found reads Missing.

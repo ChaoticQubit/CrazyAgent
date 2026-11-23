@@ -73,7 +73,7 @@ fn an_upgrade_of_the_2_4_4_fixture_replays_to_the_rows_it_held() {
     let done: Vec<(i64, String)> = db
         .prepare("SELECT seq, aggregate FROM state_log WHERE kind=?1 ORDER BY seq")
         .unwrap()
-        .query_map([crate::state_log::SNAPSHOT_DONE], |row| {
+        .query_map([kernel_storage::state_log::SNAPSHOT_DONE], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .unwrap()
@@ -82,7 +82,7 @@ fn an_upgrade_of_the_2_4_4_fixture_replays_to_the_rows_it_held() {
     let aggregates: Vec<&str> = done.iter().map(|(_, name)| name.as_str()).collect();
     assert_eq!(aggregates, ["worktrees"], "one run, for the only rows held");
     for (seq, _) in &done {
-        crate::state_log::verify_snapshot(&db, *seq as u64).unwrap();
+        kernel_storage::state_log::verify_snapshot(&db, *seq as u64).unwrap();
     }
     let tx = db.transaction().unwrap();
     crate::worktrees::log::rebuild(&tx).unwrap();

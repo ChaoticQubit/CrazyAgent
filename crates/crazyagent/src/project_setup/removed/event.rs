@@ -3,8 +3,9 @@ use crate::engine::owner::Admission;
 use crate::project_setup::SetupAction;
 use crate::protocol::{Command, ProjectId};
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::Clock;
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::Draft;
 use rusqlite::Transaction;
 use serde::{Deserialize, Serialize};
 
@@ -113,7 +114,7 @@ pub(crate) fn append(
     let body = removed.body()?;
     let mut log = Appender::owner(tx, revision, Fence::Owner(admission.clone()))?;
     let seq = log.append(&Draft {
-        aggregate: Aggregate::Projects,
+        aggregate: Aggregate::Projects.into(),
         kind: KIND,
         schema: 1,
         at_ms: Clock::System.now_ms(),
