@@ -9,8 +9,8 @@ use crazyagent::harnesses::launch::{
 };
 use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, Unstopped};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
-use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
 use crazyagent::protocol::CredentialRef;
+use kernel_common::relay_names::{TOKEN_PREFIX, is_placeholder};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -140,10 +140,10 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         ),
     ]);
     expected.extend(
-        crazyagent::sandbox::AGENT_GIT_ENV
+        kernel_sandbox::profile::consts::AGENT_GIT_ENV
             .into_iter()
-            .chain(crazyagent::sandbox::AGENT_TLS_ENV)
-            .chain(crazyagent::sandbox::AGENT_HOME_ENV)
+            .chain(kernel_sandbox::profile::consts::AGENT_TLS_ENV)
+            .chain(kernel_sandbox::profile::consts::AGENT_HOME_ENV)
             .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     assert_eq!(environment(&built), expected);
@@ -604,6 +604,7 @@ fn sandboxed_stand_in(
     assert_eq!(first.code(), Some(3));
     let profile = root.path().join("agent.sb");
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &project,
         &home,
         &tmp,
@@ -1264,7 +1265,10 @@ fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_
 #[test]
 fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_session() {
     let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
-    assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
+    assert!(
+        !kernel_sandbox::ports::OWNER_PORTS.contains(&port),
+        "{port}"
+    );
     for (harness, name, base_url) in [
         ("codex", "codex", format!("http://127.0.0.1:{port}/v1")),
         ("claude-code", "claude", format!("http://127.0.0.1:{port}")),

@@ -704,9 +704,10 @@ fn acp_request(
         tools: true,
         boundary: match profile {
             Some(profile) => crate::harnesses::launch::LaunchBoundary::Profile(profile),
-            None => {
-                crate::harnesses::launch::full_access_for_test(working, working.parent().unwrap())
-            }
+            None => crate::harnesses::launch::tests::full_access_for_test(
+                working,
+                working.parent().unwrap(),
+            ),
         },
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
@@ -760,7 +761,7 @@ fn an_acp_launch_on_a_keyless_account_is_handed_its_address_and_the_local_placeh
     );
     assert_eq!(
         set.get("OPENAI_API_KEY").map(String::as_str),
-        Some(crate::model_gateway::relay::LOCAL_PLACEHOLDER)
+        Some(kernel_common::relay_names::LOCAL_PLACEHOLDER)
     );
     assert_eq!(
         set.get("STANDIN_MODEL").map(String::as_str),
@@ -954,13 +955,15 @@ fn a_listed_install_with_a_tool_home_writes_the_agents_getconf_there() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let (folder, home) = harness_home("standin-acp");
     let base = folder.path().canonicalize().unwrap();
     let _removed = TmpRemoved(base.clone());
-    let scratch = crate::sandbox::toolchains::make_tmp(&base).unwrap();
+    let scratch =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &base).unwrap();
 
     let installed = context()
         .with_tool_home(&base)
@@ -973,7 +976,11 @@ fn a_listed_install_with_a_tool_home_writes_the_agents_getconf_there() {
         script.contains(&scratch.display().to_string()),
         "{getconf:?}: {script}"
     );
-    let path = crate::sandbox::toolchains::with_agent_git(&base, "/usr/bin:/bin".to_owned());
+    let path = kernel_sandbox::toolchains::with_agent_git(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &base,
+        "/usr/bin:/bin".to_owned(),
+    );
     assert!(
         path.starts_with(&format!("{}:", getconf.parent().unwrap().display())),
         "{path}"

@@ -1727,12 +1727,12 @@ fn fresh_link_inside(
 /// Folds one path part the way the volume compares names, when the result is ASCII.
 /// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
 /// the code points HFS+ ignores in names left out
-/// ([`crate::instruction_files::HFS_IGNORED`], RV-DS241-148), or None when a code point
+/// ([`kernel_sandbox::paths::HFS_IGNORED`], RV-DS241-148), or None when a code point
 /// stays outside ASCII.
 fn ascii_fold(part: &str) -> Option<String> {
     let mut folded = String::with_capacity(part.len());
     for point in part.chars() {
-        if crate::instruction_files::HFS_IGNORED.contains(&point) {
+        if kernel_sandbox::paths::HFS_IGNORED.contains(&point) {
             continue;
         }
         if point.is_ascii() {

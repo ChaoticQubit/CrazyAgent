@@ -2613,7 +2613,7 @@ async fn an_arrived_project_file_that_cannot_be_read_refuses_the_start_until_it_
 /// chose since (fix/own-clones-and-lead-landing 6e60b198).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners_level() {
-    use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
     let saved = bench
@@ -2636,7 +2636,7 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
             saved.version,
             AgentPolicy {
                 access: AgentAccess::Sandboxed,
-                network: crazyagent::sandbox::policy::AgentNetwork::default(),
+                network: kernel_sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),

@@ -13,8 +13,9 @@ const _: () = assert!(
 );
 
 /// The store codes a plugin's input or handle caused; any other code is a store failure.
-const REJECTED_CODES: [&str; 10] = [
+const REJECTED_CODES: [&str; 11] = [
     "credential_name_invalid",
+    "secret_hosts_invalid",
     "secret_scope_missing",
     "secret_owner_entry_missing",
     "secret_handle_refused",

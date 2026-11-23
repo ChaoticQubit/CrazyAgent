@@ -187,7 +187,7 @@ pub(crate) fn save_quit_with(
     let gateway = Gateway::new(grants, &record, switches);
     let providers = Providers {
         net: &crate::security_caps::Absent,
-        process: &crate::security_caps::Absent,
+        process: &crate::sdk_install::InstallCaps::UNREGISTERED,
         secrets: &crate::security_caps::Absent,
         settings: &provider,
         service: &crate::security_caps::Absent,

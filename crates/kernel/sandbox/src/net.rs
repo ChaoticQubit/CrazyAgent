@@ -1,8 +1,8 @@
 use crate::error::{SandboxError, invalid};
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
-/// it never binds or listens on an `OWNER_PORTS` port, one `ProjectSandbox::keep_ports`
-/// keeps or one of `model_proxy::PROXY_PORTS` or `model_proxy::RELAY_PORTS`, otherwise
+/// it never binds or listens on an `ports::OWNER_PORTS` port, one `ProjectSandbox::keep_ports`
+/// keeps or one of `ports::PROXY_PORTS` or `ports::RELAY_PORTS`, otherwise
 /// only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {

@@ -16,7 +16,7 @@ const _: () = assert!(SAMPLES >= SAMPLES_MIN && PERCENTILE < 100);
 #[cfg(target_os = "macos")]
 fn scratch(namespace: &str) -> (Box<dyn Store>, keychain_support::TemporaryKeychain) {
     let keychain = keychain_support::TemporaryKeychain::create();
-    let store = crazyagent::credentials::Keychain::at(namespace, keychain.path()).unwrap();
+    let store = kernel_security::store::macos::Keychain::at(namespace, keychain.path()).unwrap();
     (Box::new(store), keychain)
 }
 

@@ -125,9 +125,7 @@ pub async fn ensure_running(
     if answering(&layout.socket()) {
         return Ok(Started::AlreadyRunning);
     }
-    if crate::restore::holds_restart(layout.root(), crate::restore::service_running(service)) {
-        return Err(failure(crate::restore::ENGINE_RESTORING));
-    }
+    crate::restore::refuse_restart(layout.root(), service).map_err(failure)?;
     layout.prepare()?;
     let since = log_length(layout);
     if service.status()?.installed {

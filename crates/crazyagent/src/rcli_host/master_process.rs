@@ -1,12 +1,11 @@
 use super::master_launch::error;
-use crate::harnesses::leftovers::{
-    self, Follower, HoldBy, LINEAGE_VARIABLE, Leftovers, Lineage, LineageToken, Unstopped,
-};
+use crate::harnesses::leftovers::{self, Follower, HoldBy, Leftovers, Lineage, Unstopped};
 use crate::protocol::CredentialRef;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
 use kernel_processes::spawn_gate::Keeper;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
@@ -216,17 +215,17 @@ impl HostProcess {
     }
 
     /// Tells whether the host was stopped by the Linux call supervisor because it could not
-    /// take back an entry read as a held name ([`crate::sandbox::held_stop`]). Input: the
+    /// take back an entry read as a held name ([`kernel_sandbox::profile::consts::held_stop`]). Input: the
     /// process. Output: true for that exit, which outranks what the host left half written.
     fn held(&self) -> bool {
         let code = self.status.as_ref().and_then(ExitStatus::code);
-        code.and_then(|code| crate::sandbox::held_stop(std::env::consts::OS, code))
+        code.and_then(|code| kernel_sandbox::profile::consts::held_stop(std::env::consts::OS, code))
             .is_some()
     }
 
     fn exit_error(&self) -> ProtocolError {
         if self.held() {
-            return error(crate::sandbox::HELD_STOP_CAUSE);
+            return error(kernel_sandbox::profile::consts::HELD_STOP_CAUSE);
         }
         error(match self.status.as_ref().and_then(ExitStatus::code) {
             Some(64) => "rcli_master_control_rejected",
@@ -705,7 +704,11 @@ read -r _
                     Err(failure) => break failure,
                 }
             };
-            assert_eq!(failure.0, crate::sandbox::HELD_STOP_CAUSE, "{host}");
+            assert_eq!(
+                failure.0,
+                kernel_sandbox::profile::consts::HELD_STOP_CAUSE,
+                "{host}"
+            );
             process.cleanup().unwrap();
         }
     }

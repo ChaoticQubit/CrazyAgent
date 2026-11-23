@@ -14,7 +14,14 @@ pub fn full_access(project: &Path, scratch: &Path) -> LaunchBoundary {
     for folder in [&home, &tmp] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    let sandbox = ProjectSandbox::new(project, &home, &tmp, SandboxNetwork::Open).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        project,
+        &home,
+        &tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap();
     let installed = InstalledSandbox::install(
         sandbox,
         &scratch.join("full-access.sb"),

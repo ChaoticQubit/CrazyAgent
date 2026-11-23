@@ -77,7 +77,7 @@ describe("golden upgrade and restore", () => {
     step(run, STEPS[1]);
 
     await (await dialog.$(`button=${BUTTON}`)).click();
-    const last = await waitUntil("the restore to end", () => invoke("desktop_restore_status"), (view) => view.last !== null && view.last.kind !== "pending", RESTORE_MS);
+    const last = await waitUntil("the restore to end", () => invoke("desktop_restore_status"), (view) => view.last !== null && !["pending", "restoring"].includes(view.last.kind), RESTORE_MS);
     assert.equal(last.last.kind, "restored", `the restore brought the 2.4 data back: ${JSON.stringify(last)}`);
     await waitUntil("the engine to stay stopped", engineState, (now) => !now.running && now.pid === null && now.engines.length === 0);
     step(run, STEPS[2]);

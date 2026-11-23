@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::exposure::holds;
 use crate::net::capture::{CaptureRules, SEND_HOSTS_MAX};
-use crate::secrets::{Handles, KeptHosts, OwnerEntry, PLUGIN_HANDLES_MAX, Scopes, Secrets};
+use crate::secret::SECRET_BYTES_MAX;
+use crate::secrets::{
+    HOSTS_HEADER_BYTES_MAX, Handles, OwnerEntry, PLUGIN_HANDLES_MAX, Scopes, Secrets,
+};
 use crate::store::{SecretRef, Store, reference};
 
 const NAMESPACE: &str = "dev.crazyagent.e0123456789ab";
@@ -45,7 +48,7 @@ impl Store for FakeStore {
         let bytes = self.items.lock().unwrap().get(found).cloned();
         bytes.map_or_else(
             || Err(StoreError::code("credential_missing")),
-            SecretString::new,
+            SecretString::stored,
         )
     }
 
@@ -1165,150 +1168,5 @@ fn reply_headers_over_their_bounds_mint_no_handle() {
     );
 }
 
-#[test]
-fn a_captured_token_is_refused_at_a_listed_host_outside_its_set() {
-    let rig = Rig::new(&token_reply());
-    let secrets = rig.secrets();
-    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
-    let reply = requests
-        .request("github", get("https://github.com/login/oauth/access_token"))
-        .unwrap();
-    let held = reply.captured[0].secret;
-    let mut request = get("https://uploads.github.com/v1");
-    request.bearer = Some(held);
-    assert_eq!(
-        requests.request("github", request),
-        Err(StoreError::code("secret_handle_refused"))
-    );
-    let sends = rig.events().iter().filter(|event| *event == "send").count();
-    assert_eq!(sends, 1);
-}
-
-#[test]
-fn an_owner_paste_is_refused_at_a_host_the_owner_did_not_approve() {
-    let rig = Rig::new(b"{}");
-    let secrets = rig.secrets();
-    let token = secrets.put_from_owner("github", "token").unwrap();
-    rig.egress.events.lock().unwrap().clear();
-    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
-    let mut request = get("https://uploads.github.com/v1");
-    request.bearer = Some(token);
-    assert_eq!(
-        requests.request("github", request),
-        Err(StoreError::code("secret_handle_refused"))
-    );
-    let events = rig.events();
-    assert!(!events.contains(&"get".to_owned()), "{events:?}");
-    assert!(!events.contains(&"send".to_owned()), "{events:?}");
-}
-
-#[test]
-fn a_found_name_without_a_declared_keep_as_cannot_be_sent() {
-    let rig = Rig::new(&token_reply());
-    let secrets = rig.secrets();
-    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
-    let mut request = get("https://github.com/login/oauth/access_token");
-    request.capture = vec![capture("access_token", Some("token"))];
-    requests.request("github", request).unwrap();
-    let later = Mutex::new(Handles::new());
-    let next = Secrets::for_request(&rig.store, NAMESPACE, &rig.scopes, &later, None);
-    let found = next.find("github", "token").unwrap().unwrap();
-    for host in ["github.com", "api.github.com"] {
-        assert_eq!(
-            next.value("github", found, host).map(|_| ()),
-            Err(StoreError::code("secret_handle_refused")),
-            "{host}"
-        );
-    }
-    assert_eq!(next.forget("github", found), Ok(()));
-}
-
-#[test]
-fn a_found_name_with_a_declared_keep_as_gets_its_rule_hosts() {
-    let mut rig = Rig::new(&token_reply());
-    rig.rules = CaptureRules::new(&[("github", "github.com", &["access_token"])])
-        .unwrap()
-        .with_sends(&[("github", "access_token", &["api.github.com"], Some("token"))])
-        .unwrap();
-    let secrets = rig.secrets();
-    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
-    let mut request = get("https://github.com/login/oauth/access_token");
-    request.capture = vec![capture("access_token", Some("token"))];
-    requests.request("github", request).unwrap();
-    let kept: KeptHosts = rig.rules.kept_hosts();
-    let later = Mutex::new(Handles::new());
-    let next =
-        Secrets::for_request(&rig.store, NAMESPACE, &rig.scopes, &later, None).with_kept(&kept);
-    let found = next.find("github", "token").unwrap().unwrap();
-    for host in ["github.com", "api.github.com"] {
-        assert_eq!(
-            next.value("github", found, host).unwrap().expose(),
-            CAPTURED,
-            "{host}"
-        );
-    }
-    assert_eq!(
-        next.value("github", found, "uploads.github.com")
-            .map(|_| ()),
-        Err(StoreError::code("secret_handle_refused"))
-    );
-}
-
-#[test]
-fn send_rules_refuse_an_uncaptured_field_a_bad_host_list_and_a_reused_keep_as() {
-    let invalid = Err(StoreError::code("net_capture_rules_invalid"));
-    let rules = || {
-        CaptureRules::new(&[("github", "github.com", &["access_token", "device_code"])]).unwrap()
-    };
-    let many: Vec<String> = (0..=SEND_HOSTS_MAX)
-        .map(|index| format!("h{index}.example"))
-        .collect();
-    let many: Vec<&str> = many.iter().map(String::as_str).collect();
-    for rows in [
-        vec![("github", "refresh_token", &["api.github.com"][..], None)],
-        vec![("github", "access_token", &[][..], None)],
-        vec![(
-            "github",
-            "access_token",
-            &["api.github.com", "api.github.com"][..],
-            None,
-        )],
-        vec![("github", "access_token", &many[..], None)],
-        vec![(
-            "github",
-            "access_token",
-            &["api.github.com"][..],
-            Some("Token"),
-        )],
-        vec![
-            (
-                "github",
-                "access_token",
-                &["api.github.com"][..],
-                Some("token"),
-            ),
-            (
-                "github",
-                "device_code",
-                &["api.github.com"][..],
-                Some("token"),
-            ),
-        ],
-        vec![
-            ("github", "access_token", &["api.github.com"][..], None),
-            ("github", "access_token", &["github.com"][..], None),
-        ],
-    ] {
-        assert_eq!(rules().with_sends(&rows).map(|_| ()), invalid, "{rows:?}");
-    }
-    assert!(
-        rules()
-            .with_sends(&[(
-                "github",
-                "access_token",
-                &many[..SEND_HOSTS_MAX],
-                Some("token")
-            )])
-            .is_ok()
-    );
-}
+#[path = "host_set_tests.rs"]
+mod host_set_tests;

@@ -1,7 +1,7 @@
 pub use crate::agent_home::Repeated;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use kernel_sandbox::paths::ASCII_FOLDS;
+use kernel_sandbox::paths::folded;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,13 +48,6 @@ const NAMES: [&str; 6] = [
 
 const CODEX_OVERRIDE: &str = "AGENTS.override.md";
 const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
-/// The code points a case-insensitive HFS+ volume ignores in names (git's
-/// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
-/// compare that must match such a volume leaves out (RV-DS241-148).
-pub(crate) const HFS_IGNORED: [char; 16] = [
-    '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
-    '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
-];
 
 /// The project's own instruction files an import copies into the project instructions and
 /// then moves aside, by their path inside the project folder.
@@ -590,30 +583,6 @@ pub fn badges(connection: &Connection, project: &ProjectId) -> rusqlite::Result<
     statement
         .query_map([project.as_str()], |row| row.get(0))?
         .collect()
-}
-
-/// Tells whether a name opens one of `names` on a case-insensitive volume, compared as
-/// [`folded`] compares names, so `.GIT`, `\u{feff}.git` and `.g\u{131}t` all open `.git`
-/// (DS-148 F1). Inputs: the name and the plain names. Output: true for one.
-pub(crate) fn names_one_of(name: &str, names: &[&str]) -> bool {
-    let name = folded(name);
-    names.iter().any(|known| folded(known) == name)
-}
-
-/// Folds a file name the way case-insensitive volumes compare names, so a name such a
-/// volume opens as an instruction file matches it: the code points HFS+ ignores in names
-/// (git's `core.protectHFS` list) left out, each code point in [`ASCII_FOLDS`] spelled as
-/// its ASCII and ASCII letters put in lower case. Input: the name or path. Output: the
-/// folded text.
-fn folded(name: &str) -> String {
-    let mut text = String::with_capacity(name.len());
-    for point in name.chars().filter(|point| !HFS_IGNORED.contains(point)) {
-        match ASCII_FOLDS.iter().find(|(from, _)| *from == point) {
-            Some((_, ascii)) => text.push_str(ascii),
-            None => text.push(point.to_ascii_lowercase()),
-        }
-    }
-    text
 }
 
 /// Tells whether a path part opens a `.git` entry on a case-insensitive volume, compared as

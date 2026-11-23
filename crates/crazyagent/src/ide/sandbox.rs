@@ -1,10 +1,13 @@
 use crate::engine::EngineError;
-use crate::sandbox::policy::AgentFilesRule;
-use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, sbpl_overlong, seatbelt_pattern};
+use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::any_case;
 use kernel_sandbox::paths::at_or_below;
+use kernel_sandbox::policy::AgentFilesRule;
+use kernel_sandbox::profile::seatbelt::{
+    hfs_ignored_deny, regranted_denies, sbpl_overlong, seatbelt_pattern,
+};
+use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -52,7 +55,7 @@ pub fn qualified() -> bool {
 /// readable. On top, the whole engine data root is denied, then only the grants are given
 /// back, with the base
 /// write denies in `home` and the writable folders given again after them
-/// ([`crate::sandbox::regranted_denies`]), then every key
+/// ([`regranted_denies`]), then every key
 /// file directly in a folder of the data root (the owner keys) and the engine database are
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
@@ -60,11 +63,11 @@ pub fn qualified() -> bool {
 /// then the project's `.git/worktrees`, its agents' admin folders, for writing
 /// ([`agent_admin`]), then the owner's agent folders choice is held
 /// ([`AgentFilesRule::seatbelt`], DEC-124), then every path with a name HFS+ opens past a
-/// name deny ([`crate::sandbox::hfs_ignored_deny`]). The project's own git index and its
+/// name deny ([`hfs_ignored_deny`]). The project's own git index and its
 /// lock stay denied: the IDE stages on a private index
 /// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
-/// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
+/// reach what `network` allows ([`kernel_sandbox::policy::ide_network`]).
 /// On the open network it never binds or listens on `kept_ports`, the owner's local model
 /// ports. Inputs: the grants, the server port, the network, the ports kept and the agent
 /// folders rule. Output: the profile text, or `ide_sandbox_invalid` for an unsafe place.
@@ -114,12 +117,18 @@ pub fn profile(
         .ok_or_else(|| failure("ide_sandbox_invalid"))?;
     let homes = ToolHomes::owner().map_err(invalid)?;
     let closed = matches!(&network, SandboxNetwork::Only(remotes) if remotes.is_empty());
-    let sandbox = ProjectSandbox::new(grants.root, grants.home, grants.tmp, network)
-        .and_then(|sandbox| sandbox.keep_ports(kept_ports))
-        .and_then(|sandbox| sandbox.allow_read(grants.build))
-        .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
-        .map(ProjectSandbox::keep_owner_config)
-        .map_err(invalid)?;
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        grants.root,
+        grants.home,
+        grants.tmp,
+        network,
+    )
+    .and_then(|sandbox| sandbox.keep_ports(kept_ports))
+    .and_then(|sandbox| sandbox.allow_read(grants.build))
+    .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
+    .map(ProjectSandbox::keep_owner_config)
+    .map_err(invalid)?;
     let mut text = sandbox.profile();
     let base = text.len();
     text.push_str(&format!(
@@ -129,7 +138,7 @@ pub fn profile(
     for folder in std::iter::once(&grants.home).chain(grants.writable.iter()) {
         text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
     }
-    let regranted = crate::sandbox::regranted_denies(grants.home, grants.writable);
+    let regranted = regranted_denies(&crate::sandbox::PROFILE_HOOKS, grants.home, grants.writable);
     text.push_str(")\n");
     text.push_str(regranted.trim_end());
     if !grants.readable.is_empty() || !grants.read_only.is_empty() {
@@ -162,7 +171,7 @@ pub fn profile(
     text.push_str(&agent_config(grants.root));
     text.push_str(&agent_admin(grants.root));
     text.push_str(&agent_files.seatbelt(grants.root));
-    let ignored = crate::sandbox::hfs_ignored_deny();
+    let ignored = hfs_ignored_deny();
     text.push_str(&ignored);
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"

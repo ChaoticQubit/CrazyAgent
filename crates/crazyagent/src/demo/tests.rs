@@ -400,7 +400,7 @@ fn a_goal_typed_into_the_live_master_terminal_ticks_goal_sent_but_engine_words_a
 
 #[test]
 fn a_demo_that_would_start_wider_than_sandboxed_stops_at_the_assertion() {
-    use crate::sandbox::policy::{AccessGrant, AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AccessGrant, AgentAccess, AgentPolicy};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let temp = tempfile::tempdir().unwrap();
     let db = database(temp.path());
@@ -412,22 +412,22 @@ fn a_demo_that_would_start_wider_than_sandboxed_stops_at_the_assertion() {
             access,
             ..AgentPolicy::default()
         };
-        crate::sandbox::policy::save(&db, PROJECT_ID, &policy).unwrap();
+        crate::sandbox::policy_store::save(&db, PROJECT_ID, &policy).unwrap();
         assert!(trips(), "{access:?}");
     }
     let granted = AgentPolicy {
         grants: vec![AccessGrant::TempFolder],
         ..AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&db, PROJECT_ID, &granted).unwrap();
+    crate::sandbox::policy_store::save(&db, PROJECT_ID, &granted).unwrap();
     assert!(trips(), "a grant");
-    crate::sandbox::policy::save(&db, PROJECT_ID, &AgentPolicy::default()).unwrap();
+    crate::sandbox::policy_store::save(&db, PROJECT_ID, &AgentPolicy::default()).unwrap();
     assert_confined(&db, &id).unwrap();
     let folder = [std::path::PathBuf::from("/Users/owner/notes")];
-    crate::sandbox::extra_paths::save(&db, PROJECT_ID, &folder).unwrap();
+    crate::sandbox::access_store::read::save(&db, PROJECT_ID, &folder).unwrap();
     assert!(trips(), "a read folder");
-    crate::sandbox::extra_paths::save(&db, PROJECT_ID, &[]).unwrap();
-    crate::sandbox::hidden_paths::save(&db, PROJECT_ID, &folder).unwrap();
+    crate::sandbox::access_store::read::save(&db, PROJECT_ID, &[]).unwrap();
+    crate::sandbox::access_store::hidden::save(&db, PROJECT_ID, &folder).unwrap();
     assert!(trips(), "a hidden folder");
 }
 

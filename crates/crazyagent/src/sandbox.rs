@@ -1,14 +1,27 @@
+use kernel_sandbox::access::AccessHooks;
 use kernel_sandbox::elf;
 use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::grants::GrantHooks;
+use kernel_sandbox::hidden_paths::HIDDEN_MAX;
+use kernel_sandbox::host::LinuxHost;
 use kernel_sandbox::lines::*;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{
-    PATH_BYTES_MAX, SYSTEM_SECRET_PATHS, any_case, at_or_below, canonical, clean_absolute,
-    clear_of_secrets, fold_case, granted_root, owner_home, owner_secret_paths, owner_secrets,
-    plain_top, regex_escape,
+    any_case, at_or_below, canonical, clean_absolute, clear_of_secrets, fold_case, granted_root,
+    owner_home, owner_secrets, plain_top, regex_escape,
 };
-use kernel_sandbox::ports::BRIDGE_PORT_MIN;
+use kernel_sandbox::policy::PolicyHooks;
+use kernel_sandbox::ports::{
+    BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
+};
+use kernel_sandbox::profile::ProfileHooks;
+use kernel_sandbox::profile::consts::*;
+use kernel_sandbox::profile::seatbelt::*;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
+#[cfg(target_os = "macos")]
+use kernel_sandbox::tool_cache::ToolCacheHooks;
+use kernel_sandbox::toolchains::ToolchainHooks;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 #[cfg(unix)]
@@ -20,29 +33,25 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-#[cfg(unix)]
-use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub mod extra_paths;
+pub mod access_store;
 #[cfg(all(test, target_os = "macos"))]
 mod git_deny_tests;
 pub mod grants;
-pub mod hidden_paths;
+pub mod grants_store;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(test)]
-mod low_ports_tests;
-pub mod model_proxy;
-pub mod policy;
+pub mod policy_store;
 pub mod shared_folders;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
 #[cfg(target_os = "macos")]
 pub mod tool_cache;
-pub mod toolchains;
+#[cfg(all(test, unix))]
+mod toolchains_tests;
 pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -114,32 +123,10 @@ pub fn starts_at_boundary(program: &OsStr) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        windows::helper_beside_engine().is_ok_and(|helper| program == helper.as_os_str())
+        kernel_sandbox::windows::helper_beside_engine()
+            .is_ok_and(|helper| program == helper.as_os_str())
     }
 }
-
-/// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
-/// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
-/// matches a local address by port only (`localhost` there matches every local address), so
-/// it cannot keep an agent's listener on loopback; it can keep these ports free.
-pub const OWNER_PORTS: [u16; 2] = [1455, 11434];
-const _: () = {
-    use kernel_processes::spawn_gate::LOW_PORTS;
-    use model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
-    assert!(*LOW_PORTS.start() > 1024 && *LOW_PORTS.end() < 30_000);
-    assert!(*LOW_PORTS.end() < PICKED_PORTS_START);
-    assert!(*LOW_PORTS.end() < *PROXY_PORTS.start());
-    let mut index = 0;
-    while index < OWNER_PORTS.len() {
-        let port = OWNER_PORTS[index];
-        assert!(port < *LOW_PORTS.start() || port > *LOW_PORTS.end());
-        index += 1;
-    }
-};
-
-/// The most ports of the owner's configured local model endpoints one tools-on sandbox keeps
-/// free beside [`OWNER_PORTS`], which bounds the profile's deny rules.
-pub const KEPT_PORTS_MAX: usize = 64;
 
 /// The loopback ports the owner's configured model endpoints listen on, which a tools-on
 /// agent must not bind before the owner's model server does. An endpoint URL that does not
@@ -187,220 +174,6 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
         .map_or_else(Vec::new, |access| owner_ports(&access)))
 }
 
-/// Why a sandbox with hidden folders does not start on Windows, nor one with kept-out paths
-/// or open tops on Linux or Windows: those boundaries cannot keep a path inside a granted
-/// root out of reach as Seatbelt does. Linux holds hidden folders on its bubblewrap
-/// backends and names its own refusals otherwise (`linux::HIDDEN_NEEDS_NAMESPACES`,
-/// `linux::HIDDEN_MOUNTED_AGAIN`).
-pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
-
-/// Whether this system's boundary cannot hold a hidden folder, so a sandbox with one does not
-/// start ([`HIDDEN_NEEDS_SEATBELT`]), a save that hides a folder is refused and neither app
-/// offers the setting (#590): true on Windows only. Linux holds them, and each launch there
-/// refuses with its own code where the host cannot (V244-FWD-V243-4).
-pub const HIDDEN_UNHELD: bool = cfg!(target_os = "windows");
-
-/// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
-/// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
-pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
-
-/// Why a sandbox that protects agent folders does not start on Linux or Windows: only
-/// Seatbelt holds the per-path rule, and no IDE sandbox runs there in V1 (DEC-124).
-pub const AGENT_FILES_NEED_SEATBELT: &str = "agent folder protection needs the macOS sandbox";
-
-/// Why a sandbox that opens shared project folders for writing does not start on Linux or
-/// Windows: only Seatbelt keeps secret files closed inside those folders (DEC-147.9).
-pub const SHARED_WRITES_NEED_SEATBELT: &str = "writable shared folders need the macOS sandbox";
-
-/// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
-pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
-
-/// The Linux helper's exit code when its call supervisor could not take back an entry a
-/// case-folding folder read as a held name, and so stopped the run (DEC-185 S2a, rv-sec3
-/// F1). The supervisor crate keeps its own copy, tied to this one in the Linux sandbox; 125
-/// is its other stops, and 126 and up are the shell's and the signals'.
-pub const HELD_NOT_PUT_BACK_EXIT: i32 = 122;
-
-/// What the engine shows for a Linux run that ended with [`HELD_NOT_PUT_BACK_EXIT`].
-pub const HELD_NOT_PUT_BACK: &str =
-    "The sandbox stopped this run: a protected name could not be put back";
-
-/// Tells why a harness ended when its sandbox stopped it. Only the Linux call supervisor
-/// ends a run with [`HELD_NOT_PUT_BACK_EXIT`], so the code means that on Linux alone.
-/// Inputs: the system's name, as `std::env::consts::OS` gives it, and the exit code.
-/// Output: the sentence to show, or none when the code is the harness's own.
-pub fn held_stop(os: &str, code: i32) -> Option<&'static str> {
-    (os == "linux" && code == HELD_NOT_PUT_BACK_EXIT).then_some(HELD_NOT_PUT_BACK)
-}
-
-/// The cause every master host gives a turn whose harness the Linux call supervisor stopped
-/// because it could not take back an entry read as a held name ([`held_stop`]); the engine
-/// names it `MasterReason::SandboxStopped`.
-pub const HELD_STOP_CAUSE: &str = "sandbox_held_not_put_back";
-
-const READ_ROOTS_MAX: usize = 16;
-/// The most folder links one sandbox makes readable by name beside its roots: the links
-/// its process is started through.
-const LINKS_MAX: usize = 4;
-const WORKTREES_MAX: usize = 8;
-/// The most folders one sandbox hides: every hidden folder a project saves
-/// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
-/// graph step's `.crazyagent/`, or a native lead's part of the relay mailbox and its own temp
-/// folder, which its teammates' sandbox hides.
-pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
-/// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
-/// git-ignored project paths (MAP-2). A project with more builds no graph.
-pub const KEPT_OUT_MAX: usize = 1024;
-/// The most top-level names a Chosen folders or None launch keeps open in the project
-/// folder: every present entry, the engine's names and the picked ones.
-pub const OPEN_TOPS_MAX: usize = 512;
-/// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
-/// attribute values are denied with every write, run, link and clone, while names, sizes
-/// and dates stay readable, so a tool that only stats such a path does not fail.
-const KEPT_OUT_DENY: &str =
-    "(deny file-read-data file-read-xattr file-write* process-exec file-link file-clone";
-/// The longest quoted string or regex, in raw bytes, Seatbelt's profile reader takes: one
-/// byte more fails the whole profile with `Error reading string`, whatever the bytes are
-/// (probe 2026-11-12: 1023 read, 1024 refused, backslashes and multibyte letters alike).
-pub(crate) const SBPL_STRING_MAX: usize = 1023;
-/// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
-const SOCKETS_MAX: usize = 2;
-/// The most exact Unix socket grants one agent holds, of every use together: a native lead's
-/// own tmux server, its caller socket and its teammates' tmux server.
-const SOCKET_GRANTS_MAX: usize = 4;
-/// The writes that move, remove, replace, re-permission or flag a folder's own node while
-/// its contents stay writable: every writable root, the scratch root and a native lead's
-/// home for its teammates. A flag such as `uchg` would freeze the folder for every other
-/// writer and for the engine (CTX-M1 r1).
-const FIXED_WRITES: &str =
-    "file-write-unlink file-write-create file-write-mode file-write-acl file-write-flags";
-/// The writes that move, remove, re-permission or flag a folder's own node but still let it
-/// be made where it is missing: an agent home's `skills` folder, which Codex makes in a fresh
-/// home for its own skills, while no folder built elsewhere replaces the one holding the
-/// engine's copies and no flag keeps the engine from removing what is in it (CTX-M1 r1).
-const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl file-write-flags";
-/// The folders of a Claude Code config home that its agent team shares, the members'
-/// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
-/// with no variable of their own, so a native lead's teammates write the lead's (TPH-2).
-pub const CLAUDE_TEAM_SHARED: [&str; 2] = ["teams", "tasks"];
-/// The Seatbelt pattern of a lock folder's path, `<file>.lock`: the only folder a teammate
-/// may still make in a shared team folder, where it may make no other folder or link.
-const LOCK_FOLDER: &str = r#"\.lock$"#;
-/// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
-const SOCKET_PATH_BYTES_MAX: usize = 103;
-const TOOL_ROOTS_MAX: usize = 24;
-const TOOL_FILES_MAX: usize = 5;
-const EXECS_MAX: usize = 4;
-const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
-const REMOTES_MAX: usize = 8;
-#[cfg(unix)]
-const PROFILE_BYTES_MAX: usize = 64 * 1024;
-const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
-
-const SYSTEM_READ_ROOTS: &[&str] = &[
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/System",
-    "/Library/Apple",
-    "/Library/Preferences",
-    "/Library/Developer/CommandLineTools",
-    "/private/etc",
-    "/private/var/db",
-    "/private/var/select",
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/opt/homebrew/lib",
-    "/opt/homebrew/libexec",
-    "/opt/homebrew/opt",
-    "/opt/homebrew/Cellar",
-    "/opt/homebrew/Caskroom",
-    "/opt/homebrew/share",
-    "/opt/homebrew/etc",
-    "/opt/homebrew/include",
-    "/usr/local/bin",
-    "/usr/local/lib",
-    "/usr/local/opt",
-    "/usr/local/Cellar",
-    "/usr/local/share",
-    "/usr/local/etc",
-    "/usr/local/include",
-];
-
-const METADATA_LITERALS: &[&str] = &[
-    "/",
-    "/etc",
-    "/var",
-    "/tmp",
-    "/private",
-    "/private/var",
-    "/opt",
-    "/opt/homebrew",
-    "/usr/local",
-    "/Library",
-    "/Library/Developer",
-];
-
-const MACH_SERVICES: &[&str] = &[
-    "com.apple.system.opendirectoryd.libinfo",
-    "com.apple.system.opendirectoryd.membership",
-    "com.apple.system.DirectoryService.libinfo_v1",
-    "com.apple.PowerManagement.control",
-    "com.apple.bsd.dirhelper",
-    "com.apple.system.logger",
-    "com.apple.logd",
-    "com.apple.diagnosticd",
-    "com.apple.system.notification_center",
-    "com.apple.trustd",
-    "com.apple.trustd.agent",
-    "com.apple.ocspd",
-    "com.apple.networkd",
-    "com.apple.SystemConfiguration.DNSConfiguration",
-    "com.apple.SystemConfiguration.configd",
-];
-
-const KEYCHAIN_SERVICES: &[&str] = &[
-    "com.apple.SecurityServer",
-    "com.apple.securityd",
-    "com.apple.securityd.xpc",
-    "com.apple.secd",
-    "com.apple.securityd.ckks",
-    "com.apple.securityd.sos",
-    "com.apple.security.agent",
-    "com.apple.security.agent.login",
-    "com.apple.security.authhost",
-    "com.apple.security.keychainsyncingoveridsproxy",
-    "com.apple.security.cloudkeychainproxy3",
-    "com.apple.security.keychain-circle-notification",
-];
-
-const CREDENTIAL_NAMES: &[&str] = &[
-    ".npmrc",
-    "etc/npmrc",
-    ".pypirc",
-    ".netrc",
-    ".git-credentials",
-    "credentials.toml",
-    ".ssh",
-    ".aws",
-    ".gnupg",
-    ".config/gcloud",
-    ".docker",
-    ".kube",
-    "pip.conf",
-    ".yarnrc.yml",
-];
-
-const ENGINE_SECRET_FILES: &[&str] = &[
-    "engine.db",
-    "engine.db-wal",
-    "engine.db-shm",
-    "engine.db-journal",
-    "owner.sock",
-    "github.json",
-    "github.toml",
-];
-
 const ENGINE_SECRET_FOLDERS: &[&str] = &[
     crate::terminal::FOLDER,
     crate::ide::FOLDER,
@@ -409,90 +182,6 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     #[cfg(unix)]
     kernel_storage::migrations::BACKUPS,
 ];
-
-const RUNTIME_ENTRIES_MAX: usize = 1024;
-
-const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY"];
-
-const AGENT_ENV_MAX: usize = 128;
-
-const REFUSED_VARIABLES: &[&str] = &[
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    "SSH_AUTH_SOCK",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "PERL5LIB",
-    "PERL5OPT",
-    "PERLLIB",
-    "PERL5DB",
-];
-
-const REFUSED_PREFIXES: &[&str] = &[
-    "GH_",
-    "GITHUB_",
-    "GIT_CONFIG_KEY_",
-    "GIT_CONFIG_VALUE_",
-    "AWS_",
-    "AZURE_",
-    "CRAZYAGENT_",
-];
-
-const REFUSED_SUFFIXES: &[&str] = &[
-    "_API_KEY",
-    "_TOKEN",
-    "_SECRET",
-    "_SECRET_KEY",
-    "_PASSWORD",
-    "_ACCESS_KEY",
-    "_CREDENTIALS",
-];
-
-/// The git settings every agent process gets, sandboxed or at Full access: no system git
-/// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no
-/// credential helper at all, no terminal prompt, and no bare repository found by
-/// discovery (`safe.bareRepository=explicit`, SR1-2), so a folder another agent laid out
-/// as one never runs its config, while `--git-dir` still opens it. They are set after the
-/// harness's own variables, so a harness cannot replace them.
-pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
-    ("GIT_CONFIG_NOSYSTEM", "1"),
-    ("GIT_TERMINAL_PROMPT", "0"),
-    ("GIT_CONFIG_COUNT", "2"),
-    ("GIT_CONFIG_KEY_0", "credential.helper"),
-    ("GIT_CONFIG_VALUE_0", ""),
-    ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
-    ("GIT_CONFIG_VALUE_1", "explicit"),
-];
-
-/// The settings every agent process gets, sandboxed or at Full access, that keep its tools
-/// from reading config an earlier run left in its home, which a launch resets
-/// (RV-DS241-137, sec r1 F1): no global git config, as the engine's own git runs, so a
-/// `.gitconfig` or `.config/git/config` there never runs its hooks or programs, no Python
-/// user site, so a `.pth` file or `usercustomize` module there never runs as Python starts,
-/// and no npm user config, so an `.npmrc` there never hands its `node-options` or
-/// `script-shell` to a script. They are set after the harness's own variables, so a harness
-/// cannot replace them, and never in the owner's IDE terminal, whose home is the owner's own
-/// and no launch resets ([`owner_terminal_env`], code r1 F3).
-pub const AGENT_HOME_ENV: [(&str, &str); 3] = [
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
-    ("PYTHONNOUSERSITE", "1"),
-    ("NPM_CONFIG_USERCONFIG", "/dev/null"),
-];
-
-/// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
-/// bundle, named in `SSL_CERT_FILE`. A harness that reads its roots from the keychain, as
-/// Codex does through rustls-native-certs, finds none there because every agent sandbox
-/// denies the keychain services, and fails every HTTPS request. Elsewhere the harness's
-/// own platform store is left as it is.
-#[cfg(target_os = "macos")]
-pub const AGENT_TLS_ENV: [(&str, &str); 1] = [("SSL_CERT_FILE", "/private/etc/ssl/cert.pem")];
-
-/// No fixed TLS setting outside macOS: the platform's own certificate store is reachable.
-#[cfg(not(target_os = "macos"))]
-pub const AGENT_TLS_ENV: [(&str, &str); 0] = [];
 
 /// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
@@ -520,7 +209,7 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 /// other owner processes can read, save a launch's own token in [`Handed`] names on macOS only
 /// (its profile denies those reads; Linux is refused). Inputs: name, value. Output: allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
-    let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
+    let token = kernel_common::relay_names::TOKEN_PREFIX.as_bytes();
     if value
         .as_encoded_bytes()
         .windows(token.len())
@@ -528,10 +217,10 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     {
         return false;
     }
-    if name == crate::harnesses::leftovers::LINEAGE_VARIABLE {
+    if name == kernel_sandbox::profile::env::LINEAGE_VARIABLE {
         return value
             .to_str()
-            .is_some_and(crate::harnesses::leftovers::LineageToken::valid);
+            .is_some_and(kernel_sandbox::profile::env::LineageToken::valid);
     }
     if AGENT_GIT_ENV
         .iter()
@@ -544,7 +233,7 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
         .to_str()
         .is_some_and(|name| AGENT_KEY_VARIABLES.contains(&name))
     {
-        return value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        return value == kernel_common::relay_names::LOCAL_PLACEHOLDER;
     }
     !agent_env_refused(name)
 }
@@ -587,8 +276,8 @@ impl<'a> Handed<'a> {
     /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
     /// nor the keyless placeholder, a name refused for more than a key suffix, and off macOS.
     pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
-        let handed = crate::model_gateway::relay::is_relay_token(value)
-            || value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        let handed = kernel_common::relay_names::is_relay_token(value)
+            || value == kernel_common::relay_names::LOCAL_PLACEHOLDER;
         if !cfg!(target_os = "macos") || !handed {
             return Err(invalid("a launch hands only its own relay token"));
         }
@@ -602,7 +291,7 @@ impl<'a> Handed<'a> {
         if names.iter().any(other) {
             return Err(invalid("a launch hands its value only under a key name"));
         }
-        assert!(crate::model_gateway::relay::is_placeholder(value));
+        assert!(kernel_common::relay_names::is_placeholder(value));
         Ok(Self { names, value })
     }
 
@@ -975,9 +664,6 @@ pub fn agent_command<'a>(
     windows::agent_command(profile, program, base, harness)
 }
 
-/// The engine refusal code of a Linux launch the strict setting refuses ([`LinuxStrict`]).
-pub const LINUX_NOT_FULL: &str = "linux_sandbox_not_full";
-
 /// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
 /// (the nested backend), the call supervisor running, and its network limits held, so none
 /// of the gap lines would show for it. An open network has no limit to hold; a limited one
@@ -1008,18 +694,6 @@ pub fn linux_holds_fully(
     })
 }
 
-/// The engine refusal code of a Linux launch whose project hides folders on a computer
-/// where bubblewrap cannot start agents in namespaces of their own.
-pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
-
-/// The engine refusal code of a Linux launch whose project hides a folder that this
-/// computer mounts a second time where it shows that folder.
-pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
-
-/// The engine refusal code of a Linux launch whose project hides folders on a computer
-/// where the sandbox helper cannot cut the agent's mounts off from this computer's.
-pub const LINUX_HIDDEN_MOUNTS_NOT_PRIVATE: &str = "linux_hidden_mounts_not_private";
-
 /// The code a launch refusal has of its own, so a caller shows its plain line: the strict
 /// setting's ([`LINUX_NOT_FULL`]), the Windows loopback's
 /// ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]) and, on Linux, the hidden folders' three
@@ -1042,88 +716,6 @@ pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
     }
 }
 
-/// The launch refusal when the Linux sockets setting starts no limited-network agent.
-pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
-
-/// Why a sandbox with an open network does not start on a Linux that cannot keep ports
-/// free. Only Landlock network rules (Linux 6.7 or newer) keep an agent's listeners off the
-/// owner's fixed ports, the kept local model ports and the model proxy ports; without them
-/// the launch is refused instead of started unprotected (DEC-137 addendum 2).
-pub const LINUX_OPEN_NETWORK_NEEDS_LANDLOCK: &str = "keeping the owner's ports free of an \
-     open-network agent needs Landlock network rules (Linux 6.7 or newer)";
-
-/// The launch refusal when, under `TcpOnly`, a harness that looks host names up is not a
-/// glibc program: only glibc's resolver asks over TCP, so it could not reach its model.
-pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
-
-/// The launch refusal when, under `TcpOnly`, a harness that looks host names up is a script
-/// whose interpreter cannot be checked ([`elf::Lookup::Unjudged`]), such as a script that
-/// runs another script: the check follows a `#!` line one level only and never guesses.
-pub const LINUX_HARNESS_UNCHECKED: &str = "linux_harness_unchecked";
-
-/// The `.git` folders whose contents the owner's git reads and runs: hook scripts, rebase
-/// and sequencer plans, and remote and branch definitions. No macOS or Linux agent writes
-/// in them: Seatbelt denies each with everything below it, and Linux never grants one
-/// (RV-DS241-85).
-pub const GIT_STATE_TREES: [&str; 6] = [
-    "hooks",
-    "rebase-merge",
-    "rebase-apply",
-    "remotes",
-    "branches",
-    "sequencer",
-];
-
-/// The single `.git` files no macOS or Linux agent writes: the config, the index, their
-/// locks, and the links git follows to a common dir or a worktree config. Seatbelt denies
-/// each by name and Linux never grants one (RV-DS241-85).
-pub const GIT_STATE_FILES: [&str; 6] = [
-    "config",
-    "config.lock",
-    "index",
-    "index.lock",
-    "commondir",
-    "config.worktree",
-];
-
-/// The links in a linked worktree's admin folder that tie it to the project and to its
-/// worktree: no confined agent rewrites, removes or relinks one. Seatbelt denies each by
-/// name, letting a worktree-adding profile create one, and the Linux call supervisor holds
-/// each (DEC-185 S2a).
-pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
-
-/// The files in a linked worktree's admin folder no confined agent writes: the branch it
-/// stands on and the config git reads for that worktree alone. Seatbelt denies each by name
-/// and the Linux call supervisor holds each (DEC-185 S2a).
-pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
-
-/// The files in an object store's `info` folder that send git to another store: no
-/// confined agent writes one. Seatbelt denies each by name in the project's store, the
-/// store its checkout shares and a clone's own, and the Linux call supervisor holds each
-/// in a clone (DEC-185 S2b).
-pub const STORE_ALTERNATES: [&str; 2] = ["alternates", "http-alternates"];
-
-/// The repository git serves beside a clone's git folder when that folder fails git's
-/// repository test (RL-1): nothing is made there. Seatbelt denies it by name and the Linux
-/// call supervisor holds it whole (DEC-185 S2b).
-pub const GIT_FALLBACK: &str = ".git.git";
-
-/// The pack folder's multi-pack-index, which can name a pack outside the store (RL-2): no
-/// confined agent makes one. Seatbelt denies every name it begins, and the Linux call
-/// supervisor holds the file and its `.d` chain folder, the two names git reads
-/// (DEC-185 S2b).
-pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
-
-/// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
-/// computer's network on a Linux that could give them one of their own: on the project's
-/// Agent access page and in the agent's messages at its launch. Input: the port. Output:
-/// the sentences, the port named.
-pub fn linux_unbridged_line(port: u16) -> String {
-    format!(
-        "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
-    )
-}
-
 /// What a launch tells the owner in the agent's messages when a Linux that nests agents
 /// still leaves it on this computer's network: for an agent that could have a network of
 /// its own ([`ProjectSandbox::routed`]) on a host that does not route, [`LINUX_UNROUTED_LINE`]
@@ -1133,7 +725,7 @@ pub fn linux_unbridged_line(port: u16) -> String {
 /// the network choice, the sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
     host: Option<LinuxHost>,
-    choice: policy::AgentNetwork,
+    choice: kernel_sandbox::policy::AgentNetwork,
     sandbox: &ProjectSandbox,
 ) -> Option<String> {
     let host = host.filter(|host| host.nested)?;
@@ -1173,7 +765,8 @@ pub fn linux_unbridged_notice_on(
         assert!(port < BRIDGE_PORT_MIN);
         return Some(linux_unbridged_line(port));
     }
-    let unsaid = choice == policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
+    let unsaid =
+        choice == kernel_sandbox::policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
     (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
 }
 
@@ -1182,29 +775,12 @@ pub fn linux_unbridged_notice_on(
 /// the agent's sandbox as launched and the setting, none when it cannot be read, which
 /// counts as no supervisor. Output: the sentences, or none.
 pub fn linux_unbridged_notice(
-    choice: policy::AgentNetwork,
+    choice: kernel_sandbox::policy::AgentNetwork,
     sandbox: &ProjectSandbox,
     calls: Option<LinuxSupervisor>,
 ) -> Option<String> {
     let host = linux_host_kept().map(|host| host.under(calls));
     linux_unbridged_notice_on(host, choice, sandbox)
-}
-
-/// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
-/// when it starts agents in a process namespace of their own, `scoped` when the kernel
-/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
-/// `supervised` when the call supervisor holds every guard here, as launches start it,
-/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1),
-/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3), and
-/// `routed` when it gives an agent limited to ports on any host a network of its own (SBX-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LinuxHost {
-    pub nested: bool,
-    pub scoped: bool,
-    pub supervised: bool,
-    pub root: bool,
-    pub armored: bool,
-    pub routed: bool,
 }
 
 /// The network a Linux that nests agents gives one limited to ports on any host
@@ -1215,24 +791,6 @@ pub struct LinuxHost {
 pub struct Routed {
     pub any: Vec<u16>,
     pub bridged: Vec<u16>,
-}
-
-impl LinuxHost {
-    /// What this Linux holds under the owner's Linux call supervisor setting: supervised
-    /// only while it is On, and run as root only while it is not Off, so the root line says
-    /// why no supervisor runs. Input: the setting, none when it cannot be read, which shows
-    /// every line. Output: the facts the access lines read; what is kept is never changed.
-    pub fn under(self, calls: Option<LinuxSupervisor>) -> Self {
-        assert!(!(self.root && self.supervised));
-        let held = Self {
-            supervised: self.supervised && calls == Some(LinuxSupervisor::On),
-            root: self.root && calls != Some(LinuxSupervisor::Off),
-            ..self
-        };
-        assert!(self.supervised || !held.supervised);
-        assert!(!(held.root && held.supervised));
-        held
-    }
 }
 
 /// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
@@ -1264,6 +822,171 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
     }
 }
 
+/// The engine's real agent policy hooks, the only [`PolicyHooks`] production code passes:
+/// this Linux read again ([`linux_host`]) and as last kept ([`linux_host_kept`]), the
+/// bounded read for another repository ([`linux_other_git`]) and a project's local folders
+/// ([`access_local_folders`]).
+pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
+    linux_host,
+    linux_host_kept,
+    linux_other_git,
+    local_folders: access_local_folders,
+};
+
+/// A project's top-level folders the owner may pick for Chosen folders, as
+/// [`kernel_sandbox::shared_folders::local_folders`] reads them with the engine's [`ACCESS_HOOKS`].
+/// Input: the project folder. Output: the names.
+fn access_local_folders(root: &Path) -> Vec<String> {
+    kernel_sandbox::shared_folders::local_folders(&ACCESS_HOOKS, root)
+}
+
+/// The engine's real project access hooks, the only [`AccessHooks`] production code passes:
+/// the owner's git for a project folder ([`access_owner_git`]), the harness folders
+/// ([`harness_folders`]), a project's state folder and the paths git leaves untracked
+/// ([`access_untracked`]).
+pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
+    owner_git: access_owner_git,
+    harness_folders,
+    state_folder: crate::projects_home::state_folder,
+    untracked: access_untracked,
+};
+
+/// The engine's real profile hooks, the only [`ProfileHooks`] production code passes: its
+/// access and toolchain hooks, and the engine's own folder and file names, agent home lists
+/// and checks the Seatbelt rules name.
+pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
+    access: &ACCESS_HOOKS,
+    toolchain: &TOOLCHAIN_HOOKS,
+    linked_prefix: crate::agent_git::LINKED_PREFIX,
+    teammates_folder: crate::agent_git::TEAMMATES_FOLDER,
+    is_agent_branch: crate::agent_git::is_agent_branch,
+    #[cfg(unix)]
+    claude_bash_preludes: &crate::agent_home::CLAUDE_BASH_PRELUDES,
+    project_file: crate::agent_home::PROJECT_FILE,
+    claude_instruction_file: crate::agent_home::Harness::Claude.instruction_file(),
+    codex_instruction_file: crate::agent_home::Harness::Codex.instruction_file(),
+    zsh_startup: &crate::agent_home::ZSH_STARTUP,
+    zsh_compiled: crate::agent_home::ZSH_COMPILED,
+    sh_startup: &crate::agent_home::SH_STARTUP,
+    pinned_entries: crate::agent_home::pinned_entries,
+    kept_entries: crate::agent_home::kept_entries,
+    relay_lead_part: crate::coord::relay::LEAD_PART,
+    relay_plugin_folder: crate::coord::relay::PLUGIN_FOLDER,
+    relay_roster_file: crate::coord::relay::ROSTER_FILE,
+    configured_sdk_homes_folder: crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
+    native_profiles_folder: crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
+    #[cfg(unix)]
+    listed_slot_key: crate::engine::bootstrap::listed_slot_key,
+    #[cfg(unix)]
+    holds_no_sign_in: profile_holds_no_sign_in,
+    in_crazyagent_folder: crate::harnesses::in_crazyagent_folder,
+    node_prefix: crate::harnesses::node_prefix,
+    launch_state: crate::launch_context::STATE,
+    launch_lock: crate::launch_context::LOCK,
+    codex_system_skills: crate::launch_context::CODEX_SYSTEM_SKILLS,
+    crazyagent_directory: crate::projects_home::CRAZYAGENT_DIRECTORY,
+    #[cfg(unix)]
+    binding_path: crate::team::caller::binding_path,
+    mailbox_folder: crate::team::tool::MAILBOX_FOLDER,
+    reply_suffix: crate::team::tool::REPLY_SUFFIX,
+    answer_part_suffix: crate::team::tool::ANSWER_PART_SUFFIX,
+    key_folders: &crate::storage::accounts::KEY_FOLDERS,
+    engine_secret_folders: ENGINE_SECRET_FOLDERS,
+};
+
+/// Tells whether a folder holds no sign-in's record, as a listed master session's slot home
+/// must. Input: the folder. Output: the answer.
+#[cfg(unix)]
+fn profile_holds_no_sign_in(folder: &Path) -> bool {
+    crate::harnesses::launch::holds_no_sign_in(folder).is_ok()
+}
+
+/// The engine's real grant hooks, the only [`GrantHooks`] production code passes: the
+/// harness folders ([`harness_folders`]) and the IDE ports the engine recorded
+/// ([`grants::ide_ports`]).
+pub const GRANT_HOOKS: GrantHooks = GrantHooks {
+    harness_folders,
+    ide_ports: grants::ide_ports,
+};
+
+/// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code
+/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`], the real git
+/// the research runner resolved, a native lead's teammates' home, the launch folder's
+/// engine folder name and the agent tree removal of [`toolchain_remove_agent_tree`].
+pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
+    #[cfg(unix)]
+    remove_home_entry: toolchain_remove_home_entry,
+    #[cfg(unix)]
+    sandboxed_git: crate::research::runner::sandboxed_git,
+    mates_home: crate::launch_context::mates_home,
+    launch_state: crate::launch_context::STATE,
+    remove_agent_tree: toolchain_remove_agent_tree,
+};
+
+/// The tool cache hooks the engine passes: the pinning flag clearing of
+/// [`tool_cache_unpin`], the agent tree removal of [`toolchain_remove_agent_tree`] and the
+/// engine's priming process.
+#[cfg(target_os = "macos")]
+pub const TOOL_CACHE_HOOKS: ToolCacheHooks = ToolCacheHooks {
+    unpin: tool_cache_unpin,
+    remove_agent_tree: toolchain_remove_agent_tree,
+    priming_command: tool_cache::priming_command,
+};
+
+/// Clears the pinning flags an agent may set on an entry as Clean up does. Inputs: the open
+/// parent and the entry's name. Output: none.
+#[cfg(target_os = "macos")]
+fn tool_cache_unpin(parent: std::os::fd::BorrowedFd<'_>, name: &str) {
+    crate::team::cleanup::unpin(parent, name);
+}
+
+/// Removes a folder an agent wrote as Clean up removes an agent's tree, with the engine's
+/// refusal text as the error. Input: the folder. Output: done, or the error.
+fn toolchain_remove_agent_tree(folder: &Path) -> std::io::Result<()> {
+    crate::team::cleanup::remove_agent_tree(folder).map_err(|error| std::io::Error::other(error.0))
+}
+
+/// Removes one entry of an agent's own cargo home as the engine's home cleanup does, with
+/// its walk budget code kept and every other refusal given as `otherwise`. Inputs: the open
+/// cargo home, the entry name and the fallback code. Output: done, or the refusal code.
+#[cfg(unix)]
+fn toolchain_remove_home_entry(
+    folder: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    otherwise: &'static str,
+) -> Result<(), &'static str> {
+    crate::team::cleanup::remove_home_entry(folder, name)
+        .map_err(|problem| crate::team::cleanup::home_code(&problem, otherwise))
+}
+
+/// The paths git leaves untracked in the project folder `root`, as the shared folders plan
+/// reads them: what the onboarding draft lists on Unix, none elsewhere. Input: the folder.
+/// Output: the paths, or `None` when they cannot be listed.
+#[cfg(unix)]
+fn access_untracked(root: &Path) -> Option<Vec<String>> {
+    crate::onboarding::draft::untracked(root)
+}
+
+/// The paths git leaves untracked in the project folder, which no system but Unix lists for
+/// the shared folders plan. Input: the folder. Output: always `None`.
+#[cfg(not(unix))]
+fn access_untracked(_root: &Path) -> Option<Vec<String>> {
+    None
+}
+
+/// The owner's git for the project folder `root` as the access lists run it, with the
+/// engine's own git when it has one. Input: the canonical project folder. Output: the
+/// command, `Ok(None)` when the folder holds no repository, or `Err(())` when the owner's
+/// git is refused or unavailable.
+fn access_owner_git(root: &Path) -> Result<Option<std::process::Command>, ()> {
+    use crate::project_files::NoOwnerGit;
+    match crate::project_files::owner_git(root, crate::project_files::engine_git()) {
+        Ok(command) => Ok(Some(command)),
+        Err(NoOwnerGit::Absent) => Ok(None),
+        Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => Err(()),
+    }
+}
+
 /// Tells whether a project may hold a git repository besides its own top-level `.git`,
 /// which an agent may still change under the call supervisor: on Linux what a bounded read
 /// of the folder finds; elsewhere yes, where no Linux line shows. Input: the project
@@ -1287,6 +1010,7 @@ pub fn linux_other_git(project: &Path) -> bool {
 /// those roots, and network per [`SandboxNetwork`].
 #[derive(Debug, Clone)]
 pub struct ProjectSandbox {
+    hooks: &'static ProfileHooks,
     project_root: PathBuf,
     agent_home: PathBuf,
     agent_tmp: PathBuf,
@@ -1321,7 +1045,7 @@ pub struct ProjectSandbox {
     tool_cache: Option<(PathBuf, bool)>,
     lead_branch: Option<String>,
     adds_worktrees: bool,
-    agent_files: Option<policy::AgentFilesRule>,
+    agent_files: Option<kernel_sandbox::policy::AgentFilesRule>,
     granted: Vec<PathBuf>,
     owner_tmp: Option<PathBuf>,
     project_secrets: Option<PathBuf>,
@@ -1359,15 +1083,17 @@ impl ProjectSandbox {
     /// owner's home, do not sit inside a harness's own folder there, and neither hold nor
     /// sit inside an owner or system secret path. Output: the sandbox, or `Invalid`.
     pub fn new(
+        hooks: &'static ProfileHooks,
         project_root: &Path,
         agent_home: &Path,
         agent_tmp: &Path,
         network: SandboxNetwork,
     ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
-        let secrets: Vec<PathBuf> = owner_secrets(&owner, &harness_folders()).collect();
+        let secrets: Vec<PathBuf> =
+            owner_secrets(&owner, &(hooks.access.harness_folders)()).collect();
         for root in [project_root, agent_home, agent_tmp] {
-            granted_root(root, &owner, &secrets, &harness_folders())?;
+            granted_root(root, &owner, &secrets, &(hooks.access.harness_folders)())?;
         }
         if let SandboxNetwork::Only(remotes) = &network
             && (remotes.len() > REMOTES_MAX
@@ -1378,6 +1104,7 @@ impl ProjectSandbox {
             return Err(invalid("network remotes must be 1..8 nonzero ports"));
         }
         Ok(Self {
+            hooks,
             project_root: project_root.to_path_buf(),
             agent_home: agent_home.to_path_buf(),
             agent_tmp: agent_tmp.to_path_buf(),
@@ -1433,14 +1160,14 @@ impl ProjectSandbox {
     /// limited (an open network reaches it already); and the temp folder grant as the
     /// owner's private temp folder, written as a root and handed over as `TMPDIR`, with every
     /// socket node in it kept unwritable. Inputs: the saved grants and the owner's temp
-    /// folder as [`grants::owner_temp_folder`] gives it, none when it cannot be given.
+    /// folder as [`kernel_sandbox::grants::owner_temp_folder`] gives it, none when it cannot be given.
     /// Output: the widened sandbox, or `Invalid`; sockets and the temp folder need Seatbelt.
     pub fn grant_access(
         mut self,
-        grants: &[policy::AccessGrant],
+        grants: &[kernel_sandbox::policy::AccessGrant],
         owner_tmp: Option<&Path>,
     ) -> Result<Self, SandboxError> {
-        if grants.len() > policy::GRANTS_MAX {
+        if grants.len() > kernel_sandbox::policy::GRANTS_MAX {
             return Err(invalid("too many access grants"));
         }
         for grant in grants {
@@ -1448,7 +1175,7 @@ impl ProjectSandbox {
                 return Err(invalid("an access grant is not plain"));
             }
             match grant {
-                policy::AccessGrant::Socket { path } => {
+                kernel_sandbox::policy::AccessGrant::Socket { path } => {
                     if !cfg!(target_os = "macos") {
                         return Err(invalid("unix socket grants need Seatbelt"));
                     }
@@ -1463,13 +1190,15 @@ impl ProjectSandbox {
                         .chain(&self.shut)
                         .chain(&self.granted)
                         .any(|socket| socket == path);
-                    if folder.is_none() || known || self.granted.len() >= policy::GRANT_SOCKETS_MAX
+                    if folder.is_none()
+                        || known
+                        || self.granted.len() >= kernel_sandbox::policy::GRANT_SOCKETS_MAX
                     {
                         return Err(invalid("a socket grant cannot be held"));
                     }
                     self.granted.push(path.clone());
                 }
-                policy::AccessGrant::Port { port } => {
+                kernel_sandbox::policy::AccessGrant::Port { port } => {
                     if let SandboxNetwork::Only(remotes) = &mut self.network {
                         let remote = SandboxRemote::Loopback(*port);
                         if !remotes.contains(&remote) {
@@ -1480,21 +1209,27 @@ impl ProjectSandbox {
                         }
                     }
                 }
-                policy::AccessGrant::TempFolder => {
+                kernel_sandbox::policy::AccessGrant::TempFolder => {
                     if !cfg!(target_os = "macos") {
                         return Err(invalid("the temp folder grant needs Seatbelt"));
                     }
                     let tmp = owner_tmp
                         .ok_or_else(|| invalid("the owner's temp folder cannot be given"))?;
                     let owner = owner_home()?;
-                    let secrets: Vec<PathBuf> = owner_secrets(&owner, &harness_folders()).collect();
-                    granted_root(tmp, &owner, &secrets, &harness_folders())?;
+                    let secrets: Vec<PathBuf> =
+                        owner_secrets(&owner, &(self.hooks.access.harness_folders)()).collect();
+                    granted_root(
+                        tmp,
+                        &owner,
+                        &secrets,
+                        &(self.hooks.access.harness_folders)(),
+                    )?;
                     clear_of_secrets(tmp, &self.engine_secrets)?;
                     self.owner_tmp = Some(tmp.to_path_buf());
                 }
             }
         }
-        assert!(self.granted.len() <= policy::GRANT_SOCKETS_MAX);
+        assert!(self.granted.len() <= kernel_sandbox::policy::GRANT_SOCKETS_MAX);
         Ok(self)
     }
 
@@ -1639,7 +1374,7 @@ impl ProjectSandbox {
         if !clean_absolute(&runtime) || !runtime.is_dir() {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
-        let secrets = engine_secrets_in(&runtime)?;
+        let secrets = engine_secrets_in(self.hooks, &runtime)?;
         for root in self
             .writable_roots()
             .chain(self.read_roots.iter())
@@ -1675,9 +1410,9 @@ impl ProjectSandbox {
                 "engine root must be the existing folder around the runtime",
             ));
         }
-        let carved = carved_folder(&engine, &self.agent_home)
+        let carved = carved_folder(self.hooks, &engine, &self.agent_home)
             .map(|folder| (self.agent_home.clone(), folder));
-        let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
+        let secrets: Vec<PathBuf> = engine_secrets_in(self.hooks, &engine)?
             .into_iter()
             .filter(|secret| *secret != runtime)
             .collect();
@@ -1721,7 +1456,8 @@ impl ProjectSandbox {
     /// it: the owner's Keychains, SSH, GPG, cloud, gh, git, Codex and Claude credentials,
     /// the system Keychains and, once guarded, the engine runtime's secrets.
     pub fn secret_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = owner_secrets(&self.owner_home, &harness_folders()).collect();
+        let mut paths: Vec<PathBuf> =
+            owner_secrets(&self.owner_home, &(self.hooks.access.harness_folders)()).collect();
         paths.extend(self.engine_secrets.iter().cloned());
         paths
     }
@@ -1738,7 +1474,7 @@ impl ProjectSandbox {
             worktree,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
@@ -1769,7 +1505,7 @@ impl ProjectSandbox {
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        let worktrees = (self.hooks.access.state_folder)(&self.project_root).join("worktrees");
         if !clean_absolute(worktree)
             || worktree.parent() != Some(worktrees.as_path())
             || canonical(worktree)? != worktree
@@ -1830,7 +1566,7 @@ impl ProjectSandbox {
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        let worktrees = (self.hooks.access.state_folder)(&self.project_root).join("worktrees");
         if !clean_absolute(worktree)
             || worktree.parent() != Some(worktrees.as_path())
             || canonical(worktree)? != worktree
@@ -1862,7 +1598,7 @@ impl ProjectSandbox {
                 "only a clone lead's sandbox names its branch, once",
             ));
         }
-        if !crate::agent_git::is_agent_branch(branch) {
+        if !(self.hooks.is_agent_branch)(branch) {
             return Err(invalid("the lead's branch must be an agent branch"));
         }
         self.lead_branch = Some(branch.to_owned());
@@ -1886,13 +1622,13 @@ impl ProjectSandbox {
         if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
         }
-        if !crate::agent_git::is_agent_branch(branch) {
+        if !(self.hooks.is_agent_branch)(branch) {
             return Err(invalid("the lead's branch must be an agent branch"));
         }
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        let worktrees = (self.hooks.access.state_folder)(&self.project_root).join("worktrees");
         if !clean_absolute(worktree)
             || worktree.parent() != Some(worktrees.as_path())
             || canonical(worktree)? != worktree
@@ -1908,7 +1644,7 @@ impl ProjectSandbox {
                 "the lead's worktree must be a linked worktree of the project",
             ));
         }
-        let folder = worktree.join(crate::agent_git::TEAMMATES_FOLDER);
+        let folder = worktree.join(self.hooks.teammates_folder);
         ensure_store(&folder).map_err(|problem| match problem.kind() {
             io::ErrorKind::InvalidData => invalid("the teammates' folder must be a plain folder"),
             _ => SandboxError::Io(problem),
@@ -1942,7 +1678,7 @@ impl ProjectSandbox {
             root,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.read_roots.push(root.to_path_buf());
         Ok(self)
@@ -1954,7 +1690,7 @@ impl ProjectSandbox {
     /// below each folder, and `bin` goes first on PATH; a prefix or node in the project or
     /// agent-writable is skipped. Input: the canonical program. Output: the sandbox, or a refusal.
     pub fn allow_node_for(mut self, program: &Path) -> Result<Self, SandboxError> {
-        let Some(prefix) = crate::harnesses::node_prefix(program) else {
+        let Some(prefix) = (self.hooks.node_prefix)(program) else {
             return Ok(self);
         };
         let Some(package) = node_package(&prefix, program) else {
@@ -1963,7 +1699,7 @@ impl ProjectSandbox {
         let folders = [canonical(&prefix.join("bin"))?, canonical(&package)?];
         let node = canonical(&prefix.join("bin").join("node"))?;
         let agents = folders.iter().chain([&node]).any(|path| {
-            crate::harnesses::in_crazyagent_folder(path)
+            (self.hooks.in_crazyagent_folder)(path)
                 || path.starts_with(&self.project_root)
                 || self
                     .writable_roots()
@@ -2000,7 +1736,7 @@ impl ProjectSandbox {
                 .parent()
                 .map(Path::to_path_buf)
                 .ok_or_else(|| invalid("an interpreter must sit in a folder"))?;
-            let agents = crate::harnesses::in_crazyagent_folder(&folder)
+            let agents = (self.hooks.in_crazyagent_folder)(&folder)
                 || folder.starts_with(&self.project_root)
                 || self
                     .writable_roots()
@@ -2073,7 +1809,7 @@ impl ProjectSandbox {
             folder,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.tool_roots.push(folder.to_path_buf());
         assert!(self.tool_roots.len() <= TOOL_ROOTS_MAX);
@@ -2154,12 +1890,15 @@ impl ProjectSandbox {
         self.allow_read(folder)?.allow_exec(engine)
     }
 
-    /// Grants a project's toolchains read-only (see [`toolchains::Toolchains::detect`]):
+    /// Grants a project's toolchains read-only (see [`kernel_sandbox::toolchains::Toolchains::detect`]):
     /// each folder as [`Self::allow_read`] checks it, with every credential name below it
     /// denied, and each file when it is a canonical regular file clear of
     /// [`Self::secret_paths`]. Only Seatbelt grants them; the Linux and Windows boundaries
     /// leave them out. Input: the toolchains. Output: the widened sandbox, or `Invalid`.
-    pub fn allow_tools(mut self, tools: &toolchains::Toolchains) -> Result<Self, SandboxError> {
+    pub fn allow_tools(
+        mut self,
+        tools: &kernel_sandbox::toolchains::Toolchains,
+    ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
         let secrets = self.secret_paths();
         for root in tools.roots() {
@@ -2169,7 +1908,12 @@ impl ProjectSandbox {
             if self.tool_roots.len() >= TOOL_ROOTS_MAX {
                 return Err(invalid("too many toolchain folders"));
             }
-            granted_root(root, &owner, &secrets, &harness_folders())?;
+            granted_root(
+                root,
+                &owner,
+                &secrets,
+                &(self.hooks.access.harness_folders)(),
+            )?;
             self.tool_roots.push(root.clone());
         }
         for file in tools.files() {
@@ -2191,7 +1935,7 @@ impl ProjectSandbox {
     }
 
     /// Grants the owner's extra read-only folders for this project (see
-    /// [`extra_paths::checked`]) as toolchain folders are granted, with credential names
+    /// [`kernel_sandbox::extra_paths::checked`]) as toolchain folders are granted, with credential names
     /// carved out, skipping each one that is gone or no longer passes
     /// [`Self::allow_read`]'s checks. Input: the saved folders. Output: the widened sandbox
     /// and how many folders were skipped.
@@ -2204,7 +1948,13 @@ impl ProjectSandbox {
                 continue;
             }
             if self.tool_roots.len() >= TOOL_ROOTS_MAX
-                || granted_root(path, &owner, &secrets, &harness_folders()).is_err()
+                || granted_root(
+                    path,
+                    &owner,
+                    &secrets,
+                    &(self.hooks.access.harness_folders)(),
+                )
+                .is_err()
             {
                 skipped += 1;
                 continue;
@@ -2230,7 +1980,7 @@ impl ProjectSandbox {
             root,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         let overlaps = self
             .writable_roots()
@@ -2251,8 +2001,8 @@ impl ProjectSandbox {
     /// Output: the canonical path, or None.
     pub fn tool_program(&self, name: &str) -> Option<PathBuf> {
         assert!(!name.is_empty() && !name.contains('/'));
-        let homes = toolchains::ToolHomes::at(&self.owner_home);
-        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let homes = kernel_sandbox::toolchains::ToolHomes::at(&self.owner_home);
+        let path = kernel_sandbox::toolchains::agent_path(&homes, AGENT_PATH);
         let found = std::env::split_paths(&path)
             .map(|folder| folder.join(name))
             .find(|candidate| candidate.is_file())?;
@@ -2276,7 +2026,7 @@ impl ProjectSandbox {
         (read_only && !writable && program.is_file()).then_some(program)
     }
 
-    /// Adds the agent's short writable temp folder (see [`toolchains::make_tmp`]), which
+    /// Adds the agent's short writable temp folder (see [`kernel_sandbox::toolchains::make_tmp`]), which
     /// becomes its `TMPDIR`. Input: a canonical existing folder clear of
     /// [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid` for an unsafe or
     /// second folder.
@@ -2288,7 +2038,7 @@ impl ProjectSandbox {
             tmp,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.scratch = Some(tmp.to_path_buf());
         Ok(self)
@@ -2327,12 +2077,12 @@ impl ProjectSandbox {
 
     /// Keeps the secret files and folders of the project folder `root` closed to the agent
     /// (DEC-147.9): contents, attribute values, writes, runs, links and clones of every path
-    /// there with a name in [`shared_folders::SECRET_NAMES`], in any letter case, are denied,
+    /// there with a name in [`kernel_sandbox::shared_folders::SECRET_NAMES`], in any letter case, are denied,
     /// names and sizes stay visible, except under `root/.git` and inside the agent's own
     /// writable roots below it, its worktree or clone, never `root` itself. Each of `revealed`, the secrets the owner
     /// shared back, is readable again, never writable. The deny comes before every older
     /// deny in the profile, so none of those gives way. Inputs: a clean canonical folder the
-    /// sandbox already reads and at most [`shared_folders::SECRETS_MAX`] clean paths strictly
+    /// sandbox already reads and at most [`kernel_sandbox::shared_folders::SECRETS_MAX`] clean paths strictly
     /// inside it. Output: the sandbox, or `Invalid` for a second call or a path out of shape.
     pub fn keep_project_secrets(
         mut self,
@@ -2352,7 +2102,7 @@ impl ProjectSandbox {
                 "the folder whose secrets stay closed must be a canonical folder the sandbox reads",
             ));
         }
-        if revealed.len() > shared_folders::SECRETS_MAX
+        if revealed.len() > kernel_sandbox::shared_folders::SECRETS_MAX
             || !revealed.iter().all(|path| {
                 clean_absolute(path)
                     && path.starts_with(root)
@@ -2390,12 +2140,12 @@ impl ProjectSandbox {
     /// Lets the agent write one shared top-level folder of the project folder that git does
     /// not track (DEC-147.9 Read-write) as one more writable root, pinned in place; the secret
     /// names inside it stay closed, and every older deny still wins. Never a hidden folder, an
-    /// engine folder or one named `context` ([`shared_folders::never_written`]). Input: a canonical existing folder
+    /// engine folder or one named `context` ([`kernel_sandbox::shared_folders::never_written`]). Input: a canonical existing folder
     /// directly inside the folder [`Self::keep_project_secrets`] named, clear of
     /// [`Self::secret_paths`] and of every other writable root. Output: the widened sandbox, or
     /// `Invalid`; only Seatbelt holds it.
     pub fn allow_shared_write(mut self, folder: &Path) -> Result<Self, SandboxError> {
-        if self.shared_writes.len() >= shared_folders::SHARED_WRITES_MAX {
+        if self.shared_writes.len() >= kernel_sandbox::shared_folders::SHARED_WRITES_MAX {
             return Err(invalid("too many shared writable folders"));
         }
         let in_project = self
@@ -2403,9 +2153,9 @@ impl ProjectSandbox {
             .as_ref()
             .is_some_and(|root| folder.parent() == Some(root.as_path()));
         let kept_read_only = match (self.project_secrets.as_ref(), folder.file_name()) {
-            (Some(root), Some(name)) => name
-                .to_str()
-                .is_none_or(|name| shared_folders::never_written(root, name)),
+            (Some(root), Some(name)) => name.to_str().is_none_or(|name| {
+                kernel_sandbox::shared_folders::never_written(&ACCESS_HOOKS, root, name)
+            }),
             _ => true,
         };
         if !in_project || kept_read_only {
@@ -2417,7 +2167,7 @@ impl ProjectSandbox {
             folder,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         if self
             .writable_roots()
@@ -2429,7 +2179,7 @@ impl ProjectSandbox {
         }
         self.shared_writes.push(folder.to_path_buf());
         assert!(self.writes(folder));
-        assert!(self.shared_writes.len() <= shared_folders::SHARED_WRITES_MAX);
+        assert!(self.shared_writes.len() <= kernel_sandbox::shared_folders::SHARED_WRITES_MAX);
         Ok(self)
     }
 
@@ -2467,7 +2217,7 @@ impl ProjectSandbox {
     /// shared writable folders); no clone of any folder, and no move or removal of a folder
     /// inside a shared writable folder, so no folder that holds a secret leaves the name rule
     /// by a plain-named parent (L4 r1 H2); then the read allow of env templates
-    /// ([`shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
+    /// ([`kernel_sandbox::shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
     /// rules, empty when no folder was named.
     fn project_secret_rules(&self) -> String {
         let Some(root) = self
@@ -2477,7 +2227,7 @@ impl ProjectSandbox {
         else {
             return String::new();
         };
-        let names: Vec<String> = shared_folders::SECRET_NAMES
+        let names: Vec<String> = kernel_sandbox::shared_folders::SECRET_NAMES
             .iter()
             .map(|name| fold_case(name))
             .collect();
@@ -2513,7 +2263,7 @@ impl ProjectSandbox {
         text.push_str(&format!(
             "(allow file-read-data file-read-xattr\n  (regex #\"^{}/(.*/)?{}$\"))\n",
             seatbelt_pattern(root),
-            fold_case(shared_folders::SECRET_TEMPLATES)
+            fold_case(kernel_sandbox::shared_folders::SECRET_TEMPLATES)
         ));
         let revealed: Vec<&PathBuf> = self
             .secrets_revealed
@@ -2544,7 +2294,7 @@ impl ProjectSandbox {
     /// terminal keeps to what the owner chose for the IDE. Only Seatbelt holds it, so the
     /// Linux and Windows boundaries refuse a sandbox with a choice other than Allow all
     /// changes. Input: the rule. Output: the sandbox.
-    pub fn protect_agent_files(mut self, rule: policy::AgentFilesRule) -> Self {
+    pub fn protect_agent_files(mut self, rule: kernel_sandbox::policy::AgentFilesRule) -> Self {
         self.agent_files = Some(rule);
         self
     }
@@ -2642,7 +2392,7 @@ impl ProjectSandbox {
     /// run in their own home and only read the lead's, except the team folders Claude Code
     /// shares, where they make no link or folder but a lock, and never write the `git` on the
     /// lead's path (TPH-2 C). They neither read nor write the lead's own temp folder in the
-    /// short temp folder they share ([`toolchains::native_lead_tmp`], TPH-2 residual), so no
+    /// short temp folder they share ([`kernel_sandbox::toolchains::native_lead_tmp`], TPH-2 residual), so no
     /// teammate reads, races or plants a file the lead stages there. Both are shut out of the
     /// name the engine binds the caller socket at before it moves it over `callers`, so
     /// neither swaps its own listener in there (rv-secreview RH2R2-1). The lead's part of the
@@ -2668,7 +2418,7 @@ impl ProjectSandbox {
             mates_home,
             &self.owner_home,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         if mates_home.starts_with(&home) || home.starts_with(mates_home) {
             return Err(invalid("the teammates' home must sit beside the lead's"));
@@ -2682,12 +2432,12 @@ impl ProjectSandbox {
                 folder,
                 &self.owner_home,
                 &self.secret_paths(),
-                &harness_folders(),
+                &(self.hooks.access.harness_folders)(),
             )?;
         }
-        let binding = crate::team::caller::binding_path(callers);
-        let mailbox = self.agent_tmp.join(crate::team::tool::MAILBOX_FOLDER);
-        let lead_part = mailbox.join(crate::coord::relay::LEAD_PART);
+        let binding = (self.hooks.binding_path)(callers);
+        let mailbox = self.agent_tmp.join(self.hooks.mailbox_folder);
+        let lead_part = mailbox.join(self.hooks.relay_lead_part);
         let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
@@ -2699,24 +2449,25 @@ impl ProjectSandbox {
         let lead_tmp = teammates
             .scratch
             .as_deref()
-            .map(toolchains::native_lead_tmp)
+            .map(kernel_sandbox::toolchains::native_lead_tmp)
             .ok_or_else(|| invalid("a native team needs the agent temp folder"))?;
         teammates = teammates.hide(&lead_tmp)?;
         teammates.agent_home = mates_home.to_path_buf();
-        teammates.revealed = vec![lead_part.join(crate::coord::relay::ROSTER_FILE)];
+        teammates.revealed = vec![lead_part.join(self.hooks.relay_roster_file)];
         teammates.read_only = vec![
-            home.join(crate::launch_context::STATE),
-            home.join(crate::coord::relay::PLUGIN_FOLDER),
+            home.join(self.hooks.launch_state),
+            home.join(self.hooks.relay_plugin_folder),
         ];
         teammates.read_only.extend(
-            crate::agent_home::CLAUDE_BASH_PRELUDES
+            self.hooks
+                .claude_bash_preludes
                 .iter()
                 .map(|folder| home.join(folder)),
         );
         teammates.read_only.extend(
             self.scratch
                 .iter()
-                .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
+                .map(|scratch| scratch.join(kernel_sandbox::toolchains::GIT_FOLDER)),
         );
         let answers = mailbox.clone();
         teammates.answers = Some(answers.clone());
@@ -2748,8 +2499,8 @@ impl ProjectSandbox {
         let rule = format!(
             "(regex #\"^{}/[^/]+({}|{})$\")",
             seatbelt_pattern(mailbox),
-            any_case(crate::team::tool::REPLY_SUFFIX),
-            any_case(crate::team::tool::ANSWER_PART_SUFFIX),
+            any_case(self.hooks.reply_suffix),
+            any_case(self.hooks.answer_part_suffix),
         );
         format!("(deny file-write* {rule})\n(allow file-write-unlink {rule})\n")
     }
@@ -2767,14 +2518,16 @@ impl ProjectSandbox {
             return String::new();
         }
         match (&self.clone, &self.checkout) {
-            (Some(clone), _) => teammates_clone_denies(clone, self.lead_branch.as_deref()),
+            (Some(clone), _) => {
+                teammates_clone_denies(self.hooks, clone, self.lead_branch.as_deref())
+            }
             (None, Some(checkout)) => {
                 let worktree = checkout.worktree.display();
                 let root = seatbelt_pattern(&checkout.worktree);
-                let teammates = any_case(crate::agent_git::TEAMMATES_FOLDER);
+                let teammates = any_case(self.hooks.teammates_folder);
                 let text = format!(
                     "(deny file-write*\n  (require-all\n    (subpath \"{worktree}\")\n    (require-not (subpath \"{worktree}/{}\"))))\n(deny file-write*\n  (subpath \"{}\")\n  (subpath \"{}\")\n  (regex #\"^{root}/{teammates}$\"))\n(deny file-write-create file-write-unlink\n  (regex #\"^{root}/{teammates}/[^/]+$\"))\n",
-                    crate::agent_git::TEAMMATES_FOLDER,
+                    self.hooks.teammates_folder,
                     checkout.admin.display(),
                     checkout.objects.display()
                 );
@@ -3019,7 +2772,7 @@ impl ProjectSandbox {
             self.project_root.join(".crazyagent").join("context"),
             self.project_root
                 .join(".crazyagent")
-                .join(crate::agent_home::PROJECT_FILE),
+                .join(self.hooks.project_file),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -3145,7 +2898,7 @@ impl ProjectSandbox {
             text.push_str(&format!(
                 "(allow file-write*\n  (regex #\"^{}/\\.git/(logs/)?refs/heads/({}|{}--[a-z0-9-]+(\\.lock)?)$\"))\n",
                 seatbelt_pattern(&self.project_root),
-                regex_escape(crate::agent_git::LINKED_PREFIX.trim_end_matches('/')),
+                regex_escape(self.hooks.linked_prefix.trim_end_matches('/')),
                 regex_escape(branch)
             ));
         }
@@ -3283,12 +3036,12 @@ impl ProjectSandbox {
                 folder.display()
             ));
         }
-        let launch = launch_denies(&self.agent_home);
+        let launch = launch_denies(self.hooks, &self.agent_home);
         text.push_str(&launch);
         let config = if self.owner_config {
             String::new()
         } else {
-            agent_config_denies(&self.agent_home)
+            agent_config_denies(self.hooks, &self.agent_home)
         };
         text.push_str(&config);
         for root in self.writable_roots() {
@@ -3375,8 +3128,8 @@ impl ProjectSandbox {
                     .iter()
                     .chain(&self.kept_ports)
                     .copied()
-                    .chain(model_proxy::PROXY_PORTS)
-                    .chain(model_proxy::RELAY_PORTS)
+                    .chain(PROXY_PORTS)
+                    .chain(RELAY_PORTS)
                     .map(|port| format!(" (local ip \"*:{port}\")"))
                     .collect::<String>();
                 text.push_str(&format!(
@@ -3436,14 +3189,14 @@ impl ProjectSandbox {
     fn project_denies(&self) -> String {
         let project = seatbelt_pattern(&self.project_root);
         let git = any_case(".git");
-        let state = any_case(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = any_case(self.hooks.crazyagent_directory);
         let context = any_case("context");
         let objects = format!("{git}/{}", any_case("objects"));
         let mut below = vec![context.clone(), format!("{state}/{context}")];
         below.extend(GIT_STATE_TREES.map(|name| format!("{git}/{}", any_case(name))));
         let mut entries = vec![
             git.clone(),
-            format!("{state}/{}", any_case(crate::agent_home::PROJECT_FILE)),
+            format!("{state}/{}", any_case(self.hooks.project_file)),
             state,
             format!("{objects}/{}", any_case("info")),
             objects,
@@ -3489,7 +3242,7 @@ impl ProjectSandbox {
         let pattern = seatbelt_pattern(&self.project_root);
         let git = any_case(".git");
         let worktrees = any_case("worktrees");
-        let state = any_case(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = any_case(self.hooks.crazyagent_directory);
         let admin = format!("{pattern}/{git}/{worktrees}/[^/]+");
         let checkouts = format!("{pattern}(/{state})?/{worktrees}/[^/]+");
         let mut moves = format!(
@@ -3591,7 +3344,7 @@ impl ProjectSandbox {
             exempt.push_str(&format!(
                 "\n    (require-not (regex #\"^{}/{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(clone),
-                regex_escape(crate::agent_git::TEAMMATES_FOLDER)
+                regex_escape(self.hooks.teammates_folder)
             ));
         }
         if let Some(setup) = &self.setup {
@@ -3719,7 +3472,7 @@ impl ProjectSandbox {
             ));
         }
         if !self.owner_config && self.engine_home != Some(false) {
-            make_config_parents(&self.agent_home, self.engine_home == Some(true))?;
+            make_config_parents(self.hooks, &self.agent_home, self.engine_home == Some(true))?;
         }
         let profile = self.profile();
         if !sbpl_overlong(&profile).is_empty() {
@@ -3750,10 +3503,12 @@ impl ProjectSandbox {
 
     /// Refuses to write a Seatbelt profile, which Windows cannot load; Windows agents start
     /// through [`InstalledSandbox`] and the AppContainer boundary. Takes the path, unused.
-    /// Returns `Unavailable` with [`windows::SEATBELT_MISSING`].
+    /// Returns `Unavailable` with [`kernel_sandbox::windows::SEATBELT_MISSING`].
     #[cfg(target_os = "windows")]
     pub fn install(&self, _path: &Path) -> Result<(), SandboxError> {
-        Err(SandboxError::Unavailable(windows::SEATBELT_MISSING.into()))
+        Err(SandboxError::Unavailable(
+            kernel_sandbox::windows::SEATBELT_MISSING.into(),
+        ))
     }
 
     /// A command that runs `program` under the installed profile with a cleared
@@ -3775,23 +3530,23 @@ impl ProjectSandbox {
 
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
     /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies after
-    /// any [`Self::allow_node_for`] folder, the C locale and [`toolchains::agent_env`]. Only a
+    /// any [`Self::allow_node_for`] folder, the C locale and [`kernel_sandbox::toolchains::agent_env`]. Only a
     /// harness's PATH starts with the agent's own `getconf` and `git`
-    /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
+    /// ([`kernel_sandbox::toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
-        let homes = toolchains::ToolHomes::at(&self.owner_home);
+        let homes = kernel_sandbox::toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self
             .owner_tmp
             .as_ref()
             .or(self.scratch.as_ref())
             .unwrap_or(&self.agent_tmp);
-        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = kernel_sandbox::toolchains::agent_path(&homes, AGENT_PATH);
         let path = match self.node_bin.as_deref().and_then(Path::to_str) {
             Some(bin) => format!("{bin}:{path}"),
             None => path,
         };
         let path = if harness {
-            toolchains::with_agent_git(&self.agent_home, path)
+            kernel_sandbox::toolchains::with_agent_git(self.hooks.toolchain, &self.agent_home, path)
         } else {
             path
         };
@@ -3802,7 +3557,10 @@ impl ProjectSandbox {
             ("LANG", OsString::from("C")),
             ("LC_ALL", OsString::from("C")),
         ];
-        env.extend(toolchains::agent_env(&self.agent_home, &homes));
+        env.extend(kernel_sandbox::toolchains::agent_env(
+            &self.agent_home,
+            &homes,
+        ));
         if let Some((cache, uv)) = &self.tool_cache {
             if *uv {
                 env.push((TOOL_CACHE_ENV[0], cache.join("uv").into_os_string()));
@@ -3941,7 +3699,7 @@ impl InstalledSandbox {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if sandbox
             .agent_files
-            .is_some_and(|rule| rule.choice != policy::IdeAgentFiles::AllowAll)
+            .is_some_and(|rule| rule.choice != kernel_sandbox::policy::IdeAgentFiles::AllowAll)
         {
             return Err(SandboxError::Unavailable(AGENT_FILES_NEED_SEATBELT.into()));
         }
@@ -3993,7 +3751,9 @@ impl InstalledSandbox {
             "{}",
             grants.display()
         );
-        let helper = windows::existing_helper(&windows::helper_beside_engine()?)?;
+        let helper = kernel_sandbox::windows::existing_helper(
+            &kernel_sandbox::windows::helper_beside_engine()?,
+        )?;
         let windows = windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, grants)?;
         assert!(profile.is_file());
         Ok(Self {
@@ -4165,218 +3925,10 @@ fn git_link(path: &Path, prefix: &str) -> Result<String, SandboxError> {
     Ok(target.to_owned())
 }
 
-/// Escapes a plain absolute path for a Seatbelt regex, so every character matches itself.
-/// Input: a path that passes `clean_absolute`, so it holds no quote or backslash.
-/// Output: the pattern text, without anchors.
-pub(crate) fn seatbelt_pattern(path: &Path) -> String {
-    let text = path.display().to_string();
-    assert!(text.starts_with('/'));
-    regex_escape(&text)
-}
-
-/// The Seatbelt rules that keep an agent from starting a macOS app: no exec of a main
-/// executable in any app bundle's `Contents/MacOS`, wherever it sits and in any letter
-/// case, since a GUI app started inside the agent profile aborts at launch and macOS shows
-/// a crash report for every attempt (Chrome crash popups, decision C1, OP-24). The
-/// interpreter a framework Python's launcher starts, `<name>.framework/Versions/<v>/
-/// Resources/Python.app/Contents/MacOS/Python`, stays allowed, except in the folders the
-/// agent can write, where it could plant a bundle under that name; their Data volume path
-/// is denied too. Command-line tools a bundle ships under `Contents/Resources` or
-/// `Contents/Developer` stay allowed, as does each exact program the engine launches from
-/// outside those folders. It must follow the exec allow, since the last matching rule
-/// wins. Inputs: the agent's writable roots and those programs. Output: the rule text.
-fn app_exec_denies<'a>(
-    writable: impl Iterator<Item = &'a PathBuf>,
-    launched: impl Iterator<Item = &'a PathBuf>,
-) -> String {
-    let data = format!(
-        "/{}/{}/{}",
-        any_case("System"),
-        any_case("Volumes"),
-        any_case("Data")
-    );
-    let app = format!(
-        ".+{}/{}/{}/",
-        any_case(".app"),
-        any_case("Contents"),
-        any_case("MacOS")
-    );
-    let mut rule = format!(
-        "(deny process-exec\n  (regex #\"^/{app}\"))\n(allow process-exec\n  (regex #\"^/.+\\.framework/Versions/[^/]+/Resources/Python\\.app/Contents/MacOS/Python$\"))\n(deny process-exec"
-    );
-    for root in writable {
-        let root = root.display().to_string();
-        rule.push_str(&format!(
-            "\n  (regex #\"^({data})?{}/{app}\")",
-            any_case(&root)
-        ));
-    }
-    rule.push_str(")\n");
-    let launched: Vec<&PathBuf> = launched.collect();
-    if !launched.is_empty() {
-        rule.push_str("(allow process-exec");
-        for program in launched {
-            rule.push_str(&format!("\n  (literal \"{}\")", program.display()));
-        }
-        rule.push_str(")\n");
-    }
-    rule
-}
-
-/// The Seatbelt rules that keep an Own branch agent from repointing the object store its
-/// clone borrows (AL-1, DEC102-F1): no write to its `objects/info/alternates` or
-/// `http-alternates`, its git folder's `commondir` or the git folder entry itself, which
-/// it may never replace, rename or relink, no move or removal of its `objects` or
-/// `objects/info` folder, no symlink in its store, and nothing at `.git.git` beside its
-/// git folder, the fallback repository git's upload-pack serves when the git folder fails
-/// git's repository test (RL-1), no `objects/pack/multi-pack-index` file, folder or
-/// companion, which can name a pack outside the store (RL-2), and no write to the
-/// `objects/pack` or `objects/<xx>` folder entries, so no folder built elsewhere is moved
-/// in over one with its contents (RL-3), each name in any letter case, while its own loose
-/// objects and packs inside those folders stay writable. The engine makes those folders
-/// before each launch (`landing::ready_agent_clone`). The engine's fetch checks the same
-/// store before it runs (w-landing). Input: the clone. Output: the rule text.
-fn clone_store_denies(clone: &Path) -> String {
-    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(GIT_FALLBACK));
-    let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
-    let objects = format!("{git}/{}", any_case("objects"));
-    let info = format!("{objects}/{}", any_case("info"));
-    let pack = format!("{objects}/{}", any_case("pack"));
-    let index = format!("{pack}/{}", any_case(MULTI_PACK_INDEX));
-    let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
-    let [commondir, _] = ADMIN_LINKS.map(any_case);
-    let below = at_or_below(&fallback);
-    let text = format!(
-        "(deny file-write*\n  (regex #\"^{git}$\")\n  {below}\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
-    );
-    assert_eq!(text.matches("(regex #\"^/").count(), 10);
-    assert!(text.contains("(vnode-type SYMLINK)"));
-    text
-}
-
-/// The writes a clone lead's teammates may not make in the lead's clone (OP-9): anything but
-/// the teammates' folder, the clone's object store, the inside of each worktree record git
-/// keeps in `.git/worktrees`, and the refs and reflogs of the lead's own `<branch>--<name>`
-/// teammate branches, none when the lead's branch is unknown, never the lead's branch
-/// (AGENT-REF-ALLOW-NARROW); nor the links that tie a teammate worktree to the clone, which
-/// the engine writes with the lead's rights, each name in any letter case; nor the
-/// teammates' folder entry, nor make, move or remove anything directly in it, such as a
-/// teammate's folder, where the engine's lead-rights `git worktree add` writes (OP9B-C1).
-/// It must follow every write allow, since the last match wins.
-/// Inputs: the clone and the lead's branch. Output: the rule text.
-fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
-    let path = clone.display();
-    let root = seatbelt_pattern(clone);
-    let folder = crate::agent_git::TEAMMATES_FOLDER;
-    let teammates = any_case(folder);
-    let git = any_case(".git");
-    let branches = lead
-        .map(|lead| {
-            format!(
-                "\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{}--[a-z0-9-]+(\\.lock)?$\"))",
-                regex_escape(lead)
-            )
-        })
-        .unwrap_or_default();
-    let text = format!(
-        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\")){branches}))\n(deny file-write*\n  (regex #\"^{root}/{teammates}$\")\n  (regex #\"^{root}/{teammates}/[^/]+/{git}$\")\n  (regex #\"^{root}/{git}/{}/[^/]+/({}|{})$\"))\n(deny file-write-create file-write-unlink\n  (regex #\"^{root}/{teammates}/[^/]+$\"))\n",
-        any_case("worktrees"),
-        any_case("commondir"),
-        any_case("gitdir")
-    );
-    assert_eq!(
-        text.matches("(regex #\"^/").count(),
-        5 + usize::from(lead.is_some())
-    );
-    assert_eq!(text.matches("(subpath \"/").count(), 3);
-    text
-}
-
-/// Seatbelt regex bodies `{prefix}(a|b|...){suffix}` that together match each of
-/// `alternatives`, packed whole, in order, so each body fits [`SBPL_STRING_MAX`] bytes; one
-/// alternative too long beside the prefix keeps a body of its own, which [`sbpl_overlong`]
-/// then names. Inputs: the prefix, the regex fragments and the suffix. Output: the bodies.
-fn regex_bodies(prefix: &str, alternatives: &[String], suffix: &str) -> Vec<String> {
-    let body = |group: &[&str]| format!("{prefix}({}){suffix}", group.join("|"));
-    let mut bodies = Vec::new();
-    let mut group: Vec<&str> = Vec::new();
-    for alternative in alternatives {
-        let mut wider = group.clone();
-        wider.push(alternative);
-        if !group.is_empty() && body(&wider).len() > SBPL_STRING_MAX {
-            bodies.push(body(&group));
-            group.clear();
-        }
-        group.push(alternative);
-    }
-    if !group.is_empty() {
-        bodies.push(body(&group));
-    }
-    assert!(bodies.len() <= alternatives.len());
-    bodies
-}
-
-/// The quoted strings and regexes of a Seatbelt profile longer than its reader takes
-/// ([`SBPL_STRING_MAX`] bytes), every one, so a profile that would not parse is refused
-/// before it is written. Input: the profile text, whose strings hold no quote. Output: the
-/// strings too long, none for a profile that parses; an odd quote count names the rest.
-#[cfg(unix)]
-pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
-    let parts: Vec<&str> = profile.split('"').collect();
-    let mut overlong: Vec<&str> = parts
-        .iter()
-        .skip(1)
-        .step_by(2)
-        .copied()
-        .filter(|part| part.len() > SBPL_STRING_MAX)
-        .collect();
-    if parts.len().is_multiple_of(2) {
-        overlong.push(parts[parts.len() - 1]);
-    }
-    overlong
-}
-
 fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a OsStr)> {
     env.iter()
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect()
-}
-
-/// The Seatbelt profile the engine primes a uv tool cache under (T8 C3): the system's
-/// read-only roots and the uv binary to read and run, the fresh priming folder as the only
-/// place to write, `/dev/null` and the random devices, no network and no user folder.
-/// Inputs: the canonical priming folder and the canonical uv binary. Output: the text.
-#[cfg(target_os = "macos")]
-pub(crate) fn priming_profile(folder: &Path, uv: &Path) -> String {
-    assert!(clean_absolute(folder) && clean_absolute(uv));
-    let mut text = String::from(
-        "(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow sysctl-read)\n(allow mach-lookup",
-    );
-    for service in MACH_SERVICES {
-        text.push_str(&format!("\n  (global-name \"{service}\")"));
-    }
-    text.push_str(")\n(allow file-read* file-map-executable");
-    for root in SYSTEM_READ_ROOTS {
-        text.push_str(&format!("\n  (subpath \"{root}\")"));
-    }
-    text.push_str(&format!(
-        "\n  (literal \"{}\"))\n(allow file-read*",
-        uv.display()
-    ));
-    for literal in METADATA_LITERALS {
-        text.push_str(&format!("\n  (literal \"{literal}\")"));
-    }
-    text.push_str(&format!(
-        ")\n(allow file-read-metadata\n  (path-ancestors \"{0}\")\n  (path-ancestors \"{1}\"))\n(allow file-read* file-write*\n  (subpath \"{0}\"))\n",
-        folder.display(),
-        uv.display()
-    ));
-    text.push_str(
-        "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\"))\n(allow file-read*\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\"))\n",
-    );
-    assert!(text.starts_with("(version 1)\n(deny default)\n"));
-    assert!(!text.contains("(allow network") && text.matches("file-write*").count() == 1);
-    text
 }
 
 /// Makes sure a store a profile keeps read-only is a plain folder the engine made: creates
@@ -4404,21 +3956,6 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Names the credential files and folders the sandbox guards as they appear in a path: the
-/// owner's under the home, the system's without their leading `/` and the credential names
-/// no allowed root may hold. Takes nothing. Returns the names.
-pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
-    let owner: Vec<&'static str> = owner_secret_paths(&harness_folders()).collect();
-    owner
-        .into_iter()
-        .chain(CREDENTIAL_NAMES.iter().copied())
-        .chain(
-            SYSTEM_SECRET_PATHS
-                .iter()
-                .map(|path| path.trim_start_matches('/')),
-        )
-}
-
 /// The folders and files in the owner's home that belong to a harness, as every harness
 /// manifest names them, in catalog order: agents never read them and no project or sandbox
 /// root may sit inside one. Takes nothing. Returns the names, relative to the home.
@@ -4428,440 +3965,6 @@ pub(crate) fn harness_folders() -> Vec<&'static str> {
         .iter()
         .flat_map(|harness| harness.owner_folders().iter().map(String::as_str))
         .collect()
-}
-
-/// The engine runtime's secrets: the fixed secret files and folders, plus every Unix socket
-/// directly in the runtime and every runtime folder that directly holds one (owner
-/// generations, runner roots, the terminal server). Input: the canonical runtime folder.
-/// Output: the secret paths, or a refusal for a runtime or folder over the entry bound.
-fn engine_secrets_in(runtime: &Path) -> Result<Vec<PathBuf>, SandboxError> {
-    let mut secrets: Vec<PathBuf> = ENGINE_SECRET_FILES
-        .iter()
-        .chain(&crate::storage::accounts::KEY_FOLDERS)
-        .chain(ENGINE_SECRET_FOLDERS)
-        .map(|name| runtime.join(name))
-        .collect();
-    for entry in bounded_entries(runtime)? {
-        if !secrets.contains(&entry) && engine_socket_place(&entry)? {
-            secrets.push(entry);
-        }
-    }
-    Ok(secrets)
-}
-
-#[cfg(unix)]
-fn engine_socket_place(path: &Path) -> Result<bool, SandboxError> {
-    use std::os::unix::fs::FileTypeExt;
-    let Some(kind) = present_kind(path)? else {
-        return Ok(false);
-    };
-    if kind.is_socket() {
-        return Ok(true);
-    }
-    if !kind.is_dir() {
-        return Ok(false);
-    }
-    let entries = match bounded_entries(path) {
-        Err(SandboxError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(false);
-        }
-        other => other?,
-    };
-    for entry in entries {
-        if present_kind(&entry)?.is_some_and(|kind| kind.is_socket()) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(unix)]
-fn present_kind(path: &Path) -> Result<Option<fs::FileType>, SandboxError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(metadata.file_type())),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(not(unix))]
-fn engine_socket_place(_path: &Path) -> Result<bool, SandboxError> {
-    Ok(false)
-}
-
-fn bounded_entries(folder: &Path) -> Result<Vec<PathBuf>, SandboxError> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(folder)? {
-        if entries.len() == RUNTIME_ENTRIES_MAX {
-            return Err(invalid("engine runtime folder has too many entries"));
-        }
-        entries.push(entry?.path());
-    }
-    Ok(entries)
-}
-
-/// The engine secret folder a master's home may be carved back out of, the home alone: an
-/// rcli master's configured SDK home directly in its folder, or a listed master session's
-/// home in the native profiles folder ([`listed_master_folder`]). Inputs: the engine root and
-/// the canonical home. Output: the folder, or none for any other home.
-fn carved_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
-    let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
-    if home.parent() == Some(homes.as_path()) {
-        return Some(homes);
-    }
-    listed_master_folder(engine, home)
-}
-
-/// The native profiles folder when the home is a listed master session's home,
-/// `<listed key of account>/home/<session>/<harness>/<account>` in it, so in that account's
-/// own listed slot, whose home holds no sign-in's record (DEC-180 Task 20). Inputs: the
-/// engine root and the canonical home. Output: the folder, or none for any other home.
-#[cfg(unix)]
-fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
-    let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
-    let parts: Vec<Component> = home.strip_prefix(&profiles).ok()?.components().collect();
-    let [
-        Component::Normal(key),
-        Component::Normal(slot),
-        Component::Normal(_),
-        Component::Normal(_),
-        Component::Normal(account),
-    ] = parts.as_slice()
-    else {
-        return None;
-    };
-    let listed = crate::engine::bootstrap::listed_slot_key(account.to_str()?);
-    let slot_home = profiles.join(key).join(slot);
-    (*key == listed.as_str()
-        && *slot == "home"
-        && crate::harnesses::launch::holds_no_sign_in(&slot_home).is_ok())
-    .then_some(profiles)
-}
-
-/// Carves no listed master home off Unix, where a listed master session's home is never made
-/// (its listed_home refuses with `launch_account_home_unavailable`). Takes the engine root
-/// and the home, both unused. Returns none.
-#[cfg(not(unix))]
-fn listed_master_folder(_engine: &Path, _home: &Path) -> Option<PathBuf> {
-    None
-}
-
-/// The Seatbelt rules that keep an agent from changing what its harness loads from its own
-/// home as instructions, skills, hooks or settings (LL-2): no write in the launch folder or
-/// the relay plugin the engine writes before each launch, nor in the subagents, commands,
-/// output styles and rules folders Claude Code reads or the `.agents` folder whose skills
-/// Codex reads from its home, none to the global instruction files of Claude Code and Codex,
-/// the Codex override that would replace them, the Codex `config.toml` holding its developer
-/// instructions or Claude Code's `settings.json`, nor to a zsh, bash or sh startup file,
-/// which every shell its harness starts there runs first (SA vid 12), none under `skills`
-/// but Codex's own `.system` skills, which Codex installs at its start and the engine
-/// removes before each Codex launch, and no move or removal of the `skills` folder, so no
-/// folder built elsewhere
-/// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
-/// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
-/// text it runs with until the next launch rewrites it. They also keep the agent's own
-/// keychain and keychain settings, which the engine sets up with `security` calls before a
-/// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
-/// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
-/// in place of `Library`, `Library/Preferences` or any other folder a launch keeps only part
-/// of, nor of the cargo cache links the launch keeps, nor a link it makes at their names
-/// ([`crate::agent_home::pinned_entries`], DEC-173), as [`root_pin`] keeps the home itself,
-/// so no link an agent plants leads one of those calls, a launch's removal of what it does
-/// not keep or a later cargo outside the home. They deny writes to the launch lock too, so
-/// no run links, removes or replaces it, since a launch refuses a lock with a second link
-/// (r3). Every home gets them; an agent home gets [`agent_config_denies`] as well. They must
-/// follow every write allow. Input: the home. Output: the rule text.
-fn launch_denies(home: &Path) -> String {
-    use crate::agent_home::Harness;
-    use crate::launch_context::{LOCK, STATE};
-    let home = seatbelt_pattern(home);
-    let skills = format!("{home}/{}", any_case("skills"));
-    let folders = [
-        STATE,
-        crate::coord::relay::PLUGIN_FOLDER,
-        "agents",
-        "commands",
-        "output-styles",
-        "rules",
-        ".agents",
-        "Library/Keychains",
-    ];
-    let files = [
-        Harness::Claude.instruction_file(),
-        Harness::Codex.instruction_file(),
-        "AGENTS.override.md",
-        "config.toml",
-        "settings.json",
-        "Library/Preferences/com.apple.security.plist",
-        LOCK,
-    ];
-    let mut text = String::from("(deny file-write*\n");
-    for folder in folders {
-        text.push_str(&format!(
-            "  {}\n",
-            at_or_below(&format!("{home}/{}", any_case(folder)))
-        ));
-    }
-    for file in files {
-        text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
-    }
-    text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", shell_startup()));
-    let system = any_case(crate::launch_context::CODEX_SYSTEM_SKILLS);
-    text.push_str(&format!(
-        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags\n  (regex #\"^{skills}/{system}$\")\n  (regex #\"^{skills}/{system}/\"))\n",
-        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
-    ));
-    let library = format!("{home}/{}", any_case("Library"));
-    let walked: Vec<String> = crate::agent_home::pinned_entries()
-        .iter()
-        .map(|entry| format!("{home}/{}", any_case(entry)))
-        .collect();
-    assert!(walked.contains(&library));
-    assert!(walked.contains(&format!("{home}/{}", any_case(".cargo/registry"))));
-    assert!(walked.contains(&format!("{home}/{}", any_case(".config"))));
-    let spelled = |indent: &str| {
-        walked
-            .iter()
-            .map(|folder| format!("\n{indent}(regex #\"^{folder}$\")"))
-            .collect::<String>()
-    };
-    text.push_str(&format!(
-        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n",
-        spelled("  "),
-        spelled("      "),
-    ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 20 + 2 * walked.len());
-    text
-}
-
-/// The names [`agent_config_denies`] keeps a confined agent from writing in its own home,
-/// each with all it holds: cargo's config and subcommands, git's global config in both
-/// places it reads one, and npm's and yarn's user config.
-const AGENT_CONFIG: [&str; 8] = [
-    ".cargo/config",
-    ".cargo/config.toml",
-    ".cargo/bin",
-    ".config/git",
-    ".gitconfig",
-    ".npmrc",
-    ".yarnrc",
-    ".yarnrc.yml",
-];
-
-/// The folders of an agent home an [`AGENT_CONFIG`] name lies in. Each is made by
-/// [`ProjectSandbox::install`] in a home the engine made and kept by every launch, and an
-/// agent may neither make, move nor remove one, so no folder built elsewhere is moved in
-/// with config past the names (RV-DS241-186).
-const CONFIG_PARENTS: [&str; 2] = [".cargo", ".config"];
-
-/// Makes each [`CONFIG_PARENTS`] folder of an agent home a real 0700 folder where nothing
-/// holds its name, since the agent's profile keeps it from making one (RV-DS241-186). With
-/// `clear`, for a home strictly below the engine's data root ([`ProjectSandbox::anchor_home`]),
-/// what holds a name as anything else, as a link an earlier run planted, goes first, and a
-/// name that is still no folder refuses; without it nothing is ever removed and such a name
-/// stays for the launch's reset to judge (rv-code2 b8 F1). Each step goes through the home's
-/// open handle and follows no link. Inputs: the home and `clear`. Output: unit, or `Invalid`
-/// when one cannot be made.
-#[cfg(unix)]
-fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
-    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
-    let refused = || invalid("a config folder of the agent home could not be made");
-    let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let parent = rustix::fs::open(home, folder, Mode::empty()).map_err(|_| refused())?;
-    let is_folder = |name: &str| {
-        rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
-            .map(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
-    };
-    let remove =
-        |name: &str| crate::team::cleanup::remove_home_entry(&parent, name).map_err(|_| refused());
-    for name in CONFIG_PARENTS {
-        match is_folder(name) {
-            Ok(true) => continue,
-            Ok(false) if !clear => continue,
-            Ok(false) => remove(name)?,
-            Err(rustix::io::Errno::NOENT) => {}
-            Err(_) => return Err(refused()),
-        }
-        match rustix::fs::mkdirat(&parent, name, Mode::RWXU) {
-            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-            Err(_) => return Err(refused()),
-        }
-        if clear && is_folder(name) != Ok(true) {
-            return Err(refused());
-        }
-    }
-    Ok(())
-}
-
-/// The Seatbelt rules an agent home gets on top of [`launch_denies`], which a home the owner
-/// keeps for their own tools does without, as the IDE terminal's does
-/// ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). No write to an [`AGENT_CONFIG`]
-/// name in any letter case, so a run, or a process of it still alive after the next
-/// launch's reset, plants no config or program its own tools or a later run with more
-/// access follow (RV-DS241-137, -138, -186). No [`CONFIG_PARENTS`] folder made, so none
-/// built elsewhere takes the name. No flag or ACL on an entry the next launch keeps and the
-/// engine uses, nor on anything in one ([`crate::agent_home::kept_entries`]), so none holds
-/// against the engine. Copies the agent's tools make elsewhere in its home and in its caches
-/// still take flags (RV-DS241-187), and the next reset clears those as it removes them.
-/// They must follow every write allow. Input: the home. Output: the rule text.
-fn agent_config_denies(home: &Path) -> String {
-    let pinned = crate::agent_home::pinned_entries();
-    assert!(
-        CONFIG_PARENTS
-            .iter()
-            .all(|parent| pinned.iter().any(|entry| entry == *parent))
-    );
-    for (parent, _) in AGENT_CONFIG.iter().filter_map(|name| name.split_once('/')) {
-        assert!(CONFIG_PARENTS.contains(&parent));
-    }
-    let home = seatbelt_pattern(home);
-    let spelled = |names: &[&str], below: bool| {
-        names
-            .iter()
-            .map(|name| {
-                let pattern = format!("{home}/{}", any_case(name));
-                if below {
-                    format!("\n  {}", at_or_below(&pattern))
-                } else {
-                    format!("\n  (regex #\"^{pattern}$\")")
-                }
-            })
-            .collect::<String>()
-    };
-    let kept = crate::agent_home::kept_entries();
-    let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
-    let text = format!(
-        "(deny file-write*{})\n(deny file-write-create{})\n(deny file-write-flags file-write-acl{})\n",
-        spelled(&AGENT_CONFIG, true),
-        spelled(&CONFIG_PARENTS, false),
-        spelled(&kept, true)
-    );
-    assert_eq!(
-        text.matches("(regex #\"^/").count(),
-        AGENT_CONFIG.len() + CONFIG_PARENTS.len() + kept.len()
-    );
-    assert!(!text.contains("(/.*)"));
-    text
-}
-
-/// Spells the Seatbelt pattern of the shell startup files directly in a home, each in any
-/// letter case: zsh's, alone or in the compiled form zsh runs in its place, and bash's and
-/// sh's (SA vid 12). Output: the pattern, a group without anchors.
-fn shell_startup() -> String {
-    let spelled = |names: &[&str]| {
-        names
-            .iter()
-            .map(|name| any_case(name))
-            .collect::<Vec<_>>()
-            .join("|")
-    };
-    let pattern = format!(
-        "(({})({})?|{})",
-        spelled(&crate::agent_home::ZSH_STARTUP[..]),
-        any_case(crate::agent_home::ZSH_COMPILED),
-        spelled(&crate::agent_home::SH_STARTUP[..]),
-    );
-    assert!(pattern.len() <= SBPL_STRING_MAX / 2);
-    pattern
-}
-
-/// Spells a Seatbelt regex for one path component other than `name` in any letter case,
-/// with whatever follows it: a component that differs from `name` at some character, stops
-/// short of it or runs past it. Input: a name of letters, digits and dots. Output: the
-/// pattern text, a group without anchors.
-fn other_than(name: &str) -> String {
-    assert!(
-        !name.is_empty()
-            && name
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '.')
-    );
-    let characters: Vec<char> = name.chars().collect();
-    let mut alternatives = Vec::with_capacity(2 * characters.len());
-    for at in 0..characters.len() {
-        let prefix = any_case(&characters[..at].iter().collect::<String>());
-        let character = characters[at];
-        alternatives.push(format!(
-            "{prefix}[^{}{}/]",
-            character.to_ascii_lowercase(),
-            character.to_ascii_uppercase()
-        ));
-        if at > 0 {
-            alternatives.push(format!("{prefix}(/|$)"));
-        }
-    }
-    alternatives.push(format!("{}[^/]", any_case(name)));
-    assert_eq!(alternatives.len(), 2 * characters.len());
-    format!("({})", alternatives.join("|"))
-}
-
-/// The Seatbelt rule that pins one writable root itself (CTX-M1): no agent may move, replace,
-/// remove or re-permission a folder it writes in. A Seatbelt rename checks only the two
-/// paths it names, so a root moved under another root and back would carry every path a
-/// rule protects below it, such as the launch files in an agent's home (LL-2), out of that
-/// rule and back. It must follow every write allow, since the last match wins. Input: the
-/// root. Output: the rule text.
-fn root_pin(root: &Path) -> String {
-    format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
-}
-
-/// The Seatbelt filters for a `.git` at any depth below `root`, top level included, in every
-/// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
-/// working tree (SM1-R), as [`at_or_below`] spells it. Input: the root. Output: the filters.
-fn any_depth_git(root: &Path) -> String {
-    at_or_below(&format!(
-        "{}/(.+/)?{}",
-        seatbelt_pattern(root),
-        any_case(".git")
-    ))
-}
-
-/// The base write denies a profile gives again after it grants writes once more to the agent
-/// home and other folders, as the IDE profile does for its server's data folders: each one
-/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), the
-/// home's launch files ([`launch_denies`]) and no flag or ACL on anything in the home, which
-/// the engine walks and rewrites before each start, so none keeps the owner's IDE from
-/// starting (rv-sa241 b8 L1); never [`agent_config_denies`], since that home is one the
-/// owner keeps ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). They must follow that
-/// grant, since the last match wins. Inputs: the home and the other folders. Output: the
-/// rule text.
-#[cfg(unix)]
-pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
-    let mut text = launch_denies(home);
-    text.push_str(&format!(
-        "(deny file-write-flags file-write-acl {})\n",
-        at_or_below(&seatbelt_pattern(home))
-    ));
-    let mut nested = String::new();
-    for root in std::iter::once(home).chain(folders.iter().copied()) {
-        text.push_str(&root_pin(root));
-        nested.push_str(&format!("\n  {}", any_depth_git(root)));
-    }
-    text.push_str(&format!("(deny file-write*{nested})\n"));
-    text
-}
-
-/// The Seatbelt rule that refuses reading, writing, linking or cloning any path with a part
-/// made of ASCII, [`kernel_sandbox::paths::ASCII_FOLDS`] points and at least one code
-/// point HFS+ ignores in names, since such a volume opens `.g\u{200c}it/config` as
-/// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
-/// joiners. Output: the rule, ending in a line break.
-pub(crate) fn hfs_ignored_deny() -> String {
-    let ignored: Vec<String> = crate::instruction_files::HFS_IGNORED
-        .iter()
-        .map(char::to_string)
-        .collect();
-    let folds: Vec<String> = kernel_sandbox::paths::ASCII_FOLDS
-        .iter()
-        .map(|(point, _)| point.to_string())
-        .collect();
-    let ignored = ignored.join("|");
-    let part = format!("([ -.0-~]|{}|{ignored})", folds.join("|"));
-    let rule = format!(
-        "(deny file-read-data file-write* file-link file-clone\n  (regex #\"^(.*/)?{part}*({ignored}){part}*(/.*)?$\"))\n"
-    );
-    assert!(rule.len() <= SBPL_STRING_MAX && rule.matches('"').count() == 2);
-    rule
 }
 
 /// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
@@ -4920,7 +4023,7 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod handed_tests {
     use super::*;
-    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+    use kernel_common::relay_names::LOCAL_PLACEHOLDER;
 
     const NAMES: [&str; 1] = ["OPENAI_API_KEY"];
 
@@ -5006,7 +4109,7 @@ mod harness_folder_tests {
 
     #[test]
     fn the_owner_secret_list_holds_every_harness_folder_where_the_three_stood_before() {
-        let places: Vec<&str> = credential_places().collect();
+        let places: Vec<&str> = credential_places(&crate::sandbox::PROFILE_HOOKS).collect();
         let from = places.iter().position(|place| *place == ".kube").unwrap() + 1;
         let to = places
             .iter()
@@ -5065,6 +4168,7 @@ mod linux_sockets_tests {
 
     fn sandbox(case: &Case, network: SandboxNetwork, sockets: LinuxSockets) -> ProjectSandbox {
         ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &case.root.join("project"),
             &case.root.join("home"),
             &case.root.join("tmp"),
@@ -5086,6 +4190,7 @@ mod linux_sockets_tests {
     fn the_setting_defaults_to_tcp_only_and_keeps_its_wire_names() {
         let case = case();
         let fresh = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &case.root.join("project"),
             &case.root.join("home"),
             &case.root.join("tmp"),
@@ -5256,9 +4361,9 @@ mod linux_sockets_tests {
             let routed = launched.routed().is_some();
             let full = linux_holds_fully(true, true, routed, &launched);
             for choice in [
-                policy::AgentNetwork::None,
-                policy::AgentNetwork::Https,
-                policy::AgentNetwork::Open,
+                kernel_sandbox::policy::AgentNetwork::None,
+                kernel_sandbox::policy::AgentNetwork::Https,
+                kernel_sandbox::policy::AgentNetwork::Open,
             ] {
                 let line = linux_unbridged_notice_on(Some(host), choice, &launched);
                 assert_eq!(
@@ -5284,7 +4389,7 @@ mod linux_sockets_tests {
         )));
         for code in [
             MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
-            crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
+            kernel_sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
         ] {
             assert!(
                 crate::config::plain_problem(code).is_some(),
@@ -5403,27 +4508,6 @@ mod linux_sockets_tests {
     }
 }
 
-#[cfg(test)]
-mod held_stop_tests {
-    use super::*;
-
-    /// A Linux run the call supervisor stopped because it could not take back an entry
-    /// read as a held name is told so; the same code on another system, and every other
-    /// code on Linux (125, the supervisor's other stops, among them) stays the harness's
-    /// own (DEC-185 S2a, rv-sec3 F1).
-    #[test]
-    fn a_linux_run_stopped_with_a_held_name_not_put_back_is_told_so() {
-        let said = held_stop("linux", HELD_NOT_PUT_BACK_EXIT);
-        assert_eq!(said, Some(HELD_NOT_PUT_BACK));
-        for code in [0, 1, 3, 125, 126, 137] {
-            assert_eq!(held_stop("linux", code), None, "{code}");
-        }
-        for os in ["macos", "windows"] {
-            assert_eq!(held_stop(os, HELD_NOT_PUT_BACK_EXIT), None, "{os}");
-        }
-    }
-}
-
 #[cfg(all(test, target_os = "macos"))]
 mod order_tests {
     use super::*;
@@ -5439,6 +4523,7 @@ mod order_tests {
             fs::create_dir_all(root.join(folder)).unwrap();
         }
         let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &root.join("project"),
             &root.join("home"),
             &root.join("tmp"),
@@ -5471,7 +4556,7 @@ mod order_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod access_grant_tests {
     use super::*;
-    use policy::AccessGrant;
+    use kernel_sandbox::policy::AccessGrant;
 
     fn case() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -5492,6 +4577,7 @@ mod access_grant_tests {
         let socket = root.join("owner-tmp").join("discord-ipc-0");
         let owner_tmp = root.join("owner-tmp");
         let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &root.join("project"),
             &root.join("home"),
             &root.join("tmp"),
@@ -5549,6 +4635,7 @@ mod access_grant_tests {
         let (_temp, root) = case();
         let fresh = |network| {
             ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
                 &root.join("project"),
                 &root.join("home"),
                 &root.join("tmp"),
@@ -5593,12 +4680,48 @@ mod access_grant_tests {
 mod profile_string_tests {
     use super::*;
 
+    /// The engine secrets name every engine secret folder the hooks list under the runtime,
+    /// and no engine folder the hooks leave out.
+    #[test]
+    fn the_engine_secrets_name_the_secret_folders_the_hooks_list() {
+        static STAND_IN: ProfileHooks = ProfileHooks {
+            engine_secret_folders: &["stand-in-secrets"],
+            ..PROFILE_HOOKS
+        };
+        let runtime = tempfile::tempdir().unwrap();
+        let secrets = engine_secrets_in(&STAND_IN, runtime.path()).unwrap();
+        assert!(
+            secrets.contains(&runtime.path().join("stand-in-secrets")),
+            "{secrets:?}"
+        );
+        assert!(
+            !secrets.contains(&runtime.path().join(crate::ide::FOLDER)),
+            "{secrets:?}"
+        );
+    }
+
+    /// The launch denies keep writes off the launch lock the hooks name, and name no other
+    /// lock.
+    #[test]
+    fn the_launch_denies_keep_writes_off_the_lock_the_hooks_name() {
+        static STAND_IN: ProfileHooks = ProfileHooks {
+            launch_lock: "stand-in.lock",
+            ..PROFILE_HOOKS
+        };
+        let denies = launch_denies(&STAND_IN, Path::new("/private/tmp/agent/home"));
+        assert!(denies.contains(&any_case("stand-in.lock")), "{denies}");
+        assert!(
+            !denies.contains(&any_case(crate::launch_context::LOCK)),
+            "{denies}"
+        );
+    }
+
     /// v2.4.0 gate: the folded secret names, 1300 bytes as one regex, split into bodies each
     /// Seatbelt reads, every name kept whole and in order; a list that fits stays one body
     /// in the shape it had, and no names give no body.
     #[test]
     fn regex_bodies_pack_whole_names_under_the_reader_limit() {
-        let names: Vec<String> = shared_folders::SECRET_NAMES
+        let names: Vec<String> = kernel_sandbox::shared_folders::SECRET_NAMES
             .iter()
             .map(|name| fold_case(name))
             .collect();
@@ -5683,7 +4806,7 @@ mod profile_string_tests {
             fold_case("secrets?"),
             "(s|S|\u{17f})[eE][cC][rR][eE][tT](s|S|\u{17f})?"
         );
-        let templates = fold_case(shared_folders::SECRET_TEMPLATES);
+        let templates = fold_case(kernel_sandbox::shared_folders::SECRET_TEMPLATES);
         assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
     }
 
@@ -5722,12 +4845,18 @@ mod profile_string_tests {
         let open: Vec<String> = (0..64)
             .map(|at| format!("{at:02}{}", "n".repeat(40)))
             .collect();
-        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open)
-            .unwrap()
-            .keep_project_secrets(&project, &[])
-            .unwrap()
-            .open_only_tops(&open)
-            .unwrap();
+        let wide = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap()
+        .open_only_tops(&open)
+        .unwrap();
         let text = wide.profile();
         assert!(sbpl_overlong(&text).is_empty());
         assert!(text.matches("(require-not (regex #\"").count() >= 2);
@@ -5737,12 +4866,18 @@ mod profile_string_tests {
         let most: Vec<String> = (0..OPEN_TOPS_MAX)
             .map(|at| format!("{at:03}{}", "n".repeat(252)))
             .collect();
-        let crowded = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-            .unwrap()
-            .keep_project_secrets(&project, &[])
-            .unwrap()
-            .open_only_tops(&most)
-            .unwrap();
+        let crowded = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap()
+        .open_only_tops(&most)
+        .unwrap();
         let text = crowded.profile();
         assert!(sbpl_overlong(&text).is_empty());
         assert!(text.len() > PROFILE_BYTES_MAX);
@@ -5761,10 +4896,16 @@ mod profile_string_tests {
             deep = deep.join("d".repeat(room.clamp(1, 200)));
         }
         fs::create_dir_all(&deep).unwrap();
-        let narrow = ProjectSandbox::new(&deep, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-            .unwrap()
-            .keep_project_secrets(&deep, &[])
-            .unwrap();
+        let narrow = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &deep,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .keep_project_secrets(&deep, &[])
+        .unwrap();
         assert!(!sbpl_overlong(&narrow.profile()).is_empty());
         let target = profiles.join("deep.sb");
         match narrow.install(&target) {
@@ -5785,9 +4926,9 @@ mod profile_string_tests {
     fn home_denies_match_at_or_below_without_an_optional_tail() {
         let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
         let data = Path::new("/private/tmp/.tmpA1b2C3/data");
-        let config = agent_config_denies(home);
+        let config = agent_config_denies(&PROFILE_HOOKS, home);
         assert!(!config.contains("(/.*)"), "{config}");
-        let regranted = regranted_denies(home, &[data]);
+        let regranted = regranted_denies(&PROFILE_HOOKS, home, &[data]);
         assert!(!regranted.contains("(/.*)"), "{regranted}");
         let flagged = seatbelt_pattern(home);
         assert!(
@@ -5820,16 +4961,22 @@ mod profile_string_tests {
         for folder in [&home, &tmp, &project] {
             fs::create_dir_all(folder).unwrap();
         }
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-            .unwrap()
-            .keep_project_secrets(&project, &[])
-            .unwrap()
-            .open_only_tops(&["notes".to_string()])
-            .unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap()
+        .open_only_tops(&["notes".to_string()])
+        .unwrap();
         let text = [
             sandbox.profile(),
             clone_store_denies(&base.join("clone")),
-            agent_config_denies(&home),
+            agent_config_denies(&PROFILE_HOOKS, &home),
         ]
         .concat();
         let hfs = hfs_ignored_deny();
@@ -5870,14 +5017,33 @@ mod firmlink_tests {
         assert!(long(&root.join("project")).is_dir());
         let network = || SandboxNetwork::Only(Vec::new());
         let (home, tmp) = (root.join("home"), root.join("tmp"));
-        let refused = ProjectSandbox::new(&long(&root.join("project")), &home, &tmp, network());
+        let refused = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &long(&root.join("project")),
+            &home,
+            &tmp,
+            network(),
+        );
         assert!(
             matches!(&refused, Err(SandboxError::Invalid(reason)) if reason.contains("canonical")),
             "{refused:?}"
         );
-        assert!(ProjectSandbox::new(&root.join("project"), &home, &tmp, network()).is_ok());
+        assert!(
+            ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                &root.join("project"),
+                &home,
+                &tmp,
+                network()
+            )
+            .is_ok()
+        );
         assert_eq!(
-            extra_paths::checked(long(&root).to_str().unwrap(), &root.join("engine")),
+            kernel_sandbox::extra_paths::checked(
+                &ACCESS_HOOKS,
+                long(&root).to_str().unwrap(),
+                &root.join("engine")
+            ),
             Err("read_path_engine_data")
         );
     }

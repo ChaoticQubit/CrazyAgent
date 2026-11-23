@@ -1004,7 +1004,7 @@ pub fn tool_cache_files(database: &Path, folders: &[PathBuf]) -> Vec<RecordedFil
     let names = folders
         .iter()
         .filter_map(|folder| {
-            let cache = crate::sandbox::tool_cache::project_folder(root, folder.to_str()?);
+            let cache = kernel_sandbox::tool_cache::project_folder(root, folder.to_str()?);
             assert_eq!(cache.parent(), Some(root.join(TOOL_CACHE_FOLDER).as_path()));
             Some(format!(
                 "{TOOL_CACHE_PREFIX}{}",

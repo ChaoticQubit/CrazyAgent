@@ -1253,8 +1253,8 @@ async fn every_master_and_agent_launch_states_how_work_lands() {
 /// the owner saves.
 #[tokio::test]
 async fn every_launch_names_the_shared_folders_for_each_choice() {
-    use crazyagent::sandbox::policy::AgentPolicy;
-    use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
+    use kernel_sandbox::policy::AgentPolicy;
+    use kernel_sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
     let case = Case::new().await;
     let mut owner = case.owner().await;
     let project = ProjectId::new("shared").unwrap();

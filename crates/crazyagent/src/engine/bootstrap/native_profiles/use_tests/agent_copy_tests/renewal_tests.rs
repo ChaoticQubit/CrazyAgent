@@ -466,6 +466,7 @@ fn codex_sign_in(store: &str) -> String {
     }
     let executable = codex();
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &project,
         &home,
         &tmp,

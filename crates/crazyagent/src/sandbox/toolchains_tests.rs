@@ -1,0 +1,650 @@
+use kernel_sandbox::toolchains::{
+    CARGO_SHARED, GIT_FOLDER, GIT_PROGRAM, ToolHomes, catch_up_git, free_git, lead_git, make_tmp,
+    prepare_cargo_home, remove_tmp,
+};
+#[cfg(target_os = "macos")]
+use kernel_sandbox::toolchains::{
+    GETCONF_PROGRAM, ScopedTmp, getconf_folder, remove_tmp_keeping, write_getconf,
+};
+use std::fs;
+use std::io;
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_getconf_written_again_is_kept_and_one_that_changed_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let _scratch = ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
+    let getconf =
+        getconf_folder(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).join(GETCONF_PROGRAM);
+    write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false).unwrap();
+    let written = fs::read(&getconf).unwrap();
+    let again = write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false);
+    assert!(again.is_ok(), "the same getconf written again: {again:?}");
+    assert_eq!(fs::read(&getconf).unwrap(), written);
+    let changed = [written.as_slice(), b"exit 0\n"].concat();
+    fs::write(&getconf, &changed).unwrap();
+    let refused = write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false);
+    assert!(
+        matches!(&refused, Err(error) if error.kind() == io::ErrorKind::AlreadyExists),
+        "a changed getconf: {refused:?}"
+    );
+    assert_eq!(fs::read(&getconf).unwrap(), changed);
+}
+
+/// Runs a git program in the test repository with no system or global config and the
+/// test's own home. Inputs: the program, the repository, the home and the arguments.
+/// Output: the program's output.
+fn git_run(program: &Path, repo: &Path, home: &Path, args: &[&str]) -> std::process::Output {
+    kernel_processes::spawn_gate::output(
+        std::process::Command::new(program)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(repo)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap()
+}
+
+/// The master at Full access gets the free copy of its own `git` (DEC-117 Q2): it merges
+/// a branch the worker copy refuses under DEC-107.
+#[test]
+fn the_free_copy_merges_another_branch_that_the_worker_copy_refuses() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "other"],
+        &["commit", "-q", "--allow-empty", "-m", "other work"],
+        &["checkout", "-q", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let refused = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "other"],
+    );
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("git merge is refused"));
+    free_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
+    let merged = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "other"],
+    );
+    assert!(
+        merged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+}
+
+/// With "Catch up with main" on, the worker copy of an agent's own `git` merges the project
+/// main the engine keeps at `crazyagent/main`, and still refuses another branch, a merge
+/// naming another branch beside main, and pull, telling the agent how to catch up.
+#[test]
+fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "landed"],
+        &["commit", "-q", "--allow-empty", "-m", "landed work"],
+        &["update-ref", "refs/crazyagent/main", "landed"],
+        &["checkout", "-q", "-b", "other", "main"],
+        &["commit", "-q", "--allow-empty", "-m", "other work"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let merged = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "crazyagent/main"],
+    );
+    assert!(
+        merged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+    let landed = git_run(git, repo.path(), home.path(), &["rev-parse", "landed"]);
+    let head = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(head.stdout, landed.stdout);
+    for (args, refused) in [
+        (&["merge", "--no-edit", "other"][..], "git merge is refused"),
+        (
+            &["merge", "--no-edit", "crazyagent/main", "other"],
+            "git merge is refused",
+        ),
+        (&["pull"], "git pull is refused"),
+    ] {
+        let done = git_run(&wrapper, repo.path(), home.path(), args);
+        assert!(!done.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert!(stderr.contains(refused), "{args:?} {stderr}");
+        assert!(
+            stderr.contains("git merge crazyagent/main"),
+            "{args:?} {stderr}"
+        );
+    }
+}
+
+/// F19, DEC-107: with "Catch up with main" on, a lead's copy merges the landed main at
+/// `crazyagent/main` and its own workers' branches, still refuses another branch, and its
+/// refusal tells it how to catch up with main; with the setting off the lead's copy refuses
+/// main too and says nothing of it.
+#[test]
+fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_refusing() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+        }
+    }
+    let git = crate::research::runner::sandboxed_git();
+    for catch_up in [true, false] {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+            &["checkout", "-q", "-b", "landed"],
+            &["commit", "-q", "--allow-empty", "-m", "landed work"],
+            &["update-ref", "refs/crazyagent/main", "landed"],
+            &["checkout", "-q", "-b", "other", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "other work"],
+            &["checkout", "-q", "-b", "task--ann", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "ann work"],
+            &["checkout", "-q", "-b", "task", "main"],
+        ] {
+            let done = git_run(git, repo.path(), home.path(), args);
+            assert!(done.status.success(), "{args:?} {done:?}");
+        }
+        let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+        let _removed = Removed(home.path().to_path_buf());
+        lead_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp, catch_up).unwrap();
+        let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+        let main = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "-q", "--no-edit", "crazyagent/main"],
+        );
+        assert_eq!(main.status.success(), catch_up, "{main:?}");
+        let ann = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "-q", "--no-ff", "--no-edit", "task--ann"],
+        );
+        assert!(
+            ann.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ann.stderr)
+        );
+        let other = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", "other"],
+        );
+        assert!(!other.status.success());
+        let stderr = String::from_utf8_lossy(&other.stderr);
+        assert!(stderr.contains("git merge is refused"), "{stderr}");
+        assert!(
+            stderr.contains("A lead merges only the branches of its own workers"),
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("git merge crazyagent/main"),
+            catch_up,
+            "{stderr}"
+        );
+    }
+}
+
+/// F19, DEC-107: a worker's merge of its own lead's branch stays refused, with Catch up with
+/// main on or off, and the refusal tells the worker the path that works: its lead's work
+/// reaches its branch through Update on its change set, so it tells its lead (HB CM#335).
+#[test]
+fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+        }
+    }
+    let git = crate::research::runner::sandboxed_git();
+    for catch_up in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "task"][..],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+            &["checkout", "-q", "-b", "task--ann"],
+            &["commit", "-q", "--allow-empty", "-m", "ann work"],
+            &["checkout", "-q", "task"],
+            &["commit", "-q", "--allow-empty", "-m", "lead work"],
+            &["checkout", "-q", "task--ann"],
+        ] {
+            let done = git_run(git, repo.path(), home.path(), args);
+            assert!(done.status.success(), "{args:?} {done:?}");
+        }
+        let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+        let _removed = Removed(home.path().to_path_buf());
+        if catch_up {
+            catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
+        }
+        let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+        let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+        let done = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", "task"],
+        );
+        assert!(!done.status.success(), "the lead's branch was merged");
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert!(stderr.contains("git merge is refused"), "{stderr}");
+        assert!(
+            stderr.contains(
+                "Work from the lead branch reaches yours through Update on your change set"
+            ),
+            "{stderr}"
+        );
+        assert!(stderr.contains("tell your lead what you need"), "{stderr}");
+        let after = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(after.stdout, before.stdout);
+    }
+}
+
+/// The worker copy merges only the commit the engine keeps at `refs/crazyagent/main`: with
+/// that ref missing, a branch the agent named `crazyagent/main` holding other work is
+/// refused under either name and the agent's branch keeps its commit.
+#[test]
+fn the_worker_copy_refuses_a_crazyagent_main_that_is_not_the_engine_s_ref() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "crazyagent/main"],
+        &["commit", "-q", "--allow-empty", "-m", "foreign work"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+    for name in ["crazyagent/main", "refs/crazyagent/main"] {
+        let done = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", name],
+        );
+        assert!(!done.status.success(), "{name} was merged");
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert!(stderr.contains("git merge is refused"), "{name} {stderr}");
+    }
+    let after = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(after.stdout, before.stdout);
+}
+
+/// The copy of an agent's own `git` that every agent gets first, before its launch knows
+/// the project's "Catch up with main" choice, refuses `crazyagent/main`, so an agent whose
+/// later copy could not be written never merges main against an Off.
+#[test]
+fn the_copy_every_agent_gets_first_refuses_crazyagent_main() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "landed"],
+        &["commit", "-q", "--allow-empty", "-m", "landed work"],
+        &["update-ref", "refs/crazyagent/main", "landed"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let done = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "crazyagent/main"],
+    );
+    assert!(
+        !done.status.success(),
+        "the first copy merged crazyagent/main"
+    );
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert!(stderr.contains("git merge is refused"), "{stderr}");
+    assert!(!stderr.contains("crazyagent/main"), "{stderr}");
+}
+
+/// With "Catch up with main" off, the agent keeps the copy of its own `git` that
+/// [`make_tmp`] wrote, which refuses `crazyagent/main` too, with the reason the worker copy
+/// gave before the setting.
+#[test]
+fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "landed"],
+        &["commit", "-q", "--allow-empty", "-m", "landed work"],
+        &["update-ref", "refs/crazyagent/main", "landed"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let refused = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "crazyagent/main"],
+    );
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("git merge is refused"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("crazyagent/main"), "{stderr}");
+}
+
+/// RV-DS241-137 code r2 F4: a cargo home's crate caches hold only the links to the owner's
+/// own (DEC-173). Where the owner has the caches, a folder an agent made at one name and a
+/// link to elsewhere at the other give way to those links, the owner's crates and the place
+/// the link named stay as they were, and the exact link stays the same entry; where the
+/// owner has none, a link there goes and a folder stays for the launch's reset.
+#[cfg(unix)]
+#[test]
+fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(scratch.path()).unwrap();
+    let owner = root.join("owner");
+    let crate_file = owner.join(".cargo/registry/cache/x.crate");
+    fs::create_dir_all(crate_file.parent().unwrap()).unwrap();
+    fs::write(&crate_file, "the owner's crate\n").unwrap();
+    let checkout = owner.join(".cargo/git/db/x/HEAD");
+    fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+    fs::write(&checkout, "the owner's checkout\n").unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let with = root.join("with");
+    fs::create_dir_all(with.join(".cargo/registry/src/index/x-1.0.0")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, with.join(".cargo/git")).unwrap();
+    let homes = ToolHomes::at(&owner);
+
+    let cargo = prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &with, &homes).unwrap();
+
+    for name in CARGO_SHARED {
+        assert_eq!(
+            fs::read_link(cargo.join(name)).unwrap(),
+            owner.join(".cargo").join(name)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&crate_file).unwrap(),
+        "the owner's crate\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&checkout).unwrap(),
+        "the owner's checkout\n"
+    );
+    assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
+    let link = fs::symlink_metadata(cargo.join("registry")).unwrap().ino();
+    assert_eq!(
+        prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &with, &homes).unwrap(),
+        cargo
+    );
+    let again = fs::symlink_metadata(cargo.join("registry")).unwrap().ino();
+    assert_eq!(again, link, "the exact link was made again");
+
+    let bare = ToolHomes::at(&root.join("bare"));
+    let without = root.join("without");
+    fs::create_dir_all(without.join(".cargo/git/db")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, without.join(".cargo/registry")).unwrap();
+
+    prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &without, &bare).unwrap();
+
+    assert!(fs::symlink_metadata(without.join(".cargo/registry")).is_err());
+    assert!(without.join(".cargo/git/db").is_dir());
+}
+
+/// RV-DS241-199: launches that prepare one home at once, as two IDE terminals of one project
+/// opening together do, all get its cargo home: one that finds the link another launch just
+/// made at a name it saw free takes it, and every name links to the owner's cache.
+#[cfg(unix)]
+#[test]
+fn launches_that_prepare_one_cargo_home_at_once_all_get_it() {
+    const LAUNCHES: usize = 8;
+    const HOMES: usize = 64;
+    let scratch = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(scratch.path()).unwrap();
+    let owner = root.join("owner");
+    for name in CARGO_SHARED {
+        fs::create_dir_all(owner.join(".cargo").join(name)).unwrap();
+    }
+    let homes = ToolHomes::at(&owner);
+    let mut refused = Vec::new();
+    for round in 0..HOMES {
+        let home = root.join(format!("home-{round}"));
+        fs::create_dir(&home).unwrap();
+        let start = std::sync::Barrier::new(LAUNCHES);
+        let (start, home, homes) = (&start, &home, &homes);
+        let results: Vec<io::Result<PathBuf>> = std::thread::scope(|scope| {
+            let launches: Vec<_> = (0..LAUNCHES)
+                .map(|_| {
+                    scope.spawn(move || {
+                        start.wait();
+                        prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, home, homes)
+                    })
+                })
+                .collect();
+            launches
+                .into_iter()
+                .map(|launch| launch.join().unwrap())
+                .collect()
+        });
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            refused.push(format!("home {round}: {error}"));
+        }
+        for name in CARGO_SHARED {
+            assert_eq!(
+                fs::read_link(home.join(".cargo").join(name)).unwrap(),
+                owner.join(".cargo").join(name)
+            );
+        }
+    }
+    assert!(refused.is_empty(), "{refused:?}");
+}
+
+/// Runs only in the process the row below starts: makes an agent home with its short temp
+/// folder, then writes its launch `getconf` under umask 0277, which clears the owner's write
+/// bit, and reports what it got. Input: the folder named in `ROW_FOLDER`; without it, nothing.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    let _scratch = ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let getconf_folder = getconf_folder(&crate::sandbox::TOOLCHAIN_HOOKS, home.path());
+    let outcome = match write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false) {
+        Ok(()) => format!(
+            "ok {:o} {:o}",
+            fs::metadata(&getconf_folder).unwrap().mode() & 0o777,
+            fs::metadata(getconf_folder.join(GETCONF_PROGRAM))
+                .unwrap()
+                .mode()
+                & 0o777
+        ),
+        Err(error) => format!("err {error}"),
+    };
+    fs::write(Path::new(&folder).join("outcome"), outcome).unwrap();
+}
+
+/// UMASK-MODE-ASSERTS: an engine that inherited a umask clearing the owner's write bit still
+/// writes a launch's `getconf` in a private 0700 folder as a private 0700 program, where the
+/// folder came out 0500 and the write was refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_getconf_written_under_a_narrow_umask_is_a_private_program() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = kernel_processes::spawn_gate::row_alone(
+        "sandbox::toolchains::tests::a_launch_getconf_written_under_a_narrow_umask_in_its_own_process",
+        ":",
+        folder.path(),
+    );
+    assert!(
+        status.success(),
+        "the write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        fs::read_to_string(folder.path().join("outcome")).unwrap(),
+        "ok 700 700"
+    );
+}
+
+/// Leaves in an agent's short temp folder what an agent may: a folder it shut with mode 000
+/// and a file it made immutable in a folder of its own. Input: the temp folder. Output: none.
+#[cfg(target_os = "macos")]
+fn shut_and_pin(tmp: &Path) {
+    let shut = tmp.join("shut");
+    fs::create_dir_all(&shut).unwrap();
+    fs::write(shut.join("inner"), b"left by an agent\n").unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let pinned = tmp.join("deep").join("pinned");
+    fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+    fs::write(&pinned, b"left by an agent\n").unwrap();
+    assert!(
+        kernel_processes::spawn_gate::status(
+            std::process::Command::new("/usr/bin/chflags")
+                .arg("uchg")
+                .arg(&pinned)
+        )
+        .unwrap()
+        .success()
+    );
+}
+
+/// #571 sec N1: removing an agent's short temp folder removes a folder the agent shut with
+/// mode 000 and a file it made immutable, as Clean up removes an agent's tree, so neither
+/// keeps the folder in the system temp folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    shut_and_pin(&tmp);
+    let removed = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path());
+    let left = fs::symlink_metadata(&tmp).is_ok();
+    let _ = crate::team::cleanup::remove_agent_tree(&tmp);
+    assert!(removed.is_ok(), "{removed:?}");
+    assert!(!left, "the temp folder stayed");
+}
+
+/// #571 sec N1: removing all an agent's short temp folder holds but its kept socket removes
+/// a folder the agent shut with mode 000 and a file it made immutable, and keeps the socket.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
+    let socket = tmp.join("kept.sock");
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    shut_and_pin(&tmp);
+    let removed = remove_tmp_keeping(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), "kept.sock");
+    let names: Vec<_> = fs::read_dir(&tmp)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect();
+    let _ = crate::team::cleanup::remove_agent_tree(&tmp);
+    assert!(removed.is_ok(), "{removed:?}");
+    assert_eq!(names, [std::ffi::OsString::from("kept.sock")]);
+}

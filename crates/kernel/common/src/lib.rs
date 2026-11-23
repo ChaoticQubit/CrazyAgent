@@ -4,11 +4,16 @@ use sha2::{Digest, Sha256};
 
 pub mod names;
 pub mod net;
+/// The relay token and local placeholder names a model key value is told by, and the
+/// checks that tell them.
+pub mod relay_names;
 
 #[cfg(test)]
 mod names_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod relay_names_tests;
 
 /// The three desktop platforms the data root and services are defined for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -55,7 +55,7 @@ fn grants_withdrawn(checks: &Path, id: &str) -> bool {
         _ => {}
     }
     let container = match check_sandbox_folders(checks, id) {
-        Ok([project, home, _]) => crate::sandbox::windows::container_for(&project, &home),
+        Ok([project, home, _]) => kernel_sandbox::windows::container_for(&project, &home),
         Err(problem) => {
             eprintln!("plugin_check_grants_not_withdrawn cause={problem}");
             return false;

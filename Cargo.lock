@@ -1037,13 +1037,16 @@ dependencies = [
 name = "crazyagent-kernel-sandbox"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
+ "getrandom 0.4.3",
  "nix",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "url",
 ]
 
@@ -1052,10 +1055,16 @@ name = "crazyagent-kernel-security"
 version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-common",
+ "crazyagent-kernel-processes",
  "form_urlencoded",
+ "getrandom 0.4.3",
  "keyring-core",
+ "nix",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
+ "subtle",
+ "tempfile",
  "url",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",

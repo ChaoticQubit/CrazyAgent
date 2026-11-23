@@ -12,9 +12,9 @@ use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::harnesses::terminal_session::{PaneRecord, Resume, paste};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
-use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
 use kernel_processes::terminal::{AgentId, Host};
+use kernel_sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, OsStr, OsString};
@@ -654,7 +654,7 @@ impl ManagedAgent {
             .unwrap();
         }
         if let Some(network) = network {
-            crate::sandbox::policy::save(
+            crate::sandbox::policy_store::save(
                 &connection,
                 PROJECT,
                 &AgentPolicy {
@@ -864,7 +864,7 @@ impl ManagedAgent {
                     Some(Box::new(Grant {
                         profile,
                         context,
-                        access: crate::sandbox::policy::AgentAccess::Sandboxed,
+                        access: kernel_sandbox::policy::AgentAccess::Sandboxed,
                     })),
                     TurnRules {
                         limit: Some(turn_time),
@@ -921,7 +921,7 @@ impl ManagedAgent {
                 Some(Box::new(Grant {
                     profile,
                     context,
-                    access: crate::sandbox::policy::AgentAccess::Sandboxed,
+                    access: kernel_sandbox::policy::AgentAccess::Sandboxed,
                 })),
                 TurnRules {
                     limit: Some(turn_time),
@@ -1087,9 +1087,9 @@ impl ManagedAgent {
                 home: self.home.clone(),
                 executable: self.plan.entry.clone(),
             }),
-            access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            access: kernel_sandbox::policy::AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
-            network: crate::sandbox::policy::AgentNetwork::Open,
+            network: kernel_sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
             grants: Vec::new(),
@@ -1127,7 +1127,7 @@ impl ManagedAgent {
         access: AgentAccess,
     ) -> NativeTeam {
         self.assert_native();
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &self.runtime.connection,
             PROJECT,
             &AgentPolicy {
@@ -1402,7 +1402,7 @@ impl NativeTeam {
     /// retires every agent whose running process started at a wider one (AL-2).
     /// Input: the new level.
     pub(super) fn save_access(&mut self, access: AgentAccess) {
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &self.runtime.connection,
             PROJECT,
             &AgentPolicy {

@@ -2517,7 +2517,7 @@ fn a_kept_rcli_home_loses_its_cargo_code_and_crates_and_links_the_owners_caches(
     fs::create_dir_all(shared.join("registry").join("index")).unwrap();
     fs::create_dir_all(shared.join("git").join("db")).unwrap();
     fs::write(shared.join("registry/index/crate"), "the owner's\n").unwrap();
-    let homes = crate::sandbox::toolchains::ToolHomes::at(&owner);
+    let homes = kernel_sandbox::toolchains::ToolHomes::at(&owner);
 
     let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
 
@@ -2556,7 +2556,7 @@ fn a_kept_rcli_home_loses_its_own_crates_when_the_owner_has_no_caches() {
         fs::create_dir_all(&planted).unwrap();
         fs::write(planted.join("build.rs"), "fn main() { planted() }\n").unwrap();
     }
-    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+    let homes = kernel_sandbox::toolchains::ToolHomes::at(&root.join("owner"));
 
     let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
 
@@ -2577,7 +2577,7 @@ fn a_kept_rcli_home_whose_cargo_home_is_a_link_gets_a_real_one_and_the_target_st
     fs::create_dir(&elsewhere).unwrap();
     fs::write(elsewhere.join("config.toml"), "[alias]\nb = \"planted\"\n").unwrap();
     std::os::unix::fs::symlink(&elsewhere, home.join(".cargo")).unwrap();
-    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+    let homes = kernel_sandbox::toolchains::ToolHomes::at(&root.join("owner"));
 
     let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
 
@@ -2612,7 +2612,7 @@ fn an_owner_home_outside_the_engine_root_keeps_its_cargo_config_and_crates() {
         )
         .unwrap();
     }
-    let homes = crate::sandbox::toolchains::ToolHomes::at(&tools);
+    let homes = kernel_sandbox::toolchains::ToolHomes::at(&tools);
 
     let removed: Vec<_> = [&owner, &engine]
         .into_iter()

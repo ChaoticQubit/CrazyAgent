@@ -1,10 +1,11 @@
 use super::low_probe::{Try, low_probe, probe};
 use super::{judge_home, validate_home, validate_home_for};
-use crate::sandbox::windows::{HELPER_NAME, WindowsSandbox};
+use crate::sandbox::windows::WindowsSandbox;
 use crate::sandbox::{ProjectSandbox, Sandbox};
 use crazyagent_win_sandbox::dacl;
 use crazyagent_win_sandbox::private::{self, Facts};
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::windows::HELPER_NAME;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -348,8 +349,14 @@ fn a_granted_home_passes_and_a_low_integrity_process_cannot_change_it() {
     }
     drop(private::dir(&home).unwrap());
     drop(private::dir(&tmp).unwrap());
-    let sandbox =
-        ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
     let installed =
         WindowsSandbox::install(sandbox, &helper(), &profiles.join("agent.sb"), &grants).unwrap();
     let written = home.join("boxed.txt");

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod parallel;
+mod runner;
 
 struct Machine {
     root: tempfile::TempDir,
@@ -837,77 +838,6 @@ fn script(machine: &Machine, relative: &str, body: &str, args: &[&'static str]) 
 }
 
 #[test]
-fn a_run_passes_exactly_the_fixed_arguments_and_a_cleared_environment() {
-    let machine = Machine::new();
-    let out = machine.root.path().join("seen");
-    let fixed = script(
-        &machine,
-        "bin/tool",
-        &format!(
-            "printf '%s\\n' \"$@\" > {0}.args\nenv > {0}.env\n",
-            out.display()
-        ),
-        &["upgrade", "--cask", "codex"],
-    );
-    let ran = run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
-    assert!(ran.success);
-    assert_eq!(
-        std::fs::read_to_string(format!("{}.args", out.display())).unwrap(),
-        "upgrade\n--cask\ncodex\n"
-    );
-    let names: Vec<String> = std::fs::read_to_string(format!("{}.env", out.display()))
-        .unwrap()
-        .lines()
-        .filter_map(|line| line.split('=').next().map(str::to_owned))
-        .collect();
-    for name in &names {
-        assert!(
-            [
-                "HOME", "PATH", "USER", "LOGNAME", "LANG", "TMPDIR", "PWD", "SHLVL", "_", "OLDPWD"
-            ]
-            .contains(&name.as_str()),
-            "{name}"
-        );
-    }
-    assert!(names.iter().any(|name| name == "PATH"));
-}
-
-#[test]
-fn the_search_path_is_the_tools_folder_then_the_system_folders_and_nothing_else() {
-    let machine = Machine::new();
-    let out = machine.root.path().join("path");
-    let fixed = script(
-        &machine,
-        "bin/tool",
-        &format!("printf '%s' \"$PATH\" > {}\n", out.display()),
-        &[],
-    );
-    run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
-    let path = std::fs::read_to_string(&out).unwrap();
-    assert_eq!(
-        path,
-        format!(
-            "{}:/usr/bin:/bin:/usr/sbin:/sbin",
-            machine.root.path().join("bin").display()
-        )
-    );
-}
-
-#[test]
-fn output_past_the_bound_is_dropped_and_the_tool_still_ends() {
-    let machine = Machine::new();
-    let fixed = script(
-        &machine,
-        "bin/tool",
-        "i=0\nwhile [ $i -lt 40000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done\n",
-        &[],
-    );
-    let ran = run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
-    assert!(ran.success);
-    assert!(ran.output.len() <= SHOWN_BYTES_MAX);
-}
-
-#[test]
 fn a_tool_past_its_time_is_ended_with_every_child_it_started() {
     let machine = Machine::new();
     let pid_file = machine.root.path().join("child.pid");
@@ -943,32 +873,6 @@ fn a_tool_past_its_time_is_ended_with_every_child_it_started() {
         rustix::process::test_kill_process(rustix::process::Pid::from_raw(child).unwrap()).is_err()
     });
     assert!(gone);
-}
-
-#[test]
-fn a_failing_tool_reports_failure_with_its_last_lines() {
-    let machine = Machine::new();
-    let fixed = script(
-        &machine,
-        "bin/tool",
-        "echo Error: cask is pinned >&2\nexit 3\n",
-        &[],
-    );
-    let ran = run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
-    assert!(!ran.success);
-    assert!(ran.output.contains("Error: cask is pinned"));
-}
-
-#[test]
-fn a_tool_that_reads_input_gets_none() {
-    let machine = Machine::new();
-    let fixed = script(&machine, "bin/tool", "read answer || echo no-input\n", &[]);
-    assert!(
-        run(&fixed, &machine.roots().home, CHECK_TIME)
-            .unwrap()
-            .output
-            .contains("no-input")
-    );
 }
 
 #[test]
@@ -2910,6 +2814,7 @@ fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
         folder
     });
     let sandbox = crate::sandbox::ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &project,
         &home,
         &tmp,

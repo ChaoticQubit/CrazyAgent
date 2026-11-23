@@ -5,11 +5,12 @@ use super::{
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
-use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::harnesses::leftovers::{Follower, Lineage, Unstopped};
 use crate::protocol::ProjectId;
 use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::{self, Warden};
 use kernel_processes::fd_wait::{self, Wake};
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 use rustix::event::{PollFd, PollFlags};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::Errno;

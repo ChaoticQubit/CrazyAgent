@@ -1,8 +1,9 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::ProjectSandbox;
-use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope, apply};
+use crazyagent::sandbox::shared_folders::apply;
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -103,6 +104,7 @@ fn case() -> Case {
 /// The sandbox of a launch in `own` that reads the project folder, with `shared` applied.
 fn sandbox(case: &Case, shared: &SharedFolders) -> ProjectSandbox {
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.own,
         &case.home,
         &case.tmp,

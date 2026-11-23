@@ -108,7 +108,7 @@ fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
         .map(|(_, home)| PathBuf::from(home))
         .unwrap();
     env.extend(
-        toolchains::agent_env(&home, &ToolHomes::owner().unwrap())
+        kernel_sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap())
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
     );
@@ -120,10 +120,10 @@ fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
         env.push(("TMPPREFIX".to_owned(), prefix.to_str().unwrap().to_owned()));
     }
     env.extend(
-        crate::sandbox::AGENT_GIT_ENV
+        kernel_sandbox::profile::consts::AGENT_GIT_ENV
             .into_iter()
-            .chain(crate::sandbox::AGENT_TLS_ENV)
-            .chain(crate::sandbox::AGENT_HOME_ENV)
+            .chain(kernel_sandbox::profile::consts::AGENT_TLS_ENV)
+            .chain(kernel_sandbox::profile::consts::AGENT_HOME_ENV)
             .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     env
@@ -1178,13 +1178,13 @@ fn the_owner_git_identity_reaches_a_pane_agent_environment() {
 }
 
 fn tools_on_path() -> String {
-    toolchains::agent_path(&ToolHomes::owner().unwrap(), TOOLS_ON_PATH)
+    kernel_sandbox::toolchains::agent_path(&ToolHomes::owner().unwrap(), TOOLS_ON_PATH)
 }
 
 #[test]
 fn a_pane_gets_the_agent_short_temp_folder_and_the_toolchain_settings() {
     let case = Case::new();
-    let tmp = toolchains::make_tmp(&case.home()).unwrap();
+    let tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.home()).unwrap();
     for harness in ["codex", "claude-code"] {
         let request = case.request(harness, case.subscription(), true);
         let built = command(&request, None, &run(None)).unwrap();
@@ -1208,7 +1208,7 @@ fn a_pane_gets_the_agent_short_temp_folder_and_the_toolchain_settings() {
             );
         }
     }
-    toolchains::remove_tmp(&case.home()).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.home()).unwrap();
 }
 
 /// Builds the real project context `for_project` gives the case's project: an engine
@@ -1678,7 +1678,7 @@ fn a_native_lead_s_teammates_get_their_own_config_home_and_the_lead_s_sign_in() 
 #[test]
 fn a_native_lead_s_temp_folder_is_its_own_and_its_teammates_keep_the_shared_one() {
     let case = Case::new();
-    let shared = toolchains::make_tmp(&case.home()).unwrap();
+    let shared = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.home()).unwrap();
     let own = toolchains::native_lead_tmp(&shared);
     let request = case.request("claude-code", case.subscription(), true);
     let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
@@ -1724,7 +1724,7 @@ fn a_native_lead_s_temp_folder_is_its_own_and_its_teammates_keep_the_shared_one(
     );
     assert!(!script.exists());
     drop(installed);
-    toolchains::remove_tmp(&case.home()).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.home()).unwrap();
 }
 
 #[test]
@@ -1804,7 +1804,7 @@ fn a_pane_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
     };
     assert_eq!(path_of(true), tools_on_path());
     assert_eq!(path_of(false), TOOLS_OFF_PATH);
-    let tmp = toolchains::make_tmp(&case.home()).unwrap();
+    let tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.home()).unwrap();
     let bin = tmp.join("bin");
     assert_eq!(
         path_of(true),
@@ -1814,7 +1814,7 @@ fn a_pane_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
         path_of(false),
         format!("{}:{TOOLS_OFF_PATH}", bin.display())
     );
-    toolchains::remove_tmp(&case.home()).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.home()).unwrap();
 }
 
 #[test]
@@ -2328,7 +2328,7 @@ fn a_manifest_command_refuses_a_keyed_account_tools_off_and_full_access() {
     assert_eq!(refused.err(), Some(failure("launch_tools_off_unsupported")));
     let mut full = case.request("standin-jsonl-append", keyless(&case), true);
     let scratch = full.working_dir.parent().unwrap().to_path_buf();
-    full.boundary = crate::harnesses::launch::full_access_for_test(&full.working_dir, &scratch);
+    full.boundary = super::super::launch::tests::full_access_for_test(&full.working_dir, &scratch);
     let refused = command_with(&full, None, &run(None), Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_harness_unsupported")));
 }

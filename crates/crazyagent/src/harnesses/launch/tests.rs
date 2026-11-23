@@ -1,6 +1,12 @@
 use super::{AccountBinding, Driver, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest};
+#[cfg(unix)]
+use crate::sandbox::InstalledSandbox;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::Arc;
 
 fn line(value: Value) -> Vec<u8> {
     serde_json::to_vec(&value).unwrap()
@@ -559,7 +565,8 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
-    use crate::sandbox::toolchains::{self, ToolHomes};
+    use kernel_sandbox::toolchains;
+    use kernel_sandbox::toolchains::ToolHomes;
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-agent-git-")
@@ -595,17 +602,18 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
             .unwrap()
             .to_owned()
     };
-    let tools_on = toolchains::agent_path(&ToolHomes::owner().unwrap(), super::TOOLS_ON_PATH);
+    let tools_on =
+        kernel_sandbox::toolchains::agent_path(&ToolHomes::owner().unwrap(), super::TOOLS_ON_PATH);
     assert_eq!(path_of(true), tools_on);
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
-    let tmp = toolchains::make_tmp(&home).unwrap();
+    let tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let bin = tmp.join("bin");
     assert_eq!(path_of(true), format!("{}:{tools_on}", bin.display()));
     assert_eq!(
         path_of(false),
         format!("{}:{}", bin.display(), super::TOOLS_OFF_PATH)
     );
-    toolchains::remove_tmp(&home).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
 }
 
@@ -1234,7 +1242,7 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
     let token = format!(
         "{}{}",
-        crate::model_gateway::relay::TOKEN_PREFIX,
+        kernel_common::relay_names::TOKEN_PREFIX,
         "a".repeat(64)
     );
     launch.request.executable = harness;
@@ -1454,3 +1462,37 @@ mod rate_limits;
 /// managed home, its sandbox predates routing, or the format or key does not fit. Inputs:
 /// the launch fixtures. Output: none; each row asserts.
 mod chatgpt_relay;
+
+/// Builds the Full access boundary a unit row starts in (DEC-102): the project sandbox over
+/// `project`, installed with its home, temp folder and profile in `scratch`, then marked
+/// unconfined, as the integration rows' `full_access` does. Inputs: two canonical, existing
+/// folders. Output: the boundary.
+#[cfg(all(test, unix))]
+pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
+    use crate::sandbox::ProjectSandbox;
+    use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+    let home = scratch.join("full-access-home");
+    let tmp = scratch.join("full-access-tmp");
+    for folder in [&home, &tmp] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        project,
+        &home,
+        &tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap();
+    let installed = InstalledSandbox::install(
+        sandbox,
+        &scratch.join("full-access.sb"),
+        LinuxSupervisor::On,
+        LinuxStrict::Off,
+    )
+    .unwrap();
+    let boundary = LaunchBoundary::Installed(Arc::new(installed.unconfined()));
+    assert!(boundary.is_unconfined());
+    boundary
+}

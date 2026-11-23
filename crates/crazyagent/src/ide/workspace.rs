@@ -2,10 +2,10 @@ use super::log::{self, Change, WorkspaceForgotten, WorkspaceWritten};
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::ProjectId;
-use crate::sandbox::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use crate::state_log::fence::{self, Fence};
 use crate::team::AgentRole;
 use crate::team::names::{self, AgentName};
+use kernel_sandbox::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use kernel_storage::state_log::Clock;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -262,7 +262,7 @@ pub fn kept_ports(settings: Option<&(PathBuf, PathBuf)>) -> Result<Vec<u16>, Eng
 /// never widens the IDE or turns its hooks on.
 pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
     let db = open(root)?;
-    crate::sandbox::policy::load(&db, project.as_str())
+    crate::sandbox::policy_store::load(&db, project.as_str())
         .map(|policy| IdePolicy {
             access: policy.access,
             network: policy.network,

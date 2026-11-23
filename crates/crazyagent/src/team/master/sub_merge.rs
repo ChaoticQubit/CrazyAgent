@@ -158,7 +158,14 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
         .ok()
         .map(kernel_sandbox::paths::one_spelling)
         .and_then(|root| {
-            ProjectSandbox::new(&root, &home, &tmp, SandboxNetwork::Only(Vec::new())).ok()
+            ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                &root,
+                &home,
+                &tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .ok()
         });
     let Some(sandbox) = sandbox else {
         return refused(

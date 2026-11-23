@@ -1,7 +1,7 @@
 use super::request::{Capture, Captured, REPLY_BYTES_MAX, REPLY_LIST_MAX};
 use crate::error::StoreError;
 use crate::secret::{SecretString, wipe};
-use crate::secrets::{KeptHosts, Secrets};
+use crate::secrets::Secrets;
 use crate::store::checked_name;
 use std::collections::BTreeMap;
 
@@ -111,30 +111,6 @@ impl CaptureRules {
         }
         assert!(hosts.len() <= SEND_HOSTS_MAX + 1);
         hosts
-    }
-
-    /// The host keys each `keep_as` name may be sent to after `find`: every capture host
-    /// whose row names the field, then the row's `[net.send]` hosts. Output: the table.
-    pub fn kept_hosts(&self) -> KeptHosts {
-        let mut rows = Vec::new();
-        for ((plugin, field), (more, keep_as)) in &self.sends {
-            let Some(name) = keep_as else {
-                continue;
-            };
-            let mut hosts: Vec<String> = self
-                .by_plugin_host
-                .iter()
-                .filter(|((owner, _), fields)| owner == plugin && fields.contains(field))
-                .map(|((_, host), _)| host.clone())
-                .collect();
-            for host in more {
-                if !hosts.contains(host) {
-                    hosts.push(host.clone());
-                }
-            }
-            rows.push((*plugin, name.clone(), hosts));
-        }
-        KeptHosts::new(rows).expect("with_sends refuses a keep_as twice in a plugin")
     }
 
     /// The fields always captured for one plugin and host. Inputs: the plugin and the host

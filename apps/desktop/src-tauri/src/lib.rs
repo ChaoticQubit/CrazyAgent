@@ -2,6 +2,7 @@ pub mod bridge;
 mod engine_swap;
 pub mod ide;
 mod restore;
+mod terminal_walls;
 pub mod theme;
 mod updates;
 
@@ -45,8 +46,7 @@ use crazyagent::coord::tool_switches::Switch;
 use crazyagent::demo::DemoView;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
-    AppPluginsPage, ModelAccessCollection, NativeAuthMethod, PluginGrants, PluginUser, Preview,
-    TurnOff,
+    ModelAccessCollection, NativeAuthMethod,
 };
 use crazyagent::github::{
     CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
@@ -99,6 +99,7 @@ use tauri::ipc::InvokeResponseBody;
 use tauri::ipc::{Channel, Invoke};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
+use terminal_walls::open_walls;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
@@ -375,42 +376,10 @@ async fn desktop_restart_engine(
     let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
-    if crazyagent::restore::holds_restart(layout.root(), restore::service_running(&service)) {
-        return Err(engine_failure(crazyagent::restore::ENGINE_RESTORING));
-    }
+    crazyagent::restore::refuse_restart(layout.root(), &service).map_err(engine_failure)?;
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
     bridge.connect().await
-}
-
-/// Reads what Settings shows about bringing back the default engine's 2.4 data (L5), without
-/// the engine: until when its pinned backup can be restored and how the last restore ended.
-/// Nothing to show while `CRAZYAGENT_DESKTOP_SOCKET` names another engine.
-#[tauri::command]
-async fn desktop_restore_status(webview: Webview) -> Result<restore::RestoreView, BridgeError> {
-    main_window(&webview)?;
-    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
-        return Ok(restore::RestoreView::default());
-    }
-    let layout =
-        crazyagent::paths::Layout::current().map_err(|_| engine_failure("not_configured"))?;
-    Ok(restore::view(layout.root()))
-}
-
-/// Asks the default engine to stop and bring back its pinned 2.4 backup after the owner's
-/// confirm (L5). Refused `storage_restore_unavailable` while `CRAZYAGENT_DESKTOP_SOCKET` names
-/// another engine, whose restore this window could not follow.
-#[tauri::command]
-async fn desktop_restore_pinned(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    generation: u64,
-) -> Result<(), BridgeError> {
-    main_window(&webview)?;
-    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
-        return Err(engine_failure("storage_restore_unavailable"));
-    }
-    lock(&state).await?.restore_pinned(generation).await
 }
 
 #[tauri::command]
@@ -1012,7 +981,7 @@ async fn desktop_project_agent_policy(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+) -> Result<kernel_sandbox::policy::PolicyView, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.project_agent_policy(&id).await
 }
@@ -1023,7 +992,7 @@ async fn desktop_set_project_agent_policy(
     state: State<'_, NativeState>,
     id: String,
     version: u64,
-    policy: crazyagent::sandbox::policy::AgentPolicy,
+    policy: kernel_sandbox::policy::AgentPolicy,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
@@ -2783,75 +2752,6 @@ fn wall_name(name: &str) -> String {
 
 const WALL_NAME_CHARS_MAX: usize = 80;
 
-/// Opens one project's terminal wall windows, one call at a time: builds each of pages 1 to
-/// `count` not yet open, retitles the open ones and brings them forward when asked, and
-/// closes the project's windows past `count`. Without `focus` a wall is growing: it changes
-/// nothing while none of the project's wall windows is open and never closes one, so a
-/// growing team only extends a wall the owner opened. Inputs: the app, the project, its
-/// shown name, the page count and whether to focus. Output: unit, `terminal_windows_full`
-/// past WINDOWS_MAX windows in all, or `terminal_window_failed`.
-fn open_walls(
-    app: &AppHandle,
-    project: &ProjectId,
-    name: &str,
-    count: usize,
-    focus: bool,
-) -> Result<(), BridgeError> {
-    static WALLS_OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _opening = WALLS_OPENING
-        .lock()
-        .map_err(|_| engine_failure("terminal_window_failed"))?;
-    let prefix = bridge::terminal::wall_prefix(project);
-    let open = app.webview_windows();
-    let pages: Vec<usize> = open
-        .keys()
-        .filter_map(|label| label.strip_prefix(&prefix)?.parse().ok())
-        .collect();
-    let mine = pages.len();
-    let count = if focus {
-        count
-    } else {
-        pages.iter().copied().fold(count, usize::max)
-    };
-    let others = open
-        .keys()
-        .filter(|label| {
-            label.as_str() != "main"
-                && !label.starts_with(&prefix)
-                && bridge::terminal::window_label_valid(label)
-        })
-        .count();
-    if count > bridge::terminal::WINDOWS_MAX || others + count > bridge::terminal::WINDOWS_MAX {
-        return Err(engine_failure("terminal_windows_full"));
-    }
-    if !focus && mine == 0 {
-        return Ok(());
-    }
-    for (label, wall) in &open {
-        let past = label
-            .strip_prefix(&prefix)
-            .is_some_and(|page| !page.parse::<usize>().is_ok_and(|page| page <= count));
-        if past {
-            let _ = wall.close();
-        }
-    }
-    for page in 1..=count {
-        let label = bridge::terminal::wall_label(project, page);
-        let title = format!("{name} \u{b7} Terminals {page} of {count}");
-        match open.get(&label) {
-            Some(wall) => {
-                let _ = wall.set_title(&title);
-                if focus {
-                    let _ = wall.set_focus();
-                }
-            }
-            None => build_wall(app, &label, project, page, name, &title)?,
-        }
-    }
-    assert!(count <= bridge::terminal::WINDOWS_MAX);
-    Ok(())
-}
-
 /// Builds one terminal wall window on the wall page of its project, at the address naming
 /// its project name, with the main window's navigation rule, a page load that clears only its
 /// own terminal views, and a close that forgets them. Inputs: the app, the window label, the
@@ -4013,161 +3913,10 @@ async fn desktop_set_cleanup_settings(
         .await
 }
 
-#[tauri::command]
-async fn desktop_app_plugins(
-    webview: Webview,
-    state: State<'_, NativeState>,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugins()?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_grants(
-    webview: Webview,
-    state: State<'_, NativeState>,
-) -> Result<Vec<PluginGrants>, BridgeError> {
-    main_window(&webview)?;
-    lock(&state).await?.app_plugin_grants().await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_preview(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    folder: String,
-) -> Result<Preview, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_preview(folder)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_review(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-) -> Result<Preview, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_review(name)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_add(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    folder: String,
-    sha256: String,
-    replace: bool,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state)
-        .await?
-        .app_plugin_add(folder, sha256, replace)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_trust(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-    sha256: String,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_trust(name, sha256)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_set_enabled(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-    enabled: bool,
-    when_off: Option<TurnOff>,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state)
-        .await?
-        .app_plugin_set_enabled(name, enabled, when_off)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_users(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-) -> Result<Vec<PluginUser>, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_users(name)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_remove(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_remove(name)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_bind_account(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-    secret: String,
-    account: String,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state)
-        .await?
-        .app_plugin_bind_account(name, secret, account)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_set_key(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-    secret: String,
-    key: String,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_set_key(name, secret, key)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_unbind(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    name: String,
-    secret: String,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_unbind(name, secret)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_app_plugin_set_when_off(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    when_off: TurnOff,
-) -> Result<AppPluginsPage, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.app_plugin_set_when_off(when_off)?;
-    call.await
-}
+/// The App plugins settings commands: the page, the trust screen, the switches, the keys and
+/// the turn-off setting, each a direct call into the bridge.
+mod app_plugin_commands;
+use app_plugin_commands::*;
 
 #[tauri::command]
 async fn desktop_quit_settings(
@@ -4199,29 +3948,6 @@ async fn desktop_provider_retry(
 ) -> Result<crazyagent::provider_retry::ProviderRetryView, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.provider_retry().await
-}
-
-#[tauri::command]
-async fn desktop_log_compaction(
-    webview: Webview,
-    state: State<'_, NativeState>,
-) -> Result<crazyagent::log_compaction::LogCompactionView, BridgeError> {
-    main_window(&webview)?;
-    lock(&state).await?.log_compaction().await
-}
-
-#[tauri::command]
-async fn desktop_set_log_compaction(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    choice: crazyagent::log_compaction::LogCompaction,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&webview)?;
-    lock(&state)
-        .await?
-        .set_log_compaction(choice, generation)
-        .await
 }
 
 #[tauri::command]
@@ -6151,23 +5877,38 @@ fn admit_pages<R: Runtime>(
     }
 }
 
+/// The name a window calls a command by: the last part of its path in `native_commands!`, so
+/// `restore::desktop_restore_status` and `desktop_status` give the bare function name.
+/// Input: a command function, bare or one module deep. Output: its name as a string literal.
+#[cfg(test)]
+macro_rules! command_name {
+    ($module:ident :: $command:ident) => {
+        stringify!($command)
+    };
+    ($command:ident) => {
+        stringify!($command)
+    };
+}
+
 /// Declares the native commands once: their names for whoever must walk them and their
 /// handler behind the page check. The commands after the first `;` serve only the webview
 /// terminal, which a macOS build does not have (DEC-203), so they exist off macOS only; the
 /// ones after the second exist only in a macOS native-webdriver build, for its trials.
 /// Input: the command functions. Output: `NATIVE_COMMANDS` and `native_handler`.
 macro_rules! native_commands {
-    ($($command:ident,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
+    ($($head:ident $(:: $tail:ident)?,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
         #[cfg(all(test, not(target_os = "macos")))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($webview),)+];
+        const NATIVE_COMMANDS: &[&str] =
+            &[$(command_name!($head $(:: $tail)?),)+ $(stringify!($webview),)+];
         #[cfg(all(test, target_os = "macos", not(feature = "native-webdriver")))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+        const NATIVE_COMMANDS: &[&str] = &[$(command_name!($head $(:: $tail)?),)+];
         #[cfg(all(test, target_os = "macos", feature = "native-webdriver"))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($trial),)+];
+        const NATIVE_COMMANDS: &[&str] =
+            &[$(command_name!($head $(:: $tail)?),)+ $(stringify!($trial),)+];
 
         fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
             admit_pages::<tauri::Wry>(tauri::generate_handler![
-                $($command,)+
+                $($head $(:: $tail)?,)+
                 $(#[cfg(not(target_os = "macos"))] $webview,)+
                 $(#[cfg(all(target_os = "macos", feature = "native-webdriver"))] $trial,)+
             ])
@@ -6330,8 +6071,11 @@ native_commands! {
     desktop_install_dependency,
     desktop_fix_tool_permissions,
     desktop_set_refused_tool,
-    desktop_restore_status,
-    desktop_restore_pinned,
+    restore::desktop_restore_status,
+    restore::desktop_restore_pinned,
+    restore::desktop_restore_recovery,
+    restore::desktop_restore_recover,
+    restore::desktop_restore_open_backups,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,
@@ -6410,8 +6154,8 @@ native_commands! {
     desktop_set_quit_settings,
     desktop_provider_retry,
     desktop_set_provider_retry,
-    desktop_log_compaction,
-    desktop_set_log_compaction,
+    restore::desktop_log_compaction,
+    restore::desktop_set_log_compaction,
     desktop_learning_progress,
     desktop_set_learning_mark,
     desktop_master_step_settings,

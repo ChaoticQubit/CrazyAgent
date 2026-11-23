@@ -7857,7 +7857,7 @@ fn master_agent(case: &Case) -> Workspace {
 /// is refused as outside work (DEC-107).
 #[test]
 fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let case = Case::new();
     let master = master_agent(&case);
     case.start();
@@ -7885,7 +7885,7 @@ fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
     ]);
     assert_eq!(in_master(&["rev-parse", "HEAD^2"]).trim(), sub_head);
     let save = |access| {
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &case.db,
             "project-1",
             &AgentPolicy {
@@ -7949,13 +7949,13 @@ fn a_master_s_set_that_conflicts_with_main_waits_for_the_owner_at_its_turn_end()
 }
 
 /// Saves the project's agent access in the case's store. Inputs: the case and the access.
-fn save_access(case: &Case, access: crate::sandbox::policy::AgentAccess) {
-    crate::sandbox::policy::save(
+fn save_access(case: &Case, access: kernel_sandbox::policy::AgentAccess) {
+    crate::sandbox::policy_store::save(
         &case.db,
         "project-1",
-        &crate::sandbox::policy::AgentPolicy {
+        &kernel_sandbox::policy::AgentPolicy {
             access,
-            ..crate::sandbox::policy::AgentPolicy::default()
+            ..kernel_sandbox::policy::AgentPolicy::default()
         },
     )
     .unwrap();
@@ -7990,7 +7990,7 @@ fn merge_in(case: &Case, agent: &Workspace, commit: &str) {
 /// outside work (DEC-107), while its merge of an open set passes.
 #[test]
 fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refused() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     let master = master_agent(&case);
     case.start();
@@ -8047,7 +8047,7 @@ fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refu
 /// the master's same merge passes.
 #[test]
 fn at_full_access_a_sub_agent_s_or_a_lead_s_merge_of_an_open_set_is_refused() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     master_project(&case);
     case.start();
@@ -9626,14 +9626,14 @@ fn releasing_claims_for_an_open_set_trips_the_assertion() {
 /// the choice.
 fn master_may_land(
     case: &Case,
-    access: crate::sandbox::policy::AgentAccess,
+    access: kernel_sandbox::policy::AgentAccess,
     lands: crate::team::MasterLands,
 ) {
-    let policy = crate::sandbox::policy::AgentPolicy {
+    let policy = kernel_sandbox::policy::AgentPolicy {
         access,
-        ..crate::sandbox::policy::AgentPolicy::default()
+        ..kernel_sandbox::policy::AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&case.db, case.workspace.project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&case.db, case.workspace.project.as_str(), &policy).unwrap();
     crate::team::set_master_lands(&case.db, &case.workspace.project, lands).unwrap();
 }
 
@@ -9730,7 +9730,7 @@ fn conflicted_set_changing(
     in_set: impl FnOnce(&Case),
     on_main: impl FnOnce(&Case),
 ) -> (ChangeSetId, String, Workspace) {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     master_project(case);
     case.start();
     in_set(case);
@@ -9895,7 +9895,7 @@ fn a_master_merge_row_gives_the_branch_its_set_landed_on() {
 
 #[test]
 fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     let master = master_at_work(&case);
     master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
@@ -9920,7 +9920,7 @@ fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
 /// later turn that merges in another open set leaves the whole master set waiting.
 #[test]
 fn a_later_turn_merging_in_another_set_leaves_the_earlier_turns_edit_waiting() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     master_project(&case);
     case.start();
@@ -9982,7 +9982,7 @@ fn a_later_turn_merging_in_another_set_leaves_the_earlier_turns_edit_waiting() {
 /// fast-forward onto that head, resolves no conflict, so the set waits.
 #[test]
 fn a_master_set_bringing_in_another_set_with_no_conflict_waits_for_the_owner() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     for how in ["--no-ff", "--ff-only"] {
         let case = Case::new();
         master_project(&case);
@@ -10253,7 +10253,7 @@ fn a_conflict_fix_above_a_discarded_edit_the_worktree_kept_waits_for_the_owner()
 /// there with no Accept (SEC F1).
 #[test]
 fn a_conflict_fix_on_a_base_the_land_on_branch_lacks_waits_for_the_owner() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     master_project(&case);
     case.start();
@@ -10298,7 +10298,7 @@ fn a_conflict_fix_on_a_base_the_land_on_branch_lacks_waits_for_the_owner() {
 /// own Accept or Discard (CODE M1).
 #[test]
 fn an_owner_accept_of_a_master_set_that_dropped_a_sets_work_leaves_that_set_open() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     master_project(&case);
     let other = numbered_agent(&case, 3);
@@ -10348,7 +10348,7 @@ fn an_owner_accept_of_a_master_set_that_dropped_a_sets_work_leaves_that_set_open
 #[test]
 fn an_owner_accept_of_a_master_set_names_the_sets_it_closed_on_its_row() {
     use crate::activity::ActivityKind;
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     let (sub, fix, _) = master_fixing_a_conflict(&case);
     master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Waits);
@@ -10546,7 +10546,7 @@ const OWNER_AND_SECOND: &str = "one\ntwo\nthree\nfour from the owner\nfour from 
 fn two_conflicted_sets_and_master(
     case: &Case,
 ) -> ((ChangeSetId, String), (ChangeSetId, String), Workspace) {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     master_project(case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
@@ -10924,7 +10924,7 @@ fn a_master_land_at_a_path_the_set_never_had_leaves_the_set_open() {
 /// even when the second parent holds it too, so the master's set waits (SEC F3).
 #[test]
 fn a_set_on_both_sides_of_a_conflict_fix_leaves_the_master_set_waiting() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     master_project(&case);
     let held = numbered_agent(&case, 3);
@@ -11006,7 +11006,7 @@ fn a_master_set_held_in_conflict_or_mid_step_does_not_land_itself() {
 /// the engine cannot tell what the merge would have been and the set waits.
 #[test]
 fn a_master_merge_with_more_than_one_merge_base_waits_for_the_owner() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     master_project(&case);
     case.start();
@@ -11070,7 +11070,7 @@ fn a_master_merge_with_more_than_one_merge_base_waits_for_the_owner() {
 /// the master fast-forwarded onto first; that one had no conflict.
 #[test]
 fn a_set_fast_forwarded_in_beside_a_conflict_fix_leaves_the_master_set_waiting() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     master_project(&case);
     let other = numbered_agent(&case, 3);
@@ -11134,7 +11134,7 @@ fn a_pure_conflict_fix_waits_with_ask_on_and_lands_with_ask_off() {
     let master = master_at_work(&case);
     master_may_land(
         &case,
-        crate::sandbox::policy::AgentAccess::Full,
+        kernel_sandbox::policy::AgentAccess::Full,
         crate::team::MasterLands::Merges,
     );
     let sub_head = case.view(&sub).head;
@@ -11176,7 +11176,7 @@ fn a_pure_conflict_fix_waits_with_ask_on_and_lands_with_ask_off() {
 /// ancestor of that set's head, and only Discard would clear it.
 #[test]
 fn an_owner_accept_of_a_master_set_closes_the_sets_it_holds_and_a_second_accept_is_not_stuck() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     let (sub, fix, resolved) = master_fixing_a_conflict(&case);
     let sub_head = case.view(&sub).head;
@@ -11299,8 +11299,8 @@ fn a_master_fix_that_conflicts_with_main_lands_nothing() {
 
 #[test]
 fn a_master_set_waits_for_the_owner_under_waits_or_below_full_access() {
-    use crate::sandbox::policy::AgentAccess;
     use crate::team::MasterLands;
+    use kernel_sandbox::policy::AgentAccess;
     let case = Case::new();
     let (sub, fix, _) = master_fixing_a_conflict(&case);
     let tip = case.tip();

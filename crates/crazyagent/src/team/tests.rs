@@ -7272,7 +7272,7 @@ fn terminals_per_window_is_six_until_the_owner_picks_four_or_nine_and_reads_each
 
 #[test]
 fn master_lands_defaults_to_merges_at_full_access_and_is_always_waits_otherwise() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let connection = Connection::open_in_memory().unwrap();
     initialize(&connection).unwrap();
     let project = ProjectId::new("lands").unwrap();
@@ -7281,7 +7281,7 @@ fn master_lands_defaults_to_merges_at_full_access_and_is_always_waits_otherwise(
             access: level,
             ..AgentPolicy::default()
         };
-        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        crate::sandbox::policy_store::save(&connection, project.as_str(), &policy).unwrap();
     };
     access(AgentAccess::Full);
     assert_eq!(
@@ -7324,7 +7324,7 @@ fn master_lands_defaults_to_merges_at_full_access_and_is_always_waits_otherwise(
 /// (DEC-117 Q2).
 #[test]
 fn a_master_lands_change_is_saved_and_shown_only_at_full_access() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let (_directory, mut connection) = database();
     let setup = stored("team-lands", Vec::new());
     connection
@@ -7343,7 +7343,7 @@ fn a_master_lands_change_is_saved_and_shown_only_at_full_access() {
             access,
             ..AgentPolicy::default()
         };
-        crate::sandbox::policy::save(connection, project.as_str(), &policy).unwrap();
+        crate::sandbox::policy_store::save(connection, project.as_str(), &policy).unwrap();
     };
     level(&connection, AgentAccess::Full);
     assert_eq!(

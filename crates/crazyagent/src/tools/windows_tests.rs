@@ -128,3 +128,25 @@ fn a_windows_search_tries_exe_then_cmd_per_folder_and_pins_a_shim_s_script() {
     );
     assert_eq!(crate::paths::executable_names("codex.cmd"), ["codex.cmd"]);
 }
+
+/// The last good side file is written private to the engine's user, so the private read
+/// accepts it, and reads back the list it was given; the same list again keeps the file.
+#[test]
+fn the_last_good_side_file_is_private_to_the_engine_user() {
+    let folder = tempfile::tempdir().unwrap_or_else(|error| panic!("temp folder: {error}"));
+    let root = folder.path();
+    let roots = vec![PathBuf::from(r"C:\src\repo"), PathBuf::from(r"D:\work\app")];
+    super::last_good::store(root, &roots);
+    let side = root.join(super::last_good::NAME);
+    crazyagent_win_sandbox::private::read_only(&side)
+        .unwrap_or_else(|error| panic!("{}: {error}", side.display()));
+    assert_eq!(super::last_good::load(root), Some(roots.clone()));
+    let modified = || {
+        std::fs::metadata(&side)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or_else(|error| panic!("{}: {error}", side.display()))
+    };
+    let before = modified();
+    super::last_good::store(root, &roots);
+    assert_eq!(modified(), before);
+}

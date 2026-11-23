@@ -13,19 +13,19 @@ use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
 use crate::sandbox::ProjectSandbox;
-#[cfg(unix)]
-use crate::sandbox::policy::AgentAccess;
-#[cfg(unix)]
-use crate::sandbox::policy::AgentNetwork;
-use crate::sandbox::policy::AgentPolicy;
-#[cfg(unix)]
-use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 #[cfg(unix)]
 use kernel_sandbox::error::SandboxError;
 #[cfg(unix)]
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+#[cfg(unix)]
+use kernel_sandbox::policy::AgentAccess;
+#[cfg(unix)]
+use kernel_sandbox::policy::AgentNetwork;
+use kernel_sandbox::policy::AgentPolicy;
+#[cfg(unix)]
+use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
@@ -1006,7 +1006,8 @@ fn turn_sandbox(
     }
     let repository = &kernel_sandbox::paths::one_spelling(repository.to_path_buf());
     let worktree = &kernel_sandbox::paths::one_spelling(worktree.to_path_buf());
-    crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
+    kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, repository, hidden)
+        .map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
@@ -1040,13 +1041,25 @@ fn turn_sandbox(
         &policy.allowed(repository),
     );
     let sandbox = match engine {
-        None => ProjectSandbox::new(worktree, &home, &tmp, network)
-            .and_then(|sandbox| sandbox.allow_read(repository)),
+        None => ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            worktree,
+            &home,
+            &tmp,
+            network,
+        )
+        .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
             let engine = std::fs::canonicalize(engine).map_err(io_error)?;
-            ProjectSandbox::new(worktree, &home, &tmp, network)
-                .and_then(|sandbox| sandbox.allow_read(repository))
-                .and_then(|sandbox| sandbox.allow_engine(&engine))
+            ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                worktree,
+                &home,
+                &tmp,
+                network,
+            )
+            .and_then(|sandbox| sandbox.allow_read(repository))
+            .and_then(|sandbox| sandbox.allow_engine(&engine))
         }
     }
     .and_then(|sandbox| sandbox.allow_read(&install))
@@ -1063,7 +1076,7 @@ fn turn_sandbox(
         engine_root,
         &std::fs::canonicalize(repository).map_err(io_error)?,
         policy,
-        crate::sandbox::tool_cache::CacheShape::Worktree,
+        kernel_sandbox::tool_cache::CacheShape::Worktree,
         &worktree.to_string_lossy(),
     );
     let sandbox = hidden
@@ -1412,7 +1425,7 @@ fn default_master_tool_caches(runtime: &Path, repository: &Path) -> Vec<PathBuf>
     #[cfg(target_os = "macos")]
     {
         let project = std::fs::canonicalize(repository).unwrap();
-        let cache = crate::sandbox::tool_cache::project_folder(runtime, project.to_str().unwrap())
+        let cache = kernel_sandbox::tool_cache::project_folder(runtime, project.to_str().unwrap())
             .join("sandboxed-worktree");
         assert!(cache.is_dir(), "{}", cache.display());
         vec![cache]
@@ -1718,8 +1731,8 @@ mod tests {
         master_in_generation(&base).unwrap();
         let project = std::fs::canonicalize(base.join("repository")).unwrap();
         let project = project.to_str().unwrap();
-        assert!(crate::sandbox::tool_cache::project_folder(&engine, project).is_dir());
-        assert!(!crate::sandbox::tool_cache::project_folder(&base, project).exists());
+        assert!(kernel_sandbox::tool_cache::project_folder(&engine, project).is_dir());
+        assert!(!kernel_sandbox::tool_cache::project_folder(&base, project).exists());
     }
 
     /// A master's boundary denies the engine root's secrets as well as its own owner
@@ -2164,7 +2177,7 @@ mod tests {
 
     #[test]
     fn the_live_master_keeps_only_its_model_port_under_every_project_choice() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
@@ -2215,7 +2228,7 @@ mod tests {
     /// cannot run (Own branch on Linux) is refused as `agent_access_unavailable`.
     #[test]
     fn the_live_master_sandbox_is_confined_under_sandboxed_and_own_branch() {
-        use crate::sandbox::policy::AgentPolicy;
+        use kernel_sandbox::policy::AgentPolicy;
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
@@ -2380,12 +2393,12 @@ mod tests {
             ("PATH", "/usr/bin:/bin"),
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
-        expected.extend(crate::sandbox::AGENT_GIT_ENV);
-        expected.extend(crate::sandbox::AGENT_TLS_ENV);
-        expected.extend(crate::sandbox::AGENT_HOME_ENV);
+        expected.extend(kernel_sandbox::profile::consts::AGENT_GIT_ENV);
+        expected.extend(kernel_sandbox::profile::consts::AGENT_TLS_ENV);
+        expected.extend(kernel_sandbox::profile::consts::AGENT_HOME_ENV);
         let prefix = crate::sandbox::shell_tmp_prefix(&tmp);
         expected.insert("TMPPREFIX", prefix.to_str().unwrap());
-        let tools = crate::sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
+        let tools = kernel_sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
         expected.extend(
             tools
                 .iter()
@@ -2433,7 +2446,7 @@ mod tests {
             .get_envs()
             .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        let claude_path = crate::sandbox::toolchains::agent_path(
+        let claude_path = kernel_sandbox::toolchains::agent_path(
             &ToolHomes::owner().unwrap(),
             "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
         );
@@ -2448,9 +2461,9 @@ mod tests {
             ("TERM", "dumb"),
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
-        expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
-        expected_claude.extend(crate::sandbox::AGENT_TLS_ENV);
-        expected_claude.extend(crate::sandbox::AGENT_HOME_ENV);
+        expected_claude.extend(kernel_sandbox::profile::consts::AGENT_GIT_ENV);
+        expected_claude.extend(kernel_sandbox::profile::consts::AGENT_TLS_ENV);
+        expected_claude.extend(kernel_sandbox::profile::consts::AGENT_HOME_ENV);
         expected_claude.insert("TMPPREFIX", prefix.to_str().unwrap());
         expected_claude.extend(
             tools
@@ -3238,7 +3251,7 @@ mod tests {
     /// tools-off turn still runs, reaching only its model (S4B-M1).
     #[test]
     fn a_tools_on_master_turn_under_no_network_is_refused_rather_than_reaching_every_host() {
-        use crate::sandbox::policy::AgentNetwork;
+        use kernel_sandbox::policy::AgentNetwork;
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
@@ -3376,7 +3389,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let profile = sandbox.sandbox().profile();
-        let owner = crate::sandbox::toolchains::ToolHomes::owner()
+        let owner = kernel_sandbox::toolchains::ToolHomes::owner()
             .unwrap()
             .home()
             .to_path_buf();

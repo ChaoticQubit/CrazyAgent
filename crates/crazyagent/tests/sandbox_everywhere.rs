@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{HIDDEN_MAX, InstalledSandbox, ProjectSandbox};
+use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox};
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::hidden_paths::HIDDEN_MAX;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use std::fs;
@@ -45,6 +46,7 @@ fn case() -> Case {
 
 fn sandbox(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -158,6 +160,7 @@ fn worktrees_are_checked_bounded_and_kept_out_of_the_profile_location() {
 
     let base = || {
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &case.home,
             &case.tmp,
@@ -167,7 +170,7 @@ fn worktrees_are_checked_bounded_and_kept_out_of_the_profile_location() {
     };
     let link = case.root.join("link");
     std::os::unix::fs::symlink(&case.worktree, &link).unwrap();
-    let owner = crazyagent::sandbox::toolchains::ToolHomes::owner()
+    let owner = kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf();

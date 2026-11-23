@@ -42,7 +42,7 @@ const MESSAGE_BYTES_MAX: usize = 8192;
 const REINSTALL_TOO_LONG: &str = "Your message and the drafted one don't fit in one message. Send or \
                                   shorten yours, then press a again.";
 const NAME_BYTES_MAX: usize = 256;
-const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
+const FOLDERS_BYTES_MAX: usize = kernel_sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";
@@ -730,7 +730,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub hidden: Option<AddFile>,
     pub hidden_paths: Option<crate::project_setup::HiddenPaths>,
     pub access: Option<AccessEdit>,
-    pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
+    pub agent_policy: Option<kernel_sandbox::policy::PolicyView>,
     pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
@@ -973,7 +973,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
                 str::to_owned,
             );
         }
-        code @ (crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS
+        code @ (kernel_sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS
         | kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS) => {
             return crate::config::plain_problem(code).map_or_else(
                 || coded("That didn't work. Try again.", code),

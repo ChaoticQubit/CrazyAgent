@@ -105,7 +105,7 @@ fn a_native_lead_taken_over_past_its_run_time_ends_at_the_deadline_before_any_ha
             }),
             access: AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
-            network: crate::sandbox::policy::AgentNetwork::Open,
+            network: kernel_sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
             grants: Vec::new(),

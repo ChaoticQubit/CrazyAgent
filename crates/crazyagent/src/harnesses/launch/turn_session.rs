@@ -175,7 +175,7 @@ impl TurnSession {
         if request
             .account
             .key()
-            .is_some_and(|key| !crate::model_gateway::relay::is_relay_token(key.reveal()))
+            .is_some_and(|key| !kernel_common::relay_names::is_relay_token(key.reveal()))
         {
             return Err(failure("launch_key_relay_unsupported"));
         }
@@ -336,7 +336,7 @@ impl TurnSession {
             .request
             .account
             .key()
-            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()))
+            .is_some_and(|key| kernel_common::relay_names::is_relay_token(key.reveal()))
             && let Some(running) = self.running.as_mut()
         {
             match crate::research::runner::Lifeline::watch(running.child.id()) {

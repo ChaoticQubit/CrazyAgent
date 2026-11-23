@@ -5,8 +5,9 @@ use super::{
 use crate::engine::EngineError;
 use crate::protocol::{ProjectId, SessionId};
 use crate::questions::{Asker, Settlement};
-use crate::sandbox::grants::{self, Requested};
-use crate::sandbox::policy::AccessGrant;
+use crate::sandbox::grants;
+use kernel_sandbox::grants::Requested;
+use kernel_sandbox::policy::AccessGrant;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -362,7 +363,7 @@ fn not_raised(
         Err(code) => Some(format!(
             "Your access request for {} was not raised: {}",
             grant.label(),
-            grants::refusal_text(&code)
+            kernel_sandbox::grants::refusal_text(&code)
         )),
     }
 }
@@ -411,7 +412,10 @@ pub(in crate::team) fn request_reply(
         ),
         Ok(Requested::AlreadyAllowed) => (REQUEST_HELD.to_owned(), false),
         Err(code) => (
-            format!("Not requested: {}", grants::refusal_text(&code)),
+            format!(
+                "Not requested: {}",
+                kernel_sandbox::grants::refusal_text(&code)
+            ),
             true,
         ),
     }

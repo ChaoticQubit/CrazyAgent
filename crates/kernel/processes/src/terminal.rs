@@ -1080,6 +1080,20 @@ pub fn teammates_socket(
     lead_temp_socket(engine_root, lead, &name, paths)
 }
 
+/// Whether a lead's start never named a teammates' socket: no record of the name is kept, or
+/// the agent is no team agent and so never has one. A record that is present but cannot be
+/// read or trusted is not absent ([`teammates_socket`] refuses it). Takes the engine root
+/// and the lead. Returns the answer.
+#[cfg(unix)]
+pub fn teammates_record_absent(engine_root: &Path, lead: &AgentId, paths: &LeadPaths) -> bool {
+    let Some(id) = lead.team_agent() else {
+        return true;
+    };
+    let kept = (paths.agent_teammates_socket_name)(&engine_root.join("team"), id);
+    std::fs::symlink_metadata(&kept)
+        .is_err_and(|problem| problem.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Names a new socket for a native lead's teammates' server as the lead starts and keeps
 /// the name in the engine's own profiles folder, so no path a teammate's profile ever
 /// served is reused: a teammate still running from an earlier start cannot bind a listener

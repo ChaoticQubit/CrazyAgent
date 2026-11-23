@@ -502,6 +502,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     fs::create_dir(&tmp).unwrap();
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &fs::canonicalize(&project).unwrap(),
         &fs::canonicalize(&home).unwrap(),
         &fs::canonicalize(&tmp).unwrap(),
@@ -2141,7 +2142,7 @@ async fn a_claude_master_the_sandbox_stopped_for_a_held_name_says_so() {
             Err(error) => break error.0,
         }
     };
-    assert_eq!(failed, crate::sandbox::HELD_STOP_CAUSE);
+    assert_eq!(failed, kernel_sandbox::profile::consts::HELD_STOP_CAUSE);
     assert_eq!(claude.close().await.map_err(|error| error.0), Ok(()));
 }
 
@@ -2200,7 +2201,10 @@ async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
     let closed = claude.close().await.map_err(|error| error.0);
     if check == LineageCheck::Sandboxed {
         assert!(closed.is_err(), "{closed:?}");
-        assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
+        assert_ne!(
+            closed,
+            Err(kernel_sandbox::profile::consts::HELD_STOP_CAUSE.to_owned())
+        );
     } else {
         assert_eq!(closed, Ok(()));
     }
