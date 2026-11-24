@@ -1206,7 +1206,90 @@ pub fn record_turn_end(
     #[cfg(unix)]
     {
         let now = flow::now_ms()?;
-        let kept = flow::record(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now)?;
+        let names: Vec<String> = std::fs::read_dir(&workspace.worktree)
+            .map(|dir| dir.filter_map(|entry| entry.ok().map(|entry| entry.file_name().to_string_lossy().into_owned())).collect())
+            .unwrap_or_default();
+        eprintln!("gau_debug record_turn_end worktree={} entries={names:?}", workspace.worktree.display());
+        let status = std::process::Command::new("/usr/bin/git")
+            .arg("-C").arg(&workspace.worktree)
+            .args(["status", "--porcelain=v1", "--branch", "--untracked-files=all"])
+            .output();
+        let head = std::process::Command::new("/usr/bin/git")
+            .arg("-C").arg(&workspace.worktree)
+            .args(["rev-parse", "HEAD"])
+            .output();
+        let base: Option<String> = db
+            .query_row("SELECT base FROM landing_bases WHERE worktree=?1", [workspace.worktree.to_string_lossy()], |row| row.get(0))
+            .ok();
+        eprintln!(
+            "gau_debug record_turn_end status={:?} head={:?} base={base:?} repo={} git_dir={}",
+            status.map(|out| String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)),
+            head.map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned()),
+            workspace.repository.display(),
+            workspace.git_dir.display(),
+        );
+        let kept = flow::record(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now);
+        eprintln!("gau_debug record_turn_end kept={kept:?} at_ms={now}");
+        eprintln!(
+            "gau_debug record_turn_end canonical={:?} engine_cwd={:?}",
+            workspace.worktree.canonicalize(),
+            std::env::current_dir()
+        );
+        let sweep = |label: &str, repository: &std::path::Path| {
+            let worktrees = repository.join(".crazyagent").join("worktrees");
+            for entry in std::fs::read_dir(&worktrees).into_iter().flatten().flatten() {
+                let golden = entry.path().join("golden.md");
+                let made = std::fs::metadata(&golden).and_then(|meta| meta.modified()).ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|since| since.as_millis());
+                eprintln!("gau_debug {label} agent_folder={} golden_mtime_ms={made:?}", entry.path().display());
+            }
+            let dirs = vec![std::path::PathBuf::from("/private/tmp"), std::env::temp_dir()];
+            let roots: Vec<std::path::PathBuf> = dirs
+                .into_iter()
+                .filter_map(|dir| std::fs::read_dir(dir).ok())
+                .flatten().flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("ca-golden-")))
+                .collect();
+            for root in roots {
+                let found = std::process::Command::new("/usr/bin/find")
+                    .arg(&root)
+                    .args(["(", "-name", "golden.md", "-o", "-name", "rollout-*.jsonl", "-o", "-name", "README.md", "-o", "-name", "engine.db", "-o", "-name", "codex", ")", "-exec", "/usr/bin/stat", "-f", "%Fm %N", "{}", "+"])
+                    .output();
+                eprintln!("gau_debug {label} find root={} {:?}", root.display(), found.map(|out| format!("rc={:?} out={} err={}", out.status.code(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))));
+                let probes = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg("/usr/bin/find \"$1\" -name 'rollout-*.jsonl' -exec /usr/bin/grep -h '\"probe\"\\|session_meta' {} +")
+                    .arg("sh")
+                    .arg(&root)
+                    .output();
+                eprintln!("gau_debug {label} rollout probes root={} {:?}", root.display(), probes.map(|out| String::from_utf8_lossy(&out.stdout).into_owned()));
+            }
+        };
+        sweep("at_end", &workspace.repository);
+        let repository_later = workspace.repository.clone();
+        let later = workspace.worktree.clone();
+        std::thread::spawn(move || {
+            for wait in [200u64, 1000, 3000] {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                let names: Vec<String> = std::fs::read_dir(&later)
+                    .map(|dir| dir.filter_map(|entry| entry.ok().map(|entry| entry.file_name().to_string_lossy().into_owned())).collect())
+                    .unwrap_or_default();
+                let made = std::fs::metadata(later.join("golden.md"))
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|since| since.as_millis());
+                eprintln!("gau_debug later +{wait}ms worktree={} entries={names:?} golden_mtime_ms={made:?}", later.display());
+            }
+            let worktrees = repository_later.join(".crazyagent").join("worktrees");
+            for entry in std::fs::read_dir(&worktrees).into_iter().flatten().flatten() {
+                let made = std::fs::metadata(entry.path().join("golden.md")).and_then(|meta| meta.modified()).ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|since| since.as_millis());
+                eprintln!("gau_debug later+3s agent_folder={} golden_mtime_ms={made:?}", entry.path().display());
+            }
+        });
+        let kept = kept?;
         owner_edit::logged(
             "settle",
             owner_edit::settle(db, &workspace.worktree, kept.as_ref()),

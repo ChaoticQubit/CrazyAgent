@@ -10968,6 +10968,18 @@ impl TeamRuntime {
         end: TurnEnd,
         whole: bool,
     ) -> Result<bool, EngineError> {
+        eprintln!("gau_debug land_turn_as agent={id} turn={turn} whole={whole} end={end:?} what={what}");
+        {
+            let tasks: Vec<String> = self.connection
+                .prepare("SELECT id,status,agent,attempts,COALESCE(result,''),COALESCE(error,'') FROM team_tasks ORDER BY id")
+                .and_then(|mut statement| statement.query_map([], |row| Ok(format!("{}|{}|{:?}|{}|{}|{}", row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?)))?.collect())
+                .unwrap_or_default();
+            let agents: Vec<String> = self.connection
+                .prepare("SELECT id,role,status,COALESCE(worktree,''),COALESCE(error,''),task FROM team_agents ORDER BY id")
+                .and_then(|mut statement| statement.query_map([], |row| Ok(format!("{}|{}|{}|{}|{}|{:?}", row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?)))?.collect())
+                .unwrap_or_default();
+            eprintln!("gau_debug land_turn_as tasks={tasks:?} agents={agents:?}");
+        }
         type Row = (String, String, String, String, String, Option<i64>);
         let row: Option<Row> = self
             .connection
@@ -10989,6 +11001,7 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?;
         let Some((role, harness, repository, worktree, git_dir, lead)) = row else {
+            eprintln!("gau_debug land_turn_as no team_worktrees row");
             return Ok(true);
         };
         let lands = match lead {
@@ -11070,6 +11083,7 @@ impl TeamRuntime {
             }
             landed
         });
+        eprintln!("gau_debug land_turn_as landed={:?}", landed.as_ref().map(|pair| format!("{pair:?}")).map_err(|problem| problem.0.clone()));
         let kept = landed.is_ok();
         let note = match landed {
             Ok((_, false)) => {
