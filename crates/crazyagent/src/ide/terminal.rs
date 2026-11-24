@@ -128,7 +128,7 @@ pub fn profiles(platform: Platform, owner_shell: &Path, access: AgentAccess) -> 
 pub fn machine_profiles(access: AgentAccess) -> Result<Map<String, Value>, EngineError> {
     use crate::engine::owner::failure;
     let shell =
-        crate::sandbox::ide_shell::owner_shell().map_err(|_| failure("ide_shell_unknown"))?;
+        kernel_sandbox::ide_shell::owner_shell().map_err(|_| failure("ide_shell_unknown"))?;
     if !shell.is_absolute() {
         return Err(failure("ide_shell_unknown"));
     }

@@ -2,7 +2,7 @@ use super::*;
 #[cfg(unix)]
 use crate::protocol::ProjectId;
 #[cfg(unix)]
-use crate::sandbox::ide_shell;
+use kernel_sandbox::ide_shell;
 use kernel_sandbox::policy::AgentAccess;
 #[cfg(target_os = "macos")]
 use kernel_sandbox::policy::{AgentFilesRule, IdeAgentFiles};
@@ -151,7 +151,7 @@ fn in_terminal_holding(
     let shell_arguments = arguments(&["-c", script]);
     let launch = ide_shell::Launch {
         root: &case.root,
-        project: &project,
+        project: project.as_str(),
         folder: &case.folder,
         cwd: &case.folder,
         shell: std::path::Path::new("/bin/sh"),
@@ -163,7 +163,7 @@ fn in_terminal_holding(
         kept_ports,
         agent_files,
     };
-    let mut command = ide_shell::command(&launch).unwrap();
+    let mut command = ide_shell::command(&crate::sandbox::PROFILE_HOOKS, &launch).unwrap();
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -221,7 +221,7 @@ fn a_terminal_starts_with_no_shell_startup_file_left_in_its_home() {
     let shell_arguments = arguments(&["-l", "-c", "echo ran"]);
     let launch = ide_shell::Launch {
         root: &case.root,
-        project: &project,
+        project: project.as_str(),
         folder: &case.folder,
         cwd: &case.folder,
         shell: std::path::Path::new("/bin/sh"),
@@ -234,7 +234,7 @@ fn a_terminal_starts_with_no_shell_startup_file_left_in_its_home() {
         agent_files: AgentFilesRule::default(),
     };
 
-    let mut command = ide_shell::command(&launch).unwrap();
+    let mut command = ide_shell::command(&crate::sandbox::PROFILE_HOOKS, &launch).unwrap();
     let output = kernel_processes::spawn_gate::collected(&mut command).unwrap();
 
     let printed = String::from_utf8_lossy(&output.stdout);
@@ -341,7 +341,7 @@ fn an_engine_terminal_launch_at_full_access_is_refused() {
     let project = ProjectId::new(PROJECT).unwrap();
     let launch = ide_shell::Launch {
         root: &case.root,
-        project: &project,
+        project: project.as_str(),
         folder: &case.folder,
         cwd: &case.folder,
         shell: std::path::Path::new("/bin/sh"),
@@ -353,7 +353,7 @@ fn an_engine_terminal_launch_at_full_access_is_refused() {
         kept_ports: &[],
         agent_files: Default::default(),
     };
-    let refused = ide_shell::command(&launch).unwrap_err();
+    let refused = ide_shell::command(&crate::sandbox::PROFILE_HOOKS, &launch).unwrap_err();
     assert!(
         matches!(refused, kernel_sandbox::error::SandboxError::Invalid(_)),
         "{refused:?}"
@@ -621,9 +621,10 @@ fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
     let case = Case::new();
     let project = ProjectId::new(PROJECT).unwrap();
     let pane = ide_shell::interactive(
+        &crate::sandbox::PROFILE_HOOKS,
         &ide_shell::Launch {
             root: &case.root,
-            project: &project,
+            project: project.as_str(),
             folder: &case.folder,
             cwd: &case.folder,
             shell: std::path::Path::new("/bin/sh"),
@@ -768,7 +769,7 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
     ];
     let launch = ide_shell::Launch {
         root: &case.root,
-        project: &project,
+        project: project.as_str(),
         folder: &case.folder,
         cwd: &case.folder,
         shell: std::path::Path::new("/bin/sh"),
@@ -780,12 +781,17 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         kept_ports: &[],
         agent_files: Default::default(),
     };
-    let mut command = ide_shell::command(&launch).unwrap();
+    let mut command = ide_shell::command(&crate::sandbox::PROFILE_HOOKS, &launch).unwrap();
     assert_eq!(
         command.get_program(),
         kernel_sandbox::profile::command::SANDBOX_EXEC
     );
-    let pane = ide_shell::interactive(&launch, AgentAccess::Sandboxed).unwrap();
+    let pane = ide_shell::interactive(
+        &crate::sandbox::PROFILE_HOOKS,
+        &launch,
+        AgentAccess::Sandboxed,
+    )
+    .unwrap();
     let argv: Vec<&std::ffi::OsStr> = std::iter::once(command.get_program())
         .chain(command.get_args())
         .collect();
@@ -802,10 +808,6 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         pane.env
             .iter()
             .all(|(name, _)| !name.starts_with("CRAZYAGENT_") && name != "GH_TOKEN")
-    );
-    assert_eq!(
-        pane.transcript,
-        crate::harnesses::interactive::Transcript::Unavailable
     );
     command
         .stdin(std::process::Stdio::null())
@@ -866,7 +868,7 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
     let shell_arguments = arguments(&["-c", "echo started"]);
     let launch = ide_shell::Launch {
         root: &base,
-        project: &project,
+        project: project.as_str(),
         folder: &base,
         cwd: &base,
         shell: std::path::Path::new("/bin/sh"),
@@ -878,13 +880,17 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         kept_ports: &[],
         agent_files: Default::default(),
     };
-    match ide_shell::command(&launch) {
+    match ide_shell::command(&crate::sandbox::PROFILE_HOOKS, &launch) {
         Err(kernel_sandbox::error::SandboxError::Unavailable(reason)) => {
             assert_eq!(reason, ide_shell::UNAVAILABLE)
         }
         other => panic!("expected the unavailable refusal, got {other:?}"),
     }
-    match ide_shell::interactive(&launch, AgentAccess::Sandboxed) {
+    match ide_shell::interactive(
+        &crate::sandbox::PROFILE_HOOKS,
+        &launch,
+        AgentAccess::Sandboxed,
+    ) {
         Err(kernel_sandbox::error::SandboxError::Unavailable(reason)) => {
             assert_eq!(reason, ide_shell::UNAVAILABLE)
         }
@@ -992,7 +998,7 @@ fn terminal_profiles_hide_every_shell_and_default_to_the_extension_sandboxed_pro
             );
         }
     }
-    let unavailable = crate::sandbox::ide_shell::UNAVAILABLE;
+    let unavailable = kernel_sandbox::ide_shell::UNAVAILABLE;
     assert!(!unavailable.contains("IDE shell"), "{unavailable}");
     assert_eq!(
         unavailable,
@@ -1103,7 +1109,8 @@ fn ide_shell_reads_the_level_and_network_the_owner_saved() {
         ..AgentPolicy::default()
     };
     let root = saved_policy(&base, &policy);
-    let place = ide_shell::project_place(&root, &ProjectId::new(PROJECT).unwrap()).unwrap();
+    let place =
+        crate::sandbox::ide_shell::project_place(&root, &ProjectId::new(PROJECT).unwrap()).unwrap();
     assert_eq!(place.access, AgentAccess::OwnBranch);
     assert_eq!(place.network, AgentNetwork::Https);
 }
@@ -1124,7 +1131,9 @@ fn a_saved_policy_that_cannot_be_read_stops_the_terminal() {
         .unwrap();
     assert_eq!(tampered, 1);
     drop(db);
-    assert!(ide_shell::project_place(&root, &ProjectId::new(PROJECT).unwrap()).is_err());
+    assert!(
+        crate::sandbox::ide_shell::project_place(&root, &ProjectId::new(PROJECT).unwrap()).is_err()
+    );
 }
 
 #[cfg(unix)]
@@ -1147,12 +1156,14 @@ fn ide_shell_finds_the_project_folder_and_its_read_folders_in_the_engine_databas
     }
     let before = std::fs::read(root.join("engine.db")).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
-    let place = ide_shell::project_place(&root, &project).unwrap();
+    let place = crate::sandbox::ide_shell::project_place(&root, &project).unwrap();
     assert_eq!(place.folder, folder);
     assert_eq!(place.extra_reads, vec![extra]);
     assert_eq!(std::fs::read(root.join("engine.db")).unwrap(), before);
-    assert!(ide_shell::project_place(&root, &ProjectId::new("beta").unwrap()).is_err());
-    assert!(ide_shell::project_place(&base.join("missing"), &project).is_err());
+    assert!(
+        crate::sandbox::ide_shell::project_place(&root, &ProjectId::new("beta").unwrap()).is_err()
+    );
+    assert!(crate::sandbox::ide_shell::project_place(&base.join("missing"), &project).is_err());
 }
 
 /// The built-in extension keeps working in Restricted Mode, where a Full access IDE starts

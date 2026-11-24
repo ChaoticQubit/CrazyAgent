@@ -47,6 +47,7 @@ fn a_cargo_cache_name_that_will_not_give_way_refuses_with_the_hooks_code() {
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
         sandboxed_git: || Path::new("/usr/bin/git"),
+        remove_shell_startup: |_, _| Ok(()),
         mates_home: |home| home.join("mates"),
         launch_state: "crazyagent",
         remove_agent_tree: |_folder| Ok(()),
@@ -211,6 +212,7 @@ fn a_leads_copy_runs_the_git_the_hooks_name() {
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
         sandboxed_git: || Path::new("/opt/stand-in/bin/git"),
+        remove_shell_startup: |_, _| Ok(()),
         mates_home: |home| home.join("mates"),
         launch_state: "crazyagent",
         remove_agent_tree: |_folder| Ok(()),
@@ -304,6 +306,7 @@ fn the_agent_getconf_is_looked_for_in_the_launch_folder_the_hooks_name() {
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
         sandboxed_git: || Path::new("/usr/bin/git"),
+        remove_shell_startup: |_, _| Ok(()),
         mates_home: |home| home.join("mates"),
         launch_state: "stand-in",
         remove_agent_tree: |_folder| Ok(()),

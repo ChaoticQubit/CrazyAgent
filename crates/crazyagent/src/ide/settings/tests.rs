@@ -164,7 +164,7 @@ fn written_remote_settings_hold_every_locked_key() {
     assert_eq!(
         machine[format!("terminal.integrated.automationProfile.{os}").as_str()]["path"],
         json!(
-            crate::sandbox::ide_shell::owner_shell()
+            kernel_sandbox::ide_shell::owner_shell()
                 .unwrap()
                 .to_string_lossy()
         )
