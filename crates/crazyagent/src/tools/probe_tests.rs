@@ -90,3 +90,11 @@ fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_fol
     );
     Ok(())
 }
+
+/// The engine's hooks turn folder runs off in crazyagent's own unit rows, so no row runs the
+/// developer's shell files, and on in every other build, the engine a `cargo test` launches
+/// included.
+#[test]
+fn the_engine_hooks_turn_folder_runs_off_only_in_its_own_unit_rows() {
+    assert!(!crate::tools::HOOKS.folder_probes);
+}
