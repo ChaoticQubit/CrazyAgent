@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${PERF_RUNS+set}" ]; then
+  echo "run.sh: PERF_RUNS is gone, use PERF_BLOCKS (ABBA blocks, default 2)" >&2
+  exit 2
+fi
+
 packages_of() {
   local dir=$1 tests manifest
   for tests in "$dir"/crates/*/src/perf_tests.rs "$dir"/crates/*/src/perf_tests "$dir"/crates/*/*/src/perf_tests.rs "$dir"/crates/*/*/src/perf_tests; do
@@ -20,28 +25,48 @@ busy_slots() {
   echo "$busy"
 }
 
+build_of() {
+  if [ -d "$1/crates/kernel" ]; then echo 2.5; else echo 2.4.4; fi
+}
+
+plan() {
+  local dir index forward="" backward=""
+  local -a first=() rest=() ordered=()
+  for dir in "$@"; do
+    if [ "$(build_of "$dir")" = 2.5 ]; then first+=("$dir"); else rest+=("$dir"); fi
+  done
+  ordered=(${first[@]+"${first[@]}"} ${rest[@]+"${rest[@]}"})
+  for dir in "${ordered[@]}"; do forward="$forward,$(build_of "$dir")"; done
+  for ((index = ${#ordered[@]} - 1; index >= 0; index--)); do
+    backward="$backward,$(build_of "${ordered[$index]}")"
+  done
+  echo "order=${forward#,}$backward"
+  printf '%s\n' "${ordered[@]}"
+}
+
 load_one() {
   sysctl -n vm.loadavg | awk '{print $2}'
 }
 
 measure() {
-  local dir=$1 sprint=$2 build=2.4.4 load1 others condition=loaded
+  local dir=$1 sprint=$2 order=$3 build load1 others condition=loaded
   local -a packages
   local word
   packages=()
   while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
-  [ -d "$dir/crates/kernel" ] && build=2.5
+  build=$(build_of "$dir")
   load1=$(load_one)
   others=$(($(busy_slots "$sprint") - 1))
   [ "$others" -ge 0 ] || others=0
   awk -v l="$load1" 'BEGIN { exit !(l < 4) }' && [ "$others" -eq 0 ] && condition=quiet
-  echo "PERF-RUN build=$build commit=$(git -C "$dir" rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition load1=$load1 slots=$others runs=1"
+  echo "PERF-RUN build=$build commit=$(git -C "$dir" rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition load1=$load1 slots=$others runs=1 order=$order"
   (cd "$dir" && CARGO_TARGET_DIR="$dir/.local-state/target" cargo test --release "${packages[@]}" --lib perf_tests -- --ignored --nocapture --test-threads=1 2>&1) | sed -E 's/^test [^ ]+ \.\.\. (PERF )/\1/'
   return "${PIPESTATUS[0]}"
 }
 
 median() {
   python3 -I - "$1" "$2" <<'PY'
+import math
 import statistics
 import sys
 
@@ -57,28 +82,32 @@ for raw in open(path):
     elif line.startswith("PERF ") and block is not None:
         words = line.split()
         values = dict(pair.split("=", 1) for pair in words[4:])
-        if "p50_ns" in values:
+        nanoseconds = "p50_ns" in values
+        if nanoseconds:
             p50, p95 = int(values["p50_ns"]), int(values["p95_ns"])
         else:
             p50, p95 = int(values["p50"]) * 1000, int(values["p95"]) * 1000
-        block[1][tuple(words[1:4])] = (p50, p95, values["n"], int(values.get("batch", "1")))
+        block[1][tuple(words[1:4])] = (p50, p95, values["n"], int(values.get("batch", "1")), nanoseconds)
 for build, blocks in builds.items():
     assert len(blocks) == want, f"{build}: {len(blocks)} runs, wanted {want}"
     headers = [header for header, _ in blocks]
     assert len({header["commit"] for header in headers}) == 1
     condition = "quiet" if all(h["condition"] == "quiet" for h in headers) else "loaded"
+    orders = {header.get("order", "") for header in headers}
+    assert len(orders) == 1
+    order = f" order={orders.pop()}" if "order" in headers[0] else ""
     load1 = statistics.median(float(h["load1"]) for h in headers)
     slots = max(int(h["slots"]) for h in headers)
-    print(f"PERF-RUN build={build} commit={headers[0]['commit']} date={headers[0]['date']} condition={condition} load1={load1:.2f} slots={slots} runs={want}")
+    print(f"PERF-RUN build={build} commit={headers[0]['commit']} date={headers[0]['date']} condition={condition} load1={load1:.2f} slots={slots} runs={want}{order}")
     for key in blocks[0][1]:
         rows = [rows.get(key) for _, rows in blocks]
         if any(row is None for row in rows):
             continue
-        p50 = sorted(row[0] for row in rows)[want // 2]
-        p95 = sorted(row[1] for row in rows)[want // 2]
+        p50 = math.floor(statistics.median(row[0] for row in rows))
+        p95 = math.floor(statistics.median(row[1] for row in rows))
         n, batch = rows[0][2], rows[0][3]
         head = "PERF " + " ".join(key)
-        if p50 < 10_000:
+        if p50 < 10_000 or all(row[4] for row in rows):
             print(f"{head} p50_ns={p50} p95_ns={p95} n={n} batch={batch}")
         elif batch == 1:
             print(f"{head} p50={p50 // 1000} p95={p95 // 1000} n={n}")
@@ -92,22 +121,38 @@ if [ "${1:-}" = "--median" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--plan" ]; then
+  shift
+  plan "$@"
+  exit 0
+fi
+
 if [ "${1:-}" = "--inner" ]; then
   shift
-  sprint=$1 runs=$2 log=$3
+  sprint=$1 blocks=$2 log=$3
   shift 3
-  for _ in $(seq 1 "$runs"); do
-    for dir in "$@"; do
-      measure "$dir" "$sprint" >> "$log"
+  planned=()
+  while IFS= read -r word; do planned+=("$word"); done < <(plan "$@")
+  order=${planned[0]#order=}
+  ordered=("${planned[@]:1}")
+  for dir in "${ordered[@]}"; do
+    measure "$dir" "$sprint" "$order" > /dev/null
+  done
+  for _ in $(seq 1 "$blocks"); do
+    for dir in "${ordered[@]}"; do
+      measure "$dir" "$sprint" "$order" >> "$log"
+    done
+    for ((index = ${#ordered[@]} - 1; index >= 0; index--)); do
+      measure "${ordered[$index]}" "$sprint" "$order" >> "$log"
     done
   done
-  median "$log" "$runs"
+  median "$log" $((blocks * 2))
   exit 0
 fi
 
 layer=${1:?usage: run.sh <layer> [2.4.4 checkout]}
 other=${2:-}
-runs=${PERF_RUNS:-3}
+blocks=${PERF_BLOCKS:-2}
 [ "$layer" = 1 ] || { echo "run.sh: layer $layer has no rows yet" >&2; exit 2; }
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 root=$(git rev-parse --show-toplevel)
@@ -132,5 +177,5 @@ if [ -n "${PERF_WAIT_QUIET:-}" ]; then
 fi
 mkdir -p "$root/.local-state/perf"
 log="$root/.local-state/perf/L$layer-$(date +%Y%m%dT%H%M%S).log"
-bash "$sprint/slot.sh" bash "$self" --inner "$sprint" "$runs" "$log" "${dirs[@]}"
+bash "$sprint/slot.sh" bash "$self" --inner "$sprint" "$blocks" "$log" "${dirs[@]}"
 echo "raw runs: $log"
