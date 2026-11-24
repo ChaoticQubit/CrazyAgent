@@ -863,7 +863,7 @@ fn retire_claimed(
                 &target.id.to_string(),
             )
         {
-            let Some(deep) = too_deep_folder(&problem) else {
+            let Some(deep) = crate::sandbox::too_deep_folder(&problem) else {
                 return Ok(Some("cleanup_folder_failed"));
             };
             *folder = Some(deep);
@@ -1316,20 +1316,6 @@ fn folder_failed() -> EngineError {
 /// [`HOME_DEPTH_MAX`] folders below it, which only Clean up of a tool cache passes on with
 /// that folder; the callers that reset an agent's home give their own code ([`home_code`]).
 pub(crate) const FOLDER_TOO_DEEP: &str = "cleanup_folder_too_deep";
-
-/// The absolute tool cache folder a removal of an agent's caches refused as
-/// [`FOLDER_TOO_DEEP`]. Input: the removal's error. Output: the folder, or None for any other
-/// refusal or a folder whose path is not text.
-#[cfg(target_os = "macos")]
-fn too_deep_folder(problem: &std::io::Error) -> Option<String> {
-    let refused = problem
-        .get_ref()?
-        .downcast_ref::<kernel_sandbox::tool_cache::EntryRefused>()?;
-    if refused.code != FOLDER_TOO_DEEP || !refused.folder.is_absolute() {
-        return None;
-    }
-    refused.folder.to_str().map(str::to_owned)
-}
 
 /// The code a removal of an agent home entry reports once its walk's listings returned more
 /// names than its budget holds (RESET-WALK-F1), which the callers that reset an agent's home

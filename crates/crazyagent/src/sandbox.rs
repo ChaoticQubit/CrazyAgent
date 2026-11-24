@@ -286,6 +286,20 @@ fn tool_cache_remove_agent_entry(
     })
 }
 
+/// The absolute tool cache folder a removal of an agent's caches refused as too deep to
+/// remove. Input: the removal's error. Output: the folder, or None for any other refusal or
+/// a folder whose path is not text.
+#[cfg(target_os = "macos")]
+pub(crate) fn too_deep_folder(problem: &std::io::Error) -> Option<String> {
+    let refused = problem
+        .get_ref()?
+        .downcast_ref::<kernel_sandbox::tool_cache::EntryRefused>()?;
+    if refused.code != crate::team::cleanup::FOLDER_TOO_DEEP || !refused.folder.is_absolute() {
+        return None;
+    }
+    refused.folder.to_str().map(str::to_owned)
+}
+
 /// Removes a folder an agent wrote as Clean up removes an agent's tree, with the engine's
 /// refusal text as the error. Input: the folder. Output: done, or the error.
 fn toolchain_remove_agent_tree(folder: &Path) -> std::io::Result<()> {
