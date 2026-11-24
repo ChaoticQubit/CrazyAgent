@@ -6,7 +6,6 @@ use super::{
 use crate::engine::EngineError;
 use kernel_security::secret::SecretString;
 use serde::Deserialize;
-use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};

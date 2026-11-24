@@ -3,7 +3,7 @@ use crate::error::StoreError;
 use crate::secret::Piece::{Hex, Plain};
 use crate::secret::sized;
 use crate::secret::{STORED_BYTES_MAX, SecretString};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
