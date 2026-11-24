@@ -1,3 +1,5 @@
+use crate::adapters::events::RateLimitStatus;
+
 /// Tells whether a provider error message says the account hit a rate or usage limit.
 /// Takes the provider's error text, which is never stored or shown.
 /// Returns true for rate limit, usage limit, quota and HTTP 429 wording, and for the
@@ -24,6 +26,22 @@ pub(super) fn turn_error(message: &str) -> super::LaunchEvent {
     super::LaunchEvent::TurnError {
         rate_limited: rate_limited(message),
     }
+}
+
+/// The turn error a Claude rate-limit event makes: a rate-limited one when the event is a
+/// rejection whose overage is rejected too, a status this engine does not know, or not named.
+/// Takes the event's status and overage status. Returns none for any other event, and for a
+/// rejection whose overage still serves requests.
+pub(super) fn refusal(
+    status: RateLimitStatus,
+    overage: Option<RateLimitStatus>,
+) -> Option<super::LaunchEvent> {
+    let served = matches!(
+        overage,
+        Some(RateLimitStatus::Allowed | RateLimitStatus::AllowedWarning)
+    );
+    (status == RateLimitStatus::Rejected && !served)
+        .then_some(super::LaunchEvent::TurnError { rate_limited: true })
 }
 
 /// Tells whether a line is one of Claude Code's own limit lines, by the check Claude

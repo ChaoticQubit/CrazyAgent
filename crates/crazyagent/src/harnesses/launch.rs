@@ -6,7 +6,7 @@ use super::leftovers::{Follower, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
-use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
+use crate::adapters::events::{EventKind, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
@@ -1991,14 +1991,13 @@ impl Driver {
                                     events.push(LaunchEvent::ToolUse { name })
                                 }
                                 EventKind::AssistantError { code } => {
-                                    events.push(LaunchEvent::TurnError {
-                                        rate_limited: rate_limited(&code),
-                                    })
+                                    events.push(claude_limit::turn_error(&code))
                                 }
                                 EventKind::RateLimitObserved {
-                                    status: RateLimitStatus::Rejected,
+                                    status,
+                                    overage_status,
                                     ..
-                                } => events.push(LaunchEvent::TurnError { rate_limited: true }),
+                                } => events.extend(claude_limit::refusal(status, overage_status)),
                                 EventKind::TurnFinished { outcome, usage, .. } => {
                                     *interrupt = None;
                                     let tokens = Tokens::reported(&usage);
