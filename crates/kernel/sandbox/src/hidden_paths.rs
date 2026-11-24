@@ -171,8 +171,11 @@ impl HiddenRun {
     /// [`covers`] reads what [`HiddenRun::hid`] recorded, so a run that hid nothing yet
     /// covers no saved folder. Input: the saved folders. Output: the answer.
     pub fn covers_saved(&self, saved: &[PathBuf]) -> bool {
-        let _ = saved;
-        true
+        assert!(saved.len() <= HIDDEN_PATHS_MAX);
+        let runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+        let run = runs.runs.get(&self.0);
+        assert!(run.is_some());
+        run.is_some_and(|run| covers(run.hidden.as_deref(), saved))
     }
 }
 
