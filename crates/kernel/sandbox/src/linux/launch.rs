@@ -290,7 +290,7 @@ impl LinuxSandbox {
 
     /// Test helper: the supervision this launch runs under. Output: the supervision, `None`
     /// when no call supervisor runs.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn supervision(&self) -> Option<Supervision> {
         self.supervision
     }
