@@ -45,7 +45,13 @@ plan() {
 }
 
 load_one() {
-  sysctl -n vm.loadavg | awk '{print $2}'
+  local load
+  load=$(python3 -I -c 'import os; print(f"{os.getloadavg()[0]:.2f}")') || load=""
+  if ! [[ "$load" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "run.sh: no load average (read '$load')" >&2
+    return 1
+  fi
+  echo "$load"
 }
 
 measure() {
@@ -171,7 +177,9 @@ for dir in "${dirs[@]}"; do
   (cd "$dir" && CARGO_TARGET_DIR="$dir/.local-state/target" bash "$sprint/slot.sh" cargo test --release "${packages[@]}" --lib --no-run)
 done
 if [ -n "${PERF_WAIT_QUIET:-}" ]; then
-  until awk -v l="$(load_one)" 'BEGIN { exit !(l < 4) }' && [ "$(busy_slots "$sprint")" -eq 0 ]; do
+  while :; do
+    load1=$(load_one)
+    awk -v l="$load1" 'BEGIN { exit !(l < 4) }' && [ "$(busy_slots "$sprint")" -eq 0 ] && break
     sleep 60
   done
 fi
