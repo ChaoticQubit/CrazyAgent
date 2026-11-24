@@ -1729,7 +1729,7 @@ fn fresh_link_inside(
 /// the code points HFS+ ignores in names left out
 /// ([`crate::instruction_files::HFS_IGNORED`], RV-DS241-148), or None when a code point
 /// stays outside ASCII.
-fn ascii_fold(part: &str) -> Option<String> {
+pub(crate) fn ascii_fold(part: &str) -> Option<String> {
     let mut folded = String::with_capacity(part.len());
     for point in part.chars() {
         if crate::instruction_files::HFS_IGNORED.contains(&point) {
@@ -1762,7 +1762,7 @@ fn folds_onto(link: &str, walk: &[&str]) -> bool {
 /// [`ascii_fold`], or both stay outside ASCII, since the volume may still fold one onto
 /// the other. A part that stays outside ASCII never names the entry of one that folds onto
 /// ASCII. Inputs: the two parts. Output: true when they may.
-fn same_name(one: &str, other: &str) -> bool {
+pub(crate) fn same_name(one: &str, other: &str) -> bool {
     match (ascii_fold(one), ascii_fold(other)) {
         (Some(one), Some(other)) => one == other,
         (None, None) => true,

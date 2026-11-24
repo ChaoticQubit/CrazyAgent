@@ -287,7 +287,7 @@ const DATA_VOLUME: &str = "/System/Volumes/Data";
 /// True when two paths name one existing entry (device and inode). Inputs: the paths.
 /// Output: the answer, false when either does not resolve.
 #[cfg(target_os = "macos")]
-fn same_entry(left: &Path, right: &Path) -> bool {
+pub(crate) fn same_entry(left: &Path, right: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::metadata(left), std::fs::metadata(right)) {
         (Ok(left), Ok(right)) => (left.dev(), left.ino()) == (right.dev(), right.ino()),

@@ -4702,7 +4702,7 @@ pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
 
 /// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
 /// without a quote or backslash. Output: the pattern text, without anchors.
-fn regex_escape(text: &str) -> String {
+pub(crate) fn regex_escape(text: &str) -> String {
     assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);
     for character in text.chars() {
@@ -4757,7 +4757,7 @@ pub(crate) fn priming_profile(folder: &Path, uv: &Path) -> String {
     text
 }
 
-fn invalid(reason: &str) -> SandboxError {
+pub(crate) fn invalid(reason: &str) -> SandboxError {
     SandboxError::Invalid(reason.into())
 }
 
@@ -4790,13 +4790,13 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
 /// no sandbox root may contain. Takes nothing. Returns the folder, or `Invalid` when the
 /// profile names none or a relative one.
 #[cfg(target_os = "windows")]
-fn owner_home() -> Result<PathBuf, SandboxError> {
+pub(crate) fn owner_home() -> Result<PathBuf, SandboxError> {
     let home = std::env::home_dir().ok_or_else(|| invalid("owner account is unknown"))?;
     settled_home(home)
 }
 
 #[cfg(unix)]
-fn owner_home() -> Result<PathBuf, SandboxError> {
+pub(crate) fn owner_home() -> Result<PathBuf, SandboxError> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .map_err(|error| SandboxError::Io(io::Error::from(error)))?
         .ok_or_else(|| invalid("owner account is unknown"))?;
@@ -4807,7 +4807,7 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
 /// [`canonical`] when it resolves, so a home named through the macOS data volume has the
 /// short spelling every sandbox root has. Input: the home the account names. Output: the
 /// folder, or `Invalid` for a relative or unclean one.
-fn settled_home(home: PathBuf) -> Result<PathBuf, SandboxError> {
+pub(crate) fn settled_home(home: PathBuf) -> Result<PathBuf, SandboxError> {
     if !clean_absolute(&home) {
         return Err(invalid("owner home must be absolute"));
     }
@@ -4829,7 +4829,7 @@ pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
         )
 }
 
-fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
+pub(crate) fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
     OWNER_SECRET_PATHS
         .iter()
         .map(move |path| {
@@ -4908,7 +4908,7 @@ fn bounded_entries(folder: &Path) -> Result<Vec<PathBuf>, SandboxError> {
     Ok(entries)
 }
 
-fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+pub(crate) fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
     if secrets
         .iter()
         .any(|secret| root.starts_with(secret) || secret.starts_with(root))
@@ -5270,7 +5270,7 @@ fn shared_denies(folder: &Path) -> String {
     )
 }
 
-fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+pub(crate) fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
     let depth = root
         .components()
         .filter(|component| matches!(component, Component::Normal(_)))
@@ -5310,7 +5310,7 @@ pub(crate) fn plain_grants(grants: PathBuf) -> Result<PathBuf, SandboxError> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn clean_absolute(path: &Path) -> bool {
+pub(crate) fn clean_absolute(path: &Path) -> bool {
     path.is_absolute()
         && path.as_os_str().len() <= PATH_BYTES_MAX
         && path
@@ -5327,7 +5327,7 @@ fn clean_absolute(path: &Path) -> bool {
 /// UNC, verbatim or device prefix), then folder names joined by `\`, as
 /// [`windows_clean_text`] checks. Input: the path. Output: true when plain.
 #[cfg(target_os = "windows")]
-fn clean_absolute(path: &Path) -> bool {
+pub(crate) fn clean_absolute(path: &Path) -> bool {
     path.is_absolute()
         && path.components().all(|component| match component {
             Component::Prefix(prefix) => matches!(prefix.kind(), std::path::Prefix::Disk(_)),

@@ -626,7 +626,7 @@ pub(crate) fn names_one_of(name: &str, names: &[&str]) -> bool {
 /// (git's `core.protectHFS` list) left out, each code point in [`ASCII_FOLDS`] spelled as
 /// its ASCII and ASCII letters put in lower case. Input: the name or path. Output: the
 /// folded text.
-fn folded(name: &str) -> String {
+pub(crate) fn folded(name: &str) -> String {
     let mut text = String::with_capacity(name.len());
     for point in name.chars().filter(|point| !HFS_IGNORED.contains(point)) {
         match ASCII_FOLDS.iter().find(|(from, _)| *from == point) {

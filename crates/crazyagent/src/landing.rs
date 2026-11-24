@@ -13,7 +13,7 @@ mod clone;
 mod diff;
 pub(crate) mod evidence;
 #[cfg(unix)]
-mod flow;
+pub(crate) mod flow;
 #[cfg(unix)]
 mod git;
 #[cfg(unix)]
