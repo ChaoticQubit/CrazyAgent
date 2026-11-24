@@ -379,7 +379,7 @@ pub(super) fn nest_held(bwrap: &Path, helper: &Path) -> bool {
 /// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
 /// restricts them.
-fn restricts(setting: Option<&str>) -> bool {
+pub fn restricts(setting: Option<&str>) -> bool {
     setting.is_some_and(|text| text.strip_suffix('\n').unwrap_or(text) == "1")
 }
 

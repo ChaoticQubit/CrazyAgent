@@ -67,7 +67,7 @@ const AGENT_PATH: &str =
     "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/linuxbrew/.linuxbrew/bin";
 /// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
 /// Ubuntu 23.10 and newer: `1` when it does ([`restricts`]).
-pub(crate) const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+pub const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
@@ -84,7 +84,7 @@ const PROBE_FOLDER_TRIES_MAX: usize = 4;
 /// How often [`passes_within`] looks whether its probe has ended.
 const PROBE_POLL: Duration = Duration::from_millis(20);
 const RESOLVER_ROOT: &str = "/run/systemd/resolve";
-const HELPER_MISSING: &str = "CrazyAgent's sandbox helper is missing, and no Linux agent \
+pub const HELPER_MISSING: &str = "CrazyAgent's sandbox helper is missing, and no Linux agent \
      starts without it; reinstall CrazyAgent.";
 /// How a refusal starts when the probe failed for any reason but the kernel's answer.
 const PROBE_FAILED: &str = "the sandbox check failed";
