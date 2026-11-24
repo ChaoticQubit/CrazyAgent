@@ -305,10 +305,11 @@ fn the_installed_boundary_lives_in_the_kernel() {
     let _ = unconfined;
     #[cfg(target_os = "windows")]
     {
-        let grants: fn(
-            &crate::profile::ProfileHooks,
-        ) -> fn() -> Result<std::path::PathBuf, crate::error::SandboxError> =
-            |hooks| hooks.grants_folder;
+        fn grants(
+            hooks: &crate::profile::ProfileHooks,
+        ) -> Result<std::path::PathBuf, crate::error::SandboxError> {
+            (hooks.grants_folder)()
+        }
         let _ = grants;
     }
 }
