@@ -783,3 +783,42 @@ fn on_git_2_39_a_master_fix_of_a_conflict_waits_for_the_owner_and_lands_on_2_40(
     assert_eq!(case.owner(&["show", "main:README"]), resolved);
     shape_git(None);
 }
+
+/// A folder the owner saves hidden while a lockfile tool runs, one the tool's sandbox did not
+/// hide at its start, stops the tool at once: nothing is committed, the set goes back to its
+/// agent well before the tool would end, and no process of the run is left.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_its_agent() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let token = token(&case);
+    stand_in_cargo(
+        &case,
+        "",
+        &format!("/usr/bin/perl -e 'sleep 60' {token}"),
+        Duration::from_secs(90),
+    );
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while survivors(&token).is_empty() {
+        assert!(Instant::now() < deadline, "the stand-in tool never started");
+    }
+    crate::sandbox::access_store::hidden::save(
+        &case.db,
+        case.workspace.project.as_str(),
+        &[case.repo.join("secret")],
+    )
+    .unwrap();
+    let set = set_within(&case, &id, Duration::from_secs(15), |set| {
+        set.state == ChangeState::Updating
+    });
+    assert_eq!(
+        set.state,
+        ChangeState::Updating,
+        "the hide stops the tool and the agent fixes the clash"
+    );
+    assert!(!regenerated(&case, &set), "nothing was committed");
+    assert_eq!(survivors(&token), Vec::<String>::new());
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
