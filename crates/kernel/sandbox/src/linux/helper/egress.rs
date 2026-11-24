@@ -20,7 +20,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::str::FromStr;
 use std::time::Duration;
 
-pub const ROUTE: &str = "--route";
+pub(crate) const ROUTE: &str = "--route";
 pub(super) const EGRESS: &str = "--egress";
 pub(super) const SLIRP: &str = "--slirp";
 /// What slirp4netns reads and executes under its rules ([`confine_slirp`]), Landlock's read
@@ -46,7 +46,7 @@ const RO_BIND_DATA: &str = "--ro-bind-data";
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 /// The bubblewrap flags stage 1 writes itself, each with a descriptor it opened, in this
 /// order and right after `--unshare-net`, so the engine never names one ([`placed`]).
-pub const DESCRIPTOR_FLAGS: [&str; 3] = [INFO_FD, BLOCK_FD, RO_BIND_DATA];
+pub(crate) const DESCRIPTOR_FLAGS: [&str; 3] = [INFO_FD, BLOCK_FD, RO_BIND_DATA];
 /// Where the setup child takes slirp4netns from, and only from there: no flag or variable
 /// names another program, which would then run with network capabilities in the agent's
 /// user namespace (DEC-179 SBX-2).

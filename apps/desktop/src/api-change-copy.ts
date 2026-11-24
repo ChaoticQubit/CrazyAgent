@@ -1,4 +1,4 @@
-import type { PendingIntent } from "./engine-client";
+import type { ModelAccessEdit, PendingIntent } from "./engine-client";
 
 /** What each kind of pending change is called in a sentence about it. */
 export const CHANGE: Record<PendingIntent["kind"], string> = {
@@ -57,4 +57,16 @@ export const CHANGE: Record<PendingIntent["kind"], string> = {
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
   plan_roadmap: "planning the roadmap",
+};
+
+export const MODEL_ACCESS_CHANGE: Record<ModelAccessEdit["kind"], string> = {
+  add_account: "adding an account",
+  remove_account: "deleting an account",
+  create_connection: "adding a connection",
+  replace_connection: "changing a connection",
+  remove_connection: "removing a connection",
+  create_pool: "creating a pool",
+  replace_pool: "changing a pool",
+  remove_pool: "deleting a pool",
+  assign_project_pool: "changing a project's pool",
 };

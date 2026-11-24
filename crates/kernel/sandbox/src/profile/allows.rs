@@ -1060,7 +1060,7 @@ impl ProjectSandbox {
     /// and the limited network names loopback ports only, each [`BRIDGE_PORT_MIN`] or
     /// higher. Output: the ports in rising order, or none when the agent keeps the shared
     /// network.
-    pub fn bridged_ports(&self) -> Option<Vec<u16>> {
+    pub(crate) fn bridged_ports(&self) -> Option<Vec<u16>> {
         let SandboxNetwork::Only(remotes) = &self.network else {
             return None;
         };
@@ -1120,7 +1120,7 @@ impl ProjectSandbox {
     /// nests agents: the sockets setting is `TcpOnly` and the limited network names
     /// loopback ports only, but one lies below [`BRIDGE_PORT_MIN`]. Output: the lowest such
     /// port, or none when the agent is bridged or shares the network for another reason.
-    pub fn unbridged_port(&self) -> Option<u16> {
+    pub(crate) fn unbridged_port(&self) -> Option<u16> {
         let SandboxNetwork::Only(remotes) = &self.network else {
             return None;
         };

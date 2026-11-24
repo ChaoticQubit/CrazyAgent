@@ -1,21 +1,18 @@
-use crazyagent_linux_supervisor::rules::{GitOwn, Held};
-use kernel_sandbox::error::SandboxError;
-use kernel_sandbox::host::LinuxHost;
-use kernel_sandbox::lines::{
+use crate::error::SandboxError;
+use crate::host::LinuxHost;
+use crate::lines::{
     LINUX_PORTS_ANY_HOST_LINE, LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE,
     linux_unbridged_line,
 };
-use kernel_sandbox::linux::helper::bridge::Bridge;
-use kernel_sandbox::linux::helper::landlock::*;
-use kernel_sandbox::linux::helper::*;
-use kernel_sandbox::linux::launch::host::*;
-use kernel_sandbox::linux::launch::*;
-use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-use kernel_sandbox::ports::PICKED_PORTS_START;
-use kernel_sandbox::ports::PROXY_PORTS;
-use kernel_sandbox::profile::consts::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK;
-use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox, linux_unbridged_notice_on};
-use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
+use crate::linux::helper::bridge::Bridge;
+use crate::linux::launch::*;
+use crate::net::{SandboxNetwork, SandboxRemote};
+use crate::ports::PICKED_PORTS_START;
+use crate::ports::PROXY_PORTS;
+use crate::profile::consts::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK;
+use crate::profile::{ProjectSandbox, command::Sandbox, linux_unbridged_notice_on};
+use crate::settings::{LinuxSockets, LinuxSupervisor};
+use crazyagent_linux_supervisor::rules::{GitOwn, Held};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,7 +32,7 @@ fn project(network: SandboxNetwork) -> (tempfile::TempDir, ProjectSandbox) {
         fs::create_dir(folder).unwrap();
     }
     let sandbox = ProjectSandbox::new(
-        &crate::sandbox::PROFILE_HOOKS,
+        &crate::test_hooks::STAND_IN,
         &folders[0],
         &folders[1],
         &folders[2],
@@ -86,7 +83,7 @@ fn linked() -> (tempfile::TempDir, PathBuf, ProjectSandbox, PathBuf) {
         &["worktree", "add", "-q", "--detach", path, "HEAD"],
     );
     let sandbox = ProjectSandbox::new(
-        &crate::sandbox::PROFILE_HOOKS,
+        &crate::test_hooks::STAND_IN,
         &project,
         &folders[1],
         &folders[2],
@@ -398,7 +395,7 @@ fn an_open_network_policy_keeps_the_owner_model_and_proxy_ports_free() {
     assert!(!policy.limit_network);
     let mut expected = vec![1234, 1455, 8080, 11434];
     expected.extend(PROXY_PORTS);
-    expected.extend(kernel_sandbox::ports::RELAY_PORTS);
+    expected.extend(crate::ports::RELAY_PORTS);
     assert_eq!(policy.keep_free, expected);
     assert_eq!(policy.keep_free.len(), 4 + 256);
     assert_eq!(
@@ -492,7 +489,7 @@ fn a_limited_network_policy_names_the_kept_ports_for_the_helper_to_check() {
     assert!(policy.limit_network);
     let mut expected = vec![1455, 8080, 11434];
     expected.extend(PROXY_PORTS);
-    expected.extend(kernel_sandbox::ports::RELAY_PORTS);
+    expected.extend(crate::ports::RELAY_PORTS);
     assert_eq!(policy.keep_free, expected);
     assert_eq!(
         HelperRequest::parse(
@@ -886,8 +883,8 @@ fn an_agent_kept_on_this_network_by_a_low_port_names_the_lowest_one() {
 
 #[test]
 fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
+    use crate::policy::AgentNetwork;
     use SandboxRemote::{AnyHost, Loopback};
-    use kernel_sandbox::policy::AgentNetwork;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -948,8 +945,8 @@ fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
 
 #[test]
 fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
+    use crate::policy::AgentNetwork;
     use SandboxRemote::{AnyHost, Loopback};
-    use kernel_sandbox::policy::AgentNetwork;
     let host = |routed, supervised| {
         Some(LinuxHost {
             nested: true,
@@ -1016,8 +1013,8 @@ fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself()
 
 #[test]
 fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
+    use crate::policy::AgentNetwork;
     use SandboxRemote::{AnyHost, Loopback};
-    use kernel_sandbox::policy::AgentNetwork;
     let host = |nested, routed| {
         Some(LinuxHost {
             nested,
