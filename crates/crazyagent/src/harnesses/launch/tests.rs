@@ -1,6 +1,6 @@
 use super::{AccountBinding, Driver, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest};
 #[cfg(unix)]
-use crate::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::path::Path;

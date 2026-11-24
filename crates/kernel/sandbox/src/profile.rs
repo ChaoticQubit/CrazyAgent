@@ -6,6 +6,8 @@ pub mod command;
 pub mod consts;
 /// The names that tell an agent's own lineage: the lineage variable and token.
 pub mod env;
+/// The installed boundary every launch takes: the profile on disk and the platform launch.
+pub mod installed;
 
 /// The Seatbelt rule writers: the denies for app launches, a clone's object store and a
 /// lead's clone, the root pins and nested git denies, and the packing and bound checks of
@@ -142,6 +144,10 @@ pub struct ProfileHooks {
     /// removes one). Output: the command, or the engine's refusal.
     #[cfg(target_os = "windows")]
     pub windows_agent_command: WindowsAgentCommand,
+    /// The engine's grants folder a Windows boundary is installed with, made when missing.
+    /// Output: the folder, or the refusal.
+    #[cfg(target_os = "windows")]
+    pub grants_folder: fn() -> Result<PathBuf, SandboxError>,
 }
 
 /// How the engine builds a Windows agent's command: from the installed profile, the absolute

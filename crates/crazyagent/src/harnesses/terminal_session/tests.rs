@@ -195,7 +195,7 @@ mod own_turns {
                 kernel_sandbox::net::SandboxNetwork::Open,
             )
             .unwrap();
-            let installed = crate::sandbox::InstalledSandbox::install(
+            let installed = kernel_sandbox::profile::installed::InstalledSandbox::install(
                 sandbox,
                 &base.join("full-access.sb"),
                 kernel_sandbox::settings::LinuxSupervisor::On,

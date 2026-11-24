@@ -7,7 +7,7 @@ use kernel_sandbox::linux::helper::{
 };
 use kernel_sandbox::linux::launch::{LinuxBackend, LinuxSandbox, host::read_host};
 
-use crazyagent::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox};
 
 use kernel_sandbox::error::SandboxError;

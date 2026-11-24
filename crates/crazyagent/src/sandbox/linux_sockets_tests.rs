@@ -1,8 +1,14 @@
 use super::*;
 use kernel_sandbox::elf::test_support::executable;
+use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::host::LinuxHost;
 use kernel_sandbox::lines::*;
+#[cfg(target_os = "linux")]
+use kernel_sandbox::linux::launch as linux;
+use kernel_sandbox::profile::ProjectSandbox;
+use kernel_sandbox::profile::consts::*;
 use kernel_sandbox::profile::linux_unbridged_notice_on;
+use std::path::PathBuf;
 
 struct Case {
     _temp: tempfile::TempDir,

@@ -28,7 +28,7 @@ pub(crate) fn start_end_code(clocked: bool) -> &'static str {
 }
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::routing::ResourceBudget;
-use crate::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::installed::InstalledSandbox;
 #[cfg(unix)]
 use std::ffi::OsStr;
 #[cfg(unix)]

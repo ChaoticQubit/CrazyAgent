@@ -6,7 +6,7 @@ use super::{
 };
 use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
 use crate::protocol::{ProtocolError, RequestId};
-use crate::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::process::Stdio;
