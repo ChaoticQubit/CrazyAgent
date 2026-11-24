@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
+import { nativeSources } from "../native-commands.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -98,7 +99,7 @@ async function openCard(page, label, settle = true) {
 test("on the Agents tab one terminal panel follows the clicked agent, and an agent's question waits on the Questions tab, not in the drawer", { timeout: 600000 }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
-  assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
+  assert.equal(readFileSync(ROUTES, "utf8"), render(nativeSources()), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ca-one-")));
   const runtime = join(root, "engine");

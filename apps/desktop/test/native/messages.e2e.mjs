@@ -11,6 +11,7 @@ import { build } from "vite";
 import "../load-source.mjs";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
+import { nativeSources } from "../native-commands.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, fieldValue } = await import("../../src/api-messages.ts");
@@ -68,7 +69,7 @@ function teamHistory(runtime, project) {
 test("the owner sets every Messages option and reads a sub-agent's timeline from the real engine", { timeout: 900000 }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
-  assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
+  assert.equal(readFileSync(ROUTES, "utf8"), render(nativeSources()), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ca-am-")));
   const runtime = join(root, "engine");
