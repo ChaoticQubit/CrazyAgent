@@ -10,8 +10,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { ROUTES, render } from "./bridge-routes.mjs";
-import { nativeSources } from "../native-commands.mjs";
+import { ROUTES, nativeSources, render } from "./bridge-routes.mjs";
 import { POLL_MS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
 import { FOLDER, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, WORKBENCH_MS, git, ideAnswers, input, onboard, openTab, setLevel, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
 

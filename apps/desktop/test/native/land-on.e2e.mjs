@@ -9,8 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { nativeSources } from "../native-commands.mjs";
+import { LIB, ROUTES, commands, nativeSources, plan, render } from "./bridge-routes.mjs";
 import { AGENTS_VIEW, INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
