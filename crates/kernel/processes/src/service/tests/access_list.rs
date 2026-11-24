@@ -476,9 +476,9 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
 
 /// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
-/// change moves only the changed part's change time, so that part alone is listed again.
-/// HFS-CTIME: a part read in the second it changed is read again once
-/// that second has passed, and only then kept.
+/// change moves only the changed part's change time, so that part alone is listed again: a
+/// grant there reads as changeable on the next call. HFS-CTIME: a part read in the second
+/// it changed is read again once that second has passed, and only then kept.
 #[cfg(target_os = "macos")]
 #[test]
 fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts() {
@@ -516,6 +516,34 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         ours(&repeat),
         Vec::<PathBuf>::new(),
         "nothing read is listed again"
+    );
+
+    let grant = |sign: &str| {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg(sign)
+                .arg("group:staff allow add_file,delete_child")
+                .arg(&folder),
+        )
+        .unwrap();
+        assert!(status.success(), "chmod {sign} on {folder:?}");
+    };
+    grant("+a");
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(
+        ours(&acl::take_listings()),
+        vec![folder.clone()],
+        "a grant on a kept part is read on the next call, that part alone"
+    );
+    grant("-a");
+    settle(&[&folder]);
+    assert_eq!(changeable_by_others(&tool), None);
+    acl::take_listings();
+    assert_eq!(changeable_by_others(&tool), None);
+    assert_eq!(
+        ours(&acl::take_listings()),
+        Vec::<PathBuf>::new(),
+        "once the grant is gone the path is kept again"
     );
 
     changed_and_read_in_one_second(&tool, &folder, temp.path());
