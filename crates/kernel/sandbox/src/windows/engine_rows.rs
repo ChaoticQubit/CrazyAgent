@@ -4,6 +4,7 @@ mod profile_rows {
     use crate::paths::canonical;
     use crate::profile::ProjectSandbox;
     use crate::profile::command::Sandbox;
+    use crate::profile::env::Handed;
     use crate::profile::installed::InstalledSandbox;
     use crate::settings::{LinuxStrict, LinuxSupervisor};
     use crate::windows::profile::*;
@@ -314,6 +315,50 @@ mod profile_rows {
         let mut secret = Command::new(cmd());
         secret.env("GH_TOKEN", "placeholder-value");
         assert!(Sandbox::wrap(&installed, &secret).is_err());
+    }
+
+    /// The handing wrap keeps a launch's relay token under the name it hands it and refuses
+    /// the same token under any other name, while the plain wrap refuses it under every name.
+    #[test]
+    fn wrap_handing_holds_the_token_only_under_its_names() {
+        let folders = folders();
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let helper = std::env::current_exe().unwrap();
+        let installed = WindowsSandbox::install(
+            sandbox,
+            &helper,
+            &folders.profiles.join("agent.sb"),
+            &folders.grants,
+        )
+        .unwrap();
+        let token = format!(
+            "{}{}",
+            kernel_common::relay_names::TOKEN_PREFIX,
+            "a".repeat(kernel_common::relay_names::TOKEN_HEX)
+        );
+        let names = ["OPENAI_API_KEY"];
+        let handed = Handed::new(&names, &token).unwrap();
+        let mut harness = Command::new(cmd());
+        harness
+            .env("OPENAI_API_KEY", &token)
+            .current_dir(&folders.project);
+        let wrapped = installed.wrap_handing(&harness, handed).unwrap();
+        assert_eq!(wrapped.get_program(), helper.as_os_str());
+        let holding: Vec<&OsStr> = wrapped
+            .get_envs()
+            .filter(|(_, value)| *value == Some(OsStr::new(&token)))
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(holding, [OsStr::new("OPENAI_API_KEY")]);
+        assert!(matches!(
+            Sandbox::wrap(&installed, &harness),
+            Err(SandboxError::Invalid(_))
+        ));
+        harness.env("OTHER_TOKEN", &token);
+        assert!(matches!(
+            installed.wrap_handing(&harness, handed),
+            Err(SandboxError::Invalid(_))
+        ));
     }
 
     #[test]

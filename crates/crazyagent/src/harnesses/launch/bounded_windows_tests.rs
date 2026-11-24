@@ -1,6 +1,6 @@
 use super::{
     AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest, build,
-    claude_invocation, codex_invocation,
+    claude_invocation, codex_invocation, listed_command,
 };
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -8,12 +8,13 @@ use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::profile::command::LineageCheck;
 use kernel_sandbox::profile::consts::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV};
+use kernel_sandbox::profile::env::Handed;
 use kernel_sandbox::profile::installed::InstalledSandbox;
 use kernel_sandbox::settings::LinuxSupervisor;
 use kernel_sandbox::windows::HELPER_NAME;
 use kernel_sandbox::windows::profile::container_name;
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
@@ -301,6 +302,36 @@ fn a_windows_launch_starts_at_its_installed_boundary_with_only_the_boundary_vari
             assert_eq!(names, expected_names(&request), "{harness} tools {tools}");
         }
     }
+}
+
+/// A Windows launch carries its account hand-over: the relay token reaches the helper
+/// command only under the name the launch hands it, and the same token under any other
+/// name is refused.
+#[test]
+fn a_windows_launch_with_a_hand_over_holds_the_token_only_under_its_names() {
+    let case = case();
+    let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+    let launch = LaunchBoundary::Installed(boundary.clone());
+    let request = request(&case, "codex", launch, &case.home, false);
+    let token = format!(
+        "{}{}",
+        kernel_common::relay_names::TOKEN_PREFIX,
+        "a".repeat(kernel_common::relay_names::TOKEN_HEX)
+    );
+    let names = ["OPENAI_API_KEY"];
+    let handed = Handed::new(&names, &token).expect("Windows admits a launch's own relay token");
+    let key = (OsString::from("OPENAI_API_KEY"), OsString::from(&token));
+    let built = listed_command(&request, &[], std::slice::from_ref(&key), handed).unwrap();
+    assert_eq!(built.get_program(), boundary.launcher().as_os_str());
+    let holding: Vec<&OsStr> = built
+        .get_envs()
+        .filter(|(_, value)| *value == Some(OsStr::new(&token)))
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(holding, [OsStr::new("OPENAI_API_KEY")]);
+    let other = (OsString::from("OTHER_TOKEN"), OsString::from(&token));
+    let refused = listed_command(&request, &[], &[key, other], handed).unwrap_err();
+    assert_eq!(refused.0, "launch_environment_refused");
 }
 
 /// H3 row 2 (ANSWER-0405 condition 2): a home that is not the boundary's agent home is
