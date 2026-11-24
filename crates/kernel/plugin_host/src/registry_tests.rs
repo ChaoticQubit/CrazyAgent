@@ -1366,3 +1366,63 @@ fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
         "the old folder never comes back"
     );
 }
+
+/// A removal inside a caller's open transaction is refused before anything is written, so
+/// a rollback can never bring the rows back without the folder.
+#[test]
+fn a_removal_inside_an_open_transaction_is_refused_and_leaves_the_folder_and_rows() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    let before = plugin(&list(&case.db, &case.engine()).unwrap(), "acme")
+        .status
+        .clone();
+    case.db.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        code(remove(&case.db, &case.engine(), "acme")),
+        "app_plugins_unavailable"
+    );
+    assert!(
+        plugins_folder(&case)
+            .join("acme")
+            .join(MANIFEST_FILE)
+            .exists()
+    );
+    case.db.execute_batch("ROLLBACK").unwrap();
+    let after = plugin(&list(&case.db, &case.engine()).unwrap(), "acme")
+        .status
+        .clone();
+    assert_eq!(after, before);
+}
+
+/// An add inside a caller's open transaction is refused before its folder is written, so a
+/// rollback never leaves a folder with no trust record.
+#[test]
+fn an_add_inside_an_open_transaction_is_refused_and_writes_no_folder() {
+    let case = case();
+    case.db.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        code(add_text(&case, ACME, false, 1)),
+        "app_plugins_unavailable"
+    );
+    assert!(!plugins_folder(&case).join("acme").exists());
+    case.db.execute_batch("ROLLBACK").unwrap();
+}
+
+/// A key entered inside a caller's open transaction is refused before the key is saved, so
+/// a rollback never leaves a key no binding row names or a key it did not keep.
+#[test]
+fn a_key_set_inside_an_open_transaction_is_refused_and_saves_no_key_file() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    case.db.execute_batch("BEGIN").unwrap();
+    let refused = set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0002".to_vec(),
+    );
+    assert_eq!(code(refused), "app_plugins_unavailable");
+    assert!(plugin_keys(&case).is_empty());
+    case.db.execute_batch("ROLLBACK").unwrap();
+}
