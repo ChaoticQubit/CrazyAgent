@@ -146,6 +146,7 @@ fn update_calls() {
     let home = std::fs::canonicalize(home.path()).unwrap();
     let root = home.join("engine");
     std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     save_channel(&root, Channel::Dev).unwrap();
     let (archive, sha256, signature, key) = signed_archive(&home);
     let tar = release_tar(&home);
