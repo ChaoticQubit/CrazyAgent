@@ -1,5 +1,5 @@
-use super::ProjectSandbox;
 use kernel_sandbox::policy::AgentPolicy;
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::tool_cache::{CacheShape, PRIMING_ENV, UV, key, prepare};
 use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;

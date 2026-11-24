@@ -1,7 +1,7 @@
 use super::*;
-use crate::sandbox::ProjectSandbox;
 use crate::team::runtime::managed_agent::{claude, codex};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::profile::ProjectSandbox;
 
 const COPY_WAIT: Duration = Duration::from_secs(90);
 

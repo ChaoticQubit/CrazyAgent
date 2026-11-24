@@ -1118,7 +1118,7 @@ fn launch_base(
 #[cfg(windows)]
 fn home_containers(
     home: &Path,
-    sandbox: &crate::sandbox::ProjectSandbox,
+    sandbox: &kernel_sandbox::profile::ProjectSandbox,
 ) -> Result<(), LaunchError> {
     use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     use std::os::windows::fs::OpenOptionsExt;

@@ -20880,7 +20880,7 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
             .create(folder)
             .unwrap();
     }
-    crate::sandbox::ProjectSandbox::new(
+    kernel_sandbox::profile::ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &repository,
         &home,
@@ -25793,9 +25793,9 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_on_agent_profile_follows_the_project_network_choice() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::policy::AgentNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let make = |name: &str| {

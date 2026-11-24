@@ -584,8 +584,8 @@ fn sandboxed_stand_in(
     prefix: &str,
     script: &str,
 ) -> (tempfile::TempDir, PathBuf, PathBuf, Session) {
-    use crazyagent::sandbox::ProjectSandbox;
     use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::profile::ProjectSandbox;
 
     let root = private_dir(prefix);
     let project = private_folder(root.path(), "project");

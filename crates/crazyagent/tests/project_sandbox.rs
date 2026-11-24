@@ -1,11 +1,11 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, tool_cache};
+use crazyagent::sandbox::{InstalledSandbox, tool_cache};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
-use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::profile::env::agent_process_env;
+use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::tool_cache::CacheShape;
 use std::collections::{BTreeMap, BTreeSet};

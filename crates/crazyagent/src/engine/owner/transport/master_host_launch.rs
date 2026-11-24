@@ -11,8 +11,6 @@ use crate::master_session::MasterBackend;
 use crate::master_step_limit::StepLimit;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
-#[cfg(unix)]
-use crate::sandbox::ProjectSandbox;
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 #[cfg(unix)]
@@ -24,6 +22,8 @@ use kernel_sandbox::policy::AgentAccess;
 #[cfg(unix)]
 use kernel_sandbox::policy::AgentNetwork;
 use kernel_sandbox::policy::AgentPolicy;
+#[cfg(unix)]
+use kernel_sandbox::profile::ProjectSandbox;
 #[cfg(unix)]
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 #[cfg(unix)]

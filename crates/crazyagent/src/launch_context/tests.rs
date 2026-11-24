@@ -4354,8 +4354,8 @@ fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, Path
 #[cfg(target_os = "macos")]
 #[test]
 fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
     let directory = tempfile::tempdir().unwrap();
@@ -4415,8 +4415,8 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     const MARKER: &str = "ctx-execute-4471";
@@ -4496,8 +4496,8 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_cannot_change_its_launch_getconf() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains;
     const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
 printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
@@ -4709,9 +4709,9 @@ fn tools_on_profile(
     port: u16,
     installs: &[&Path],
 ) -> PathBuf {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::policy::AgentPolicy;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
     let policy = AgentPolicy::default();

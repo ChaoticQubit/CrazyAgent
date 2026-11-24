@@ -310,7 +310,7 @@ impl Team {
     /// installed for it outside every writable root, as the engine installs a lead's.
     /// Returns the sandbox and the profile.
     #[cfg(target_os = "macos")]
-    fn lead_rights(&self) -> (crazyagent::sandbox::ProjectSandbox, PathBuf) {
+    fn lead_rights(&self) -> (kernel_sandbox::profile::ProjectSandbox, PathBuf) {
         let (home, tmp, profiles) = (
             self.root.join("lead/home"),
             self.root.join("lead/tmp"),
@@ -319,7 +319,7 @@ impl Team {
         for folder in [&home, &tmp, &profiles] {
             fs::create_dir_all(folder).unwrap();
         }
-        let sandbox = crazyagent::sandbox::ProjectSandbox::new(
+        let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
             &crazyagent::sandbox::PROFILE_HOOKS,
             &self.project,
             &home,

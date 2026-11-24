@@ -4,11 +4,11 @@ use crazyagent::sandbox::linux::{
     NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS, loader_variable,
 };
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox};
+use crazyagent::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox};
 
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 
 use crazyagent::harnesses::launch::{
