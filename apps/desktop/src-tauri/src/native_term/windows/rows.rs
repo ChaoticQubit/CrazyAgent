@@ -1643,7 +1643,7 @@ enum Client {
 /// wrapped command, the reader copied into the project. Inputs: the view's window and the
 /// client. Output: the reader's lines.
 fn read_from_an_agent_container(hwnd: HWND, client: Client) -> Vec<String> {
-    use crazyagent::sandbox::InstalledSandbox;
+    use kernel_sandbox::profile::installed::InstalledSandbox;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     use kernel_sandbox::{net::SandboxNetwork, profile::ProjectSandbox};
     let temp = tempfile::tempdir().expect("a temporary folder");
