@@ -566,6 +566,21 @@ fn a_lost_bundled_tmux_says_it_is_missing_only_in_a_build_that_ships_one() {
     assert_eq!((found.entry, note), (brew, None));
 }
 
+/// A system tmux too old for agent terminals is never the tmux found, so setup and the
+/// terminal start give one answer: with a bundled copy that cannot run, or with no bundled
+/// copy at all, the only tmux left is the old one and none is found.
+#[test]
+fn a_system_tmux_too_old_for_the_terminal_is_never_the_one_found() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, _brew) = bundled_layout(&home);
+    program(&sidecar, "#!/bin/sh\nexit 1\n");
+    assert_eq!(crate::terminal::tmux::installed_at(&places), None);
+    assert_eq!(
+        crate::terminal::tmux::installed_at(&places.without_bundled()),
+        None
+    );
+}
+
 /// The two notes, word for word as the TUI and the desktop app show them.
 #[test]
 fn the_bundle_notes_name_the_system_tmux_and_the_reinstall() {
