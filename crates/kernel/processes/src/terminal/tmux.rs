@@ -290,7 +290,7 @@ fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> Result<(), Op
         time,
     );
     let running = match version {
-        Err(crate::run::InstallError(code)) if code == "setup_timeout" => Ok(()),
+        Err(crate::run::InstallError("setup_timeout")) => Ok(()),
         Err(_) | Ok((false, _)) => Err(None),
         Ok((true, output)) => match crate::run::version_from(&output) {
             Ok(found) => match supported(found.as_str()) {
