@@ -41,7 +41,7 @@ use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use kernel_sandbox::policy::AccessApply;
 use kernel_sandbox::policy::{AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing};
 use kernel_sandbox::profile::installed::InstalledSandbox;
