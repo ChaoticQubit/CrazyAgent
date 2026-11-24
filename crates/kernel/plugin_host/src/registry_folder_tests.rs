@@ -314,3 +314,122 @@ fn a_stuck_removal_folder_beside_a_re_added_plugin_is_deleted_at_start() {
         ACME
     );
 }
+
+/// Replaces acme with a new text inside a capture whose transaction then rolls back, and
+/// ends its folder steps as the engine does after a rollback. Inputs: the case, the key
+/// store the replace runs with, the new text, and what to do between the commit-less
+/// write and the rollback.
+fn replace_rolled_back(case: &mut Case, keys: &'static Keys, text: &str, between: impl FnOnce()) {
+    case.release();
+    let source = picked(case, "rolled-back", text);
+    let root = case.root.clone();
+    let engine = Engine {
+        root: &root,
+        keys,
+        handed_out: None,
+    };
+    case.db.execute_batch("BEGIN").unwrap();
+    let (added, mut captured) = crate::store_log::capture(&case.db, || {
+        add(&case.db, &engine, &source, &sha(text), true, 2)
+    });
+    added.unwrap();
+    between();
+    case.db.execute_batch("ROLLBACK").unwrap();
+    for step in std::mem::take(&mut captured.folders).into_iter().rev() {
+        step.roll_back();
+    }
+    case.hold();
+}
+
+/// An id source that gives one id, then fails, so the replace's write takes its id and
+/// any later call errs.
+fn one_ref() -> Result<String, &'static str> {
+    static GIVEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if GIVEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("app_plugin_folder_unavailable");
+    }
+    Ok("00000000000000000000000000000000000000000000000000000000000000d1".to_owned())
+}
+
+/// A key store whose id source gives one id, then fails.
+const ONE_REF: Keys = Keys {
+    new_ref: one_ref,
+    ..KEYS
+};
+
+/// A replace rolled back when the id source has nothing more to give puts the original
+/// folder back under the plugin name, leaving no retired or staged folder.
+#[test]
+fn a_replace_rolled_back_with_no_id_source_puts_the_original_back() {
+    let mut case = case();
+    trusted(&case, ACME);
+    let text = ACME.replace("Acme embeddings", "Acme embeddings two");
+
+    replace_rolled_back(&mut case, &ONE_REF, &text, || {});
+
+    let folder = plugins_folder(&case);
+    assert_eq!(names_in(&folder), ["acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        ACME
+    );
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").sha256, sha(ACME));
+}
+
+/// A replace rolled back whose new folder cannot leave the plugin name keeps the original
+/// through the next start: the start sweep, once the name it was blocked on is free, puts
+/// the original back under the name in place of the new folder.
+#[test]
+fn a_replace_rollback_whose_new_folder_cannot_move_keeps_the_original_through_the_sweep() {
+    let mut case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    let text = ACME.replace("Acme embeddings", "Acme embeddings two");
+
+    replace_rolled_back(&mut case, &STUCK, &text, || take_nameless(&folder));
+    std::fs::remove_dir_all(folder.join(format!(".old-{STUCK_ID}"))).unwrap();
+    sweep_staged(&case.engine());
+
+    assert_eq!(names_in(&folder), ["acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        ACME
+    );
+}
+
+/// Two folders owed back to one plugin name are left as they are by the start sweep, with
+/// the live folder under the name, since the sweep cannot tell which one is the original.
+#[test]
+fn two_folders_owed_to_one_name_are_left_by_the_sweep() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    let owed = [
+        ".back-acme.00000000000000000000000000000000000000000000000000000000000000e1",
+        ".back-acme.00000000000000000000000000000000000000000000000000000000000000e2",
+    ];
+    for name in owed {
+        std::fs::create_dir(folder.join(name)).unwrap();
+        std::fs::write(folder.join(name).join(MANIFEST_FILE), NEAR).unwrap();
+    }
+
+    sweep_staged(&case.engine());
+
+    let mut names = names_in(&folder);
+    names.sort();
+    assert_eq!(names, [owed[0], owed[1], "acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        ACME
+    );
+}
