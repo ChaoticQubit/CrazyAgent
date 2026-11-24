@@ -755,7 +755,16 @@ pub fn remove(
         Err(code) => return Ok(Removal::refused(code)),
     };
     let mut removed = Vec::new();
-    let kept = match retire_claimed(db, runtime, project, &claimed, now, &mut removed) {
+    let mut folder = None;
+    let kept = match retire_claimed(
+        db,
+        runtime,
+        project,
+        &claimed,
+        now,
+        &mut removed,
+        &mut folder,
+    ) {
         Ok(None) => None,
         Ok(Some(code)) => Some(code.to_owned()),
         Err(problem) => Some(problem.0),
@@ -770,10 +779,11 @@ pub fn remove(
     }
     assert!(removed.len() <= claimed.len());
     assert_eq!(kept.is_none(), removed.len() == claimed.len());
+    assert_eq!(folder.is_some(), kept.as_deref() == Some(FOLDER_TOO_DEEP));
     Ok(Removal {
         agents: removed,
         kept,
-        folder: None,
+        folder,
     })
 }
 
@@ -784,7 +794,7 @@ pub fn remove(
 /// waiting record, so a later removal deletes the leftover without asking git again
 /// (RVD-C-N1). Inputs: the store, the project, the claims, the time now and the list each
 /// removed agent joins. Output: None once all are removed, or the plain code of the first
-/// one kept.
+/// one kept, with `folder` set to the absolute tool cache folder too deep to remove.
 fn retire_claimed(
     db: &Connection,
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] runtime: &Path,
@@ -792,6 +802,7 @@ fn retire_claimed(
     claimed: &[Target],
     now: u64,
     removed: &mut Vec<i64>,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] folder: &mut Option<String>,
 ) -> Result<Option<&'static str>, EngineError> {
     for target in claimed {
         if !placed(db, project, &target.place)? {
@@ -845,15 +856,18 @@ fn retire_claimed(
         }
         #[cfg(target_os = "macos")]
         if let Some(project_root) = place.repository.to_str()
-            && kernel_sandbox::tool_cache::remove_agent(
+            && let Err(problem) = kernel_sandbox::tool_cache::remove_agent(
                 &crate::sandbox::TOOL_CACHE_HOOKS,
                 runtime,
                 project_root,
                 &target.id.to_string(),
             )
-            .is_err()
         {
-            return Ok(Some("cleanup_folder_failed"));
+            let Some(deep) = too_deep_folder(&problem) else {
+                return Ok(Some("cleanup_folder_failed"));
+            };
+            *folder = Some(deep);
+            return Ok(Some(FOLDER_TOO_DEEP));
         }
         db.execute(
             "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
@@ -1034,8 +1048,8 @@ pub(crate) const HOME_WALK_NAMES: usize = HOME_NAMES_CHUNK * HOME_WALK_CHUNKS_MA
 /// ([`open_home_folder`], [`unlink_home_entry`]), so a reset never stops on one (code r1
 /// F2, r2 F3), and no folder's size stops it (code r1 F1 ds137-reset-walk). Inputs: the
 /// parent handle and the name, one plain name. Output: Ok once nothing has the name,
-/// `cleanup_folder_failed`, also past [`HOME_DEPTH_MAX`] folders deep or for a folder that
-/// keeps gaining entries while it is emptied ([`empty_home_folder`]), or
+/// [`FOLDER_TOO_DEEP`] past [`HOME_DEPTH_MAX`] folders deep, `cleanup_folder_failed`, also
+/// for a folder that keeps gaining entries while it is emptied ([`empty_home_folder`]), or
 /// `cleanup_walk_too_long` once the walk's listings return more than
 /// [`HOME_WALK_CHUNKS_MAX`] listings' worth of names (RESET-WALK-F1).
 #[cfg(unix)]
@@ -1075,7 +1089,7 @@ fn remove_home_below(
     use rustix::fs::{AtFlags, FileType};
     assert!(plain_name(name));
     if depth > HOME_DEPTH_MAX {
-        return Err(folder_failed());
+        return Err(EngineError(FOLDER_TOO_DEEP.into()));
     }
     let found = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => return Ok(()),
@@ -1296,6 +1310,25 @@ fn plain_name(name: &std::ffi::CStr) -> bool {
 #[cfg(unix)]
 fn folder_failed() -> EngineError {
     EngineError("cleanup_folder_failed".into())
+}
+
+/// The code a removal of an agent home entry reports for a folder more than
+/// [`HOME_DEPTH_MAX`] folders below it, which only Clean up of a tool cache passes on with
+/// that folder; the callers that reset an agent's home give their own code ([`home_code`]).
+pub(crate) const FOLDER_TOO_DEEP: &str = "cleanup_folder_too_deep";
+
+/// The absolute tool cache folder a removal of an agent's caches refused as
+/// [`FOLDER_TOO_DEEP`]. Input: the removal's error. Output: the folder, or None for any other
+/// refusal or a folder whose path is not text.
+#[cfg(target_os = "macos")]
+fn too_deep_folder(problem: &std::io::Error) -> Option<String> {
+    let refused = problem
+        .get_ref()?
+        .downcast_ref::<kernel_sandbox::tool_cache::EntryRefused>()?;
+    if refused.code != FOLDER_TOO_DEEP || !refused.folder.is_absolute() {
+        return None;
+    }
+    refused.folder.to_str().map(str::to_owned)
 }
 
 /// The code a removal of an agent home entry reports once its walk's listings returned more

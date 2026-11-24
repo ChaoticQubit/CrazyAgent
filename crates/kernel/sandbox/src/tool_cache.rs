@@ -108,6 +108,23 @@ pub fn project_folder(runtime: &Path, project: &str) -> PathBuf {
     runtime.join(FOLDER).join(digest(project, 32))
 }
 
+/// An agent's tool cache folder the hooks' removal refused: the hooks' code and the folder
+/// that stays, `<project folder>/<name>`, so the engine can name it to the owner. It shows
+/// as the code alone, as the io error [`remove_agent`] fails with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryRefused {
+    pub code: &'static str,
+    pub folder: PathBuf,
+}
+
+impl std::fmt::Display for EntryRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl std::error::Error for EntryRefused {}
+
 /// The first `length` hex digits of the SHA-256 of `text`, a plain folder name for an id of
 /// any form. Inputs: the text and the length. Output: the digits.
 fn digest(text: &str, length: usize) -> String {
@@ -140,7 +157,8 @@ fn plain_name(name: &str) -> bool {
 /// accepted only as the engine's own, as [`prepare`] opens them, so a link or another
 /// user's folder above the caches fails with its plain code and removes nothing. Inputs:
 /// the hooks, the engine runtime, the project as [`project_folder`] names it and the
-/// agent's id. Output: Ok once none is left, also when the folders were never made.
+/// agent's id. Output: Ok once none is left, also when the folders were never made; a folder
+/// the hooks' removal refused fails with an [`EntryRefused`] naming it.
 pub fn remove_agent(
     hooks: &ToolCacheHooks,
     runtime: &Path,
@@ -176,7 +194,12 @@ pub fn remove_agent(
                             name.as_str(),
                             "cleanup_folder_failed",
                         )
-                        .map_err(std::io::Error::other)?
+                        .map_err(|code| {
+                            std::io::Error::other(EntryRefused {
+                                code,
+                                folder: project_folder(runtime, project).join(&name),
+                            })
+                        })?
                     }
                     Ok(_) => rustix::fs::unlinkat(&owned, name.as_str(), AtFlags::empty())?,
                 }

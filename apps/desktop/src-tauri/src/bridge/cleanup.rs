@@ -19,15 +19,16 @@ pub(super) fn cleanup_error(error: EngineError) -> BridgeError {
     )
 }
 
-/// The removal the window gets: the agents removed and the listed code of the one kept, as
-/// [`cleanup_error`] passes codes. Input: the engine's removal. Output: the window's.
+/// The removal the window gets: the agents removed, the listed code of the one kept, as
+/// [`cleanup_error`] passes codes, and the folder too deep to remove. Input: the engine's
+/// removal. Output: the window's.
 fn window_removal(removal: Removal) -> Removal {
     Removal {
         kept: removal
             .kept
             .map(|code| cleanup_error(EngineError(code)).code.to_owned()),
         agents: removal.agents,
-        folder: None,
+        folder: removal.folder,
     }
 }
 

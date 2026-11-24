@@ -3714,7 +3714,7 @@ fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_noth
             && *code != "cleanup_request_invalid"
         {
             assert_ne!(
-                super::cleanup::words(code),
+                super::cleanup::kept_words(code, Some("/folder")),
                 "The engine could not do this.",
                 "{code}"
             );

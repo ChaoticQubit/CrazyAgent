@@ -26,6 +26,7 @@ pub const CLEANUP_CODES: &[&str] = &[
     "cleanup_changes_restorable",
     "cleanup_commits_unlanded",
     "cleanup_folder_failed",
+    "cleanup_folder_too_deep",
     "cleanup_outcome_unknown",
     "cleanup_refs_unlanded",
     "cleanup_reply_bounds",
@@ -79,6 +80,8 @@ enum Reply {
     Removed {
         agents: Vec<i64>,
         kept: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
     },
     Removal {
         preview: RemovalPreview,
@@ -389,34 +392,62 @@ async fn remove(
     work.await.map_err(|_| failure("cleanup_unavailable"))?
 }
 
-/// The reply a removal answers with: a refusal when it removed none, else what it removed
-/// and the code of the first one kept. Input: the removal. Output: the reply.
+/// The longest folder a removal reply may name, in bytes.
+const FOLDER_TEXT_MAX: usize = 4096;
+
+/// The reply a removal answers with: a refusal when it removed none and names no folder,
+/// else what it removed, the code of the first one kept and the folder too deep to remove.
+/// Input: the removal. Output: the reply.
 fn reply_of(removal: Removal) -> Reply {
     match removal {
         Removal {
             agents,
             kept: Some(code),
-            ..
+            folder: None,
         } if agents.is_empty() => Reply::Rejected { code },
-        Removal { agents, kept, .. } => Reply::Removed { agents, kept },
+        Removal {
+            agents,
+            kept,
+            folder,
+        } => Reply::Removed {
+            agents,
+            kept,
+            folder,
+        },
     }
 }
 
-/// The removal a client reads from a reply: at least one agent removed and no more than a
-/// request may name. Input: the reply. Output: the removal, or None for any other reply.
+/// The removal a client reads from a reply: no more than a request may name, at least one
+/// agent removed unless it names a folder, and a folder exactly when it kept one as too deep
+/// to remove, absolute, bounded and free of control characters. Input: the reply. Output:
+/// the removal, or None for any other reply.
 fn removal_of(reply: Reply) -> Option<Removal> {
-    match reply {
-        Reply::Removed { agents, kept }
-            if !agents.is_empty() && agents.len() <= RECLAIMABLE_MAX =>
-        {
-            Some(Removal {
-                agents,
-                kept,
-                folder: None,
-            })
-        }
-        _ => None,
+    let Reply::Removed {
+        agents,
+        kept,
+        folder,
+    } = reply
+    else {
+        return None;
+    };
+    let deep = kept.as_deref() == Some(crate::team::cleanup::FOLDER_TOO_DEEP);
+    let named = folder.as_deref().is_some_and(|folder| {
+        folder.starts_with('/')
+            && folder.len() <= FOLDER_TEXT_MAX
+            && !folder.contains(char::is_control)
+    });
+    if agents.len() > RECLAIMABLE_MAX
+        || deep != folder.is_some()
+        || deep != named
+        || (agents.is_empty() && !named)
+    {
+        return None;
     }
+    Some(Removal {
+        agents,
+        kept,
+        folder,
+    })
 }
 
 #[cfg(test)]
@@ -449,6 +480,25 @@ mod tests {
         assert!(
             matches!(reply_of(plain), Reply::Rejected { code } if code == "cleanup_worktree_dirty")
         );
+        for (kept, folder) in [
+            ("cleanup_folder_too_deep", None),
+            ("cleanup_folder_too_deep", Some("runtime/tool-cache")),
+            ("cleanup_folder_too_deep", Some("/runtime/tool\ncache")),
+            ("cleanup_worktree_dirty", Some("/runtime/tool-cache")),
+        ] {
+            let reply = Reply::Removed {
+                agents: vec![2],
+                kept: Some(kept.into()),
+                folder: folder.map(str::to_owned),
+            };
+            assert_eq!(removal_of(reply), None, "{kept} {folder:?}");
+        }
+        let reply = Reply::Removed {
+            agents: Vec::new(),
+            kept: Some("cleanup_folder_too_deep".into()),
+            folder: Some(format!("/{}", "a".repeat(FOLDER_TEXT_MAX))),
+        };
+        assert_eq!(removal_of(reply), None);
     }
 
     /// The listed codes cover every plain code the cleanup and retire steps can answer
