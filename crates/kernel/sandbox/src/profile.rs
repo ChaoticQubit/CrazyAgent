@@ -965,3 +965,5 @@ impl Checkout {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+#[cfg(all(test, target_os = "linux"))]
+mod interpreter_tests;

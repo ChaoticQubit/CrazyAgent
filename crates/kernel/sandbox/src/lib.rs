@@ -80,7 +80,7 @@ mod low_ports_tests;
 pub mod test_agent;
 /// The stand-in profile hooks the kernel's own rows build sandboxes on, in place of the
 /// engine's real ones.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, unix))]
 pub(crate) mod test_hooks;
 #[cfg(test)]
 mod tests;
