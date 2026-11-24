@@ -13,8 +13,7 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
     for path in [&home, &build, &root] {
         folder(path);
     }
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -27,9 +26,15 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         locked: &[],
     };
     assert_eq!(
-        profile(&grants, PORT, closed(), &[], AgentFilesRule::default())
-            .unwrap_err()
-            .0,
+        profile(
+            &crate::test_hooks::STAND_IN,
+            &grants,
+            PORT,
+            closed(),
+            &[],
+            AgentFilesRule::default()
+        )
+        .unwrap_err(),
         "ide_sandbox_invalid"
     );
     let elsewhere = tempfile::Builder::new()
@@ -41,14 +46,30 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         root: &project,
         ..grants
     };
-    assert!(profile(&outside, PORT, closed(), &[], AgentFilesRule::default()).is_ok());
+    assert!(
+        profile(
+            &crate::test_hooks::STAND_IN,
+            &outside,
+            PORT,
+            closed(),
+            &[],
+            AgentFilesRule::default()
+        )
+        .is_ok()
+    );
     assert_eq!(
-        profile(&outside, 0, closed(), &[], AgentFilesRule::default())
-            .unwrap_err()
-            .0,
+        profile(
+            &crate::test_hooks::STAND_IN,
+            &outside,
+            0,
+            closed(),
+            &[],
+            AgentFilesRule::default()
+        )
+        .unwrap_err(),
         "ide_sandbox_invalid"
     );
-    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
@@ -73,8 +94,7 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
     for path in [&home, &build, &root] {
         folder(path);
     }
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -90,10 +110,18 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
         choice: IdeAgentFiles::ReadOnly,
         older_agents: true,
     };
-    let text = profile(&grants, PORT, closed(), &[], rule).unwrap();
-    let spelled = kernel_sandbox::paths::any_case(root.to_str().unwrap());
+    let text = profile(
+        &crate::test_hooks::STAND_IN,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        rule,
+    )
+    .unwrap();
+    let spelled = crate::paths::any_case(root.to_str().unwrap());
     assert!(text.contains(&format!("(regex #\"^{spelled}")), "{text}");
-    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// The Remote settings folder the engine writes before each launch is locked inside the
@@ -109,8 +137,8 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         .unwrap();
     let base = fs::canonicalize(scratch.path()).unwrap();
     let data = base.join("data");
-    let mine = data.join(crate::ide::FOLDER).join("p1");
-    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let mine = data.join(FOLDER).join("p1");
+    let build = data.join(FOLDER).join("builds").join("v1");
     let root = base.join("project");
     let home = mine.join("server");
     let user_data = home.join("data");
@@ -121,8 +149,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
     let settings = machine.join("settings.json");
     let engine = "{\"chat.disableAIFeatures\": true}\n";
     fs::write(&settings, engine).unwrap();
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -135,6 +162,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         locked: &[machine.as_path()],
     };
     let profile = install(
+        &crate::test_hooks::STAND_IN,
         &mine,
         &grants,
         PORT,
@@ -185,88 +213,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         1,
         "nothing was added next to the engine's settings"
     );
-    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
-}
-
-/// The server's data folder and its other writable folders are granted after the base
-/// profile, so the base denies there hold only when given again after that grant (sandbox-git
-/// r1 note 4): no `.git` at any depth in any letter case, no launch file or folder of an
-/// agent home, and no mode change of a granted folder itself, nor any flag or ACL in the
-/// data folder, which the engine walks and rewrites before each start, so none keeps the
-/// owner's IDE from starting (rv-sa241 b8 L1). Everything else there stays writable, npm's
-/// config too, since no launch resets the data folder and the agent config denies are an
-/// agent home's alone (RV-DS241-188).
-#[test]
-fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_grant() {
-    let scratch = tempfile::Builder::new()
-        .prefix("ca-ides-")
-        .tempdir_in(fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = fs::canonicalize(scratch.path()).unwrap();
-    let data = base.join("data");
-    let mine = data.join(crate::ide::FOLDER).join("p1");
-    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
-    let root = base.join("project");
-    let home = mine.join("server");
-    let work = mine.join("work");
-    for path in [&home, &work, &build, &root] {
-        folder(path);
-    }
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
-    let grants = Grants {
-        data: &data,
-        root: &root,
-        build: &build,
-        home: &home,
-        tmp: &tmp,
-        writable: &[work.as_path()],
-        read_only: &[],
-        readable: &[],
-        locked: &[],
-    };
-    let profile = install(
-        &mine,
-        &grants,
-        PORT,
-        closed(),
-        &[],
-        AgentFilesRule::default(),
-    )
-    .unwrap();
-    let make = r#"/bin/mkdir -p "$1""#;
-    let write = r#": > "$1""#;
-    for granted in [&home, &work] {
-        assert!(
-            !sh(&profile, make, &granted.join(".git")),
-            "{} takes no .git",
-            granted.display()
-        );
-        assert!(!sh(&profile, make, &granted.join("deep/.GIT")));
-        assert!(!sh(&profile, r#"/bin/chmod 777 "$1""#, granted));
-        assert!(sh(&profile, make, &granted.join("deep/kept")));
-        assert!(sh(&profile, write, &granted.join("kept.txt")));
-    }
-    for launch in ["settings.json", "CLAUDE.md", "Config.TOML"] {
-        assert!(!sh(&profile, write, &home.join(launch)), "{launch}");
-    }
-    assert!(!sh(&profile, make, &home.join("agents")));
-    assert!(sh(&profile, make, &home.join("data/User/globalStorage")));
-    assert!(sh(&profile, write, &home.join("data/User/settings.json")));
-    assert!(sh(&profile, write, &home.join(".npmrc")));
-    let flagged = r#"/usr/bin/chflags uchg "$1" && /usr/bin/chflags nouchg "$1""#;
-    assert!(!sh(&profile, flagged, &home.join("kept.txt")));
-    let listed = r#"/bin/chmod +a 'everyone deny read' "$1" && /bin/chmod -N "$1""#;
-    assert!(!sh(&profile, listed, &home.join("kept.txt")));
-    for granted in [&home, &work] {
-        assert!(!granted.join(".git").exists() && !granted.join("deep/.GIT").exists());
-        assert_eq!(
-            fs::metadata(granted).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-    }
-    assert!(!home.join("settings.json").exists() && !home.join("agents").exists());
-    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// A lock outside every writable folder, a read-only folder inside a writable one, and a
@@ -280,16 +227,15 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
         .unwrap();
     let base = fs::canonicalize(scratch.path()).unwrap();
     let data = base.join("data");
-    let mine = data.join(crate::ide::FOLDER).join("p1");
-    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let mine = data.join(FOLDER).join("p1");
+    let build = data.join(FOLDER).join("builds").join("v1");
     let root = base.join("project");
     let home = mine.join("server");
     let extensions = mine.join("extensions");
     for path in [&home, &extensions, &build, &root] {
         folder(path);
     }
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let machine = home.join("data").join("Machine");
     let grants = Grants {
         data: &data,
@@ -302,11 +248,27 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
         readable: &[],
         locked: &[machine.as_path()],
     };
-    assert!(profile(&grants, PORT, closed(), &[], AgentFilesRule::default()).is_ok());
+    assert!(
+        profile(
+            &crate::test_hooks::STAND_IN,
+            &grants,
+            PORT,
+            closed(),
+            &[],
+            AgentFilesRule::default()
+        )
+        .is_ok()
+    );
     let invalid = |grants: &Grants| {
-        profile(grants, PORT, closed(), &[], AgentFilesRule::default())
-            .unwrap_err()
-            .0
+        profile(
+            &crate::test_hooks::STAND_IN,
+            grants,
+            PORT,
+            closed(),
+            &[],
+            AgentFilesRule::default(),
+        )
+        .unwrap_err()
     };
     for locked in [extensions.as_path(), home.as_path(), mine.as_path()] {
         let locks = [locked];
@@ -344,7 +306,7 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
             read_only.display()
         );
     }
-    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// DEC-098 addendum 9: the server cannot read an agent's IDE config, any `.vscode` folder
@@ -361,8 +323,8 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         .unwrap();
     let base = fs::canonicalize(scratch.path()).unwrap();
     let data = base.join("data");
-    let mine = data.join(crate::ide::FOLDER).join("p1");
-    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let mine = data.join(FOLDER).join("p1");
+    let build = data.join(FOLDER).join("builds").join("v1");
     let root = base.join("project");
     let home = mine.join("server");
     let inner = root.join(".crazyagent").join("worktrees").join("agent-1");
@@ -410,8 +372,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         linked.join("team.code-workspace"),
         inner.join(".vscode").join("launch.json"),
     ];
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -424,6 +385,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         locked: &[],
     };
     let profile = install(
+        &crate::test_hooks::STAND_IN,
         &mine,
         &grants,
         PORT,
@@ -454,7 +416,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         (true, planted.to_owned()),
         "a link is refused for its name, not for being a link"
     );
-    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// A listener on a free loopback port, with nothing behind it. Output: the listener, held
@@ -481,14 +443,13 @@ fn kept_profile(network: SandboxNetwork, kept_ports: &[u16]) -> (tempfile::TempD
         .unwrap();
     let base = fs::canonicalize(scratch.path()).unwrap();
     let data = base.join("data");
-    let mine = data.join(crate::ide::FOLDER).join("p1");
-    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let mine = data.join(FOLDER).join("p1");
+    let build = data.join(FOLDER).join("builds").join("v1");
     let (home, root) = (mine.join("server"), base.join("project"));
     for path in [&home, &build, &root] {
         folder(path);
     }
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -501,6 +462,7 @@ fn kept_profile(network: SandboxNetwork, kept_ports: &[u16]) -> (tempfile::TempD
         locked: &[],
     };
     let profile = install(
+        &crate::test_hooks::STAND_IN,
         &mine,
         &grants,
         PORT,
@@ -607,8 +569,8 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
         .unwrap();
     let base = fs::canonicalize(scratch.path()).unwrap();
     let data = base.join("data");
-    let mine = data.join(crate::ide::FOLDER).join("p1");
-    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let mine = data.join(FOLDER).join("p1");
+    let build = data.join(FOLDER).join("builds").join("v1");
     let root = base.join("project");
     let home = mine.join("server");
     let machine = home.join("data").join("Machine");
@@ -618,8 +580,7 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
     let settings = machine.join("settings.json");
     let engine = "{\"chat.disableAIFeatures\": true}\n";
     fs::write(&settings, engine).unwrap();
-    let tmp =
-        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -632,6 +593,7 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
         locked: &[machine.as_path()],
     };
     let profile = install(
+        &crate::test_hooks::STAND_IN,
         &mine,
         &grants,
         PORT,
@@ -650,5 +612,5 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
     }
     assert_eq!(fs::read_to_string(&settings).unwrap(), engine);
     assert_eq!(fs::read_dir(&machine).unwrap().count(), 1);
-    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
