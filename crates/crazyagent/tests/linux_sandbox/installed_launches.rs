@@ -32,6 +32,9 @@ const HANDED_NAME: &str = "OPENAI_API_KEY";
 /// so it stays alive while another agent looks for it.
 const READS_ITSELF: &str = "tr '\\0' '\\n' < /proc/$$/environ | grep -c '^OPENAI_API_KEY=crazyagent-relay-'; cat > /dev/null";
 
+/// Writes the holder's variable names, never values, to a file in its folder.
+const NAMES_DUMP: &str = "tr '\\0' '\\n' < /proc/$$/environ | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | cut -d= -f1 | sort | tr '\\n' ',' > holder-names.txt; ";
+
 /// An agent that reads the environment of every process its `/proc` shows and counts how
 /// many it could read and how many hold a hand-over line.
 const READS_OTHERS: &str = "seen=0; held=0
@@ -114,7 +117,7 @@ fn assert_environ_kept_apart(case: &Case, sandbox: &LinuxSandbox) {
     let handed = Handed::new(&names, &token).expect("Linux admits a launch's own relay token");
     let mut holder = Command::new("/bin/sh");
     holder
-        .args(["-c", READS_ITSELF])
+        .args(["-c", &format!("{NAMES_DUMP}{READS_ITSELF}")])
         .env(HANDED_NAME, &token)
         .current_dir(case.project.join("worktrees"));
     let mut holder = kernel_processes::spawn_gate::spawn(
@@ -138,6 +141,26 @@ fn assert_environ_kept_apart(case: &Case, sandbox: &LinuxSandbox) {
     let found = agent_stdout(Some(sandbox as &dyn Sandbox), reader);
     drop(holder.stdin.take());
     assert!(holder.wait().unwrap().success());
+    if let Some(diag) = std::env::var_os("HOLDER_READ_DIAG") {
+        let names =
+            std::fs::read_to_string(case.project.join("worktrees").join("holder-names.txt"))
+                .unwrap_or_else(|error| format!("unread: {error}"));
+        let row = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_owned();
+        let text = format!(
+            "{row} holder={} reader={} holder_names={names}\n",
+            line.trim(),
+            found.trim()
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(diag)
+            .unwrap();
+        std::io::Write::write_all(&mut file, text.as_bytes()).unwrap();
+    }
     let (seen, held) = found
         .trim()
         .split_once(' ')
