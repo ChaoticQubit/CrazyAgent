@@ -1,4 +1,4 @@
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
 use std::path::Path;
 
 /// The macOS admin group, whose members can already act as root.
@@ -73,11 +73,11 @@ fn local_accounts() -> Option<String> {
 }
 
 /// The largest user lookup configuration read to find where accounts come from.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
 const LOOKUP_CONFIG_BYTES_MAX: u64 = 64 * 1024;
 
 /// The most entries read from SSSD's drop-in folder before it counts as configured.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
 const SSSD_DROP_INS_MAX: usize = 4096;
 
 /// Whether the local account file holds every account the system's user lookup can give a
@@ -86,7 +86,7 @@ const SSSD_DROP_INS_MAX: usize = 4096;
 /// items and comments are skipped; a missing or unreadable file, a larger one or no
 /// `passwd` line gives no. Input: the folder holding `nsswitch.conf` and `sssd`, `/etc`
 /// outside rows. Output: the answer.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
 pub(super) fn accounts_complete(etc: &Path) -> bool {
     use std::io::Read as _;
     let mut text = String::new();
@@ -128,7 +128,7 @@ pub(super) fn accounts_complete(etc: &Path) -> bool {
 /// the `conf.d` drop-in folder is missing or holds no `.conf` entry. Any other answer, such
 /// as a folder this user cannot look into, counts as configured. Input: the SSSD folder.
 /// Output: the answer.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
 fn sssd_unconfigured(sssd: &Path) -> bool {
     let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
     match std::fs::metadata(sssd.join("sssd.conf")) {
