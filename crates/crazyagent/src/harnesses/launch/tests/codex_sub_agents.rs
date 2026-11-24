@@ -140,3 +140,44 @@ fn a_native_codex_lead_keeps_its_codex_sub_agents_running_and_finishes_its_turn(
             .any(|event| matches!(event, LaunchEvent::TurnFinished { success: true }))
     );
 }
+
+/// A Codex error the app server says it will retry is not a turn error, so a rate limit it
+/// names is not counted and the turn that then completes stays a success; the same error
+/// with no retry left is a rate-limited turn error.
+#[test]
+fn a_codex_error_that_will_be_retried_is_no_turn_error() {
+    let limit = "429 Too Many Requests: You have hit your usage limit.";
+    let error = |will_retry: bool| {
+        line(json!({"method":"error","params":{
+            "threadId":"own-thread", "turnId":"own-turn",
+            "error":{"message":limit}, "willRetry":will_retry
+        }}))
+    };
+    let mut driver = codex_driver_in_a_turn();
+    let (events, _) = driver.receive(&error(true)).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::TurnError { .. })),
+        "{events:?}"
+    );
+    let (events, _) = driver
+        .receive(&line(json!({"method":"turn/completed","params":{
+            "threadId":"own-thread",
+            "turn":{"id":"own-turn","items":[],"status":"completed"}
+        }})))
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::TurnFinished { success: true }))
+    );
+    let mut driver = codex_driver_in_a_turn();
+    let (events, _) = driver.receive(&error(false)).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::TurnError { rate_limited: true })),
+        "{events:?}"
+    );
+}
