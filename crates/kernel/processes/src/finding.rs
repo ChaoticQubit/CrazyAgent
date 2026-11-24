@@ -701,15 +701,24 @@ impl BundleNote {
 /// Finds the tmux the engine uses, the one answer for setup, the terminal and the sandbox
 /// grant: the bundled copy when it passes the entry checks and `runs`, else the usual
 /// order with the reason the bundled one was not used; with no other tmux, the usual
-/// search's own miss. Inputs: the places, whether this build ships tmux and the check that
-/// the bundled copy runs. Output: the tmux and its note, or why none can run.
+/// search's own miss. A tmux of the usual order that fails `runs` gives way to a bundled
+/// copy that runs; with none, one too old for agent terminals is a [`Reason::WrongVersion`]
+/// miss naming its version, and one that cannot run is still returned. Inputs: the places,
+/// whether this build ships tmux and the check that a tmux runs: none when it cannot run,
+/// its version when it is too old. Output: the tmux and its note, or why none can run.
 pub fn resolve_tmux(
     places: &Places,
     ships_bundle: bool,
-    runs: impl Fn(&Resolved) -> bool,
+    runs: impl Fn(&Resolved) -> Result<(), Option<String>>,
 ) -> Result<(Resolved, Option<BundleNote>), Missing> {
+    let settled = |found: Resolved, note: Option<BundleNote>, failed: Option<String>| match failed {
+        Some(version) => Err(too_old_tmux(&found, version)),
+        None => Ok((found, note)),
+    };
     let Some(bundled) = places.bundled("tmux") else {
-        return resolve("tmux", places).map(|found| (found, None));
+        let found = resolve("tmux", places)?;
+        let failed = runs(&found).err().flatten();
+        return settled(found, None, failed);
     };
     let note = if std::fs::symlink_metadata(&bundled).is_ok() {
         Some(BundleNote::CannotRun)
@@ -719,12 +728,44 @@ pub fn resolve_tmux(
         None
     };
     match resolve("tmux", places) {
-        Ok(found) if found.entry == bundled && runs(&found) => Ok((found, None)),
-        Ok(found) if found.entry != bundled => Ok((found, note)),
-        _ => resolve("tmux", &places.without_bundled()).map(|found| {
+        Ok(found) if found.entry == bundled && runs(&found).is_ok() => Ok((found, None)),
+        Ok(found) if found.entry != bundled => match runs(&found) {
+            Ok(()) => Ok((found, note)),
+            Err(failed) => match resolve_entry(&bundled, places) {
+                Ok(copy) if runs(&copy).is_ok() => Ok((copy, None)),
+                _ => settled(found, note, failed),
+            },
+        },
+        _ => {
+            let found = resolve("tmux", &places.without_bundled())?;
             assert_ne!(found.entry, bundled);
-            (found, note)
-        }),
+            let failed = runs(&found).err().flatten();
+            settled(found, note, failed)
+        }
+    }
+}
+
+/// The miss for a tmux too old for agent terminals: its version, the oldest one they
+/// support where the terminal host builds, and its folder. Inputs: the tmux and its
+/// version. Output: the miss.
+fn too_old_tmux(found: &Resolved, version: String) -> Missing {
+    assert!(!version.is_empty());
+    #[cfg(unix)]
+    let needs = Some(crate::terminal::tmux::version_needed());
+    #[cfg(not(unix))]
+    let needs = None;
+    Missing {
+        tool: "tmux".to_owned(),
+        reason: Reason::WrongVersion,
+        needs,
+        found: Some(version),
+        looked: found
+            .entry
+            .parent()
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect(),
+        refused: None,
     }
 }
 

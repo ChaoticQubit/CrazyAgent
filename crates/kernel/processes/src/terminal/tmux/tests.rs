@@ -3114,13 +3114,13 @@ fn a_tmux_whose_version_read_runs_out_of_time_is_not_read_again_while_the_file_i
     let tmux = counted_tmux(folder.path(), &ran, "exec /bin/sleep 30");
     let bound = std::time::Duration::from_secs(1);
     assert!(
-        runs_within(&tmux, bound),
+        runs_within(&tmux, bound).is_ok(),
         "a read that runs out of time counts as running"
     );
     let first = started(&ran);
     assert!(first <= 1);
     let again = std::time::Instant::now();
-    assert!(runs_within(&tmux, bound));
+    assert!(runs_within(&tmux, bound).is_ok());
     assert_eq!(
         started(&ran),
         first,
@@ -3134,9 +3134,9 @@ fn a_tmux_whose_version_read_fails_is_asked_again_so_a_fix_outside_the_file_coun
     let folder = tempfile::tempdir().unwrap();
     let ran = folder.path().join("ran.txt");
     let tmux = counted_tmux(folder.path(), &ran, "exit 1");
-    assert!(!runs(&tmux));
+    assert!(runs(&tmux).is_err());
     assert_eq!(started(&ran), 1);
-    assert!(!runs(&tmux));
+    assert!(runs(&tmux).is_err());
     assert_eq!(started(&ran), 2, "a failed read is not kept");
 }
 
