@@ -579,7 +579,7 @@ done
             Arc::new(Tmux::open(
                 Some(self.tmux.clone()),
                 &self.base.join(FOLDER),
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             ))
         }
@@ -1380,7 +1380,7 @@ mod live {
         let host: Arc<dyn Host> = Arc::new(Tmux::open(
             Some(tmux),
             &agent.base.join(FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ));
         let counter = agent.working_dir.join("ran.txt");

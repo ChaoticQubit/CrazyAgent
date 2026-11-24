@@ -97,7 +97,7 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crazyagent::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crazyagent::terminal::tmux::tmux_hooks(),
             );
             launcher
@@ -304,7 +304,7 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crazyagent::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crazyagent::terminal::tmux::tmux_hooks(),
             );
             for agent in &agents {

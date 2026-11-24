@@ -91,7 +91,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &folder,
-        crazyagent::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crazyagent::terminal::tmux::tmux_hooks(),
     ));
     let home = root_path.join("home");
@@ -186,7 +186,7 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &folder,
-        crazyagent::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crazyagent::terminal::tmux::tmux_hooks(),
     ));
     let home = root_path.join("home");
@@ -287,7 +287,7 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
         Arc::new(Tmux::open(
             Some(tmux),
             &folder,
-            crazyagent::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crazyagent::terminal::tmux::tmux_hooks(),
         ))
     };
@@ -621,7 +621,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &folder,
-        crazyagent::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crazyagent::terminal::tmux::tmux_hooks(),
     ));
     let home = root_path.join("home");

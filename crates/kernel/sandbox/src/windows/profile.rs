@@ -15,9 +15,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The owner's own git for one project inside an AppContainer of its own, with no capability,
-/// so a `.git` that points git elsewhere reaches nothing (V244-WIN-GIT-UNC-SIBLINGS).
-
 /// The most processes one agent may run at once inside its job.
 pub const ACTIVE_PROCESSES: u32 = 512;
 /// The lock file git writes beside `.git\config` while it changes the config. The Windows

@@ -2381,7 +2381,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
             Some(tmux),
             &root.join(crate::terminal::FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ));
     let pane = crate::harnesses::terminal_session::TerminalSession::start(
@@ -2490,7 +2490,7 @@ impl LeftPane {
             std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
                 Some(tmux.clone()),
                 &root.join(crate::terminal::FOLDER),
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             ));
         let agent = kernel_processes::terminal::AgentId::team(team).unwrap();

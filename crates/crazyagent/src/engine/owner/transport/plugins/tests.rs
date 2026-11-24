@@ -631,7 +631,8 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
             kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap();
-        let mut profile = kernel_sandbox::windows::profile::boundary_profile(&sandbox, &grants).unwrap();
+        let mut profile =
+            kernel_sandbox::windows::profile::boundary_profile(&sandbox, &grants).unwrap();
         if id == FORGED {
             profile.container = foreign.clone();
         } else {

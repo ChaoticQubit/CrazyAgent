@@ -141,13 +141,19 @@ pub struct ProfileHooks {
     /// installed profile, the absolute program, the base and the harness variables (None
     /// removes one). Output: the command, or the engine's refusal.
     #[cfg(target_os = "windows")]
-    pub windows_agent_command: fn(
-        &Path,
-        &Path,
-        &[(&str, &OsStr)],
-        Vec<(&OsStr, Option<&OsStr>)>,
-    ) -> Result<Command, SandboxError>,
+    pub windows_agent_command: WindowsAgentCommand,
 }
+
+/// How the engine builds a Windows agent's command: from the installed profile, the absolute
+/// program, the base and the harness variables (None removes one), to the command or the
+/// engine's refusal.
+#[cfg(target_os = "windows")]
+pub type WindowsAgentCommand = fn(
+    &Path,
+    &Path,
+    &[(&str, &OsStr)],
+    Vec<(&OsStr, Option<&OsStr>)>,
+) -> Result<Command, SandboxError>;
 
 /// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
 /// (the nested backend), the call supervisor running, and its network limits held, so none

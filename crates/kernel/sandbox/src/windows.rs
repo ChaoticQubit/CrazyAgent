@@ -65,6 +65,8 @@ pub fn existing_helper(helper: &Path) -> Result<PathBuf, SandboxError> {
     Ok(helper.to_path_buf())
 }
 
+/// The owner's own git for one project inside an AppContainer of its own, with no capability,
+/// so a `.git` that points git elsewhere reaches nothing (V244-WIN-GIT-UNC-SIBLINGS).
 #[cfg(windows)]
 pub mod owner_git;
 #[cfg(not(windows))]

@@ -14,8 +14,6 @@ use kernel_sandbox::paths::clean_absolute;
 use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
-#[cfg(unix)]
-use kernel_sandbox::profile::env::*;
 #[cfg(all(test, unix))]
 use kernel_sandbox::profile::linux_holds_fully;
 #[cfg(test)]
@@ -59,27 +57,6 @@ use kernel_sandbox::windows::{GRANTS_FOLDER, profile as windows};
 pub(crate) mod windows_farm;
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests;
-
-/// How the tmux host wraps a confined pane, built from this module's sandbox values: the
-/// runner, the keeper and pane shim words and variables, and which variables reach a pane.
-/// Output: the value the kernel tmux host is opened with.
-#[cfg(unix)]
-pub fn confinement() -> kernel_processes::terminal::tmux::Confinement {
-    kernel_processes::terminal::tmux::Confinement {
-        sandbox_exec: SANDBOX_EXEC,
-        #[cfg(target_os = "macos")]
-        keeper: KEEPER,
-        #[cfg(target_os = "macos")]
-        keeper_deadline_variable: KEEPER_DEADLINE,
-        #[cfg(target_os = "macos")]
-        keeper_state_variable: KEEPER_STATE,
-        #[cfg(target_os = "macos")]
-        pane_shim: PANE_SHIM,
-        variable_allowed: agent_variable_allowed,
-        #[cfg(target_os = "macos")]
-        unkept_pane,
-    }
-}
 
 /// The loopback ports the owner's configured model endpoints listen on, which a tools-on
 /// agent must not bind before the owner's model server does. An endpoint URL that does not
@@ -163,6 +140,19 @@ fn windows_agent_command_hook(
     windows::agent_command(profile, program, base, harness)
 }
 
+/// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
+/// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
+/// I/O error.
+#[cfg(target_os = "windows")]
+pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
+    let layout =
+        crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
+    let grants = layout.root().join(GRANTS_FOLDER);
+    fs::create_dir_all(&grants)?;
+    assert!(grants.is_dir());
+    Ok(grants)
+}
+
 /// The code a launch refusal has of its own, so a caller shows its plain line: the strict
 /// setting's ([`LINUX_NOT_FULL`]), the Windows loopback's
 /// ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]) and, on Linux, the hidden folders' three
@@ -230,13 +220,8 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
 }
 
 /// The engine's real agent policy hooks, the only [`PolicyHooks`] production code passes:
-/// this Linux read again ([`linux_host`]) and as last kept ([`linux_host_kept`]), the
-/// bounded read for another repository ([`linux_other_git`]) and a project's local folders
-/// ([`access_local_folders`]).
+/// a project's local folders ([`access_local_folders`]).
 pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
-    linux_host,
-    linux_host_kept,
-    linux_other_git,
     local_folders: access_local_folders,
 };
 
@@ -1060,17 +1045,4 @@ mod linux_sockets_tests {
             );
         }
     }
-}
-
-/// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
-/// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
-/// I/O error.
-#[cfg(target_os = "windows")]
-pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
-    let layout =
-        crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
-    let grants = layout.root().join(GRANTS_FOLDER);
-    fs::create_dir_all(&grants)?;
-    assert!(grants.is_dir());
-    Ok(grants)
 }
