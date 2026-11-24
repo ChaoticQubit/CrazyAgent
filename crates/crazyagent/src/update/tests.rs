@@ -261,6 +261,24 @@ fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
     assert_eq!(found, vec!["\nfn sneak() {\n    swap("]);
 }
 
+/// A swap imported under another name is looked at where it is imported, so an alias never
+/// hides a swap from the install guard.
+#[test]
+fn an_aliased_swap_import_is_looked_at() {
+    let text = "use kernel_processes::update::swap as put;\n\nfn sneak() {\n    put(&a, &b);\n}\n";
+    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
+    assert_eq!(found, vec!["use kernel_processes::update::swap as put;"]);
+}
+
+/// A swap taken as a value through the update path is looked at where it is taken, so a
+/// function pointer never hides a swap from the install guard.
+#[test]
+fn a_swap_taken_as_a_value_is_looked_at() {
+    let text = "fn sneak() {\n    let f = update::swap;\n    f(&a, &b);\n}\n";
+    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
+    assert_eq!(found, vec!["let f = update::swap;"]);
+}
+
 /// Every install step that writes a release over the running app is reached only after its
 /// signature check: the desktop installs only the bytes `update.download` verified, and the
 /// command line swaps only inside `swap_around_engine`, which only `install_release` runs,

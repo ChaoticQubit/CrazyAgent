@@ -174,6 +174,28 @@ fn a_dependency_table_turning_test_support_on_is_caught() {
     );
 }
 
+/// A manifest whose own feature forwards this crate's `test-support` is caught, since a
+/// forward in `default` reaches a release build.
+#[test]
+fn a_feature_forwarding_test_support_is_caught() {
+    let text = "[package]\nname = \"other\"\n\n[features]\ndefault = [\"crazyagent-kernel-processes/test-support\"]\n\n[dependencies]\ncrazyagent-kernel-processes = { path = \"../kernel/processes\" }\n";
+    assert_eq!(
+        test_support_tables(Path::new("other/Cargo.toml"), text),
+        ["features"]
+    );
+}
+
+/// A workspace dependency row that turns `test-support` on is caught, since every member
+/// that inherits it with `workspace = true` gets the feature.
+#[test]
+fn a_workspace_dependency_turning_test_support_on_is_caught() {
+    let text = "[workspace]\nmembers = [\"crates/other\"]\n\n[workspace.dependencies]\ncrazyagent-kernel-processes = { path = \"crates/kernel/processes\", features = [\"test-support\"] }\n";
+    assert_eq!(
+        test_support_tables(Path::new("Cargo.toml"), text),
+        ["workspace.dependencies"]
+    );
+}
+
 /// Only the engine crate's dev-dependencies turn on this crate's `test-support` feature, so
 /// its test helpers never reach a release build. Input: every Cargo.toml in the workspace.
 #[test]
