@@ -1020,8 +1020,8 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
     assert!(checked >= 20, "{checked}");
 }
 
-/// A plugin that is gone tells the owner how to see the current list, since neither a
-/// failed save nor a failed check reads the list again.
+/// A plugin that is gone says how to see the current list, since neither a failed save
+/// nor a failed check reads the list again.
 #[test]
 fn a_plugin_that_is_gone_says_how_to_see_the_current_ones() {
     assert_eq!(
