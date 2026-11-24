@@ -597,6 +597,63 @@ fn a_replace_rolled_back_keeps_the_old_folder_and_trust_row() {
     assert_eq!(case.trusted_sha("near"), Some(old_sha));
 }
 
+impl Case {
+    /// The entered plugin key files and their bytes, sorted by name. Output: the pairs.
+    fn plugin_keys(&self) -> Vec<(String, Vec<u8>)> {
+        let folder = self.root.join(crate::storage::accounts::PLUGIN_KEYS);
+        let mut keys: Vec<(String, Vec<u8>)> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let bytes = std::fs::read(entry.path()).unwrap();
+                (entry.file_name().into_string().unwrap(), bytes)
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Sets acme's entered key inside one `logged` run whose work then ends with `last`.
+    /// Inputs: the key and the work's end. Output: the run's result.
+    fn key_in_logged(&self, key: &[u8], last: Result<(), EngineError>) -> Result<(), String> {
+        logged(&self.db, &self.root, |db| {
+            kernel_plugin_host::store::set_key(
+                db,
+                &engine(&self.root),
+                "acme",
+                "api_key",
+                key.to_vec(),
+            )
+            .map_err(|refused| EngineError(refused.code.into()))?;
+            last
+        })
+        .map_err(|error| error.0)
+    }
+}
+
+/// A key replaced in place inside a capture that rolls back leaves the old key in its file
+/// and the new one nowhere on disk; the same replace committed puts the new key in that
+/// same file.
+#[test]
+fn a_key_replaced_in_a_rolled_back_capture_keeps_the_old_key() {
+    let case = case(true);
+    case.add("acme", ACME, false).unwrap();
+    case.run(set_key(b"sk-row-swap-key-01")).unwrap();
+    let first = case.plugin_keys();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].1, b"sk-row-swap-key-01");
+
+    let refused = case.key_in_logged(b"sk-row-swap-key-02", Err(EngineError(ROLLED_BACK.into())));
+    assert_eq!(refused, Err(ROLLED_BACK.to_owned()));
+    assert_eq!(case.plugin_keys(), first);
+
+    case.key_in_logged(b"sk-row-swap-key-03", Ok(())).unwrap();
+    let swapped = case.plugin_keys();
+    assert_eq!(swapped.len(), 1);
+    assert_eq!(swapped[0].0, first[0].0);
+    assert_eq!(swapped[0].1, b"sk-row-swap-key-03");
+}
+
 /// The plugin host modules that write the plugin store, or reach a write through their
 /// start pass, as engine code names them.
 const STORE_WRITERS: [&str; 4] = [
