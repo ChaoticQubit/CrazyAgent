@@ -4,11 +4,12 @@ use crate::team::runtime::TeamLimits;
 #[cfg(target_os = "macos")]
 use crate::team::runtime::tests::{ENDPOINT, Fixture, hand_off, limited_runtime, owner};
 
-/// Opens a Codex stand-in whose every turn hits its usage limit, written the way a real
-/// Codex writes the limit error, then ends the turn with `end`. Input: the rollout line that
-/// ends the turn. Output: the stand-in script.
+/// Opens a Codex stand-in whose every turn reports its usage limit, written the way a real
+/// Codex writes it, as an event of type `kind`: `error` for a limit that ends the request,
+/// `stream_error` for one Codex retries. It then ends the turn with `end`. Inputs: the event
+/// type and the rollout line that ends the turn. Output: the stand-in script.
 #[cfg(target_os = "macos")]
-fn limit_codex(end: &str) -> String {
+fn limit_codex(kind: &str, end: &str) -> String {
     format!(
         r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
@@ -27,21 +28,27 @@ while IFS= read -r line; do
   esac
   printf '{{"type":"event_msg","payload":{{"type":"task_started"}}}}\n' >> "$f"
   /bin/sleep 0.3
-  printf '{{"type":"event_msg","payload":{{"type":"error","message":"429 Too Many Requests: You have hit your usage limit."}}}}\n' >> "$f"
+  printf '{{"type":"event_msg","payload":{{"type":"{kind}","message":"429 Too Many Requests: You have hit your usage limit."}}}}\n' >> "$f"
   printf '%s\n' '{end}' >> "$f"
 done
 "#
     )
 }
 
-/// Hands one task to a sub-agent whose turn hits its usage limit and ends with `end`, and
-/// waits for that first try to end. Input: the line that ends the turn. Output: the task's
-/// status and attempts, and the project's rested accounts.
+/// Hands one task to a sub-agent whose turn reports its usage limit as a `kind` event and
+/// ends with `end`, and waits for that first try to end. Inputs: the event type and the line
+/// that ends the turn. Output: the task's status and attempts, and the project's rested
+/// accounts.
 #[cfg(target_os = "macos")]
-fn limited_task(end: &str) -> ((String, i64), Vec<String>) {
+fn limited_task(kind: &str, end: &str) -> ((String, i64), Vec<String>) {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let mut team = limited_runtime(&fixture, &host, &limit_codex(end), TeamLimits::default());
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        &limit_codex(kind, end),
+        TeamLimits::default(),
+    );
     owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
     let task = |f: &Fixture| -> (String, i64) {
         f.connection
@@ -102,7 +109,10 @@ fn a_launched_turn_end_puts_the_limit_first_and_keeps_a_success_after_an_interru
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_turn_that_hits_its_limit_and_then_completes_goes_back_to_the_queue() {
-    let (task, rested) = limited_task(r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#);
+    let (task, rested) = limited_task(
+        "error",
+        r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+    );
     assert_eq!(
         task,
         ("queued".to_owned(), 1),
@@ -118,6 +128,7 @@ fn a_task_turn_that_hits_its_limit_and_then_completes_goes_back_to_the_queue() {
 #[test]
 fn a_task_turn_that_hits_its_limit_and_then_aborts_goes_back_to_the_queue() {
     let (task, rested) = limited_task(
+        "error",
         r#"{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}"#,
     );
     assert_eq!(
@@ -126,4 +137,22 @@ fn a_task_turn_that_hits_its_limit_and_then_aborts_goes_back_to_the_queue() {
         "the limit sends the task back"
     );
     assert_eq!(rested, [ENDPOINT], "the limited account rests");
+}
+
+/// A sub-agent turn whose transcript reports the usage limit as a `stream_error`, the
+/// notice Codex writes while it retries the request, and then completes is a success: the
+/// retry went through, so the task is done and no account rests.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_turn_that_completes_after_a_retried_limit_is_done() {
+    let (task, rested) = limited_task(
+        "stream_error",
+        r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+    );
+    assert_eq!(
+        task,
+        ("done".to_owned(), 1),
+        "the retried limit ends nothing"
+    );
+    assert!(rested.is_empty(), "no account rests: {rested:?}");
 }
