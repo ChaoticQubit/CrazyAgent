@@ -164,16 +164,16 @@ async function onEngine(t, prefix, steps, versions) {
   process.umask(0o077);
   const root = homeRoot(prefix);
   try {
-    await onRoot(t, root, prefix, steps, versions);
+    await onRoot(t, root, prefix, steps, { engineBinary, bridgeBinary }, versions);
   } finally {
     if (!process.env.E2E_EVIDENCE) removeHomeRoot(root);
   }
 }
 
 /** Runs onEngine's engine, bridge and page in the test root it made, so the root is removed
- * however the run ends. Inputs: the test context, the root, its prefix, the steps and
- * onEngine's options. Output: none. */
-async function onRoot(t, root, prefix, steps, versions) {
+ * however the run ends. Inputs: the test context, the root, its prefix, the steps, the
+ * engine and bridge binaries, and onEngine's versions. Output: none. */
+async function onRoot(t, root, prefix, steps, { engineBinary, bridgeBinary }, versions) {
   const runtime = join(root, "engine");
   const evidence = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? join(process.env.E2E_EVIDENCE, prefix) : join(root, "evidence");
   const home = join(root, "home");
