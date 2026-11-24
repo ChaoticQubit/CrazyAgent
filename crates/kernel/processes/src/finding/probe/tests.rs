@@ -589,3 +589,23 @@ fn the_module_mark_starts_a_due_run_first_as_folders_does() {
     assert!(!mark.first_run_pending);
     assert!(lock(&FOLDERS).last.is_some());
 }
+
+/// A folder run starts only in a build that is not a row build and only when the hooks allow
+/// it, so the engine's own unit rows and a seed whose hooks turn probes off never run the
+/// owner's shell files, while an engine `cargo test` launches still probes.
+#[test]
+fn a_folder_run_starts_only_outside_row_builds_and_when_the_hooks_allow_it() {
+    let on = crate::finding::FindingHooks {
+        folder_probes: true,
+        ..crate::finding::stub::STUB_HOOKS
+    };
+    let off = crate::finding::FindingHooks {
+        folder_probes: false,
+        ..crate::finding::stub::STUB_HOOKS
+    };
+    assert!(may_probe(false, &on));
+    assert!(!may_probe(true, &on));
+    assert!(!may_probe(false, &off));
+    assert!(!may_probe(true, &off));
+    assert!(!crate::finding::stub::stub_seed().hooks.folder_probes);
+}
