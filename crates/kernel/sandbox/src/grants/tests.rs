@@ -275,10 +275,10 @@ fn a_socket_must_exist_be_the_user_s_own_and_sit_where_no_one_else_can_swap_it()
     }
 }
 
-/// L2 r1 F1: a socket that drives the owner's terminal or editor (Emacs, Neovim, screen,
-/// Zellij, kitty, WezTerm, Alacritty, iTerm2, VS Code-family IPC, Cursor, Hammerspoon, or
-/// tmux started with -S anywhere) runs commands as the owner, so it is refused by name even
-/// when it exists and is the user's own; plain names that only look alike stay allowed.
+/// A socket that drives the owner's terminal or editor (Emacs, Neovim, screen, Zellij, kitty,
+/// WezTerm, Alacritty, iTerm2, VS Code-family IPC, Cursor, Hammerspoon, or tmux started with -S
+/// anywhere) runs commands as the owner, so it is refused by name even when it exists and is the
+/// user's own; plain names that only look alike stay allowed.
 #[cfg(target_os = "macos")]
 #[test]
 fn editor_and_terminal_control_sockets_are_refused_by_class() {
@@ -327,7 +327,7 @@ fn editor_and_terminal_control_sockets_are_refused_by_class() {
     }
 }
 
-/// L2 r1 F1 (hard link): a socket with a second name is refused at both names, so a hard
+/// A socket with a second name is refused at both names, so a hard
 /// link to a refused socket at a plain name never passes; a socket with one name is kept.
 #[cfg(target_os = "macos")]
 #[test]
@@ -358,7 +358,7 @@ fn a_socket_with_a_second_name_is_refused_at_both_names() {
     }
 }
 
-/// L2 r1 F1 (ports): Docker's TCP API (2375, 2376) and the Chrome DevTools and Node
+/// Docker's TCP API (2375, 2376) and the Chrome DevTools and Node
 /// inspector ports (9222, 9229) run anything as the owner, so a port grant never reaches
 /// them.
 #[test]
@@ -377,7 +377,7 @@ fn a_port_grant_never_reaches_docker_s_api_or_a_browser_or_node_debugger() {
     );
 }
 
-/// L2 r2 L2-M1 floor: Kakoune, dtach and abduco sessions and an ssh ControlMaster socket
+/// Kakoune, dtach and abduco sessions and an ssh ControlMaster socket
 /// named by its `%C` hash are refused as control sockets; a shorter hex name is kept.
 #[cfg(target_os = "macos")]
 #[test]
@@ -409,7 +409,7 @@ fn the_floor_also_refuses_kakoune_dtach_abduco_and_ssh_mux_sockets() {
     assert_eq!(escape_class(&short), None);
 }
 
-/// L2 r2 L2-M1 floor: the Java (JDWP 5005), Python (debugpy 5678) and Go (Delve 2345)
+/// The Java (JDWP 5005), Python (debugpy 5678) and Go (Delve 2345)
 /// debugger ports are reserved like Docker's and the browser's.
 #[test]
 fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
@@ -428,7 +428,7 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
     );
 }
 
-/// SA241 vid 9: a port grant never opens a model relay port to an agent, at either end of
+/// A port grant never opens a model relay port to an agent, at either end of
 /// the relay block.
 #[test]
 fn a_port_grant_refuses_the_model_relay_ports() {

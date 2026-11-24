@@ -25,12 +25,12 @@ pub fn starts_at_boundary(program: &OsStr) -> bool {
     }
 }
 
-/// The end of the agent shims: forks the run's warden when handed a [`warden::WARDEN_FD`],
-/// keeping that descriptor and variable from the harness, then replaces the shim with the
-/// harness program and its arguments. Asked `S` on its line, the warden stops every other
-/// process in the sandbox three times over, through the kill call that spares its sender,
-/// and answers `s` only when every pass took; asked `C`, it continues them and answers `c`
-/// (DEC-158). At the line's end it kills them all, as before.
+/// The end of the agent shims: forks the run's warden when handed a [`warden::WARDEN_FD`], keeping
+/// that descriptor and variable from the harness, then replaces the shim with the harness program
+/// and its arguments. Asked `S` on its line, the warden stops every other process in the sandbox
+/// three times over, through the kill call that spares its sender, and answers `s` only when every
+/// pass took; asked `C`, it continues them and answers `c`. At the line's end it kills them all, as
+/// before.
 #[cfg(unix)]
 macro_rules! warden_then_harness {
     () => {
@@ -70,24 +70,22 @@ pub const PANE_SHIM: [&str; 5] = [
     "--",
 ];
 
-/// A pane's first process, outside the sandbox, followed by the sandboxed command it keeps.
-/// It starts that command holding one end of a socket pair as the run's warden descriptor
-/// and waits until the command exits or the pane is asked to stop with hangup or terminate.
-/// Then it shuts its end, so the warden kills every process left in the sandbox, sessions
-/// of their own included, and it exits only once the warden confirmed that or found
-/// signals not confined; otherwise it keeps the pane open, ignoring terminate, until a
-/// hangup. A confining profile keeps every agent signal from it, and the terminal keys
-/// that signal the pane's group do not end it. Given [`KEEPER_DEADLINE`], as a native lead's
-/// server keeper is, it also reads the engine's deadline record and, once one read found the
-/// deadline ahead, stops after that many reads in a row found it passed or unreadable
-/// (FBTMUX-P1-R1-L1): it kills its command, the server, itself from outside the sandbox, so
-/// a killed warden cannot keep the server, then has the warden end the rest, and exits
-/// with status 3 when the warden does not confirm. Given the engine's freeze record, as the
-/// word before a kept pane's `sandbox-exec` (see [`kept_pane`]) or in [`KEEPER_STATE`] for a
-/// native lead's server keeper, never both, user signal 1 asks the warden to stop every
-/// process in the sandbox and user signal 2 to continue them, and each answer is written to
-/// that record as `S` or `C` (DEC-158); without it both signals are ignored. Its deadline reads count wall time, so answers do not hasten
-/// them.
+/// A pane's first process, outside the sandbox, followed by the sandboxed command it keeps. It
+/// starts that command holding one end of a socket pair as the run's warden descriptor and waits
+/// until the command exits or the pane is asked to stop with hangup or terminate. Then it shuts its
+/// end, so the warden kills every process left in the sandbox, sessions of their own included, and
+/// it exits only once the warden confirmed that or found signals not confined; otherwise it keeps
+/// the pane open, ignoring terminate, until a hangup. A confining profile keeps every agent signal
+/// from it, and the terminal keys that signal the pane's group do not end it. Given
+/// [`KEEPER_DEADLINE`], as a native lead's server keeper is, it also reads the engine's deadline
+/// record and, once one read found the deadline ahead, stops after that many reads in a row found
+/// it passed or unreadable: it kills its command, the server, itself from outside the sandbox, so a
+/// killed warden cannot keep the server, then has the warden end the rest, and exits with status 3
+/// when the warden does not confirm. Given the engine's freeze record, as the word before a kept
+/// pane's `sandbox-exec` (see [`kept_pane`]) or in [`KEEPER_STATE`] for a native lead's server
+/// keeper, never both, user signal 1 asks the warden to stop every process in the sandbox and user
+/// signal 2 to continue them, and each answer is written to that record as `S` or `C`; without it
+/// both signals are ignored. Its deadline reads count wall time, so answers do not hasten them.
 #[cfg(target_os = "macos")]
 pub const KEEPER: [&str; 6] = [
     "/usr/bin/perl",
@@ -98,18 +96,18 @@ pub const KEEPER: [&str; 6] = [
     "--",
 ];
 
-/// The variable a native lead's server keeper takes its deadline reads from
-/// (FBTMUX-P1-R1-L1): the seconds between two reads, how many reads in a row past the
-/// deadline end the server, and the engine's absolute deadline record, separated by single
-/// spaces. The [`KEEPER`] removes it before the command starts; a kept pane has none.
+/// The variable a native lead's server keeper takes its deadline reads from: the seconds between
+/// two reads, how many reads in a row past the deadline end the server, and the engine's absolute
+/// deadline record, separated by single spaces. The [`KEEPER`] removes it before the command
+/// starts; a kept pane has none.
 #[cfg(target_os = "macos")]
 pub const KEEPER_DEADLINE: &str = "CRAZYAGENT_KEEPER_DEADLINE";
 
 /// The variable that names the engine's absolute freeze record to a native lead's server
-/// [`KEEPER`], whose warden then stops and continues the sandbox on the engine's signals
-/// (DEC-158). The keeper removes it before the command starts. A pane's variables never
-/// carry it, since the pane variable gate refuses the engine's own; a kept pane takes the
-/// record as an argument instead (see [`kept_pane`]).
+/// [`KEEPER`], whose warden then stops and continues the sandbox on the engine's signals. The
+/// keeper removes it before the command starts. A pane's variables never carry it, since the pane
+/// variable gate refuses the engine's own; a kept pane takes the record as an argument instead (see
+/// [`kept_pane`]).
 #[cfg(target_os = "macos")]
 pub const KEEPER_STATE: &str = "CRAZYAGENT_KEEPER_STATE";
 
@@ -118,12 +116,12 @@ pub const KEEPER_STATE: &str = "CRAZYAGENT_KEEPER_STATE";
 #[cfg(target_os = "macos")]
 const KEEPER_STATE_BYTES_MAX: usize = 1001;
 
-/// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping
-/// the pane ends every process its agent started. Inputs: the argv `sandbox-exec -f
-/// <profile> <program> <arguments>` and the engine's freeze record, which goes to the keeper
-/// as the word before `sandbox-exec` and never reaches the command (DEC-158). Output: the
-/// kept argv, or none for any other argv or a record that is not an absolute path of at
-/// most [`KEEPER_STATE_BYTES_MAX`] bytes on one line.
+/// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping the pane
+/// ends every process its agent started. Inputs: the argv `sandbox-exec -f <profile> <program>
+/// <arguments>` and the engine's freeze record, which goes to the keeper as the word before
+/// `sandbox-exec` and never reaches the command. Output: the kept argv, or none for any other argv
+/// or a record that is not an absolute path of at most [`KEEPER_STATE_BYTES_MAX`] bytes on one
+/// line.
 #[cfg(target_os = "macos")]
 pub fn kept_pane(argv: Vec<String>, state: Option<&Path>) -> Option<Vec<String>> {
     if argv.len() < 4 || argv[0] != SANDBOX_EXEC || argv[1] != "-f" {
@@ -208,10 +206,9 @@ pub trait Sandbox: Send + Sync {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError>;
 }
 
-/// What a run's stop checks, once its process group is killed, of the processes the run
-/// left outside that group: nothing where its boundary ends them all, its Full access
-/// lineage, or a sandboxed lineage where a confined process that starts its own session
-/// outlives the group kill (LINUX-KILL-GROUP).
+/// What a run's stop checks, once its process group is killed, of the processes the run left
+/// outside that group: nothing where its boundary ends them all, its Full access lineage, or a
+/// sandboxed lineage where a confined process that starts its own session outlives the group kill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineageCheck {
     Unneeded,

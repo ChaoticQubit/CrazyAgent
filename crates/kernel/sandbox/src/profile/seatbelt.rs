@@ -26,17 +26,16 @@ pub fn seatbelt_pattern(path: &Path) -> String {
     regex_escape(&text)
 }
 
-/// The Seatbelt rules that keep an agent from starting a macOS app: no exec of a main
-/// executable in any app bundle's `Contents/MacOS`, wherever it sits and in any letter
-/// case, since a GUI app started inside the agent profile aborts at launch and macOS shows
-/// a crash report for every attempt (Chrome crash popups, decision C1, OP-24). The
-/// interpreter a framework Python's launcher starts, `<name>.framework/Versions/<v>/
-/// Resources/Python.app/Contents/MacOS/Python`, stays allowed, except in the folders the
-/// agent can write, where it could plant a bundle under that name; their Data volume path
-/// is denied too. Command-line tools a bundle ships under `Contents/Resources` or
-/// `Contents/Developer` stay allowed, as does each exact program the engine launches from
-/// outside those folders. It must follow the exec allow, since the last matching rule
-/// wins. Inputs: the agent's writable roots and those programs. Output: the rule text.
+/// The Seatbelt rules that keep an agent from starting a macOS app: no exec of a main executable in
+/// any app bundle's `Contents/MacOS`, wherever it sits and in any letter case, since a GUI app
+/// started inside the agent profile aborts at launch and macOS shows a crash report for every
+/// attempt (Chrome crash popups). The interpreter a framework Python's launcher starts,
+/// `<name>.framework/Versions/<v>/ Resources/Python.app/Contents/MacOS/Python`, stays allowed,
+/// except in the folders the agent can write, where it could plant a bundle under that name; their
+/// Data volume path is denied too. Command-line tools a bundle ships under `Contents/Resources` or
+/// `Contents/Developer` stay allowed, as does each exact program the engine launches from outside
+/// those folders. It must follow the exec allow, since the last matching rule wins. Inputs: the
+/// agent's writable roots and those programs. Output: the rule text.
 pub fn app_exec_denies<'a>(
     writable: impl Iterator<Item = &'a PathBuf>,
     launched: impl Iterator<Item = &'a PathBuf>,
@@ -75,19 +74,18 @@ pub fn app_exec_denies<'a>(
     rule
 }
 
-/// The Seatbelt rules that keep an Own branch agent from repointing the object store its
-/// clone borrows (AL-1, DEC102-F1): no write to its `objects/info/alternates` or
-/// `http-alternates`, its git folder's `commondir` or the git folder entry itself, which
-/// it may never replace, rename or relink, no move or removal of its `objects` or
-/// `objects/info` folder, no symlink in its store, and nothing at `.git.git` beside its
-/// git folder, the fallback repository git's upload-pack serves when the git folder fails
-/// git's repository test (RL-1), no `objects/pack/multi-pack-index` file, folder or
-/// companion, which can name a pack outside the store (RL-2), and no write to the
-/// `objects/pack` or `objects/<xx>` folder entries, so no folder built elsewhere is moved
-/// in over one with its contents (RL-3), each name in any letter case, while its own loose
-/// objects and packs inside those folders stay writable. The engine makes those folders
-/// before each launch (`landing::ready_agent_clone`). The engine's fetch checks the same
-/// store before it runs (w-landing). Input: the clone. Output: the rule text.
+/// The Seatbelt rules that keep an Own branch agent from repointing the object store its clone
+/// borrows: no write to its `objects/info/alternates` or `http-alternates`, its git folder's
+/// `commondir` or the git folder entry itself, which it may never replace, rename or relink, no
+/// move or removal of its `objects` or `objects/info` folder, no symlink in its store, and nothing
+/// at `.git.git` beside its git folder, the fallback repository git's upload-pack serves when the
+/// git folder fails git's repository test, no `objects/pack/multi-pack-index` file, folder or
+/// companion, which can name a pack outside the store, and no write to the `objects/pack` or
+/// `objects/<xx>` folder entries, so no folder built elsewhere is moved in over one with its
+/// contents, each name in any letter case, while its own loose objects and packs inside those
+/// folders stay writable. The engine makes those folders before each launch
+/// (`landing::ready_agent_clone`). The engine's fetch checks the same store before it runs
+/// (w-landing). Input: the clone. Output: the rule text.
 pub fn clone_store_denies(clone: &Path) -> String {
     let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(GIT_FALLBACK));
     let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
@@ -106,16 +104,15 @@ pub fn clone_store_denies(clone: &Path) -> String {
     text
 }
 
-/// The writes a clone lead's teammates may not make in the lead's clone (OP-9): anything but
-/// the teammates' folder, the clone's object store, the inside of each worktree record git
-/// keeps in `.git/worktrees`, and the refs and reflogs of the lead's own `<branch>--<name>`
-/// teammate branches, none when the lead's branch is unknown, never the lead's branch
-/// (AGENT-REF-ALLOW-NARROW); nor the links that tie a teammate worktree to the clone, which
-/// the engine writes with the lead's rights, each name in any letter case; nor the
-/// teammates' folder entry, nor make, move or remove anything directly in it, such as a
-/// teammate's folder, where the engine's lead-rights `git worktree add` writes (OP9B-C1).
-/// It must follow every write allow, since the last match wins.
-/// Inputs: the profile hooks, the clone and the lead's branch. Output: the rule text.
+/// The writes a clone lead's teammates may not make in the lead's clone: anything but the
+/// teammates' folder, the clone's object store, the inside of each worktree record git keeps in
+/// `.git/worktrees`, and the refs and reflogs of the lead's own `<branch>--<name>` teammate
+/// branches, none when the lead's branch is unknown, never the lead's branch; nor the links that
+/// tie a teammate worktree to the clone, which the engine writes with the lead's rights, each name
+/// in any letter case; nor the teammates' folder entry, nor make, move or remove anything directly
+/// in it, such as a teammate's folder, where the engine's lead-rights `git worktree add` writes. It
+/// must follow every write allow, since the last match wins. Inputs: the profile hooks, the clone
+/// and the lead's branch. Output: the rule text.
 pub fn teammates_clone_denies(hooks: &ProfileHooks, clone: &Path, lead: Option<&str>) -> String {
     let path = clone.display();
     let root = seatbelt_pattern(clone);
@@ -218,19 +215,19 @@ pub fn other_than(name: &str) -> String {
     format!("({})", alternatives.join("|"))
 }
 
-/// The Seatbelt rule that pins one writable root itself (CTX-M1): no agent may move, replace,
-/// remove or re-permission a folder it writes in. A Seatbelt rename checks only the two
-/// paths it names, so a root moved under another root and back would carry every path a
-/// rule protects below it, such as the launch files in an agent's home (LL-2), out of that
-/// rule and back. It must follow every write allow, since the last match wins. Input: the
-/// root. Output: the rule text.
+/// The Seatbelt rule that pins one writable root itself: no agent may move, replace, remove or
+/// re-permission a folder it writes in. A Seatbelt rename checks only the two paths it names, so a
+/// root moved under another root and back would carry every path a rule protects below it, such as
+/// the launch files in an agent's home, out of that rule and back. It must follow every write
+/// allow, since the last match wins. Input: the root. Output: the rule text.
 pub fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
 /// The Seatbelt filters for a `.git` at any depth below `root`, top level included, in every
-/// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
-/// working tree (SM1-R), as [`at_or_below`] spells it. Input: the root. Output: the filters.
+/// spelling a case-insensitive volume finds ([`any_case`]): the part of
+/// [`ProjectSandbox::nested_git_denies`] for a root that is not a working tree, as [`at_or_below`]
+/// spells it. Input: the root. Output: the filters.
 pub fn any_depth_git(root: &Path) -> String {
     at_or_below(&format!(
         "{}/(.+/)?{}",
@@ -239,11 +236,10 @@ pub fn any_depth_git(root: &Path) -> String {
     ))
 }
 
-/// The Seatbelt rule that refuses reading, writing, linking or cloning any path with a part
-/// made of ASCII, [`crate::paths::ASCII_FOLDS`] points and at least one code
-/// point HFS+ ignores in names, since such a volume opens `.g\u{200c}it/config` as
-/// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
-/// joiners. Output: the rule, ending in a line break.
+/// The Seatbelt rule that refuses reading, writing, linking or cloning any path with a part made of
+/// ASCII, [`crate::paths::ASCII_FOLDS`] points and at least one code point HFS+ ignores in names,
+/// since such a volume opens `.g\u{200c}it/config` as `.git/config` past every name deny. A part in
+/// another script keeps its joiners. Output: the rule, ending in a line break.
 pub fn hfs_ignored_deny() -> String {
     let ignored: Vec<String> = crate::paths::HFS_IGNORED
         .iter()
@@ -262,10 +258,10 @@ pub fn hfs_ignored_deny() -> String {
     rule
 }
 
-/// The Seatbelt profile the engine primes a uv tool cache under (T8 C3): the system's
-/// read-only roots and the uv binary to read and run, the fresh priming folder as the only
-/// place to write, `/dev/null` and the random devices, no network and no user folder.
-/// Inputs: the canonical priming folder and the canonical uv binary. Output: the text.
+/// The Seatbelt profile the engine primes a uv tool cache under: the system's read-only roots and
+/// the uv binary to read and run, the fresh priming folder as the only place to write, `/dev/null`
+/// and the random devices, no network and no user folder. Inputs: the canonical priming folder and
+/// the canonical uv binary. Output: the text.
 #[cfg(target_os = "macos")]
 pub fn priming_profile(folder: &Path, uv: &Path) -> String {
     assert!(clean_absolute(folder) && clean_absolute(uv));
@@ -399,10 +395,10 @@ pub fn carved_folder(hooks: &ProfileHooks, engine: &Path, home: &Path) -> Option
     listed_master_folder(hooks, engine, home)
 }
 
-/// The native profiles folder when the home is a listed master session's home,
-/// `<listed key of account>/home/<session>/<harness>/<account>` in it, so in that account's
-/// own listed slot, whose home holds no sign-in's record (DEC-180 Task 20). Inputs: the
-/// profile hooks, the engine root and the canonical home. Output: the folder, or none for any other home.
+/// The native profiles folder when the home is a listed master session's home, `<listed key of
+/// account>/home/<session>/<harness>/<account>` in it, so in that account's own listed slot, whose
+/// home holds no sign-in's record. Inputs: the profile hooks, the engine root and the canonical
+/// home. Output: the folder, or none for any other home.
 #[cfg(unix)]
 fn listed_master_folder(hooks: &ProfileHooks, engine: &Path, home: &Path) -> Option<PathBuf> {
     let profiles = engine.join(hooks.native_profiles_folder);
@@ -431,31 +427,29 @@ fn listed_master_folder(_hooks: &ProfileHooks, _engine: &Path, _home: &Path) -> 
     None
 }
 
-/// The Seatbelt rules that keep an agent from changing what its harness loads from its own
-/// home as instructions, skills, hooks or settings (LL-2): no write in the launch folder or
-/// the relay plugin the engine writes before each launch, nor in the subagents, commands,
-/// output styles and rules folders Claude Code reads or the `.agents` folder whose skills
-/// Codex reads from its home, none to the global instruction files of Claude Code and Codex,
-/// the Codex override that would replace them, the Codex `config.toml` holding its developer
-/// instructions or Claude Code's `settings.json`, nor to a zsh, bash or sh startup file,
-/// which every shell its harness starts there runs first (SA vid 12), none under `skills`
-/// but Codex's own `.system` skills, which Codex installs at its start and the engine
-/// removes before each Codex launch, and no move or removal of the `skills` folder, so no
-/// folder built elsewhere
-/// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
-/// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
-/// text it runs with until the next launch rewrites it. They also keep the agent's own
-/// keychain and keychain settings, which the engine sets up with `security` calls before a
-/// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
-/// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
-/// in place of `Library`, `Library/Preferences` or any other folder a launch keeps only part
-/// of, nor of the cargo cache links the launch keeps, nor a link it makes at their names
-/// ([`crate::agent_home::pinned_entries`], DEC-173), as [`root_pin`] keeps the home itself,
-/// so no link an agent plants leads one of those calls, a launch's removal of what it does
-/// not keep or a later cargo outside the home. They deny writes to the launch lock too, so
-/// no run links, removes or replaces it, since a launch refuses a lock with a second link
-/// (r3). Every home gets them; an agent home gets [`agent_config_denies`] as well. They must
-/// follow every write allow. Inputs: the profile hooks and the home. Output: the rule text.
+/// The Seatbelt rules that keep an agent from changing what its harness loads from its own home as
+/// instructions, skills, hooks or settings: no write in the launch folder or the relay plugin the
+/// engine writes before each launch, nor in the subagents, commands, output styles and rules
+/// folders Claude Code reads or the `.agents` folder whose skills Codex reads from its home, none
+/// to the global instruction files of Claude Code and Codex, the Codex override that would replace
+/// them, the Codex `config.toml` holding its developer instructions or Claude Code's
+/// `settings.json`, nor to a zsh, bash or sh startup file, which every shell its harness starts
+/// there runs first, none under `skills` but Codex's own `.system` skills, which Codex installs at
+/// its start and the engine removes before each Codex launch, and no move or removal of the
+/// `skills` folder, so no folder built elsewhere is moved in, nor a flag on `skills` or anywhere in
+/// `.system` that would keep the engine from removing it, each name in any letter case. Its own run
+/// cannot change the text it runs with until the next launch rewrites it. They also keep the
+/// agent's own keychain and keychain settings, which the engine sets up with `security` calls
+/// before a launch, out of its reach: no write under `Library/Keychains` nor to
+/// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link in
+/// place of `Library`, `Library/Preferences` or any other folder a launch keeps only part of, nor
+/// of the cargo cache links the launch keeps, nor a link it makes at their names
+/// ([`crate::agent_home::pinned_entries`]), as [`root_pin`] keeps the home itself, so no link an
+/// agent plants leads one of those calls, a launch's removal of what it does not keep or a later
+/// cargo outside the home. They deny writes to the launch lock too, so no run links, removes or
+/// replaces it, since a launch refuses a lock with a second link. Every home gets them; an agent
+/// home gets [`agent_config_denies`] as well. They must follow every write allow. Inputs: the
+/// profile hooks and the home. Output: the rule text.
 pub fn launch_denies(hooks: &ProfileHooks, home: &Path) -> String {
     let home = seatbelt_pattern(home);
     let skills = format!("{home}/{}", any_case("skills"));
@@ -535,19 +529,18 @@ const AGENT_CONFIG: [&str; 8] = [
 ];
 
 /// The folders of an agent home an [`AGENT_CONFIG`] name lies in. Each is made by
-/// [`ProjectSandbox::install`] in a home the engine made and kept by every launch, and an
-/// agent may neither make, move nor remove one, so no folder built elsewhere is moved in
-/// with config past the names (RV-DS241-186).
+/// [`ProjectSandbox::install`] in a home the engine made and kept by every launch, and an agent may
+/// neither make, move nor remove one, so no folder built elsewhere is moved in with config past the
+/// names.
 const CONFIG_PARENTS: [&str; 2] = [".cargo", ".config"];
 
-/// Makes each [`CONFIG_PARENTS`] folder of an agent home a real 0700 folder where nothing
-/// holds its name, since the agent's profile keeps it from making one (RV-DS241-186). With
-/// `clear`, for a home strictly below the engine's data root ([`ProjectSandbox::anchor_home`]),
-/// what holds a name as anything else, as a link an earlier run planted, goes first, and a
-/// name that is still no folder refuses; without it nothing is ever removed and such a name
-/// stays for the launch's reset to judge (rv-code2 b8 F1). Each step goes through the home's
-/// open handle and follows no link. Inputs: the profile hooks, the home and `clear`. Output: unit, or `Invalid`
-/// when one cannot be made.
+/// Makes each [`CONFIG_PARENTS`] folder of an agent home a real 0700 folder where nothing holds its
+/// name, since the agent's profile keeps it from making one. With `clear`, for a home strictly
+/// below the engine's data root ([`ProjectSandbox::anchor_home`]), what holds a name as anything
+/// else, as a link an earlier run planted, goes first, and a name that is still no folder refuses;
+/// without it nothing is ever removed and such a name stays for the launch's reset to judge. Each
+/// step goes through the home's open handle and follows no link. Inputs: the profile hooks, the
+/// home and `clear`. Output: unit, or `Invalid` when one cannot be made.
 #[cfg(unix)]
 pub fn make_config_parents(
     hooks: &ProfileHooks,
@@ -586,17 +579,16 @@ pub fn make_config_parents(
     Ok(())
 }
 
-/// The Seatbelt rules an agent home gets on top of [`launch_denies`], which a home the owner
-/// keeps for their own tools does without, as the IDE terminal's does
-/// ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). No write to an [`AGENT_CONFIG`]
-/// name in any letter case, so a run, or a process of it still alive after the next
-/// launch's reset, plants no config or program its own tools or a later run with more
-/// access follow (RV-DS241-137, -138, -186). No [`CONFIG_PARENTS`] folder made, so none
-/// built elsewhere takes the name. No flag or ACL on an entry the next launch keeps and the
-/// engine uses, nor on anything in one ([`crate::agent_home::kept_entries`]), so none holds
-/// against the engine. Copies the agent's tools make elsewhere in its home and in its caches
-/// still take flags (RV-DS241-187), and the next reset clears those as it removes them.
-/// They must follow every write allow. Inputs: the profile hooks and the home. Output: the rule text.
+/// The Seatbelt rules an agent home gets on top of [`launch_denies`], which a home the owner keeps
+/// for their own tools does without, as the IDE terminal's does
+/// ([`ProjectSandbox::keep_owner_config`]). No write to an [`AGENT_CONFIG`] name in any letter
+/// case, so a run, or a process of it still alive after the next launch's reset, plants no config
+/// or program its own tools or a later run with more access follow. No [`CONFIG_PARENTS`] folder
+/// made, so none built elsewhere takes the name. No flag or ACL on an entry the next launch keeps
+/// and the engine uses, nor on anything in one ([`crate::agent_home::kept_entries`]), so none holds
+/// against the engine. Copies the agent's tools make elsewhere in its home and in its caches still
+/// take flags, and the next reset clears those as it removes them. They must follow every write
+/// allow. Inputs: the profile hooks and the home. Output: the rule text.
 pub fn agent_config_denies(hooks: &ProfileHooks, home: &Path) -> String {
     let pinned = (hooks.pinned_entries)();
     assert!(
@@ -637,9 +629,9 @@ pub fn agent_config_denies(hooks: &ProfileHooks, home: &Path) -> String {
     text
 }
 
-/// Spells the Seatbelt pattern of the shell startup files directly in a home, each in any
-/// letter case: zsh's, alone or in the compiled form zsh runs in its place, and bash's and
-/// sh's (SA vid 12). Input: the profile hooks. Output: the pattern, a group without anchors.
+/// Spells the Seatbelt pattern of the shell startup files directly in a home, each in any letter
+/// case: zsh's, alone or in the compiled form zsh runs in its place, and bash's and sh's. Input:
+/// the profile hooks. Output: the pattern, a group without anchors.
 fn shell_startup(hooks: &ProfileHooks) -> String {
     let spelled = |names: &[&str]| {
         names
@@ -658,15 +650,14 @@ fn shell_startup(hooks: &ProfileHooks) -> String {
     pattern
 }
 
-/// The base write denies a profile gives again after it grants writes once more to the agent
-/// home and other folders, as the IDE profile does for its server's data folders: each one
-/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), the
-/// home's launch files ([`launch_denies`]) and no flag or ACL on anything in the home, which
-/// the engine walks and rewrites before each start, so none keeps the owner's IDE from
-/// starting (rv-sa241 b8 L1); never [`agent_config_denies`], since that home is one the
-/// owner keeps ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). They must follow that
-/// grant, since the last match wins. Inputs: the profile hooks, the home and the other folders. Output: the
-/// rule text.
+/// The base write denies a profile gives again after it grants writes once more to the agent home
+/// and other folders, as the IDE profile does for its server's data folders: each one pinned
+/// ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), the home's launch
+/// files ([`launch_denies`]) and no flag or ACL on anything in the home, which the engine walks and
+/// rewrites before each start, so none keeps the owner's IDE from starting; never
+/// [`agent_config_denies`], since that home is one the owner keeps
+/// ([`ProjectSandbox::keep_owner_config`]). They must follow that grant, since the last match wins.
+/// Inputs: the profile hooks, the home and the other folders. Output: the rule text.
 #[cfg(unix)]
 pub fn regranted_denies(hooks: &ProfileHooks, home: &Path, folders: &[&Path]) -> String {
     let mut text = launch_denies(hooks, home);
@@ -737,10 +728,10 @@ pub fn ensure_store(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
-/// the last matching rule and a deny a later allow overrides no longer holds (CTX-M1 F1).
-/// Inputs: the profile text and the deny rules as written in it. Output: false when any
-/// deny is missing or comes before a write allow.
+/// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies the
+/// last matching rule and a deny a later allow overrides no longer holds. Inputs: the profile text
+/// and the deny rules as written in it. Output: false when any deny is missing or comes before a
+/// write allow.
 pub fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
     let last_write_allow = text
         .rfind("(allow file-write*")
@@ -750,9 +741,9 @@ pub fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
         .all(|deny| text.rfind(deny.as_str()) > last_write_allow)
 }
 
-/// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
-/// link may be made there and no folder but a lock, so no teammate places a path the lead's
-/// own Claude Code writes through (TPH-2 C). Input: the folder. Output: the rules.
+/// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no link
+/// may be made there and no folder but a lock, so no teammate places a path the lead's own Claude
+/// Code writes through. Input: the folder. Output: the rules.
 pub fn shared_denies(folder: &Path) -> String {
     let folder = folder.display();
     format!(

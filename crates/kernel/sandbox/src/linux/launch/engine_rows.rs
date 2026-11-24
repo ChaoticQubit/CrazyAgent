@@ -180,9 +180,9 @@ fn a_launch_whose_git_grant_covers_a_protected_path_nothing_holds_is_refused() {
     );
 }
 
-/// LINUX-KILL-GROUP: only the plain Landlock backend leaves a process in a session of its
-/// own running after a stop's group kill, so only its runs have their lineage checked;
-/// both bubblewrap backends end every process with their process namespace.
+/// Only the plain Landlock backend leaves a process in a session of its own running after a stop's
+/// group kill, so only its runs have their lineage checked; both bubblewrap backends end every
+/// process with their process namespace.
 #[test]
 fn only_the_plain_landlock_backend_leaves_a_session_of_its_own_running() {
     let (_temp, _project, sandbox, _worktree) = linked();
@@ -534,10 +534,10 @@ fn refusal(detected: Result<LinuxSandbox, SandboxError>) -> String {
     }
 }
 
-/// V243-LINUX-KEEP-FREE-REFUSAL-NAME: a probe that says the kernel cannot hold the
-/// boundary keeps the kernel refusals; any other failure is named, its first line cut to
-/// 200 bytes with no control characters. A network with ports never widens to open; a
-/// closed network keeps its bubblewrap fallback, and without bubblewrap names the reason.
+/// A probe that says the kernel cannot hold the boundary keeps the kernel refusals; any other
+/// failure is named, its first line cut to 200 bytes with no control characters. A network with
+/// ports never widens to open; a closed network keeps its bubblewrap fallback, and without
+/// bubblewrap names the reason.
 #[test]
 fn a_failed_probe_names_its_own_reason_and_only_an_enforcement_answer_names_the_kernel() {
     use std::os::unix::fs::PermissionsExt;
@@ -795,10 +795,10 @@ fn a_set_user_or_set_group_id_bubblewrap_is_never_nested_under() {
     }
 }
 
-/// rv-sa241 SBX-2-R2 LOW-1: where this computer's nest check passes, a launch whose own
-/// nest probe fails is refused with words to try again or restart, instead of running on
-/// the shared network with Landlock rules only while the Agent access page says it is
-/// nested; where the nest check fails too, the launch is a Landlock one, as the page says.
+/// Where this computer's nest check passes, a launch whose own nest probe fails is refused with
+/// words to try again or restart, instead of running on the shared network with Landlock rules only
+/// while the Agent access page says it is nested; where the nest check fails too, the launch is a
+/// Landlock one, as the page says.
 #[test]
 fn a_launch_whose_own_nest_probe_fails_where_this_computer_nests_is_refused() {
     use std::os::unix::fs::PermissionsExt;
@@ -1123,9 +1123,9 @@ fn a_nested_agent_may_have_an_open_network_and_keeps_the_kept_port_check() {
     }
 }
 
-/// A launch whose own probe fails with the setting On runs without the supervisor and
-/// marks the kept host as running none, so the next Agent access page read shows the
-/// wider lines; nothing kept stays nothing (rv-secreview linux-t4c F2).
+/// A launch whose own probe fails with the setting On runs without the supervisor and marks the
+/// kept host as running none, so the next Agent access page read shows the wider lines; nothing
+/// kept stays nothing.
 #[test]
 fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
     let host = LinuxHost {
@@ -1159,9 +1159,9 @@ fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
     assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
 }
 
-/// A supervised launch guards the loopback ports of a limited network under TCP only,
-/// but a port it may also reach on any host or look names up on, always its own git
-/// folders, and signals only where the host holds nothing else (DEC-179 T4c).
+/// A supervised launch guards the loopback ports of a limited network under TCP only, but a port it
+/// may also reach on any host or look names up on, always its own git folders, and signals only
+/// where the host holds nothing else.
 #[test]
 fn a_supervised_launch_carries_each_guard_its_policy_and_host_need() {
     use SandboxRemote::{AnyHost, Loopback};
@@ -1200,9 +1200,9 @@ fn a_supervised_launch_carries_each_guard_its_policy_and_host_need() {
     );
 }
 
-/// The git folders a supervised agent owns are the ones the macOS boundary leaves it:
-/// the top of each tree it works in and, for the engine's worktree step, each folder in
-/// the two worktree folders (DEC-179 T4c, RV-DS241-85b).
+/// The git folders a supervised agent owns are the ones the macOS boundary leaves it: the top of
+/// each tree it works in and, for the engine's worktree step, each folder in the two worktree
+/// folders.
 #[test]
 fn a_supervised_agent_owns_the_git_of_each_tree_it_works_in_and_of_each_engine_worktree() {
     let (temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));

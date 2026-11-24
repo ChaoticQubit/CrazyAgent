@@ -1463,10 +1463,10 @@ mod rate_limits;
 /// the launch fixtures. Output: none; each row asserts.
 mod chatgpt_relay;
 
-/// Builds the Full access boundary a unit row starts in (DEC-102): the project sandbox over
-/// `project`, installed with its home, temp folder and profile in `scratch`, then marked
-/// unconfined, as the integration rows' `full_access` does. Inputs: two canonical, existing
-/// folders. Output: the boundary.
+/// Builds the Full access boundary a unit row starts in: the project sandbox over `project`,
+/// installed with its home, temp folder and profile in `scratch`, then marked unconfined, as the
+/// integration rows' `full_access` does. Inputs: two canonical, existing folders. Output: the
+/// boundary.
 #[cfg(all(test, unix))]
 pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
     use kernel_sandbox::net::SandboxNetwork;
