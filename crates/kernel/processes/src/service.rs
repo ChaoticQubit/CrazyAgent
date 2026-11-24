@@ -1363,6 +1363,8 @@ mod acl;
 /// owners, modes, groups and access lists on Unix, access lists on Windows. Input: a path.
 /// Output: the first such entry, or none.
 mod changeable;
+#[cfg(unix)]
+pub use changeable::changeable_above_socket;
 #[cfg(all(test, unix))]
 use changeable::{Part, first_changeable_part};
 pub use changeable::{changeable_by_others, changeable_past_sticky};
