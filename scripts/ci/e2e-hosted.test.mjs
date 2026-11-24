@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
-import { HOSTED_CONFIGS, NOT_RUN, classify, specRows } from "./e2e-hosted.mjs";
+import { HOSTED_CONFIGS, NOT_RUN, SUITES, classify, fixtureFor, specRows } from "./e2e-hosted.mjs";
 import rowReporter, { rowLine } from "./row-reporter.mjs";
 
 const NATIVE = new URL("../../apps/desktop/test/native/", import.meta.url);
@@ -19,6 +19,17 @@ test("a file no configuration names and that is not a node:test file is unplaced
   const texts = { "a.e2e.mjs": "describe('x')", "b.e2e.mjs": 'import { test } from "node:test";' };
   const sorted = classify(["a.e2e.mjs", "b.e2e.mjs"], [], (file) => texts[file] ?? "");
   assert.deepEqual([sorted.unplaced, sorted.nodeTest], [["a.e2e.mjs"], ["b.e2e.mjs"]]);
+});
+
+test("a file that names the clean-Mac gate feature runs on the gated owner fixture, every other on the plain one", () => {
+  assert.equal(fixtureFor("must be built with --features crazyagent/clean-mac-gate", "/plain", "/gated"), "/gated");
+  assert.equal(fixtureFor("describe('x')", "/plain", "/gated"), "/plain");
+  const sorted = classify(listing.filter((file) => file.endsWith(".e2e.mjs")), listing.filter((file) => file.endsWith(".wdio.conf.mjs")), read);
+  for (const suite of SUITES) assert.ok(sorted.suites.includes(`${suite}.e2e.mjs`), suite);
+  const gated = SUITES.filter((suite) => fixtureFor(read(`${suite}.e2e.mjs`), "/plain", "/gated") === "/gated");
+  assert.deepEqual(gated, ["first-run-harnesses-node", "refused-tool"]);
+  const nodeGated = sorted.nodeTest.filter((file) => fixtureFor(read(file), "/plain", "/gated") === "/gated");
+  assert.deepEqual(nodeGated, []);
 });
 
 test("the spec reporter's rows are read with their spec file and result", () => {
