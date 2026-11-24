@@ -639,7 +639,9 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy() {
     let crashed = names(&root);
     assert_eq!(crashed.len(), 1);
     assert!(root.backups()[0].join(CHECKED).is_file());
-    let crashed_copy = std::fs::read(root.backups()[0].join(DATABASE)).unwrap();
+    let crashed_path = root.backups()[0].join(DATABASE);
+    let crashed_copy = std::fs::read(&crashed_path)
+        .unwrap_or_else(|error| panic!("read the backup {crashed_path:?}: {error}"));
 
     let sources = sources(&root);
     upgrade_at(
@@ -658,7 +660,9 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy() {
     assert_eq!(kept.len(), 2);
     let rerun = kept.iter().find(|name| **name != crashed[0]).unwrap();
     assert_eq!(pinned_name(&root, SystemTime::now()).as_ref(), Some(rerun));
-    let rerun_copy = std::fs::read(root.path().join(BACKUPS).join(rerun).join(DATABASE)).unwrap();
+    let rerun_path = root.path().join(BACKUPS).join(rerun).join(DATABASE);
+    let rerun_copy = std::fs::read(&rerun_path)
+        .unwrap_or_else(|error| panic!("read the backup {rerun_path:?}: {error}"));
     assert_eq!(
         differences(&rerun_copy, &crashed_copy),
         Vec::<usize>::new(),
