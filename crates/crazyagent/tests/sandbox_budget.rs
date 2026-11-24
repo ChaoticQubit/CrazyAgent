@@ -35,19 +35,19 @@ fn timed(row: &str, mut step: impl FnMut()) -> u128 {
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
-fn profile_build_p95() {
+fn profile_build_p95() -> Result<(), Box<dyn std::error::Error>> {
     use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::profile::command::SANDBOX_EXEC;
     use kernel_sandbox::profile::env::agent_command;
     use std::ffi::OsStr;
     use std::path::Path;
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
     let (project, home, tmp) = (root.join("project"), root.join("home"), root.join("tmp"));
     let profiles = root.join("profiles");
     for folder in [&project, &home, &tmp, &profiles] {
-        std::fs::create_dir_all(folder).unwrap();
+        std::fs::create_dir_all(folder)?;
     }
     let profile = profiles.join("agent.sb");
     let base = [("HOME", home.as_os_str()), ("TMPDIR", tmp.as_os_str())];
@@ -67,6 +67,7 @@ fn profile_build_p95() {
         assert_eq!(command.get_program(), SANDBOX_EXEC);
     });
     assert!(profile.is_file());
+    Ok(())
 }
 
 /// Reading one project's saved agent policy from an engine database file, as every launch
@@ -74,17 +75,18 @@ fn profile_build_p95() {
 /// its row. Prints `budget policy_load_p95 p95_us=<n> runs=200`.
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
-fn policy_load_p95() {
+fn policy_load_p95() -> Result<(), Box<dyn std::error::Error>> {
     use crazyagent::sandbox::policy_store;
     use kernel_sandbox::policy::AgentPolicy;
-    let temp = tempfile::tempdir().unwrap();
-    let connection = rusqlite::Connection::open(temp.path().join("engine.db")).unwrap();
+    let temp = tempfile::tempdir()?;
+    let connection = rusqlite::Connection::open(temp.path().join("engine.db"))?;
     let saved = AgentPolicy::default();
-    policy_store::save(&connection, "budget-project", &saved).unwrap();
+    policy_store::save(&connection, "budget-project", &saved)?;
     timed("policy_load_p95", || {
         let loaded = policy_store::load(&connection, "budget-project").unwrap();
         assert_eq!(loaded, saved);
     });
+    Ok(())
 }
 
 /// Building one agent's Linux boundary for a fixed project, as a Linux launch does: the
@@ -95,7 +97,7 @@ fn policy_load_p95() {
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
-fn linux_policy_write_p95() {
+fn linux_policy_write_p95() -> Result<(), Box<dyn std::error::Error>> {
     use kernel_sandbox::linux::launch::LinuxSandbox;
     use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::profile::ProjectSandbox;
@@ -103,11 +105,11 @@ fn linux_policy_write_p95() {
     use std::path::Path;
     use std::process::Command;
     let helper = Path::new(env!("CARGO_BIN_EXE_crazyagent-landlock"));
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
     let (project, home, tmp) = (root.join("project"), root.join("home"), root.join("tmp"));
     for folder in [&project, &home, &tmp] {
-        std::fs::create_dir_all(folder).unwrap();
+        std::fs::create_dir_all(folder)?;
     }
     let harness = Command::new("/bin/true");
     timed("linux_policy_write_p95", || {
@@ -123,4 +125,5 @@ fn linux_policy_write_p95() {
         let command = linux.wrap(&harness).unwrap();
         assert_ne!(command.get_program(), harness.get_program());
     });
+    Ok(())
 }
