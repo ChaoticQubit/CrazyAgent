@@ -856,6 +856,70 @@ fn persistable_keeps_the_copy_of_a_newer_engine_the_data_root_reports() {
     assert_eq!(read(&recorded), "99.0.0\n");
 }
 
+/// The engine copies kept under `<data root>/setup/bin` by a first run, then a bundle whose
+/// `crazyagent` and `crazyagent-runner` bytes changed and a version file naming an older
+/// engine. Output: the folder, the bundled engine, the data root and the copies folder.
+#[cfg(unix)]
+fn changed_bundle() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let root = layout.root().to_path_buf();
+    persistable(&bundled, &root, Some(&mount), &HOOKS).unwrap();
+    let source = bundled.parent().unwrap();
+    write_mode(&source.join("crazyagent"), "crazyagent next bytes", 0o755);
+    write_mode(
+        &source.join("crazyagent-runner"),
+        "crazyagent-runner next bytes",
+        0o755,
+    );
+    std::fs::write(root.join("setup").join("bin-version"), "0.0.1\n").unwrap();
+    let copies = root.join("setup").join("bin");
+    (temp, bundled, mount, root, copies)
+}
+
+/// A refresh that stops while it renames the new copies in has already raised the version
+/// file to this engine's, so an older engine never takes the copies that did land for its
+/// own.
+#[cfg(unix)]
+#[test]
+fn a_refresh_stopped_while_renaming_has_already_raised_the_version_file() {
+    let (_temp, bundled, mount, root, copies) = changed_bundle();
+    std::fs::remove_file(copies.join("crazyagent-runner")).unwrap();
+    std::fs::create_dir_all(copies.join("crazyagent-runner").join("held")).unwrap();
+    assert!(persistable(&bundled, &root, Some(&mount), &HOOKS).is_err());
+    assert_eq!(
+        std::fs::read_to_string(root.join("setup").join("bin-version")).unwrap(),
+        kernel_processes::version::VERSION
+    );
+}
+
+/// A refresh that fails while it stages the new copies renames nothing, leaves the version
+/// file as it was and removes what it staged.
+#[cfg(unix)]
+#[test]
+fn a_refresh_that_fails_while_staging_changes_nothing() {
+    let (_temp, bundled, mount, root, copies) = changed_bundle();
+    let blocked = copies.join(format!(".crazyagent-runner.{}", std::process::id()));
+    std::fs::create_dir_all(blocked.join("held")).unwrap();
+    assert!(persistable(&bundled, &root, Some(&mount), &HOOKS).is_err());
+    assert_eq!(
+        std::fs::read_to_string(root.join("setup").join("bin-version")).unwrap(),
+        "0.0.1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(copies.join("crazyagent")).unwrap(),
+        "crazyagent bytes"
+    );
+    assert!(
+        std::fs::symlink_metadata(copies.join(format!(".crazyagent.{}", std::process::id())))
+            .is_err(),
+        "a staged copy is removed"
+    );
+}
+
 /// DS-118 r1 F1 (rv-code): a refused start removes an installed definition naming a broken
 /// program, so launchd no longer runs a gone, /Volumes or translocated path at login or on a
 /// KeepAlive retry, and keeps a usable one. The service has a label of its own, never the
