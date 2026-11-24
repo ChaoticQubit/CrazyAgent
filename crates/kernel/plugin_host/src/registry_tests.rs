@@ -278,12 +278,32 @@ pub(crate) fn trusted(case: &Case, text: &str) {
     add_text(case, text, false, 1).unwrap();
 }
 
+/// Reads a fixture a row checks. Inputs: its path and the read. Output: what the read
+/// returned; a failed read stops the row naming the path and the I/O error.
+fn fixture<'p, T>(path: &'p Path, read: impl FnOnce(&'p Path) -> std::io::Result<T>) -> T {
+    read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// A fixture read that fails stops the row with the path it read and the I/O error.
+#[test]
+#[should_panic(expected = "missing.toml: No such file")]
+fn a_failed_fixture_read_names_its_path_and_error() {
+    let case = case();
+    fixture(&case.root.join("missing.toml"), std::fs::read);
+}
+
 fn plugin_keys(case: &Case) -> Vec<PathBuf> {
     let keys = case.root.join("plugin-keys");
     let Ok(entries) = std::fs::read_dir(&keys) else {
         return Vec::new();
     };
-    let mut files: Vec<PathBuf> = entries.map(|entry| entry.unwrap().path()).collect();
+    let mut files: Vec<PathBuf> = entries
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("{}: {error}", keys.display()))
+                .path()
+        })
+        .collect();
     files.sort();
     files
 }
@@ -448,12 +468,12 @@ fn add_saves_a_private_file_trusts_it_and_turns_it_on() {
     let folder = case.root.join(FOLDER);
     let plugin_folder = folder.join("acme");
     let file = plugin_folder.join(MANIFEST_FILE);
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), ACME);
+    assert_eq!(fixture(&file, std::fs::read), ACME.as_bytes());
     assert_eq!(
         (mode(&folder), mode(&plugin_folder), mode(&file)),
         (0o700, 0o700, 0o600)
     );
-    assert_eq!(std::fs::read_dir(&plugin_folder).unwrap().count(), 1);
+    assert_eq!(fixture(&plugin_folder, std::fs::read_dir).count(), 1);
     let listing = list(&case.db, &case.engine()).unwrap();
     let acme = plugin(&listing, "acme");
     assert_eq!(
@@ -488,7 +508,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").version, "1.1.0");
     assert_eq!(
-        std::fs::read_dir(case.root.join(FOLDER)).unwrap().count(),
+        fixture(&case.root.join(FOLDER), std::fs::read_dir).count(),
         1,
         "no staged or retired folder is left"
     );
@@ -550,7 +570,10 @@ fn add_copies_only_the_reviewed_content() {
     assert!(!case.root.join(FOLDER).join("acme").exists());
     add(&case.db, &case.engine(), &source, &sha(ACME), false, 5).unwrap();
     assert_eq!(
-        std::fs::read(case.root.join(FOLDER).join("acme").join(MANIFEST_FILE)).unwrap(),
+        fixture(
+            &case.root.join(FOLDER).join("acme").join(MANIFEST_FILE),
+            std::fs::read
+        ),
         ACME.as_bytes()
     );
 }
@@ -612,7 +635,7 @@ fn a_left_over_yaml_plugin_is_listed_refused_and_kept() {
     );
     assert!(legacy.is_file());
     assert_eq!(
-        std::fs::read_to_string(&legacy).unwrap(),
+        fixture(&legacy, std::fs::read_to_string),
         "schema: 1\nkind: embedding\nname: acme\n"
     );
     remove(&case.db, &case.engine(), "acme").unwrap();
@@ -1091,7 +1114,7 @@ fn a_key_entered_for_a_plugin_is_a_private_file_replaced_in_place_and_deleted_on
     )
     .unwrap();
     assert_eq!(plugin_keys(&case), files);
-    assert_eq!(std::fs::read(&files[0]).unwrap(), b"pa-second-key-002");
+    assert_eq!(fixture(&files[0], std::fs::read), b"pa-second-key-002");
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::Key);
     assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
@@ -1370,7 +1393,7 @@ fn the_start_sweep_deletes_staged_leftovers_and_keeps_saved_keys_and_files() {
         assert!(!leftover.exists(), "{}", leftover.display());
     }
     assert_eq!(plugin_keys(&case), kept);
-    assert_eq!(std::fs::read(&kept[0]).unwrap(), b"sk-kept-key-00001");
+    assert_eq!(fixture(&kept[0], std::fs::read), b"sk-kept-key-00001");
     assert!(plugins.join("acme").join(MANIFEST_FILE).is_file());
     let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
     assert_eq!(loaded.bindings.len(), 1);
