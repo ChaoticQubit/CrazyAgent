@@ -41,6 +41,7 @@ const NOTICES_MAX: usize = 64;
 const INTRO: &str = "Plugins CrazyAgent itself runs, such as the embedding models search ranks with. Each one shows what it reaches before you approve it.";
 const ABSOLUTE: &str = "Type the full path of the plugin folder, starting with /.";
 const PATH_LONG: &str = "A folder path can be at most 1024 characters.";
+const TURNING_OFF: &str = "Turning it off...";
 const PATH_CHANGED: &str =
     "The path changed while it was being checked. Press Enter to check it again.";
 
@@ -637,7 +638,9 @@ impl AppPluginsPage {
                 let last = trust_lines(trust, usize::from(MODAL_WIDTH) - 4).len();
                 *scroll = (*scroll + 1).min(last.saturating_sub(1));
             }
-            (Open::TurnOff(form), Key::Tab | Key::BackTab) => form.choice = other(form.choice),
+            (Open::TurnOff(form), Key::Tab | Key::BackTab) if idle => {
+                form.choice = other(form.choice);
+            }
             (Open::Trust { approve: true, .. }, Key::Char('y')) if idle => self.confirm(ctx),
             (Open::Remove { .. } | Open::TurnOff(_), Key::Char('y')) if idle => {
                 self.confirm(ctx);
@@ -1375,6 +1378,11 @@ impl Screen for AppPluginsPage {
                     vec![hint("y", "Remove"), hint("Esc", "Cancel")],
                 )
             }
+            Open::TurnOff(form) if self.pending.is_some() => (
+                format!("Turn off {}?", form.title),
+                [vec![TURNING_OFF.to_owned()], turn_off_lines(form, room)].concat(),
+                vec![hint("Esc", "Close")],
+            ),
             Open::TurnOff(form) => (
                 format!("Turn off {}?", form.title),
                 turn_off_lines(form, room),

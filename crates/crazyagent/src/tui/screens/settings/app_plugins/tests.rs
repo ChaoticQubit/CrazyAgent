@@ -1303,7 +1303,7 @@ fn a_turn_off_sent_with_y_shows_it_is_saving_and_offers_no_keep_on() {
     shell.key(Key::Char('y'));
     let job = one(&mut shell);
     assert!(!bar(&mut shell).contains("Keep on"), "{}", bar(&mut shell));
-    assert!(shows(&mut shell, "Turning it off..."));
+    assert!(shows(&mut shell, TURNING_OFF));
     shell.key(Key::Esc);
     assert!(requests(&mut shell).is_empty(), "Esc sends no cancel");
     answer(&mut shell, &mut fake, job);
