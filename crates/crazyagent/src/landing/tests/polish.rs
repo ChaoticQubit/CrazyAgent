@@ -823,10 +823,10 @@ fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
-/// A folder the owner saves hidden while the lockfile tool's version probe runs, and that the
-/// sandbox did not hide at its start, refuses the set even when every tool run exits on its
-/// own before its stop reads the saved folders again: nothing is committed, the set goes back
-/// to its agent and no process of the run is left.
+/// A folder the owner saves hidden while the lockfile tool's version probe waits for the row's
+/// signal, and that the sandbox did not hide at its start, refuses the set even when every
+/// tool run then exits on its own before its stop reads the saved folders again: nothing is
+/// committed, the set goes back to its agent and no process of the run is left.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuses_the_set() {
@@ -835,7 +835,7 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
     let token = token(&case);
     stand_in_cargo(
         &case,
-        &format!("/usr/bin/perl -e 'select(undef, undef, undef, 0.4)' {token}"),
+        &format!("/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; sleep 60' {token}"),
         "",
         Duration::from_secs(90),
     );
@@ -865,6 +865,15 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
         &[case.repo.join("secret")],
     )
     .unwrap();
+    let released = kernel_processes::spawn_gate::status(
+        Command::new("/usr/bin/pkill")
+            .args(["-USR1", "-f", &token])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(released.success(), "the version probe was waiting");
     let set = set_within(&case, &id, Duration::from_secs(15), |set| {
         set.state == ChangeState::Updating || regenerated(&case, set)
     });
