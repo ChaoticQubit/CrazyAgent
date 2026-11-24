@@ -400,6 +400,30 @@ fn retiring_the_old_appimage_copy_leaves_a_link_to_another_engine_alone() {
     assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), other);
 }
 
+/// An old copy that is itself a link to another engine is not the old copy: whoever can
+/// write `<data root>/bin` cannot make retiring point a command line link that names that
+/// other engine at the new copy. The link stays as it was, and so does the file it names.
+#[cfg(unix)]
+#[test]
+fn retiring_leaves_a_link_alone_when_the_old_copy_only_links_to_its_engine() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = old_copy(&layout);
+    let other = bundle(&temp.path().join("other"));
+    std::fs::remove_file(&old).unwrap();
+    std::os::unix::fs::symlink(&other, &old).unwrap();
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(&other, cli.join("crazyagent")).unwrap();
+    let installed = persistable(&bundled, layout.root(), Some(&mount), &HOOKS).unwrap();
+    retire_old_copies_with(layout.root(), &installed, Some(&cli), &HOOKS);
+    assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), other);
+    assert!(other.is_file(), "the engine the old copy linked to stays");
+}
+
 #[cfg(unix)]
 #[test]
 fn persistable_never_copies_from_a_folder_other_users_can_change_and_install_refuses_it() {
