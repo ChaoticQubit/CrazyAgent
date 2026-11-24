@@ -74,6 +74,24 @@ fn binding(home: &Path) -> PathBuf {
     home.join("stand-in-binding")
 }
 
+/// Stands in for the agent home's pinned entries, each folder ahead of what it holds: the
+/// folders a launch keeps only part of, cargo's registry link and each config folder, as
+/// the profile requires of every hooks value. Output: the paths below the home.
+fn pinned() -> Vec<String> {
+    ["Library", ".cargo", ".cargo/registry", ".config"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+/// Stands in for the agent home's entries a launch keeps whole: its state folder, lock and
+/// relay folder, so the profile's flag and ACL deny names each. Output: the paths below the
+/// home.
+fn kept() -> Vec<String> {
+    ["stand-in-state", "stand-in.lock", "stand-in-relay"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
 pub(crate) static ACCESS: AccessHooks = AccessHooks {
     owner_git: no_owner_git,
     harness_folders: Vec::new,
@@ -103,8 +121,8 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     zsh_startup: &[".zshrc"],
     zsh_compiled: ".zwc",
     sh_startup: &[".profile"],
-    pinned_entries: Vec::new,
-    kept_entries: Vec::new,
+    pinned_entries: pinned,
+    kept_entries: kept,
     relay_lead_part: "stand-in-lead",
     relay_plugin_folder: "stand-in-relay",
     relay_roster_file: "stand-in-roster",
@@ -116,7 +134,7 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     node_prefix: no_node,
     launch_state: "stand-in-state",
     launch_lock: "stand-in.lock",
-    codex_system_skills: "stand-in-skills",
+    codex_system_skills: ".bundle",
     crazyagent_directory: ".stand-in",
     binding_path: binding,
     mailbox_folder: "stand-in-mailbox",
