@@ -43,6 +43,10 @@ fn tree_removed(_folder: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn startup_removed(_home: &Path, _root: &Path) -> Result<(), &'static str> {
+    Ok(())
+}
+
 /// Stands in for every name check: no. Input: the name. Output: false.
 fn never(_name: &str) -> bool {
     false
@@ -80,6 +84,7 @@ pub(crate) static ACCESS: AccessHooks = AccessHooks {
 static TOOLCHAIN: ToolchainHooks = ToolchainHooks {
     remove_home_entry: removed,
     sandboxed_git: system_git,
+    remove_shell_startup: startup_removed,
     mates_home,
     launch_state: "stand-in-state",
     remove_agent_tree: tree_removed,

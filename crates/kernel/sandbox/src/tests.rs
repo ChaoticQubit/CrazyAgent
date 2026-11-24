@@ -229,3 +229,46 @@ fn confinement_equals_the_values_crazyagent_built() {
         assert_eq!((confinement.unkept_pane)(&plain), None);
     }
 }
+
+/// A Sandboxed IDE terminal names its own folder under the engine data root after the
+/// project, so the kernel refuses, before it writes anything, every project that is not a
+/// project id: empty, `.`, `..`, a nested path, an absolute path, a trailing dot, a space,
+/// a quote, a newline or `..` inside a name.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_refuses_a_project_that_is_not_one_folder_name() {
+    use crate::error::SandboxError;
+    use crate::ide_shell::{Launch, command};
+    use crate::policy::{AgentAccess, AgentFilesRule, AgentNetwork};
+    let scratch = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(scratch.path()).unwrap();
+    let (root, folder) = (base.join("data"), base.join("project"));
+    for path in [&root, &folder] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    for project in [
+        "", ".", "..", "a/b", "../p", "/p", "p.", "p q", "p\"q", "p\nq", "a..b",
+    ] {
+        let launch = Launch {
+            root: &root,
+            project,
+            folder: &folder,
+            cwd: &folder,
+            shell: Path::new("/bin/zsh"),
+            arguments: &[],
+            incoming: &[],
+            extra_reads: &[],
+            level: AgentAccess::Sandboxed,
+            network: AgentNetwork::default(),
+            kept_ports: &[],
+            agent_files: AgentFilesRule::default(),
+        };
+        match command(&crate::test_hooks::STAND_IN, &launch) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert_eq!(reason, "the project id is not a folder name", "{project:?}")
+            }
+            other => panic!("{project:?} gave {other:?}"),
+        }
+        assert!(!root.join("ide-shell").exists(), "{project:?}");
+    }
+}
