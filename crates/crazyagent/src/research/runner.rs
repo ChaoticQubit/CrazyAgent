@@ -1,5 +1,5 @@
 use super::accounts::PROFILE_BUSY;
-use super::jobs::{JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
+use super::jobs::{ATTEMPTS_MAX, JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
 use crate::agents::{Agents, Hold, Holder};
 use crate::config::ModelConnection;
 use crate::engine::bootstrap::{AgentCredential, NativeProfileUse, NativeProfileUsePurpose};
@@ -204,7 +204,7 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 const SETUP_TIMED_OUT: &str = "setup_timed_out";
 #[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
-const RUNS_PER_ATTEMPT_MAX: u32 = 100;
+pub(crate) const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
@@ -1864,18 +1864,17 @@ impl ResearchRunner {
         }))
     }
 
-    /// Names this launch of a job so it never reuses the agent state or the
-    /// worktree of an earlier launch, such as one an engine stop interrupted
-    /// without spending its attempt. Takes the project folder and the job.
-    /// Returns the agent state name and the worktree path, or an error after
-    /// `RUNS_PER_ATTEMPT_MAX` launches of the same attempt.
+    /// Names a launch of a job that reuses no earlier launch's agent state or worktree.
+    /// Takes the project folder and the job. Returns the agent state name and worktree path,
+    /// or an error for an attempt outside `1..=ATTEMPTS_MAX` or past `RUNS_PER_ATTEMPT_MAX`.
     fn free_run(&self, root: &Path, job: &ResearchJob) -> Result<(String, PathBuf), RunError> {
+        if !(1..=ATTEMPTS_MAX).contains(&job.attempts) {
+            return Err(RunError::Invalid("research attempt out of range".into()));
+        }
         for launch in 0..RUNS_PER_ATTEMPT_MAX {
-            let suffix = if launch == 0 {
-                String::new()
-            } else {
-                format!("-{launch}")
-            };
+            let suffix = (launch > 0)
+                .then(|| format!("-{launch}"))
+                .unwrap_or_default();
             let name = format!("job-{}-{}{suffix}", job.id, job.attempts);
             let worktree = crate::projects_home::state_folder(root)
                 .join("worktrees")

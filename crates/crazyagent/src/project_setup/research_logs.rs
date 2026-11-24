@@ -19,7 +19,7 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
     ) else {
         return Ok(Vec::new());
     };
-    let Some(run) = latest_run(&agents, job)? else {
+    let Some(run) = latest_run(&directory, job)? else {
         return Ok(Vec::new());
     };
     let Ok(run) = open_directory(&directory, &run) else {
@@ -76,38 +76,25 @@ pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineEr
 }
 
 /// Names the newest run folder of a research job in the runner's agent state.
-/// Takes the agents folder and the job id; run folders are named job-<id>-<attempt> with an
-/// optional -<launch>. Returns the highest attempt and launch, or none before any run.
+/// Takes the open agents folder and the job id; run folders are named job-<id>-<attempt> with
+/// an optional -<launch>, both bounded by the runner, so each name is probed newest first and
+/// no other entry can hide it. Returns the highest attempt and launch, or none before any run.
 #[cfg(unix)]
-fn latest_run(agents: &Path, job: i64) -> Result<Option<String>, EngineError> {
-    let prefix = format!("job-{job}-");
-    let mut latest: Option<((u32, u32), String)> = None;
-    for entry in std::fs::read_dir(agents)
-        .map_err(error)?
-        .take(RESEARCH_RUNS_SCANNED_MAX)
-    {
-        let Ok(name) = entry.map_err(error)?.file_name().into_string() else {
-            continue;
-        };
-        let Some(rest) = name.strip_prefix(prefix.as_str()) else {
-            continue;
-        };
-        let mut parts = rest.split('-');
-        let attempt = parts.next().and_then(|part| part.parse::<u32>().ok());
-        let launch = parts
-            .next()
-            .map_or(Some(0), |part| part.parse::<u32>().ok());
-        let (Some(attempt), Some(launch), None) = (attempt, launch, parts.next()) else {
-            continue;
-        };
-        if latest
-            .as_ref()
-            .is_none_or(|(order, _)| (attempt, launch) > *order)
-        {
-            latest = Some(((attempt, launch), name));
+fn latest_run(agents: &Directory, job: i64) -> Result<Option<String>, EngineError> {
+    for attempt in (1..=crate::research::jobs::ATTEMPTS_MAX).rev() {
+        for launch in (0..crate::research::runner::RUNS_PER_ATTEMPT_MAX).rev() {
+            let suffix = (launch > 0)
+                .then(|| format!("-{launch}"))
+                .unwrap_or_default();
+            let name = format!("job-{job}-{attempt}{suffix}");
+            match rustix::fs::statat(agents, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => return Ok(Some(name)),
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(problem) => return Err(error(problem)),
+            }
         }
     }
-    Ok(latest.map(|(_, name)| name))
+    Ok(None)
 }
 
 /// Turns one raw agent log line into one plain line, secrets not yet hidden: control
