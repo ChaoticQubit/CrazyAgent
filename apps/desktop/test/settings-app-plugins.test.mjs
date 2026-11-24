@@ -230,3 +230,8 @@ test("App plugins: a change waiting on the database is a warning on the page and
     assert.match(refused, /<div class="notice danger" role="alert">(?:(?!<\/div>).)*<div>Refused\.<\/div>/u);
   }
 });
+
+test("App plugins: a request refused because CrazyAgent was busy says so in the app's busy sentence and stays danger", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_busy" }), "CrazyAgent is busy with other requests. Try again in a moment.");
+  assert.equal(api.failureTone("owner_busy"), "danger");
+});
