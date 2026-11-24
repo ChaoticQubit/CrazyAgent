@@ -116,11 +116,13 @@ pub enum InstallRecipe {
     },
 }
 
-/// What one install run gave back: its exit code and its output, bounded by the caller.
+/// What one install run gave back: its exit code, the last bytes of its standard output and
+/// the last bytes of its standard error, each bounded by the runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallResult {
     pub code: u32,
     pub output: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 /// Whether a text is a plain harness name: it starts with a lower-case letter or a digit
