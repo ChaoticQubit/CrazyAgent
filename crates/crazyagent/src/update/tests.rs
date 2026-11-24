@@ -206,8 +206,12 @@ fn function_holding<'a>(path: &Path, text: &'a str, at: usize) -> &'a str {
     &text[start..at]
 }
 
+/// Says whether a source is test code the install scan skips: a file under a `tests` or
+/// `perf_tests` folder, or one whose name ends in `tests.rs`. Input: the source's path.
+/// Output: true for test code.
 fn test_source(path: &Path) -> bool {
-    path.components().any(|part| part.as_os_str() == "tests")
+    path.components()
+        .any(|part| part.as_os_str() == "tests" || part.as_os_str() == "perf_tests")
         || path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().ends_with("tests.rs"))
@@ -257,6 +261,16 @@ fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
     let text = "use kernel_processes::{update, process};\n\nfn sneak() {\n    swap(&a, &b);\n}\n";
     let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
     assert_eq!(found, vec!["\nfn sneak() {\n    swap("]);
+}
+
+/// A file in a `perf_tests` folder is test code to the install scan, and a plain source
+/// beside it is not, so a timing row never reads as an install path.
+#[test]
+fn a_perf_tests_folder_is_test_code_to_the_install_scan() {
+    let timing = Path::new("/repo/crates/kernel/processes/src/perf_tests/update.rs");
+    let shipped = Path::new("/repo/crates/kernel/processes/src/update.rs");
+    assert!(test_source(timing));
+    assert!(!test_source(shipped));
 }
 
 /// Every install step that writes a release over the running app is reached only after its

@@ -245,6 +245,7 @@ fn for_test_names_stay_in_test_files() {
         }
         let shown = file.to_string_lossy().replace('\\', "/");
         let test_file = shown.contains("/tests/")
+            || shown.contains("/perf_tests/")
             || shown.ends_with("/tests.rs")
             || shown.ends_with("_tests.rs");
         if test_file {
