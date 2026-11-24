@@ -21,6 +21,7 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
 fn private_scratch() -> (tempfile::TempDir, PathBuf) {
     let folder = crate::service::test_support::durable_folder();
     let real = folder.path().canonicalize().unwrap();
+    assert_eq!(crate::service::changeable_by_others(&real), None);
     (folder, real)
 }
 
