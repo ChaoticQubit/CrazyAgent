@@ -6,7 +6,7 @@ use std::path::Path;
 const ADMIN_GROUP: u32 = 80;
 
 /// The macOS daemon group, whose only member is root; it owns /private/var/run, where
-/// nix-darwin's /run link leads (RV-DS241-140 r4).
+/// nix-darwin's /run link leads.
 #[cfg(target_os = "macos")]
 const DAEMON_GROUP: u32 = 1;
 

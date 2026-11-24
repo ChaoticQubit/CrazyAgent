@@ -75,8 +75,8 @@ fn refusal_of(entry: &Path, places: &Places) -> Option<(PathBuf, Refusal)> {
 /// setting or a flag other than -S, an `env` other than /usr/bin/env, a relative interpreter,
 /// one with a `..` part, a line that is not UTF-8, a line longer than the part read, and
 /// `/usr/bin/env` reached as the program `env` runs or through a link of another name, plus
-/// a CRLF line end, more words than the reader keeps and an `-S` program holding `$`
-/// (B11 r2 N1), each as [`Refusal::FirstLine`].
+/// a CRLF line end, more words than the reader keeps and an `-S` program holding `$`,
+/// each as [`Refusal::FirstLine`].
 /// `env -S` still resolves (`shebang_flags_and_absolute_interpreters_are_kept`).
 #[test]
 fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
@@ -382,7 +382,7 @@ fn a_probed_folder_in_a_temp_folder_is_refused_on_the_engine_places() {
     }
 }
 
-/// 2.4.1 r2 RH2-L1: a file found through a place outside every temp folder whose real file
+/// A file found through a place outside every temp folder whose real file
 /// lies in one, such as an owner link in `~/.local/bin` into the temp folder, leads into
 /// temp; one whose place is itself in a temp folder, or whose real file is not, does not.
 #[test]

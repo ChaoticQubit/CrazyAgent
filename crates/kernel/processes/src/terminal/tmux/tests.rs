@@ -1212,7 +1212,7 @@ fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
     }
 }
 
-/// Keeper r1 KP-L3: a pane's keeper is a perl outside the sandbox, so no pane command may
+/// A pane's keeper is a perl outside the sandbox, so no pane command may
 /// carry a variable that makes perl load code from elsewhere, in any letter case.
 #[test]
 fn a_pane_command_with_a_perl_load_variable_is_refused() {
@@ -2021,7 +2021,7 @@ fn kill_pane_ends_only_that_pane_and_refuses_the_last_and_a_foreign_one() {
 
 /// A process group a test read from a pane, killed when the test ends unless the test saw
 /// it gone, so a failing check leaves no stand-in process running and a group number that
-/// answered ESRCH is never signalled (r1 SG-L1).
+/// answered ESRCH is never signalled.
 #[cfg(target_os = "macos")]
 struct Group(rustix::process::Pid, std::cell::Cell<bool>);
 
@@ -2250,7 +2250,7 @@ fn close_ends_every_process_in_the_server_pane_groups() {
     assert!(gone(&group, child), "the outside pane's group is gone");
 }
 
-/// A group that once answered ESRCH is never tested or signalled again (r1 SG-L1): its
+/// A group that once answered ESRCH is never tested or signalled again: its
 /// number is free, and a new group may take it while another group of the same stop still
 /// ends. One real group ended and was reaped before the call, one real group lives until
 /// its KILL.
@@ -2319,7 +2319,7 @@ fn a_group_once_gone_is_never_tested_or_signalled_again() {
     guard.1.set(true);
 }
 
-/// Stops in a row do not each wait out the hangup grace (r1 SG-L2): the team tick ends the
+/// Stops in a row do not each wait out the hangup grace: the team tick ends the
 /// panes of three agents whose children ignore the hangup in less than one grace, and every
 /// group is still ended.
 #[cfg(target_os = "macos")]
@@ -2365,8 +2365,8 @@ fn stops_in_a_row_wait_less_than_one_hangup_grace() {
     }
 }
 
-/// Closing the server waits about one hangup grace for all its panes, not one per pane
-/// (r1 SG-L2), and returns only once every group is gone, as the engine's shutdown needs.
+/// Closing the server waits about one hangup grace for all its panes, not one per pane,
+/// and returns only once every group is gone, as the engine's shutdown needs.
 #[cfg(target_os = "macos")]
 #[test]
 fn close_waits_one_hangup_grace_for_all_its_panes() {
@@ -3173,7 +3173,7 @@ fn host_with_agents(home: &Path, ids: &[i64]) -> (Tmux, Server) {
 
 /// Live views count per pane, not per tmux server: eight views of one agent leave room for
 /// a view of another agent on the engine's same server, as a nine-tile wall needs, while a
-/// ninth view of that same pane is still refused (RV-DS241-96).
+/// ninth view of that same pane is still refused.
 #[cfg(target_os = "macos")]
 #[test]
 fn views_count_per_pane_so_eight_of_one_agent_leave_room_for_another() {
@@ -3193,7 +3193,7 @@ fn views_count_per_pane_so_eight_of_one_agent_leave_room_for_another() {
 }
 
 /// A view of a teammate pane ends once that pane closes while its window stays, so a closed
-/// pane keeps no frozen view holding a view slot (RV-DS241-98).
+/// pane keeps no frozen view holding a view slot.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_view_of_a_closed_pane_ends_though_its_window_stays() {

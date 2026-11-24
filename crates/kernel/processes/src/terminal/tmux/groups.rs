@@ -10,7 +10,7 @@ impl Tmux {
     /// the user's account. `kill`, `kill_pane` and the server's close go through here. A
     /// command never sent ends no group; one whose answer failed ends only the groups of the
     /// panes no longer open. Takes the control, the open panes the command closes and the
-    /// command. Returns the command's answer at once; a reaper ends the groups (r1 SG-L2).
+    /// command. Returns the command's answer at once; a reaper ends the groups.
     pub(super) fn close_panes(
         &self,
         control: &Control,
@@ -155,7 +155,7 @@ impl Tmux {
 /// background stay. A pane whose first process ended or leads no group of its own gives
 /// none, so a stop never signals a group it did not read from its pane. A group another
 /// path holds, as the session stop that ends this pane, is left to that path, so one group
-/// is signalled from one path only (CB-2 one signal). Takes the panes. Returns the holds on
+/// is signalled from one path only. Takes the panes. Returns the holds on
 /// their groups.
 pub(super) fn pane_groups(panes: &[PaneInfo]) -> Vec<Ending> {
     assert!(panes.len() <= PANES_LISTED_MAX);
@@ -177,8 +177,8 @@ pub(super) fn pane_groups(panes: &[PaneInfo]) -> Vec<Ending> {
 /// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
 /// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group,
 /// and a group that answered ESRCH once is never tested or signalled again: its number may
-/// lead a new group by then (r1 SG-L1); its hold is marked gone and dropped then, so the
-/// number stays refused to later paths (CB-2 r1 F1). Takes the holds `pane_groups` took
+/// lead a new group by then; its hold is marked gone and dropped then, so the
+/// number stays refused to later paths. Takes the holds `pane_groups` took
 /// before their panes closed.
 pub(super) fn end_groups(groups: Vec<Ending>) {
     end_groups_with(
@@ -217,7 +217,7 @@ pub(super) fn end_groups_with(
 }
 
 /// Keeps the holds whose group still answers `left` and marks every other one gone, so
-/// its number stays refused to later paths once dropped (CB-2 r1 F1). Takes the holds and
+/// its number stays refused to later paths once dropped. Takes the holds and
 /// the test.
 pub(super) fn keep_left(
     groups: &mut Vec<Ending>,

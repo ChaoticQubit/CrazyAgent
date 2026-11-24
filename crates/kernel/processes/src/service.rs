@@ -670,10 +670,10 @@ WantedBy=default.target\n",
     /// What to do with the engine service when no engine answers. Another program the
     /// installed definition runs that still exists and the `bundled` engine may not replace
     /// ([`Self::may_replace`], judged on the app's own engine and not on an AppImage's private
-    /// copy) is kept on a forced reinstall and started as it is otherwise (RV-DS241-129, DS-118
-    /// r2 F1). So is any usable definition while this service runs such a private copy, one
+    /// copy) is kept on a forced reinstall and started as it is otherwise.
+    /// So is any usable definition while this service runs such a private copy, one
     /// path every AppImage shares, which keeps a newer engine's bytes while one is known there
-    /// ([`newer_engine_at`], [`persistable`], DS-118 r3 F1). Else this definition is installed
+    /// ([`newer_engine_at`], [`persistable`]). Else this definition is installed
     /// when asked, when none is installed, when the installed one names a broken program
     /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`] or
     /// [`Self::throttled`]; otherwise the installed one starts as it is. An engine that is
@@ -1003,7 +1003,7 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// one ([`retire_old_copies`]). The version written goes in `<data root>/setup/bin-version`,
 /// and while a newer engine is known there ([`newer_engine_at`]) this user's private copy is
 /// kept as it is, so an older AppImage never puts its bytes over the engine every AppImage
-/// runs there (DS-118 r3 F1). Nothing is ever copied from another folder, so an engine other
+/// runs there. Nothing is ever copied from another folder, so an engine other
 /// users can change is returned as it is and refused where it would be kept. Inputs: the
 /// bundled engine, the data root, the AppImage mount folder when there is one and the engine's
 /// checks. Output: the executable to keep.
