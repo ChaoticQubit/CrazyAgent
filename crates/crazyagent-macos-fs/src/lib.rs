@@ -545,16 +545,30 @@ pub struct AccessList {
 /// Reads one entry's extended access list with `getattrlist` and `FSOPT_NOFOLLOW`, so a
 /// link's own list is read and never its target's, and the list comes with the device, file
 /// id and change time of the object it was read from. A second `getattrlist` of the same path,
-/// also not following a link, must name the same device and a volume that keeps access lists,
-/// since an entry on a volume without them returns none, as an entry with no list does. No
-/// right on the entry itself is needed, only search on the folders above it. Safety contract
-/// of its unsafe calls: the path is a valid C string, and each attribute list and reply buffer
-/// is a local that outlives its call, whose length is passed as the buffer's own. Input: the
-/// path. Output: the list, or an error for a call that failed, a reply cut short or out of
-/// shape, or a volume without access lists or a device that moved between the two calls.
+/// also not following a link, must name a volume that keeps access lists, since an entry on a
+/// volume without them returns none, as an entry with no list does, and the entry's own
+/// device or, as the sealed system volume reads, the device pair `/` itself reads
+/// ([`root_pair`]). No right on the entry itself is needed, only search on the folders above
+/// it. Input: the path. Output: the list, or an error for a call that failed, a reply cut short
+/// or out of shape, or a volume without access lists or another device.
+#[cfg(target_os = "macos")]
+pub fn access_list(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
+    let read = entry_read(path)?;
+    let volume = volume_read(path)?;
+    if !volume_keeps_lists(&volume, read.device, root_pair()) {
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+    }
+    Ok(read)
+}
+
+/// The first call of [`access_list`]: the entry's access list, device, file id and change
+/// time, read without following a link. Safety contract of its unsafe call: the path is a
+/// valid C string, and the attribute list and reply buffer are locals that outlive the call,
+/// whose length is passed as the buffer's own. Input: the path. Output: the list, or an error
+/// for a call that failed or a reply cut short or out of shape.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-pub fn access_list(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
+fn entry_read(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
     let mut list = libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
@@ -579,7 +593,17 @@ pub fn access_list(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
     if done != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let read = entry_reply(&reply)?;
+    entry_reply(&reply)
+}
+
+/// The second call of [`access_list`]: the device and capabilities of the volume the path
+/// sits on, read without following a link. Safety contract of its unsafe call: the path is a
+/// valid C string, and the attribute list and reply buffer are locals that outlive the call,
+/// whose length is passed as the buffer's own. Input: the path. Output: the raw reply, or the
+/// error of a call that failed.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn volume_read(path: &std::ffi::CStr) -> std::io::Result<[u8; VOLUME_REPLY_BYTES]> {
     let mut volume = libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
@@ -589,23 +613,38 @@ pub fn access_list(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
         fileattr: 0,
         forkattr: 0,
     };
-    let mut volume_reply = [0u8; VOLUME_REPLY_BYTES];
+    let mut reply = [0u8; VOLUME_REPLY_BYTES];
     let done = unsafe {
         libc::getattrlist(
             path.as_ptr(),
             (&raw mut volume).cast(),
-            volume_reply.as_mut_ptr().cast(),
-            volume_reply.len(),
+            reply.as_mut_ptr().cast(),
+            reply.len(),
             libc::FSOPT_NOFOLLOW,
         )
     };
     if done != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    if !volume_keeps_lists(&volume_reply, read.device) {
-        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
-    }
-    Ok(read)
+    Ok(reply)
+}
+
+/// The device `/` itself reads in an entry call and in a volume call, read once. On a sealed
+/// system volume the two differ, and every entry there reads that same pair; elsewhere they
+/// are equal and the pair adds nothing. It is read from `/` only, never from a path under
+/// test. Output: the pair, or none when either read of `/` failed or came back out of shape,
+/// so no mismatch is ever let through.
+#[cfg(target_os = "macos")]
+fn root_pair() -> Option<(u64, u64)> {
+    static PAIR: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+    *PAIR.get_or_init(|| {
+        let entry = entry_read(c"/").ok()?;
+        let volume = volume_read(c"/").ok()?;
+        if u32_at(&volume, 0)? as usize != VOLUME_REPLY_BYTES {
+            return None;
+        }
+        Some((entry.device, device_at(&volume, 4)?))
+    })
 }
 
 /// The native-endian `u32` at `at`, if the bytes hold it. Inputs: the bytes and the offset.
@@ -726,12 +765,14 @@ fn filesec_entries(filesec: &[u8]) -> std::io::Result<Vec<AccessEntry>> {
     Ok(entries)
 }
 
-/// Whether a volume reply of `getattrlist` names the entry's device and a volume that keeps
-/// extended access lists: the length must be the reply's, and the capability both valid and
-/// set. Inputs: the reply and the device the entry was read on. Output: the answer, false
-/// for a reply out of shape.
+/// Whether a volume reply of `getattrlist` names the entry's device, or the one other device
+/// `/` itself pairs with it ([`root_pair`]), and a volume that keeps extended access lists:
+/// the length must be the reply's, and the capability both valid and set. Any other device
+/// reads as not keeping them. Inputs: the reply, the device the entry was read on, and the
+/// root's pair, none when it could not be read. Output: the answer, false for a reply out of
+/// shape.
 #[cfg(target_os = "macos")]
-fn volume_keeps_lists(reply: &[u8], device: u64) -> bool {
+fn volume_keeps_lists(reply: &[u8], device: u64, root: Option<(u64, u64)>) -> bool {
     let interfaces = libc::VOL_CAPABILITIES_INTERFACES * 4;
     let (Some(length), Some(on), Some(set), Some(valid)) = (
         u32_at(reply, 0),
@@ -742,7 +783,7 @@ fn volume_keeps_lists(reply: &[u8], device: u64) -> bool {
         return false;
     };
     length as usize == VOLUME_REPLY_BYTES
-        && on == device
+        && (on == device || root == Some((device, on)))
         && set & valid & libc::VOL_CAP_INT_EXTENDED_SECURITY != 0
 }
 
@@ -1037,30 +1078,71 @@ mod tests {
         let length = u32::try_from(super::VOLUME_REPLY_BYTES).unwrap();
         assert!(super::volume_keeps_lists(
             &volume_reply(length, 5, lists, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 6, lists, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 5, 0, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 5, lists, 0),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length - 4, 5, lists, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 5, lists, lists)[..20],
-            5
+            5,
+            None
         ));
         let negative = volume_reply(length, -2, lists, lists);
-        assert!(super::volume_keeps_lists(&negative, u64::MAX - 1));
+        assert!(super::volume_keeps_lists(&negative, u64::MAX - 1, None));
+    }
+
+    /// On a sealed system volume the volume reply names another device than the entry's, as
+    /// `/` itself reads: that one pair, read from `/`, keeps lists when the capability is set,
+    /// and any other device the volume reply names still reads as not keeping them.
+    #[test]
+    fn a_volume_keeps_lists_for_the_root_s_own_device_pair_and_no_other() {
+        let lists = libc::VOL_CAP_INT_EXTENDED_SECURITY;
+        let length = u32::try_from(super::VOLUME_REPLY_BYTES).unwrap();
+        let root = Some((5, 9));
+        assert!(super::volume_keeps_lists(
+            &volume_reply(length, 9, lists, lists),
+            5,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 7, lists, lists),
+            5,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 9, lists, lists),
+            6,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 9, 0, lists),
+            5,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 9, lists, lists),
+            5,
+            None
+        ));
     }
 
     /// The GUIDs of root, wheel, daemon and admin are the well-known ones, and this user's
