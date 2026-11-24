@@ -8,17 +8,18 @@ const SECRET: &[u8] = b"mcp-config-secret-fixture-7340";
 static WATCHING: AtomicBool = AtomicBool::new(false);
 static FREED_WITH_SECRET: AtomicUsize = AtomicUsize::new(0);
 
-/// The system allocator, which also counts the blocks freed while the row watches that
-/// still hold the secret, growth of a buffer included.
+/// The system allocator, handing out zeroed blocks, which also counts the byte blocks
+/// (align 1) freed while the row watches that still hold the secret, growth of a buffer
+/// included. Blocks of other layouts can hold padding, so they are never read.
 struct FreeScan;
 
 unsafe impl GlobalAlloc for FreeScan {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { System.alloc(layout) }
+        unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
-        if WATCHING.load(Ordering::SeqCst) && layout.size() >= SECRET.len() {
+        if WATCHING.load(Ordering::SeqCst) && layout.align() == 1 && layout.size() >= SECRET.len() {
             let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
             if bytes.windows(SECRET.len()).any(|window| window == SECRET) {
                 FREED_WITH_SECRET.fetch_add(1, Ordering::SeqCst);
