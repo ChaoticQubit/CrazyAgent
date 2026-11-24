@@ -94,8 +94,9 @@ fn the_kernel_names_no_crazyagent_or_sandbox_item() {
     ));
 }
 
-/// The dependency tables of one Cargo.toml that turn on this crate's `test-support`
-/// feature, read as TOML so a dependency table of its own or a wrapped features line counts
+/// The tables of one Cargo.toml that turn on this crate's `test-support` feature: its
+/// dependency tables, `workspace.dependencies`, and `features` when one forwards the
+/// feature. Read as TOML so a dependency table of its own or a wrapped features line counts
 /// as an inline one. Panics naming the manifest when it does not parse. Inputs: the
 /// manifest's path and text. Output: each such table's name.
 fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
@@ -115,8 +116,40 @@ fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
             }
         }
     }
+    if let Some(shared) = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+    {
+        tables.push(("workspace.dependencies".to_owned(), shared));
+    }
     let name = "crazyagent-kernel-processes";
-    tables
+    let keys: Vec<&str> = tables
+        .iter()
+        .filter_map(|(_, table)| table.as_table())
+        .flat_map(|table| table.iter())
+        .filter(|(key, entry)| {
+            key.as_str() == name
+                || entry.get("package").and_then(toml::Value::as_str) == Some(name)
+        })
+        .map(|(key, _)| key.as_str())
+        .collect();
+    let forwards = manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|features| {
+            features
+                .values()
+                .filter_map(toml::Value::as_array)
+                .flatten()
+                .filter_map(toml::Value::as_str)
+                .any(|feature| {
+                    std::iter::once(name).chain(keys.iter().copied()).any(|key| {
+                        feature == format!("{key}/test-support")
+                            || feature == format!("{key}?/test-support")
+                    })
+                })
+        });
+    let mut found: Vec<String> = tables
         .into_iter()
         .filter(|(_, table)| {
             table.as_table().is_some_and(|table| {
@@ -140,7 +173,11 @@ fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
             })
         })
         .map(|(table, _)| table)
-        .collect()
+        .collect();
+    if forwards {
+        found.push("features".to_owned());
+    }
+    found
 }
 
 /// A folder that holds a link to a sibling folder gives each file once, never through the

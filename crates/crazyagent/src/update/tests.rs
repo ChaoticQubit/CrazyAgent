@@ -231,10 +231,43 @@ fn calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
 }
 
 /// The plain or `update::` calls of one swap step in a non-test source, by the function
-/// holding each. Inputs: the source's path, its text and the step's name. Output: the
-/// holding functions' text up to each call.
+/// holding each, then each line that names the step without calling it ([`hides_swap`]).
+/// Inputs: the source's path, its text and the step's name. Output: the holding functions'
+/// text up to each call, then those lines.
 fn swap_calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
-    calls(path, text, name)
+    let mut found = calls(path, text, name);
+    found.extend(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && hides_swap(line, name)),
+    );
+    found
+}
+
+/// Whether a source line names a swap step without calling it: an import under another
+/// name (`swap as put`), or the step taken as a value through the update path
+/// (`let f = update::swap;`), outside an import. Inputs: the trimmed line and the step's
+/// name. Output: the answer.
+fn hides_swap(line: &str, name: &str) -> bool {
+    assert!(!name.is_empty());
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let alias = format!("{name} as ");
+    let aliased = line.match_indices(&alias).any(|(at, _)| {
+        line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !ident(c) && c != '.')
+    });
+    let import = line.starts_with("use ") || (line.starts_with("pub") && line.contains(" use "));
+    let named = format!("update::{name}");
+    let valued = !import
+        && line.match_indices(&named).any(|(at, _)| {
+            line[at + named.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !ident(c) && c != '(')
+        });
+    aliased || valued
 }
 
 /// A folder that holds a link to a sibling folder gives each `.rs` file once, at its real
