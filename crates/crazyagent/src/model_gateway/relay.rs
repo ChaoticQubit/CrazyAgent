@@ -14,7 +14,7 @@ use subtle::ConstantTimeEq;
 
 pub const TOKEN_PREFIX: &str = "crazyagent-relay-";
 pub const LOCAL_PLACEHOLDER: &str = "crazyagent-local";
-const TOKEN_HEX: usize = 64;
+pub(crate) const TOKEN_HEX: usize = 64;
 /// The longest key the engine writes into an account's key file: a relay token.
 pub const KEY_BYTES_MAX: usize = TOKEN_PREFIX.len() + TOKEN_HEX;
 const CURL: &str = "/usr/bin/curl";
@@ -79,7 +79,7 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
 
-fn random_hex(bytes: usize) -> Result<String, EngineError> {
+pub(crate) fn random_hex(bytes: usize) -> Result<String, EngineError> {
     let mut buffer = vec![0_u8; bytes];
     getrandom::fill(&mut buffer).map_err(|_| failure("model_relay_unavailable"))?;
     Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())

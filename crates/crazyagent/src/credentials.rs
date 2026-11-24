@@ -7,7 +7,7 @@ use std::sync::Arc;
 mod linux;
 #[cfg(target_os = "macos")]
 #[path = "credential_store/macos.rs"]
-mod macos;
+pub(crate) mod macos;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "credential_store/test_keychain.rs"]
 pub(crate) mod test_keychain;

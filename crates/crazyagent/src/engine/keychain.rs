@@ -258,7 +258,7 @@ fn create_keychain(home: &Path, directory: &Path) -> Result<PathBuf, EngineError
 /// Whether `name` is one this module gives an agent keychain: `agent-`, sixteen lowercase
 /// hex digits and `.keychain-db`. No other keychain file is ever deleted. Input: the file
 /// name. Output: true or false.
-fn agent_keychain_name(name: &str) -> bool {
+pub(crate) fn agent_keychain_name(name: &str) -> bool {
     name.strip_prefix(AGENT_PREFIX)
         .and_then(|rest| rest.strip_suffix(KEYCHAIN_SUFFIX))
         .is_some_and(|hex| {

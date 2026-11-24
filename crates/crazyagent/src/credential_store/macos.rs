@@ -84,7 +84,7 @@ impl Keychain {
         Ok((self.owned(service)?, account))
     }
 
-    fn keychain_text(&self) -> &str {
+    pub(crate) fn keychain_text(&self) -> &str {
         self.keychain
             .to_str()
             .expect("keychain path was checked as text")
@@ -198,7 +198,7 @@ fn unavailable() -> StoreError {
     StoreError::code("credential_store_unavailable")
 }
 
-fn owned_namespace(namespace: &str) -> Result<&str, StoreError> {
+pub(crate) fn owned_namespace(namespace: &str) -> Result<&str, StoreError> {
     let namespace = checked_name(namespace)?;
     if !namespace.starts_with(NAMESPACE_ROOT) || namespace.len() == NAMESPACE_ROOT.len() {
         return Err(StoreError::code("credential_namespace_refused"));
