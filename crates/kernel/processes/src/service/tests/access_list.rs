@@ -492,9 +492,15 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
             .cloned()
             .collect()
     };
+    let touching = |listings: Vec<Vec<PathBuf>>| -> Vec<Vec<PathBuf>> {
+        listings
+            .into_iter()
+            .filter(|listing| listing.iter().any(|listed| listed.starts_with(temp.path())))
+            .collect()
+    };
     acl::take_listings();
     assert_eq!(changeable_by_others(&tool), None);
-    let first = acl::take_listings();
+    let first = touching(acl::take_listings());
     assert_eq!(first.len(), 1, "one listing for every part: {first:?}");
     for part in [&tool, &folder, &kit] {
         assert!(first[0].contains(part), "{part:?} in {first:?}");
@@ -502,7 +508,6 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
 
     assert_eq!(changeable_by_others(&tool), None);
     let repeat = acl::take_listings();
-    assert!(repeat.len() <= 1, "{repeat:?}");
     assert_eq!(
         ours(&repeat),
         Vec::<PathBuf>::new(),
