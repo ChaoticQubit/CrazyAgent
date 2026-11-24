@@ -1,7 +1,7 @@
 use crate::agents::now_ms;
 use crate::config::resolve_config_bytes;
 use crate::engine::EngineError;
-use crate::perf_kit::{Row, SAMPLES, SAMPLES_MIN, line, time};
+use crate::perf_kit::{Row, SAMPLES, SAMPLES_MIN, line_ns, time};
 use crate::protocol::{ClientId, Cursor, Event, Outcome, RequestId};
 use crate::storage::migrations::{
     BACKUP_FAILURE_FILE, Step, backup, backup_failed, backup_failure, backup_time, check, prune,
@@ -67,7 +67,7 @@ fn nanos(started: Instant) -> u64 {
 
 /// Times a call whose fixture each sample sets up again: `one` sets it up, times one call
 /// and returns that span, a tenth of the samples running first as warm-up. Prints the PERF
-/// line. Inputs: the row (batch 1), the samples and the sample. Output: none.
+/// line in nanoseconds, so a pair near 10 us prints in one unit on both builds. Inputs: the row (batch 1), the samples and the sample. Output: none.
 fn sampled(row: &Row, samples: usize, mut one: impl FnMut() -> u64) {
     assert!(samples >= SAMPLES_MIN);
     assert_eq!(row.batch, 1);
@@ -77,7 +77,7 @@ fn sampled(row: &Row, samples: usize, mut one: impl FnMut() -> u64) {
     let mut spans: Vec<u64> = (0..samples).map(|_| one()).collect();
     assert_eq!(spans.len(), samples);
     spans.sort_unstable();
-    println!("{}", line(row, &spans));
+    println!("{}", line_ns(row, &spans));
 }
 
 /// Times the 2.4.4 code that did the job of each storage call with no I/O, under the 2.5
