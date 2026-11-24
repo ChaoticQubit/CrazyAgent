@@ -83,6 +83,10 @@ impl SettingsSources {
                 return Err(refused);
             }
         };
+        #[cfg(test)]
+        if let Some(step) = AFTER_RENAME.with(|hook| hook.borrow_mut().take()) {
+            step()?;
+        }
         self.global.sync_parent()?;
         let now = self.snapshot()?;
         if now.global.identity != staged_identity
@@ -104,3 +108,15 @@ pub(super) type GlobalEdit<'a> =
 
 /// The name a plain key edit is staged under in the global file's folder before its rename.
 pub(super) const SETTING_STAGED: &str = ".crazyagent-setting-staged";
+
+/// A step a test runs once, right after the rename and before the folder sync: an error
+/// stands for a failed sync, and a write stands for another hand changing the file.
+#[cfg(test)]
+pub(super) type AfterRename = Box<dyn FnOnce() -> Result<(), EngineError>>;
+
+#[cfg(test)]
+thread_local! {
+    /// The step the next write on this thread runs after its rename, taken when it runs.
+    pub(super) static AFTER_RENAME: std::cell::RefCell<Option<AfterRename>> =
+        const { std::cell::RefCell::new(None) };
+}
