@@ -1382,3 +1382,23 @@ fn a_change_waiting_its_turn_reads_waiting_and_other_refusals_still_read_not_sav
     answer(&mut shell, &mut fake, job);
     assert!(said(&shell).starts_with("Not saved. "), "{}", said(&shell));
 }
+
+/// A plugin change whose engine actor stopped before it answered reads as the page's
+/// unknown outcome, since the change may have landed.
+#[test]
+fn a_stopped_owner_actor_reads_as_an_unknown_plugin_outcome() {
+    assert_eq!(
+        sentence("owner_actor_stopped_outcome_unknown"),
+        sentence("app_plugin_outcome_unknown")
+    );
+}
+
+/// A plugin change whose owner answer was lost reads as the page's unknown outcome, since
+/// the change may have landed.
+#[test]
+fn a_lost_owner_answer_reads_as_an_unknown_plugin_outcome() {
+    assert_eq!(
+        sentence("owner_outcome_unknown_reconcile_same_identity"),
+        sentence("app_plugin_outcome_unknown")
+    );
+}

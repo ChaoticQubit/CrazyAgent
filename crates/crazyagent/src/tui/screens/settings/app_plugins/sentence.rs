@@ -4,7 +4,9 @@ use crate::tui::text::coded;
 /// sentence, or the plain fallback naming the code.
 pub(in crate::tui) fn sentence(code: &str) -> String {
     let known = match code {
-        "app_plugin_outcome_unknown" => {
+        "app_plugin_outcome_unknown"
+        | "owner_outcome_unknown_reconcile_same_identity"
+        | "owner_actor_stopped_outcome_unknown" => {
             "CrazyAgent couldn't confirm what happened. Check the list before you try again."
         }
         "app_plugin_request_bounds" => "This plugin request was too large to send.",
