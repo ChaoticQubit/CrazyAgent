@@ -201,12 +201,6 @@ pub(crate) fn found(engine: &Engine<'_>, name: &str) -> Result<Found, Refused> {
     find(engine, name)?.ok_or_else(|| refused("app_plugin_not_found"))
 }
 
-/// Drops what an older plugin of the owner's left under a name a bundled plugin or a
-/// bundled code plugin now has: its secret bindings with the keys entered for it, its switch
-/// and its trust record. Neither kind ever gets a trust record, so one is the mark of such a
-/// leftover, and it goes last so an interrupted pass runs again. Each binding row goes
-/// before its key file, as [`drop_binding`] does. Inputs: database and engine facts.
-/// Output: Ok, or `app_plugins_unavailable`.
 /// Refuses a write that touches files while the caller holds an open transaction, before
 /// anything is written, so a rollback can never part the rows from the files on disk.
 /// Input: the connection. Output: Ok, or `app_plugins_unavailable`.
@@ -218,6 +212,12 @@ pub(crate) fn outside_transaction(db: &Connection) -> Result<(), Refused> {
     }
 }
 
+/// Drops what an older plugin of the owner's left under a name a bundled plugin or a
+/// bundled code plugin now has: its secret bindings with the keys entered for it, its switch
+/// and its trust record. Neither kind ever gets a trust record, so one is the mark of such a
+/// leftover, and it goes last so an interrupted pass runs again. Each binding row goes
+/// before its key file, as [`drop_binding`] does. Inputs: database and engine facts.
+/// Output: Ok, or `app_plugins_unavailable`.
 pub(crate) fn prepare(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
     let reserved = BUNDLED
         .iter()
