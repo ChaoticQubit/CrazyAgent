@@ -291,3 +291,38 @@ fn a_lookup_runs_within_its_bound_and_no_more_than_the_cap_are_out_at_once() {
         }
     }
 }
+
+/// A lookup refused at the cap never raises the count, even for a moment: with the count
+/// at the cap, refusals racing on four threads never let it read past the cap, so a lookup
+/// thread ending meanwhile never takes the count below what is alive.
+#[test]
+fn a_refused_lookup_never_raises_the_count_past_the_cap() {
+    static COUNTED: AtomicUsize = AtomicUsize::new(LOOKUPS_OUT_MAX);
+    static RAN: AtomicUsize = AtomicUsize::new(0);
+    let callers: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                for _ in 0..20_000 {
+                    let refused = bounded_on(&COUNTED, || {
+                        RAN.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    });
+                    assert_eq!(
+                        refused.map_err(|error| error.kind()),
+                        Err(io::ErrorKind::TimedOut)
+                    );
+                }
+            })
+        })
+        .collect();
+    let mut highest = 0;
+    while !callers.iter().all(|caller| caller.is_finished()) {
+        highest = highest.max(COUNTED.load(Ordering::SeqCst));
+    }
+    for caller in callers {
+        caller.join().unwrap();
+    }
+    assert_eq!(highest, LOOKUPS_OUT_MAX);
+    assert_eq!(COUNTED.load(Ordering::SeqCst), LOOKUPS_OUT_MAX);
+    assert_eq!(RAN.load(Ordering::SeqCst), 0);
+}
