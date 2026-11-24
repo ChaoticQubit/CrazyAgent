@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use crate::credentials::test_keychain::TestKeychain;
 use crate::credentials::{Keychain, SecretString, Store};
 use crate::paths::{Layout, Platform};
-use crate::perf_kit::{Row, SAMPLES, line, time};
+use crate::perf_kit::{Row, SAMPLES, line, line_ns, time};
 use crate::protocol::Outcome;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
@@ -69,6 +69,13 @@ fn print(row: &Row, mut samples: Vec<u64>) {
     println!("{}", line(row, &samples));
 }
 
+/// Prints the PERF line of one row in nanoseconds at any median, for a row whose builds
+/// fall on either side of 10 us. Inputs: the row and the unsorted per-call samples.
+fn print_ns(row: &Row, mut samples: Vec<u64>) {
+    samples.sort_unstable();
+    println!("{}", line_ns(row, &samples));
+}
+
 /// A data folder made private as the engine makes it. Output: the guard and its layout.
 fn data_root() -> (tempfile::TempDir, Layout) {
     let folder = tempfile::tempdir().unwrap();
@@ -113,7 +120,7 @@ fn settings_save_quit() {
     for _ in 0..SAMPLES / 10 {
         step();
     }
-    print(
+    print_ns(
         &row("provider.settings.save_quit", 1),
         (0..SAMPLES).map(|_| step()).collect(),
     );
