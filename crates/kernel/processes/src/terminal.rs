@@ -16,7 +16,7 @@ pub mod windows;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
 /// The marker that closes a bracketed paste. A program may read typed bytes per read, so
-/// no split of them cuts it (RV-DS241-69).
+/// no split of them cuts it.
 pub const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 pub const PROMPT_BYTES_MAX: usize = 4096;
 /// The most bytes one owner paste may hold once the engine gathered its `Paste` chunks, the
@@ -1130,7 +1130,7 @@ pub fn renew_teammates_socket(
 
 /// Writes one engine record in the profiles folder no agent writes, in place of any earlier
 /// one: a staged file only this user reads, under a random name of its own so no other
-/// writer's staged file is met or removed (RV-DS241-22), renamed over the record so no
+/// writer's staged file is met or removed, renamed over the record so no
 /// reader sees part of it. Takes the record path and its text. Returns Ok, or
 /// `terminal_own_server_unavailable`.
 #[cfg(unix)]

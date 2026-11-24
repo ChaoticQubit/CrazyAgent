@@ -133,7 +133,7 @@ fn a_teammates_server_pin_record_missing_or_for_another_socket_refuses_every_ser
     );
 }
 
-/// A record write never collides with another writer's staged file (RV-DS241-22): a file
+/// A record write never collides with another writer's staged file: a file
 /// staged under the name this process once used for every write, as a concurrent writer or
 /// an earlier engine with the same pid left it, neither fails the write nor is removed by it.
 #[cfg(unix)]

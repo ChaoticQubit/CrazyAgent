@@ -266,8 +266,7 @@ fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() -> Te
 }
 
 /// A trusted comment that names a field twice is refused before its version is read, so the
-/// updater and the release asset check can never read different versions from one signature
-/// (RV-DS241-35).
+/// updater and the release asset check can never read different versions from one signature.
 #[test]
 fn a_trusted_comment_that_names_a_field_twice_is_refused() -> TestResult {
     let folder = tempfile::tempdir()?;
