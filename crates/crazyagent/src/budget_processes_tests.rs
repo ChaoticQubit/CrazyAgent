@@ -18,15 +18,22 @@ const PTY_LINE: &[u8] = b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 const ARCHIVE_BYTES: usize = 1 << 20;
 
 type Call<'a> = (&'static str, usize, Box<dyn FnMut() + 'a>);
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Names the path a filesystem step failed on. Inputs: the path and the step's result.
+/// Output: the value, or an error naming the path.
+fn at<T>(path: &Path, result: std::io::Result<T>) -> TestResult<T> {
+    result.map_err(|error| format!("{path:?}: {error}").into())
+}
 
 /// Times each process call on this machine and prints its p50 and p95 in microseconds.
 /// Inputs: none (a fresh temp folder, a private tmux socket, a key pair made in setup).
 /// Output: one `budget` line per call on stdout; it asserts every sample was taken.
 #[test]
 #[ignore = "budget row: run with --ignored --nocapture on a quiet and a loaded Mac"]
-fn processes_budget_rows() {
-    let home = tempfile::tempdir().unwrap();
-    let fixtures = Fixtures::new(home.path());
+fn processes_budget_rows() -> TestResult {
+    let home = tempfile::tempdir()?;
+    let fixtures = Fixtures::new(home.path())?;
     let calls = fixtures.calls();
     assert!(calls.len() >= 6);
     for (call, runs, mut run) in calls {
@@ -39,6 +46,7 @@ fn processes_budget_rows() {
             micros[runs * 95 / 100]
         );
     }
+    Ok(())
 }
 
 fn time(run: &mut dyn FnMut()) -> u128 {
@@ -65,10 +73,13 @@ struct Fixtures {
 }
 
 impl Fixtures {
-    fn new(home: &Path) -> Self {
+    fn new(home: &Path) -> TestResult<Self> {
         let folder = home.join("terminal");
-        std::fs::create_dir(&folder).unwrap();
-        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at(&folder, std::fs::create_dir(&folder))?;
+        at(
+            &folder,
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
         let tmux = installed(home).expect("tmux is required for the budget row");
         let host = Tmux::open(
             Some(tmux.clone()),
@@ -87,16 +98,15 @@ impl Fixtures {
                 agent,
                 &kernel_processes::terminal::PaneCommand::from(&command),
             )
-            .unwrap();
         };
         let echo = AgentId::team(1).unwrap();
         #[cfg(target_os = "macos")]
         let shown = AgentId::team(2).unwrap();
-        cat(&echo);
+        cat(&echo)?;
         #[cfg(target_os = "macos")]
-        cat(&shown);
-        let stream = std::cell::RefCell::new(host.attach(&echo).unwrap());
-        let (archive, sha256, signature, key) = signed_archive(home);
+        cat(&shown)?;
+        let stream = std::cell::RefCell::new(host.attach(&echo)?);
+        let (archive, sha256, signature, key) = signed_archive(home)?;
         let service = Service {
             platform: Platform::CURRENT,
             name: format!("dev.crazyagent.engine.budget-{}", std::process::id()),
@@ -124,7 +134,7 @@ impl Fixtures {
             service,
         };
         fixtures.pty_echo();
-        fixtures
+        Ok(fixtures)
     }
 
     fn calls(&self) -> Vec<Call<'_>> {
@@ -239,10 +249,10 @@ fn output_echo() {
     assert!(output.status.success());
 }
 
-fn signed_archive(home: &Path) -> (PathBuf, String, String, String) {
+fn signed_archive(home: &Path) -> TestResult<(PathBuf, String, String, String)> {
     let bytes: Vec<u8> = (0..ARCHIVE_BYTES).map(|at| (at % 251) as u8).collect();
     let archive = home.join("crazyagent.tar.gz");
-    std::fs::write(&archive, &bytes).unwrap();
+    at(&archive, std::fs::write(&archive, &bytes))?;
     let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
     let key = STANDARD.encode(pair.pk.to_box().unwrap().into_string());
     let signature = minisign::sign(
@@ -254,10 +264,10 @@ fn signed_archive(home: &Path) -> (PathBuf, String, String, String) {
     )
     .unwrap();
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
-    (
+    Ok((
         archive,
         sha256,
         STANDARD.encode(signature.into_string()),
         key,
-    )
+    ))
 }

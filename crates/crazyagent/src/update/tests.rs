@@ -1,5 +1,5 @@
 use super::*;
-use kernel_processes::update::test_support::{code, response, said, serve};
+use kernel_processes::update::test_support::{TestResult, code, joined, response, said, serve};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -61,14 +61,14 @@ fn saving_the_channel_creates_a_missing_data_folder_the_engine_accepts() {
 }
 
 #[test]
-fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
+fn a_channel_with_no_release_says_so_in_one_plain_sentence() -> TestResult {
     let missing = || {
         response(
             "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\n",
             b"Not Found",
         )
     };
-    let (url, server) = serve(vec![missing(), missing()]);
+    let (url, server) = serve(vec![missing(), missing()])?;
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -83,11 +83,12 @@ fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
             "No dev release is published yet.".to_owned()
         )
     );
-    server.join().unwrap();
+    joined(server)?;
+    Ok(())
 }
 
 #[test]
-fn download_and_manifest_failures_never_quote_curl_or_the_server() {
+fn download_and_manifest_failures_never_quote_curl_or_the_server() -> TestResult {
     let answered = |head: &str, body: &[u8]| {
         response(
             &format!(
@@ -105,7 +106,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         answered("500 Internal Server Error", b"curl: (22) oops"),
         answered("200 OK", b"<html>no</html>"),
         answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
-    ]);
+    ])?;
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -121,7 +122,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         said(fetch_manifest(Channel::Dev, &url).unwrap_err()),
         unreadable
     );
-    server.join().unwrap();
+    joined(server)?;
 
     let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let address = format!("127.0.0.1:{port}");
@@ -141,6 +142,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
             "Couldn't reach the update server. Check your connection and try again.".to_owned()
         )
     );
+    Ok(())
 }
 
 #[test]

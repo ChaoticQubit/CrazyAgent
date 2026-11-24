@@ -27,20 +27,40 @@ pub fn read_request(stream: &mut TcpStream) {
     }
 }
 
+/// The result of a row or fixture whose setup can fail at a file, socket or thread.
+pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Names the path a filesystem step failed on. Inputs: the path and the step's result.
+/// Output: the value, or an error naming the path.
+pub fn at<T>(path: &std::path::Path, result: std::io::Result<T>) -> TestResult<T> {
+    result.map_err(|error| format!("{path:?}: {error}").into())
+}
+
+/// Waits for a fixture thread and hands back what it returned, its own socket or file
+/// error included. Input: the thread. Output: its value, or an error when it failed or
+/// panicked.
+pub fn joined<T>(thread: std::thread::JoinHandle<std::io::Result<T>>) -> TestResult<T> {
+    Ok(thread.join().map_err(|_| "a fixture thread panicked")??)
+}
+
 /// A real HTTP server on this computer's loopback address that answers one request per
 /// response, in order. Input: the raw responses. Output: the URL to fetch and the server
-/// thread, which ends after the last response.
-pub fn serve(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<()>) {
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
+/// thread, which ends after the last response and returns the first accept error, or an
+/// error when the loopback socket cannot be opened.
+pub fn serve(
+    responses: Vec<Vec<u8>>,
+) -> TestResult<(String, std::thread::JoinHandle<std::io::Result<()>>)> {
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
     let server = std::thread::spawn(move || {
         for response in responses {
-            let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+            let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener)?;
             read_request(&mut stream);
             let _ = stream.write_all(&response);
         }
+        Ok(())
     });
-    (format!("http://{address}/release"), server)
+    Ok((format!("http://{address}/release"), server))
 }
 
 /// One raw HTTP response. Inputs: the status line and headers ending in a blank line, and
