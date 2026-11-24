@@ -157,16 +157,20 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Lists the project's running agents that can still open a folder the owner hid after
-    /// they started, for the team status and the owner's Restart them (SA-VID14-A): each not
-    /// stopping, in the sandbox and not a teammate, whose start hid neither the folder nor
-    /// one above it, a pane from before the engine kept that list counting as hiding none.
-    /// Takes the project's stored setup. Returns any SQLite failure.
+    /// Stops and holds the project's running agents that can still open a folder the owner
+    /// hid after they started, as a narrowed agent stops: each not stopping, in the sandbox
+    /// and not a teammate, whose start hid neither the folder nor one above it, a pane from
+    /// before the engine kept that list counting as hiding none. Each stays listed for the
+    /// team status and the owner's Restart them until restarted or started again. Takes the
+    /// project's stored setup. Returns any SQLite failure.
     pub(super) fn mark_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let saved = crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
             .map_err(error)?;
-        let seers: BTreeSet<i64> = self
+        let workers = &self.workers;
+        self.hidden_held
+            .retain(|id, _| workers.get(id).is_none_or(|worker| worker.stopping));
+        let found: Vec<i64> = self
             .workers
             .iter()
             .filter(|(_, w)| &w.project == project && !w.stopping)
@@ -174,15 +178,31 @@ impl TeamRuntime {
             .filter(|(_, w)| !kernel_sandbox::hidden_paths::covers(w.hidden.as_deref(), &saved))
             .map(|(id, _)| *id)
             .collect();
-        assert!(seers.len() <= self.workers.len());
+        for id in found {
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stop_for("engine_stop:hidden");
+            worker.held = true;
+            worker.narrowed = Some(Narrowed::Hidden);
+            worker.cancel.store(true, Ordering::SeqCst);
+            let _ = worker.orders.send(Order::Stop);
+            let held = (project.clone(), worker.role, worker.live);
+            self.hidden_held.insert(id, held);
+        }
+        let seers: BTreeSet<i64> = self
+            .hidden_held
+            .iter()
+            .filter(|(_, (owner, ..))| owner == project)
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(seers.len() <= self.hidden_held.len());
         crate::sandbox::access_store::hidden::set_seers(&self.connection, project.as_str(), &seers)
             .map_err(error)
     }
 
-    /// Serves the owner's Restart them (SA-VID14-A): each listed agent stops at once with its
-    /// work held for it, a sub-agent to start again in its own worktree and conversation once
-    /// its process ended and the live master as a planned restart, so its next start hides
-    /// every saved folder. Takes the project's stored setup. Returns any SQLite failure.
+    /// Serves the owner's Restart them (SA-VID14-A): a listed agent still running stops with its
+    /// work held, and one the engine stopped whose process ended starts again, a sub-agent in
+    /// its own worktree and conversation and the live master as a planned restart, so its next
+    /// start hides every saved folder. Takes the project's stored setup. Returns any SQLite failure.
     pub(super) fn restart_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let asked =
@@ -190,6 +210,20 @@ impl TeamRuntime {
                 .map_err(error)?;
         for id in asked {
             let Some(worker) = self.workers.get_mut(&id) else {
+                if let Some((owner, role, live)) = self.hidden_held.get(&id).cloned()
+                    && &owner == project
+                {
+                    self.hidden_held.remove(&id);
+                    match (role, live) {
+                        (AgentRole::Sub, _) => {
+                            self.restarts.insert(id, (owner, Restart::Hidden));
+                        }
+                        (AgentRole::Master, true) => {
+                            self.master_restarts.insert(owner);
+                        }
+                        _ => {}
+                    }
+                }
                 continue;
             };
             if &worker.project != project || worker.stopping || worker.role == AgentRole::Teammate {

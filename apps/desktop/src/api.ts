@@ -207,6 +207,7 @@ const COPY: Record<string, string> = {
   grant_requests_full: "Four access requests of this project are still waiting for the owner.",
   grant_reason_invalid: "Give a reason in plain words.",
   agent_grant_revoked: "An allowed extra this agent held (a socket, a port or your temp folder) was removed, so the agent was stopped. Its next start goes without it.",
+  agent_folder_hidden: "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);

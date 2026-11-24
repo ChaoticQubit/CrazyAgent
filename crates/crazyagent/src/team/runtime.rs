@@ -135,6 +135,9 @@ const MOVE_DWELL: Duration = Duration::from_secs(crate::scheduling::MOVE_DWELL_S
 /// desktop master area shows.
 const ACCESS_WIDER_WHEN_IDLE: &str = "The owner widened the project's agent access. Each running agent stops when it is next idle so its next start has it; the live master starts again in its own conversation. Teammates keep their old access until their next start.";
 const ACCESS_WIDER_NEXT_START: &str = "The owner widened the project's agent access. Running agents keep their old access until their next start (Apply access changes: At its next start).";
+/// Why the engine stopped an agent that could still open a folder the owner hid after it
+/// started, as the owner worded it.
+const FOLDER_HIDDEN_STOPPED: &str = "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it.";
 const ACCESS_MASTER_RESTARTED: &str = "The live master stopped while idle and starts again in its own conversation with the owner's wider access.";
 const LIVE_MASTER_MOVED: &str = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
 const SWEEP_EVERY: Duration = Duration::from_secs(2);
@@ -685,12 +688,14 @@ enum Busy {
 
 /// Why the engine stopped an agent whose running process holds more than the owner saved:
 /// what the saved policy no longer allows, toolchains a pane from before the engine kept
-/// them may hold, or an allowed extra the owner removed (F08).
+/// them may hold, an allowed extra the owner removed (F08), or a folder the owner hid after
+/// the agent started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Narrowed {
     Saved(Narrowing),
     Unrecorded,
     Revoked,
+    Hidden,
 }
 
 impl Narrowed {
@@ -730,6 +735,7 @@ impl Narrowed {
                 "the owner removed an allowed extra (socket, port or temp folder) the agent held, so the agent was stopped; its next start goes without it",
                 "agent_grant_revoked",
             ),
+            Self::Hidden => (FOLDER_HIDDEN_STOPPED, "agent_folder_hidden"),
         };
         with_code(text, Some(code))
     }
@@ -931,6 +937,7 @@ pub struct TeamRuntime {
     instructions_next: BTreeMap<ProjectId, Instant>,
     restarts: BTreeMap<i64, (ProjectId, Restart)>,
     hidden_next: BTreeMap<ProjectId, Instant>,
+    hidden_held: BTreeMap<i64, (ProjectId, AgentRole, bool)>,
     followed: Option<(i64, u64)>,
     access_restarts: BTreeMap<i64, ProjectId>,
     access_widened: BTreeSet<ProjectId>,
@@ -1289,6 +1296,7 @@ impl TeamRuntime {
             instructions_next: BTreeMap::new(),
             restarts: BTreeMap::new(),
             hidden_next: BTreeMap::new(),
+            hidden_held: BTreeMap::new(),
             followed: None,
             access_restarts: BTreeMap::new(),
             access_widened: BTreeSet::new(),
