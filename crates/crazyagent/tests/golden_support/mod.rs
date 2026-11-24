@@ -120,8 +120,13 @@ impl Golden {
         let started = controller
             .start_onboarding(path, pool.clone(), generation)
             .await;
-        assert_eq!(landed(started.unwrap()), OwnerResult::Applied);
         let project = project_id_for(repo).unwrap();
+        assert_eq!(
+            landed(started.unwrap()),
+            OwnerResult::OnboardingStarted {
+                project_id: project.clone()
+            }
+        );
         let id = &project;
         wait_until("onboarding to settle", ONBOARD_TIME, async || {
             let view = controller.onboarding(id.clone()).await.unwrap();
