@@ -567,3 +567,75 @@ fn an_entry_changed_while_its_access_list_is_read_gets_no_answer_and_is_not_kept
         "an entry changed during its listing is not kept"
     );
 }
+
+/// Makes one new file in the folder now and again after every later access listing on this
+/// thread, as parallel work keeps adding files to a shared temp or home folder. Inputs: the
+/// folder and how many files it made so far.
+#[cfg(target_os = "macos")]
+fn churn(folder: PathBuf, made: u32) {
+    assert!(
+        made < 64,
+        "the churn ran past every listing a read may make"
+    );
+    std::fs::write(folder.join(format!("churn-{made}")), "").unwrap();
+    acl::after_next_listing(move || churn(folder, made + 1));
+}
+
+/// A folder that gains files while its access list is read, on every listing, never reads
+/// as changeable by others from that churn alone: its access list never changed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_gaining_files_during_every_listing_does_not_read_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("busy");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    let busy = folder.clone();
+    acl::after_next_listing(move || churn(busy, 0));
+    assert_eq!(changeable_by_others(&tool), None);
+}
+
+/// An access list that lets another user write, added while the folder's list is read,
+/// still makes the folder read as changeable by others.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_list_added_during_the_listing_still_reads_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    let opened = folder.clone();
+    acl::after_next_listing(move || {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("user:nobody allow add_file,write")
+                .arg(&opened),
+        )
+        .unwrap();
+        assert!(status.success());
+    });
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+}
+
+/// A deny-only access list, as a macOS home folder carries (`group:everyone deny delete`),
+/// lets no one else change the folder, so it never reads as changeable by others.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("home");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("group:everyone deny delete")
+            .arg(&folder),
+    )
+    .unwrap();
+    assert!(status.success());
+    assert_eq!(changeable_by_others(&tool), None);
+}
