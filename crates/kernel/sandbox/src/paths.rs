@@ -323,6 +323,19 @@ fn identity(path: &Path) -> io::Result<Option<Identity>> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many walks [`Walk::of`] took on this thread, which rows read through [`walks`].
+    static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of walks [`Walk::of`] took on this thread so far. Takes nothing. Returns the
+/// count.
+#[cfg(test)]
+pub(crate) fn walks() -> usize {
+    WALKS.with(std::cell::Cell::get)
+}
+
 /// A path's parts with the identity of each leading run of them, top down: None from the
 /// first run that does not exist on, and None for a Windows drive prefix alone, which names
 /// the drive's current folder. `reached` holds the identities of the folders the deepest
@@ -341,6 +354,8 @@ impl<'a> Walk<'a> {
     /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or the resolve fails other than
     /// not found.
     fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
+        #[cfg(test)]
+        WALKS.with(|walks| walks.set(walks.get() + 1));
         let refused = |_| invalid(SECRET_ROOT_REFUSED);
         let parts: Vec<Component<'a>> = path.components().collect();
         let mut ids = Vec::with_capacity(parts.len());

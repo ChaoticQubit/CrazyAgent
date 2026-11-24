@@ -572,3 +572,26 @@ fn a_link_swapped_in_after_the_build_still_keeps_an_engine_secret_out() {
     assert!(fs::symlink_metadata(&project).unwrap().is_symlink());
     refused(&project.join("engine.db"));
 }
+
+/// Building a sandbox walks each secret, each harness home and the owner home once for its
+/// three roots, and each root once, so the walks a build takes are those paths and the three
+/// roots.
+#[test]
+fn a_build_walks_each_secret_once_for_its_three_roots() {
+    let (_scratch, [project, home, tmp]) = folders();
+    let harnesses = (STAND_IN.access.harness_folders)();
+    let owner = crate::paths::owner_home().unwrap();
+    let secrets = crate::paths::owner_secrets(&owner, &harnesses).count();
+    assert!(secrets > 0);
+    let before = crate::paths::walks();
+    ProjectSandbox::new(
+        &STAND_IN,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let walked = crate::paths::walks() - before;
+    assert_eq!(walked, secrets + harnesses.len() + 1 + 3, "{walked} walks");
+}
