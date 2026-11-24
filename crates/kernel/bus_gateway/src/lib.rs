@@ -11,6 +11,11 @@ pub use grants::{Grants, PERMISSIONS_MAX, PLUGINS_MAX};
 #[cfg(test)]
 mod core_tests;
 #[cfg(test)]
+#[path = "../../common/src/perf_kit.rs"]
+mod perf_kit;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
 mod table_tests;
 #[cfg(test)]
 mod tests;
