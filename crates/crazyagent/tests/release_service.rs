@@ -776,7 +776,12 @@ fn an_update_stops_an_engine_running_without_the_service_and_restarts_it_from_th
     };
     let old_group = Group(old);
     assert_eq!(readies(&layout), 1);
-    let said = crazyagent::update::swap_around_engine(&layout, &install, &unpacked, VERSION);
+    let said = crazyagent::update::swap_around_engine(
+        &layout,
+        &install,
+        &kernel_processes::update::test_support::unpacked(&unpacked),
+        VERSION,
+    );
     let stopped = exited(old);
     let restarted = crazyagent::service::stop_detached(&layout).unwrap();
     drop(old_group);
@@ -801,7 +806,12 @@ fn an_update_with_no_engine_running_and_no_service_only_swaps_the_files() {
     let unpacked = temp.path().join("unpacked");
     release_folder(&rows, &install);
     release_folder(&rows, &unpacked);
-    let said = crazyagent::update::swap_around_engine(&layout, &install, &unpacked, VERSION);
+    let said = crazyagent::update::swap_around_engine(
+        &layout,
+        &install,
+        &kernel_processes::update::test_support::unpacked(&unpacked),
+        VERSION,
+    );
     assert!(!crazyagent::service::answering(&layout.socket()));
     assert_eq!(said.unwrap(), format!("Updated crazyagent to {VERSION}."));
     assert!(install.join("crazyagent").is_file());
