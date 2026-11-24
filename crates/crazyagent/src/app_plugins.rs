@@ -352,12 +352,14 @@ pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData,
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
 
-/// Runs the plugin store's start sweeps: what a crash left staged, then every entered plugin
-/// key file in `plugin-keys` that no binding row names, as a committed removal or a crash
-/// between a binding change and its file delete leaves it. Inputs: the engine connection and
-/// root. Output: none.
+/// Runs the plugin store's start sweeps: what a crash left staged, then each folder a
+/// removal moved aside, settled by the plugin's rows, then every entered plugin key file in
+/// `plugin-keys` that no binding row names, as a committed removal or a crash between a
+/// binding change and its file delete leaves it. Inputs: the engine connection and root.
+/// Output: none.
 pub(crate) fn sweep_at_start(db: &Connection, root: &Path) {
     sweep_staged(root);
+    let _ = registry::sweep_removals(db, &engine(root));
     sweep_unnamed_keys(db, root);
 }
 
