@@ -204,3 +204,10 @@ test("Settings lists App plugins under App next to the other app pages and keeps
   assert.match(index, /tab === "app-plugins" \? <AppPluginsSettings \/>/u);
   assert.match(index, /tab === "plugins" \? <PluginsAndSkills skill=\{skill\} \/>/u);
 });
+
+test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_not_found" }),
+    "That plugin is gone. Open App plugins again to see the current ones.",
+  );
+});
