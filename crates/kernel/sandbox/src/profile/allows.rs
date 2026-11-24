@@ -78,27 +78,27 @@ impl ProjectSandbox {
             if agents {
                 return Err(invalid("an interpreter sits where the agent can write"));
             }
-            let covered = SYSTEM_READ_ROOTS
-                .iter()
-                .map(Path::new)
-                .chain(self.read_roots.iter().map(PathBuf::as_path))
-                .chain(self.tool_roots.iter().map(PathBuf::as_path))
-                .any(|root| folder.starts_with(root));
-            if !covered {
+            if !self.reads(&folder) {
                 self = self.allow_node_folder(&folder)?;
             }
         }
         Ok(self)
     }
 
-    /// Whether a system, granted or toolchain folder already makes a path readable. Input: an
+    /// Whether a system, granted or toolchain folder already makes a path readable. Only
+    /// Seatbelt grants the toolchain folders, so elsewhere they never count. Input: an
     /// absolute path. Output: the answer.
     fn reads(&self, path: &Path) -> bool {
+        let tools: &[PathBuf] = if cfg!(target_os = "macos") {
+            &self.tool_roots
+        } else {
+            &[]
+        };
         SYSTEM_READ_ROOTS
             .iter()
             .map(Path::new)
             .chain(self.read_roots.iter().map(PathBuf::as_path))
-            .chain(self.tool_roots.iter().map(PathBuf::as_path))
+            .chain(tools.iter().map(PathBuf::as_path))
             .any(|root| path.starts_with(root))
     }
 
