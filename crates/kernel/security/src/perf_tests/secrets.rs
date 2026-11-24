@@ -94,7 +94,6 @@ fn secrets_calls() {
     let store = MemoryStore::default();
     let table = scopes();
     let hosts = vec![HOST.to_owned()];
-    let found = reference(&format!("{NAMESPACE}.github"), "token").unwrap();
     let shared = Mutex::new(Handles::new());
     let secrets = Secrets::for_request(&store, NAMESPACE, &table, &shared, Some(owner()));
     let put = secrets.put_from_owner("github", "token").unwrap();
@@ -115,9 +114,13 @@ fn secrets_calls() {
     time(&row("secrets.Handles.new", FAST), SAMPLES, || {
         black_box(Handles::new());
     });
+    let references: Vec<SecretRef> = (0..ONE_SHOT)
+        .map(|at| reference(&format!("{NAMESPACE}.github"), &format!("minted-{at}")).unwrap())
+        .collect();
+    let mut fresh = references.into_iter();
     let mut minted = Handles::new();
     time(&row("secrets.Handles.mint", ONE), SAMPLES, || {
-        black_box(minted.mint("github", found.clone()).unwrap());
+        black_box(minted.mint("github", fresh.next().unwrap()).unwrap());
     });
     assert_eq!(minted.total(), ONE_SHOT);
     let mut holding = Handles::new();

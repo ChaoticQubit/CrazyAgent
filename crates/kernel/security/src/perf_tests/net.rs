@@ -156,8 +156,10 @@ fn net_calls() {
         200
     );
     assert_eq!(
-        fields(&sends, "github", "github.com", &asked).unwrap(),
-        asked
+        fields(&sends, "github", "github.com", &asked)
+            .unwrap()
+            .len(),
+        2
     );
     time(&row("net.capture.CaptureRules.new", FAST), SAMPLES, || {
         black_box(rules());

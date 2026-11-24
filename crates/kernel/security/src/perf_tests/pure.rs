@@ -56,7 +56,7 @@ fn output() -> Vec<u8> {
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn pure_calls() {
     let output = output();
-    let text: Vec<u8> = output[..256].to_vec();
+    let text: Vec<u8> = output[200..456].to_vec();
     let token = RelayToken::mint().unwrap();
     let presented = token.as_str().to_owned();
     let secret = SecretString::new(SECRET.to_vec()).unwrap();
