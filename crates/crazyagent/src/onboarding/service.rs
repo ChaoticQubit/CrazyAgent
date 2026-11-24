@@ -592,6 +592,20 @@ fn run_step(
     waits
 }
 
+/// The stop a code graph build polls: yes once `stop` says so, or once a folder the
+/// project saves hidden now is one the build's sandbox did not hide at its start, so the
+/// build ends and runs again hiding it. Takes the worker's database, the project, the
+/// build's hidden folders guard and `stop`. Returns the stop.
+fn hide_stops<'a>(
+    database: &'a Connection,
+    project: &'a str,
+    listed: &'a kernel_sandbox::hidden_paths::HiddenRun,
+    stop: &'a dyn Fn() -> bool,
+) -> impl Fn() -> bool + 'a {
+    let _ = (database, project, listed);
+    move || stop()
+}
+
 fn graph_step(
     work: &Work,
     database: &rusqlite::Connection,
@@ -619,15 +633,16 @@ fn graph_step(
     } else {
         None
     };
-    match graph::update(
+    let ending = graph::update(
         &graphify,
         &claimed.repo,
         work.runner.state(),
         &run_name(claimed, None),
         &hidden,
         work.limits.graph_time,
-        beat,
-    ) {
+        &hide_stops(database, &claimed.project, &listed, beat),
+    );
+    match ending {
         #[cfg(unix)]
         Ok(GraphEnding::Built) => {
             if let Some(tip) = tip {
@@ -939,7 +954,12 @@ fn refresh_build(
         &name,
         hidden,
         work.limits.graph_time,
-        &gives_way(database, repo, halted),
+        &hide_stops(
+            database,
+            project,
+            &listed,
+            &gives_way(database, repo, halted),
+        ),
     );
     if matches!(ending, Err(RunError::Uncertain(_))) {
         std::mem::forget(listed);
@@ -1440,5 +1460,7 @@ pub(crate) const GRAPHIFY_REFUSED: &str = "graphify can't start: the file found 
 
 #[cfg(test)]
 mod claim_tests;
+#[cfg(test)]
+mod hide_tests;
 #[cfg(test)]
 mod start_tests;

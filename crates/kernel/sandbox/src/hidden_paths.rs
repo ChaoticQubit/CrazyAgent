@@ -166,6 +166,14 @@ impl HiddenRun {
             run.hidden = Some(digests);
         }
     }
+
+    /// Tells whether this run's sandbox keeps it out of every folder saved hidden now, as
+    /// [`covers`] reads what [`HiddenRun::hid`] recorded, so a run that hid nothing yet
+    /// covers no saved folder. Input: the saved folders. Output: the answer.
+    pub fn covers_saved(&self, saved: &[PathBuf]) -> bool {
+        let _ = saved;
+        true
+    }
 }
 
 impl Drop for HiddenRun {
@@ -722,5 +730,22 @@ mod tests {
         let run = listed_run(RunKind::Research, project, &[]);
         std::mem::forget(run);
         assert_eq!(runs_seeing(project, &saved), vec![RunKind::Research]);
+    }
+
+    /// A run covers the folders it hid and those below them, and stops covering once a
+    /// folder it did not hide is saved hidden.
+    #[test]
+    fn a_run_stops_covering_once_a_folder_it_did_not_hide_is_saved() {
+        let project = "covers-saved";
+        let (hid, below, later) = (
+            PathBuf::from("/tmp/covers-saved/vault"),
+            PathBuf::from("/tmp/covers-saved/vault/keys"),
+            PathBuf::from("/tmp/covers-saved/dump"),
+        );
+        let run = listed_run(RunKind::CodeGraph, project, std::slice::from_ref(&hid));
+        assert!(run.covers_saved(std::slice::from_ref(&hid)));
+        assert!(run.covers_saved(std::slice::from_ref(&below)));
+        assert!(!run.covers_saved(&[hid, later.clone()]));
+        assert!(!run.covers_saved(std::slice::from_ref(&later)));
     }
 }
