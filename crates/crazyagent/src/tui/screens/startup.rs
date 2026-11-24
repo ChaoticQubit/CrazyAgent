@@ -264,7 +264,7 @@ impl Screen for Startup {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
         if Self::broken(ctx) && ctx.starts_engine {
-            self.recovery.start();
+            self.recovery.start(ctx.engine.as_ref());
         }
         let lines = if Self::broken(ctx) {
             self.recovery_lines(ctx, area.width)
@@ -331,7 +331,10 @@ mod tests {
         };
         startup.shown(&mut ctx);
         assert!(!ctx.take_start(), "a restored record never starts 2.5");
-        assert!(ctx.take_reconnect(), "the reconnect shows how the engine stands");
+        assert!(
+            ctx.take_reconnect(),
+            "the reconnect shows how the engine stands"
+        );
     }
 
     #[test]
