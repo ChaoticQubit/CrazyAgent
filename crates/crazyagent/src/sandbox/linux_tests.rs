@@ -140,15 +140,15 @@ fn a_linked_worktree_writes_its_tree_its_admin_folder_without_links_and_no_objec
 #[test]
 fn a_confined_launch_on_the_bubblewrap_backend_is_refused_with_its_own_line() {
     let (_temp, _project, sandbox, worktree) = linked();
-    let launch = LinuxSandbox {
-        sandbox: sandbox.confine_to_worktree(&worktree).unwrap(),
-        backend: LinuxBackend::Bubblewrap {
+    let launch = LinuxSandbox::assembled(
+        sandbox.confine_to_worktree(&worktree).unwrap(),
+        LinuxBackend::Bubblewrap {
             bwrap: PathBuf::from(BWRAP_PATHS[0]),
             helper: helper(),
         },
-        supervision: None,
-        routed: None,
-    };
+        None,
+        None,
+    );
     let mut harness = Command::new("/bin/true");
     harness.current_dir(&worktree);
     let refused = launch.wrap(&harness).err();
@@ -162,12 +162,12 @@ fn a_confined_launch_on_the_bubblewrap_backend_is_refused_with_its_own_line() {
 #[test]
 fn a_launch_whose_git_grant_covers_a_protected_path_nothing_holds_is_refused() {
     let (_temp, _project, sandbox, worktree) = linked();
-    let launch = LinuxSandbox {
-        sandbox: sandbox.confine_to_worktree(&worktree).unwrap(),
-        backend: LinuxBackend::Landlock { helper: helper() },
-        supervision: None,
-        routed: None,
-    };
+    let launch = LinuxSandbox::assembled(
+        sandbox.confine_to_worktree(&worktree).unwrap(),
+        LinuxBackend::Landlock { helper: helper() },
+        None,
+        None,
+    );
     let mut harness = Command::new("/bin/true");
     harness.current_dir(&worktree);
     let refused = launch.wrap(&harness).err();
@@ -185,13 +185,7 @@ fn a_launch_whose_git_grant_covers_a_protected_path_nothing_holds_is_refused() {
 fn only_the_plain_landlock_backend_leaves_a_session_of_its_own_running() {
     let (_temp, _project, sandbox, _worktree) = linked();
     let ends = |backend: LinuxBackend| {
-        LinuxSandbox {
-            sandbox: sandbox.clone(),
-            backend,
-            supervision: None,
-            routed: None,
-        }
-        .ends_every_session()
+        LinuxSandbox::assembled(sandbox.clone(), backend, None, None).ends_every_session()
     };
     let bwrap = PathBuf::from("/usr/bin/bwrap");
 
@@ -207,12 +201,12 @@ fn only_the_plain_landlock_backend_leaves_a_session_of_its_own_running() {
 }
 
 fn supervised_launch(sandbox: ProjectSandbox) -> LinuxSandbox {
-    LinuxSandbox {
+    LinuxSandbox::assembled(
         sandbox,
-        backend: LinuxBackend::Landlock { helper: helper() },
-        supervision: Some(Supervision { signals: false }),
-        routed: None,
-    }
+        LinuxBackend::Landlock { helper: helper() },
+        Some(Supervision { signals: false }),
+        None,
+    )
 }
 
 fn flag_values(words: &[OsString], flag: &str) -> Vec<PathBuf> {
@@ -309,10 +303,7 @@ fn a_supervised_clone_launches_with_its_store_held() {
     let objects = clone.join(".git").join("objects");
     assert_eq!(guarded.stores, vec![objects.clone()]);
     assert!(guarded.entries.contains(&objects.join("ff")));
-    let unsupervised = LinuxSandbox {
-        supervision: None,
-        ..launch
-    };
+    let unsupervised = launch.with_supervision(None);
     let refused = unsupervised.wrap(&harness).err();
     assert!(
         matches!(&refused, Some(SandboxError::Unavailable(reason))
@@ -368,15 +359,15 @@ fn a_clone_on_the_bubblewrap_backend_is_refused_with_the_landlock_line() {
     let clone = project.join("worktrees").join("agent-2");
     fs::create_dir(&clone).unwrap();
     git(&clone, &["init", "-q"]);
-    let launch = LinuxSandbox {
-        sandbox: sandbox.confine_to_clone(&clone).unwrap(),
-        backend: LinuxBackend::Bubblewrap {
+    let launch = LinuxSandbox::assembled(
+        sandbox.confine_to_clone(&clone).unwrap(),
+        LinuxBackend::Bubblewrap {
             bwrap: PathBuf::from(BWRAP_PATHS[0]),
             helper: helper(),
         },
-        supervision: None,
-        routed: None,
-    };
+        None,
+        None,
+    );
     let mut harness = Command::new("/bin/true");
     harness.current_dir(&clone);
     let refused = launch.wrap(&harness).err();
@@ -1167,7 +1158,7 @@ fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
     };
     let launch = LinuxSandbox::new(sandbox, failing).unwrap();
     let unsupervised = launch.supervise(LinuxSupervisor::On, Some(data.as_path()));
-    assert_eq!(unsupervised.supervision, None);
+    assert_eq!(unsupervised.supervision(), None);
     assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
 }
 
@@ -1259,10 +1250,7 @@ fn only_a_supervised_launch_hands_the_helper_its_guards() {
             .collect()
     };
     assert!(!words(&plain).contains(&GUARD_GIT.into()));
-    let supervised = LinuxSandbox {
-        supervision: Some(Supervision { signals: false }),
-        ..plain
-    };
+    let supervised = plain.with_supervision(Some(Supervision { signals: false }));
     let held = words(&supervised);
     let git = [GUARD_GIT, OWN_TREE].map(OsString::from);
     let at = held
