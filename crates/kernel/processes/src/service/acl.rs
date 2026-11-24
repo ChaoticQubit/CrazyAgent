@@ -107,6 +107,10 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
         .unwrap_or(0);
     let read = list(&listed, &inodes);
     assert_eq!(read.len(), missed.len());
+    #[cfg(test)]
+    if let Some(hook) = AFTER_LISTING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     for (index, (answer, direct)) in missed.into_iter().zip(read) {
         answers[index] = answer;
@@ -198,6 +202,29 @@ thread_local! {
     /// The entries of each access listing this test thread ran, in order.
     static LISTINGS: std::cell::RefCell<Vec<Vec<std::path::PathBuf>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// What runs once on this test thread between the next access listing and the `lstat`
+    /// after it, so a row can change an entry while its access list is being read.
+    static AFTER_LISTING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the hook once on this test thread between the next access listing and the `lstat`
+/// after it. Input: the hook.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn after_next_listing(hook: impl FnOnce() + 'static) {
+    AFTER_LISTING.with(|after| *after.borrow_mut() = Some(Box::new(hook)));
+}
+
+/// Whether an access answer is kept for the entry. Input: the entry. Output: the answer.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn kept(entry: &Path) -> bool {
+    KEPT.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(entry)
 }
 
 /// Takes the entries of each access listing this test thread ran since the last take.

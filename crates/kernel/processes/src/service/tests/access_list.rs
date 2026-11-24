@@ -528,3 +528,42 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         "read in a later second, it is kept"
     );
 }
+
+/// An entry whose change time moves between its access listing and the `lstat` after it
+/// gets no answer, which counts as changeable, and nothing is kept for it; an entry with the
+/// same read-only access list, left alone, reads as not shared and is kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_entry_changed_while_its_access_list_is_read_gets_no_answer_and_is_not_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = durable_folder();
+    let still = temp.path().join("still");
+    let swapped = temp.path().join("swapped");
+    for entry in [&still, &swapped] {
+        write_mode(entry, "", 0o644);
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("group:staff allow read")
+                .arg(entry),
+        )
+        .unwrap();
+        assert!(status.success());
+    }
+    settle(&[&still, &swapped]);
+    let read = |entry: &Path| {
+        let metadata = std::fs::symlink_metadata(entry).unwrap();
+        acl::shared_all(&[(entry, &metadata)])
+    };
+    assert_eq!(read(&still), vec![Some(false)]);
+    assert!(acl::kept(&still), "an entry left alone is kept");
+    let moved = swapped.clone();
+    acl::after_next_listing(move || {
+        std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o600)).unwrap();
+    });
+    assert_eq!(read(&swapped), vec![None]);
+    assert!(
+        !acl::kept(&swapped),
+        "an entry changed during its listing is not kept"
+    );
+}
