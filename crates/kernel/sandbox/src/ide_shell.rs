@@ -76,9 +76,10 @@ pub struct Launch<'a> {
 /// process such as the IDE server.
 /// Its listeners stay off the owner's local model ports, and it keeps to the project's IDE
 /// agent folders choice (DEC-124).
-/// Input: the launch. Output: the command, or a refusal for an unlisted shell, a start
-/// outside the project folder, an unsafe root or Full access, which only the IDE server's own
-/// shell runs.
+/// Inputs: the engine's profile hooks, which also remove the home's shell startup files, and
+/// the launch. Output: the command, or a refusal for a project that is not a project id
+/// (one plain folder name), an unlisted shell, a start outside the project folder, an unsafe
+/// root or Full access, which only the IDE server's own shell runs.
 #[cfg(target_os = "macos")]
 pub fn command(hooks: &'static ProfileHooks, launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use crate::error::invalid;
@@ -92,7 +93,7 @@ pub fn command(hooks: &'static ProfileHooks, launch: &Launch<'_>) -> Result<Comm
     if launch.level == AgentAccess::Full {
         return Err(invalid("a Full access terminal runs in the IDE server"));
     }
-    if !kernel_common::names::single_component(launch.project) {
+    if kernel_common::names::validate_identity(launch.project).is_err() {
         return Err(invalid("the project id is not a folder name"));
     }
     if launch.arguments.len() > SHELL_ARGUMENTS_MAX {
@@ -164,7 +165,8 @@ pub fn command(hooks: &'static ProfileHooks, launch: &Launch<'_>) -> Result<Comm
 }
 
 /// Refuses the Sandboxed terminal where no sandbox is qualified for it, before anything
-/// is written. Takes the launch, unused. Returns `Unavailable` with [`UNAVAILABLE`].
+/// is written. Takes the profile hooks and the launch, both unused. Returns `Unavailable`
+/// with [`UNAVAILABLE`].
 #[cfg(not(target_os = "macos"))]
 pub fn command(
     _hooks: &'static ProfileHooks,
@@ -176,8 +178,9 @@ pub fn command(
 /// Builds the Sandboxed terminal as the engine's terminal host runs it in a pane: the same
 /// argument list, working folder and environment as [`command`], as text, with a login shell
 /// started through [`SAYS_THEN_SHELL`] so the owner reads that this terminal cannot stage or
-/// commit. Inputs: the launch and the level the project is at, which picks those words.
-/// Output: the pane command, or [`command`]'s refusal, or `Invalid` for a part that is not UTF-8.
+/// commit. Inputs: the engine's profile hooks, the launch and the level the project is at,
+/// which picks those words. Output: the pane command, or [`command`]'s refusal, or `Invalid`
+/// for a part that is not UTF-8.
 pub fn interactive(
     hooks: &'static ProfileHooks,
     launch: &Launch<'_>,

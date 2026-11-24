@@ -221,8 +221,9 @@ fn confinement_equals_the_values_crazyagent_built() {
 }
 
 /// A Sandboxed IDE terminal names its own folder under the engine data root after the
-/// project, so the kernel refuses, before it writes anything, every project that is not one
-/// plain folder name: empty, `.`, `..`, a nested path, an absolute path or a trailing dot.
+/// project, so the kernel refuses, before it writes anything, every project that is not a
+/// project id: empty, `.`, `..`, a nested path, an absolute path, a trailing dot, a space,
+/// a quote, a newline or `..` inside a name.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_ide_terminal_refuses_a_project_that_is_not_one_folder_name() {
@@ -235,7 +236,9 @@ fn an_ide_terminal_refuses_a_project_that_is_not_one_folder_name() {
     for path in [&root, &folder] {
         std::fs::create_dir_all(path).unwrap();
     }
-    for project in ["", ".", "..", "a/b", "../p", "/p", "p."] {
+    for project in [
+        "", ".", "..", "a/b", "../p", "/p", "p.", "p q", "p\"q", "p\nq", "a..b",
+    ] {
         let launch = Launch {
             root: &root,
             project,
