@@ -76,8 +76,9 @@ pub const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 /// Tells whether one variable may reach an agent process with this value: a name
 /// [`agent_env_refused`] accepts, a fixed [`AGENT_GIT_ENV`] pair, a model key name holding the
 /// placeholder or the lineage token in its own variable; never a real key or relay token, which
-/// other owner processes can read, save a launch's own token in [`Handed`] names on macOS and
-/// Linux, where [`Handed::new`] states what keeps those reads out; elsewhere it is refused.
+/// other owner processes can read, save a launch's own token in [`Handed`] names on macOS,
+/// Linux and Windows, where [`Handed::new`] states what keeps those reads out; elsewhere it is
+/// refused.
 /// Inputs: name, value. Output: allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     let token = kernel_common::relay_names::TOKEN_PREFIX.as_bytes();
@@ -143,15 +144,22 @@ impl<'a> Handed<'a> {
     /// from reading the launch's environment: on macOS the agent profile denies those reads;
     /// on Linux the bubblewrap and nested backends start each agent in its own process
     /// namespace with a fresh `/proc`, and under the Landlock backend, with no namespace,
-    /// Landlock's ptrace scope keeps sibling domains from each other's `/proc/<pid>/environ`.
+    /// Landlock's ptrace scope keeps sibling domains from each other's `/proc/<pid>/environ`;
+    /// on Windows each agent runs in its own AppContainer, which another container cannot open
+    /// for a query or a memory read, nor the helper that starts it.
     /// Inputs: the names, from the manifest's accounts entry for the account's wire format,
     /// and the one value they may hold. Output: the exception, or `Invalid` for a value that
     /// is neither a relay token nor the keyless placeholder, a name refused for more than a
-    /// key suffix, and off macOS and Linux.
+    /// key suffix, and off macOS, Linux and Windows.
     pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
         let handed = kernel_common::relay_names::is_relay_token(value)
             || value == kernel_common::relay_names::LOCAL_PLACEHOLDER;
-        if !cfg!(any(target_os = "macos", target_os = "linux")) || !handed {
+        if !cfg!(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )) || !handed
+        {
             return Err(invalid("a launch hands only its own relay token"));
         }
         let other = |name: &&str| {

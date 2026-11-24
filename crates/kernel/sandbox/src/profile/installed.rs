@@ -226,9 +226,10 @@ impl InstalledSandbox {
     }
 
     /// Rebuilds a harness command as [`InstalledSandbox::wrap`] does for a launch that hands
-    /// its account over, through [`linux::LinuxSandbox::wrap_handing`]. Inputs: the harness
-    /// command and the launch's exception. Output: the command, or the refusal.
-    #[cfg(target_os = "linux")]
+    /// its account over, through [`linux::LinuxSandbox::wrap_handing`] on Linux and
+    /// [`windows::WindowsSandbox::wrap_handing`] on Windows. Inputs: the harness command and
+    /// the launch's exception. Output: the command, or the refusal.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn wrap_handing(
         &self,
         harness: &Command,
@@ -237,7 +238,10 @@ impl InstalledSandbox {
         if self.unconfined {
             return Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()));
         }
+        #[cfg(target_os = "linux")]
         let command = self.linux.wrap_handing(harness, handed)?;
+        #[cfg(target_os = "windows")]
+        let command = self.windows.wrap_handing(harness, handed)?;
         assert_eq!(command.get_program(), self.launcher().as_os_str());
         Ok(command)
     }

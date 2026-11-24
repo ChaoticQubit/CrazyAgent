@@ -4,7 +4,7 @@ use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{canonical, clean_absolute};
 use crate::profile::ProjectSandbox;
 use crate::profile::command::Sandbox;
-use crate::profile::env::agent_process_env;
+use crate::profile::env::{Handed, agent_process_env, agent_process_env_handing};
 use crate::windows::{container_for, existing_helper, helper_beside_engine};
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
@@ -161,8 +161,28 @@ impl WindowsSandbox {
     }
 }
 
-impl Sandbox for WindowsSandbox {
-    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+impl WindowsSandbox {
+    /// Rebuilds a harness command as [`Sandbox::wrap`] does for a launch that hands its
+    /// account over: its environment lets the names the exception lists hold its one value.
+    /// Inputs: the harness command and the launch's exception. Output: the command, or the
+    /// refusal.
+    pub fn wrap_handing(
+        &self,
+        harness: &Command,
+        handed: Handed<'_>,
+    ) -> Result<Command, SandboxError> {
+        self.wrapped(harness, Some(handed))
+    }
+
+    /// Rebuilds a harness command to start through the helper in this boundary, its
+    /// environment built with the launch's exception to the variable guard when it has one.
+    /// Inputs: the harness command and the exception, if any. Output: the command, or the
+    /// refusal.
+    fn wrapped(
+        &self,
+        harness: &Command,
+        handed: Option<Handed<'_>>,
+    ) -> Result<Command, SandboxError> {
         let program = Path::new(harness.get_program());
         if !clean_absolute(program) {
             return Err(invalid("harness program must be an absolute plain path"));
@@ -189,12 +209,22 @@ impl Sandbox for WindowsSandbox {
                 .iter()
                 .any(|pinned| name.eq_ignore_ascii_case(pinned))
         };
-        let env = agent_process_env(&base, harness.get_envs().filter(|&(name, _)| !pinned(name)))?;
+        let variables = harness.get_envs().filter(|&(name, _)| !pinned(name));
+        let env = match handed {
+            Some(handed) => agent_process_env_handing(&base, variables, handed)?,
+            None => agent_process_env(&base, variables)?,
+        };
         let mut command = boundary_command(&self.helper, &self.profile, program, &env);
         command.args(harness.get_args()).current_dir(cwd);
         assert_eq!(command.get_program(), self.helper.as_os_str());
         assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
         Ok(command)
+    }
+}
+
+impl Sandbox for WindowsSandbox {
+    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+        self.wrapped(harness, None)
     }
 }
 
