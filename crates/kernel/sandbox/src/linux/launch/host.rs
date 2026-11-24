@@ -510,10 +510,11 @@ pub(super) fn publish(kept: &KeptHost, generation: u64, host: crate::host::Linux
 
 /// Marks what is kept of this machine as running no call supervisor, after a launch with
 /// the setting On found it does not hold (rv-secreview linux-t4c F2), so the Agent access
-/// page shows the wider lines until the next read. Nothing kept stays nothing. Input: what
-/// is kept.
+/// page shows the wider lines until the next read, and counts the mark so a read that began
+/// before it is not kept ([`publish`]). Nothing kept stays nothing. Input: what is kept.
 pub fn forget_supervisor(kept: &KeptHost) {
     let mut held = kept.lock().unwrap_or_else(PoisonError::into_inner);
+    held.0 += 1;
     if let Some((_, host)) = held.1.as_mut() {
         host.supervised = false;
     }
