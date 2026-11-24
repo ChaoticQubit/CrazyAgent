@@ -44,6 +44,7 @@ const ONBOARDED_MAX: i64 = 256;
 #[cfg(unix)]
 const REFRESH_PREFIX: &str = "graph-main-";
 /// How often a main graph refresh build looks for a waiting onboarding step to give way to.
+#[cfg(unix)]
 const STEP_POLL: Duration = Duration::from_secs(1);
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MAPPING_HARNESSES: [ResearchHarness; 2] =
