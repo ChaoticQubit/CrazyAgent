@@ -182,7 +182,7 @@ async function main() {
     report(specRows(spec, `suite ${suite}`), `suite ${suite}`, { code: run.code, text: `${run.text}\n${spec}` }, counts);
   }
   for (const config of HOSTED_CONFIGS) {
-    const root = realpathSync(mkdtempSync("/tmp/ms-"));
+    const root = join(realpathSync(mkdtempSync("/tmp/ms-")), "root");
     const env = { ...process.env, WD_APP: app, WD_PORT: String(await freePort()), MS_ENGINE: engine, MS_ROOT: root,
       MS_EVIDENCE: join(evidence, config.replace(/\.wdio\.conf\.mjs$/, "")) };
     mkdirSync(env.MS_EVIDENCE, { recursive: true, mode: 0o700 });
