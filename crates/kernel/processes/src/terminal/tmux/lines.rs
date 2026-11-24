@@ -344,19 +344,17 @@ impl Tmux {
         let until = Instant::now() + REPLY_TIME;
         loop {
             let marker = fresh_marker()?;
-            let line = format!("{asked} ; display-message -p '{marker}'");
+            let shown = format!("display-message -p '{marker}'");
             let (reply, answer) = sync_channel(1);
-            control.send(
-                &line,
-                Pending::Attach {
-                    agent: agent.clone(),
-                    located: None,
-                    history,
-                    view,
-                    reply,
-                    marker: marker.into_bytes(),
-                },
-            )?;
+            let attaching = Pending::Attach {
+                agent: agent.clone(),
+                located: None,
+                history,
+                view,
+                reply,
+                marker: marker.into_bytes(),
+            };
+            control.send_all(vec![(&asked, attaching), (&shown, Pending::Spent)])?;
             match control.wait(&answer) {
                 Err(cut) if cut.0 == REPLY_CUT && Instant::now() < until => {}
                 Err(cut) if cut.0 == REPLY_CUT => return Err(failure("terminal_not_answering")),
