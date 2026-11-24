@@ -53,9 +53,10 @@ pub fn linux_unbridged_notice(
 }
 
 /// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
-/// launches take, again once what is kept is a minute old. No input. Output: none on
-/// another system; on Linux the facts, each false when it cannot be read, so its gap line
-/// is shown.
+/// launches take, again once what is kept is a minute old. A reader calls it before it opens
+/// its database transaction, so no view inside one waits on a program. No input. Output:
+/// none on another system; on Linux the facts, each false when it cannot be read, so its
+/// gap line is shown.
 pub fn linux_host() -> Option<LinuxHost> {
     #[cfg(target_os = "linux")]
     {
