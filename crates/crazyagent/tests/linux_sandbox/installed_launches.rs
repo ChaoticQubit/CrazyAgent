@@ -30,7 +30,7 @@ const HANDED_NAME: &str = "OPENAI_API_KEY";
 
 /// An agent that counts the hand-over lines in its own environment, then waits on its input,
 /// so it stays alive while another agent looks for it.
-const READS_ITSELF: &str = "tr '\\0' '\\n' < /proc/self/environ | grep -c '^OPENAI_API_KEY=crazyagent-relay-'; cat > /dev/null";
+const READS_ITSELF: &str = "tr '\\0' '\\n' < /proc/$$/environ | grep -c '^OPENAI_API_KEY=crazyagent-relay-'; cat > /dev/null";
 
 /// An agent that reads the environment of every process its `/proc` shows and counts how
 /// many it could read and how many hold a hand-over line.
