@@ -61,28 +61,30 @@ const SUPERSCRIPT_DIGITS: [char; 3] = ['\u{b9}', '\u{b2}', '\u{b3}'];
 
 /// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
 /// CONIN$, CONOUT$, or COM or LPT followed by one ASCII digit or a superscript one, two or
-/// three. Case is compared on the Unicode upper case, so a dotless i counts as an I. The
-/// name may stand alone, before an extension or before one trailing colon, with or without
-/// spaces before the dot. Input: one path component. Output: whether it is reserved on
-/// Windows.
+/// three. Case is compared on the Unicode upper case, char by expanded char without a new
+/// String, so a dotless i counts as an I and a sharp s as SS. The name may stand alone,
+/// before an extension or before one trailing colon, with or without spaces before the
+/// dot. Input: one path component. Output: whether it is reserved on Windows.
 pub fn windows_device(name: &str) -> bool {
     let name = name.strip_suffix(':').unwrap_or(name);
     let stem = name
         .split_once('.')
         .map_or(name, |(stem, _)| stem)
-        .trim_end_matches(' ')
-        .to_uppercase();
+        .trim_end_matches(' ');
+    let upper = || stem.chars().flat_map(char::to_uppercase);
     let numbered = WINDOWS_NUMBERED_DEVICES.iter().any(|prefix| {
-        stem.strip_prefix(prefix).is_some_and(|tail| {
-            let mut tail = tail.chars();
-            matches!(
-                (tail.next(), tail.next()),
+        let mut chars = upper();
+        prefix.chars().all(|want| chars.next() == Some(want))
+            && matches!(
+                (chars.next(), chars.next()),
                 (Some(digit), None)
                     if digit.is_ascii_digit() || SUPERSCRIPT_DIGITS.contains(&digit)
             )
-        })
     });
-    numbered || WINDOWS_DEVICE_NAMES.contains(&stem.as_str())
+    numbered
+        || WINDOWS_DEVICE_NAMES
+            .iter()
+            .any(|device| upper().eq(device.chars()))
 }
 
 #[cfg(test)]
