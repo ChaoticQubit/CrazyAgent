@@ -92,6 +92,29 @@ test("two ABBA blocks print each build's median of its four runs and name the or
   ]);
 });
 
+test("a row whose runs all print nanoseconds keeps nanoseconds in its median at any size", () => {
+  const lines = [];
+  const runs = [
+    ["2.5", 50375, 57875],
+    ["2.4.4", 4875, 5000],
+    ["2.4.4", 6208, 6333],
+    ["2.5", 59708, 67958],
+  ];
+  for (const [build, p50, p95] of runs) {
+    lines.push(header(build, "loaded", "2.00", "2.5,2.4.4,2.4.4,2.5"));
+    lines.push(`PERF 1 sdk provider.settings.save_quit p50_ns=${p50} p95_ns=${p95} n=200 batch=1`);
+    lines.push(`PERF 1 sdk provider.sandbox.save_settings p50=${p50 * 3} p95=${p95 * 3} n=200`);
+  }
+  assert.deepEqual(median(lines, 2), [
+    "PERF-RUN build=2.5 commit=aaa date=2026-11-23T22:00 condition=loaded load1=2.00 slots=0 runs=2 order=2.5,2.4.4,2.4.4,2.5",
+    "PERF 1 sdk provider.settings.save_quit p50_ns=55041 p95_ns=62916 n=200 batch=1",
+    "PERF 1 sdk provider.sandbox.save_settings p50=165124 p95=188749 n=200",
+    "PERF-RUN build=2.4.4 commit=bbb date=2026-11-23T22:00 condition=loaded load1=2.00 slots=0 runs=2 order=2.5,2.4.4,2.4.4,2.5",
+    "PERF 1 sdk provider.settings.save_quit p50_ns=5541 p95_ns=5666 n=200 batch=1",
+    "PERF 1 sdk provider.sandbox.save_settings p50=16624 p95=16999 n=200",
+  ]);
+});
+
 test("a caller that still sets PERF_RUNS is refused before any run", () => {
   const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
   try {

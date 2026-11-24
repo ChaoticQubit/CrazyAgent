@@ -10,4 +10,9 @@ pub use generated::{Bound, Providers};
 #[cfg(test)]
 mod overhead_tests;
 #[cfg(test)]
+#[path = "../../../kernel/common/src/perf_kit.rs"]
+mod perf_kit;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
 mod tests;
