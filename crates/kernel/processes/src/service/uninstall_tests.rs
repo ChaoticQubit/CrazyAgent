@@ -77,3 +77,94 @@ fn an_uninstall_removes_a_deleted_or_already_absent_task_and_repeats_safely() {
     windows.uninstall().unwrap();
     assert!(!windows.definition.exists());
 }
+
+/// Hooks for an install row: the data folder is made, nothing else is asked.
+#[cfg(unix)]
+const INSTALL_HOOKS: Hooks = Hooks {
+    reported_version: |_| None,
+    prepare_root: |root| std::fs::create_dir_all(root).map_err(|error| failure(error.to_string())),
+    private_folder: |_| Ok(()),
+    is_private_folder: |_| true,
+};
+
+/// A service of one platform installed from a folder no other user can change, whose
+/// manager is a stand-in that logs each call's arguments to `calls` and fails the step
+/// named by `refused` with `refused: <step>`. Inputs: the folder, the platform, the manager
+/// it stands in for and the refused step. Output: the service.
+#[cfg(unix)]
+fn installing(folder: &Path, platform: Platform, manager: &str, refused: &str) -> Service {
+    use std::os::unix::fs::PermissionsExt;
+    let stand_in = folder.join(manager);
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\ncase \"$*\" in\n  *{refused}*) echo \"refused: {refused}\" >&2; exit 1 ;;\nesac\n[ \"$1\" != /Query ]\n"
+    );
+    std::fs::write(&stand_in, script).unwrap();
+    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+    STAND_INS.with(|stand_ins| *stand_ins.borrow_mut() = vec![(manager.to_owned(), stand_in)]);
+    let mut service = test_support::service(platform);
+    service.executable = folder.join("crazyagent");
+    std::fs::write(&service.executable, "engine").unwrap();
+    service.root = folder.join("engine");
+    service.definition = folder.join("definition");
+    service
+}
+
+/// The calls a stand-in manager logged, one line each. Input: its folder. Output: the lines.
+#[cfg(unix)]
+fn calls(folder: &Path) -> Vec<String> {
+    std::fs::read_to_string(folder.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A registration that fails after the definition is written leaves no definition behind:
+/// the unregister steps run, systemd reloads, and the install fails with the manager's
+/// refusal, so the next launch installs again instead of starting a unit that never starts
+/// at login. A registration that succeeds keeps the definition.
+#[cfg(unix)]
+#[test]
+fn a_failed_registration_removes_the_definition_and_a_registered_one_keeps_it() {
+    let folder = test_support::durable_folder();
+    let unit = test_support::service(Platform::Linux).name;
+    let linux = installing(folder.path(), Platform::Linux, SYSTEMCTL, "enable");
+    let error = linux.install(&INSTALL_HOOKS).unwrap_err();
+    assert!(error.0.contains("refused: enable"), "{}", error.0);
+    assert!(!linux.definition.exists());
+    assert_eq!(
+        calls(folder.path()),
+        [
+            "--user daemon-reload".to_owned(),
+            format!("--user enable --now {unit}"),
+            format!("--user disable --now {unit}"),
+            "--user daemon-reload".to_owned(),
+        ]
+    );
+    let windows_folder = test_support::durable_folder();
+    let windows = installing(
+        windows_folder.path(),
+        Platform::Windows,
+        SCHTASKS,
+        "/Create",
+    );
+    let error = windows.install(&INSTALL_HOOKS).unwrap_err();
+    assert!(error.0.contains("refused: /Create"), "{}", error.0);
+    assert!(!windows.definition.exists());
+    let task = &windows.name;
+    assert_eq!(
+        calls(windows_folder.path())[1..],
+        [format!("/End /TN {task}"), format!("/Delete /TN {task} /F")]
+    );
+    let kept = test_support::durable_folder();
+    let linux = installing(kept.path(), Platform::Linux, SYSTEMCTL, "nothing-refused");
+    linux.install(&INSTALL_HOOKS).unwrap();
+    assert!(linux.definition.is_file());
+    assert_eq!(
+        calls(kept.path()),
+        [
+            "--user daemon-reload".to_owned(),
+            format!("--user enable --now {unit}")
+        ]
+    );
+}
