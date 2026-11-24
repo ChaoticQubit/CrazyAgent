@@ -20,14 +20,42 @@ const REDACTED: &[u8] = b"[REDACTED]";
 /// (at most `OUTPUT_MAX` bytes), the secret values and the environment values. Output: the
 /// redacted bytes.
 pub fn redact(output: &[u8], secrets: &[&[u8]], env: &[&[u8]]) -> Vec<u8> {
+    redact_edges(output, secrets, env, false, false)
+}
+
+/// Redacts as [`redact`] does, and at a cut edge also the part of a value the cut left:
+/// with `front` the longest opening run that equals an end of a value, with `back` the
+/// longest closing run that equals a start of one. Inputs: as [`redact`], plus whether
+/// the output was cut before its first byte and after its last. Output: the redacted bytes.
+pub fn redact_edges(
+    output: &[u8],
+    secrets: &[&[u8]],
+    env: &[&[u8]],
+    front: bool,
+    back: bool,
+) -> Vec<u8> {
     assert!(output.len() <= OUTPUT_MAX);
     let values = secrets
         .iter()
         .filter(|value| !value.is_empty())
         .chain(env.iter().filter(|value| value.len() >= ENV_VALUE_MIN));
     let mut covered = vec![false; output.len()];
+    let length = output.len();
     for value in values {
-        if value.len() > output.len() {
+        let parts = (1..value.len().min(length + 1)).rev();
+        if let Some(part) = parts
+            .clone()
+            .find(|&k| front && output[..k] == value[value.len() - k..])
+        {
+            covered[..part].fill(true);
+        }
+        if let Some(part) = parts
+            .clone()
+            .find(|&k| back && output[length - k..] == value[..k])
+        {
+            covered[length - part..].fill(true);
+        }
+        if value.len() > length {
             continue;
         }
         for (start, window) in output.windows(value.len()).enumerate() {
