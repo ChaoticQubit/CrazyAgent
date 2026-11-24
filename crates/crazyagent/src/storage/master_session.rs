@@ -45,6 +45,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod delete;
 use delete::delete_session;
+mod sign_in;
+use sign_in::sign_in_gap;
 
 /// The device and inode that name the engine database file.
 /// Takes its path, unused here, and its metadata. Returns the pair.
@@ -2036,24 +2038,6 @@ fn listed_auth(
     assert_eq!(&proof.connection, member);
     assert!(session.admits_binding(&proof.config_id, &proof.source_hash, true));
     Ok(proof)
-}
-
-/// Names why the latest sign-in cannot authorize a master turn.
-/// Input: that sign-in's phase. Output: None when authenticated, the
-/// not-signed-in code when it finished without an account, else the stale code.
-fn sign_in_gap(phase: NativeAuthPhase) -> Option<&'static str> {
-    match phase {
-        NativeAuthPhase::AuthenticatedObserved => None,
-        NativeAuthPhase::UnauthenticatedObserved
-        | NativeAuthPhase::Failed
-        | NativeAuthPhase::Cancelled
-        | NativeAuthPhase::Unavailable => Some("master_authentication_unknown"),
-        NativeAuthPhase::Starting
-        | NativeAuthPhase::AwaitingOwner
-        | NativeAuthPhase::CheckingAccount
-        | NativeAuthPhase::Cancelling
-        | NativeAuthPhase::Uncertain => Some("master_authentication_stale"),
-    }
 }
 
 /// Proves one member of the master's pool can authorize its turns now.
