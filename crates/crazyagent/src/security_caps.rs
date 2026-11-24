@@ -1,6 +1,7 @@
 use kernel_security::error::StoreError;
 use kernel_security::net as kernel_net;
 use kernel_security::secrets::Secrets;
+use sdk::generated::{service, update};
 use sdk::secrets::Secret;
 use sdk::settings::QuitSettings;
 use sdk::{Refusal, net, secrets, settings};
@@ -174,6 +175,30 @@ impl net::Provide for Absent {
 
 impl settings::Provide for Absent {
     fn save_quit(&self, _: &'static str, _: QuitSettings) -> Result<(), Refusal> {
+        Err(absent())
+    }
+}
+
+impl service::Provide for Absent {
+    fn status(&self, _: &'static str) -> Result<service::ServiceState, Refusal> {
+        Err(absent())
+    }
+
+    fn repair(&self, _: &'static str) -> Result<(), Refusal> {
+        Err(absent())
+    }
+
+    fn install(&self, _: &'static str) -> Result<(), Refusal> {
+        Err(absent())
+    }
+
+    fn uninstall(&self, _: &'static str) -> Result<(), Refusal> {
+        Err(absent())
+    }
+}
+
+impl update::Provide for Absent {
+    fn set_channel(&self, _: &'static str, _: update::UpdateChannel) -> Result<(), Refusal> {
         Err(absent())
     }
 }

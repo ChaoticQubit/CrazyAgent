@@ -224,7 +224,7 @@ fn calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
                 .is_some_and(|c| c == ' ' || c == '(' || c == '\n');
             (plain || before.ends_with("update::")) && !before.ends_with("fn ")
         })
-        .map(|(at, _)| function_holding(path, text, at))
+        .map(|(at, _)| function_holding(path, text, at + needle.len()))
         .collect()
 }
 
@@ -256,7 +256,7 @@ fn rust_sources_skips_folder_links_and_finds_each_file_once() {
 fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
     let text = "use kernel_processes::{update, process};\n\nfn sneak() {\n    swap(&a, &b);\n}\n";
     let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
-    assert_eq!(found, vec!["\nfn sneak() {\n    "]);
+    assert_eq!(found, vec!["\nfn sneak() {\n    swap("]);
 }
 
 /// Every install step that writes a release over the running app is reached only after its
@@ -284,10 +284,15 @@ fn no_install_path_skips_verification() {
     for path in sources.iter().filter(|path| !test_source(path)) {
         let text =
             std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+        let mut sites = std::collections::BTreeSet::new();
         for needle in &installs {
+            let call = needle.find("install(").expect(needle) + "install(".len();
             for (at, _) in text.match_indices(needle.as_str()) {
-                desktop.push((path.clone(), function_holding(path, &text, at).to_owned()));
+                sites.insert(at + call);
             }
+        }
+        for site in sites {
+            desktop.push((path.clone(), function_holding(path, &text, site).to_owned()));
         }
         for body in swap_calls(path, &text, "swap") {
             swaps.push((path.clone(), body.to_owned()));
