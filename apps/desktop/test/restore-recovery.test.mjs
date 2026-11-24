@@ -86,3 +86,17 @@ test("the TUI says the recovery words and labels the desktop says", () => {
     assert.ok(tui.includes(`"${line}"`), `the TUI says ${line}`);
   }
 });
+
+test("a refused finish clears its running flag and offers Try again, as the TUI reads again on r", async () => {
+  const finishing = { current: false };
+  const refused = await recovery.finishOnce(finishing, async () => ({ kind: "error", code: "storage_putback_busy" }));
+  assert.equal(refused, "storage_putback_busy");
+  assert.equal(finishing.current, false, "a refused finish can run again");
+  assert.equal(await recovery.finishOnce(finishing, async () => ({ kind: "ok" })), null);
+  assert.equal(finishing.current, true, "a finish that ran is not run twice");
+  const copy = "replaced-20261117T093000000Z";
+  assert.doesNotMatch(view({ kind: "finished", copy }), button("Try again"), "a running finish offers nothing");
+  const shown = view({ kind: "finished", copy }, { problem: "storage_putback_busy" });
+  assert.match(shown, button("Try again"));
+  assert.ok(shown.includes("storage_putback_busy"), shown);
+});
