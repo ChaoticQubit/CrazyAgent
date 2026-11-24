@@ -496,10 +496,12 @@ mod profile_rows {
             format!("{verb}|{}", paths.join("|"))
         };
         let verb = if step.len() == 2 { "rename" } else { "rmtree" };
+        let child = module_path!().strip_prefix("crazyagent::").unwrap();
+        let child = format!("{child}::file_call_child");
         let mut command = Command::new(&probe);
         command
             .args([
-                "sandbox::windows::tests::file_call_child",
+                child.as_str(),
                 "--exact",
                 "--nocapture",
                 "--test-threads",
