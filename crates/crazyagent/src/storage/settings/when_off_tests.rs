@@ -51,6 +51,7 @@ impl Fixture {
             .write_global(&move |global: &str, project: &str| {
                 edit_when_turned_off(global, project, when_off)
             })
+            .map_err(|refused| refused.refused)
     }
 
     fn staged_left(&self) -> bool {

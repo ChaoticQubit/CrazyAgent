@@ -7,11 +7,12 @@ impl SettingsSources {
     /// only while both files still read as they did. A linked, shared or hard-linked file
     /// and a text that does not resolve are refused and left as they are. Input: the edit,
     /// from the global and project texts to the new global text and its config. Output: the
-    /// config the files now resolve to.
+    /// config the files now resolve to, or the refusal: one before the rename leaves the file
+    /// untouched, and one after it carries the config the files then resolve to, if any.
     pub(super) fn write_global(
         &self,
         edit: &GlobalEdit<'_>,
-    ) -> Result<EffectiveConfig, EngineError> {
+    ) -> Result<EffectiveConfig, GlobalRefused> {
         #[cfg(unix)]
         {
             self.global.verify()?;
@@ -21,17 +22,17 @@ impl SettingsSources {
                 AtFlags::SYMLINK_NOFOLLOW,
             ) {
                 Ok(named) if named.st_mode & 0o170000 == 0o120000 => {
-                    return Err(error("settings_metadata_invalid"));
+                    return Err(error("settings_metadata_invalid").into());
                 }
                 Ok(_) | Err(rustix::io::Errno::NOENT) => {}
-                Err(e) => return Err(error(e)),
+                Err(e) => return Err(error(e).into()),
             }
         }
         let old = self.snapshot()?;
         let (bytes, next) =
             edit(&old.global.bytes, &old.project.bytes).map_err(|refused| error(refused.0))?;
         if bytes.len() > crate::config::CONFIG_BYTES_MAX {
-            return Err(error("settings_file_bounds"));
+            return Err(error("settings_file_bounds").into());
         }
         self.remove_temporary(SETTING_STAGED)?;
         let name = OsString::from(SETTING_STAGED);
@@ -80,22 +81,30 @@ impl SettingsSources {
             Ok(identity) => identity,
             Err(refused) => {
                 let _ = self.remove_temporary(SETTING_STAGED);
-                return Err(refused);
+                return Err(refused.into());
             }
+        };
+        let adopt = |refused: EngineError| GlobalRefused {
+            refused,
+            adopted: self
+                .snapshot()
+                .and_then(|now| now.config())
+                .ok()
+                .map(Box::new),
         };
         #[cfg(test)]
         if let Some(step) = AFTER_RENAME.with(|hook| hook.borrow_mut().take()) {
-            step()?;
+            step().map_err(adopt)?;
         }
-        self.global.sync_parent()?;
-        let now = self.snapshot()?;
+        self.global.sync_parent().map_err(adopt)?;
+        let now = self.snapshot().map_err(adopt)?;
         if now.global.identity != staged_identity
             || now.global.bytes != bytes
             || now.project != old.project
         {
-            return Err(error("settings_publication_unknown"));
+            return Err(adopt(error("settings_publication_unknown")));
         }
-        let resolved = now.config()?;
+        let resolved = now.config().map_err(adopt)?;
         assert_eq!(resolved.id, next.id);
         Ok(resolved)
     }
@@ -105,6 +114,23 @@ impl SettingsSources {
 /// the new global text and the config both then resolve to, or the config refusal.
 pub(super) type GlobalEdit<'a> =
     dyn Fn(&str, &str) -> Result<(String, EffectiveConfig), crate::config::ConfigError> + 'a;
+
+/// A refused plain key edit of the global file: the storage refusal, and, when it came
+/// after the rename, the config the files then resolve to, if they still resolve.
+pub(super) struct GlobalRefused {
+    pub(super) refused: EngineError,
+    pub(super) adopted: Option<Box<EffectiveConfig>>,
+}
+
+impl From<EngineError> for GlobalRefused {
+    /// A refusal before the rename: the file is untouched, so nothing is adopted.
+    fn from(refused: EngineError) -> Self {
+        Self {
+            refused,
+            adopted: None,
+        }
+    }
+}
 
 /// The name a plain key edit is staged under in the global file's folder before its rename.
 pub(super) const SETTING_STAGED: &str = ".crazyagent-setting-staged";
