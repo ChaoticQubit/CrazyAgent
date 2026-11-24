@@ -1235,3 +1235,146 @@ fn the_page_and_its_modals_match_their_frames() {
     answer(&mut shell, &mut fake, job);
     check("app-plugin-off-80", &render(&mut shell, 80, 24), &[], None);
 }
+
+/// Opens the Add form and sends `path` for its check. Output: the Preview job it sent.
+fn check_path(shell: &mut Shell, path: &str) -> AppPluginsJob {
+    shell.key(Key::Char('a'));
+    shell.key(Key::Paste(path.into()));
+    shell.key(Key::Enter);
+    one(shell)
+}
+
+#[test]
+fn an_add_path_edited_while_its_check_runs_is_checked_again_and_never_added_as_typed_later() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    let job = check_path(&mut shell, DOCK_TWO);
+    shell.key(Key::Paste("-copy".into()));
+    answer(&mut shell, &mut fake, job);
+    assert!(
+        !shows(&mut shell, "Review Dock two"),
+        "a review of another path is never offered for approval"
+    );
+    assert!(shows(&mut shell, PATH_CHANGED));
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    assert!(matches!(
+        job,
+        AppPluginsJob::Preview { ref folder }
+            if folder.as_path() == std::path::Path::new("/Users/owner/plugins/dock-two-copy")
+    ));
+}
+
+#[test]
+fn the_review_scroll_stops_at_its_last_line_so_one_up_moves_back_one_line() {
+    let mut fake = Fake::new();
+    let Preview::Ready { trust } = fake.folders[0].1.clone() else {
+        panic!("the dock-two folder has a review");
+    };
+    let texts = trust_lines(&trust, usize::from(MODAL_WIDTH) - 4);
+    let before_last = texts[texts.len() - 2].clone();
+    let mut shell = page(&mut fake);
+    let job = check_path(&mut shell, DOCK_TWO);
+    answer(&mut shell, &mut fake, job);
+    assert!(shows(&mut shell, "Review Dock two"));
+    for _ in 0..40 {
+        shell.key(Key::Down);
+    }
+    assert!(
+        !shows(&mut shell, &before_last),
+        "only the last line is left"
+    );
+    shell.key(Key::Up);
+    assert!(
+        shows(&mut shell, &before_last),
+        "one Up shows the line before the last"
+    );
+}
+
+#[test]
+fn a_turn_off_sent_with_y_shows_it_is_saving_and_offers_no_keep_on() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 2);
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(bar(&mut shell).contains("Esc Keep on"));
+    shell.key(Key::Char('y'));
+    let job = one(&mut shell);
+    assert!(!bar(&mut shell).contains("Keep on"), "{}", bar(&mut shell));
+    assert!(shows(&mut shell, TURNING_OFF));
+    shell.key(Key::Esc);
+    assert!(requests(&mut shell).is_empty(), "Esc sends no cancel");
+    answer(&mut shell, &mut fake, job);
+    serve(&mut shell, &mut fake);
+    assert!(said(&shell).starts_with("Saved."), "{}", said(&shell));
+    assert!(line(&mut shell, "Dock embeddings").contains("Approved  Off"));
+}
+
+#[test]
+fn the_key_source_list_scrolls_so_the_typed_key_source_and_its_input_stay_in_view() {
+    let mut fake = Fake::new();
+    fake.accounts = (1..=30)
+        .map(|index| account(index, &format!("Key account {index}"), SignInMethod::ApiKey))
+        .collect();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 0);
+    shell.key(Key::Char('k'));
+    let _ = requests(&mut shell);
+    arrive(
+        &mut shell,
+        SettingsEvent::AllAccounts(Ok(fake.accounts.clone())),
+    );
+    for _ in 0..30 {
+        shell.key(Key::Down);
+    }
+    let shown = render(&mut shell, 100, 24);
+    assert!(
+        shown.iter().any(|row| row.contains("Key for api_key")),
+        "{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.contains("Enter a key for this plugin")),
+        "{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.contains("Sent to the engine once and never shown again.")),
+        "{shown:#?}"
+    );
+}
+
+#[test]
+fn the_add_path_hint_names_a_path_starting_with_slash() {
+    assert_eq!(
+        ABSOLUTE,
+        "Type the full path of the plugin folder, starting with /."
+    );
+}
+
+#[test]
+fn a_change_waiting_its_turn_reads_waiting_and_other_refusals_still_read_not_saved() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 2);
+    shell.key(Key::Char('x'));
+    shell.key(Key::Char('y'));
+    fake.refuse = Some("access_change_pending".into());
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    let message = shell.ctx.message().expect("a message").clone();
+    assert_eq!(message.lead, "Waiting.");
+    assert_eq!(message.rest, crate::config::ACCESS_CHANGE_PENDING_LINE);
+    assert_eq!(message.tone, crate::tui::frame::Tone::Warning);
+
+    shell.key(Key::Char('x'));
+    shell.key(Key::Char('y'));
+    fake.refuse = Some("app_plugin_not_found".into());
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(said(&shell).starts_with("Not saved. "), "{}", said(&shell));
+}
