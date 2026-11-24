@@ -108,6 +108,30 @@ pub fn ask_restart(connection: &Connection, project: &str) -> rusqlite::Result<u
     )
 }
 
+/// Reads the projects with a listed agent the owner asked to restart, as the engine does on
+/// every tick: a database without the list has none, told by the read's own missing-table
+/// error rather than a schema scan. Input: the connection. Output: the project ids, or the
+/// database error.
+pub fn asked_projects(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
+    match asked(connection) {
+        Err(rusqlite::Error::SqliteFailure(code, Some(message)))
+            if code.extended_code == rusqlite::ffi::SQLITE_ERROR
+                && message == "no such table: team_hidden_seers" =>
+        {
+            Ok(BTreeSet::new())
+        }
+        read => read,
+    }
+}
+
+/// Reads the projects with a listed agent the owner asked to restart from the list itself.
+/// Input: the connection. Output: the project ids, or the database error.
+fn asked(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
+    let mut statement =
+        connection.prepare("SELECT DISTINCT project FROM team_hidden_seers WHERE restart=1")?;
+    statement.query_map([], |row| row.get(0))?.collect()
+}
+
 /// Reads the listed agents of one project the owner asked to restart. Inputs: the
 /// connection and the project id. Output: their ids.
 pub fn restarts(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
