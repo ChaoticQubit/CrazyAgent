@@ -84,6 +84,53 @@ fn a_recipe_with_an_extra_argument_is_refused() {
     assert_eq!(validate(&update(&["-update"])), Err(TEMPLATE_MISMATCH));
 }
 
+/// A system package name that ends in anything but a lower-case letter or digit, or in
+/// `.rpm`, is refused for both managers: apt-get reads a trailing `-` as a removal and dnf
+/// reads a `.rpm` name as a local file. Plain names still pass.
+#[test]
+fn a_system_package_name_that_turns_the_verb_or_names_a_file_is_refused() {
+    for manager in [SystemManager::AptGet, SystemManager::Dnf] {
+        for (package, answer) in [
+            ("tmux-", Err(NAME_INVALID)),
+            ("tmux.", Err(NAME_INVALID)),
+            ("tmux.rpm", Err(NAME_INVALID)),
+            ("tmux", Ok(())),
+            ("openssh-server", Ok(())),
+        ] {
+            let recipe = InstallRecipe::SystemPackage {
+                manager,
+                package: package.to_owned(),
+            };
+            assert_eq!(validate(&recipe), answer, "{manager:?} {package}");
+        }
+    }
+}
+
+/// On Windows a download recipe is refused as a template mismatch rather than built, since
+/// its curl and tar are Unix paths, which Windows does not read as absolute.
+#[cfg(windows)]
+#[test]
+fn a_download_recipe_is_refused_on_windows() {
+    let paths = |member: Option<&str>| InstallPaths {
+        archive: Some(std::path::PathBuf::from(r"C:\s\stage\archive.tar.gz")),
+        out: Some(std::path::PathBuf::from(r"C:\s\stage\out")),
+        source: Some("https://example.test/uv.tar.gz".to_owned()),
+        member: member.map(str::to_owned),
+        ..InstallPaths::default()
+    };
+    let uv = release("0.13.5", "x86_64-pc-windows-msvc", HASH);
+    let node = InstallRecipe::NodeArchive {
+        version: "26.13.1".to_owned(),
+        target: "x86_64-pc-windows-msvc".to_owned(),
+        sha256: HASH.to_owned(),
+    };
+    assert_eq!(
+        steps(&uv, &paths(Some("uv-x86_64-pc-windows-msvc/uv"))),
+        Err(TEMPLATE_MISMATCH)
+    );
+    assert_eq!(steps(&node, &paths(None)), Err(TEMPLATE_MISMATCH));
+}
+
 /// A self-update whose arguments are well-formed words but not a bundled list is refused.
 #[test]
 fn an_unlisted_self_update_arg_list_is_refused() {
