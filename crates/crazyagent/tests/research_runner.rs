@@ -7,7 +7,7 @@ use crazyagent::protocol::CredentialRef;
 use crazyagent::provider_reach::ProviderReach;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{
-    ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
+    ResearchAccount, ResearchLimits, ResearchProject, ResearchRun, ResearchRunner, RunError,
 };
 use research_support::{
     EngineRuntime, claude, codex, counted_hanging_endpoint, hanging_endpoint, processes_with,
@@ -423,38 +423,14 @@ fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
         .enqueue("project-a", "market_research", "codex", true)
         .unwrap();
     let (port, _server) = hanging_endpoint();
-    let runner = Arc::new(runner(&case, limits(Duration::from_secs(120))));
-    let project_root = case.project.clone();
-    let handle = {
-        let runner = runner.clone();
-        std::thread::spawn(move || {
-            runner
-                .run_once(&ResearchProject {
-                    id: "project-a",
-                    root: &project_root,
-                    account: Some(endpoint(port)),
-                })
-                .unwrap()
-                .unwrap()
-        })
-    };
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    std::thread::sleep(Duration::from_secs(1));
+    let handle = running_research(&case, &jobs, id, port);
     save(&connection, "project-a", &rust(false)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !handle.is_finished() {
-        if Instant::now() >= deadline {
-            jobs.request_cancel(id).unwrap();
-            let _ = handle.join();
-            panic!("the research job kept running after Rust was turned off");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let run = handle.join().unwrap();
+    let run = ended(
+        handle,
+        &jobs,
+        id,
+        "the research job kept running after Rust was turned off",
+    );
     assert_eq!(run.status, ResearchStatus::Queued);
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!((job.status, job.attempts), (ResearchStatus::Queued, 0));
@@ -462,6 +438,101 @@ fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
         job.error.as_deref(),
         Some(
             "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it"
+        )
+    );
+    assert!(!process_group_alive(run.process_group.unwrap()));
+}
+
+/// Starts the project's queued research job on its own thread against a model endpoint
+/// that never answers, and returns once the job has run for a second. Inputs: the case,
+/// the job store, the job and the endpoint's port. Output: the thread, which returns the
+/// run.
+fn running_research(
+    case: &Case,
+    jobs: &ResearchJobs,
+    id: i64,
+    port: u16,
+) -> std::thread::JoinHandle<ResearchRun> {
+    let runner = Arc::new(runner(case, limits(Duration::from_secs(120))));
+    let project_root = case.project.clone();
+    let handle = std::thread::spawn(move || {
+        runner
+            .run_once(&ResearchProject {
+                id: "project-a",
+                root: &project_root,
+                account: Some(endpoint(port)),
+            })
+            .unwrap()
+            .unwrap()
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    handle
+}
+
+/// Waits up to 15 seconds for a running research job to end by itself; past that it
+/// cancels the job and fails with `kept`. Inputs: the job's thread, the job store, the job
+/// and the failure text. Output: the run.
+fn ended(
+    handle: std::thread::JoinHandle<ResearchRun>,
+    jobs: &ResearchJobs,
+    id: i64,
+    kept: &str,
+) -> ResearchRun {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            jobs.request_cancel(id).unwrap();
+            let _ = handle.join();
+            panic!("{kept}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    handle.join().unwrap()
+}
+
+/// Saving a folder hidden that a running confined research job did not hide stops the
+/// job and puts it back in the queue without spending its attempt, with the owner's line,
+/// so its next run starts with the folder hidden.
+#[test]
+fn hiding_a_folder_stops_running_research_and_queues_it_again() {
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
+    let case = case("A plain project.");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let connection = rusqlite::Connection::open(&case.database).unwrap();
+    let policy = AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        ..Default::default()
+    };
+    crazyagent::sandbox::policy_store::save(&connection, "project-a", &policy).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let (port, _server) = hanging_endpoint();
+    let handle = running_research(&case, &jobs, id, port);
+    crazyagent::sandbox::access_store::hidden::save(
+        &connection,
+        "project-a",
+        &[case.project.join("vault")],
+    )
+    .unwrap();
+    let run = ended(
+        handle,
+        &jobs,
+        id,
+        "the research job kept running after a folder was hidden",
+    );
+    assert_eq!(run.status, ResearchStatus::Queued);
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!((job.status, job.attempts), (ResearchStatus::Queued, 0));
+    assert_eq!(
+        job.error.as_deref(),
+        Some(
+            "A folder was hidden from agents, so this research was stopped and queued again; its next run cannot see it"
         )
     );
     assert!(!process_group_alive(run.process_group.unwrap()));
