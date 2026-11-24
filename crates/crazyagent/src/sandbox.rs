@@ -200,7 +200,9 @@ pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
         #[cfg(target_os = "linux")]
         linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
         #[cfg(target_os = "linux")]
-        kernel_sandbox::linux::helper::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
+        kernel_sandbox::linux::helper::HIDDEN_MOUNTS_NOT_PRIVATE => {
+            Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE)
+        }
         _ => None,
     }
 }
