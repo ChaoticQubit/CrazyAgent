@@ -14095,23 +14095,6 @@ pub(crate) fn wake_loops() {
     WOKEN.notify_all();
 }
 
-/// The count of team loop wakes so far, read before a tick so a wake during it is not
-/// missed. Output: the count.
-fn wakes_seen() -> u64 {
-    *WAKES.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Waits until a wake newer than `seen` or `tick` has passed. Inputs: the count read before
-/// the tick and the tick. Output: the count now.
-fn wait_for_wake(seen: u64, tick: Duration) -> u64 {
-    let wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
-    let (wakes, waited) = WOKEN
-        .wait_timeout_while(wakes, tick, |wakes| *wakes == seen)
-        .unwrap_or_else(PoisonError::into_inner);
-    assert!(waited.timed_out() || *wakes != seen);
-    *wakes
-}
-
 /// Background loop that keeps every project's team moving.
 pub struct TeamService {
     stop: Arc<AtomicBool>,
@@ -14907,6 +14890,11 @@ mod resume;
 mod spawn_ledger;
 
 mod teammates;
+
+/// The team loop's side of a wake: the count read before a tick, and the wait that ends at
+/// a newer wake or the tick. Inputs: the count and the tick. Outputs: the count.
+mod wake;
+use wake::{wait_for_wake, wakes_seen};
 
 /// Who a test's agent is to a leftover hold: no project, so a hold it leaves ends its
 /// processes by the default setting and no owner view lists it. Output: the label.
