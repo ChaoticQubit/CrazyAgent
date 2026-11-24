@@ -2,13 +2,13 @@ use super::{
     AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest, build,
     claude_invocation, codex_invocation,
 };
-use crate::sandbox::InstalledSandbox;
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::profile::command::LineageCheck;
 use kernel_sandbox::profile::consts::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV};
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use kernel_sandbox::settings::LinuxSupervisor;
 use kernel_sandbox::windows::HELPER_NAME;
 use kernel_sandbox::windows::profile::container_name;
@@ -393,14 +393,18 @@ fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
     let plain = kernel_sandbox::paths::canonical(temp.path())
         .unwrap()
         .join("grants");
-    assert_eq!(crate::sandbox::plain_grants(plain.clone()).unwrap(), plain);
+    assert_eq!(
+        kernel_sandbox::profile::installed::plain_grants(plain.clone()).unwrap(),
+        plain
+    );
     for refused in [
         r"C:/data\grants",
         r"\\server\share\grants",
         r"C:\data\..\grants",
         "grants",
     ] {
-        let error = crate::sandbox::plain_grants(PathBuf::from(refused)).unwrap_err();
+        let error =
+            kernel_sandbox::profile::installed::plain_grants(PathBuf::from(refused)).unwrap_err();
         assert!(
             matches!(error, kernel_sandbox::error::SandboxError::Invalid(_)),
             "{refused}: {error:?}"

@@ -440,9 +440,9 @@ fn node_command(
     scratch: &Path,
     bin: &Path,
 ) -> Result<std::process::Command, InstallError> {
-    use crate::sandbox::InstalledSandbox;
     use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::profile::ProjectSandbox;
+    use kernel_sandbox::profile::installed::InstalledSandbox;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let mut folders = Vec::with_capacity(3);
