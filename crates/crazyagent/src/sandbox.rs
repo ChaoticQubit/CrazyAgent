@@ -241,13 +241,16 @@ pub const GRANT_HOOKS: GrantHooks = GrantHooks {
 
 /// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code
 /// passes: the cargo home entry removal of [`toolchain_remove_home_entry`], the real git
-/// the research runner resolved, a native lead's teammates' home, the launch folder's
+/// the research runner resolved, the shell startup removal of
+/// [`toolchain_remove_shell_startup`], a native lead's teammates' home, the launch folder's
 /// engine folder name and the agent tree removal of [`toolchain_remove_agent_tree`].
 pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
     #[cfg(unix)]
     remove_home_entry: toolchain_remove_home_entry,
     #[cfg(unix)]
     sandboxed_git: crate::research::runner::sandboxed_git,
+    #[cfg(unix)]
+    remove_shell_startup: toolchain_remove_shell_startup,
     mates_home: crate::launch_context::mates_home,
     launch_state: crate::launch_context::STATE,
     remove_agent_tree: toolchain_remove_agent_tree,
@@ -274,6 +277,14 @@ fn tool_cache_unpin(parent: std::os::fd::BorrowedFd<'_>, name: &str) {
 /// refusal text as the error. Input: the folder. Output: done, or the error.
 fn toolchain_remove_agent_tree(folder: &Path) -> std::io::Result<()> {
     crate::team::cleanup::remove_agent_tree(folder).map_err(|error| std::io::Error::other(error.0))
+}
+
+/// Removes a kept home's shell startup files as the engine's home cleanup does
+/// ([`crate::agent_home::remove_shell_startup`]). Inputs: the home and the engine data
+/// root, both canonical. Output: done, or `agent_home_unwritable` when one stays.
+#[cfg(unix)]
+fn toolchain_remove_shell_startup(home: &Path, root: &Path) -> Result<(), &'static str> {
+    crate::agent_home::remove_shell_startup(home, root).map_err(|_| "agent_home_unwritable")
 }
 
 /// Removes one entry of an agent's own cargo home as the engine's home cleanup does, with

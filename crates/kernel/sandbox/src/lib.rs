@@ -26,6 +26,9 @@ pub mod hidden_paths;
 /// What this Linux holds for an agent beyond its Landlock rules: namespaces, signal scope,
 /// the call supervisor, root, AppArmor and its own network.
 pub mod host;
+/// The Sandboxed IDE terminal: its launch, the confined shell command and pane command
+/// built from it, and the owner's login shell.
+pub mod ide_shell;
 /// The plain lines and refusal codes a launch shows when a Linux or Windows sandbox cannot
 /// hold something, and the check that tells the Windows loopback refusal apart.
 pub mod lines;
