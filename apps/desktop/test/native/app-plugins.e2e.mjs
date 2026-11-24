@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { nativeSources } from "../native-commands.mjs";
 import { ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, endTerminals, owner, required, serveApp, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
+import { waitUntil } from "./golden-run.mjs";
+import { INTERNALS, STEP_MS, endTerminals, owner, required, serveApp, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const GLOBAL = `# the owner's own notes
@@ -22,16 +22,6 @@ const STOP_CARD = "Stop runs using it Runs using the plugin are stopped.";
 const ESSENTIAL_NOTE = "This plugin stays on. CrazyAgent needs it to save what the agents were doing when the app quits.";
 const SHOWN = `(() => document.querySelector('input[type=radio][name="app-plugin-when-off"]:checked')?.value ?? null)()`;
 const LOCKED = `(() => document.querySelectorAll('ul[aria-label="Built-in code plugins"] button[role=switch][id^="app-plugin-"][aria-disabled="true"][aria-checked="true"]').length)()`;
-
-/** Polls a read until it equals what is wanted, failing with the last value after one step's
- * time. Inputs: what is awaited, the wanted value and the read. Output: none. */
-async function until(what, wanted, read) {
-  for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
-    const seen = await read();
-    if (JSON.stringify(seen) === JSON.stringify(wanted)) return;
-    assert.ok(Date.now() < deadline, `${what} never came: ${JSON.stringify(seen)}, wanted ${JSON.stringify(wanted)}`);
-  }
-}
 
 /** Starts the real engine with writable settings and the bridge, serves the built app to a
  * browser page, runs the steps and stops everything. Inputs: the test context, the temporary
@@ -124,17 +114,17 @@ async function stored(bridge) {
 
 test("App plugins: Stop runs using it is saved to the global settings file with the owner's other lines kept, and stays after an engine restart", { timeout: 600000 }, (t) => onEngine(t, "ca-app-plugins-when-off-", async ({ bridge, me, page, open, global, restart }) => {
   await open();
-  await until("the default in the engine", ["refuse_new_calls", false], () => stored(bridge));
-  await until("the default on the page", "refuse_new_calls", () => page.evaluate(SHOWN));
+  await waitUntil("the default in the engine", () => stored(bridge), (seen) => JSON.stringify(seen) === JSON.stringify(["refuse_new_calls", false]), STEP_MS);
+  await waitUntil("the default on the page", () => page.evaluate(SHOWN), (seen) => JSON.stringify(seen) === JSON.stringify("refuse_new_calls"), STEP_MS);
   await me.click(STOP_CARD, "label.radio-card");
-  await until("Stop runs using it in the engine", ["stop_runs", false], () => stored(bridge));
+  await waitUntil("Stop runs using it in the engine", () => stored(bridge), (seen) => JSON.stringify(seen) === JSON.stringify(["stop_runs", false]), STEP_MS);
   const saved = readFileSync(global, "utf8");
   assert.ok(saved.startsWith(GLOBAL), `the owner's lines stay byte for byte: ${saved}`);
   assert.ok(saved.includes('[plugins]\nwhen_turned_off = "stop_runs"\n'), `the choice is in the file: ${saved}`);
   await restart();
-  await until("Stop runs using it after an engine restart", ["stop_runs", false], () => stored(bridge));
+  await waitUntil("Stop runs using it after an engine restart", () => stored(bridge), (seen) => JSON.stringify(seen) === JSON.stringify(["stop_runs", false]), STEP_MS);
   await open();
-  await until("Stop runs using it on the page after the restart", "stop_runs", () => page.evaluate(SHOWN));
+  await waitUntil("Stop runs using it on the page after the restart", () => page.evaluate(SHOWN), (seen) => JSON.stringify(seen) === JSON.stringify("stop_runs"), STEP_MS);
   await me.capture("app-plugins-when-off");
 }));
 
