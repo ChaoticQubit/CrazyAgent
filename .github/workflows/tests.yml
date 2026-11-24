@@ -82,7 +82,7 @@ jobs:
           set -euo pipefail
           git log -1 --format='farm %H %s'
           git log -1 --format='branch tip %H %s' HEAD^
-          [ "$(git rev-parse HEAD^)" = 4432a3a4cb3850aa0eb0e5402466d3b198798a50 ] || { echo "::error::the parent is not the E2E-HOSTED round 5a tip 4432a3a4cb"; exit 1; }
+          [ "$(git rev-parse HEAD^)" = 68dd3890c3d91ce79ccb52520484b746b448629d ] || { echo "::error::the parent is not the E2E-HOSTED round 5c tip 68dd3890c3"; exit 1; }
           git checkout HEAD^ -- .github/workflows/tests.yml
           git diff --quiet HEAD^ || { echo "::error::the tree is not the branch tip"; exit 1; }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -140,13 +140,13 @@ jobs:
           IFS=. read -r major minor _ <<< "${version#git version }"
           (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
           echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
-      - name: Run the round 5a evidence rows
+      - name: Run the round 5c evidence rows
         timeout-minutes: 90
         env:
           E2E_HOSTED_ONLY: golden-run-team.e2e.mjs,golden-accept-changes.e2e.mjs,changes.e2e.mjs
         run: |
           set -euo pipefail
-          if grep -l crazyagent/clean-mac-gate apps/desktop/test/native/golden-run-team.e2e.mjs apps/desktop/test/native/golden-accept-changes.e2e.mjs apps/desktop/test/native/changes.e2e.mjs; then echo "::error::a round 5a file needs the clean-Mac gate fixture, which this round does not build"; exit 1; fi
+          if grep -l crazyagent/clean-mac-gate apps/desktop/test/native/golden-run-team.e2e.mjs apps/desktop/test/native/golden-accept-changes.e2e.mjs apps/desktop/test/native/changes.e2e.mjs; then echo "::error::a round 5c file needs the clean-Mac gate fixture, which this round does not build"; exit 1; fi
           export CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE="$RUNNER_TEMP/clean-mac-gate-not-built/desktop-owner-fixture"
           export E2E_ENGINE="$GITHUB_WORKSPACE/target/debug/crazyagent"
           export E2E_BRIDGE="$GITHUB_WORKSPACE/target/debug/desktop-e2e-bridge"
@@ -154,7 +154,7 @@ jobs:
           export CRAZYAGENT_DESKTOP_TEST_FIXTURE="$GITHUB_WORKSPACE/target/debug/desktop-owner-fixture"
           export E2E_HOSTED_EVIDENCE="$RUNNER_TEMP/e2e-evidence"
           node scripts/ci/e2e-hosted.mjs
-      - name: Print the kept roots and Sandbox lines
+      - name: Print the kept roots, engine tables and Sandbox lines
         if: always()
         run: |
           set +e
@@ -163,6 +163,7 @@ jobs:
           for f in "$ev"/roots/*/checkouts.txt; do echo "== $f"; head -c 6000 "$f"; done
           for f in "$ev"/roots/*/files.txt; do echo "== $f"; cat "$f"; done
           find "$ev/roots" -name '*rollout-*.jsonl' -exec sh -c 'echo "== $1"; head -c 1500 "$1"' _ {} \;
+          for f in "$ev"/roots/*/engine-db.txt; do echo "== $f"; head -c 20000 "$f"; done
           exit 0
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
