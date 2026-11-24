@@ -151,7 +151,7 @@ pub const INTAKE_CODES: [&str; 120] = [
     "projects_removed_full",
 ];
 
-const GITHUB_CODES: [&str; 70] = [
+const GITHUB_CODES: [&str; 71] = [
     "github_not_signed_in",
     "github_token_invalid",
     "github_token_refused",
@@ -166,6 +166,7 @@ const GITHUB_CODES: [&str; 70] = [
     "github_cli_not_signed_in",
     "github_unreachable",
     "github_reply_invalid",
+    "github_address_refused",
     "github_config_unsafe",
     "github_config_invalid",
     "github_state_invalid",

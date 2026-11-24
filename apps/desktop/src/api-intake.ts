@@ -120,6 +120,7 @@ const COPY: Record<string, string> = {
   github_cli_not_signed_in: "The GitHub CLI isn't signed in. Run gh auth login first.",
   github_unreachable: "Couldn't reach GitHub. Check your connection and try again.",
   github_reply_invalid: "GitHub sent a reply CrazyAgent couldn't read. Try again.",
+  github_address_refused: "GitHub resolved to a private or local address, so CrazyAgent sent nothing.",
   github_config_unsafe: "CrazyAgent's GitHub settings file can't be read safely. Sign in again.",
   github_config_invalid: "CrazyAgent's GitHub settings file can't be read safely. Sign in again.",
   github_state_invalid: "The saved GitHub sign-in can't be read. Sign in again.",
