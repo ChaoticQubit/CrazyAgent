@@ -468,3 +468,62 @@ fn a_read_only_grant_that_holds_the_engine_root_is_refused() {
         ));
     }
 }
+
+/// A read-only run of a project ends Stopped, which its callers queue again, once a folder
+/// it did not hide at its start is saved hidden; its stand-in agent never ends by itself,
+/// and the stop it is given saves the folder at its first poll and never says yes.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_read_only_run_stops_once_a_folder_it_did_not_hide_is_saved_hidden() {
+    let root = engine_root();
+    let codex = root.base.join("bin").join("codex");
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(&codex, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+    let pinned = codex.clone();
+    let runner =
+        ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+            .unwrap()
+            .with_harness_lookup(Arc::new(move |harness: &str| {
+                (harness == "codex").then(|| pinned.clone())
+            }));
+    let folder = root.base.join("repo");
+    fs::create_dir_all(folder.join("vault")).unwrap();
+    fs::write(folder.join("README.md"), "readme\n").unwrap();
+    repository_git(&folder, &["init", "-q"]);
+    repository_git(&folder, &["add", "README.md"]);
+    repository_git(&folder, &["commit", "-q", "-m", "Start"]);
+    let project = ProjectId::new("alpha").unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        model: "local-model".into(),
+        key: None,
+    };
+    let run = ReadOnlyRun {
+        name: "overview-alpha-hide",
+        agent: "overview",
+        kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
+        project: Some(&project),
+        folder: &folder,
+        prompt: "Describe this project.",
+        account: &account,
+        wall_time: Duration::from_secs(10),
+        output_tokens: None,
+    };
+    let saved = std::cell::Cell::new(false);
+    let save_once = || {
+        if !saved.replace(true) {
+            let connection = rusqlite::Connection::open(&root.database).unwrap();
+            crate::sandbox::access_store::hidden::save(
+                &connection,
+                project.as_str(),
+                &[folder.join("vault")],
+            )
+            .unwrap();
+        }
+        false
+    };
+    let ending = runner.run_read_only(&run, &save_once);
+    assert!(saved.get());
+    assert_eq!(ending.ok(), Some(ReadOnlyEnding::Stopped));
+}
