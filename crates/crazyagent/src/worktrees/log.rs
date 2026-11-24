@@ -600,16 +600,6 @@ fn forget_admissions(db: &Connection, project: &str) -> Result<(), EngineError> 
 /// Q9). Input: the transaction. Output: the fence, or `owner_runtime_stale` for a store
 /// whose owner runtime never started or is not active.
 pub(crate) fn store_fence(tx: &Transaction<'_>) -> Result<Fence, EngineError> {
-    let owned: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_meta')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if !owned {
-        return Err(error("owner_runtime_stale"));
-    }
     let host = tx
         .query_row(
             "SELECT db_instance, engine_epoch FROM owner_meta
@@ -623,11 +613,30 @@ pub(crate) fn store_fence(tx: &Transaction<'_>) -> Result<Fence, EngineError> {
             },
         )
         .optional()
-        .map_err(error)?
+        .map_err(|failed| {
+            if owner_table_missing(&failed) {
+                error("owner_runtime_stale")
+            } else {
+                error(failed)
+            }
+        })?
         .ok_or_else(|| error("owner_runtime_stale"))?;
     assert_eq!(host.db_instance.len(), 64, "owner_meta checks its instance");
     assert_eq!(host.engine_epoch.len(), 64, "owner_meta checks its epoch");
     Ok(Fence::Engine(host))
+}
+
+/// Tells whether a read failed only because the store has no `owner_meta` table, as a store
+/// no owner runtime ever started has: SQLite's plain error with exactly its missing-table
+/// message for that table, so a wrong-shaped table or any other failure is not this. Input:
+/// the error. Output: the answer.
+fn owner_table_missing(failed: &rusqlite::Error) -> bool {
+    matches!(
+        failed,
+        rusqlite::Error::SqliteFailure(code, Some(message))
+            if code.extended_code == rusqlite::ffi::SQLITE_ERROR
+                && message == "no such table: owner_meta"
+    )
 }
 
 /// Writes one worktrees event for an engine writer in its own transaction: `own` moves the
