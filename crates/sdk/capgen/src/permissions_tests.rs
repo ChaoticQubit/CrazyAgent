@@ -142,7 +142,10 @@ fn a_bundled_plugin_outside_its_tier_folder_is_refused() {
     let root = plugins("tier", &[("t1", "p", &manifest("p", "t2", "[]"))]);
     let error = refused(&root);
     assert_eq!(error.code, "capgen_plugin_tier");
-    assert!(error.file.ends_with("t1/p/plugin.toml"), "{error:?}");
+    assert!(
+        Path::new(&error.file).ends_with("t1/p/plugin.toml"),
+        "{error:?}"
+    );
     fs::remove_dir_all(&root).expect("the folder is removed");
 }
 
@@ -165,7 +168,10 @@ fn a_manifest_refusal_names_its_file_and_line() {
     let root = plugins("invalid", &[("t2", "p", &manifest("p", "t4", "[]"))]);
     let error = refused(&root);
     assert_eq!(error.code, "plugin_manifest_invalid");
-    assert!(error.file.ends_with("t2/p/plugin.toml"), "{error:?}");
+    assert!(
+        Path::new(&error.file).ends_with("t2/p/plugin.toml"),
+        "{error:?}"
+    );
     assert_eq!(error.detail, "line 2");
     fs::remove_dir_all(&root).expect("the folder is removed");
 }
