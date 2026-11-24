@@ -23,8 +23,14 @@ tokio = { version = "=1.53.2", features = ["net", "rt", "time"] }
 url = "=2.5.8"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "=0.28.0", default-features = false, features = ["user"] }
-rustix = { version = "=1.1.5", features = ["fs", "process"] }
+libc = "=0.2.191"
+nix = { version = "=0.28.0", default-features = false, features = ["fs", "mount", "net", "sched", "signal", "socket", "uio", "user"] }
+rustix = { version = "=1.1.5", features = ["event", "fs", "process", "thread"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+crazyagent-linux-supervisor = { path = "../../crazyagent-linux-supervisor" }
+landlock = "=0.4.2"
+seccompiler = { version = "=0.5.0", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
