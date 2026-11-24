@@ -2,7 +2,7 @@ use super::*;
 
 /// An engine whose own folder is not cargo's `deps` takes only the helper beside it, even
 /// with none there and a helper in the folder above, and a `deps` folder further up the
-/// path changes nothing (V243-LANDLOCK-TEST-HELPER-PATH).
+/// path changes nothing.
 #[test]
 fn an_engine_outside_a_deps_folder_never_takes_another_helper() {
     let root = tempfile::tempdir().unwrap();
@@ -20,7 +20,7 @@ fn an_engine_outside_a_deps_folder_never_takes_another_helper() {
 
 /// A debug test binary in cargo's `deps` folder with no helper beside it takes cargo's own
 /// build of the helper in the folder above; one beside it wins, and with neither it keeps
-/// the missing one beside it (V243-LANDLOCK-TEST-HELPER-PATH).
+/// the missing one beside it.
 #[cfg(debug_assertions)]
 #[test]
 fn a_test_binary_in_cargos_deps_folder_takes_cargos_helper_build_only_when_none_is_beside_it() {
@@ -40,7 +40,7 @@ fn a_test_binary_in_cargos_deps_folder_takes_cargos_helper_build_only_when_none_
     assert_eq!(helper_for(&engine), beside, "the one beside it wins");
 }
 
-/// V243-LINUX-KEEP-FREE-REFUSAL-NAME: without the helper no agent starts on any network,
+/// Without the helper no agent starts on any network,
 /// and the refusal says the helper is missing, not that the kernel is too old.
 #[test]
 fn no_agent_starts_without_the_helper_and_the_refusal_says_so() {
@@ -71,7 +71,7 @@ fn without_the_helper_bubblewrap_starts_no_agent() {
 }
 
 /// The owner's setting Off, and a host that only has bubblewrap, start no supervisor:
-/// the launch stays as it was before the supervisor (DEC-179 add.2 Q1).
+/// the launch stays as it was before the supervisor.
 #[test]
 fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
     let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
@@ -94,7 +94,7 @@ fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
 
 /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
 /// reads 1; any other value, or no file, leaves them free, so the AppArmor line shows
-/// only where it is the reason nothing nests (DEC-179 SBX-3).
+/// only where it is the reason nothing nests.
 #[test]
 fn only_an_apparmor_setting_of_one_restricts_user_namespaces() {
     assert_eq!(
