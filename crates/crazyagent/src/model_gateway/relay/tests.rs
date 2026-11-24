@@ -1,4 +1,5 @@
 use super::*;
+use kernel_security::relay_token::{KEY_BYTES_MAX, LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use std::ffi::OsStr;
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -846,7 +847,10 @@ fn temp_files_holding(since: std::time::SystemTime, marker: &[u8]) -> Vec<PathBu
 /// request, no file in the temp folder holds its body.
 #[test]
 fn a_request_body_never_lands_in_the_temp_folder_an_agent_grant_reaches() {
-    let marker = format!("vid201-{}", random_hex(16).unwrap());
+    let marker = format!(
+        "vid201-{}",
+        &RelayToken::mint().unwrap().as_str()[TOKEN_PREFIX.len()..]
+    );
     let since = std::time::SystemTime::now();
     let during = Arc::new(Mutex::new(None));
     let (looked, probe) = (Arc::clone(&during), marker.clone());

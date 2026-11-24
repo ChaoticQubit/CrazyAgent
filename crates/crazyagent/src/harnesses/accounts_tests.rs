@@ -2,7 +2,8 @@ use super::{handover, no_account_line};
 use crate::config::ModelConnection;
 use crate::harnesses::manifest;
 use crate::harnesses::registry::Registry;
-use crate::model_gateway::relay::{LOCAL_PLACEHOLDER, Relay, is_relay_token};
+use crate::model_gateway::relay::Relay;
+use kernel_security::relay_token::{LOCAL_PLACEHOLDER, is_relay_token};
 use kernel_security::secret::SecretString;
 
 const SENTINEL: &str = "sk-sentinel-saved-key-0123456789abcdef";
