@@ -1132,7 +1132,8 @@ pub fn existing_tmp(home: &Path) -> Option<PathBuf> {
 }
 
 /// A native lead's own temp folder, its `TMPDIR`: `lead` in its short temp folder, which its
-/// teammates share for their tmux socket and temp files but never reach inside. Input: the lead's short temp folder. Output: the path, which may not exist.
+/// teammates share for their tmux socket and temp files but never reach inside. Input: the lead's
+/// short temp folder. Output: the path, which may not exist.
 pub fn native_lead_tmp(scratch: &Path) -> PathBuf {
     scratch.join(NATIVE_LEAD_TMP)
 }

@@ -189,14 +189,14 @@ pub fn remove_agent(
 
 /// Makes, or finds, the tool cache `<project folder>/<key>` for one launch, with `uv` and
 /// `pnpm-store` folders inside, and, when a uv binary is given, a `.git` link to exactly
-/// `/dev/null` in each cache bucket uv makes a `.git` file in, so uv runs under the deny of `.git` in
-/// every writable root that is not a working tree, with no exemption. Every folder is made and opened one part at a time with no link followed,
-/// the engine's own as plain 0700 folders of this user; a link or someone else's folder anywhere
-/// fails closed. The buckets come from a record kept per cache and uv binary; with none, or after
-/// uv changed, [`prime`] finds them. A launch with a record only checks each marker and makes one
-/// an agent's move of its bucket took away. Inputs: the hooks, the engine runtime folder, the
-/// project as [`project_folder`] names it, the key and the canonical uv binary, if any. Output: the
-/// prepared cache, or the plain code that refused it.
+/// `/dev/null` in each cache bucket uv makes a `.git` file in, so uv runs under the deny of `.git`
+/// in every writable root that is not a working tree, with no exemption. Every folder is made and
+/// opened one part at a time with no link followed, the engine's own as plain 0700 folders of this
+/// user; a link or someone else's folder anywhere fails closed. The buckets come from a record kept
+/// per cache and uv binary; with none, or after uv changed, [`prime`] finds them. A launch with a
+/// record only checks each marker and makes one an agent's move of its bucket took away. Inputs:
+/// the hooks, the engine runtime folder, the project as [`project_folder`] names it, the key and
+/// the canonical uv binary, if any. Output: the prepared cache, or the plain code that refused it.
 pub fn prepare(
     hooks: &ToolCacheHooks,
     runtime: &Path,
