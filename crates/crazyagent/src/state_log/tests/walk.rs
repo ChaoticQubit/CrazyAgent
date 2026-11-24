@@ -181,9 +181,9 @@ pub(super) fn draft_kinds(code: &str) -> Vec<Option<String>> {
     kinds
 }
 
-/// The kind one draft literal names: the code after its `kind:` field with the spaces
-/// removed, or None for a `kind` shorthand or no kind field. Input: the code right after the
-/// literal's `{`. Output: the kind.
+/// The kind one draft literal names: the code after its own `kind:` field with the spaces
+/// removed, or None for a `kind` shorthand or no kind field. Fields split only at commas
+/// outside nested values. Input: the code right after the literal's `{`. Output: the kind.
 fn literal_kind(body: &str) -> Option<String> {
     let mut depth = 0_usize;
     let mut field = String::new();
@@ -191,7 +191,7 @@ fn literal_kind(body: &str) -> Option<String> {
         match c {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' if depth > 0 => depth -= 1,
-            ',' | '}' => {
+            ',' | '}' if depth == 0 => {
                 let value = field
                     .trim()
                     .strip_prefix("kind")
