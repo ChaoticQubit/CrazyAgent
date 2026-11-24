@@ -259,6 +259,57 @@ fn an_unlocked_essential_plugin_turns_off_and_back_on() {
     assert!(off_code_plugins(&case.db).unwrap().is_empty());
 }
 
+/// A switch row an older version left under a bundled code plugin's id, an unreviewed
+/// drop-in turned off with no trust record, never turns that code plugin off: the off set
+/// stays empty, the grants list it as on, and the next registry call drops the row. The
+/// owner's own switch-off with the lock lifted still lands in the off set.
+#[test]
+fn an_old_drop_in_off_row_does_not_turn_off_a_code_plugin() {
+    let case = case();
+    case.db
+        .execute(
+            "INSERT INTO app_plugin_state (name, enabled) VALUES ('agent-quit', 0)",
+            [],
+        )
+        .unwrap();
+    let left = |case: &Case| -> i64 {
+        case.db
+            .query_row(
+                "SELECT COUNT(*) FROM app_plugin_state WHERE name='agent-quit'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(left(&case), 1);
+    assert!(off_code_plugins(&case.db).unwrap().is_empty());
+    let grants = crate::grants::list(&case.db, &case.engine()).unwrap();
+    let quit = grants
+        .iter()
+        .find(|grant| grant.plugin == "agent-quit")
+        .unwrap();
+    assert_eq!(quit.state, crate::grants::GrantState::On);
+    list(&case.db, &case.engine()).unwrap();
+    assert_eq!(left(&case), 0);
+    assert!(off_code_plugins(&case.db).unwrap().is_empty());
+
+    set_enabled(&case.db, &case.engine(), "agent-quit", code_off(true)).unwrap();
+    assert_eq!(
+        off_code_plugins(&case.db)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["agent-quit"]
+    );
+    assert_eq!(left(&case), 0, "the owner's switch is not a bare row");
+    list(&case.db, &case.engine()).unwrap();
+    assert_eq!(
+        off_code_plugins(&case.db).unwrap().len(),
+        1,
+        "the next registry call keeps the owner's switch"
+    );
+}
+
 /// A user plugin named like a bundled code plugin is refused, so it never shares that
 /// plugin's on and off state: adding it is `app_plugin_name_taken`, and one dropped into
 /// the folder lists with that problem.

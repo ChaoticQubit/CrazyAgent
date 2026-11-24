@@ -1024,6 +1024,16 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
     );
 }
 
+/// A plugin that is gone says how to see the current list, since neither a failed save
+/// nor a failed check reads the list again.
+#[test]
+fn a_plugin_that_is_gone_says_how_to_see_the_current_ones() {
+    assert_eq!(
+        sentence("app_plugin_not_found"),
+        "That plugin is gone. Open App plugins again to see the current ones."
+    );
+}
+
 #[test]
 fn the_permission_words_shown_are_the_words_the_page_reply_carried() {
     let mut fake = Fake::new();
@@ -1238,4 +1248,167 @@ fn the_page_and_its_modals_match_their_frames() {
     let job = one(&mut shell);
     answer(&mut shell, &mut fake, job);
     check("app-plugin-off-80", &render(&mut shell, 80, 24), &[], None);
+}
+
+/// Opens the Add form and sends `path` for its check. Output: the Preview job it sent.
+fn check_path(shell: &mut Shell, path: &str) -> AppPluginsJob {
+    shell.key(Key::Char('a'));
+    shell.key(Key::Paste(path.into()));
+    shell.key(Key::Enter);
+    one(shell)
+}
+
+#[test]
+fn an_add_path_edited_while_its_check_runs_is_checked_again_and_never_added_as_typed_later() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    let job = check_path(&mut shell, DOCK_TWO);
+    shell.key(Key::Paste("-copy".into()));
+    answer(&mut shell, &mut fake, job);
+    assert!(
+        !shows(&mut shell, "Review Dock two"),
+        "a review of another path is never offered for approval"
+    );
+    assert!(shows(&mut shell, PATH_CHANGED));
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    assert!(matches!(
+        job,
+        AppPluginsJob::Preview { ref folder }
+            if folder.as_path() == std::path::Path::new("/Users/owner/plugins/dock-two-copy")
+    ));
+}
+
+#[test]
+fn the_review_scroll_stops_at_its_last_line_so_one_up_moves_back_one_line() {
+    let mut fake = Fake::new();
+    let Preview::Ready { trust } = fake.folders[0].1.clone() else {
+        panic!("the dock-two folder has a review");
+    };
+    let texts = trust_lines(&trust, usize::from(MODAL_WIDTH) - 4);
+    let before_last = texts[texts.len() - 2].clone();
+    let mut shell = page(&mut fake);
+    let job = check_path(&mut shell, DOCK_TWO);
+    answer(&mut shell, &mut fake, job);
+    assert!(shows(&mut shell, "Review Dock two"));
+    for _ in 0..40 {
+        shell.key(Key::Down);
+    }
+    assert!(
+        !shows(&mut shell, &before_last),
+        "only the last line is left"
+    );
+    shell.key(Key::Up);
+    assert!(
+        shows(&mut shell, &before_last),
+        "one Up shows the line before the last"
+    );
+}
+
+#[test]
+fn a_turn_off_sent_with_y_shows_it_is_saving_and_offers_no_keep_on() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 2);
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(bar(&mut shell).contains("Esc Keep on"));
+    shell.key(Key::Char('y'));
+    let job = one(&mut shell);
+    assert!(!bar(&mut shell).contains("Keep on"), "{}", bar(&mut shell));
+    assert!(shows(&mut shell, TURNING_OFF));
+    shell.key(Key::Esc);
+    assert!(requests(&mut shell).is_empty(), "Esc sends no cancel");
+    answer(&mut shell, &mut fake, job);
+    serve(&mut shell, &mut fake);
+    assert!(said(&shell).starts_with("Saved."), "{}", said(&shell));
+    assert!(line(&mut shell, "Dock embeddings").contains("Approved  Off"));
+}
+
+#[test]
+fn the_key_source_list_scrolls_so_the_typed_key_source_and_its_input_stay_in_view() {
+    let mut fake = Fake::new();
+    fake.accounts = (1..=30)
+        .map(|index| account(index, &format!("Key account {index}"), SignInMethod::ApiKey))
+        .collect();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 0);
+    shell.key(Key::Char('k'));
+    let _ = requests(&mut shell);
+    arrive(
+        &mut shell,
+        SettingsEvent::AllAccounts(Ok(fake.accounts.clone())),
+    );
+    for _ in 0..30 {
+        shell.key(Key::Down);
+    }
+    let shown = render(&mut shell, 100, 24);
+    assert!(
+        shown.iter().any(|row| row.contains("Key for api_key")),
+        "{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.contains("Enter a key for this plugin")),
+        "{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.contains("Sent to the engine once and never shown again.")),
+        "{shown:#?}"
+    );
+}
+
+#[test]
+fn the_add_path_hint_names_a_path_starting_with_slash() {
+    assert_eq!(
+        ABSOLUTE,
+        "Type the full path of the plugin folder, starting with /."
+    );
+}
+
+#[test]
+fn a_change_waiting_its_turn_reads_waiting_and_other_refusals_still_read_not_saved() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 2);
+    shell.key(Key::Char('x'));
+    shell.key(Key::Char('y'));
+    fake.refuse = Some("access_change_pending".into());
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    let message = shell.ctx.message().expect("a message").clone();
+    assert_eq!(message.lead, "Waiting.");
+    assert_eq!(message.rest, crate::config::ACCESS_CHANGE_PENDING_LINE);
+    assert_eq!(message.tone, crate::tui::frame::Tone::Warning);
+
+    shell.key(Key::Char('x'));
+    shell.key(Key::Char('y'));
+    fake.refuse = Some("app_plugin_not_found".into());
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(said(&shell).starts_with("Not saved. "), "{}", said(&shell));
+}
+
+/// A plugin change whose engine actor stopped before it answered reads as the page's
+/// unknown outcome, since the change may have landed.
+#[test]
+fn a_stopped_owner_actor_reads_as_an_unknown_plugin_outcome() {
+    assert_eq!(
+        sentence("owner_actor_stopped_outcome_unknown"),
+        sentence("app_plugin_outcome_unknown")
+    );
+}
+
+/// A plugin change whose owner answer was lost reads as the page's unknown outcome, since
+/// the change may have landed.
+#[test]
+fn a_lost_owner_answer_reads_as_an_unknown_plugin_outcome() {
+    assert_eq!(
+        sentence("owner_outcome_unknown_reconcile_same_identity"),
+        sentence("app_plugin_outcome_unknown")
+    );
 }

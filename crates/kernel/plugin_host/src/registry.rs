@@ -8,9 +8,8 @@ use crate::embedding::{self, Manifest};
 use crate::generated::permissions::BUNDLED_GRANTS;
 use crate::manifest::MANIFEST_BYTES_MAX;
 use crate::problem::{PORT_HANDED_OUT, Problem};
-use crate::store::{
-    Keys, Loaded, binding_rows, drop_binding, forget_key_file, refused, resolve, sqlite,
-};
+use crate::store::{Keys, Loaded, binding_rows, forget_key_file, refused, resolve, sqlite};
+use crate::store_log;
 use crate::trust;
 use crate::usage::{ChangeNotice, Holder, Lease, TurnOff, Usage};
 use crate::views::{
@@ -201,23 +200,13 @@ pub(crate) fn found(engine: &Engine<'_>, name: &str) -> Result<Found, Refused> {
     find(engine, name)?.ok_or_else(|| refused("app_plugin_not_found"))
 }
 
-/// Refuses a write that touches files while the caller holds an open transaction, before
-/// anything is written, so a rollback can never part the rows from the files on disk.
-/// Input: the connection. Output: Ok, or `app_plugins_unavailable`.
-pub(crate) fn outside_transaction(db: &Connection) -> Result<(), Refused> {
-    if db.is_autocommit() {
-        Ok(())
-    } else {
-        Err(refused("app_plugins_unavailable"))
-    }
-}
-
-/// Drops what an older plugin of the owner's left under a name a bundled plugin or a
-/// bundled code plugin now has: its secret bindings with the keys entered for it, its switch
-/// and its trust record. Neither kind ever gets a trust record, so one is the mark of such a
-/// leftover, and it goes last so an interrupted pass runs again. Each binding row goes
-/// before its key file, as [`drop_binding`] does. Inputs: database and engine facts.
-/// Output: Ok, or `app_plugins_unavailable`.
+/// Forgets what a reserved name holds that a bundled plugin or a bundled code plugin does
+/// not own: a trust record, which neither kind ever gets, marks an older plugin of the
+/// owner's of that name, and a switch row under a bare code plugin id is such a leftover
+/// too, since a code plugin's own switch sits under `code:<id>`. Each leftover goes as one
+/// [`store_log::Event::Forgotten`], then the keys entered for its bindings go, as
+/// `store::drop_binding` does. Inputs: database and engine facts. Output: Ok, or
+/// `app_plugins_unavailable`.
 pub(crate) fn prepare(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
     let reserved = BUNDLED
         .iter()
@@ -226,21 +215,25 @@ pub(crate) fn prepare(db: &Connection, engine: &Engine<'_>) -> Result<(), Refuse
     for name in reserved {
         let leftover: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)",
-                [name],
+                "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
+                 OR (?2 AND EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1))",
+                params![name, is_code_plugin(name)],
                 |row| row.get(0),
             )
             .map_err(sqlite)?;
         if !leftover {
             continue;
         }
-        for (secret, source, reference) in binding_rows(db, name)? {
-            drop_binding(db, engine, name, &secret, &source, &reference)?;
+        let bindings = binding_rows(db, name)?;
+        store_log::record(
+            db,
+            store_log::Event::Forgotten {
+                plugin: name.to_owned(),
+            },
+        )?;
+        for (_, source, reference) in &bindings {
+            forget_key_file(db, engine, source, reference);
         }
-        db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
-            .map_err(sqlite)?;
-        db.execute("DELETE FROM app_plugin_trust WHERE name=?1", [name])
-            .map_err(sqlite)?;
     }
     Ok(())
 }
@@ -266,7 +259,37 @@ fn enabled_flag(db: &Connection, name: &str) -> Result<bool, Refused> {
     Ok(stored.unwrap_or(false))
 }
 
+/// Switches a plugin by its switch table key, a plugin name or a code plugin's
+/// `code:<id>`, recording the change; a switch to the state the row already holds records
+/// nothing. Inputs: database, key and the state. Output: Ok, or the store's refusal.
 pub(crate) fn set_flag(db: &Connection, name: &str, enabled: bool) -> Result<(), Refused> {
+    let stored: Option<bool> = db
+        .query_row(
+            "SELECT enabled FROM app_plugin_state WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sqlite)?;
+    if stored == Some(enabled) {
+        return Ok(());
+    }
+    let event = match name.strip_prefix(CODE_KEY_PREFIX) {
+        Some(plugin) => store_log::Event::CodeSwitched {
+            plugin: plugin.to_owned(),
+            enabled,
+        },
+        None => store_log::Event::Switched {
+            plugin: name.to_owned(),
+            enabled,
+        },
+    };
+    store_log::record(db, event)
+}
+
+/// Writes one switch row as the store keeps it. Inputs: database, key and the state.
+/// Output: Ok, or `app_plugins_unavailable`.
+pub(crate) fn set_flag_row(db: &Connection, name: &str, enabled: bool) -> Result<(), Refused> {
     db.execute(
         "INSERT INTO app_plugin_state (name, enabled) VALUES (?1, ?2)
          ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled",
@@ -433,8 +456,9 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
 /// or `app_plugin_changed`, `_refused`, `_name_taken`, `_past_cap` (the listing would not
 /// show it, or would drop a listed plugin for it), `_port_handed_out` (its loopback port
-/// is in the range the engine reads now), or the folder's refusal; inside a caller's open
-/// transaction, `app_plugins_unavailable` before anything is written.
+/// is in the range the engine reads now), or the folder's refusal; outside the capture of
+/// its own transaction, `app_plugins_unavailable` before anything is written. A replaced
+/// folder is deleted only after the capture's commit and put back after its rollback.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -443,7 +467,7 @@ pub fn add(
     replace: bool,
     now_ms: i64,
 ) -> Result<(), Refused> {
-    outside_transaction(db)?;
+    store_log::in_capture(db)?;
     prepare(db, engine)?;
     let bytes = folder::read_source(source).map_err(|_| refused("app_plugin_refused"))?;
     if kernel_common::hash(&bytes) != sha256 {
@@ -463,7 +487,10 @@ pub fn add(
     if handed_problem(&manifest, engine.handed_out.as_ref()).is_some() {
         return Err(refused(PORT_HANDED_OUT));
     }
-    folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
+    let replaced = folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
+    if let Some(step) = replaced.and_then(store_log::after_commit) {
+        step.commit()?;
+    }
     trust::settle(db, engine, &manifest, now_ms)
 }
 
@@ -514,8 +541,16 @@ pub fn set_enabled(
     }
 }
 
-/// Turns a bundled code plugin on or off by its plugin id in the switch table, where no row
-/// reads as on. An essential one is refused with `app_plugin_essential` while the
+/// The switch table key of a bundled code plugin: `code:<id>`, which no user plugin name can
+/// carry. Input: the plugin id. Output: the key.
+pub(crate) fn code_key(name: &str) -> String {
+    format!("{CODE_KEY_PREFIX}{name}")
+}
+
+const CODE_KEY_PREFIX: &str = "code:";
+
+/// Turns a bundled code plugin on or off under its `code:<id>` key in the switch table,
+/// where no row reads as on. An essential one is refused with `app_plugin_essential` while the
 /// `plugins.essential_unlocked` setting is false; turning off with `stop_runs` stops each
 /// run holding it once the off state is written. Inputs: database, plugin id and switch.
 /// Output: Ok, `app_plugin_essential`, or `app_plugins_unavailable`.
@@ -524,8 +559,10 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
         .iter()
         .find(|grant| grant.plugin == name)
         .expect("only a bundled code plugin id switches here");
+    let key = code_key(name);
+    assert!(!embedding::valid_name(&key));
     match switch {
-        Switch::On => set_flag(db, name, true),
+        Switch::On => set_flag(db, &key, true),
         Switch::Off {
             usage,
             when_off,
@@ -534,7 +571,7 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
             if grant.essential && !essential_unlocked {
                 return Err(refused("app_plugin_essential"));
             }
-            set_flag(db, name, false)?;
+            set_flag(db, &key, false)?;
             if when_off == TurnOff::StopRuns {
                 usage.stop_runs(name);
             }
@@ -545,15 +582,12 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
 }
 
 /// The bundled code plugins turned off, by plugin id, for the engine's in-memory off set.
-/// A switch row under a code plugin id that also has a trust record belongs to an older
-/// plugin of the owner's and is left out. Input: the database. Output: the ids, or
-/// `app_plugins_unavailable`.
+/// Only `code:<id>` switch rows count, so a row an older plugin of the owner's left under a
+/// bare code plugin id never turns that plugin off; an id no bundled code plugin has is
+/// left out. Input: the database. Output: the ids, or `app_plugins_unavailable`.
 pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<String>, Refused> {
     let mut statement = db
-        .prepare(
-            "SELECT name FROM app_plugin_state WHERE enabled=0
-             AND NOT EXISTS (SELECT 1 FROM app_plugin_trust WHERE app_plugin_trust.name=app_plugin_state.name)",
-        )
+        .prepare("SELECT name FROM app_plugin_state WHERE enabled=0 AND name LIKE 'code:%'")
         .map_err(sqlite)?;
     let names: Vec<String> = statement
         .query_map([], |row| row.get(0))
@@ -561,20 +595,24 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
         .collect::<Result<_, _>>()
         .map_err(sqlite)?;
     Ok(names
-        .into_iter()
+        .iter()
+        .filter_map(|key| key.strip_prefix(CODE_KEY_PREFIX))
         .filter(|name| is_code_plugin(name))
+        .map(str::to_owned)
         .collect())
 }
 
-/// Removes a user plugin: its bindings, trust record and state in one savepoint first, then,
-/// once those rows are gone, the keys entered for it and its folder (or the .yaml file an
-/// older version left). A failed row write or commit changes nothing. Account keys stay. Under a
-/// bundled plugin's name it removes only what the owner's folder still holds, which the
-/// bundled plugin shadows. Inside a caller's open transaction it is refused before anything
-/// is written. Inputs: database, engine facts and name. Output: Ok, or
-/// `app_plugin_bundled`, `app_plugin_not_found`, the database's or the folder's refusal.
+/// Removes a user plugin: its folder moved aside under its removal name, then its bindings,
+/// trust record and state as one Forgotten event in a savepoint, then the keys entered for
+/// it; the folder moved aside and any .yaml file an older version left are deleted only
+/// after the capture's commit, and the folder goes back after its rollback. A failed row
+/// write, or a savepoint release that cannot commit outside a capture, changes nothing. Account keys stay. Under a bundled plugin's name it removes only
+/// what the owner's folder still holds, which the bundled plugin shadows. Outside the
+/// capture of its own transaction it is refused before anything is written. Inputs:
+/// database, engine facts and name. Output: Ok, or `app_plugin_bundled`,
+/// `app_plugin_not_found`, `app_plugins_unavailable`, the database's or the folder's refusal.
 pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Refused> {
-    outside_transaction(db)?;
+    let captured = store_log::in_capture(db)?;
     prepare(db, engine)?;
     if is_bundled(name) {
         return if folder::remove(engine.root, name, engine.keys.new_ref)? {
@@ -587,41 +625,48 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
         return Err(refused("app_plugin_not_found"));
     }
     let present = folder::read(engine.root, name)?.is_some();
-    let known: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
-             OR EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1)
-             OR EXISTS(SELECT 1 FROM app_plugin_secrets WHERE plugin=?1)",
-            [name],
-            |row| row.get(0),
-        )
-        .map_err(sqlite)?;
+    let known = known(db, name)?;
     if !present && !known {
         return Err(refused("app_plugin_not_found"));
     }
-    let retired = folder::retire(engine.root, name, engine.keys.new_ref)?;
+    let retired = if known {
+        Some(folder::retire(engine.root, name, engine.keys.new_ref)?)
+    } else {
+        None
+    };
     let bindings = binding_rows(db, name)?;
-    assert!(db.is_autocommit());
-    db.execute_batch("SAVEPOINT app_plugin_remove")
-        .map_err(sqlite)?;
-    let written = [
-        "DELETE FROM app_plugin_secrets WHERE plugin=?1",
-        "DELETE FROM app_plugin_trust WHERE name=?1",
-        "DELETE FROM app_plugin_state WHERE name=?1",
-    ]
-    .iter()
-    .try_for_each(|sql| db.execute(sql, [name]).map(|_| ()))
-    .and_then(|()| db.execute_batch("RELEASE app_plugin_remove"));
-    if let Err(error) = written {
-        let _ = db.execute_batch("ROLLBACK");
-        return Err(sqlite(error));
+    if known {
+        assert_eq!(db.is_autocommit(), !captured);
+        db.execute_batch("SAVEPOINT app_plugin_remove")
+            .map_err(sqlite)?;
+        let forgotten = store_log::Event::Forgotten {
+            plugin: name.to_owned(),
+        };
+        let written = store_log::record(db, forgotten).and_then(|()| {
+            db.execute_batch("RELEASE app_plugin_remove")
+                .map_err(sqlite)
+        });
+        if let Err(refusal) = written {
+            let undo = if captured {
+                "ROLLBACK TO app_plugin_remove; RELEASE app_plugin_remove"
+            } else {
+                "ROLLBACK"
+            };
+            let _ = db.execute_batch(undo);
+            return Err(refusal);
+        }
     }
     for (_, source, reference) in &bindings {
         forget_key_file(db, engine, source, reference);
     }
-    retired.finish()?;
-    folder::remove(engine.root, name, engine.keys.new_ref)?;
-    Ok(())
+    let step = match retired {
+        Some(retired) => retired.into_step(engine.keys.new_ref),
+        None => folder::removal(engine.root, name, engine.keys.new_ref),
+    };
+    match store_log::after_commit(step) {
+        Some(step) => step.commit(),
+        None => Ok(()),
+    }
 }
 
 /// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
@@ -694,8 +739,32 @@ pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
     folder::remove_staged(root)
 }
 
+/// Whether any row a removal deletes names the plugin: its trust record, its switch or a
+/// secret binding. Inputs: the database and the name. Output: the answer, or the
+/// database's refusal.
+fn known(db: &Connection, name: &str) -> Result<bool, Refused> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
+         OR EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1)
+         OR EXISTS(SELECT 1 FROM app_plugin_secrets WHERE plugin=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(sqlite)
+}
+
+/// Settles at start each folder a removal moved aside, by the rows that removal deletes:
+/// while they still name the plugin, the removal never committed and the folder goes back
+/// under the name when that name is missing; otherwise it loses the name and is deleted.
+/// Inputs: database and engine facts. Output: Ok, or the first refusal after every entry
+/// was tried.
+pub fn sweep_removals(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
+    folder::sweep_removals(engine.root, |name| known(db, name))
+}
+
 const STAGED: &str = ".add-";
 const RETIRED: &str = ".old-";
+const REMOVING: &str = ".rm-";
 
 /// The most folder levels below a plugin folder that deleting it goes down.
 const TREE_DEPTH_MAX: usize = 4;
@@ -723,6 +792,20 @@ fn retired_name(file: &str) -> Option<&str> {
     embedding::valid_name(name).then_some(name)
 }
 
+/// The folder name a removal moves a plugin's folder to until its rows are gone: the plugin
+/// name and an id. Inputs: a valid name and the id. Output: the folder name.
+fn removing(name: &str, id: &str) -> String {
+    assert!(embedding::valid_name(name));
+    format!("{REMOVING}{name}.{id}")
+}
+
+/// The plugin name a removal moved a folder aside from. Input: the entry name. Output: the
+/// name, or none when the entry is no removal folder or carries no valid name.
+fn removing_name(file: &str) -> Option<&str> {
+    let (name, _id) = file.strip_prefix(REMOVING)?.rsplit_once('.')?;
+    embedding::valid_name(name).then_some(name)
+}
+
 /// One user plugin the folder listing returns: its name and its plugin.toml bytes, or the
 /// refusal that kept it unread.
 type UserFile = (String, Result<Vec<u8>, Problem>);
@@ -732,3 +815,5 @@ compile_error!("the plugins folder is built for Unix and Windows only");
 
 #[path = "registry_folder.rs"]
 mod folder;
+
+pub use folder::FolderStep;

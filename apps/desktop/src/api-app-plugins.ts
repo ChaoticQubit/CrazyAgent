@@ -64,11 +64,13 @@ export interface PluginGrants {
  * sentences. */
 export const APP_PLUGIN_REFUSALS: Record<string, string> = {
   app_plugin_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
+  owner_outcome_unknown_reconcile_same_identity: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
+  owner_actor_stopped_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
   app_plugin_request_bounds: "This plugin request was too large to send.",
   app_plugin_request_invalid: "The engine didn't accept this plugin request. Reload the page and try again.",
   app_plugins_unavailable: "App plugins aren't available in this engine yet.",
   app_plugins_readonly: "CrazyAgent's data is read-only right now, so plugins can't change. Nothing was changed.",
-  app_plugin_not_found: "That plugin is gone. The list now shows the current ones.",
+  app_plugin_not_found: "That plugin is gone. Open App plugins again to see the current ones.",
   app_plugin_name_taken: "A built-in plugin already has that name. Give your plugin another name.",
   app_plugin_bundled: "Built-in plugins can be turned off but not removed or replaced.",
   app_plugin_essential: "This built-in plugin stays on. CrazyAgent needs it to work.",
@@ -121,6 +123,12 @@ export function pluginState(plugin: PluginView): { word: string; tone: Tone; det
   if (status.kind === "needs_review") return { word: "Needs review", tone: "warn", detail: "Review this plugin before it runs.", review: true };
   if (status.kind === "needs_key") return { word: "Needs a key", tone: "warn", detail: "Set a key for each secret it needs.", review: false };
   return plugin.enabled ? { word: "Enabled", tone: "ok", detail: null, review: false } : { word: "Off", tone: "neutral", detail: null, review: false };
+}
+
+/** The tone of a refused request's notice: a change waiting its turn in the database still
+ * lands, so it warns; every other refusal is danger. Input: the code. Output: the tone. */
+export function failureTone(code: string): "warn" | "danger" {
+  return code === "access_change_pending" ? "warn" : "danger";
 }
 
 /** One plain sentence for a refused app plugin request. Input: the refusal code and its

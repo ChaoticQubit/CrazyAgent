@@ -26,6 +26,8 @@ pub mod registry;
 #[cfg(feature = "store")]
 pub mod store;
 #[cfg(feature = "store")]
+pub mod store_log;
+#[cfg(feature = "store")]
 pub mod trust;
 #[cfg(feature = "store")]
 pub mod usage;
@@ -43,6 +45,8 @@ mod problem_tests;
 mod registry_folder_windows_tests;
 #[cfg(all(test, feature = "store", unix))]
 mod registry_tests;
+#[cfg(all(test, feature = "store"))]
+mod store_log_tests;
 #[cfg(all(test, feature = "store"))]
 mod sweep_tests;
 #[cfg(test)]
