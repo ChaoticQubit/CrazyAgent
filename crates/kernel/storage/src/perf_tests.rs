@@ -3,7 +3,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::migrations::{backup_time, stamp, stamp_time};
 use crate::namespace::Namespace;
-use crate::perf_kit::{Row, SAMPLES, SAMPLES_MIN, line, time};
+use crate::perf_kit::{Row, SAMPLES, SAMPLES_MIN, line_ns, time};
 use crate::state_log::replay::{Logged, chunk};
 use crate::state_log::{
     AggregateName, Chunk, Clock, Draft, SNAPSHOT_CHUNK, check, read_chunk, snapshot_bodies,
@@ -44,7 +44,7 @@ pub(crate) fn nanos(started: Instant) -> u64 {
 
 /// Times a call whose fixture each sample sets up again: `one` sets it up, times one call
 /// and returns that span, a tenth of the samples running first as warm-up. Prints the PERF
-/// line. Inputs: the row (batch 1), the samples and the sample. Output: none.
+/// line in nanoseconds, so a pair near 10 us prints in one unit on both builds. Inputs: the row (batch 1), the samples and the sample. Output: none.
 pub(crate) fn sampled(row: &Row, samples: usize, mut one: impl FnMut() -> u64) {
     assert!(samples >= SAMPLES_MIN);
     assert_eq!(row.batch, 1);
@@ -54,7 +54,7 @@ pub(crate) fn sampled(row: &Row, samples: usize, mut one: impl FnMut() -> u64) {
     let mut spans: Vec<u64> = (0..samples).map(|_| one()).collect();
     assert_eq!(spans.len(), samples);
     spans.sort_unstable();
-    println!("{}", line(row, &spans));
+    println!("{}", line_ns(row, &spans));
 }
 
 /// The time the pure rows format and read: 2026-11-24 08:25:00.123 UTC. Output: the time.
