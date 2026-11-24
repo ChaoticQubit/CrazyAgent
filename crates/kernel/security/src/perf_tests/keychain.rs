@@ -92,16 +92,19 @@ impl Drop for Scratch {
     }
 }
 
-/// Times the macOS keychain calls that touch only a scratch keychain in a temporary home:
-/// the name checks, the store opened at that keychain and in that home, its writes, reads
-/// and deletes, and one agent keychain record removal. `open_profile_keychain`,
-/// `prepare_profile_keychain` and `fresh_profile_keychain` get no row here (layer 3).
+/// Times the macOS keychain calls that touch only a scratch keychain in a temporary home
+/// under `/tmp/ca-keychain-*`, so its path is as long as the twin build's: the name checks,
+/// the store opened at that keychain and in that home, its writes, reads and deletes, and
+/// one agent keychain record removal. The profile keychain calls get no row (layer 3).
 /// Prints one PERF line per call and asserts no time.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn keychain_calls() {
-    let root = tempfile::tempdir().unwrap();
-    let home = std::fs::canonicalize(root.path()).unwrap().join("home");
+    let root = tempfile::Builder::new()
+        .prefix("ca-keychain-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let home = root.path().join("home");
     let scratch = Scratch::create(&home, PROFILE_KEYCHAIN);
     let agent = Scratch::create(&home.join("agent"), AGENT_KEYCHAIN);
     let store = Keychain::at(NAMESPACE, &scratch.path).unwrap();
