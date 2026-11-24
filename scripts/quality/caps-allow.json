@@ -148,7 +148,7 @@
   "crates/crazyagent/tests/client_controller.rs": 1735,
   "crates/crazyagent/tests/coord_relay.rs": 1690,
   "crates/crazyagent/tests/e2e_tui.rs": 3212,
-  "crates/crazyagent/tests/linux_sandbox.rs": 4752,
+  "crates/crazyagent/tests/linux_sandbox.rs": 4731,
   "crates/crazyagent/tests/master_session.rs": 1776,
   "crates/crazyagent/tests/model_access_management.rs": 1882,
   "crates/crazyagent/tests/model_gateway.rs": 1522,
