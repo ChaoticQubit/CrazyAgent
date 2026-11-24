@@ -250,12 +250,12 @@ pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
 };
 
 /// The tool cache hooks the engine passes: the pinning flag clearing of
-/// [`tool_cache_unpin`], the by-handle entry removal of [`toolchain_remove_home_entry`] and
+/// [`tool_cache_unpin`], the by-handle entry removal of [`tool_cache_remove_agent_entry`] and
 /// the engine's priming process.
 #[cfg(target_os = "macos")]
 pub const TOOL_CACHE_HOOKS: ToolCacheHooks = ToolCacheHooks {
     unpin: tool_cache_unpin,
-    remove_agent_entry: toolchain_remove_home_entry,
+    remove_agent_entry: tool_cache_remove_agent_entry,
     priming_command: tool_cache::priming_command,
 };
 
@@ -264,6 +264,40 @@ pub const TOOL_CACHE_HOOKS: ToolCacheHooks = ToolCacheHooks {
 #[cfg(target_os = "macos")]
 fn tool_cache_unpin(parent: std::os::fd::BorrowedFd<'_>, name: &str) {
     crate::team::cleanup::unpin(parent, name);
+}
+
+/// Removes one entry of an agent's tool cache as [`toolchain_remove_home_entry`] does, but
+/// keeps the code for a folder too deep to remove, which Clean up names to the owner.
+/// Inputs: the open cache folder, the entry name and the fallback code. Output: done, or the
+/// refusal code.
+#[cfg(target_os = "macos")]
+fn tool_cache_remove_agent_entry(
+    folder: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    otherwise: &'static str,
+) -> Result<(), &'static str> {
+    use crate::team::cleanup::{FOLDER_TOO_DEEP, home_code, remove_home_entry};
+    remove_home_entry(folder, name).map_err(|problem| {
+        if problem.0 == FOLDER_TOO_DEEP {
+            FOLDER_TOO_DEEP
+        } else {
+            home_code(&problem, otherwise)
+        }
+    })
+}
+
+/// The absolute tool cache folder a removal of an agent's caches refused as too deep to
+/// remove. Input: the removal's error. Output: the folder, or None for any other refusal or
+/// a folder whose path is not text.
+#[cfg(target_os = "macos")]
+pub(crate) fn too_deep_folder(problem: &std::io::Error) -> Option<String> {
+    let refused = problem
+        .get_ref()?
+        .downcast_ref::<kernel_sandbox::tool_cache::EntryRefused>()?;
+    if refused.code != crate::team::cleanup::FOLDER_TOO_DEEP || !refused.folder.is_absolute() {
+        return None;
+    }
+    refused.folder.to_str().map(str::to_owned)
 }
 
 /// Removes a folder an agent wrote as Clean up removes an agent's tree, with the engine's

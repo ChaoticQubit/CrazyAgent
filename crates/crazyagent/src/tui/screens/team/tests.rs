@@ -3521,6 +3521,7 @@ fn c_lists_the_finished_agents_with_their_size_and_y_removes_every_one() {
         Ok(CleanupReply::Removed(crate::team::cleanup::Removal {
             agents: vec![4, 2],
             kept: None,
+            folder: None,
         })),
     ));
     let message = shell.ctx.message().unwrap();
@@ -3601,44 +3602,6 @@ fn twenty_agents_at_80x24_keep_the_question_and_y_removes_every_one_read() {
 }
 
 #[test]
-fn a_removal_that_stopped_part_way_says_how_many_went_and_why_one_stayed() {
-    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
-    let mut shell = team();
-    shell.key(Key::Char('c'));
-    let read = CleanupQuery::Finished { project: project() };
-    cleanup_sent(&mut shell);
-    let agents = vec![
-        finished(4, "Ada (@login-page)", 3 * 1024 * 1024),
-        finished(3, "Lin (@docs)", 1024 * 1024),
-        finished(2, "Grace (@signup)", 1024 * 1024),
-    ];
-    shell.arrive(cleanup_reply(read, Ok(CleanupReply::Finished(agents))));
-    shell.key(Key::Char('y'));
-    let sent = cleanup_sent(&mut shell);
-    assert_eq!(
-        sent,
-        vec![CleanupQuery::Remove {
-            project: project(),
-            agents: vec![4, 3, 2],
-        }]
-    );
-    shell.arrive(cleanup_reply(
-        sent[0].clone(),
-        Ok(CleanupReply::Removed(crate::team::cleanup::Removal {
-            agents: vec![4, 3],
-            kept: Some("cleanup_worktree_dirty".into()),
-        })),
-    ));
-    let message = shell.ctx.message().unwrap();
-    assert_eq!(message.lead, "Removed 2 worktrees, kept 1:");
-    assert_eq!(
-        message.rest,
-        "An agent's working copy has changes that are not saved anywhere else."
-    );
-    assert!(!render(&mut shell).join("\n").contains("Grace (@signup)"));
-}
-
-#[test]
 fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_nothing() {
     use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
     let read = CleanupQuery::Finished { project: project() };
@@ -3712,7 +3675,7 @@ fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_noth
             && *code != "cleanup_request_invalid"
         {
             assert_ne!(
-                super::cleanup::words(code),
+                super::cleanup::kept_words(code, Some("/folder")),
                 "The engine could not do this.",
                 "{code}"
             );
@@ -5787,6 +5750,7 @@ fn keys_typed_into_the_master_terminal_across_the_minute_never_act_on_the_view()
     assert_eq!(starts_asked(&mut shell), 1);
 }
 
+mod cleanup_deep;
 /// The saved master harness switch row (DEC-161 bug 2): a master harness saved while the
 /// live master was off starts it on the new harness at the next team read. Inputs: the team
 /// screen and its shell. Output: none; the row asserts.
