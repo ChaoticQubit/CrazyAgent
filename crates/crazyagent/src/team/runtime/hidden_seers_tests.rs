@@ -159,8 +159,10 @@ fn the_owner_restart_starts_a_seer_the_engine_stopped_again() {
 }
 
 /// macOS only, as team panes run only there (DEC-094): a pane a later engine takes over is
-/// listed by what its record says its sandbox hid, a pane from before the engine kept that
-/// list counting as hiding none, so an engine restart or a thaw never drops it from the list.
+/// judged by what its record says its sandbox hid, a pane from before the engine kept that
+/// list counting as hiding none. A pane that can still see the hidden folder is stopped,
+/// held and listed, so an engine restart or a thaw never drops it; one whose record hid the
+/// folder keeps running and is not listed.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_pane_taken_over_after_a_folder_was_hidden_is_listed_by_what_its_record_hid() {
@@ -196,19 +198,30 @@ fn a_pane_taken_over_after_a_folder_was_hidden_is_listed_by_what_its_record_hid(
         };
         fixture.keep(master, &record);
         let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
-        fixture.until(&mut team, "the pane is taken over", |f| {
-            f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master)
-        });
-        for _ in 0..20 {
-            team.tick().unwrap();
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert_eq!(sees(&fixture, master), seen, "a record that hid {kept:?}");
         assert_eq!(
             team.workers[&master].hidden, kept,
             "the record's list is kept"
         );
-        assert_eq!(team.shutdown().unwrap(), names(&[master]));
+        if seen {
+            fixture.until(&mut team, "the taken-over pane is stopped and held", |f| {
+                f.agent_status(master) == (AgentStatus::Stopped, Some(FOLDER_HIDDEN.to_owned()))
+            });
+        } else {
+            fixture.until(&mut team, "the pane is taken over", |f| {
+                f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master)
+            });
+            for _ in 0..20 {
+                team.tick().unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        assert_eq!(sees(&fixture, master), seen, "a record that hid {kept:?}");
+        let left = if seen { names(&[]) } else { names(&[master]) };
+        assert_eq!(
+            team.shutdown().unwrap(),
+            left,
+            "a held pane is not left running"
+        );
         host.close(&[]).unwrap();
     }
 }
