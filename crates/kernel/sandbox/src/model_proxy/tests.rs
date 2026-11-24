@@ -176,9 +176,8 @@ fn the_proxy_variables_name_the_proxy_and_exempt_no_host() {
     }
 }
 
-/// S4B-2W1: a proxy started without a saved port takes a port of the fixed block on both
-/// loopback addresses, and a second proxy started while the first holds its port takes
-/// another port of the block.
+/// A proxy started without a saved port takes a port of the fixed block on both loopback addresses,
+/// and a second proxy started while the first holds its port takes another port of the block.
 #[test]
 fn a_proxy_takes_a_port_of_the_fixed_block_and_skips_a_taken_one() {
     let first = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None, &[]).unwrap();
@@ -197,8 +196,8 @@ fn a_proxy_takes_a_port_of_the_fixed_block_and_skips_a_taken_one() {
     }
 }
 
-/// S4B-2W1: a port search whose every port is held, one on 127.0.0.1 and one on ::1 only,
-/// skips both and refuses plainly with `AddrInUse`, from any start.
+/// A port search whose every port is held, one on 127.0.0.1 and one on ::1 only, skips both and
+/// refuses plainly with `AddrInUse`, from any start.
 #[test]
 fn a_port_search_with_every_port_taken_refuses_plainly() {
     let v4 = spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
@@ -214,11 +213,10 @@ fn a_port_search_with_every_port_taken_refuses_plainly() {
     }
 }
 
-/// S4B-2W1 r1 (rv-code L1, rv-secreview L2): a port search skips a port this user holds on
-/// 127.0.0.1, ::1, 0.0.0.0 or ::, each bound as `std` binds, with `SO_REUSEADDR`, and takes
-/// the next one, so a proxy never sits beside an owner's wildcard listener and takes its
-/// loopback connections. On Windows the search sees only listeners bound before its own
-/// bind (W10b, `spawn_gate::bind_tcp_std_exclusive`).
+/// A port search skips a port this user holds on 127.0.0.1, ::1, 0.0.0.0 or ::, each bound as `std`
+/// binds, with `SO_REUSEADDR`, and takes the next one, so a proxy never sits beside an owner's
+/// wildcard listener and takes its loopback connections. On Windows the search sees only listeners
+/// bound before its own bind (`spawn_gate::bind_tcp_std_exclusive`).
 #[test]
 fn a_port_search_skips_a_port_held_on_any_address_of_this_user() {
     for holder in ["127.0.0.1:0", "[::1]:0", "0.0.0.0:0", "[::]:0"] {
@@ -234,9 +232,9 @@ fn a_port_search_skips_a_port_held_on_any_address_of_this_user() {
     }
 }
 
-/// S4B-2W1 r1 (rv-secreview L1): a port search leaves the owner's configured model ports
-/// alone even while they are free, so a proxy never takes the port the owner's model
-/// server starts on, and refuses plainly when they are the only ports it has.
+/// A port search leaves the owner's configured model ports alone even while they are free, so a
+/// proxy never takes the port the owner's model server starts on, and refuses plainly when they are
+/// the only ports it has.
 #[test]
 fn a_port_search_leaves_the_owner_model_ports_alone_even_while_free() {
     let kept = spawn_gate::free_low_tcp_port().unwrap();
@@ -355,9 +353,9 @@ fn a_client_hello_naming_another_host_or_none_never_reaches_the_host() {
     );
 }
 
-/// A model host whose name resolves only to loopback is never dialled: the engine opens
-/// tunnels outside the sandbox, so a host's DNS must not steer it to the engine's own
-/// machine. The tunnel is cut and nothing reaches the local listener (CS-4).
+/// A model host whose name resolves only to loopback is never dialled: the engine opens tunnels
+/// outside the sandbox, so a host's DNS must not steer it to the engine's own machine. The tunnel
+/// is cut and nothing reaches the local listener.
 #[test]
 fn a_model_host_that_resolves_to_loopback_is_never_dialled() {
     let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -629,10 +627,10 @@ fn a_tunnel_dials_no_address_on_this_machine_but_keeps_the_local_network() {
     }
 }
 
-/// CLOUD-METADATA-ADDRS: a tunnel dials no cloud's metadata or credential service outside
-/// the link-local range, whatever a model host's name resolves to: Alibaba's and Azure's
-/// IPv4 addresses, also inside IPv6, and the IPv6 ones of AWS IMDS and EKS Pod Identity,
-/// Google, OCI, Akamai and Scaleway. Their neighbours stay dialable.
+/// A tunnel dials no cloud's metadata or credential service outside the link-local range, whatever
+/// a model host's name resolves to: Alibaba's and Azure's IPv4 addresses, also inside IPv6, and the
+/// IPv6 ones of AWS IMDS and EKS Pod Identity, Google, OCI, Akamai and Scaleway. Their neighbours
+/// stay dialable.
 #[test]
 fn a_tunnel_dials_no_cloud_metadata_service() {
     let listed = [
@@ -674,10 +672,10 @@ fn routed_address() -> Option<Ipv4Addr> {
     }
 }
 
-/// A host name may resolve to an address one of this machine's interfaces holds, such as its
-/// own LAN address, which reaches the owner's services from outside the sandbox as loopback
-/// does. The tunnel never dials one, also inside an IPv6 address, and an address no
-/// interface holds stays dialable (S4B-I1).
+/// A host name may resolve to an address one of this machine's interfaces holds, such as its own
+/// LAN address, which reaches the owner's services from outside the sandbox as loopback does. The
+/// tunnel never dials one, also inside an IPv6 address, and an address no interface holds stays
+/// dialable.
 #[test]
 fn a_tunnel_dials_no_address_this_machines_interfaces_hold() {
     let mut held: Vec<IpAddr> = vec![Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()];
@@ -733,9 +731,9 @@ fn the_proxy_counts_every_refused_request_and_cut_tunnel() {
     assert_eq!(proxy.refusals(), refused + 1);
 }
 
-/// Where a Linux sysctl lets programs bind any address, every address counts as held, so a
-/// cut says the proxy cannot tell its own addresses rather than that the host is this
-/// machine (S4B-I1-L1). The sysctl values are given; the real ones are never read here.
+/// Where a Linux sysctl lets programs bind any address, every address counts as held, so a cut says
+/// the proxy cannot tell its own addresses rather than that the host is this machine. The sysctl
+/// values are given; the real ones are never read here.
 #[test]
 fn a_cut_names_the_sysctl_that_lets_any_address_bind() {
     let reason = |values: [Option<&str>; 2]| {
