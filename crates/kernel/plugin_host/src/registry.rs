@@ -765,6 +765,7 @@ pub fn sweep_removals(db: &Connection, engine: &Engine<'_>) -> Result<(), Refuse
 const STAGED: &str = ".add-";
 const RETIRED: &str = ".old-";
 const REMOVING: &str = ".rm-";
+const OWED: &str = ".back-";
 
 /// The most folder levels below a plugin folder that deleting it goes down.
 const TREE_DEPTH_MAX: usize = 4;
@@ -772,10 +773,12 @@ const TREE_DEPTH_MAX: usize = 4;
 /// The most entries deleting a plugin folder reads from any one folder in it.
 const TREE_ENTRIES_MAX: usize = 64;
 
-/// Whether a plugins folder entry is a staged copy or a retired folder. Input: the entry
-/// name. Output: the answer.
+/// Whether a plugins folder entry is a staged copy, a retired folder or a folder owed back
+/// to its plugin name. Input: the entry name. Output: the answer.
 fn left_over(file: &[u8]) -> bool {
-    file.starts_with(STAGED.as_bytes()) || file.starts_with(RETIRED.as_bytes())
+    file.starts_with(STAGED.as_bytes())
+        || file.starts_with(RETIRED.as_bytes())
+        || file.starts_with(OWED.as_bytes())
 }
 
 /// The retired folder name a replace moves a plugin's old folder to: the plugin name and
@@ -789,6 +792,21 @@ fn retired(name: &str, id: &str) -> String {
 /// the name, or none when the entry is no retired folder or carries no valid name.
 fn retired_name(file: &str) -> Option<&str> {
     let (name, _id) = file.strip_prefix(RETIRED)?.rsplit_once('.')?;
+    embedding::valid_name(name).then_some(name)
+}
+
+/// The folder name a rolled-back replace gives the original folder it could not put back
+/// under the plugin name, so the start sweep puts it back: the plugin name and the write id.
+/// Inputs: a valid name and the id. Output: the folder name.
+fn owed(name: &str, id: &str) -> String {
+    assert!(embedding::valid_name(name));
+    format!("{OWED}{name}.{id}")
+}
+
+/// The plugin name a folder is owed back to. Input: the entry name. Output: the name, or
+/// none when the entry is no owed folder or carries no valid name.
+fn owed_name(file: &str) -> Option<&str> {
+    let (name, _id) = file.strip_prefix(OWED)?.rsplit_once('.')?;
     embedding::valid_name(name).then_some(name)
 }
 
