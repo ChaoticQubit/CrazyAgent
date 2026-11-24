@@ -246,8 +246,9 @@ pub fn lookup_within(
 }
 
 /// [`lookup_within`] counting its thread on the given counter, which the engine keeps as
-/// [`LOOKUPS`] and a test row keeps as its own. Inputs: the counter, host, port and lookup.
-/// Output: the answer, or a `TimedOut` failure past the bound or at the cap.
+/// [`LOOKUPS`] and a test row keeps as its own. A lookup is admitted only by raising a count
+/// below the cap, so a refusal never writes the counter. Inputs: the counter, host, port and
+/// lookup. Output: the answer, or a `TimedOut` failure past the bound or at the cap.
 fn lookup_counted(
     lookups: &'static AtomicUsize,
     host: &str,
@@ -255,10 +256,13 @@ fn lookup_counted(
     lookup: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
 ) -> io::Result<Vec<IpAddr>> {
     assert!(!host.is_empty());
-    if lookups.fetch_add(1, Ordering::SeqCst) >= LOOKUPS_MAX {
-        lookups.fetch_sub(1, Ordering::SeqCst);
+    let admitted = lookups.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |alive| {
+        (alive < LOOKUPS_MAX).then_some(alive + 1)
+    });
+    let Ok(before) = admitted else {
         return Err(io::Error::from(io::ErrorKind::TimedOut));
-    }
+    };
+    assert!(before < LOOKUPS_MAX);
     let alive = Alive(lookups);
     let host = host.to_owned();
     let (answer, answered) = std::sync::mpsc::sync_channel(1);
