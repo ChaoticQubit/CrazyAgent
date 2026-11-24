@@ -20,6 +20,7 @@ import { AppMetrics } from "./screens/metrics";
 import { useResetNotice } from "./screens/metrics/extras";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
+import { RestoreRecovery } from "./screens/restore-recovery";
 import { Settings } from "./screens/settings";
 import { UserDialogLayer, closeUserDialog, openUserDialog, useUserDialog } from "./screens/user-menu";
 import { alertRoute, freshAlerts, unseenByProject, workingByProject } from "./screens/team/wake";
@@ -171,7 +172,8 @@ function ShellSidebar({ route, projects, profileName, session }: { route: Route;
 }
 
 /** The whole app for one session and route: the engine-down or engine-outdated state, the
- * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
+ * recovery screen for a restore that did not finish, the launch skeleton, the first-run
+ * Welcome page while the profile is empty, or the shell with the
  * routed screen. Updates, by route or as the open dialog, opens on its own in place of all but
  * the shell, so an install that restarts the engine keeps it in view. In the shell a route to
  * Profile, Updates, GitHub or Projects folder opens that dialog over the page under it.
@@ -180,6 +182,7 @@ function ShellSidebar({ route, projects, profileName, session }: { route: Route;
 export function AppView({ session, route, alerts, working, under, back }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number>; under?: Route; back?: string }) {
   const open = useUserDialog();
   const updates = route.name === "settings" && route.tab === "updates" || open === "updates";
+  if (session.engine === "down" && !updates && session.engineProblem === plainError("engine_restore_broken")) return <RestoreRecovery onDone={session.retry} />;
   if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} problem={session.engineProblem ?? null} />;
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
   if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
