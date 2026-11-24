@@ -18,7 +18,7 @@ pub const SEATBELT_MISSING: &str =
 pub const GRANTS_FOLDER: &str = "boundary-grants";
 
 /// The start of every agent's AppContainer name.
-pub const CONTAINER_PREFIX: &str = "crazyagent.";
+pub(crate) const CONTAINER_PREFIX: &str = "crazyagent.";
 const CONTAINER_HASH_BYTES: usize = 16;
 
 /// The AppContainer name for one agent of one project: [`CONTAINER_PREFIX`] and 32 hex digits
@@ -65,6 +65,10 @@ pub fn existing_helper(helper: &Path) -> Result<PathBuf, SandboxError> {
     Ok(helper.to_path_buf())
 }
 
+/// The Windows boundary rows on the stand-in hooks: profiles, installs, wrapped agents
+/// inside their AppContainer and the owner's git.
+#[cfg(all(test, windows))]
+mod engine_rows;
 /// The owner's own git for one project inside an AppContainer of its own, with no capability,
 /// so a `.git` that points git elsewhere reaches nothing (V244-WIN-GIT-UNC-SIBLINGS).
 #[cfg(windows)]
