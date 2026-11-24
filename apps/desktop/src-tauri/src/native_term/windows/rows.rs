@@ -289,6 +289,13 @@ fn presents() -> u64 {
     draw::counts().0
 }
 
+/// Asserts that no surface setup, swap-chain wait or draw failed since the failure count
+/// read earlier: rows that fail one on purpose run in the same process, so a row compares
+/// against its own start. Inputs: the earlier count and what the check covers.
+fn no_failure_since(failed: u64, what: &str) {
+    assert_eq!(draw::counts().1, failed, "{what}");
+}
+
 fn await_present(what: &str, after: u64) {
     pump_until(what, FARM_WAIT, || presents() > after);
     pump_for(Duration::from_millis(300));
@@ -426,7 +433,7 @@ fn focus_follows_clicks(view: &View, webview: HWND, centre: POINT) {
 /// A move to a 150 percent display: the view takes the new device rectangle and the render
 /// thread makes its surface again on the 1.5x shared state, then presents.
 fn rescaled_on_a_dpi_change(parent: HWND, view: &View) {
-    let before = presents();
+    let (before, failed) = draw::counts();
     view::trial_key(Some(150));
     unsafe { SendMessageW(view.hwnd(), WM_DPICHANGED_AFTERPARENT, 0, 0) };
     view::trial_key(None);
@@ -439,11 +446,7 @@ fn rescaled_on_a_dpi_change(parent: HWND, view: &View) {
     await_present("the present at 1.5x", before);
     let centre = on_screen(parent, (want.0 + 300, want.1 + 300));
     assert_color(centre, background(), "the view draws at 1.5x");
-    assert_eq!(
-        draw::counts().1,
-        0,
-        "the surface was made again without a failure"
-    );
+    no_failure_since(failed, "the surface was made again without a failure");
     println!("h1 row: 1.5x placed {want:?}, presents {}", presents());
 }
 
@@ -452,6 +455,7 @@ fn rescaled_on_a_dpi_change(parent: HWND, view: &View) {
 /// 13000 is 19500, past it, so the surface holds to that side. The render thread must not
 /// panic in configure: each wide view presents, then the box presents again.
 fn held_to_the_device_limit(parent: HWND, view: &View) {
+    let failed = draw::counts().1;
     for (css, device) in [(6000.0, 9000), (13000.0, 19500)] {
         let before = presents();
         view.place(Some((0.0, 0.0, css, 60.0))).expect("a wide box");
@@ -466,7 +470,7 @@ fn held_to_the_device_limit(parent: HWND, view: &View) {
     let wide = presents();
     view.place(Some(PAGE)).expect("the box again");
     await_present("the render thread presents after the wide views", wide);
-    assert_eq!(draw::counts().1, 0, "no failure past the texture limit");
+    no_failure_since(failed, "no failure past the texture limit");
     println!(
         "h1 row: 9000 and 19500 px views presented, then {} presents",
         presents()
@@ -501,6 +505,7 @@ fn parent_destroys_a_live_view(parent: HWND, webview: HWND) {
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
 fn a_view_sits_over_the_webview_draws_a_fed_screen_hides_and_drops_its_surface_first() {
     let (parent, webview) = stand_ins();
+    let failed = draw::counts().1;
     let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
     assert_eq!(
         unsafe { IsWindowVisible(view.hwnd()) },
@@ -526,11 +531,7 @@ fn a_view_sits_over_the_webview_draws_a_fed_screen_hides_and_drops_its_surface_f
         "dropped after its surface, the window goes"
     );
     parent_destroys_a_live_view(parent, webview);
-    assert_eq!(
-        draw::counts().1,
-        0,
-        "no surface setup, swap-chain wait or draw failed"
-    );
+    no_failure_since(failed, "no surface setup, swap-chain wait or draw failed");
 }
 
 /// The layouts the key rows load, by their KLID.
@@ -1776,14 +1777,11 @@ fn contained_read_nothing(contained: &[String]) {
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
 fn an_agent_container_reaches_the_view_and_reads_nothing_of_it() {
     let (parent, webview) = stand_ins();
+    let failed = draw::counts().1;
     let (view, temp) = shown_for_readers(parent, webview);
     the_wall(&view, &temp.path().join("reader.ps1"));
     drop(view);
-    assert_eq!(
-        draw::counts().1,
-        0,
-        "no surface setup, swap-chain wait or draw failed"
-    );
+    no_failure_since(failed, "no surface setup, swap-chain wait or draw failed");
 }
 
 #[test]
