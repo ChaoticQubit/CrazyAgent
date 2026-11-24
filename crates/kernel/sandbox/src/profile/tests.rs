@@ -522,3 +522,53 @@ mod clone_confinement_tests {
         ));
     }
 }
+
+/// A link to the engine runtime put inside the project folder, and then the project folder
+/// itself swapped for such a link, after the sandbox was built and guarded and before it is
+/// installed, still keep the runtime's database out when the agent runs: each read fails inside
+/// the sandbox, while the same read succeeds outside it and a project file is read inside it.
+#[test]
+fn a_link_swapped_in_after_the_build_still_keeps_an_engine_secret_out() {
+    let (scratch, [project, home, tmp]) = folders();
+    let root = canonical(scratch.path()).unwrap();
+    let runtime = root.join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    let secret = runtime.join("engine.db");
+    fs::write(&secret, "engine secret\n").unwrap();
+    fs::write(project.join("own.txt"), "own\n").unwrap();
+    let sandbox = ProjectSandbox::new(
+        &STAND_IN,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .guard_engine(&runtime)
+    .unwrap();
+    assert!(sandbox.secret_paths().contains(&secret));
+    let profile = root.join("agent.sb");
+    let read = |path: &Path| {
+        sandbox.install(&profile).unwrap();
+        sandbox
+            .command(&profile, Path::new("/bin/cat"))
+            .arg(path)
+            .current_dir(&home)
+            .output()
+            .unwrap()
+    };
+    let refused = |path: &Path| {
+        assert_eq!(fs::read(path).unwrap(), b"engine secret\n");
+        let output = read(path);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"", "{output:?}");
+    };
+    let own = read(&project.join("own.txt"));
+    assert_eq!(own.stdout, b"own\n", "{own:?}");
+    std::os::unix::fs::symlink(&runtime, project.join("inner")).unwrap();
+    refused(&project.join("inner").join("engine.db"));
+    fs::rename(&project, root.join("project.old")).unwrap();
+    std::os::unix::fs::symlink(&runtime, &project).unwrap();
+    assert!(fs::symlink_metadata(&project).unwrap().is_symlink());
+    refused(&project.join("engine.db"));
+}
