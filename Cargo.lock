@@ -1131,6 +1131,7 @@ dependencies = [
 name = "crazyagent-win-sandbox"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
  "tempfile",
  "tokio",
  "windows-sys 0.61.2",
