@@ -19,6 +19,18 @@ pub(super) fn cleanup_error(error: EngineError) -> BridgeError {
     )
 }
 
+/// The removal the window gets: the agents removed and the listed code of the one kept, as
+/// [`cleanup_error`] passes codes. Input: the engine's removal. Output: the window's.
+fn window_removal(removal: Removal) -> Removal {
+    Removal {
+        kept: removal
+            .kept
+            .map(|code| cleanup_error(EngineError(code)).code.to_owned()),
+        agents: removal.agents,
+        folder: None,
+    }
+}
+
 fn project(id: String) -> Result<ProjectId, BridgeError> {
     ProjectId::new(id).map_err(|_| failure("cleanup_request_invalid"))
 }
@@ -79,12 +91,7 @@ impl NativeBridge {
                 .remove_finished_agents(project, agents)
                 .await
                 .map_err(cleanup_error)?;
-            Ok(Removal {
-                kept: removal
-                    .kept
-                    .map(|code| cleanup_error(EngineError(code)).code.to_owned()),
-                agents: removal.agents,
-            })
+            Ok(window_removal(removal))
         }))
     }
 }
@@ -92,6 +99,26 @@ impl NativeBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A removal kept for a folder too deep to remove reaches the window with that folder,
+    /// also when it removed no agent; a removal kept for any other code carries none.
+    #[test]
+    fn a_too_deep_removal_reaches_the_window_with_its_folder() {
+        for agents in [Vec::new(), vec![3]] {
+            let deep = Removal {
+                agents,
+                kept: Some("cleanup_folder_too_deep".into()),
+                folder: Some("/runtime/tool-cache/ab12/agent-1".into()),
+            };
+            assert_eq!(window_removal(deep.clone()), deep);
+        }
+        let dirty = Removal {
+            agents: vec![3],
+            kept: Some("cleanup_worktree_dirty".into()),
+            folder: None,
+        };
+        assert_eq!(window_removal(dirty.clone()), dirty);
+    }
 
     /// Every cleanup code the engine answers reaches the window as itself; anything else
     /// is an unknown outcome with the engine code behind it and raw engine text withheld.

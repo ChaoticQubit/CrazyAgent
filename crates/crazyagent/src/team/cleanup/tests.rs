@@ -412,6 +412,7 @@ fn removed(agents: &[i64]) -> Removal {
     Removal {
         agents: agents.to_vec(),
         kept: None,
+        folder: None,
     }
 }
 
@@ -1031,6 +1032,7 @@ fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again(
         Removal {
             agents: vec![1],
             kept: Some("cleanup_worktree_leftover".into()),
+            folder: None,
         }
     );
     assert!(!case.worktree(1).exists() && case.history_kept(1));
@@ -2893,5 +2895,6 @@ fn removing_a_deleted_agent_s_files_removes_what_it_shut_and_pinned_in_its_home(
     assert!(!left, "the agent folder stayed");
 }
 
+mod deep_tests;
 #[cfg(target_os = "macos")]
 mod run_folder_tests;

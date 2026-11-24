@@ -257,7 +257,8 @@ async fn a_removal_slower_than_the_owner_deadline_answers_with_the_agents_it_rem
         removed,
         Removal {
             agents: vec![AGENT],
-            kept: None
+            kept: None,
+            folder: None,
         }
     );
     assert!(!worktree.exists());

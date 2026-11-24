@@ -126,17 +126,10 @@ impl OwnerClient {
         project: ProjectId,
         agents: Vec<i64>,
     ) -> Result<Removal, EngineError> {
-        match self
+        let reply = self
             .cleanup_exchange(Action::Remove { project, agents })
-            .await?
-        {
-            Reply::Removed { agents, kept }
-                if !agents.is_empty() && agents.len() <= RECLAIMABLE_MAX =>
-            {
-                Ok(Removal { agents, kept })
-            }
-            _ => Err(unknown()),
-        }
+            .await?;
+        removal_of(reply).ok_or_else(unknown)
     }
 
     /// Reads what removing a project would do: its name, the folders Delete everything
@@ -388,21 +381,75 @@ async fn remove(
         tokio::task::spawn_blocking(move || {
             let db = open(&root)?;
             let now = crate::team::now_ms();
-            Ok(match cleanup::remove(&db, &root, &project, &agents, now)? {
-                Removal {
-                    agents,
-                    kept: Some(code),
-                } if agents.is_empty() => Reply::Rejected { code },
-                Removal { agents, kept } => Reply::Removed { agents, kept },
-            })
+            Ok(reply_of(cleanup::remove(
+                &db, &root, &project, &agents, now,
+            )?))
         })
     };
     work.await.map_err(|_| failure("cleanup_unavailable"))?
 }
 
+/// The reply a removal answers with: a refusal when it removed none, else what it removed
+/// and the code of the first one kept. Input: the removal. Output: the reply.
+fn reply_of(removal: Removal) -> Reply {
+    match removal {
+        Removal {
+            agents,
+            kept: Some(code),
+            ..
+        } if agents.is_empty() => Reply::Rejected { code },
+        Removal { agents, kept, .. } => Reply::Removed { agents, kept },
+    }
+}
+
+/// The removal a client reads from a reply: at least one agent removed and no more than a
+/// request may name. Input: the reply. Output: the removal, or None for any other reply.
+fn removal_of(reply: Reply) -> Option<Removal> {
+    match reply {
+        Reply::Removed { agents, kept }
+            if !agents.is_empty() && agents.len() <= RECLAIMABLE_MAX =>
+        {
+            Some(Removal {
+                agents,
+                kept,
+                folder: None,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A removal kept for a folder too deep to remove answers with that folder, also when it
+    /// removed no agent, and the client reads it back whole; a removal of none kept for any
+    /// other code stays a plain refusal.
+    #[test]
+    fn a_too_deep_removal_reaches_the_client_with_its_folder_also_when_it_removed_none() {
+        let folder = Some("/runtime/tool-cache/ab12/agent-1".to_owned());
+        for agents in [Vec::new(), vec![2]] {
+            let deep = Removal {
+                agents,
+                kept: Some("cleanup_folder_too_deep".into()),
+                folder: folder.clone(),
+            };
+            let wire = serde_json::to_vec(&reply_of(deep.clone())).unwrap();
+            assert_eq!(
+                removal_of(serde_json::from_slice(&wire).unwrap()),
+                Some(deep)
+            );
+        }
+        let plain = Removal {
+            agents: Vec::new(),
+            kept: Some("cleanup_worktree_dirty".into()),
+            folder: None,
+        };
+        assert!(
+            matches!(reply_of(plain), Reply::Rejected { code } if code == "cleanup_worktree_dirty")
+        );
+    }
 
     /// The listed codes cover every plain code the cleanup and retire steps can answer
     /// with, so a client that passes listed codes through never hides a real one.

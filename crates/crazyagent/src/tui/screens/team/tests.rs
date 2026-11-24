@@ -3521,6 +3521,7 @@ fn c_lists_the_finished_agents_with_their_size_and_y_removes_every_one() {
         Ok(CleanupReply::Removed(crate::team::cleanup::Removal {
             agents: vec![4, 2],
             kept: None,
+            folder: None,
         })),
     ));
     let message = shell.ctx.message().unwrap();
@@ -3627,6 +3628,7 @@ fn a_removal_that_stopped_part_way_says_how_many_went_and_why_one_stayed() {
         Ok(CleanupReply::Removed(crate::team::cleanup::Removal {
             agents: vec![4, 3],
             kept: Some("cleanup_worktree_dirty".into()),
+            folder: None,
         })),
     ));
     let message = shell.ctx.message().unwrap();
@@ -5787,6 +5789,7 @@ fn keys_typed_into_the_master_terminal_across_the_minute_never_act_on_the_view()
     assert_eq!(starts_asked(&mut shell), 1);
 }
 
+mod cleanup_deep;
 /// The saved master harness switch row (DEC-161 bug 2): a master harness saved while the
 /// live master was off starts it on the new harness at the next team read. Inputs: the team
 /// screen and its shell. Output: none; the row asserts.

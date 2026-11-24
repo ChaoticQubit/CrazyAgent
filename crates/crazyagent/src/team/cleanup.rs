@@ -33,13 +33,16 @@ pub struct FinishedAgent {
     pub kept: Option<String>,
 }
 
-/// What one removal did: the agents whose worktree is gone, in the
-/// order asked, and the plain code of the agent it kept when it stopped before the end.
+/// What one removal did: the agents whose worktree is gone, in the order asked, the plain
+/// code of the agent it kept when it stopped before the end, and for a folder too deep to
+/// remove the absolute folder the owner must delete first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Removal {
     pub agents: Vec<i64>,
     pub kept: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 impl Removal {
@@ -47,6 +50,7 @@ impl Removal {
         Self {
             agents: Vec::new(),
             kept: Some(code.into()),
+            folder: None,
         }
     }
 }
@@ -769,6 +773,7 @@ pub fn remove(
     Ok(Removal {
         agents: removed,
         kept,
+        folder: None,
     })
 }
 
