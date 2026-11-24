@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
-import { HOSTED_CONFIGS, NOT_RUN, SUITES, classify, fixtureFor, specRows } from "./e2e-hosted.mjs";
+import { HOSTED_CONFIGS, NOT_RUN, SUITES, classify, denialsUnder, fixtureFor, logStart, onlyFiles, specRows } from "./e2e-hosted.mjs";
 import rowReporter, { rowLine } from "./row-reporter.mjs";
 
 const NATIVE = new URL("../../apps/desktop/test/native/", import.meta.url);
@@ -64,4 +64,23 @@ test("the row reporter prints a line per row that is not a suite, then the tally
   for await (const line of rowReporter((async function* () { yield* events; })())) lines.push(line);
   assert.deepEqual(lines, [rowLine("a.e2e.mjs", "one", "ok"), rowLine("a.e2e.mjs", "two", "not ok", "wrong"),
     rowLine("a.e2e.mjs", "three", "skip", "no keys"), "ROWS ok 1 not-ok 1 skip 1\n"]);
+});
+
+test("E2E_HOSTED_ONLY keeps the named node:test files in job order and refuses a name the job does not run", () => {
+  const files = ["a.e2e.mjs", "b.e2e.mjs", "c.e2e.mjs"];
+  assert.deepEqual(onlyFiles(files, ""), files);
+  assert.deepEqual(onlyFiles(files, undefined), files);
+  assert.deepEqual(onlyFiles(files, " c.e2e.mjs,a.e2e.mjs "), ["a.e2e.mjs", "c.e2e.mjs"]);
+  assert.throws(() => onlyFiles(files, "a.e2e.mjs,d.e2e.mjs"), /d\.e2e\.mjs/);
+});
+
+test("the Sandbox lines kept are those naming the temporary folder, with or without /private", () => {
+  const folder = "/private/var/folders/x/T";
+  const text = ["deny(1) file-write-create /private/var/folders/x/T/ca-golden-1/a", "deny(1) file-read-data /var/folders/x/T/ca-ch-2/b", "deny(1) file-read-data /Users/runner/c", ""].join("\n");
+  assert.deepEqual(denialsUnder(text, folder), text.split("\n").slice(0, 2));
+  assert.throws(() => denialsUnder(text, "var/folders"));
+});
+
+test("log show starts at the run's local time to the second", () => {
+  assert.equal(logStart(new Date(2026, 10, 4, 5, 6, 7, 800)), "2026-11-04 05:06:07");
 });

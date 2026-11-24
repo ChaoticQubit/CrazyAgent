@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { cpSync, createWriteStream, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { cpSync, createWriteStream, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { displays, shown } from "../../apps/desktop/test/native/test-window.mjs";
 import { rowLine } from "./row-reporter.mjs";
@@ -25,6 +26,18 @@ const FILES_AT_ONCE = 2;
 /** The text an e2e file holds when it must run on the owner fixture built with the clean-Mac
  * gate feature, which keeps this runner's own Node and Homebrew out of the engine's view. */
 const GATE_FEATURE = "crazyagent/clean-mac-gate";
+
+/** The prefix of the temporary root each e2e file makes and keeps when E2E_EVIDENCE is set. */
+const ROOT_PREFIX = "ca-";
+
+/** How many bytes of one rollout or engine log are kept; a larger file keeps its last part. */
+const KEPT_BYTES_MAX = 2 * 1024 * 1024;
+
+/** How many rollout and log files are kept from one temporary root. */
+const KEPT_FILES_MAX = 50;
+
+/** How many Sandbox denial lines that name the temporary folder are kept. */
+const DENIALS_MAX = 5000;
 
 /** The closed suites `test/native/run.mjs` runs that need nothing outside the job. */
 export const SUITES = Object.freeze([
@@ -103,6 +116,71 @@ export function specRows(text, fallback) {
   return rows;
 }
 
+/** The node:test files a run keeps to when E2E_HOSTED_ONLY names some, comma separated. Each
+ * named file must be one of this job's node:test files. Inputs: the node:test files and the
+ * variable's value. Output: the named files in job order, or every file for an empty value. */
+export function onlyFiles(nodeTest, value) {
+  const names = (value ?? "").split(",").map((name) => name.trim()).filter(Boolean);
+  for (const name of names) assert.ok(nodeTest.includes(name), `E2E_HOSTED_ONLY names ${name}, which is not a hosted node:test file`);
+  return names.length === 0 ? [...nodeTest] : nodeTest.filter((file) => names.includes(file));
+}
+
+/** The lines of a Sandbox log that name a folder, as the folder or without its /private
+ * prefix, at most DENIALS_MAX. Inputs: the log text and the folder. Output: the lines. */
+export function denialsUnder(text, folder) {
+  assert.ok(isAbsolute(folder), "the folder is absolute");
+  const names = [folder, folder.replace(/^\/private(?=\/)/, "")];
+  return text.split("\n").filter((line) => names.some((name) => line.includes(name))).slice(0, DENIALS_MAX);
+}
+
+/** The local time `log show --start` reads. Input: a Date. Output: "YYYY-MM-DD HH:MM:SS". */
+export function logStart(date) {
+  const two = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
+}
+
+/** Keeps what tells an agent's refused write apart from a wrong working folder. For every
+ * temporary root the e2e files left, it writes each git checkout's listing, status and last
+ * commits, and copies each Codex rollout file (its session_meta names the stand-in's cwd) and
+ * each engine log. Then it keeps the Sandbox denials since the start that name the temporary
+ * folder. The roots hold stand-in and fixture data only. Inputs: the evidence folder and the
+ * run's start. Output: none; it writes evidence/roots and evidence/sandbox-deny.txt. */
+function keepRoots(evidence, started) {
+  const temporary = realpathSync(tmpdir());
+  for (const name of readdirSync(temporary).filter((entry) => entry.startsWith(ROOT_PREFIX)).sort()) {
+    const root = join(temporary, name);
+    const into = join(evidence, "roots", name);
+    mkdirSync(into, { recursive: true, mode: 0o700 });
+    const found = (args) => spawnSync("/usr/bin/find", [root, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout.split("\n").filter(Boolean);
+    const lines = [];
+    for (const checkout of found(["-name", ".git", "-not", "-path", "*/node_modules/*"]).map(dirname)) {
+      lines.push(`== ${checkout}`);
+      for (const [program, args] of [["/bin/ls", ["-la", checkout]], ["git", ["-C", checkout, "status", "--short", "--branch", "--untracked-files=all"]], ["git", ["-C", checkout, "log", "--oneline", "-3"]]]) {
+        const result = spawnSync(program, args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+        lines.push(`$ ${program} ${args.join(" ")} (rc ${result.status})`, result.stdout ?? "", result.stderr ?? "");
+      }
+    }
+    writeFileSync(join(into, "checkouts.txt"), lines.join("\n"), { mode: 0o600 });
+    const files = [...found(["-path", "*/.codex/sessions/*", "-name", "rollout-*.jsonl"]), ...found(["-path", "*/logs/*", "-name", "*.log"])].slice(0, KEPT_FILES_MAX);
+    const index = [];
+    for (const [at, file] of files.entries()) {
+      const copy = `${at}-${basename(file)}`;
+      try {
+        const bytes = readFileSync(file);
+        writeFileSync(join(into, copy), bytes.subarray(Math.max(0, bytes.length - KEPT_BYTES_MAX)), { mode: 0o600 });
+        index.push(`${copy} ${file} ${bytes.length}`);
+      } catch (error) {
+        index.push(`${copy} ${file} unread: ${error.code ?? error.message}`);
+      }
+    }
+    writeFileSync(join(into, "files.txt"), index.join("\n"), { mode: 0o600 });
+  }
+  const shown = spawnSync("/usr/bin/log", ["show", "--start", logStart(started), "--style", "compact", "--predicate", 'sender == "Sandbox"'], { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 });
+  const denials = denialsUnder(shown.stdout ?? "", temporary);
+  writeFileSync(join(evidence, "sandbox-deny.txt"), [`log show rc ${shown.status} since ${logStart(started)} under ${temporary}: ${denials.length} lines`, (shown.stderr ?? "").slice(0, 2000), ...denials].join("\n"), { mode: 0o600 });
+  console.log(`EVIDENCE roots kept; Sandbox lines under ${temporary}: ${denials.length}`);
+}
+
 /** The owner fixture an e2e file runs on: the clean-Mac gate build when the file's text names
  * the feature, else the plain build. Inputs: the file's text and both fixture paths. Output:
  * the path. */
@@ -173,8 +251,12 @@ function needed(name) {
  * once, with its own E2E_EVIDENCE folder, so its engine and bridge logs are kept. Environment:
  * E2E_ENGINE, E2E_BRIDGE, WD_APP, CRAZYAGENT_DESKTOP_TEST_FIXTURE, its clean-Mac gate build
  * CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE, CRAZYAGENT_CHROME and E2E_HOSTED_EVIDENCE.
- * A file whose text names the gate feature gets the gated fixture. Output: exit status 1 when any row or run failed or a file is not placed. */
+ * A file whose text names the gate feature gets the gated fixture. E2E_HOSTED_ONLY, when set,
+ * names the only node:test files to run, and the suites and wdio configurations are then left
+ * out. After the node:test files, keepRoots keeps their checkouts, rollouts, engine logs and
+ * Sandbox denials. Output: exit status 1 when any row or run failed or a file is not placed. */
 async function main() {
+  const started = new Date();
   const [engine, , app, fixture, gatedFixture, , evidence] = ["E2E_ENGINE", "E2E_BRIDGE", "WD_APP",
     "CRAZYAGENT_DESKTOP_TEST_FIXTURE", "CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE", "CRAZYAGENT_CHROME",
     "E2E_HOSTED_EVIDENCE"].map(needed);
@@ -189,8 +271,11 @@ async function main() {
     counts["not ok"] += 1;
     process.stdout.write(rowLine(file, "(placement)", "not ok", "an e2e file the hosted job neither runs nor names as not run, or places twice"));
   }
-  console.log(`E2E node:test files ${sorted.nodeTest.length}, at most ${FILES_AT_ONCE} at once`);
-  const waiting = [...sorted.nodeTest];
+  const only = process.env.E2E_HOSTED_ONLY ?? "";
+  const files = onlyFiles(sorted.nodeTest, only);
+  if (only) console.log(`ONLY ${files.join(" ")}; suites and wdio configurations are left out`);
+  console.log(`E2E node:test files ${files.length}, at most ${FILES_AT_ONCE} at once`);
+  const waiting = [...files];
   const codes = [];
   const lane = async () => {
     for (let file = waiting.shift(); file; file = waiting.shift()) {
@@ -203,10 +288,15 @@ async function main() {
     }
   };
   await Promise.all(Array.from({ length: FILES_AT_ONCE }, lane));
-  assert.equal(codes.length, sorted.nodeTest.length, "every node:test file ran once");
+  assert.equal(codes.length, files.length, "every node:test file ran once");
   const nodeCode = codes.find((code) => code !== 0) ?? 0;
   console.log(`E2E node:test rc ${nodeCode}`);
-  for (const suite of SUITES) {
+  try {
+    keepRoots(evidence, started);
+  } catch (error) {
+    console.log(`EVIDENCE roots not kept: ${error.message}`);
+  }
+  for (const suite of only ? [] : SUITES) {
     const specFile = `${suite}.e2e.mjs`;
     assert.ok(sorted.suites.includes(specFile), `the closed suite ${suite} runs ${specFile}`);
     const env = { ...process.env, CRAZYAGENT_DESKTOP_TEST_APP: app, CRAZYAGENT_DESKTOP_TEST_SUITE: suite,
@@ -218,7 +308,7 @@ async function main() {
     if (completion) cpSync(dirname(completion), join(evidence, `suite-${suite}`), { recursive: true });
     report(specRows(spec, `suite ${suite}`), `suite ${suite}`, { code: run.code, text: `${run.text}\n${spec}` }, counts);
   }
-  for (const config of HOSTED_CONFIGS) {
+  for (const config of only ? [] : HOSTED_CONFIGS) {
     const root = join(realpathSync(mkdtempSync("/tmp/ms-")), "root");
     const env = { ...process.env, WD_APP: app, WD_PORT: String(await freePort()), MS_ENGINE: engine, MS_ROOT: root,
       MS_EVIDENCE: join(evidence, config.replace(/\.wdio\.conf\.mjs$/, "")) };
