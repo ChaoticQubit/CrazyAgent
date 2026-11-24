@@ -79,6 +79,20 @@ pub fn profile(
     kept_ports: &[u16],
     agent_files: AgentFilesRule,
 ) -> Result<String, EngineError> {
+    let homes = ToolHomes::owner().map_err(|_| failure("ide_sandbox_invalid"))?;
+    profile_with(&homes, grants, port, network, kept_ports, agent_files)
+}
+
+/// [`profile`] over given tool homes in place of the owner's. Inputs: the tool homes, then
+/// as [`profile`]. Output: as [`profile`].
+pub fn profile_with(
+    homes: &ToolHomes,
+    grants: &Grants,
+    port: u16,
+    network: SandboxNetwork,
+    kept_ports: &[u16],
+    agent_files: AgentFilesRule,
+) -> Result<String, EngineError> {
     let invalid = |_| failure("ide_sandbox_invalid");
     let data = grants.data;
     let writes: Vec<&Path> = std::iter::once(grants.home)
@@ -116,7 +130,6 @@ pub fn profile(
         .map(|folder| grant(&writes, folder).map(|within| (*folder, within)))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("ide_sandbox_invalid"))?;
-    let homes = ToolHomes::owner().map_err(invalid)?;
     let closed = matches!(&network, SandboxNetwork::Only(remotes) if remotes.is_empty());
     let sandbox = ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
@@ -127,7 +140,7 @@ pub fn profile(
     )
     .and_then(|sandbox| sandbox.keep_ports(kept_ports))
     .and_then(|sandbox| sandbox.allow_read(grants.build))
-    .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
+    .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, homes)))
     .map(ProjectSandbox::keep_owner_config)
     .map_err(invalid)?;
     let mut text = sandbox.profile();
