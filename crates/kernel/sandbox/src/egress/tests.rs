@@ -166,3 +166,24 @@ fn each_exchange_failure_maps_to_its_net_code() {
     assert_eq!(net_code(ExchangeError::Unreachable), "net_unreachable");
     assert_eq!(net_code(ExchangeError::ReplyInvalid), "net_reply_invalid");
 }
+
+/// A plugin request's lookup that never answers is `net_host_unresolved` once the lookup
+/// bound passes. The lookup runs on its own thread so a lookup with no bound fails this
+/// row instead of hanging it.
+#[test]
+fn a_plugin_lookup_that_never_answers_is_unresolved_within_the_bound() {
+    let (_held, never) = std::sync::mpsc::channel::<()>();
+    let (done, finished) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let found = resolve_with("api.github.com", 443, move |_, _| {
+            let _ = never.recv();
+            Ok(Vec::new())
+        });
+        let _ = done.send(found.map_err(|error| error.0));
+    });
+    let margin = Duration::from_secs(5);
+    let answer = finished.recv_timeout(LOOKUP_TIME + margin);
+    assert_eq!(answer, Ok(Err("net_host_unresolved".to_owned())));
+    assert!(started.elapsed() < LOOKUP_TIME + margin);
+}

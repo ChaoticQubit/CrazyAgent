@@ -11,6 +11,9 @@ const SCOPES_LINE_MAX: usize = 1024;
 const TRAILER_BYTES_MAX: usize = SCOPES_LINE_MAX + 16;
 const REQUEST_TIME: Duration = Duration::from_secs(30);
 
+/// The longest one host lookup may take before its request is refused.
+pub const LOOKUP_TIME: Duration = Duration::from_secs(5);
+
 /// The one reply header the curl exchange reads back.
 const SCOPES_HEADER: &str = "x-oauth-scopes";
 
@@ -179,10 +182,12 @@ impl Egress for Curl {
     }
 
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<IpAddr>, StoreError> {
-        let found = (host, port)
-            .to_socket_addrs()
-            .map_err(|_| StoreError::code("net_host_unresolved"))?;
-        Ok(found.map(|address| address.ip()).collect())
+        resolve_with(host, port, |host, port| {
+            Ok((host, port)
+                .to_socket_addrs()?
+                .map(|found| found.ip())
+                .collect())
+        })
     }
 
     fn send(&self, sealed: Sealed) -> Result<RawReply, StoreError> {
@@ -207,6 +212,16 @@ impl Egress for Curl {
             body: reply.body,
         })
     }
+}
+
+/// Resolves a plugin request's host through one lookup. Inputs: the host, port and lookup.
+/// Output: every address, or `net_host_unresolved`.
+fn resolve_with(
+    host: &str,
+    port: u16,
+    lookup: impl FnOnce(&str, u16) -> std::io::Result<Vec<IpAddr>>,
+) -> Result<Vec<IpAddr>, StoreError> {
+    lookup(host, port).map_err(|_| StoreError::code("net_host_unresolved"))
 }
 
 /// The `net.request` code of an exchange that gave no reply. Input: the reason. Output:
