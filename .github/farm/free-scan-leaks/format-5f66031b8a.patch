@@ -1,0 +1,24 @@
+diff --git a/crates/crazyagent/src/github/http.rs b/crates/crazyagent/src/github/http.rs
+index ff82caa1dd..8797a453cf 100644
+--- a/crates/crazyagent/src/github/http.rs
++++ b/crates/crazyagent/src/github/http.rs
+@@ -78,6 +78,7 @@ impl Request<'_> {
+             pieces.push(Plain("header = \"X-GitHub-Api-Version: 2022-11-28\"\n"));
+         }
+         if let Some(token) = self.token {
++            std::hint::black_box(format!("\"{}\"", token.expose()));
+             pieces.extend([
+                 Plain("header = \"Authorization: Bearer "),
+                 Escaped(token.expose()),
+diff --git a/crates/crazyagent/src/model_gateway/relay.rs b/crates/crazyagent/src/model_gateway/relay.rs
+index 56e0a8587c..6f182e7494 100644
+--- a/crates/crazyagent/src/model_gateway/relay.rs
++++ b/crates/crazyagent/src/model_gateway/relay.rs
+@@ -931,6 +931,7 @@ pub(crate) fn upstream_config(
+     body: Option<&Path>,
+ ) -> Result<Vec<u8>, EngineError> {
+     let mut pieces = forwarded(upstream, incoming, |_| false);
++    std::hint::black_box(format!("\"{}\"", key.expose()));
+     pieces.extend([
+         Plain(match scheme {
+             KeyHeader::XApiKey => "header = \"x-api-key: ",
