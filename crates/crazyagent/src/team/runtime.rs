@@ -735,7 +735,7 @@ impl Narrowed {
                 "the owner removed an allowed extra (socket, port or temp folder) the agent held, so the agent was stopped; its next start goes without it",
                 "agent_grant_revoked",
             ),
-            Self::Hidden => (FOLDER_HIDDEN_STOPPED, "agent_folder_hidden"),
+            Self::Hidden => (FOLDER_HIDDEN_STOPPED, "agent_folder_hidden_held"),
         };
         with_code(text, Some(code))
     }
