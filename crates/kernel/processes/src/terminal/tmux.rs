@@ -366,7 +366,7 @@ impl Tmux {
     }
 
     /// Opens the host on a native lead's teammates' own tmux server (see
-    /// `super::teammates_socket`, rv-audit S1 F1): the server runs inside the teammates'
+    /// `super::teammates_socket`): the server runs inside the teammates'
     /// profile, which cannot reach its socket, started under its keeper by `Servers`
     /// (FBTMUX-P1-R1-L1), and each engine client connects inside the lead's profile and never
     /// starts a server, so no server runs in the lead's profile with teammate panes. Each
@@ -439,7 +439,7 @@ impl Tmux {
 
     /// Removes the socket file an ended server left behind. A teammates' socket stays: once
     /// it is gone a teammate still running could bind a server of its own there, which the
-    /// lead's tmux clients would then obey (rv-audit S1 F1), and the lead's next start names
+    /// lead's tmux clients would then obey, and the lead's next start names
     /// a new one. Output: Ok once it is gone or kept, or `terminal_folder_unsafe` when it
     /// cannot be removed.
     fn remove_socket(&self) -> Result<(), HostError> {
@@ -785,7 +785,7 @@ impl Tmux {
             .ok_or_else(|| failure("terminal_agent_unknown"))
     }
 
-    /// Readies a native lead's teammates' server for the lead's start (rv-audit S1 F1): the
+    /// Readies a native lead's teammates' server for the lead's start: the
     /// server starts if none listens, the holder pane of a fresh one is tagged as the lead's
     /// anchor, and its environment becomes the lead's, which every teammate pane gets. Takes
     /// the lead and its command. Returns the variables the lead's pane starts with, so its
