@@ -59,7 +59,7 @@ unsafe impl GlobalAlloc for FreeScan {
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
-        let wide = layout.align() == 4 && layout.size() % 4 == 0;
+        let wide = layout.align() == 4 && layout.size().is_multiple_of(4);
         if WATCHING.load(Ordering::SeqCst) && wide {
             let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
             if let Some(mark) = mark()
