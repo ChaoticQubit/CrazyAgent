@@ -1319,6 +1319,12 @@ mod access_list;
 /// none; each row asserts on the written text.
 mod launchd;
 
+/// The Windows link rows: a junction chain through a folder others can change is
+/// changeable though both its ends are private, and a link's target walks from a drive root
+/// or counts as changeable. Inputs: real junctions made with mklink and literal targets.
+/// Output: none.
+mod windows_links;
+
 /// The Windows user PATH rows of link_cli: a folder named like PowerShell code is added
 /// once, one holding a ';' is refused, and the PATH keeps its kind and unexpanded
 /// references. Inputs: the user's stored PATH, restored after each row. Output: none.
