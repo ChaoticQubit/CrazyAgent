@@ -291,6 +291,12 @@ impl Plugins {
         self.skills.len() + self.servers.len() + self.hook_rows().len()
     }
 
+    /// Whether the App plugins row, the one row after every list once they are read, is
+    /// selected. Output: the answer.
+    fn on_app_plugins(&self) -> bool {
+        matches!(self.load, Load::Ready(())) && self.selected == self.count()
+    }
+
     /// The Hooks list's rows: each plugin's row, followed by its hooks when it is the one
     /// opened with Enter. Output: the rows in list order.
     fn hook_rows(&self) -> Vec<HookRow> {
@@ -471,7 +477,9 @@ impl Plugins {
 
     fn windows(&self, ctx: &Ctx, subtitle_rows: usize) -> (usize, usize, usize) {
         let content = (ctx.height as usize).saturating_sub(4 + 1 + ctx.extra_hint_rows());
-        let avail = content.saturating_sub(1 + subtitle_rows + 1 + 3 + 2).max(3);
+        let avail = content
+            .saturating_sub(1 + subtitle_rows + 1 + 3 + 2 + 1)
+            .max(3);
         let hooks = self.hook_rows().len().max(1).min((avail / 3).max(1));
         let avail = avail.saturating_sub(hooks).max(2);
         let servers_wanted = self.servers.len().max(1);
@@ -776,6 +784,14 @@ impl Plugins {
                 ctx,
             ));
         }
+        lines.push(list_row(
+            Line::raw("App plugins"),
+            limit,
+            self.on_app_plugins(),
+            focused,
+            theme,
+            glyphs,
+        ));
         lines
     }
 
@@ -1043,7 +1059,7 @@ impl Screen for Plugins {
         if !matches!(self.open, Open::None) {
             return self.modal_key(key, ctx);
         }
-        let count = self.count();
+        let count = self.count() + 1;
         match key {
             Key::Char('a') => return Flow::Replace(Box::new(AddPlugin::skill())),
             Key::Char('i') => return Flow::Replace(Box::new(ImportSkillsPage::new())),
@@ -1063,6 +1079,9 @@ impl Screen for Plugins {
             }
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char(' ') if self.changing.is_none() => self.toggle(ctx),
+            Key::Enter if self.changing.is_none() && self.on_app_plugins() => {
+                return Flow::Open(Place::AppPlugins);
+            }
             Key::Enter if self.changing.is_none() => match self.picked() {
                 Some(Picked::Skill(index)) => {
                     let skill = &self.skills[index];
@@ -1123,7 +1142,7 @@ impl Screen for Plugins {
                         self.skills = skills.clone();
                         self.servers = servers.clone();
                         self.load = Load::Ready(());
-                        self.selected = self.selected.min(self.count().saturating_sub(1));
+                        self.selected = self.selected.min(self.count());
                     }
                     Err(code) if self.count() == 0 => self.load = Load::Failed(code.clone()),
                     Err(code) if asked => ctx.say(Message::error(
@@ -1138,7 +1157,7 @@ impl Screen for Plugins {
                 match result {
                     Ok(hooks) => {
                         self.hooks = hooks.clone();
-                        self.selected = self.selected.min(self.count().saturating_sub(1));
+                        self.selected = self.selected.min(self.count());
                     }
                     Err(code) => {
                         ctx.say(Message::error("Could not read hooks.", plugin_plain(code)))

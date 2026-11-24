@@ -135,7 +135,7 @@
   "crates/crazyagent/src/tui/screens/settings_add_account.rs": 2288,
   "crates/crazyagent/src/tui/screens/settings_harnesses.rs": 1515,
   "crates/crazyagent/src/tui/screens/settings_harnesses/tests.rs": 1907,
-  "crates/crazyagent/src/tui/screens/settings_plugins.rs": 2236,
+  "crates/crazyagent/src/tui/screens/settings_plugins.rs": 2255,
   "crates/crazyagent/src/tui/screens/settings_plugins/tests.rs": 1870,
   "crates/crazyagent/src/tui/screens/team/tests.rs": 5792,
   "crates/crazyagent/src/tui/screens/usage/tests.rs": 1623,
