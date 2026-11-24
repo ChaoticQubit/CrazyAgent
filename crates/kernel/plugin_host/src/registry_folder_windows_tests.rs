@@ -242,7 +242,7 @@ fn windows_lists_reads_and_writes_a_user_plugin() {
     private::check(&private::open_dir(&plugins.join("near")).unwrap()).unwrap();
     let manifest = plugins.join("near").join(MANIFEST_FILE);
     private::check(&private::read_only(&manifest).unwrap()).unwrap();
-    assert_eq!(std::fs::read_to_string(manifest).unwrap(), NEAR);
+    assert_eq!(fixture(&manifest, std::fs::read_to_string), NEAR);
 }
 
 /// A plugins folder that is a junction or a directory link is refused as unsafe on the
@@ -464,6 +464,12 @@ fn windows_the_sweep_restores_a_retired_folder_cut_between_renames() {
     );
 }
 
+/// Reads a fixture a row checks. Inputs: its path and the read. Output: what the read
+/// returned; a failed read stops the row naming the path and the I/O error.
+fn fixture<'p, T>(path: &'p Path, read: impl FnOnce(&'p Path) -> std::io::Result<T>) -> T {
+    read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
 /// Leaves read-only as the one attribute of a file or folder, as an unzipped or copied
 /// plugin can carry it, with `attrib`, the path with backslashes only.
 fn read_only(path: &Path) {
@@ -597,5 +603,5 @@ fn windows_a_read_only_file_hard_linked_from_outside_keeps_its_attribute() {
             .readonly(),
         "the outside file keeps its read-only attribute"
     );
-    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    assert_eq!(fixture(&outside, std::fs::read), b"outside");
 }

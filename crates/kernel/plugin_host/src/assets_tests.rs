@@ -69,19 +69,23 @@ fn taken<'a>(project_id: &'a str, config_id: &'a str) -> SnapshotFacts<'a> {
 }
 
 /// A canonical scratch folder, so the no-follow walk meets no symlinked temp prefix.
-/// Output: the folder guard and its canonical path.
+/// Output: the folder guard and its canonical path; a failure stops the row naming it.
 #[cfg(unix)]
 fn scratch() -> (tempfile::TempDir, PathBuf) {
-    let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let root = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let base = root
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("{}: {error}", root.path().display()));
     (root, base)
 }
 
-/// Writes a file owned by this user. Inputs: folder, name and text. Output: its path.
+/// Writes a file owned by this user. Inputs: folder, name and text. Output: its path; a
+/// failed write stops the row naming the path and the I/O error.
 #[cfg(unix)]
 fn file(base: &Path, name: &str, text: &str) -> PathBuf {
     let path = base.join(name);
-    std::fs::write(&path, text).unwrap();
+    std::fs::write(&path, text).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     path
 }
 
