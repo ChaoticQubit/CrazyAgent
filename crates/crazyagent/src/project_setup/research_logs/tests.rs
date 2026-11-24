@@ -90,3 +90,19 @@ fn an_end_with_no_begin_hides_every_line_before_it() {
         [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
     );
 }
+
+#[test]
+fn only_an_end_before_any_marker_hides_the_lines_before_it() {
+    let shown = redact(&format!(
+        "{BEGIN}\n{BODY_SHORT}\n{END}\n{BODY_NO_DIGIT}\n{END}\nafter"
+    ));
+    let hidden = [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE];
+    assert_eq!(
+        shown,
+        [&hidden[..], &[BODY_NO_DIGIT, HIDDEN_LINE, "after"]]
+            .concat()
+            .join("\n")
+    );
+    let joined = format!("before\nkey {BEGIN}\\n{BODY_SHORT}\\n{END}\nafter");
+    assert_eq!(redact(&joined), ["before", HIDDEN_LINE, "after"].join("\n"));
+}

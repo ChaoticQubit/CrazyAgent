@@ -44,7 +44,13 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
         if start > 0 {
             rows.next();
         }
-        lines.extend(rows.filter_map(plain_log_line));
+        let plain: Vec<String> = rows.filter_map(plain_text).collect();
+        if plain.is_empty() {
+            continue;
+        }
+        let before = lines.len();
+        lines.extend(redact(&plain.join("\n")).split('\n').map(clipped));
+        assert_eq!(lines.len() - before, plain.len());
     }
     let mut kept = 0;
     let mut bytes = 0;
@@ -104,11 +110,12 @@ fn latest_run(agents: &Path, job: i64) -> Result<Option<String>, EngineError> {
     Ok(latest.map(|(_, name)| name))
 }
 
-/// Turns one raw agent log line into plain text with likely secrets hidden.
-/// Takes the raw line; a JSON event gives its message text and textless events are skipped.
-/// Returns the bounded plain line, or none for an empty or textless line.
+/// Turns one raw agent log line into one plain line, secrets not yet hidden: control
+/// characters, line breaks among them, become spaces. Takes the raw line; a JSON event gives
+/// its message text and textless events are skipped. Returns the line, or none for an empty
+/// or textless line.
 #[cfg(unix)]
-fn plain_log_line(raw: &str) -> Option<String> {
+fn plain_text(raw: &str) -> Option<String> {
     let text = match serde_json::from_str::<serde_json::Value>(raw.trim()) {
         Ok(event) if event.is_object() => event_text(&event)?,
         _ => raw.to_owned(),
@@ -121,13 +128,20 @@ fn plain_log_line(raw: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    let line = redact(text);
+    assert!(!text.contains('\n'));
+    Some(text.to_owned())
+}
+
+/// Bounds one redacted log line to RESEARCH_LOG_LINE_CHARS_MAX characters, marking a cut
+/// with "...". Takes the line. Returns it whole when it fits, else its head and the mark.
+#[cfg(unix)]
+fn clipped(line: &str) -> String {
     if line.chars().count() <= RESEARCH_LOG_LINE_CHARS_MAX {
-        return Some(line);
+        return line.to_owned();
     }
     let mut cut: String = line.chars().take(RESEARCH_LOG_LINE_CHARS_MAX).collect();
     cut.push_str("...");
-    Some(cut)
+    cut
 }
 
 #[cfg(unix)]
