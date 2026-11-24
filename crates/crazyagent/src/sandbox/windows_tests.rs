@@ -1,5 +1,4 @@
 mod profile_rows {
-    use crate::sandbox::InstalledSandbox;
     use crazyagent_win_sandbox::profile::{
         BoundaryProfile, Capability, Guard, Guarded, check_container,
     };
@@ -9,6 +8,7 @@ mod profile_rows {
     use kernel_sandbox::paths::canonical;
     use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::profile::command::Sandbox;
+    use kernel_sandbox::profile::installed::InstalledSandbox;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     use kernel_sandbox::windows::profile::*;
     use kernel_sandbox::windows::{APPCONTAINER_MISSING, CONTAINER_PREFIX, HELPER_NAME};

@@ -437,8 +437,8 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
     use crate::engine::owner::{HostStamp, NativeProfileBinding};
     use crate::protocol::{ConfigId, Cursor, SessionId};
-    use crate::sandbox::InstalledSandbox;
     use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::profile::installed::InstalledSandbox;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 
     let reference = |value: &str| CredentialRef::new(value).unwrap();

@@ -15,11 +15,11 @@ use crate::master_session::{
 use crate::master_step_limit::steps_of_cause;
 use crate::master_time_limit::{TimeLimit, minutes_of_cause};
 use crate::protocol::{ProjectId, RequestId, SessionId};
-use crate::sandbox::InstalledSandbox;
 use crate::storage::{
     Job, MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
 };
 use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_reported, count_turn};
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use std::fs::File;
 use std::io::Seek;
 use std::io::Write;

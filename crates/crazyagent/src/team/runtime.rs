@@ -36,7 +36,6 @@ use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::InstalledSandbox;
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
@@ -45,6 +44,7 @@ use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use kernel_sandbox::{host::linux_unbridged_notice, toolchains};
 use kernel_sandbox::{profile::ProjectSandbox, profile::warden, settings::LinuxStrict};

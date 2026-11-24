@@ -10,11 +10,11 @@ use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
-use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use kernel_processes::group::Ending;
 use kernel_sandbox::profile::env::{Handed, LINEAGE_VARIABLE, LineageToken};
+use kernel_sandbox::profile::installed::InstalledSandbox;
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
