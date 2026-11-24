@@ -127,8 +127,9 @@ fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() -> TestResu
     Ok(())
 }
 
-/// While another install holds the PATH lock past the wait, link_cli is refused with a
-/// try-again line and the PATH value stays as it was.
+/// While another install holds the PATH lock, link_cli is refused with a try-again line and
+/// the PATH value stays as it was. The holder lets go only when this row says so, after the
+/// refusal, or when the row ends and its input closes, so no start-up time decides the row.
 #[cfg(windows)]
 #[test]
 fn link_cli_refuses_while_another_install_holds_the_path_lock() -> TestResult {
@@ -139,10 +140,11 @@ fn link_cli_refuses_while_another_install_holds_the_path_lock() -> TestResult {
         "$ErrorActionPreference='Stop'; \
 $m=[System.Threading.Mutex]::new($true, $env:CRAZYAGENT_TEST_LOCK); \
 [Console]::Out.WriteLine('held'); [Console]::Out.Flush(); \
-Start-Sleep -Seconds 15; $m.ReleaseMutex()",
+[void][Console]::In.ReadLine(); $m.ReleaseMutex()",
         &[("CRAZYAGENT_TEST_LOCK", &lock)],
     );
-    let mut child = crate::spawn_gate::spawn(holder.stdout(std::process::Stdio::piped()))?;
+    let mut child = crate::spawn_gate::spawn(holder.stdin(std::process::Stdio::piped()))?;
+    let mut release = child.stdin.take().expect("the holder's input");
     let mut held = String::new();
     let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
     std::io::BufRead::read_line(&mut reader, &mut held)?;
@@ -152,6 +154,8 @@ Start-Sleep -Seconds 15; $m.ReleaseMutex()",
     let refusal = linked.unwrap_err().to_string();
     assert!(refusal.contains("try again"), "{refusal}");
     assert_eq!(key.path(), (before.0.to_owned(), before.1.to_owned()));
+    std::io::Write::write_all(&mut release, b"release\n")?;
+    drop(release);
     assert!(child.wait()?.success());
     Ok(())
 }
