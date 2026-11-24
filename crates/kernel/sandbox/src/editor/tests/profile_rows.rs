@@ -72,9 +72,8 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
     crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
-/// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
-/// still gets an IDE profile holding its agent folders rule under the folder's spelled
-/// name, rather than a panic while that name is spelled.
+/// A project folder named with long runs of `s` and `f` still gets an IDE profile holding its agent
+/// folders rule under the folder's spelled name, rather than a panic while that name is spelled.
 #[test]
 fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
     let scratch = tempfile::Builder::new()
@@ -309,12 +308,11 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
     crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
-/// DEC-098 addendum 9: the server cannot read an agent's IDE config, any `.vscode` folder
-/// in an agent worktree and any `.code-workspace` file in one, under either agents root and
-/// in any letter case, so an agent cannot set the owner's IDE settings. A link an agent
-/// commits under those names is refused as well, though the file it leads to stays
-/// readable by its own name. The project's own files, the agent's other files and the
-/// engine's workspace file stay readable.
+/// The server cannot read an agent's IDE config, any `.vscode` folder in an agent worktree and any
+/// `.code-workspace` file in one, under either agents root and in any letter case, so an agent
+/// cannot set the owner's IDE settings. A link an agent commits under those names is refused as
+/// well, though the file it leads to stays readable by its own name. The project's own files, the
+/// agent's other files and the engine's workspace file stay readable.
 #[test]
 fn the_ide_server_cannot_read_agent_ide_config() {
     let scratch = tempfile::Builder::new()
@@ -558,9 +556,9 @@ fn a_sandboxed_server_refuses_a_local_listener_even_on_open() {
     assert!(!reaches(&profile, port));
 }
 
-/// r1 M1 for a locked folder: the Remote settings lock holds against a path spelled with
-/// the long s, the only other letter APFS folds to `s`, in the folders above the lock:
-/// the engine's settings keep their bytes.
+/// For a locked folder, the Remote settings lock holds against a path spelled with the long s, the
+/// only other letter APFS folds to `s`, in the folders above the lock: the engine's settings keep
+/// their bytes.
 #[test]
 fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
     let scratch = tempfile::Builder::new()

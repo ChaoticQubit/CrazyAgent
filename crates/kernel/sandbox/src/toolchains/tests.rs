@@ -1,8 +1,8 @@
 use super::*;
 
-/// F26: the xcode-select link names an Xcode app's developer folder only when it leads to a
-/// real `<name>.app/Contents/Developer`; the Command Line Tools, another folder and a
-/// dangling link name none.
+/// The xcode-select link names an Xcode app's developer folder only when it leads to a real
+/// `<name>.app/Contents/Developer`; the Command Line Tools, another folder and a dangling link name
+/// none.
 #[cfg(unix)]
 #[test]
 fn the_xcode_select_link_names_only_an_xcode_app_developer_folder() {
@@ -105,9 +105,9 @@ fn without_the_command_line_tools_cc_the_agent_path_and_variables_stay_as_they_w
     fs::remove_dir(developer.join("SDKs").join("MacOSX.sdk")).unwrap();
     assert_eq!(agent_env(&home, &homes), before);
 }
-/// F26: a project's toolchains are found by the newer marker names (`.nvmrc`,
-/// `.node-version`, `uv.lock`, `.python-version`, `requirements.txt`) and one folder down,
-/// never inside a hidden folder, `node_modules`, `target` or the older agents root.
+/// A project's toolchains are found by the newer marker names (`.nvmrc`, `.node-version`,
+/// `uv.lock`, `.python-version`, `requirements.txt`) and one folder down, never inside a hidden
+/// folder, `node_modules`, `target` or the older agents root.
 #[test]
 fn toolchains_are_found_by_every_marker_name_and_one_folder_down() {
     let root = tempfile::tempdir().unwrap();
@@ -157,8 +157,8 @@ fn toolchains_are_found_by_every_marker_name_and_one_folder_down() {
         "two folders down is not looked at"
     );
 }
-/// F26: without the Command Line Tools' `cc`, an agent runs the picked Xcode app's compilers
-/// and its macOS SDK, and that app's developer folder is granted read-only with every choice.
+/// Without the Command Line Tools' `cc`, an agent runs the picked Xcode app's compilers and its
+/// macOS SDK, and that app's developer folder is granted read-only with every choice.
 #[test]
 fn without_the_command_line_tools_an_agent_uses_the_picked_xcode_compilers_and_sdk() {
     let scratch = tempfile::tempdir().unwrap();

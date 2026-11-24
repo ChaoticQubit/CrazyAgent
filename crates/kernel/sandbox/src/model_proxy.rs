@@ -105,13 +105,12 @@ pub fn variables(port: u16) -> [(&'static str, String); 6] {
     ]
 }
 
-/// One agent's model proxy (S4b): a listener on 127.0.0.1 and one on ::1, on the same port,
-/// that opens a CONNECT tunnel only to a host on the agent's list, resolves the host itself
-/// and passes the TLS bytes through untouched, after checking that the ClientHello names the
-/// same host. The agent's Seatbelt profile reaches only this port on loopback, which Seatbelt
-/// names `localhost` and which covers both addresses, so holding both leaves no other
-/// process a side of the port while the proxy runs (S4B-2). Dropping it closes the
-/// listeners and, within a poll, every open tunnel.
+/// One agent's model proxy: a listener on 127.0.0.1 and one on ::1, on the same port, that opens a
+/// CONNECT tunnel only to a host on the agent's list, resolves the host itself and passes the TLS
+/// bytes through untouched, after checking that the ClientHello names the same host. The agent's
+/// Seatbelt profile reaches only this port on loopback, which Seatbelt names `localhost` and which
+/// covers both addresses, so holding both leaves no other process a side of the port while the
+/// proxy runs. Dropping it closes the listeners and, within a poll, every open tunnel.
 pub struct ModelProxy {
     port: u16,
     shared: Arc<Shared>,
@@ -137,10 +136,9 @@ struct Shared {
 }
 
 impl Shared {
-    /// Counts one refusal and logs its line while the proxy has logged fewer than
-    /// `REFUSALS_SHOWN`, after that a total at most once per `REFUSAL_TOTAL_EVERY`, so a
-    /// client refused in a loop cannot fill the engine log (CS-5). Input: the line, which
-    /// names no client secret. Output: none.
+    /// Counts one refusal and logs its line while the proxy has logged fewer than `REFUSALS_SHOWN`,
+    /// after that a total at most once per `REFUSAL_TOTAL_EVERY`, so a client refused in a loop
+    /// cannot fill the engine log. Input: the line, which names no client secret. Output: none.
     fn log(&self, line: &str) {
         let count = self.refusals.fetch_add(1, Ordering::SeqCst) + 1;
         let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -168,9 +166,9 @@ enum Shown {
     Quiet,
 }
 
-/// Which refusals a proxy logs: the first `REFUSALS_SHOWN` in full, then a total once at
-/// least `REFUSAL_TOTAL_EVERY` has passed since the last total (CS-5). Inputs: the
-/// refusal's count, from 1, and the time since the last total. Output: what to log.
+/// Which refusals a proxy logs: the first `REFUSALS_SHOWN` in full, then a total once at least
+/// `REFUSAL_TOTAL_EVERY` has passed since the last total. Inputs: the refusal's count, from 1, and
+/// the time since the last total. Output: what to log.
 fn shown_refusal(count: u64, since_total: Duration) -> Shown {
     assert!(count >= 1);
     if count <= REFUSALS_SHOWN {
@@ -435,10 +433,10 @@ fn admit(client: TcpStream, shared: &Arc<Shared>) {
         .spawn(move || tunnel(client, &held.0));
 }
 
-/// The log line for a refused request: the agent, the request's method and the host and
-/// port it named, never its path, query or user info, which may hold a credential (S4B-3).
-/// A method that is not a plain upper-case word, or a target with no plain host, shows as
-/// `-`. Inputs: the agent and the request line. Output: the line.
+/// The log line for a refused request: the agent, the request's method and the host and port it
+/// named, never its path, query or user info, which may hold a credential. A method that is not a
+/// plain upper-case word, or a target with no plain host, shows as `-`. Inputs: the agent and the
+/// request line. Output: the line.
 fn refusal(agent: i64, line: &str) -> String {
     let mut words = line.split(' ');
     let (method, target) = (
@@ -664,12 +662,12 @@ fn connect_target(line: &str) -> Option<ModelHost> {
     ModelHost::new(name, port.parse().ok()?)
 }
 
-/// Reads the server name a TLS ClientHello carries in its server_name extension. The record
-/// must hold exactly one ClientHello, parsed to its last byte. A hello that carries an
-/// Encrypted Client Hello or the older encrypted server name is refused, since its outer
-/// name need not be the host the client reaches (S4B-1). Input: one whole TLS record.
-/// Output: the name, or none for another message, a malformed or trailing byte, no name,
-/// more than one host name or server_name extension, or an encrypted name.
+/// Reads the server name a TLS ClientHello carries in its server_name extension. The record must
+/// hold exactly one ClientHello, parsed to its last byte. A hello that carries an Encrypted Client
+/// Hello or the older encrypted server name is refused, since its outer name need not be the host
+/// the client reaches. Input: one whole TLS record. Output: the name, or none for another message,
+/// a malformed or trailing byte, no name, more than one host name or server_name extension, or an
+/// encrypted name.
 pub fn server_name(record: &[u8]) -> Option<&str> {
     let length = usize::from(u16::from_be_bytes([*record.get(3)?, *record.get(4)?]));
     if *record.first()? != 0x16 || record.len() != 5 + length {
@@ -788,21 +786,20 @@ fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::
     Ok(stream)
 }
 
-/// Tells whether the engine may dial `address`, one a remote model host's name gave, from
-/// outside the sandbox: [`dialable`] and not held by this machine ([`on_this_machine`]). The
-/// one rule for the proxy's tunnels and the reach check before a run (DEC-163 addendum 8).
-/// Input: the address. Output: true when the engine may dial it.
+/// Tells whether the engine may dial `address`, one a remote model host's name gave, from outside
+/// the sandbox: [`dialable`] and not held by this machine ([`on_this_machine`]). The one rule for
+/// the proxy's tunnels and the reach check before a run. Input: the address. Output: true when the
+/// engine may dial it.
 pub fn may_dial(address: IpAddr) -> bool {
     dialable(address) && !on_this_machine(address)
 }
 
-/// Tells whether a tunnel may dial `address`, one a model host's name resolved to: not
-/// loopback, unspecified, in 0.0.0.0/8 or a cloud's metadata service, link-local included
-/// ([`kernel_common::net::metadata_address`]), also as an IPv4 address inside an IPv6 one. The engine
-/// dials outside the sandbox, so a host's DNS must not steer it to this machine or its
-/// cloud's metadata (CS-4); private network addresses stay allowed for an owner's endpoint on
-/// another machine of the local network. Input: the address. Output: true when the proxy may
-/// dial it.
+/// Tells whether a tunnel may dial `address`, one a model host's name resolved to: not loopback,
+/// unspecified, in 0.0.0.0/8 or a cloud's metadata service, link-local included
+/// ([`kernel_common::net::metadata_address`]), also as an IPv4 address inside an IPv6 one. The
+/// engine dials outside the sandbox, so a host's DNS must not steer it to this machine or its
+/// cloud's metadata; private network addresses stay allowed for an owner's endpoint on another
+/// machine of the local network. Input: the address. Output: true when the proxy may dial it.
 fn dialable(address: IpAddr) -> bool {
     let v4 = |ip: Ipv4Addr| !(ip.is_loopback() || ip.is_unspecified() || ip.octets()[0] == 0);
     let elsewhere = match address {
@@ -812,13 +809,12 @@ fn dialable(address: IpAddr) -> bool {
     elsewhere && !kernel_common::net::metadata_address(address)
 }
 
-/// Tells whether one of this machine's interfaces holds `address`, such as its own LAN
-/// address, which reaches the owner's services from outside the sandbox as loopback does
-/// (S4B-I1). A socket binds only to an address an interface holds, and binding sends nothing.
-/// An IPv4 address inside an IPv6 one is tried as IPv4. Any other bind error counts as held,
-/// so a failed check refuses the dial. Where a Linux sysctl lets any address bind, every
-/// address counts as held and the cut says why ([`own_address_reason`]). Input: the address.
-/// Output: true when held or unsure.
+/// Tells whether one of this machine's interfaces holds `address`, such as its own LAN address,
+/// which reaches the owner's services from outside the sandbox as loopback does. A socket binds
+/// only to an address an interface holds, and binding sends nothing. An IPv4 address inside an IPv6
+/// one is tried as IPv4. Any other bind error counts as held, so a failed check refuses the dial.
+/// Where a Linux sysctl lets any address bind, every address counts as held and the cut says why
+/// ([`own_address_reason`]). Input: the address. Output: true when held or unsure.
 fn on_this_machine(address: IpAddr) -> bool {
     let held = |ip: IpAddr| match spawn_gate::bind_udp_std((ip, 0)) {
         Ok(_) => true,

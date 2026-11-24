@@ -60,11 +60,10 @@ pub fn covers(built: Option<&[String]>, saved: &[PathBuf]) -> bool {
 /// is refused as if its hidden folders could not be read, so the list never misses one.
 const RUNS_MAX: usize = 256;
 
-/// One kind of engine run, not a team agent, that hides a project's saved folders from its
-/// own start (SA-VID14-R2-N2): headless master turns (SA-VID14-MASTER-TURNS), research
-/// jobs, the overview, roadmap and onboarding agents, code graph builds and lockfile
-/// rebuilds. An instructions cleanup run reads only an empty
-/// engine folder, so it never sees a project folder and is not one.
+/// One kind of engine run, not a team agent, that hides a project's saved folders from its own
+/// start: headless master turns, research jobs, the overview, roadmap and onboarding agents, code
+/// graph builds and lockfile rebuilds. An instructions cleanup run reads only an empty engine
+/// folder, so it never sees a project folder and is not one.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -153,9 +152,9 @@ static RUNS: Mutex<Registry> = Mutex::new(Registry::new());
 pub struct HiddenRun(u64);
 
 impl HiddenRun {
-    /// Records, once, the folders this run's sandbox hides after it has read them, so from
-    /// then on only a folder saved hidden later names it (SA-VID14 r1). Input: the folders,
-    /// at most [`HIDDEN_PATHS_MAX`], none for a run that is not confined.
+    /// Records, once, the folders this run's sandbox hides after it has read them, so from then on
+    /// only a folder saved hidden later names it. Input: the folders, at most [`HIDDEN_PATHS_MAX`],
+    /// none for a run that is not confined.
     pub fn hid(&self, hidden: &[PathBuf]) {
         assert!(hidden.len() <= HIDDEN_PATHS_MAX);
         let digests = hidden.iter().map(|folder| digest(folder)).collect();
@@ -507,11 +506,10 @@ mod tests {
         }
     }
 
-    /// V243-WIN-HIDDEN-GIT (leader 09:21, #590): git's answer counts only when every line is
-    /// whole and falls in an asked folder, itself or below it, ASCII case ignored as git's
-    /// `icase` does; an empty line, a line in no asked folder (a sibling sharing the name's
-    /// start), or one cut short before the read cap is unchecked. Past the cap the cut tail is
-    /// dropped and the whole lines still count.
+    /// Git's answer counts only when every line is whole and falls in an asked folder, itself or
+    /// below it, ASCII case ignored as git's `icase` does; an empty line, a line in no asked folder
+    /// (a sibling sharing the name's start), or one cut short before the read cap is unchecked.
+    /// Past the cap the cut tail is dropped and the whole lines still count.
     #[test]
     fn an_answer_line_cut_short_or_in_no_asked_folder_is_unchecked() {
         let specs = ["secret".to_owned(), "conf/keys".to_owned()];
@@ -569,9 +567,9 @@ mod tests {
         );
     }
 
-    /// SA-VID14-R2-N2: an engine run that started before a folder was hidden is listed by
-    /// its kind until it ends; one whose start hid the folder, or a folder above it, is
-    /// not, and another project's list never shows it.
+    /// An engine run that started before a folder was hidden is listed by its kind until it ends;
+    /// one whose start hid the folder, or a folder above it, is not, and another project's list
+    /// never shows it.
     #[test]
     fn a_run_started_before_a_folder_was_hidden_is_listed_by_kind_until_it_ends() {
         let project = "n2-listed";
@@ -599,8 +597,7 @@ mod tests {
         drop(overview);
     }
 
-    /// SA-VID14-R2-N2 (leader 08:04): a run leaves the list on every exit, a normal
-    /// return, an early error return and a panic.
+    /// A run leaves the list on every exit, a normal return, an early error return and a panic.
     #[test]
     fn a_run_leaves_the_list_on_every_exit_path() {
         let project = "n2-exits";
@@ -637,8 +634,7 @@ mod tests {
         assert!(runs_seeing(project, &saved).is_empty(), "a panic");
     }
 
-    /// SA-VID14-R2-N2 (leader 08:04): the list keeps digests and the run kind only, never a
-    /// folder path or the project id.
+    /// The list keeps digests and the run kind only, never a folder path or the project id.
     #[test]
     fn the_run_list_holds_digests_and_kinds_only() {
         let project = "n2-plain-project";
@@ -664,8 +660,8 @@ mod tests {
         }
     }
 
-    /// SA-VID14-R2-N2: the list refuses a run past its bound, so callers fail closed, and
-    /// takes one again once a run ends; keys are never reused.
+    /// The list refuses a run past its bound, so callers fail closed, and takes one again once a
+    /// run ends; keys are never reused.
     #[test]
     fn the_run_list_refuses_past_its_bound_and_takes_one_again_once_one_ends() {
         let mut registry = Registry::new();
@@ -690,9 +686,9 @@ mod tests {
         assert_eq!(registry.runs.len(), RUNS_MAX);
     }
 
-    /// SA-VID14 r1 (rv-code4 F1, rv-sec2 F2): a run is listed before it reads the saved
-    /// hidden folders, so a hide saved meanwhile names it. Until it records what it hid it
-    /// counts as hiding nothing; after, only folders it did not hide name it.
+    /// A run is listed before it reads the saved hidden folders, so a hide saved meanwhile names
+    /// it. Until it records what it hid it counts as hiding nothing; after, only folders it did not
+    /// hide name it.
     #[test]
     fn a_run_listed_before_its_load_is_named_for_any_saved_folder_until_it_records_its_folders() {
         let project = "n2-before-load";
@@ -723,9 +719,9 @@ mod tests {
         drop(run);
     }
 
-    /// SA-VID14 r1 (rv-sec2 F1): a run whose stop was uncertain, or whose processes the
-    /// owner keeps, forgets its guard as it forgets its lease, so it stays named while its
-    /// processes may still run, until the engine starts again.
+    /// A run whose stop was uncertain, or whose processes the owner keeps, forgets its guard as it
+    /// forgets its lease, so it stays named while its processes may still run, until the engine
+    /// starts again.
     #[test]
     fn a_run_left_running_stays_named_after_its_launch_returns() {
         let project = "n2-left-running";

@@ -172,9 +172,8 @@ fn the_helper_refuses_kept_ports_that_do_not_fit_its_policy() {
     );
 }
 
-/// V243-LINUX-PROBE-STDERR-CAP: a failed probe that says far more than it should is read
-/// only to [`PROBE_SAID_MAX`] bytes and still ends with its own status; bytes that are not
-/// UTF-8 stay within the cap once replaced.
+/// A failed probe that says far more than it should is read only to [`PROBE_SAID_MAX`] bytes and
+/// still ends with its own status; bytes that are not UTF-8 stay within the cap once replaced.
 #[test]
 fn a_failed_probe_is_read_only_to_its_cap_and_still_ends() {
     use std::os::unix::fs::PermissionsExt;
@@ -204,9 +203,8 @@ fn a_failed_probe_is_read_only_to_its_cap_and_still_ends() {
     assert_eq!(ended, "exit status: 3");
 }
 
-/// V243-LINUX-PROBE-STDERR-CAP: what a failed probe said goes to the log as one line, with
-/// its newlines and other control characters escaped, so a probe cannot write log lines
-/// of its own or terminal escapes.
+/// What a failed probe said goes to the log as one line, with its newlines and other control
+/// characters escaped, so a probe cannot write log lines of its own or terminal escapes.
 #[test]
 fn a_failed_probe_is_logged_on_one_line_with_its_control_characters_escaped() {
     let line = probe_log(
@@ -225,9 +223,9 @@ fn a_failed_probe_is_logged_on_one_line_with_its_control_characters_escaped() {
     );
 }
 
-/// V243-LINUX-PROBE-STDERR-CAP (#592 F1): what a failed probe that says far too much
-/// writes to the log is one line, built from at most [`PROBE_SAID_MAX`] bytes, with its
-/// control characters escaped. Writing what it said raw fails this row.
+/// What a failed probe that says far too much writes to the log is one line, built from at most
+/// [`PROBE_SAID_MAX`] bytes, with its control characters escaped. Writing what it said raw fails
+/// this row.
 #[test]
 fn a_failed_probe_writes_one_escaped_line_to_the_log() {
     use std::os::unix::fs::PermissionsExt;
@@ -467,13 +465,12 @@ fn the_route_answer_is_asked_once_per_engine_and_never_when_refused() {
     assert_eq!(probes.get(), 2);
 }
 
-/// rv-sa241 SBX-2-R2 N1: the host read asks a kept false route answer again, so one
-/// failed probe (a timeout while the engine starts under load) leaves launches unrouted
-/// only until the next host read. The owner's read of the project catalog or a project's
-/// agent policy runs that read at most once per `HOST_AGE_MAX`, and an engine nobody
-/// reads keeps the false answer until a restart. A launch reads what is kept and never
-/// waits on the probe, a true answer is never asked again, and a false probe never
-/// replaces a true another caller kept meanwhile.
+/// The host read asks a kept false route answer again, so one failed probe (a timeout while the
+/// engine starts under load) leaves launches unrouted only until the next host read. The owner's
+/// read of the project catalog or a project's agent policy runs that read at most once per
+/// `HOST_AGE_MAX`, and an engine nobody reads keeps the false answer until a restart. A launch
+/// reads what is kept and never waits on the probe, a true answer is never asked again, and a false
+/// probe never replaces a true another caller kept meanwhile.
 #[test]
 fn a_false_route_answer_is_asked_again_by_the_host_read_and_a_true_one_is_kept() {
     let kept: KeptRoute = Mutex::new(None);
@@ -529,9 +526,9 @@ fn a_false_route_answer_is_asked_again_by_the_host_read_and_a_true_one_is_kept()
     );
 }
 
-/// rv-sa241 SBX-2-R2 LOW-1: the nest answer the page and every launch read keeps a nest
-/// found for the same bubblewrap and helper without asking again, and asks again after a
-/// nest was not found and for another bubblewrap, whose miss keeps the found one.
+/// The nest answer the page and every launch read keeps a nest found for the same bubblewrap and
+/// helper without asking again, and asks again after a nest was not found and for another
+/// bubblewrap, whose miss keeps the found one.
 #[test]
 fn a_found_nest_is_kept_and_a_missing_one_is_asked_again() {
     let kept: KeptNest = Mutex::new(None);
@@ -615,10 +612,10 @@ fn the_bubblewrap_a_nest_starts_is_checked_as_the_file_it_opened() {
     );
 }
 
-/// rv-code4 F1 (#622): a second mount of a hidden folder's disk that shows the folder, a
-/// folder above it or one inside it refuses the launch wherever it is mounted (farm run
-/// 44410206144 read the folder through one); another disk, a folder beside it and the
-/// folder's own mount do not, and a mount list that does not read plainly refuses too.
+/// A second mount of a hidden folder's disk that shows the folder, a folder above it or one inside
+/// it refuses the launch wherever it is mounted (farm run 44410206144 read the folder through one);
+/// another disk, a folder beside it and the folder's own mount do not, and a mount list that does
+/// not read plainly refuses too.
 #[test]
 fn a_second_mount_of_a_hidden_folders_disk_refuses_the_launch() {
     let line = |id: u32, device: &str, root: &str, point: &str| {
@@ -685,9 +682,9 @@ fn a_second_mount_of_a_hidden_folders_disk_refuses_the_launch() {
     }
 }
 
-/// V24x-LINUX-NEST-MOUNT-PROPAGATION: a launch with hidden folders asks the helper for a
-/// private tree with each folder as a cover on both hiding backends, the nested policy
-/// reading back from its own words, and a launch without them asks for none.
+/// A launch with hidden folders asks the helper for a private tree with each folder as a cover on
+/// both hiding backends, the nested policy reading back from its own words, and a launch without
+/// them asks for none.
 #[test]
 fn a_launch_with_hidden_folders_asks_the_helper_for_a_private_tree_on_both_backends() {
     let folder = PathBuf::from("/w/project/private");
@@ -902,9 +899,8 @@ fn a_guard_keeps_its_ports_on_this_machine_and_leaves_the_others_to_every_host()
     assert_eq!((held.reach, held.git, held.signals), (None, None, true));
 }
 
-/// Each supervisor probe gets a new folder only this user may open, under a name no
-/// stale, concurrent or planted folder takes, and none where the data folder refuses
-/// one (rv-secreview linux-t4c F1).
+/// Each supervisor probe gets a new folder only this user may open, under a name no stale,
+/// concurrent or planted folder takes, and none where the data folder refuses one.
 #[test]
 fn each_supervisor_probe_gets_a_new_private_folder_under_the_engine_data_folder() {
     let temp = tempfile::tempdir().unwrap();
@@ -924,9 +920,8 @@ fn each_supervisor_probe_gets_a_new_private_folder_under_the_engine_data_folder(
     assert_eq!(private_folder(&data.join("missing")), None);
 }
 
-/// The helper runs its supervisor probe only in the private folder the engine made for
-/// it: a link to it, a folder others may open, one that holds anything, a file or no
-/// folder at all fails it (rv-secreview linux-t4c F1).
+/// The helper runs its supervisor probe only in the private folder the engine made for it: a link
+/// to it, a folder others may open, one that holds anything, a file or no folder at all fails it.
 #[test]
 fn the_supervisor_probe_takes_only_an_empty_folder_only_this_user_may_open() {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
@@ -951,10 +946,9 @@ fn the_supervisor_probe_takes_only_an_empty_folder_only_this_user_may_open() {
     assert!(!private_empty(&data.join("missing")), "no folder");
 }
 
-/// The engine makes the probe's folder, hands it to the helper and removes it whatever
-/// the probe answered, so a failed or killed probe leaves nothing a later one trips on,
-/// two probes at once each get their own, and as root no probe runs (rv-secreview
-/// linux-t4c F1, rv-code4 linux-t4c F1).
+/// The engine makes the probe's folder, hands it to the helper and removes it whatever the probe
+/// answered, so a failed or killed probe leaves nothing a later one trips on, two probes at once
+/// each get their own, and as root no probe runs.
 #[test]
 fn a_supervisor_probe_runs_in_its_own_folder_the_engine_removes_after() {
     use std::os::unix::fs::PermissionsExt;
@@ -1008,9 +1002,9 @@ fn a_supervisor_probe_runs_in_its_own_folder_the_engine_removes_after() {
     );
 }
 
-/// The helper refuses every variable that makes glibc load code, the dynamic loader's
-/// and gconv's, and no other: a name that only starts with `LD`, holds `LD_` later, or
-/// differs in case still passes (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2).
+/// The helper refuses every variable that makes glibc load code, the dynamic loader's and gconv's,
+/// and no other: a name that only starts with `LD`, holds `LD_` later, or differs in case still
+/// passes.
 #[test]
 fn the_helper_refuses_only_the_variables_that_load_code() {
     for name in [

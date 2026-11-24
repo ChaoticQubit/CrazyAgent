@@ -3,9 +3,9 @@ use kernel_sandbox::policy::*;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain};
 use std::path::Path;
 
-/// DEC-173 add.1: a policy saved before the agent home caches setting reads Clear when
-/// access is raised, each choice survives a save, a load and a pin, and the view lists
-/// every choice with the words the owner reads.
+/// A policy saved before the agent home caches setting reads Clear when access is raised, each
+/// choice survives a save, a load and a pin, and the view lists every choice with the words the
+/// owner reads.
 #[test]
 fn a_policy_saved_before_the_home_caches_setting_clears_when_access_is_raised() {
     let old: AgentPolicy =
@@ -165,9 +165,9 @@ fn a_saved_network_choice_reads_back_and_defaults_to_open() {
     assert_eq!(old.network, AgentNetwork::Open);
 }
 
-/// DEC-124: the agent folders choice reads back as saved, through the view and a pinned
-/// policy; a policy saved before the setting existed reads Allow all changes, and an
-/// unknown choice makes the policy unreadable, so it never reads as a wider one.
+/// The agent folders choice reads back as saved, through the view and a pinned policy; a policy
+/// saved before the setting existed reads Allow all changes, and an unknown choice makes the policy
+/// unreadable, so it never reads as a wider one.
 #[test]
 fn a_saved_agent_folders_choice_reads_back_and_an_older_policy_reads_allow_all() {
     let connection = Connection::open_in_memory().unwrap();
@@ -311,9 +311,8 @@ fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hol
     assert_eq!(told, [said], "a project with no other repository");
 }
 
-/// The Agent access page reads the project folder for another git repository before its
-/// database transaction, and only where the call supervisor runs; the view takes that
-/// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
+/// The Agent access page reads the project folder for another git repository before its database
+/// transaction, and only where the call supervisor runs; the view takes that answer.
 #[test]
 fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_takes_it() {
     use kernel_sandbox::host::LinuxHost;

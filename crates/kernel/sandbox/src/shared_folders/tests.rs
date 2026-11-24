@@ -8,8 +8,8 @@ fn chosen(names: &[&str]) -> SharedFolders {
     }
 }
 
-/// DEC-147.9: a policy saved before the setting reads All and Read-only with nothing picked,
-/// a save names the choice and a pinned policy keeps it.
+/// A policy saved before the setting reads All and Read-only with nothing picked, a save names the
+/// choice and a pinned policy keeps it.
 #[test]
 fn a_policy_saved_before_shared_folders_reads_all_and_read_only_and_a_save_keeps_the_choice() {
     let old: AgentPolicy =
@@ -117,8 +117,8 @@ fn a_shared_folders_choice_out_of_shape_is_refused() {
     assert_eq!(policy.validate(), Err("agent_policy_invalid"));
 }
 
-/// L4 r1 L3: a shared-back secret the choice keeps closed shows as not reachable: every one
-/// under None, under Chosen folders the ones outside a picked folder, none under All.
+/// A shared-back secret the choice keeps closed shows as not reachable: every one under None, under
+/// Chosen folders the ones outside a picked folder, none under All.
 #[test]
 fn a_shared_back_secret_outside_the_shared_folders_shows_as_not_reachable() {
     let secrets = vec![

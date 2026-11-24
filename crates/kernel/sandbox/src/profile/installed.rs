@@ -99,11 +99,11 @@ impl InstalledSandbox {
         }
     }
 
-    /// The Windows arm of [`Self::install`], once its checks pass: the helper beside the
-    /// engine and the boundary profile written with `grants`, which `install` gives as the
-    /// engine's grants folder and a test as a folder of its own (CR-1614). Inputs: the policy,
-    /// the profile path, the call supervisor choice and the grants folder, absolute and plain.
-    /// Output: the boundary, or the refusal.
+    /// The Windows arm of [`Self::install`], once its checks pass: the helper beside the engine and
+    /// the boundary profile written with `grants`, which `install` gives as the engine's grants
+    /// folder and a test as a folder of its own. Inputs: the policy, the profile path, the call
+    /// supervisor choice and the grants folder, absolute and plain. Output: the boundary, or the
+    /// refusal.
     #[cfg(target_os = "windows")]
     pub fn install_with_grants(
         sandbox: ProjectSandbox,
@@ -129,11 +129,10 @@ impl InstalledSandbox {
         })
     }
 
-    /// Marks this boundary as a Full access project's (DEC-102): every command it wraps then
-    /// starts with no Seatbelt profile (see [`ProjectSandbox::wrap_unconfined`]), keeping
-    /// the agent environment, the worktree start and the process group. Only macOS runs
-    /// Full access; elsewhere [`Self::wrap`] refuses an unconfined boundary. Output: the
-    /// marked boundary.
+    /// Marks this boundary as a Full access project's: every command it wraps then starts with no
+    /// Seatbelt profile (see [`ProjectSandbox::wrap_unconfined`]), keeping the agent environment,
+    /// the worktree start and the process group. Only macOS runs Full access; elsewhere
+    /// [`Self::wrap`] refuses an unconfined boundary. Output: the marked boundary.
     pub fn unconfined(mut self) -> Self {
         self.unconfined = true;
         self
@@ -252,7 +251,8 @@ impl Sandbox for InstalledSandbox {
 
 /// The engine's grants folder when it is a plain drive path, which `install_with_grants`
 /// asserts: the data root comes from the owner's `CRAZYAGENT_HOME`, so `C:/data` or a UNC
-/// root is refused here, as the boundary install refused it before CR-1614, never a panic.
+/// root is refused here, as the boundary install refused it before `install_with_grants`
+/// existed, never a panic.
 /// Input: the folder. Output: the folder, or `Invalid`.
 #[cfg(target_os = "windows")]
 pub fn plain_grants(grants: PathBuf) -> Result<PathBuf, SandboxError> {

@@ -63,8 +63,8 @@ fn a_folder_name_from_uv_is_lowercase_letters_digits_and_dashes_only() {
     }
 }
 
-/// T8 C2 (R2): no two level and shape pairs share a cache, Full access gets none, and under
-/// One per agent each agent gets its own, apart from every shared one.
+/// No two level and shape pairs share a cache, Full access gets none, and under One per agent each
+/// agent gets its own, apart from every shared one.
 #[test]
 fn shared_caches_differ_by_level_and_shape_and_full_access_gets_none() {
     let mut keys = std::collections::BTreeSet::new();
@@ -96,8 +96,8 @@ fn shared_caches_differ_by_level_and_shape_and_full_access_gets_none() {
     }
 }
 
-/// T8 C3 (R3): a bucket named `.git` or over 64 bytes, or a 17th bucket, refuses the whole
-/// fresh cache, and up to 16 plain buckets pass.
+/// A bucket named `.git` or over 64 bytes, or a 17th bucket, refuses the whole fresh cache, and up
+/// to 16 plain buckets pass.
 #[test]
 fn a_bucket_name_or_count_out_of_bounds_refuses_the_cache() {
     let mark = |cache: &Path, name: &str| {
