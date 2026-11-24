@@ -270,3 +270,18 @@ fn the_draft_scan_reads_every_literal_shape() {
         "use crate::state_log::{Aggregate as Kind, Appender, Draft};"
     )));
 }
+
+/// A file that re-exports the whole log module, or names the log's draft through a type
+/// alias, hides its drafts from the scan just as a renamed import does; a private glob import
+/// and a type that does not name the draft hide nothing.
+#[test]
+fn a_glob_re_export_or_a_type_alias_hides_the_draft() {
+    assert!(hides_draft(&code_only("pub use crate::state_log::*;")));
+    assert!(hides_draft(&code_only("pub(crate) use crate::state_log::*;")));
+    assert!(hides_draft(&code_only("type D = Draft;")));
+    assert!(hides_draft(&code_only(
+        "type Entry<'a> = state_log::Draft<'a>;"
+    )));
+    assert!(!hides_draft(&code_only("use crate::state_log::*;")));
+    assert!(!hides_draft(&code_only("type Kind = &'static str;")));
+}
