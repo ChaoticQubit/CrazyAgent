@@ -371,6 +371,7 @@ test("F08: Agent access shows the extras with what each means, the apply choice 
   assert.ok(!access.GRANT_MEANINGS.temp_folder.includes(RUN_AS_YOU));
   for (const [, code, text] of pairs) assert.equal(api.plainError(code), text.replace(/\\'/g, "'"), code);
   assert.match(api.plainError("agent_grant_revoked"), /was removed, so the agent was stopped/);
+  assert.equal(api.plainError("agent_folder_hidden"), "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it.");
 });
 
 test("the shared folders choice is saved with the policy, the saved one unless the owner picks another, with the engine's labels in both UIs", () => {

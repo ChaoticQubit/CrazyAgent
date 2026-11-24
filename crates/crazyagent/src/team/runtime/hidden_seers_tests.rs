@@ -42,12 +42,15 @@ fn restart_them(fixture: &Fixture) -> crate::protocol::Outcome {
     outcome
 }
 
-/// SA-VID14-A: a running agent that started before the owner hid a folder can still open
-/// it, so the team status lists it, and the live master too, until the owner's Restart them
-/// stops each to start again; an agent whose launch hid that folder or one above it, one at
-/// Full access and a teammate, whose lead is the one listed, never are.
+/// The owner's sentence on an agent the engine stopped for a folder hidden after it started.
+const FOLDER_HIDDEN: &str = "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it. (agent_folder_hidden)";
+
+/// A running agent that started before the owner hid a folder can still open it, so the
+/// engine stops it at its next check with its work held, the live master too, and keeps both
+/// listed for the owner's Restart them; an agent whose launch hid that folder or one above
+/// it, one at Full access and a teammate, whose lead is the one listed, keep running.
 #[test]
-fn an_agent_started_before_a_folder_was_hidden_is_listed_until_the_owner_restarts_it() {
+fn an_agent_that_can_open_a_newly_hidden_folder_is_stopped_held_and_listed() {
     let fixture = Fixture::new(1);
     let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
@@ -60,7 +63,7 @@ fn an_agent_started_before_a_folder_was_hidden_is_listed_until_the_owner_restart
     let (mut worker, orders) = held_worker(&project, AgentRole::Sub);
     worker.hidden = Some(Vec::new());
     team.workers.insert(before, worker);
-    let (mut worker, _) = held_worker(&project, AgentRole::Sub);
+    let (mut worker, after_orders) = held_worker(&project, AgentRole::Sub);
     worker.hidden = hid(std::slice::from_ref(&secrets));
     team.workers.insert(after, worker);
     let (mut worker, _) = held_worker(&project, AgentRole::Sub);
@@ -77,10 +80,25 @@ fn an_agent_started_before_a_folder_was_hidden_is_listed_until_the_owner_restart
 
     team.mark_seers(&fixture.setup).unwrap();
     assert!(listed(&fixture).is_empty(), "nothing is hidden yet");
+    assert!(team.workers.values().all(|worker| !worker.stopping));
     assert_eq!(restart_them(&fixture), refused);
 
     crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
     team.mark_seers(&fixture.setup).unwrap();
+    for (id, orders) in [(before, &orders), (master, &master_orders)] {
+        let stopped = &team.workers[&id];
+        assert!(stopped.stopping && stopped.held, "agent {id} stops held");
+        assert_eq!(stopped.stop_why, "engine_stop:hidden");
+        assert_eq!(
+            stopped.narrowed.map(Narrowed::problem).as_deref(),
+            Some(FOLDER_HIDDEN)
+        );
+        assert!(matches!(orders.try_recv(), Ok(Order::Stop)));
+    }
+    for id in [after, full, TEAMMATE] {
+        assert!(!team.workers[&id].stopping, "agent {id} keeps running");
+    }
+    assert!(after_orders.try_recv().is_err());
     assert_eq!(
         listed(&fixture),
         vec![before, master],
@@ -91,33 +109,53 @@ fn an_agent_started_before_a_folder_was_hidden_is_listed_until_the_owner_restart
         BTreeSet::from([before, master]),
         "never Full access or a teammate"
     );
-    assert!(
-        team.workers.values().all(|worker| !worker.stopping),
-        "the list stops no one"
+
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(orders.try_recv().is_err(), "a stopped seer is stopped once");
+    assert_eq!(listed(&fixture), vec![before, master], "it stays listed");
+    team.workers.clear();
+}
+
+/// The owner's Restart them starts again a seer the engine stopped once its process ended: a
+/// sub-agent in its own worktree and conversation, the live master as a planned restart in
+/// its own session; then neither is listed.
+#[test]
+fn the_owner_restart_starts_a_seer_the_engine_stopped_again() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let keys = fixture.setup.project_folder().join("secrets").join("keys");
+    let before = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let (mut worker, _orders) = held_worker(&project, AgentRole::Sub);
+    worker.hidden = Some(Vec::new());
+    team.workers.insert(before, worker);
+    let (mut worker, _master_orders) = held_worker(&project, AgentRole::Master);
+    worker.live = true;
+    team.workers.insert(master, worker);
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    team.workers.clear();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert_eq!(
+        listed(&fixture),
+        vec![before, master],
+        "an ended seer stays listed"
     );
 
     assert_eq!(restart_them(&fixture), crate::protocol::Outcome::Applied);
     team.restart_seers(&fixture.setup).unwrap();
-    let restarted = &team.workers[&before];
-    assert!(restarted.stopping && restarted.restarting && restarted.held);
-    assert_eq!(restarted.stop_why, "engine_stop:hidden");
-    assert!(matches!(orders.try_recv(), Ok(Order::Stop)));
-    assert!(team.workers[&master].stopping);
-    assert!(matches!(master_orders.try_recv(), Ok(Order::Stop)));
-    assert!(
-        team.master_restarts.contains(&project),
-        "the live master starts again in its own session"
+    assert_eq!(
+        team.restarts.get(&before),
+        Some(&(project.clone(), Restart::Hidden))
     );
-    for id in [after, full, TEAMMATE] {
-        assert!(!team.workers[&id].stopping, "agent {id} keeps running");
-    }
+    assert!(team.master_restarts.contains(&project));
     team.mark_seers(&fixture.setup).unwrap();
     assert!(
         listed(&fixture).is_empty(),
-        "a stopping agent is not listed"
+        "a restarted seer is not listed"
     );
-    assert_eq!(restart_them(&fixture), refused);
-    team.workers.clear();
+    team.restarts.clear();
 }
 
 /// macOS only, as team panes run only there (DEC-094): a pane a later engine takes over is
