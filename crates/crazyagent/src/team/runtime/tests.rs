@@ -49,6 +49,10 @@ mod hidden_seers_tests;
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "uncommitted_note_tests.rs"]
+mod uncommitted_note_tests;
+
 const PROJECT: &str = "team-panes";
 
 const ENDPOINT: &str = "local-a";
