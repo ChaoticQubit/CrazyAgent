@@ -288,7 +288,7 @@ fn a_turn_with_many_odd_names_names_what_fits_and_counts_the_rest() {
     assert!(note.len() <= crate::team::NOTE_BYTES_MAX, "{}", note.len());
     assert!(!note.chars().any(char::is_control), "{note:?}");
     let shown = note[head.len()..].split(", ").count();
-    assert!(shown >= 1 && shown < 80, "{shown}");
+    assert!((1..80).contains(&shown), "{shown}");
     assert!(
         note.ends_with(&format!(" and {} more.", 80 - shown)),
         "{note}"

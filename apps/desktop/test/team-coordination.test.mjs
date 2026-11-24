@@ -225,7 +225,9 @@ test("the Task-start reminder row follows Workflow nudges with On as the default
     const reminder = markup.indexOf('aria-label="Task-start reminder"');
     const counted = markup.indexOf('aria-label="Counted tools"');
     assert.ok(nudges >= 0 && nudges < reminder && reminder < counted, `the reminder row sits between Workflow nudges and Counted tools: ${option}`);
-    const row = markup.slice(reminder, counted);
+    const next = markup.indexOf('aria-label="Uncommitted edits reminder"');
+    assert.ok(reminder < next && next < counted, `the Uncommitted edits reminder follows it: ${option}`);
+    const row = markup.slice(reminder, next);
     assert.deepEqual([...row.matchAll(/role="radio" aria-checked="(true|false)"[^>]*>([^<]+)</gu)].map((match) => [match[2], match[1]]),
       [["On", String(checked === "On")], ["Off", String(checked === "Off")]], option);
     assert.match(row, /ToolSearch/, option);

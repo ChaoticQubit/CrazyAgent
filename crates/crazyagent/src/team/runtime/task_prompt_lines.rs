@@ -18,14 +18,14 @@ impl TeamRuntime {
         if !whole {
             return Ok(());
         }
-        let Some(held) = self.held_uncommitted(
+        let Some(note) = self.held_uncommitted(
             &workspace.repository,
             &workspace.worktree,
             &workspace.git_dir,
+            Some(what),
         ) else {
             return Ok(());
         };
-        let note = crate::landing::retire::uncommitted::note_line(what, &held);
         if let Some(lead) = lead {
             self.note_lead(project, lead, note.clone())?;
         }
@@ -63,25 +63,31 @@ impl TeamRuntime {
             Path::new(&repository),
             Path::new(&worktree),
             Path::new(&git_dir),
+            None,
         )
-        .map(|held| crate::landing::retire::uncommitted::agent_line(&held))
         .unwrap_or_default()
     }
 
-    /// Lists what an agent's own clone holds beyond its branch tip, logging a clone it
-    /// cannot read by its plain code. Takes the three paths. Returns the listing, or None
-    /// for a linked worktree, a clean clone or one it cannot read.
+    /// The line naming what an agent's own clone holds beyond its branch tip: the note for
+    /// what ended, or with no `what` the agent's own line, logging a clone it cannot read by
+    /// its plain code. Takes the three paths and what ended. Returns the line, or None for a
+    /// linked worktree, a clean clone or one it cannot read.
+    #[cfg(unix)]
     fn held_uncommitted(
         &self,
         repository: &Path,
         worktree: &Path,
         git_dir: &Path,
-    ) -> Option<crate::landing::retire::uncommitted::Uncommitted> {
-        let held = crate::landing::open(&self.root).and_then(|db| {
-            crate::landing::retire::uncommitted::uncommitted(&db, repository, worktree, git_dir)
-        });
+        what: Option<&str>,
+    ) -> Option<String> {
+        use crate::landing::retire::uncommitted;
+        let held = crate::landing::open(&self.root)
+            .and_then(|db| uncommitted::uncommitted(&db, repository, worktree, git_dir));
         match held {
-            Ok(held) => held,
+            Ok(held) => held.map(|held| match what {
+                Some(what) => uncommitted::note_line(what, &held),
+                None => uncommitted::agent_line(&held),
+            }),
             Err(problem) => {
                 eprintln!(
                     "landing_uncommitted_unread cause={}",
@@ -90,6 +96,13 @@ impl TeamRuntime {
                 None
             }
         }
+    }
+
+    /// Finds nothing: an agent works in its own clone only on unix. Takes the same inputs
+    /// as the unix form. Returns None.
+    #[cfg(not(unix))]
+    fn held_uncommitted(&self, _: &Path, _: &Path, _: &Path, _: Option<&str>) -> Option<String> {
+        None
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch,

@@ -2,7 +2,7 @@ import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 import { isWindows } from "./ui/keys";
-import type { SkillRole, RoleSkills, TerminalDisplay, TaskStart, HeavyLane, SharedResource, UncommittedReminder } from "./coord-types";
+import type { RoleSkills, TerminalDisplay, TaskStart, HeavyLane, SharedResource, UncommittedReminder } from "./coord-types";
 export type { SkillRole, RoleSkills, TerminalDisplay, TaskStart, HeavyLane, SharedResource, UncommittedReminder } from "./coord-types";
 
 /** Storage's own answers to a request, one sentence each, the same on every page and in the
