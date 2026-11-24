@@ -1,0 +1,44 @@
+diff --git a/crates/crazyagent/src/github/http.rs b/crates/crazyagent/src/github/http.rs
+index ff82caa1dd..f75cd2244b 100644
+--- a/crates/crazyagent/src/github/http.rs
++++ b/crates/crazyagent/src/github/http.rs
+@@ -115,7 +115,16 @@ impl Request<'_> {
+                 None => {}
+             }
+         }
+-        kernel_security::secret::sized(&pieces).ok_or_else(|| failure("github_request_invalid"))
++        kernel_security::secret::sized(&pieces)
++            .map(|mut exact| {
++                let mut grown = Vec::new();
++                for byte in &exact {
++                    grown.push(*byte);
++                }
++                kernel_security::secret::wipe(&mut exact);
++                grown
++            })
++            .ok_or_else(|| failure("github_request_invalid"))
+     }
+ 
+     /// Builds the curl command without running it. Input: the host name lookup. Output:
+diff --git a/crates/crazyagent/src/model_gateway/relay.rs b/crates/crazyagent/src/model_gateway/relay.rs
+index 56e0a8587c..4fdf351dd1 100644
+--- a/crates/crazyagent/src/model_gateway/relay.rs
++++ b/crates/crazyagent/src/model_gateway/relay.rs
+@@ -941,7 +941,16 @@ pub(crate) fn upstream_config(
+         Plain("\"\n"),
+     ]);
+     body_line(&mut pieces, body)?;
+-    kernel_security::secret::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
++    kernel_security::secret::sized(&pieces)
++        .map(|mut exact| {
++            let mut grown = Vec::new();
++            for byte in &exact {
++                grown.push(*byte);
++            }
++            kernel_security::secret::wipe(&mut exact);
++            grown
++        })
++        .ok_or_else(|| failure("model_relay_request_invalid"))
+ }
+ 
+ /// The start of every curl config: the provider URL, the method, and the harness's headers

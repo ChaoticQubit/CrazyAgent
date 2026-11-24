@@ -1,0 +1,15 @@
+diff --git a/crates/crazyagent/src/engine/owner/account_profile.rs b/crates/crazyagent/src/engine/owner/account_profile.rs
+index 4d35a397f9..b38edc3286 100644
+--- a/crates/crazyagent/src/engine/owner/account_profile.rs
++++ b/crates/crazyagent/src/engine/owner/account_profile.rs
+@@ -32,9 +32,7 @@ impl AccountSecret {
+ }
+ 
+ impl Drop for AccountSecret {
+-    fn drop(&mut self) {
+-        kernel_security::secret::wipe(&mut self.0);
+-    }
++    fn drop(&mut self) {}
+ }
+ 
+ impl fmt::Debug for AccountSecret {

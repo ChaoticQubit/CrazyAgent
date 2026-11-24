@@ -1,0 +1,16 @@
+diff --git a/crates/crazyagent/src/launch_context.rs b/crates/crazyagent/src/launch_context.rs
+index bb1bc08cce..19481cc3ed 100644
+--- a/crates/crazyagent/src/launch_context.rs
++++ b/crates/crazyagent/src/launch_context.rs
+@@ -2689,9 +2689,10 @@ pub fn claude_config<'a>(
+             return Err(failure("launch_context_server_name_taken"));
+         }
+     }
+-    sized_json(&ClaudeConfig {
++    serde_json::to_string(&ClaudeConfig {
+         mcp_servers: declared,
+     })
++    .map_err(|_| failure("launch_context_unavailable"))
+ }
+ 
+ /// Claude Code's `--mcp-config` document, borrowing every value, secrets included.
