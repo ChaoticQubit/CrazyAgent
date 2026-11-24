@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${PERF_RUNS+set}" ]; then
+  echo "run.sh: PERF_RUNS is gone, use PERF_BLOCKS (ABBA blocks, default 2)" >&2
+  exit 2
+fi
+
 packages_of() {
   local dir=$1 tests manifest
   for tests in "$dir"/crates/*/src/perf_tests.rs "$dir"/crates/*/src/perf_tests "$dir"/crates/*/*/src/perf_tests.rs "$dir"/crates/*/*/src/perf_tests; do
