@@ -323,6 +323,19 @@ fn identity(path: &Path) -> io::Result<Option<Identity>> {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// How many walks [`Walk::of`] took on this thread, which rows read through [`walks`].
+    static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of walks [`Walk::of`] took on this thread so far, read by the macOS profile
+/// rows. Takes nothing. Returns the count.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn walks() -> usize {
+    WALKS.with(std::cell::Cell::get)
+}
+
 /// A path's parts with the identity of each leading run of them, top down: None from the
 /// first run that does not exist on, and None for a Windows drive prefix alone, which names
 /// the drive's current folder. `reached` holds the identities of the folders the deepest
@@ -341,6 +354,8 @@ impl<'a> Walk<'a> {
     /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or the resolve fails other than
     /// not found.
     fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
+        #[cfg(all(test, target_os = "macos"))]
+        WALKS.with(|walks| walks.set(walks.get() + 1));
         let refused = |_| invalid(SECRET_ROOT_REFUSED);
         let parts: Vec<Component<'a>> = path.components().collect();
         let mut ids = Vec::with_capacity(parts.len());
@@ -444,6 +459,58 @@ pub fn granted_root(
     secrets: &[PathBuf],
     harnesses: &[&'static str],
 ) -> Result<(), SandboxError> {
+    let homes = harness_homes(owner, harnesses);
+    granted_walked(root, &Walked::of(owner, &homes, secrets)?)
+}
+
+/// The owner's harness homes: each harness folder name joined to the owner home. Inputs:
+/// the owner home and the folder names. Output: the folders, in the names' order.
+pub(crate) fn harness_homes(owner: &Path, harnesses: &[&'static str]) -> Vec<PathBuf> {
+    harnesses
+        .iter()
+        .map(|private| owner.join(private))
+        .collect()
+}
+
+/// The walks of the owner home, of its harness homes and of the secret paths, taken once for
+/// the roots one check or one sandbox build compares against them, and dropped with it, so
+/// no walk outlives the moment its answer is used. Built by [`Walked::of`].
+pub(crate) struct Walked<'a> {
+    owner: Walk<'a>,
+    harnesses: Vec<Walk<'a>>,
+    secrets: Vec<Walk<'a>>,
+}
+
+impl<'a> Walked<'a> {
+    /// Walks the owner home, each harness home and each secret path once. Inputs: the owner
+    /// home, the harness homes ([`harness_homes`]) and the secret paths. Output: the walks,
+    /// or `Invalid` with [`SECRET_ROOT_REFUSED`] when a read fails other than not found.
+    pub(crate) fn of(
+        owner: &'a Path,
+        harnesses: &'a [PathBuf],
+        secrets: &'a [PathBuf],
+    ) -> Result<Walked<'a>, SandboxError> {
+        let walked = Walked {
+            owner: Walk::of(owner)?,
+            harnesses: harnesses
+                .iter()
+                .map(|home| Walk::of(home.as_path()))
+                .collect::<Result<_, _>>()?,
+            secrets: secrets
+                .iter()
+                .map(|secret| Walk::of(secret.as_path()))
+                .collect::<Result<_, _>>()?,
+        };
+        assert_eq!(walked.harnesses.len(), harnesses.len());
+        assert_eq!(walked.secrets.len(), secrets.len());
+        Ok(walked)
+    }
+}
+
+/// Checks a root as [`granted_root`] does, against the owner home, harness homes and secrets
+/// one [`Walked`] holds, walking only the root itself, once. Inputs: the root and the walks.
+/// Output: unit, or `Invalid` naming the rule.
+pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), SandboxError> {
     let depth = root
         .components()
         .filter(|component| matches!(component, Component::Normal(_)))
@@ -452,20 +519,31 @@ pub fn granted_root(
         return Err(invalid("sandbox roots must be absolute, deep and plain"));
     }
     let walk = Walk::of(root)?;
-    if Walk::of(owner)?.sits_in(&walk) {
+    if walked.owner.sits_in(&walk) {
         return Err(invalid("sandbox roots must not contain the owner home"));
     }
-    for private in harnesses {
-        let folder = owner.join(private);
-        if walk.sits_in(&Walk::of(&folder)?) {
+    for home in &walked.harnesses {
+        if walk.sits_in(home) {
             return Err(invalid("sandbox roots must not be owner harness homes"));
         }
     }
-    clear_of_secrets(root, secrets)?;
+    clear_of_walked(&walk, &walked.secrets)?;
     if !root.is_dir() || canonical(root)? != root {
         return Err(invalid(
             "sandbox roots must be existing canonical directories",
         ));
+    }
+    Ok(())
+}
+
+/// Refuses a walked root that equals, holds or sits inside one of the walked secrets, as
+/// [`clear_of_secrets`] does. Inputs: the root's walk and the secrets' walks. Output: unit,
+/// or `Invalid` with [`SECRET_ROOT_REFUSED`].
+fn clear_of_walked(root: &Walk, secrets: &[Walk]) -> Result<(), SandboxError> {
+    for secret in secrets {
+        if root.sits_in(secret) || secret.sits_in(root) {
+            return Err(invalid(SECRET_ROOT_REFUSED));
+        }
     }
     Ok(())
 }

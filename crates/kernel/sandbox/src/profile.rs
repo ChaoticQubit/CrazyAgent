@@ -36,8 +36,9 @@ use crate::host::LinuxHost;
 use crate::lines::*;
 use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{
-    any_case, at_or_below, canonical, clean_absolute, clear_of_secrets, fold_case, granted_root,
-    owner_home, owner_secrets, plain_top, regex_escape,
+    Walked, any_case, at_or_below, canonical, clean_absolute, clear_of_secrets, fold_case,
+    granted_root, granted_walked, harness_homes, owner_home, owner_secrets, plain_top,
+    regex_escape,
 };
 use crate::ports::{
     BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
@@ -340,10 +341,12 @@ impl ProjectSandbox {
         network: SandboxNetwork,
     ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
-        let secrets: Vec<PathBuf> =
-            owner_secrets(&owner, &(hooks.access.harness_folders)()).collect();
+        let harnesses = (hooks.access.harness_folders)();
+        let secrets: Vec<PathBuf> = owner_secrets(&owner, &harnesses).collect();
+        let homes = harness_homes(&owner, &harnesses);
+        let walked = Walked::of(&owner, &homes, &secrets)?;
         for root in [project_root, agent_home, agent_tmp] {
-            granted_root(root, &owner, &secrets, &(hooks.access.harness_folders)())?;
+            granted_walked(root, &walked)?;
         }
         if let SandboxNetwork::Only(remotes) = &network
             && (remotes.len() > REMOTES_MAX
