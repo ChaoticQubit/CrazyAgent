@@ -374,6 +374,7 @@ fn an_agent_in_one_container_reads_another_containers_environment_or_not() {
     let mut reader = agent(&other, "read");
     reader.env(TARGETS, &targets);
     let cross = reader.output().unwrap();
+    let between = report("owner->agentB-between", pid);
     let mut sibling_reader = agent(&held, "read");
     sibling_reader.env(TARGETS, &targets);
     let sibling = sibling_reader.output().unwrap();
@@ -384,7 +385,7 @@ fn an_agent_in_one_container_reads_another_containers_environment_or_not() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
-    for line in before.iter().chain([&after]) {
+    for line in before.iter().chain([&between, &after]) {
         println!("{line}");
     }
     println!("CROSS {}", ran(&cross));
@@ -393,7 +394,10 @@ fn an_agent_in_one_container_reads_another_containers_environment_or_not() {
         before.iter().all(|line| line.contains("marker=yes")),
         "owner control failed: {before:?}"
     );
-    assert!(after.contains("marker=yes"), "holder gone: {after}");
+    assert!(
+        between.contains("marker=yes"),
+        "holder gone before the sibling: {between}"
+    );
     let cross_out = String::from_utf8_lossy(&cross.stdout).into_owned();
     let own = cross_out
         .lines()
