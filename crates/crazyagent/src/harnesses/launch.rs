@@ -1043,7 +1043,7 @@ fn bounded<'a>(
                 failure("launch_environment_refused")
             }
             error => failure(
-                crate::sandbox::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
+                kernel_sandbox::lines::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
             ),
         })?;
         assert_eq!(command.get_program(), boundary.launcher().as_os_str());
