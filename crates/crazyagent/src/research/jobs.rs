@@ -703,7 +703,6 @@ impl ResearchJobs {
 
     /// The queue database's open connection, for a read the queue keeps no method for.
     /// Takes nothing. Returns the connection.
-    #[cfg(unix)]
     pub(crate) fn connection(&self) -> &Connection {
         &self.connection
     }

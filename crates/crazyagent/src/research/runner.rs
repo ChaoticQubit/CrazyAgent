@@ -599,7 +599,12 @@ enum Ending {
     Interrupted,
     RateLimited,
     Narrowed(Narrowing),
+    Hidden,
 }
+
+/// The plain line a confined research job stopped because a folder was saved hidden after
+/// its start shows while it waits to run again, the next run hiding that folder.
+const HIDDEN_REQUEUED: &str = "A folder was hidden from agents, so this research was stopped and queued again; its next run cannot see it";
 
 /// What a running research job's sandbox profile was built with, checked against the saved
 /// policy while it runs: its project and canonical folder, the access level and the granted
@@ -622,6 +627,24 @@ impl Granted {
             Some(self.access),
             None,
             &self.toolchains,
+        )
+    }
+
+    /// The stop a running job polls for a folder saved hidden after its start that its
+    /// sandbox did not hide. A job with full access hid nothing and passes no guard, so a
+    /// saved folder never stops it. Takes the job store, the job's hidden folders guard and
+    /// the stop it wraps. Returns the stop.
+    fn hide_stops<'a>(
+        &'a self,
+        jobs: &'a ResearchJobs,
+        listed: &'a HiddenRun,
+        stop: &'a dyn Fn() -> bool,
+    ) -> impl Fn() -> bool + 'a {
+        crate::sandbox::access_store::hidden::hide_stops(
+            jobs.connection(),
+            self.project.as_str(),
+            (self.access != AgentAccess::Full).then_some(listed),
+            stop,
         )
     }
 }
@@ -1026,9 +1049,10 @@ impl ResearchRunner {
                     jobs.cancelled(&job)?;
                     return Ok(run(ResearchStatus::Cancelled, None, Some(group)));
                 }
-                if let Ending::Interrupted | Ending::Narrowed(_) = ending {
+                if let Ending::Interrupted | Ending::Narrowed(_) | Ending::Hidden = ending {
                     let reason = match ending {
                         Ending::Narrowed(cause) => Some(requeued_reason(cause)),
+                        Ending::Hidden => Some(HIDDEN_REQUEUED),
                         _ => None,
                     };
                     let _ = jobs.release(&job, reason);
@@ -1527,7 +1551,15 @@ impl ResearchRunner {
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let ending = self.supervise(jobs, job, &granted, &mut running, &counted, &limited)?;
+        let ending = self.supervise(
+            jobs,
+            job,
+            &granted,
+            &listed,
+            &mut running,
+            &counted,
+            &limited,
+        )?;
         let stopped = running.stop();
         let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         drop(running);
@@ -1633,19 +1665,24 @@ impl ResearchRunner {
 
     /// Follows a direct agent process until it exits, its stderr shows it waiting out a
     /// rate or usage limit, the job is cancelled, the saved policy no longer covers what it
-    /// was granted, the runner stops or a limit passes; the caller then stops it. Takes the
-    /// job store, the job, its grants, the process, its output count and the limit flag its
-    /// stderr drain sets. Returns how the run ended.
+    /// was granted, a folder it did not hide is saved hidden, the runner stops or a limit
+    /// passes; the caller then stops it. Takes the job store, the job, its grants, its
+    /// hidden folders guard, the process, its output count and the limit flag its stderr
+    /// drain sets. Returns how the run ended.
+    #[allow(clippy::too_many_arguments)]
     fn supervise(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
         granted: &Granted,
+        listed: &HiddenRun,
         agent: &mut AgentProcess,
         counted: &AtomicU64,
         limited: &AtomicBool,
     ) -> Result<Ending, RunError> {
         noted_launch(jobs, job);
+        let never = || false;
+        let hides = granted.hide_stops(jobs, listed, &never);
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
@@ -1670,6 +1707,9 @@ impl ResearchRunner {
                 }
                 if let Some(cause) = granted.narrowed(jobs) {
                     break Ending::Narrowed(cause);
+                }
+                if hides() {
+                    break Ending::Hidden;
                 }
             }
             std::thread::sleep(POLL);
@@ -1701,8 +1741,16 @@ impl ResearchRunner {
         let group = session.process_group();
         #[cfg(unix)]
         let mut lifeline = Lifeline::watch(group)?;
-        let ending =
-            self.supervise_pane(jobs, job, granted, &mut session, prompt, harness, &output);
+        let ending = self.supervise_pane(
+            jobs,
+            job,
+            granted,
+            &listed,
+            &mut session,
+            prompt,
+            harness,
+            &output,
+        );
         let stopped = session.stop();
         #[cfg(unix)]
         lifeline.release();
@@ -1719,14 +1767,16 @@ impl ResearchRunner {
     /// Types the research prompt into the agent's pane, or sends it to a listed harness's
     /// headless session, and follows its session record until
     /// the turn ends or reports a rate or usage limit, the job is cancelled, the saved policy
-    /// no longer covers what it was granted, the runner stops or a limit passes. The agent's
-    /// [`Reply`] becomes the report at `output`. Returns how the run ended.
+    /// no longer covers what it was granted, a folder it did not hide is saved hidden, the
+    /// runner stops or a limit passes. The agent's [`Reply`] becomes the report at `output`.
+    /// Returns how the run ended.
     #[allow(clippy::too_many_arguments)]
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
         granted: &Granted,
+        listed: &HiddenRun,
         session: &mut AgentSession,
         prompt: &str,
         harness: ResearchHarness,
@@ -1741,6 +1791,8 @@ impl ResearchRunner {
             return Ok(Ending::Exited(false));
         }
         noted_launch(jobs, job);
+        let never = || false;
+        let hides = granted.hide_stops(jobs, listed, &never);
         let mut beat = Instant::now();
         let ending = loop {
             if self.is_stopping() {
@@ -1755,6 +1807,9 @@ impl ResearchRunner {
                 }
                 if let Some(cause) = granted.narrowed(jobs) {
                     break Ending::Narrowed(cause);
+                }
+                if hides() {
+                    break Ending::Hidden;
                 }
             }
             match session.next_event(POLL) {
