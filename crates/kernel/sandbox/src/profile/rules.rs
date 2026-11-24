@@ -595,7 +595,7 @@ impl ProjectSandbox {
     /// tree, and a `.git` at any depth (top level included) in every other root, is denied so
     /// no agent can create a repository the owner's git enters there or rename one whole
     /// into a worktree (OP-9 r2, SM1-R). Output: the working roots and the other roots.
-    pub fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
+    pub(crate) fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         assert!(self.confinements() <= 1);
         let mut working: Vec<&Path> = vec![match (&self.checkout, &self.clone, &self.setup) {
             (Some(checkout), _, _) => checkout.worktree.as_path(),
@@ -705,7 +705,7 @@ impl ProjectSandbox {
     /// any [`Self::allow_node_for`] folder, the C locale and [`crate::toolchains::agent_env`]. Only a
     /// harness's PATH starts with the agent's own `getconf` and `git`
     /// ([`crate::toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
-    pub fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
+    pub(crate) fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = crate::toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self
             .owner_tmp

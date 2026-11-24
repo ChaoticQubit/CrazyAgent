@@ -32,39 +32,39 @@ use landlock::*;
 /// Fixed places a distribution installs bubblewrap. It is never looked up through `PATH`.
 pub const BWRAP_PATHS: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 
-pub const GRANTS_MAX: usize = 1024;
+pub(crate) const GRANTS_MAX: usize = 1024;
 
-pub const HELPER_PATHS_MAX: usize = GRANTS_MAX + 64;
+pub(crate) const HELPER_PATHS_MAX: usize = GRANTS_MAX + 64;
 
 const READ: &str = "--read";
 
 const WRITE: &str = "--write";
 
-pub const GIT_WRITE: &str = "--git-write";
+pub(crate) const GIT_WRITE: &str = "--git-write";
 
-pub const CONNECT: &str = "--connect";
+pub(crate) const CONNECT: &str = "--connect";
 
-pub const LIMIT_NETWORK: &str = "--limit-network";
+pub(crate) const LIMIT_NETWORK: &str = "--limit-network";
 
-pub const OPEN_SOCKETS: &str = "--open-sockets";
+pub(crate) const OPEN_SOCKETS: &str = "--open-sockets";
 
 pub const KEEP_FREE: &str = "--keep-free";
 
 pub const PROBE: &str = "--probe";
 
-pub const FILTER_SOCKETS: &str = "--filter-sockets";
+pub(crate) const FILTER_SOCKETS: &str = "--filter-sockets";
 
-pub const DIE_WITH: &str = "--die-with";
+pub(crate) const DIE_WITH: &str = "--die-with";
 
 pub const NEST: &str = "--nest";
 
 pub const NESTED: &str = "--nested";
 
-pub const PRIVATE_MOUNTS: &str = "--private-mounts";
+pub(crate) const PRIVATE_MOUNTS: &str = "--private-mounts";
 
-pub const COVER: &str = "--cover";
+pub(crate) const COVER: &str = "--cover";
 
-pub const SCOPED: &str = "--scoped";
+pub(crate) const SCOPED: &str = "--scoped";
 
 pub const GUARD_LOOPBACK: &str = "--guard-loopback";
 
@@ -72,7 +72,7 @@ pub const GUARD_GIT: &str = "--guard-git";
 
 pub const OWN_TREE: &str = "--own-tree";
 
-pub const OWN_KIDS: &str = "--own-kids";
+pub(crate) const OWN_KIDS: &str = "--own-kids";
 
 pub const OWN_GIT: &str = "--own-git";
 
@@ -84,7 +84,7 @@ pub const GUARD_HELD_TREE: &str = "--guard-held-tree";
 
 pub const GUARD_HELD_STORE: &str = "--guard-held-store";
 
-pub const PROBE_SUPERVISOR: &str = "--probe-supervisor";
+pub(crate) const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 
 const PROBE_SUPERVISED: &str = "--probe-supervised";
 
@@ -97,7 +97,7 @@ pub const LOADER_REFUSED: &str = "the helper refuses variables that load code";
 
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
 /// other than the engine's user, so [`trusted`] refuses it.
-pub const SET_ID_BITS: u32 = 0o6000;
+pub(crate) const SET_ID_BITS: u32 = 0o6000;
 
 /// The group and other write bits: a program anyone but its owner may change is never run.
 const OTHERS_WRITE_BITS: u32 = 0o022;
@@ -122,11 +122,11 @@ pub const NEST_ARGS: [&str; 10] = [
 
 /// How the helper says the kernel holds the ruleset only in part or not at all, the one probe
 /// failure a kernel refusal names ([`probe_refusal`]).
-pub const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
+pub(crate) const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
 
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
 /// ports and every model proxy and model relay port.
-pub const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
+pub(crate) const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
     + KEPT_PORTS_MAX
     + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize
     + 1
@@ -313,7 +313,7 @@ impl HelperRequest {
 /// The helper words that ask for a private mount tree with these covers, or none.
 /// Input: the covers, when the tree is asked for. Output: [`PRIVATE_MOUNTS`], then
 /// [`COVER`] and the path for each cover.
-pub fn cut_args(covers: Option<&[PathBuf]>) -> Vec<OsString> {
+pub(crate) fn cut_args(covers: Option<&[PathBuf]>) -> Vec<OsString> {
     let Some(covers) = covers else {
         return Vec::new();
     };
@@ -575,7 +575,7 @@ pub fn kept_outside_picked(
 /// so the helper allows every other one, port 0 among them, which asks Linux for a free
 /// port: [`kept_outside_picked`] holds that such a port is never a kept one. Input: the
 /// kept ports, none of them 0. Output: every port that is not kept, in rising order.
-pub fn bindable(keep_free: &[u16]) -> Vec<u16> {
+pub(crate) fn bindable(keep_free: &[u16]) -> Vec<u16> {
     assert!(!keep_free.contains(&0));
     let mut kept = vec![false; usize::from(u16::MAX) + 1];
     for port in keep_free {
@@ -720,7 +720,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
 /// routes alone, so the bridge's check is left to the route's. Input: the helper
 /// arguments. Output: the route ports, empty for none, the bridge, the go descriptor and
 /// the request; or the reason.
-pub fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
+pub(crate) fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
     let (routes, args) = egress::leading(args)?;
     let (bridge, args) = Bridge::leading(args)?;
     let (started, args) = egress::handed(args)?;
@@ -923,7 +923,7 @@ fn probe_supervisor(folder: &Path) -> ExitCode {
 /// Tells whether a folder is the private probe folder the engine made ([`private_folder`]):
 /// a real folder, not a link, that this user owns with mode 0700 and that holds nothing
 /// (rv-secreview linux-t4c F1). Input: the absolute folder. Output: true only then.
-pub fn private_empty(folder: &Path) -> bool {
+pub(crate) fn private_empty(folder: &Path) -> bool {
     assert!(folder.is_absolute());
     let Ok(held) = fs::symlink_metadata(folder) else {
         return false;
@@ -1094,7 +1094,7 @@ fn placed(nested: bool) -> Result<(), String> {
 /// [`OTHERS_WRITE_BITS`], so it runs with this user's privileges and only root or this user
 /// put it there or may change it. It opens without reading, so a program that can only be
 /// run still opens. Input: its path. Output: the open file, which [`nest`] starts, or none.
-pub fn trusted_file(bwrap: &Path) -> Option<fs::File> {
+pub(crate) fn trusted_file(bwrap: &Path) -> Option<fs::File> {
     let own = rustix::process::geteuid().as_raw();
     let file = fs::OpenOptions::new()
         .read(true)
@@ -1108,16 +1108,16 @@ pub fn trusted_file(bwrap: &Path) -> Option<fs::File> {
 
 /// One line of the mount list: the mount's id, its disk's device number, the folder of
 /// that disk it shows and the folder it is mounted on.
-pub struct Mount {
-    pub id: u64,
-    pub device: String,
-    pub root: PathBuf,
-    pub point: PathBuf,
+pub(crate) struct Mount {
+    pub(crate) id: u64,
+    pub(crate) device: String,
+    pub(crate) root: PathBuf,
+    pub(crate) point: PathBuf,
 }
 
 /// Reads the mount list text, one mount per line as `/proc/self/mountinfo` writes it.
 /// Input: the text. Output: the mounts, or none when a line does not read plainly.
-pub fn mounts(text: &str) -> Option<Vec<Mount>> {
+pub(crate) fn mounts(text: &str) -> Option<Vec<Mount>> {
     text.lines()
         .map(|line| {
             let mut fields = line.split(' ');

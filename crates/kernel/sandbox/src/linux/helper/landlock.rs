@@ -216,7 +216,7 @@ pub(super) fn guard_flag(
 /// connect to, under the network limit with TCP sockets alone, where every connect is one
 /// the supervisor can judge; no guard goes with `--die-with`; the own git places are
 /// bounded. Input: the parsed policy. Output: Ok, or the reason.
-pub fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
+pub(crate) fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     let guard = &policy.guard;
     if *guard == Guard::default() {
         return Ok(());

@@ -53,7 +53,7 @@ pub const DESCRIPTOR_FLAGS: [&str; 3] = [INFO_FD, BLOCK_FD, RO_BIND_DATA];
 pub const SLIRP_PATHS: &[&str] = &["/usr/bin/slirp4netns"];
 /// Where the setup child takes the nf_tables `iptables` programs from, and only from
 /// there: the IPv4 restore and save, then the IPv6 restore and save.
-pub const IPTABLES_PATHS: [&str; 4] = [
+pub(crate) const IPTABLES_PATHS: [&str; 4] = [
     "/usr/sbin/iptables-restore",
     "/usr/sbin/iptables-save",
     "/usr/sbin/ip6tables-restore",
