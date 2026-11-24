@@ -82,6 +82,20 @@ pub const SETTINGS_VERSION: u16 = 1;
 /// The owner's plugin settings by field name, each listed as `plugins.<name>` when any
 /// of them is set in a file. The listing and the listed-settings count both read it.
 const PLUGIN_SETTINGS: [&str; 2] = ["when_turned_off", "essential_unlocked"];
+/// The settings an effective config always lists: the top-level ones and every routing one.
+const BASE_SETTINGS: usize = 17;
+/// The knowledge settings, listed when any of them is set in a file.
+const KNOWLEDGE_SETTINGS: usize = 8;
+
+/// The most settings an effective config lists: every group shown, plus `model_access`
+/// when present. Input: the settings. Output: the bound the config and the store's owner
+/// settings reads assert.
+pub(crate) fn listed_settings_max(settings: &Settings) -> usize {
+    BASE_SETTINGS
+        + KNOWLEDGE_SETTINGS
+        + PLUGIN_SETTINGS.len()
+        + usize::from(settings.model_access.is_some())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -533,7 +547,8 @@ fn resolve_files(global: ConfigFile, project: ConfigFile) -> Result<EffectiveCon
     assert!(origins.len() <= values.len());
     assert_eq!(
         values.len(),
-        17 + 8 * usize::from(knowledge)
+        BASE_SETTINGS
+            + KNOWLEDGE_SETTINGS * usize::from(knowledge)
             + PLUGIN_SETTINGS.len() * usize::from(plugins)
             + usize::from(model_access)
     );
@@ -1266,7 +1281,7 @@ fn from_settings(
     let id = ConfigId::new(format!("{:x}", Sha256::digest(bytes)))
         .map_err(|e| ConfigError(e.to_string()))?;
     assert_eq!(id.as_str().len(), 64);
-    assert!(descriptors.len() <= 27 + usize::from(settings.model_access.is_some()));
+    assert!(descriptors.len() <= listed_settings_max(&settings));
     Ok(EffectiveConfig {
         id,
         settings,
