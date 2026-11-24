@@ -1,5 +1,6 @@
 use crate::hidden_paths::HIDDEN_MAX;
 use crate::lines::HELD_NOT_PUT_BACK_EXIT;
+use crate::linux::places::{BOUND, Bound, bound_entry};
 use crate::paths::clean_absolute;
 use crate::ports::{
     KEPT_PORTS_MAX, OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
@@ -186,6 +187,7 @@ pub enum HelperRequest {
         program: PathBuf,
         args: Vec<OsString>,
         cut: Option<Vec<PathBuf>>,
+        bound: Vec<Bound>,
     },
     Nest {
         bwrap: PathBuf,
@@ -251,6 +253,7 @@ impl HelperRequest {
         let mut probe = false;
         let mut filter = false;
         let mut nest = false;
+        let mut bound = Vec::new();
         let mut rest = args.into_iter();
         while let Some(flag) = rest.next() {
             if guard_flag(&mut policy.guard, &flag, &mut rest)? {
@@ -259,6 +262,13 @@ impl HelperRequest {
             match flag.to_str() {
                 Some(PROBE) => probe = true,
                 Some(FILTER_SOCKETS) => filter = true,
+                Some(BOUND) if filter => {
+                    if bound.len() == HELPER_PATHS_MAX {
+                        return Err(format!("more than {HELPER_PATHS_MAX} bound roots"));
+                    }
+                    let root = absolute(rest.next())?;
+                    bound.push(bound_entry(root, &mut rest)?);
+                }
                 Some(NEST) => nest = true,
                 Some(NESTED) => policy.nested = true,
                 Some(LIMIT_NETWORK) => policy.limit_network = true,
@@ -287,6 +297,7 @@ impl HelperRequest {
                         program,
                         args: rest.collect(),
                         cut,
+                        bound,
                     });
                 }
                 Some("--") if !probe => return run_request(policy, rest),
@@ -681,8 +692,13 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         return ExitCode::from(3);
     }
     let (policy, launch) = match request {
-        HelperRequest::Filter { program, args, cut } => {
-            return filtered(&program, args, cut.as_deref());
+        HelperRequest::Filter {
+            program,
+            args,
+            cut,
+            bound,
+        } => {
+            return filtered(&program, args, cut.as_deref(), &bound);
         }
         HelperRequest::Nest { bwrap, args } => {
             return nest(&bwrap, &args, bridge.as_ref(), &routes);

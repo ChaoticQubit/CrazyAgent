@@ -199,7 +199,7 @@ pub(super) fn cuts(backend: &LinuxBackend) -> bool {
                 hidden: Vec::new(),
             };
             let closed = SandboxNetwork::Only(Vec::new());
-            let mut probe = bwrap_command(bwrap, helper, &bare, Path::new("/"), &closed);
+            let mut probe = bwrap_command(bwrap, helper, &bare, &[], Path::new("/"), &closed);
             probe.args([PRIVATE_MOUNTS, "--", "/bin/true"]);
             passes(&mut probe)
         }

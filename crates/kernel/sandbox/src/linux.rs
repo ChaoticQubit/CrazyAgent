@@ -4,3 +4,6 @@ pub mod helper;
 /// The Linux sandbox as the engine launches it: the backend, the launch command, the
 /// helper lookup and the host read.
 pub mod launch;
+/// How the engine and the helper open a granted folder part by part without following a
+/// link, and which fixed system places keep following theirs.
+pub mod places;
