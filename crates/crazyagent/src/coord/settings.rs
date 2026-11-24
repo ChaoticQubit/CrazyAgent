@@ -438,9 +438,36 @@ pub fn resource_name_valid(name: &str) -> bool {
             .all(|b| plain(b) || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Whether a team agent working in its own clone reads, at its next task, which of its edits
+/// it left uncommitted and did not land: On, the default, adds one line naming them; Off adds
+/// none. The owner is told in the project's notes either way. It is advice, never a guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UncommittedReminder {
+    #[default]
+    On,
+    Off,
+}
+
+named!(UncommittedReminder { On => "on", Off => "off" });
+
+impl UncommittedReminder {
+    /// Every option, in the order settings list them.
+    pub const ALL: [Self; 2] = [Self::On, Self::Off];
+
+    /// The words settings show for this option. Takes the option. Returns its fixed text.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Off => "Off",
+        }
+    }
+}
+
 /// A project's coordination settings. Every option is the owner's choice; the defaults
 /// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Fullscreen terminal display, the
-/// Task-start reminder On, a heavy lane of One and no shared resources. A row stored before
+/// Task-start reminder On, a heavy lane of One, no shared resources and the Uncommitted edits
+/// reminder On. A row stored before
 /// DEC-141 names the display `claude_display`; it reads as `terminal_display`, so the
 /// owner's choice is kept. A row stored before F28 reads with the lane defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +487,8 @@ pub struct CoordSettings {
     pub heavy_lane: HeavyLane,
     #[serde(default)]
     pub shared_resources: Vec<SharedResource>,
+    #[serde(default)]
+    pub uncommitted_reminder: UncommittedReminder,
 }
 
 impl Default for CoordSettings {
@@ -474,6 +503,7 @@ impl Default for CoordSettings {
             task_start: TaskStart::On,
             heavy_lane: HeavyLane::One,
             shared_resources: Vec::new(),
+            uncommitted_reminder: UncommittedReminder::On,
         }
     }
 }
