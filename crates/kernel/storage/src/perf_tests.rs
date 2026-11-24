@@ -1,9 +1,9 @@
 use std::hint::black_box;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::migrations::{backup_time, stamp, stamp_time};
 use crate::namespace::Namespace;
-use crate::perf_kit::{Row, SAMPLES, time};
+use crate::perf_kit::{Row, SAMPLES, SAMPLES_MIN, line, time};
 use crate::state_log::replay::{Logged, chunk};
 use crate::state_log::{
     AggregateName, Chunk, Clock, Draft, SNAPSHOT_CHUNK, check, read_chunk, snapshot_bodies,
@@ -11,6 +11,8 @@ use crate::state_log::{
 
 #[cfg(unix)]
 mod root_files;
+#[cfg(unix)]
+mod sized;
 mod store;
 
 const BATCH: usize = 1000;
@@ -33,6 +35,26 @@ pub(crate) fn row(name: &'static str, batch: usize) -> Row {
         name,
         batch,
     }
+}
+
+/// The nanoseconds since a start. Input: the start. Output: the span.
+pub(crate) fn nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).expect("span fits u64")
+}
+
+/// Times a call whose fixture each sample sets up again: `one` sets it up, times one call
+/// and returns that span, a tenth of the samples running first as warm-up. Prints the PERF
+/// line. Inputs: the row (batch 1), the samples and the sample. Output: none.
+pub(crate) fn sampled(row: &Row, samples: usize, mut one: impl FnMut() -> u64) {
+    assert!(samples >= SAMPLES_MIN);
+    assert_eq!(row.batch, 1);
+    for _ in 0..samples / 10 {
+        one();
+    }
+    let mut spans: Vec<u64> = (0..samples).map(|_| one()).collect();
+    assert_eq!(spans.len(), samples);
+    spans.sort_unstable();
+    println!("{}", line(row, &spans));
 }
 
 /// The time the pure rows format and read: 2026-11-24 08:25:00.123 UTC. Output: the time.

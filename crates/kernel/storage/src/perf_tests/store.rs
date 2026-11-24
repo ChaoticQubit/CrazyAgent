@@ -1,12 +1,13 @@
 use std::hint::black_box;
 use std::path::Path;
+use std::time::Instant;
 
 use rusqlite::{Connection, Transaction};
 
-use super::{AT_MS, chunks, row};
+use super::{AT_MS, chunks, nanos, row, sampled};
 use crate::events::{logged, persist};
 use crate::namespace::{self, Namespace, PLUGINS};
-use crate::perf_kit::{SAMPLES, time};
+use crate::perf_kit::{Row, SAMPLES, time};
 use crate::state_log::compact::{Compaction, compact};
 use crate::state_log::replay::{Logged, checkpoint, redact, redact_matching, replay, rows};
 use crate::state_log::{
@@ -108,23 +109,63 @@ fn owner<'a, 'c>(tx: &'a Transaction<'c>, before: u64) -> Appender<'a, 'c> {
     Appender::owner(tx, before + 1, passing(), known).expect("owner")
 }
 
-/// Runs one write in a transaction and rolls it back, so every sample starts from the same
-/// store; the begin and the rollback are inside the timed span. Inputs: the connection and
-/// the write. Output: none.
-fn rolled_back(db: &mut Connection, write: impl FnOnce(&Transaction<'_>)) {
-    let tx = db.transaction().expect("tx");
-    write(&tx);
-    tx.rollback().expect("rollback");
+/// The write the checkpoint row commits before each call, outside the timed span, so the
+/// WAL holds one changed page as after an owner delete. The 2.4.4 twin runs the same text.
+const WAL_WRITE: &str =
+    "UPDATE events SET body = body WHERE cursor = (SELECT MAX(cursor) FROM events)";
+
+/// Times one call per sample in a transaction rolled back after it, so every sample starts
+/// from the same store: the begin, `prepare` and the rollback run outside the timed span.
+/// Inputs: the row (batch 1), the connection, what to do before the call and the call.
+/// Output: none; prints the PERF line.
+fn time_tx<T>(
+    row: &Row,
+    db: &mut Connection,
+    mut prepare: impl FnMut(&Transaction<'_>) -> T,
+    mut call: impl FnMut(&Transaction<'_>, T),
+) {
+    sampled(row, SAMPLES, || {
+        let tx = db.transaction().expect("tx");
+        let input = prepare(&tx);
+        let started = Instant::now();
+        call(&tx, input);
+        let spent = nanos(started);
+        tx.rollback().expect("rollback");
+        spent
+    });
+}
+
+/// Times one appender call per sample: the begin, the appender's open through
+/// [`Appender::own`], `prepare` and the rollback run outside the timed span. Inputs: the
+/// row (batch 1), the connection, what to build before the call and the call. Output: none;
+/// prints the PERF line.
+fn time_appender<T>(
+    row: &Row,
+    db: &mut Connection,
+    mut prepare: impl FnMut() -> T,
+    mut call: impl FnMut(&mut Appender<'_, '_>, T),
+) {
+    sampled(row, SAMPLES, || {
+        let tx = db.transaction().expect("tx");
+        let mut appender = own(&tx);
+        let input = prepare();
+        let started = Instant::now();
+        call(&mut appender, input);
+        let spent = nanos(started);
+        drop(appender);
+        tx.rollback().expect("rollback");
+        spent
+    });
 }
 
 /// Times every storage call on one engine store: the watch's events, plugin records, the
 /// log's appender, snapshot check, compaction, replay, redaction and the WAL checkpoint.
-/// Each write row runs in a transaction rolled back per call, begin and rollback inside the
-/// timed span, and its name ends `.rolled_back`; `tx.begin_rollback` times that pair alone.
-/// The appender rows open their appender with `own` inside the span, as `Appender.own`
-/// times; `Appender.owner` runs `events::persist` first, as an owner request does.
-/// `replay.rows` is a test-only call, timed because it is public. Prints one PERF line per
-/// call.
+/// Each write runs in a transaction rolled back after it, with the begin, any appender open
+/// and the rollback outside the timed span. `Appender.owner` has `events::persist` run
+/// before it outside the span, as an owner request moves the revision first. Compaction is
+/// timed on its two paths that write nothing: Off, the default, and On before the next run
+/// is due. `replay.rows` is a test-only call, timed because it is public. Prints one PERF
+/// line per call.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn storage_store_calls() {
@@ -214,11 +255,6 @@ fn storage_store_calls() {
     assert_eq!(rows(&db, "plugin_records").expect("rows").len(), RECORDS);
     assert!(checkpoint(&db));
 
-    time(&row("tx.begin_rollback", READ_BATCH), SAMPLES, || {
-        rolled_back(&mut db, |tx| {
-            black_box(tx);
-        });
-    });
     {
         let tx = db.transaction().expect("tx");
         time(&row("events.logged", READ_BATCH), SAMPLES, || {
@@ -237,166 +273,12 @@ fn storage_store_calls() {
         drop(appender);
         tx.rollback().expect("rollback");
     }
-    time(
-        &row("events.persist.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                persist(tx, now + 1, EVENT_BODY, EVENTS_KEPT).expect("persist");
-            });
-        },
-    );
     time(&row("namespace.initialize", READ_BATCH), SAMPLES, || {
         let _ = black_box(namespace::initialize(black_box(&db)));
     });
     time(&row("state_log.ensure", READ_BATCH), SAMPLES, || {
         let _ = black_box(ensure(black_box(&db)));
     });
-    time(
-        &row("state_log.Appender.owner.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                black_box(owner(tx, now));
-            });
-        },
-    );
-    time(
-        &row("state_log.Appender.own.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                black_box(own(tx));
-            });
-        },
-    );
-    time(
-        &row("state_log.Appender.project.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                let appender = own(tx);
-                let _ = black_box(appender.project(|_| Ok::<_, crate::StorageError>(())));
-            });
-        },
-    );
-    time(
-        &row("state_log.Appender.append.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                let mut appender = own(tx);
-                black_box(appender.append(black_box(&draft)).expect("append"));
-            });
-        },
-    );
-    time(
-        &row("state_log.Appender.snapshot.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                let mut appender = own(tx);
-                black_box(
-                    appender
-                        .snapshot(PLUGINS, AT_MS, chunks())
-                        .expect("snapshot"),
-                );
-            });
-        },
-    );
-    time(
-        &row("namespace.put.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                let mut appender = own(tx);
-                namespace::put(&mut appender, &ns, &key(1), &value, AT_MS).expect("put");
-            });
-        },
-    );
-    time(
-        &row("namespace.delete.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                let mut appender = own(tx);
-                black_box(namespace::delete(&mut appender, &ns, &key(2), AT_MS).expect("delete"));
-            });
-        },
-    );
-    time(
-        &row("namespace.apply.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                namespace::apply(tx, black_box(&event)).expect("apply");
-            });
-        },
-    );
-    time(
-        &row("state_log.compact.compact.off.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                let mut appender = own(tx);
-                let _ = black_box(compact(
-                    &mut appender,
-                    Compaction::Off,
-                    PLUGINS,
-                    AT_MS,
-                    |_| Ok::<_, crate::StorageError>(chunks()),
-                ));
-            });
-        },
-    );
-    time(
-        &row(
-            "state_log.compact.compact.on_not_due.rolled_back",
-            WRITE_BATCH,
-        ),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                let mut appender = own(tx);
-                let _ = black_box(compact(
-                    &mut appender,
-                    Compaction::On,
-                    PLUGINS,
-                    AT_MS,
-                    |_| Ok::<_, crate::StorageError>(chunks()),
-                ));
-            });
-        },
-    );
-    time(
-        &row("state_log.replay.redact.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                redact(tx, newest_put, &passing()).expect("redact");
-            });
-        },
-    );
-    time(
-        &row("state_log.replay.redact_matching.rolled_back", WRITE_BATCH),
-        SAMPLES,
-        || {
-            rolled_back(&mut db, |tx| {
-                black_box(
-                    redact_matching(
-                        tx,
-                        &[PLUGINS],
-                        Some(&["RecordPut"]),
-                        "key",
-                        &key(3),
-                        0,
-                        &passing(),
-                    )
-                    .expect("redact matching"),
-                );
-            });
-        },
-    );
     time(
         &row("state_log.verify_snapshot", WRITE_BATCH),
         SAMPLES,
@@ -417,11 +299,128 @@ fn storage_store_calls() {
     time(&row("state_log.replay.rows", WRITE_BATCH), SAMPLES, || {
         let _ = black_box(rows(black_box(&db), "plugin_records"));
     });
-    time(
+    time_tx(
+        &row("events.persist", WRITE_BATCH),
+        &mut db,
+        |_| (),
+        |tx, ()| persist(tx, now + 1, EVENT_BODY, EVENTS_KEPT).expect("persist"),
+    );
+    time_tx(
+        &row("state_log.Appender.owner", WRITE_BATCH),
+        &mut db,
+        |tx| {
+            persist(tx, now + 1, EVENT_BODY, EVENTS_KEPT).expect("persist");
+            passing()
+        },
+        |tx, fence| {
+            black_box(Appender::owner(tx, now + 1, fence, known).expect("owner"));
+        },
+    );
+    time_tx(
+        &row("state_log.Appender.own", WRITE_BATCH),
+        &mut db,
+        |_| (),
+        |tx, ()| {
+            black_box(own(tx));
+        },
+    );
+    time_appender(
+        &row("state_log.Appender.project", WRITE_BATCH),
+        &mut db,
+        || (),
+        |appender, ()| {
+            let _ = black_box(appender.project(|_| Ok::<_, crate::StorageError>(())));
+        },
+    );
+    time_appender(
+        &row("state_log.Appender.append", WRITE_BATCH),
+        &mut db,
+        || (),
+        |appender, ()| {
+            black_box(appender.append(black_box(&draft)).expect("append"));
+        },
+    );
+    time_appender(
+        &row("state_log.Appender.snapshot", WRITE_BATCH),
+        &mut db,
+        chunks,
+        |appender, run| {
+            black_box(appender.snapshot(PLUGINS, AT_MS, run).expect("snapshot"));
+        },
+    );
+    time_appender(
+        &row("namespace.put", WRITE_BATCH),
+        &mut db,
+        || (),
+        |appender, ()| namespace::put(appender, &ns, &key(1), &value, AT_MS).expect("put"),
+    );
+    time_appender(
+        &row("namespace.delete", WRITE_BATCH),
+        &mut db,
+        || (),
+        |appender, ()| {
+            black_box(namespace::delete(appender, &ns, &key(2), AT_MS).expect("delete"));
+        },
+    );
+    time_appender(
+        &row("state_log.compact.compact.off", WRITE_BATCH),
+        &mut db,
+        || (),
+        |appender, ()| {
+            let _ = black_box(compact(appender, Compaction::Off, PLUGINS, AT_MS, |_| {
+                Ok::<_, crate::StorageError>(chunks())
+            }));
+        },
+    );
+    time_appender(
+        &row("state_log.compact.compact.on_not_due", WRITE_BATCH),
+        &mut db,
+        || (),
+        |appender, ()| {
+            let _ = black_box(compact(appender, Compaction::On, PLUGINS, AT_MS, |_| {
+                Ok::<_, crate::StorageError>(chunks())
+            }));
+        },
+    );
+    time_tx(
+        &row("namespace.apply", WRITE_BATCH),
+        &mut db,
+        |_| (),
+        |tx, ()| namespace::apply(tx, black_box(&event)).expect("apply"),
+    );
+    time_tx(
+        &row("state_log.replay.redact", WRITE_BATCH),
+        &mut db,
+        |_| passing(),
+        |tx, fence| redact(tx, newest_put, &fence).expect("redact"),
+    );
+    time_tx(
+        &row("state_log.replay.redact_matching", WRITE_BATCH),
+        &mut db,
+        |_| passing(),
+        |tx, fence| {
+            black_box(
+                redact_matching(
+                    tx,
+                    &[PLUGINS],
+                    Some(&["RecordPut"]),
+                    "key",
+                    &key(3),
+                    0,
+                    &fence,
+                )
+                .expect("redact matching"),
+            );
+        },
+    );
+    sampled(
         &row("state_log.replay.checkpoint", WRITE_BATCH),
         SAMPLES,
         || {
+            db.execute(WAL_WRITE, []).expect("wal write");
+            let started = Instant::now();
             black_box(checkpoint(black_box(&db)));
+            nanos(started)
         },
     );
 }
