@@ -80,7 +80,7 @@ pub struct Launch<'a> {
 /// outside the project folder, an unsafe root or Full access, which only the IDE server's own
 /// shell runs.
 #[cfg(target_os = "macos")]
-pub fn command(hooks: &ProfileHooks, launch: &Launch<'_>) -> Result<Command, SandboxError> {
+pub fn command(hooks: &'static ProfileHooks, launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use crate::error::invalid;
     use crate::paths::{canonical, clean_absolute};
     use crate::profile::ProjectSandbox;
@@ -166,7 +166,10 @@ pub fn command(hooks: &ProfileHooks, launch: &Launch<'_>) -> Result<Command, San
 /// Refuses the Sandboxed terminal where no sandbox is qualified for it, before anything
 /// is written. Takes the launch, unused. Returns `Unavailable` with [`UNAVAILABLE`].
 #[cfg(not(target_os = "macos"))]
-pub fn command(_hooks: &ProfileHooks, _launch: &Launch<'_>) -> Result<Command, SandboxError> {
+pub fn command(
+    _hooks: &'static ProfileHooks,
+    _launch: &Launch<'_>,
+) -> Result<Command, SandboxError> {
     Err(SandboxError::Unavailable(UNAVAILABLE.into()))
 }
 
@@ -176,7 +179,7 @@ pub fn command(_hooks: &ProfileHooks, _launch: &Launch<'_>) -> Result<Command, S
 /// commit. Inputs: the launch and the level the project is at, which picks those words.
 /// Output: the pane command, or [`command`]'s refusal, or `Invalid` for a part that is not UTF-8.
 pub fn interactive(
-    hooks: &ProfileHooks,
+    hooks: &'static ProfileHooks,
     launch: &Launch<'_>,
     project_access: AgentAccess,
 ) -> Result<PaneCommand, SandboxError> {
