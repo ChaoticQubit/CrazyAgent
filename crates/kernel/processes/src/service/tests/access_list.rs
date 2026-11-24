@@ -125,7 +125,7 @@ fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
 #[test]
 fn a_listing_of_several_entries_is_read_block_by_block() {
     let me = Some("me");
-    let line = |name: &str| format!("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
+    let line = |name: &str| format!("      7 drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
     let open = " 0: group:staff allow add_file,delete_child\n";
     let closed = " 0: group:everyone deny delete\n";
     let entries = ["/Volumes/My /c", "/c", "/Users/me/bin", "/Users/me"];
@@ -137,16 +137,28 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         line("/c")
     );
     assert_eq!(
-        acl::listed_shared_all(&text, &entries, me),
+        acl::listed_shared_all(&text, &entries, &[7; 4], me, &|_| Some(false)),
         vec![Some(false), Some(false), Some(true), Some(false)]
     );
     assert_eq!(
-        acl::listed_shared_all(&line("/Users/me"), &["/Users/me", "/gone"], me),
+        acl::listed_shared_all(
+            &line("/Users/me"),
+            &["/Users/me", "/gone"],
+            &[7; 2],
+            me,
+            &|_| Some(false)
+        ),
         vec![Some(false), None],
         "an entry the listing left out"
     );
     assert_eq!(
-        acl::listed_shared_all(&format!("{0}{0}", line("/a")), &["/a"], me),
+        acl::listed_shared_all(
+            &format!("{0}{0}", line("/a")),
+            &["/a"],
+            &[7; 1],
+            me,
+            &|_| Some(false)
+        ),
         vec![None],
         "an entry listed twice"
     );
@@ -154,7 +166,9 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         acl::listed_shared_all(
             &format!("{} 0: group:staff\n{}{open}", line("/a"), line("/b")),
             &["/a", "/b"],
-            me
+            &[7; 2],
+            me,
+            &|_| Some(false)
         ),
         vec![None, Some(true)],
         "a block that does not read fails alone"
@@ -165,11 +179,76 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         String::new(),
     ] {
         assert_eq!(
-            acl::listed_shared_all(&whole, &["/a", "/b"], me),
+            acl::listed_shared_all(&whole, &["/a", "/b"], &[7; 2], me, &|_| Some(false)),
             vec![None, None],
             "{whole:?}"
         );
     }
+}
+
+/// An entry whose block printed no access-list lines takes the direct read's answer, as
+/// `ls` prints a list it could not read exactly as no list; an entry whose block printed
+/// lines is read from them and never read again.
+#[cfg(unix)]
+#[test]
+fn an_entry_listed_with_no_access_lines_takes_the_direct_read() {
+    let me = Some("me");
+    let line = |name: &str| format!("      7 drwxr-xr-x  2 me  staff  64 Nov 14 03:33 {name}\n");
+    let text = format!("{}{} 0: user:me allow write\n", line("/a"), line("/b"));
+    let unreadable = |index: usize| {
+        assert_eq!(index, 0, "an entry with access lines was read again");
+        None
+    };
+    assert_eq!(
+        acl::listed_shared_all(&text, &["/a", "/b"], &[7; 2], me, &unreadable),
+        vec![None, Some(false)]
+    );
+}
+
+/// A direct read that finds no list confirms none; one that finds a list `ls` did not print,
+/// or cannot read, is not known, so the entry counts as changeable.
+#[cfg(unix)]
+#[test]
+fn a_direct_read_confirms_only_a_list_that_is_not_there() {
+    assert_eq!(acl::confirmed(Ok(false)), Some(false));
+    assert_eq!(acl::confirmed(Ok(true)), None);
+    assert_eq!(
+        acl::confirmed(Err(std::io::Error::from_raw_os_error(13))),
+        None
+    );
+}
+
+/// Each block's first field is the inode `ls -i` read, padded to one width; a block whose
+/// inode is not the one the entry was stamped with, or does not parse, is about another
+/// file, so its entry reads none and is never read again.
+#[cfg(unix)]
+#[test]
+fn a_block_whose_inode_is_not_the_stamped_one_reads_none() {
+    let me = Some("me");
+    let text = concat!(
+        "        2 drwxr-xr-x  2 me  staff  64 Nov 14 03:33 /a\n",
+        "609424587 -rw-r--r--  1 me  staff   0 Nov 14 03:33 /b\n",
+        " 0: group:everyone allow write\n",
+    );
+    let entries = ["/a", "/b"];
+    let never = |index: usize| -> Option<bool> { panic!("entry {index} was read again") };
+    assert_eq!(
+        acl::listed_shared_all(text, &entries, &[2, 609424587], me, &|_| Some(false)),
+        vec![Some(false), Some(true)]
+    );
+    assert_eq!(
+        acl::listed_shared_all(text, &entries, &[3, 609424587], me, &never),
+        vec![None, Some(true)]
+    );
+    assert_eq!(
+        acl::listed_shared_all(text, &entries, &[2, 609424588], me, &|_| Some(false)),
+        vec![Some(false), None]
+    );
+    let bare = "drwxr-xr-x  2 me  staff  64 Nov 14 03:33 /a\n";
+    assert_eq!(
+        acl::listed_shared_all(bare, &["/a"], &[2], me, &never),
+        vec![None]
+    );
 }
 
 /// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others
@@ -312,6 +391,30 @@ fn early_in_a_second() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     panic!("the clock never read the first half of a second");
+}
+
+/// An answer is kept only when its entry settled before the listing, a second `lstat` after
+/// the listing finds the same device, inode and change time, and the answer came from the
+/// listing's own lines, never from the direct read.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_answer_is_kept_only_for_the_file_its_stamp_names() {
+    let stamp = (1, 2, 100, 0);
+    assert!(acl::keep(&stamp, Some(&stamp), false, 101));
+    assert!(!acl::keep(&stamp, Some(&stamp), false, 100), "not settled");
+    assert!(!acl::keep(&stamp, None, false, 101), "no second lstat");
+    for moved in [
+        (9, 2, 100, 0),
+        (1, 9, 100, 0),
+        (1, 2, 101, 0),
+        (1, 2, 100, 1),
+    ] {
+        assert!(!acl::keep(&stamp, Some(&moved), false, 101), "{moved:?}");
+    }
+    assert!(
+        !acl::keep(&stamp, Some(&stamp), true, 101),
+        "the direct read"
+    );
 }
 
 /// HFS-CTIME: an access answer is kept only when its listing started in a later second than
