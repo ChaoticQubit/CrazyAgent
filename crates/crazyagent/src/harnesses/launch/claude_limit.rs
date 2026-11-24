@@ -18,6 +18,14 @@ pub fn rate_limited(message: &str) -> bool {
         || claude_limit_line(message.trim_start())
 }
 
+/// The turn error a provider's final error message makes, rate limited when the message
+/// names a limit ([`rate_limited`]). Takes the error text. Returns the event.
+pub(super) fn turn_error(message: &str) -> super::LaunchEvent {
+    super::LaunchEvent::TurnError {
+        rate_limited: rate_limited(message),
+    }
+}
+
 /// Tells whether a line is one of Claude Code's own limit lines, by the check Claude
 /// Code 2.1.309 ships (`Bii`): one of its limit prefixes, or a model family, an optional
 /// name of 1 to 40 characters without a middle dot or line break, then

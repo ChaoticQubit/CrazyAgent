@@ -1929,11 +1929,11 @@ impl Driver {
                             );
                             events.push(LaunchEvent::ApprovalDenied);
                         }
-                        CodexEvent::TurnError { message, .. } => {
-                            events.push(LaunchEvent::TurnError {
-                                rate_limited: rate_limited(&message),
-                            });
-                        }
+                        CodexEvent::TurnError {
+                            message,
+                            will_retry: false,
+                            ..
+                        } => events.push(claude_limit::turn_error(&message)),
                         CodexEvent::RequestFailed {
                             method: "turn/interrupt",
                             ..
