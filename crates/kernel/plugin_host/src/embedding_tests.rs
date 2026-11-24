@@ -705,6 +705,69 @@ fn a_title_or_description_with_a_bidi_or_zero_width_mark_is_refused() {
     }
 }
 
+/// Asserts that a title holding any mark of the range is refused on `title`. Input: the
+/// inclusive range of marks.
+fn refuses_title_marks(marks: core::ops::RangeInclusive<char>) {
+    let old = "title = \"Acme embeddings\"";
+    for mark in marks {
+        let marked = format!("title = \"{mark}Acme embeddings\"");
+        assert_eq!(
+            refused(&with(old, &marked)),
+            (
+                "app_plugin_field_invalid".to_owned(),
+                Some("title".to_owned())
+            ),
+            "title U+{:04X}",
+            u32::from(mark)
+        );
+    }
+}
+
+#[test]
+fn a_title_with_a_left_to_right_mark_is_refused() {
+    refuses_title_marks('\u{200E}'..='\u{200E}');
+}
+
+#[test]
+fn a_title_with_a_right_to_left_mark_is_refused() {
+    refuses_title_marks('\u{200F}'..='\u{200F}');
+}
+
+#[test]
+fn a_title_with_an_arabic_letter_mark_is_refused() {
+    refuses_title_marks('\u{061C}'..='\u{061C}');
+}
+
+#[test]
+fn a_title_with_a_line_separator_is_refused() {
+    refuses_title_marks('\u{2028}'..='\u{2028}');
+}
+
+#[test]
+fn a_title_with_a_paragraph_separator_is_refused() {
+    refuses_title_marks('\u{2029}'..='\u{2029}');
+}
+
+#[test]
+fn a_title_with_a_soft_hyphen_is_refused() {
+    refuses_title_marks('\u{00AD}'..='\u{00AD}');
+}
+
+#[test]
+fn a_title_with_a_mongolian_vowel_separator_is_refused() {
+    refuses_title_marks('\u{180E}'..='\u{180E}');
+}
+
+#[test]
+fn a_title_with_an_interlinear_annotation_mark_is_refused() {
+    refuses_title_marks('\u{FFF9}'..='\u{FFFB}');
+}
+
+#[test]
+fn a_title_with_a_tag_character_is_refused() {
+    refuses_title_marks('\u{E0000}'..='\u{E007F}');
+}
+
 /// An embedding plugin asks the kernel for nothing, since the engine's HTTP
 /// runner makes its call, so a permission is refused.
 #[test]
