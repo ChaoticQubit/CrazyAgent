@@ -51,7 +51,7 @@ mod stop_race_tests;
 
 const PROJECT: &str = "team-panes";
 
-const ENDPOINT: &str = "local-a";
+pub(super) const ENDPOINT: &str = "local-a";
 
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Plan the page"}}"#;
 
@@ -63,17 +63,17 @@ fn reference(value: &str) -> CredentialRef {
     CredentialRef::new(value).unwrap()
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     _root: tempfile::TempDir,
     base: PathBuf,
     tmux: PathBuf,
-    connection: Connection,
+    pub(super) connection: Connection,
     setup: StoredSetup,
     access: ModelAccess,
 }
 
 impl Fixture {
-    fn new(subs: u8) -> Self {
+    pub(super) fn new(subs: u8) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-team-panes-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -170,7 +170,7 @@ impl Fixture {
         }
     }
 
-    fn host(&self) -> Arc<dyn Host> {
+    pub(super) fn host(&self) -> Arc<dyn Host> {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
             &self.base.join(FOLDER),
@@ -289,7 +289,7 @@ impl Fixture {
             .any(|message| message.state == MessageState::Note && message.text == text)
     }
 
-    fn until(&self, team: &mut TeamRuntime, what: &str, done: impl Fn(&Self) -> bool) {
+    pub(super) fn until(&self, team: &mut TeamRuntime, what: &str, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + WAIT;
         while !done(self) {
             assert!(Instant::now() < deadline, "{what}: {:#?}", self.status());
@@ -8560,7 +8560,7 @@ done
 /// under `limits`. Inputs: the fixture, its terminal host, the script and the limits.
 /// Output: the runtime.
 #[cfg(target_os = "macos")]
-fn limited_runtime(
+pub(super) fn limited_runtime(
     fixture: &Fixture,
     host: &Arc<dyn Host>,
     script: &str,
@@ -8586,7 +8586,7 @@ fn limited_runtime(
 
 /// Applies owner team actions in one transaction, as the owner socket does.
 #[cfg(target_os = "macos")]
-fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
+pub(super) fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
     let tx = connection.transaction().unwrap();
     for action in actions {
@@ -8600,7 +8600,7 @@ fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
 }
 
 #[cfg(target_os = "macos")]
-fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
+pub(super) fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
     crate::team::TeamAction::Delegate {
         project_id: fixture.setup.project_id.clone(),
         harness: Some("codex".into()),
