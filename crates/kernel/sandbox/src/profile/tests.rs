@@ -550,12 +550,9 @@ fn a_link_swapped_in_after_the_build_still_keeps_an_engine_secret_out() {
     let profile = root.join("agent.sb");
     let read = |path: &Path| {
         sandbox.install(&profile).unwrap();
-        sandbox
-            .command(&profile, Path::new("/bin/cat"))
-            .arg(path)
-            .current_dir(&home)
-            .output()
-            .unwrap()
+        let mut command = sandbox.command(&profile, Path::new("/bin/cat"));
+        command.arg(path).current_dir(&home);
+        kernel_processes::spawn_gate::collected(&mut command).unwrap()
     };
     let refused = |path: &Path| {
         assert_eq!(fs::read(path).unwrap(), b"engine secret\n");
