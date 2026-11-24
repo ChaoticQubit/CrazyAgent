@@ -182,15 +182,23 @@ fn pinned(value: &toml::Value) -> bool {
     }
 }
 
-/// The `cargo tree` listing of one package of the workspace at `root`, on the host target,
+/// The `cargo tree` listing of one package of the workspace at `root`, on every target,
 /// one crate per line with no prefix, read offline from the lockfile as it stands. Inputs:
 /// the workspace folder and the package name. Output: the listing, or the error naming why
 /// cargo gave none.
 fn path_tree(root: &Path, package: &str) -> std::io::Result<String> {
     let mut tree = Command::new(env!("CARGO"));
-    tree.args(["tree", "-p", package, "-e", "normal,build"])
-        .args(["--prefix", "none", "--offline", "--locked"])
-        .current_dir(root);
+    tree.args([
+        "tree",
+        "-p",
+        package,
+        "-e",
+        "normal,build",
+        "--target",
+        "all",
+    ])
+    .args(["--prefix", "none", "--offline", "--locked"])
+    .current_dir(root);
     let output = kernel_processes::spawn_gate::collected(&mut tree)?;
     if !output.status.success() {
         return Err(std::io::Error::other(
@@ -220,7 +228,7 @@ fn outside(listed: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `cargo tree` for kernel/sandbox on the host target, which the batch runs on each farm
+/// `cargo tree` for kernel/sandbox on every target, which the batch runs on each farm
 /// runner, names only the allowlisted path crates (kernel common, processes, security and
 /// storage and the platform crates), never the engine, the SDK or the bus gateway; and its
 /// own manifest pins every third-party crate exactly.
@@ -288,23 +296,22 @@ fn a_grouped_import_of_the_hub_is_found() {
     );
 }
 
-/// A build dependency on the SDK is listed and lies outside the allowlist, so the layering
-/// row reads build edges too; the workspace is a stand-in of two path crates in a temp
-/// folder, read offline.
-#[test]
-fn a_build_dependency_on_the_sdk_is_outside_the_allowlist() -> Result<(), Box<dyn std::error::Error>>
-{
+/// The [`path_tree`] listing of the kernel sandbox in a stand-in workspace of two path crates
+/// in a temp folder, locked and read offline, its manifest ending in `edge`, the table that
+/// names its dependency on the stand-in SDK. Input: that table. Output: the listing, or the
+/// error that kept cargo from giving one.
+fn sdk_fixture_tree(edge: &str) -> Result<String, Box<dyn std::error::Error>> {
     let folder = tempfile::tempdir()?;
     let root = folder.path();
+    let sandbox = format!(
+        "[package]\nname = \"crazyagent-kernel-sandbox\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n{edge}"
+    );
     for (path, text) in [
         (
             "Cargo.toml",
             "[workspace]\nmembers = [\"sandbox\", \"sdk\"]\nresolver = \"2\"\n",
         ),
-        (
-            "sandbox/Cargo.toml",
-            "[package]\nname = \"crazyagent-kernel-sandbox\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[build-dependencies]\ncrazyagent-sdk = { path = \"../sdk\" }\n",
-        ),
+        ("sandbox/Cargo.toml", sandbox.as_str()),
         ("sandbox/build.rs", "fn main() {}\n"),
         ("sandbox/src/lib.rs", ""),
         (
@@ -326,7 +333,30 @@ fn a_build_dependency_on_the_sdk_is_outside_the_allowlist() -> Result<(), Box<dy
         "{}",
         String::from_utf8_lossy(&locked.stderr)
     );
-    let listed = path_tree(root, "crazyagent-kernel-sandbox")?;
+    Ok(path_tree(root, "crazyagent-kernel-sandbox")?)
+}
+
+/// A build dependency on the SDK is listed and lies outside the allowlist, so the layering
+/// row reads build edges too.
+#[test]
+fn a_build_dependency_on_the_sdk_is_outside_the_allowlist() -> Result<(), Box<dyn std::error::Error>>
+{
+    let listed =
+        sdk_fixture_tree("[build-dependencies]\ncrazyagent-sdk = { path = \"../sdk\" }\n")?;
+    assert_eq!(outside(&listed), ["crazyagent-sdk"], "{listed}");
+    Ok(())
+}
+
+/// A dependency on the SDK under a platform other than the one the row runs on is listed and
+/// lies outside the allowlist, so the layering row reads every target's edges, not the host's
+/// only.
+#[test]
+fn a_dependency_on_the_sdk_under_another_platform_is_outside_the_allowlist()
+-> Result<(), Box<dyn std::error::Error>> {
+    let other = if cfg!(windows) { "unix" } else { "windows" };
+    let listed = sdk_fixture_tree(&format!(
+        "[target.'cfg({other})'.dependencies]\ncrazyagent-sdk = {{ path = \"../sdk\" }}\n"
+    ))?;
     assert_eq!(outside(&listed), ["crazyagent-sdk"], "{listed}");
     Ok(())
 }
