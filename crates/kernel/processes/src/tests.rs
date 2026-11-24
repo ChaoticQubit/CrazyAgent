@@ -311,6 +311,7 @@ fn finding_test_support_exports_exactly_the_named_items() {
         "at_roots",
         "below",
         "entry_at",
+        "forget_last_good",
         "kept",
         "last_run_finished",
         "log_own_node_passed_over",
