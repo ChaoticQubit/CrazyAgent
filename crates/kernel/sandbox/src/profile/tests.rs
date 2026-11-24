@@ -469,3 +469,58 @@ fn a_run_without_a_warden_reports_a_clean_stop() {
         Ok(())
     );
 }
+
+mod clone_confinement_tests {
+    use super::*;
+
+    /// Makes a clone folder with a real `.git` folder in the stand-in project state's
+    /// `worktrees/`, as `confine_to_clone` takes one. Input: the project. Output: the clone.
+    fn clone_in(project: &Path) -> PathBuf {
+        let clone = project
+            .join(".stand-in-state")
+            .join("worktrees")
+            .join("agent-1");
+        fs::create_dir_all(clone.join(".git")).unwrap();
+        canonical(&clone).unwrap()
+    }
+
+    /// A clone confinement is refused when the agent's temp folder is the project folder,
+    /// since that root would leave the whole project writable beside the clone.
+    #[test]
+    fn a_clone_confinement_is_refused_when_the_temp_folder_is_the_project() {
+        let (_scratch, [project, home, _tmp]) = folders();
+        let clone = clone_in(&project);
+        let sandbox =
+            ProjectSandbox::new(&STAND_IN, &project, &home, &project, SandboxNetwork::Open)
+                .unwrap();
+        assert!(matches!(
+            sandbox.confine_to_clone(&clone),
+            Err(SandboxError::Invalid(_))
+        ));
+    }
+
+    /// A root added after a clone confinement that holds the project, such as the project
+    /// folder as an extra worktree, is refused, while disjoint home and temp folders keep
+    /// the clone the only writable project path.
+    #[test]
+    fn a_root_added_after_a_clone_confinement_cannot_reach_the_project() {
+        let (_scratch, [project, home, tmp]) = folders();
+        let clone = clone_in(&project);
+        let confined = ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, SandboxNetwork::Open)
+            .unwrap()
+            .confine_to_clone(&clone)
+            .unwrap();
+        let outside: Vec<&PathBuf> = confined
+            .writable_roots()
+            .filter(|root| {
+                (root.starts_with(&project) || project.starts_with(root))
+                    && !root.starts_with(&clone)
+            })
+            .collect();
+        assert!(outside.is_empty(), "{outside:?}");
+        assert!(matches!(
+            confined.allow_worktree(&project),
+            Err(SandboxError::Invalid(_))
+        ));
+    }
+}
