@@ -1,9 +1,9 @@
-use crate::config::EffectiveConfig;
 use crate::engine::owner::native_auth as owner_auth;
 use crate::engine::owner::*;
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
+use crate::{config::EffectiveConfig, sandbox::linux_other_git};
 #[cfg(windows)]
 use crazyagent_win_sandbox::private;
 use rusqlite::OpenFlags;
@@ -3730,8 +3730,7 @@ fn project_other_git(
     drop(tx);
     let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
     let other_git = kernel_sandbox::policy::LevelView::other_git;
-    let folder = setup.map(|setup| setup.project_folder());
-    Ok(folder.is_none_or(|folder| other_git(&crate::sandbox::POLICY_HOOKS, host, &folder)))
+    Ok(setup.is_none_or(|setup| other_git(host, &setup.project_folder(), linux_other_git)))
 }
 
 fn owner_read(
@@ -3745,7 +3744,7 @@ fn owner_read(
         query,
         OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
     ) {
-        kernel_sandbox::policy::LevelView::refresh(&crate::sandbox::POLICY_HOOKS);
+        crate::sandbox::linux_host();
     }
     let other_git = match query {
         OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
@@ -3834,6 +3833,7 @@ fn owner_read(
                 .map_err(error)?
                 .view(
                     &crate::sandbox::POLICY_HOOKS,
+                    crate::sandbox::linux_host_kept(),
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,

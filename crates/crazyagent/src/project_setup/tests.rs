@@ -228,7 +228,7 @@ fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
     let catalog = catalog(&config(), None, &[], &BTreeSet::new(), None).unwrap();
     assert_eq!(
         catalog.agent_access,
-        LevelView::all(&crate::sandbox::POLICY_HOOKS, None)
+        LevelView::all(crate::sandbox::linux_host_kept(), None)
     );
     let runs: Vec<(AgentAccess, bool)> = catalog
         .agent_access
