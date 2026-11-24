@@ -653,7 +653,10 @@ pub(crate) const BACKUP_FAILURE_FILE: &str = "backup-failed";
 /// Keeps a durable record of how an upgrade backup ended: a failure writes its code into
 /// [`BACKUP_FAILURE_FILE`], a success removes the file. Writing the record never changes
 /// the result. Inputs: the database path and the backup's result. Output: the same result.
-pub(crate) fn recorded(path: &Path, result: Result<PathBuf, EngineError>) -> Result<PathBuf, EngineError> {
+pub(crate) fn recorded(
+    path: &Path,
+    result: Result<PathBuf, EngineError>,
+) -> Result<PathBuf, EngineError> {
     let Some(root) = path.parent() else {
         return result;
     };

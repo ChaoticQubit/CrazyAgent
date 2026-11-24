@@ -2732,7 +2732,11 @@ fn enforce_snapshot_bound(tx: &Transaction<'_>) -> Result<(), EngineError> {
     Ok(())
 }
 
-pub(crate) fn events(tx: &Transaction<'_>, after: u64, revision: u64) -> Result<Outcome, EngineError> {
+pub(crate) fn events(
+    tx: &Transaction<'_>,
+    after: u64,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
     let first: Option<i64> = tx
         .query_row("SELECT MIN(cursor) FROM events", [], |row| row.get(0))
         .map_err(error)?;
