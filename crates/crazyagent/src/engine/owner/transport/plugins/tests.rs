@@ -623,7 +623,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
         for folder in &folders {
             std::fs::create_dir_all(folder).unwrap();
         }
-        let sandbox = crate::sandbox::ProjectSandbox::new(
+        let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
             &crate::sandbox::PROFILE_HOOKS,
             &folders[0],
             &folders[1],
@@ -631,7 +631,8 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
             kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap();
-        let mut profile = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+        let mut profile =
+            kernel_sandbox::windows::profile::boundary_profile(&sandbox, &grants).unwrap();
         if id == FORGED {
             profile.container = foreign.clone();
         } else {

@@ -105,7 +105,7 @@ impl Fixture {
         Arc::new(Tmux::open(
             Some(tmux),
             &self.base.join(FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ))
     }
@@ -1184,7 +1184,7 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let folder = PathBuf::from(&fixture.setup.folder);
-    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
     let ask =
         json!({"question": "Ship on Friday?", "options": ["Yes", "No"], "recommended": "Yes"});
@@ -1296,7 +1296,7 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
     assert_eq!(messages, 4);
     let page = std::fs::read_to_string(
         folder
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
             .join("questions.md"),
     )
     .unwrap();
@@ -4579,37 +4579,6 @@ fn lead_delegate_is_refused_at_max_teammates() {
     assert_eq!(tasks(&fixture).len(), 1);
 }
 
-/// A lead's `merge` reaches only its own workers: a worker of another lead is not one of
-/// its sub-agents, whatever it is called (feat/coord-spawn 372ee630).
-#[test]
-fn merge_refuses_a_worker_of_another_lead() {
-    let mut fixture = Fixture::new();
-    let access = codex_pool();
-    let agents = fixture.base.join("team/agents");
-    team_agent(&fixture, LEAD, "claude-code", "working", None);
-    team_agent(&fixture, 61, "claude-code", "working", None);
-    team_agent(&fixture, WORKER, "codex", "idle", Some(LEAD));
-    let answer = lead_call(
-        &mut fixture,
-        &access,
-        &agents,
-        61,
-        Call::Merge {
-            agent: WORKER.to_string(),
-        },
-    );
-    assert_eq!(
-        answer,
-        (
-            format!(
-                "Not merged: none of your own sub-agents is called {WORKER}. Call {}() for their names.",
-                tool::INSPECT_WORK_TOOL
-            ),
-            true
-        )
-    );
-}
-
 /// Makes the fixture's project folder a real git repository with one commit on `main`, the
 /// engine's state folder excluded and its worktrees folder made. Takes the fixture.
 /// Returns the git home and the project folder.
@@ -5419,7 +5388,7 @@ fn merge_from_a_lead_merges_its_finished_worker_and_closes_its_change_set() {
     for folder in [&home, &tmp, &profiles] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    crate::sandbox::ProjectSandbox::new(
+    kernel_sandbox::profile::ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &clones.project,
         &home,
@@ -6813,7 +6782,7 @@ fn a_live_master_relays_a_terminal_answer_withdraws_and_asks_a_text_question_aga
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let folder = PathBuf::from(&fixture.setup.folder);
-    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
     fixture.live(Some(MASTER));
     let project = fixture.setup.project_id.clone();
@@ -6930,7 +6899,7 @@ fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let folder = PathBuf::from(&fixture.setup.folder);
-    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
     fixture.live(Some(MASTER));
     let project = fixture.setup.project_id.clone();
@@ -6956,3 +6925,6 @@ fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
             .is_empty()
     );
 }
+
+#[path = "tests/other_lead.rs"]
+mod other_lead;

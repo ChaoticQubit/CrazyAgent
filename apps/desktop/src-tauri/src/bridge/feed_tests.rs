@@ -580,7 +580,7 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
         let launcher = Tmux::open(
             Some(tmux),
             &folder,
-            crazyagent::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crazyagent::terminal::tmux::tmux_hooks(),
         );
         launcher

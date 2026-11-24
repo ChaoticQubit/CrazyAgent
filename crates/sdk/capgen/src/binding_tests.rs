@@ -75,11 +75,22 @@ fn the_host_binding_is_generated_for_every_capability() {
         for capability in &file.capabilities {
             let function = capability.name[stem.len() + 1..].replace('.', "_");
             let constant = function.to_ascii_uppercase();
+            let (signature, provided) = if capability.inputs.is_empty() {
+                (
+                    format!("fn{stem}_{function}(&self)->"),
+                    format!("self.providers.{stem}.{function}(self.caller.plugin())"),
+                )
+            } else {
+                (
+                    format!("fn{stem}_{function}(&self,"),
+                    format!("self.providers.{stem}.{function}(self.caller.plugin(),"),
+                )
+            };
             for part in [
-                format!("fn{stem}_{function}(&self,"),
+                signature,
                 format!("self.caller.call(&{stem}::{constant},"),
                 format!("{stem}::check_{function}_input"),
-                format!("self.providers.{stem}.{function}(self.caller.plugin(),"),
+                provided,
                 format!("{stem}::check_{function}_output,)"),
             ] {
                 assert!(flat.contains(&part), "{part}");
@@ -88,6 +99,13 @@ fn the_host_binding_is_generated_for_every_capability() {
         }
     }
     assert!(count > 0);
+    assert!(
+        loaded
+            .iter()
+            .flat_map(|(_, file)| &file.capabilities)
+            .any(|capability| capability.inputs.is_empty()),
+        "no capability without inputs"
+    );
     assert_eq!(flat.matches("self.caller.call(").count(), count);
     assert!(flat.contains(
         "fnsettings_save_quit(&self,settings:sdk::generated::settings::QuitSettings,)->Result<(),Refusal>{self.caller.call(&settings::SAVE_QUIT,settings,settings::check_save_quit_input,|settings|{self.providers.settings.save_quit(self.caller.plugin(),settings)},settings::check_save_quit_output,)}"

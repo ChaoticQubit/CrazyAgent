@@ -75,7 +75,7 @@ pub fn request(
     }
     let settings = crate::sandbox_settings::load(db).ok();
     let calls = settings.map(|settings| settings.linux_supervisor);
-    let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+    let host = kernel_sandbox::host::linux_host_kept().map(|host| host.under(calls));
     let sockets = settings.map(|settings| settings.linux_sockets);
     let gap =
         kernel_sandbox::policy::linux_network_gap(policy.network, host, sockets, &grown.grants);

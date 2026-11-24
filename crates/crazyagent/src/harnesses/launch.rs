@@ -10,11 +10,11 @@ use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
-use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use kernel_processes::group::Ending;
 use kernel_sandbox::profile::env::{Handed, LINEAGE_VARIABLE, LineageToken};
+use kernel_sandbox::profile::installed::InstalledSandbox;
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
@@ -1043,7 +1043,7 @@ fn bounded<'a>(
                 failure("launch_environment_refused")
             }
             error => failure(
-                crate::sandbox::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
+                kernel_sandbox::lines::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
             ),
         })?;
         assert_eq!(command.get_program(), boundary.launcher().as_os_str());
@@ -1118,7 +1118,7 @@ fn launch_base(
 #[cfg(windows)]
 fn home_containers(
     home: &Path,
-    sandbox: &crate::sandbox::ProjectSandbox,
+    sandbox: &kernel_sandbox::profile::ProjectSandbox,
 ) -> Result<(), LaunchError> {
     use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     use std::os::windows::fs::OpenOptionsExt;
@@ -1126,7 +1126,7 @@ fn home_containers(
     const FILE_SHARE_WRITE: u32 = 0x2;
     let unsafe_home = || failure("launch_account_home_unsafe");
     let unavailable = |_| failure("launch_account_home_unavailable");
-    let name = crate::sandbox::windows::container_name(sandbox);
+    let name = kernel_sandbox::windows::profile::container_name(sandbox);
     let expected = crazyagent_win_sandbox::container_sid(&name)
         .map_err(|_| failure("launch_sandbox_unavailable"))?;
     assert!(app_container(&expected));
@@ -2087,7 +2087,7 @@ impl Driver {
 /// engine's lifeline, so its group ends with the engine (b6 r2 F1), released once stopped.
 pub struct Session {
     child: Child,
-    warden: Option<crate::sandbox::warden::Warden>,
+    warden: Option<kernel_sandbox::profile::warden::Warden>,
     uncertain: bool,
     follower: Option<Follower>,
     stdin: Option<File>,
@@ -2243,7 +2243,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
-                (child, warden) = crate::sandbox::warden::spawn(&mut command)
+                (child, warden) = kernel_sandbox::profile::warden::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 stdin = child.stdin.take().map(stdin_file);
                 let stdout = child
@@ -2528,7 +2528,7 @@ impl Session {
             lifeline.release();
         }
         self.uncertain =
-            crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
+            kernel_sandbox::profile::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());
         assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))

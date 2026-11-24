@@ -256,7 +256,7 @@ impl Restart {
             Arc::new(kernel_processes::terminal::tmux::Tmux::open(
                 Some(tmux),
                 &base.join(crate::terminal::FOLDER),
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             ));
         let team = team

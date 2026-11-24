@@ -220,6 +220,7 @@ mod tests {
             recover(&root, true, "put_back", settings),
             Err("storage_putback_busy")
         );
+        std::fs::write(root.join("engine.db"), b"").unwrap();
         let view = recovery(&root, false).unwrap();
         assert_eq!(view.offer, None);
         assert_eq!(view.folder, root.join("backups").display().to_string());

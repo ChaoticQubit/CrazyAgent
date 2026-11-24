@@ -75,3 +75,9 @@ pub fn validate_identity(value: &str) -> Result<(), &'static str> {
     assert!(value.len() <= 128);
     Ok(())
 }
+
+pub const CRAZYAGENT_DIRECTORY: &str = ".crazyagent";
+#[cfg(not(windows))]
+pub const NULL_DEVICE: &str = "/dev/null";
+#[cfg(windows)]
+pub const NULL_DEVICE: &str = "NUL";

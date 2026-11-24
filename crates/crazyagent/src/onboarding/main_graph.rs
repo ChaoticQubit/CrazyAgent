@@ -1,5 +1,5 @@
 use crate::file_lock::HeldLock;
-use crate::projects_home::CRAZYAGENT_DIRECTORY;
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use rustix::fs::{AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};

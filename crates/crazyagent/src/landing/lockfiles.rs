@@ -4,7 +4,7 @@ use super::owner;
 use super::store::{self, Intent, Record};
 use super::{AfterRegeneration, AgentKind, ChangeSetId, ChangeState, diff};
 use crate::engine::EngineError;
-use crate::sandbox::ProjectSandbox;
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use rusqlite::Connection;
@@ -719,7 +719,7 @@ fn run(
         joined.push(path);
         command.env("PATH", joined);
     }
-    let (mut child, warden) = crate::sandbox::warden::spawn(&mut command).ok()?;
+    let (mut child, warden) = kernel_sandbox::profile::warden::spawn(&mut command).ok()?;
     let group = child.id();
     let (sent, printed) = std::sync::mpsc::channel();
     if let Some(stdout) = child.stdout.take() {
@@ -746,7 +746,8 @@ fn run(
         }
     };
     stop_group(group);
-    let ended = crate::sandbox::warden::fire_reported(warden, "landing_regenerate").is_ok();
+    let ended =
+        kernel_sandbox::profile::warden::fire_reported(warden, "landing_regenerate").is_ok();
     let printed = printed
         .recv_timeout(until.saturating_duration_since(Instant::now()))
         .unwrap_or_default();

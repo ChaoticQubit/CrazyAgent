@@ -174,7 +174,7 @@ impl Fixture {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
             &self.base.join(FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ))
     }
@@ -469,7 +469,7 @@ fn an_agent_whose_stop_outlives_the_join_wait_is_not_recorded_plainly_stopped() 
         (
             AgentStatus::Stopped,
             Some(with_code(
-                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
                 Some(crate::harnesses::leftovers::UNCERTAIN)
             ))
         )
@@ -7876,7 +7876,7 @@ fn master_question_box_leaves(owner_keyed: bool) {
         fixture
             .base
             .join("project")
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY),
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY),
     )
     .unwrap();
     let host = fixture.host();
@@ -7944,7 +7944,7 @@ fn master_question_box_leaves(owner_keyed: bool) {
     let page = fixture
         .base
         .join("project")
-        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
         .join("questions.md");
     assert!(
         std::fs::read_to_string(&page)
@@ -8104,40 +8104,6 @@ fn a_short_task_line_inside_another_typed_turn_does_not_read_as_delivered() {
         outcomes(&fixture, "dispatch", &format!("team-task/{task}")),
         [Some("failed".to_owned())]
     );
-}
-
-/// The status log keeps only its newest 20000 rows, whichever project owns them: a new row
-/// drops every row that far behind it and keeps the next one (HB-S5-I, TEAM-11-L2).
-#[test]
-fn the_status_log_keeps_only_its_newest_rows() {
-    let fixture = Fixture::new(1);
-    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    for (id, project) in [
-        (10_001, "another-project"),
-        (10_002, PROJECT),
-        (30_000, PROJECT),
-    ] {
-        fixture
-            .connection
-            .execute(
-                "INSERT INTO team_status_log(id,project,agent,status,at_ms) VALUES (?1,?2,?3,'idle',1)",
-                params![id, project, agent],
-            )
-            .unwrap();
-    }
-    fixture
-        .connection
-        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [agent])
-        .unwrap();
-    let ids: Vec<i64> = fixture
-        .connection
-        .prepare("SELECT id FROM team_status_log ORDER BY id")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(ids, [10_002, 30_000, 30_001]);
 }
 
 /// An agent that starts its harness for each turn keeps no pane record, only the session
@@ -20875,11 +20841,11 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
     .unwrap();
     committed_project(fixture);
     let repository = fixture.base.join("project");
-    std::fs::create_dir(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(repository.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     let db = crate::landing::open(&fixture.base).unwrap();
     let worktrees = crate::projects_home::state_folder(&repository).join("worktrees");
-    assert!(worktrees.starts_with(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)));
+    assert!(worktrees.starts_with(repository.join(kernel_common::names::CRAZYAGENT_DIRECTORY)));
     std::fs::create_dir_all(&worktrees).unwrap();
     let clone = worktrees.join(format!("agent-{lead}"));
     let branch =
@@ -20914,7 +20880,7 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
             .create(folder)
             .unwrap();
     }
-    crate::sandbox::ProjectSandbox::new(
+    kernel_sandbox::profile::ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &repository,
         &home,
@@ -22450,7 +22416,7 @@ fn native_lead_linked_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf
     .unwrap();
     let git_home = committed_project(fixture);
     let repository = fixture.base.join("project");
-    std::fs::create_dir(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(repository.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     let worktrees = crate::projects_home::state_folder(&repository).join("worktrees");
     std::fs::create_dir_all(&worktrees).unwrap();
@@ -25151,7 +25117,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let uncertain = with_code(
-        crate::sandbox::warden::CLEANUP_UNCERTAIN,
+        kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
         Some(crate::harnesses::leftovers::UNCERTAIN),
     );
     for (first, expected) in [
@@ -25827,9 +25793,9 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_on_agent_profile_follows_the_project_network_choice() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::policy::AgentNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let make = |name: &str| {
@@ -26678,7 +26644,7 @@ fn published_graph(base: &Path) -> PathBuf {
     let project = base.join("project");
     let graph = project.join(GRAPH_FOLDER);
     std::fs::create_dir_all(graph.join("wiki")).unwrap();
-    std::fs::create_dir_all(project.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir_all(project.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     std::fs::write(graph.join("graph.json"), "{}").unwrap();
     std::fs::write(graph.join("GRAPH_REPORT.md"), "report\n").unwrap();
     std::fs::write(graph.join("wiki").join("index.md"), "wiki\n").unwrap();
@@ -26844,7 +26810,7 @@ fn an_own_clone_leads_teammate_follows_the_clones_exclude() {
     std::fs::create_dir_all(project_exclude.parent().unwrap()).unwrap();
     let teammate = |lead: &str, exclude: &str| -> PathBuf {
         let clone = project
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
             .join("worktrees")
             .join(lead);
         std::fs::create_dir_all(clone.join(".git").join("info")).unwrap();
@@ -28664,7 +28630,7 @@ fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         None,
         &fixture.base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let mut team = fixture.runtime();
@@ -35061,3 +35027,6 @@ fn only_codex_and_claude_code_name_model_hosts_for_a_signed_in_agent_with_no_net
 /// told why. Inputs: the team runtime fixtures. Output: none; each row asserts.
 #[path = "launch_home_hooks_tests.rs"]
 mod launch_home_hooks_tests;
+
+#[path = "tests/status_log.rs"]
+mod status_log;

@@ -19,19 +19,19 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
-use crate::sandbox::warden::Warden;
-use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
-use kernel_sandbox::hidden_paths::HiddenRun;
 use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
+use kernel_sandbox::profile::installed::InstalledSandbox;
+use kernel_sandbox::profile::warden::{self, Warden};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+use kernel_sandbox::{hidden_paths::HiddenRun, profile::ProjectSandbox};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -2420,7 +2420,7 @@ fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
                 .unwrap_or_else(|| "Could not give the agent this project's context".to_owned()),
             attempts_max,
         ),
-        RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
+        RunError::Uncertain(_) => (warden::CLEANUP_UNCERTAIN.to_owned(), 1),
         RunError::Sandbox(refusal) if kernel_sandbox::lines::model_loopback_windows(refusal) => (
             crate::config::plain_problem(kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
                 .unwrap_or(kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE)
@@ -3183,8 +3183,8 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     if fs::symlink_metadata(root.join(".git")).is_ok() {
         return Ok(());
     }
-    let owners = root.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY)
-        || fs::symlink_metadata(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).is_ok();
+    let owners = root.ends_with(kernel_common::names::CRAZYAGENT_DIRECTORY)
+        || fs::symlink_metadata(root.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).is_ok();
     if owners {
         return Err(RunError::Invalid(NOT_A_REPOSITORY.into()));
     }
@@ -3834,11 +3834,11 @@ pub(crate) struct AgentProcess {
 
 impl AgentProcess {
     /// Starts an agent command that leads its own process group, with the warden
-    /// [`crate::sandbox::warden::spawn`] gives a sandboxed one, and starts its
+    /// [`warden::spawn`] gives a sandboxed one, and starts its
     /// lifeline. Takes the command. Returns the guard, or the error that kept the
     /// agent or its lifeline from starting, after stopping what had started.
     pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
-        let (child, warden) = crate::sandbox::warden::spawn(command)?;
+        let (child, warden) = warden::spawn(command)?;
         Self::new(child, warden)
     }
 
@@ -3857,7 +3857,7 @@ impl AgentProcess {
                 kill_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
-                let _ = crate::sandbox::warden::fire_reported(warden, "agent");
+                let _ = warden::fire_reported(warden, "agent");
                 return Err(error);
             }
         };
@@ -3882,7 +3882,7 @@ impl AgentProcess {
             kill_group(self.group);
             let _ = self.child.wait();
             await_group_exit(self.group);
-            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.cleanup = warden::fire_reported(self.warden.take(), "agent");
             self.lifeline.release();
             self.stopped = true;
         }
@@ -3897,7 +3897,7 @@ impl AgentProcess {
         if !self.stopped {
             let _ = self.child.kill();
             let _ = self.child.wait();
-            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.cleanup = warden::fire_reported(self.warden.take(), "agent");
             self.stopped = true;
         }
         assert!(self.warden.is_none());
@@ -5294,7 +5294,7 @@ mod tests {
             (
                 bare,
                 one_refused_run(|folder| {
-                    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+                    let state = folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
                     fs::create_dir(state).unwrap();
                 }),
             ),
@@ -7043,90 +7043,6 @@ mod tests {
         assert_eq!(ends, [ResearchStatus::Queued; 5]);
     }
 
-    /// RV-DS241-159: only rate-limited ends in a row count toward the cap, so a run that is
-    /// saved, stopped, failed before its harness started or taken back stale starts the count
-    /// again. Each such end after two rate-limited ones leaves the count at zero, and the job
-    /// taken back stale takes two more rate-limited ends before the third fails it.
-    #[test]
-    fn an_end_other_than_a_rate_limit_starts_the_rate_limit_count_again() {
-        let root = engine_root();
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        register_project(&root.database, "alpha", &folder);
-        let jobs = ResearchJobs::open(&root.database).unwrap();
-        let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let account = reference("codex-connection");
-        let limited = |id: i64| -> i64 {
-            connection
-                .query_row(
-                    "SELECT limited FROM research_jobs WHERE id = ?1",
-                    [id],
-                    |row| row.get(0),
-                )
-                .unwrap()
-        };
-        let limited_twice = |kind: &str| {
-            let id = jobs.enqueue("alpha", kind, "codex", false).unwrap();
-            for _ in 0..2 {
-                let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-                assert_eq!(held.id, id);
-                assert_eq!(
-                    jobs.rate_limited(&held, &account).unwrap().0,
-                    ResearchStatus::Queued
-                );
-            }
-            assert_eq!(limited(id), 2);
-            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-            assert_eq!(held.id, id);
-            held
-        };
-
-        let saved = limited_twice("market_research");
-        jobs.finish(&saved, "context/research/market.md").unwrap();
-        assert_eq!(limited(saved.id), 0, "a saved run starts the count again");
-
-        let stopped = limited_twice("competitor_research");
-        jobs.cancelled(&stopped).unwrap();
-        assert_eq!(
-            limited(stopped.id),
-            0,
-            "a stopped run starts the count again"
-        );
-
-        let unspent = limited_twice("design_research");
-        assert_eq!(
-            jobs.fail_unspent(&unspent, "Provider refused").unwrap(),
-            ResearchStatus::Failed
-        );
-        assert_eq!(
-            limited(unspent.id),
-            0,
-            "a run failed before its harness started starts the count again"
-        );
-
-        let stale = limited_twice("tech_stack_research");
-        assert_eq!(jobs.recover_stale(0, 10).unwrap(), 1);
-        assert_eq!(
-            limited(stale.id),
-            0,
-            "a run taken back stale starts the count again"
-        );
-        let mut ends = Vec::new();
-        for _ in 0..3 {
-            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-            assert_eq!(held.id, stale.id);
-            ends.push(jobs.rate_limited(&held, &account).unwrap().0);
-        }
-        assert_eq!(
-            ends,
-            [
-                ResearchStatus::Queued,
-                ResearchStatus::Queued,
-                ResearchStatus::Failed
-            ]
-        );
-    }
-
     /// DEC-170 addendum 6 (RV-DS241-27): a research job its runner hands back because a
     /// projects home move holds its folder spends no attempt, is not claimed again until its
     /// backoff ends, shows why it waits and records no start, since no harness ran.
@@ -8203,11 +8119,11 @@ mod tests {
         };
 
         let owners = base.join("owners");
-        fs::create_dir_all(owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        fs::create_dir_all(owners.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         fs::write(owners.join("notes.txt"), "the owner's file\n").unwrap();
         assert!(refused(&owners), "an owner's folder gets no repository");
         assert!(!owners.join(".git").exists());
-        let state = owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = owners.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
         assert!(refused(&state), "nor does its .crazyagent folder");
         assert!(!state.join(".git").exists());
 
@@ -8506,6 +8422,8 @@ mod tests {
         assert_eq!(limited.answer(), None);
         assert!(limited.limited());
     }
+
+    mod rate_limit_count;
 }
 
 #[cfg(all(test, windows))]

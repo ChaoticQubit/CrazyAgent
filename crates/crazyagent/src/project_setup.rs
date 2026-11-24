@@ -520,7 +520,7 @@ impl StoredSetup {
 /// recorded folder. Output: the project folder.
 pub(crate) fn project_folder_of(folder: &Path) -> PathBuf {
     match folder.parent() {
-        Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
+        Some(parent) if folder.ends_with(kernel_common::names::CRAZYAGENT_DIRECTORY) => {
             parent.to_path_buf()
         }
         _ => folder.to_path_buf(),
@@ -1129,7 +1129,7 @@ pub fn catalog(
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
-        agent_access: LevelView::all(&crate::sandbox::POLICY_HOOKS, calls),
+        agent_access: LevelView::all(kernel_sandbox::host::linux_host_kept(), calls),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)
@@ -2020,7 +2020,7 @@ fn stage_in_home(
             .create(context.join(directory))
             .map_err(io_failed)?;
     }
-    assert!(state.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY));
+    assert!(state.ends_with(kernel_common::names::CRAZYAGENT_DIRECTORY));
     copy_counted(
         documents,
         &context.join("documents"),
@@ -3830,17 +3830,6 @@ fn secret_key(word: &str) -> Option<KeyValue> {
     None
 }
 
-/// Whether a word at a line's start can be the wrapped tail of a token masked at the end of
-/// the line before: at least `WRAPPED_TAIL_MIN` bytes of the token and base64 alphabets,
-/// holding a digit. Takes the word.
-fn wrapped_tail(word: &str) -> bool {
-    word.len() >= WRAPPED_TAIL_MIN
-        && word.bytes().any(|b| b.is_ascii_digit())
-        && word
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
-}
-
 /// Appends a word with the user part of each URL in it, `scheme://user:password@host`,
 /// replaced by the hidden mark, keeping the scheme, host and path. Takes the text to extend
 /// and the word.
@@ -3956,3 +3945,6 @@ pub(crate) mod removed;
 mod retry;
 #[cfg(all(test, unix))]
 mod tests;
+
+mod wrapped_tail;
+use wrapped_tail::wrapped_tail;

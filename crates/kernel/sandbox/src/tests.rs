@@ -172,3 +172,145 @@ fn the_model_proxy_variables_name_its_port_and_its_tunnels_dial_no_local_or_meta
     }
     assert!(may_dial("192.0.2.1".parse().unwrap()));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_linux_helper_entry_lives_in_the_kernel() {
+    let main: fn(Vec<std::ffi::OsString>) -> std::process::ExitCode = crate::linux::helper::main;
+    let _ = main;
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_linux_launch_and_its_host_read_live_in_the_kernel() {
+    let read: fn(&std::path::Path, Option<&std::path::Path>) -> crate::host::LinuxHost =
+        crate::linux::launch::host::read_host;
+    let _ = read;
+    let _: Option<crate::linux::launch::LinuxSandbox> = None;
+}
+
+/// The confinement the kernel builds for the tmux host holds the very values the engine built
+/// it from: the sandbox runner, the keeper and pane shim words and variables, and a variable
+/// gate and a keeper undo that answer as the sandbox's own do, for a kept and a refused case.
+#[cfg(unix)]
+#[test]
+fn confinement_equals_the_values_crazyagent_built() {
+    use crate::profile::command::SANDBOX_EXEC;
+    use crate::profile::consts::AGENT_GIT_ENV;
+    use crate::profile::env::agent_variable_allowed;
+    use std::ffi::OsStr;
+    let confinement = crate::confinement();
+    assert_eq!(confinement.sandbox_exec, SANDBOX_EXEC);
+    let (git, fixed) = AGENT_GIT_ENV[0];
+    let relay = format!("{}stand-in", kernel_common::relay_names::TOKEN_PREFIX);
+    for (name, value, allowed) in [
+        (git, fixed, true),
+        ("STAND_IN_TOKEN", relay.as_str(), false),
+    ] {
+        let (name, value) = (OsStr::new(name), OsStr::new(value));
+        assert_eq!(agent_variable_allowed(name, value), allowed);
+        assert_eq!((confinement.variable_allowed)(name, value), allowed);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use crate::profile::command::{
+            KEEPER, KEEPER_DEADLINE, KEEPER_STATE, PANE_SHIM, kept_pane, unkept_pane,
+        };
+        assert_eq!(confinement.keeper, KEEPER);
+        assert_eq!(confinement.keeper_deadline_variable, KEEPER_DEADLINE);
+        assert_eq!(confinement.keeper_state_variable, KEEPER_STATE);
+        assert_eq!(confinement.pane_shim, PANE_SHIM);
+        let plain: Vec<String> = [SANDBOX_EXEC, "-f", "/private/tmp/stand-in.sb", "/bin/sh"]
+            .map(str::to_owned)
+            .to_vec();
+        let kept = kept_pane(plain.clone(), None).unwrap();
+        assert_eq!(unkept_pane(&kept).as_ref(), Some(&plain));
+        assert_eq!((confinement.unkept_pane)(&kept), Some(plain.clone()));
+        assert_eq!((confinement.unkept_pane)(&plain), None);
+    }
+}
+
+/// The engine's host reads and the launch refusal codes live in the kernel on every system:
+/// off Linux no host is read and a project may hold another git, and the strict setting's
+/// refusal keeps its own code while any other line has none.
+#[test]
+fn the_host_reads_and_refusal_codes_live_in_the_kernel() {
+    use crate::error::SandboxError;
+    use crate::lines::{LINUX_NOT_FULL_LINE, refusal_code};
+    use crate::profile::consts::LINUX_NOT_FULL;
+    let kept: fn() -> Option<crate::host::LinuxHost> = crate::host::linux_host_kept;
+    let other: fn(&std::path::Path) -> bool = crate::host::linux_other_git;
+    let _ = crate::host::linux_unbridged_notice;
+    let strict = SandboxError::Unavailable(LINUX_NOT_FULL_LINE.to_owned());
+    assert_eq!(refusal_code(&strict), Some(LINUX_NOT_FULL));
+    let plain = SandboxError::Unavailable("no such line".to_owned());
+    assert_eq!(refusal_code(&plain), None);
+    if cfg!(not(target_os = "linux")) {
+        assert_eq!(crate::host::linux_host(), None);
+        assert_eq!(kept(), None);
+        assert!(other(std::path::Path::new("/")));
+    }
+}
+
+/// A Sandboxed IDE terminal names its own folder under the engine data root after the
+/// project, so the kernel refuses, before it writes anything, every project that is not a
+/// project id: empty, `.`, `..`, a nested path, an absolute path, a trailing dot, a space,
+/// a quote, a newline or `..` inside a name.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_refuses_a_project_that_is_not_one_folder_name() {
+    use crate::error::SandboxError;
+    use crate::ide_shell::{Launch, command};
+    use crate::policy::{AgentAccess, AgentFilesRule, AgentNetwork};
+    let scratch = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(scratch.path()).unwrap();
+    let (root, folder) = (base.join("data"), base.join("project"));
+    for path in [&root, &folder] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    for project in [
+        "", ".", "..", "a/b", "../p", "/p", "p.", "p q", "p\"q", "p\nq", "a..b",
+    ] {
+        let launch = Launch {
+            root: &root,
+            project,
+            folder: &folder,
+            cwd: &folder,
+            shell: Path::new("/bin/zsh"),
+            arguments: &[],
+            incoming: &[],
+            extra_reads: &[],
+            level: AgentAccess::Sandboxed,
+            network: AgentNetwork::default(),
+            kept_ports: &[],
+            agent_files: AgentFilesRule::default(),
+        };
+        match command(&crate::test_hooks::STAND_IN, &launch) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert_eq!(reason, "the project id is not a folder name", "{project:?}")
+            }
+            other => panic!("{project:?} gave {other:?}"),
+        }
+        assert!(!root.join("ide-shell").exists(), "{project:?}");
+    }
+}
+
+/// The installed boundary every launch takes lives in the kernel beside the profile it was
+/// installed from, and the kernel profile hooks name the Windows grants folder it installs
+/// with.
+#[test]
+fn the_installed_boundary_lives_in_the_kernel() {
+    let _: Option<crate::profile::installed::InstalledSandbox> = None;
+    let unconfined: fn(&crate::profile::installed::InstalledSandbox) -> bool =
+        crate::profile::installed::InstalledSandbox::is_unconfined;
+    let _ = unconfined;
+    #[cfg(target_os = "windows")]
+    {
+        fn grants(
+            hooks: &crate::profile::ProfileHooks,
+        ) -> Result<std::path::PathBuf, crate::error::SandboxError> {
+            (hooks.grants_folder)()
+        }
+        let _ = grants;
+    }
+}

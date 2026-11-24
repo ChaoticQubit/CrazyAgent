@@ -56,3 +56,37 @@ fn an_agent_environment_refuses_secrets_and_the_owner_terminal_keeps_its_home() 
     };
     assert_eq!(routed.clone(), routed);
 }
+
+/// Windows reads variable names in any case, so a harness `Path` replaces the base `PATH`
+/// and a removed `Path` removes it, leaving one name each time, and a harness `tmpdir`
+/// never replaces the pinned `TMPDIR`.
+#[cfg(windows)]
+#[test]
+fn a_harness_variable_in_another_case_replaces_or_removes_the_base_one_on_windows() {
+    let names = |env: &[(OsString, OsString)], name: &str| {
+        env.iter()
+            .filter(|(known, _)| known.eq_ignore_ascii_case(name))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let base = [
+        ("PATH", OsStr::new(r"C:\Windows")),
+        ("TMPDIR", OsStr::new(r"C:\agent\tmp")),
+    ];
+    let set = agent_process_env(
+        &base,
+        [
+            (OsStr::new("Path"), Some(OsStr::new(r"C:\tools"))),
+            (OsStr::new("tmpdir"), Some(OsStr::new(r"C:\elsewhere"))),
+        ],
+    )
+    .unwrap();
+    let path = names(&set, "PATH");
+    assert_eq!(path.len(), 1, "{path:?}");
+    assert_eq!(path[0].1, OsString::from(r"C:\tools"));
+    let tmp = names(&set, "TMPDIR");
+    assert_eq!(tmp.len(), 1, "{tmp:?}");
+    assert_eq!(tmp[0].1, OsString::from(r"C:\agent\tmp"));
+    let removed = agent_process_env(&base, [(OsStr::new("Path"), None)]).unwrap();
+    assert!(names(&removed, "PATH").is_empty(), "{removed:?}");
+}

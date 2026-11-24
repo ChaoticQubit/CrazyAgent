@@ -66,7 +66,7 @@ fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
         let rest = length - folder.as_os_str().len() - 1;
         folder.push("m".repeat(rest));
         assert_eq!(folder.as_os_str().len(), length);
-        fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        fs::create_dir_all(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         let setup = stored(&folder);
 
         let text = render(&setup.project_id, Some(&setup), "", Layout::Linked);
@@ -1186,7 +1186,7 @@ fn listed(folders: &[&Path]) -> String {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
-    let agents = crate::sandbox::test_agent::TestAgent::new();
+    let agents = kernel_sandbox::test_agent::TestAgent::new(&crate::sandbox::PROFILE_HOOKS);
     let outside = agents.peer.join("skills");
     let _unpinned = Unpinned(outside.clone());
     let system = outside.join(CODEX_SYSTEM_SKILLS);
@@ -1687,7 +1687,7 @@ fn a_home_released_by_its_path_is_never_a_link() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_home() {
-    let agents = crate::sandbox::test_agent::TestAgent::new();
+    let agents = kernel_sandbox::test_agent::TestAgent::new(&crate::sandbox::PROFILE_HOOKS);
     let marker = agents.peer.join(STATE).join("marker");
     fs::create_dir(agents.peer.join(STATE)).unwrap();
     fs::write(&marker, "peer").unwrap();
@@ -2193,7 +2193,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let folder = root.join("project");
-    fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    fs::create_dir_all(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let setup = stored(&folder);
     let linked = [
         "Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`.",
@@ -2381,7 +2381,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
             Some(tmux),
             &root.join(crate::terminal::FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ));
     let pane = crate::harnesses::terminal_session::TerminalSession::start(
@@ -2490,7 +2490,7 @@ impl LeftPane {
             std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
                 Some(tmux.clone()),
                 &root.join(crate::terminal::FOLDER),
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             ));
         let agent = kernel_processes::terminal::AgentId::team(team).unwrap();
@@ -2848,43 +2848,6 @@ fn codex_servers(home: &Path) -> toml::Table {
         .parse()
         .unwrap();
     config["mcp_servers"].as_table().unwrap().clone()
-}
-
-#[test]
-fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_codex() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
-    let plugins = || LaunchPlugins {
-        skills: Vec::new(),
-        servers: vec![command_server("context-mode"), command_server("graph")],
-        context_mode_off: None,
-        batch_files: Vec::new(),
-        commands_not_found: Vec::new(),
-        left_out: Vec::new(),
-    };
-
-    let claude = private_home(&root, "claude");
-    let installed = context_with(&root, plugins(), Vec::new())
-        .install("claude-code", &claude, true)
-        .unwrap();
-    let mcp: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(claude.join(STATE).join("mcp.json")).unwrap())
-            .unwrap();
-    let declared = mcp["mcpServers"].as_object().unwrap();
-    assert!(declared.contains_key("plugin_context-mode_context-mode"));
-    assert!(declared.contains_key("graph"));
-    assert!(!declared.contains_key("context-mode"));
-    drop(installed);
-
-    let codex = private_home(&root, "codex");
-    let installed = context_with(&root, plugins(), Vec::new())
-        .install("codex", &codex, true)
-        .unwrap();
-    let declared = codex_servers(&codex);
-    assert!(declared.contains_key("plugin_context-mode_context-mode"));
-    assert!(declared.contains_key("graph"));
-    assert!(!declared.contains_key("context-mode"));
-    drop(installed);
 }
 
 #[test]
@@ -4391,8 +4354,8 @@ fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, Path
 #[cfg(target_os = "macos")]
 #[test]
 fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
     let directory = tempfile::tempdir().unwrap();
@@ -4452,8 +4415,8 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     const MARKER: &str = "ctx-execute-4471";
@@ -4533,8 +4496,8 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_cannot_change_its_launch_getconf() {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains;
     const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
 printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
@@ -4746,9 +4709,9 @@ fn tools_on_profile(
     port: u16,
     installs: &[&Path],
 ) -> PathBuf {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::policy::AgentPolicy;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
     let policy = AgentPolicy::default();
@@ -5356,3 +5319,6 @@ mod batch_files_tests;
 /// malformed or FIFO one. Inputs: the launch fixtures. Output: none; each row asserts.
 #[path = "codex_hook_tests.rs"]
 mod codex_hook_tests;
+
+#[path = "tests/context_mode_server.rs"]
+mod context_mode_server;

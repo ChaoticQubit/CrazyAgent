@@ -1,10 +1,8 @@
 #![cfg(target_os = "linux")]
-use crazyagent::sandbox::linux::{
-    BWRAP_PATHS, HIDDEN_MOUNTED_AGAIN, HIDDEN_MOUNTS_NOT_PRIVATE, LinuxBackend, LinuxSandbox,
-    NEST_ARGS,
-};
+use kernel_sandbox::linux::helper::{BWRAP_PATHS, HIDDEN_MOUNTS_NOT_PRIVATE, NEST_ARGS};
+use kernel_sandbox::linux::launch::{HIDDEN_MOUNTED_AGAIN, LinuxBackend, LinuxSandbox};
 
-use crazyagent::sandbox::ProjectSandbox;
+use kernel_sandbox::profile::ProjectSandbox;
 
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::SandboxNetwork;

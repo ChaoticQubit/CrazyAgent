@@ -148,7 +148,7 @@ pub fn roadmap(
     } else {
         format!(
             "{}/{}",
-            crate::projects_home::CRAZYAGENT_DIRECTORY,
+            kernel_common::names::CRAZYAGENT_DIRECTORY,
             crate::planning::ROADMAP
         )
     };
@@ -245,7 +245,7 @@ pub(crate) fn below_folder(path: &str) -> bool {
         && names
             .iter()
             .all(|name| !name.is_empty() && *name != "." && *name != "..")
-        && !names[0].eq_ignore_ascii_case(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        && !names[0].eq_ignore_ascii_case(kernel_common::names::CRAZYAGENT_DIRECTORY)
 }
 
 /// The docs one listing found: the first by path with their sizes in bytes, how many more

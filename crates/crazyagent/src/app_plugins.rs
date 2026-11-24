@@ -85,7 +85,7 @@ pub(crate) const KEYS: Keys = Keys {
 /// profile, so none there. Output: the range, or none.
 #[cfg(target_os = "linux")]
 fn handed_out() -> Option<std::ops::RangeInclusive<u16>> {
-    crate::sandbox::linux::read_picked_ports()
+    kernel_sandbox::linux::helper::read_picked_ports()
 }
 
 #[cfg(not(target_os = "linux"))]

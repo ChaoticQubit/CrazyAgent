@@ -1,22 +1,22 @@
 use crate::engine::EngineError;
+use kernel_sandbox::egress::{
+    BODY_BYTES_MAX, CURL_TIME, ExchangeError, exchange, lookup_within, system_lookup,
+};
 use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use kernel_security::secret::SecretString;
-use std::io::{Read, Write};
+use std::io;
+use std::net::IpAddr;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 const CURL: &str = "/usr/bin/curl";
-const BODY_BYTES_MAX: usize = 4 << 20;
-const SCOPES_LINE_MAX: usize = 1024;
-const TRAILER_BYTES_MAX: usize = SCOPES_LINE_MAX + 16;
 const WRITE_OUT: &str = "\n%header{x-oauth-scopes}\n%{http_code}";
-const REQUEST_TIME: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "CrazyAgent";
 
 /// One HTTP exchange through the system curl. The URL, headers, token and form body go
 /// only into curl's config on stdin, so nothing secret reaches an argument or the
 /// environment; curl reads no `.curlrc`, follows no redirects and only uses the allowed
-/// schemes.
+/// schemes. A host name is looked up once, within 5 s, and every address checked before
+/// curl runs; curl is pinned to every checked address, so it never looks the name up again.
 pub(crate) struct Request<'a> {
     pub(crate) url: url::Url,
     pub(crate) accept: &'a str,
@@ -46,13 +46,8 @@ impl Verb {
     }
 }
 
-/// What came back: the HTTP status, at most 4 MiB of body, and the scopes a classic
-/// GitHub token holds when GitHub named them in `X-OAuth-Scopes`.
-pub(crate) struct Reply {
-    pub(crate) status: u16,
-    pub(crate) body: Vec<u8>,
-    pub(crate) scopes: Option<Vec<String>>,
-}
+/// What came back from [`exchange`], read by the GitHub API and rules calls.
+pub(crate) use kernel_sandbox::egress::Reply;
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
@@ -62,18 +57,25 @@ impl Request<'_> {
     /// Builds curl's config: the URL, headers, token, and either the form body or a
     /// method with its JSON body, never both; a bodyless PUT, POST or PATCH sends an empty
     /// body so it says its length is zero. Input: the method and body, none for a GET or a
-    /// form. Output: the config bytes, or `github_request_invalid` for a control character.
-    fn config(&self, body: Option<(Verb, Option<&str>)>) -> Result<Vec<u8>, EngineError> {
+    /// form, and the `resolve` line value for a host name. Output: the config bytes, or
+    /// `github_request_invalid` for a control character.
+    fn config(
+        &self,
+        body: Option<(Verb, Option<&str>)>,
+        pinned: Option<&str>,
+    ) -> Result<Vec<u8>, EngineError> {
         assert!(body.is_none() || self.form.is_none());
-        let mut pieces = vec![
-            Plain("url = \""),
-            Escaped(self.url.as_str()),
-            Plain("\"\nheader = \"Accept: "),
+        let mut pieces = vec![Plain("url = \""), Escaped(self.url.as_str()), Plain("\"\n")];
+        if let Some(pinned) = pinned {
+            pieces.extend([Plain("resolve = \""), Escaped(pinned), Plain("\"\n")]);
+        }
+        pieces.extend([
+            Plain("header = \"Accept: "),
             Escaped(self.accept),
             Plain("\"\nuser-agent = \""),
             Escaped(USER_AGENT),
             Plain("\"\n"),
-        ];
+        ]);
         if self.url.host_str() == Some("api.github.com") || self.allow_http {
             pieces.push(Plain("header = \"X-GitHub-Api-Version: 2022-11-28\"\n"));
         }
@@ -118,22 +120,31 @@ impl Request<'_> {
         kernel_security::secret::sized(&pieces).ok_or_else(|| failure("github_request_invalid"))
     }
 
-    /// Builds the curl command without running it. Output: the command, whose arguments
-    /// and environment hold no URL, header or secret, and the config bytes for its stdin.
-    pub(crate) fn command(&self) -> Result<(Command, Vec<u8>), EngineError> {
-        self.command_with(None)
+    /// Builds the curl command without running it. Input: the host name lookup. Output:
+    /// the command, whose arguments and environment hold no URL, header or secret, and the
+    /// config bytes for its stdin.
+    pub(crate) fn command(
+        &self,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
+    ) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(None, resolve)
     }
 
-    /// Builds the curl command for a POST of a JSON body without running it. Input: the
-    /// body. Output: the command, whose arguments and environment hold no URL, header,
-    /// body or secret, and the config bytes for its stdin.
-    pub(crate) fn json_command(&self, json: &str) -> Result<(Command, Vec<u8>), EngineError> {
-        self.command_with(Some((Verb::Post, Some(json))))
+    /// Builds the curl command for a POST of a JSON body without running it. Inputs: the
+    /// body and the host name lookup. Output: the command, whose arguments and environment
+    /// hold no URL, header, body or secret, and the config bytes for its stdin.
+    pub(crate) fn json_command(
+        &self,
+        json: &str,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
+    ) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(Some((Verb::Post, Some(json))), resolve)
     }
 
     fn command_with(
         &self,
         body: Option<(Verb, Option<&str>)>,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
     ) -> Result<(Command, Vec<u8>), EngineError> {
         let secure = self.url.scheme() == "https";
         let loopback = self.url.scheme() == "http"
@@ -142,6 +153,18 @@ impl Request<'_> {
         if !secure && !loopback {
             return Err(failure("github_request_invalid"));
         }
+        let port = self
+            .url
+            .port_or_known_default()
+            .expect("https and http always have a port");
+        let pinned = kernel_security::net::pinned(
+            &self.url,
+            port,
+            |name, port| {
+                lookup_within(name, port, resolve).map_err(|_| failure("github_unreachable"))
+            },
+            || failure("github_address_refused"),
+        )?;
         let mut command = Command::new(CURL);
         command
             .arg("-q")
@@ -149,7 +172,7 @@ impl Request<'_> {
             .args(["--proto", if loopback { "=http" } else { "=https" }])
             .args(["--max-redirs", "0"])
             .args(["--connect-timeout", "10"])
-            .args(["--max-time", "30"])
+            .args(["--max-time", &CURL_TIME.as_secs().to_string()])
             .args(["--max-filesize", &BODY_BYTES_MAX.to_string()])
             .args(["--write-out", WRITE_OUT])
             .args(["--config", "-"])
@@ -159,132 +182,42 @@ impl Request<'_> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        Ok((command, self.config(body)?))
+        Ok((command, self.config(body, pinned.as_deref())?))
     }
 
-    /// Sends the request and waits at most 30 s. Output: the reply, or
-    /// `github_unreachable` when curl could not finish the exchange.
+    /// Looks the host up once, waiting at most 5 s, then sends the request and waits at most
+    /// 25 s for curl, 30 s in all.
+    /// Output: the reply, `github_address_refused` for a refused address, or
+    /// `github_unreachable` when the lookup or curl could not finish the exchange.
     pub(crate) fn send(&self) -> Result<Reply, EngineError> {
-        let (command, config) = self.command()?;
-        exchange(command, config)
+        let (command, config) = self.command(system_lookup)?;
+        exchange(command, config).map_err(code)
     }
 
-    /// POSTs a JSON body and waits at most 30 s, as `send` does. Input: the body.
-    /// Output: the reply, or `github_unreachable` when curl could not finish the exchange.
+    /// POSTs a JSON body after the one host lookup, as `send` does. Input: the body.
+    /// Output: the reply, `github_address_refused`, or `github_unreachable`.
     pub(crate) fn send_json(&self, json: &str) -> Result<Reply, EngineError> {
-        let (command, config) = self.json_command(json)?;
-        exchange(command, config)
+        let (command, config) = self.json_command(json, system_lookup)?;
+        exchange(command, config).map_err(code)
     }
 
-    /// Sends a request with a method and an optional JSON body and waits at most 30 s, as
-    /// `send` does. Inputs: the method and the body. Output: the reply, or
-    /// `github_unreachable` when curl could not finish the exchange.
+    /// Sends a request with a method and an optional JSON body after the one host lookup,
+    /// as `send` does. Inputs: the method and the body. Output: the reply,
+    /// `github_address_refused`, or `github_unreachable`.
     pub(crate) fn send_body(&self, verb: Verb, json: Option<&str>) -> Result<Reply, EngineError> {
-        let (command, config) = self.command_with(Some((verb, json)))?;
-        exchange(command, config)
+        let (command, config) = self.command_with(Some((verb, json)), system_lookup)?;
+        exchange(command, config).map_err(code)
     }
 }
 
-/// Runs a built curl command, writes its config to curl's stdin, wipes the config and
-/// reads the reply within the request time. Inputs: the command and its config. Output:
-/// the reply, or `github_unreachable`.
-pub(crate) fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, EngineError> {
-    let spawned = kernel_processes::spawn_gate::spawn(&mut command);
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(_) => {
-            kernel_security::secret::wipe(&mut config);
-            return Err(failure("github_unreachable"));
-        }
-    };
-    let mut stdin = child.stdin.take().expect("curl stdin is piped");
-    let written = stdin.write_all(&config);
-    kernel_security::secret::wipe(&mut config);
-    drop(stdin);
-    let stdout = child.stdout.take().expect("curl stdout is piped");
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout
-            .take((BODY_BYTES_MAX + TRAILER_BYTES_MAX) as u64)
-            .read_to_end(&mut bytes);
-        (read, bytes)
-    });
-    let deadline = Instant::now() + REQUEST_TIME + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|_| failure("github_unreachable"))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(failure("github_unreachable"));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let (read, bytes) = reader.join().map_err(|_| failure("github_unreachable"))?;
-    if written.is_err() || read.is_err() || !status.success() {
-        return Err(failure("github_unreachable"));
-    }
-    split(bytes)
-}
-
-/// Splits curl's output into the body, the `X-OAuth-Scopes` line and the status line
-/// that `WRITE_OUT` puts after it. Input: the output. Output: the reply, or
-/// `github_reply_invalid` for a body past 4 MiB or a missing or bad status.
-fn split(mut bytes: Vec<u8>) -> Result<Reply, EngineError> {
-    let invalid = || failure("github_reply_invalid");
-    if bytes.len() > BODY_BYTES_MAX + TRAILER_BYTES_MAX {
-        return Err(invalid());
-    }
-    let cut = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .ok_or_else(invalid)?;
-    let code = std::str::from_utf8(&bytes[cut + 1..]).map_err(|_| invalid())?;
-    let status: u16 = code.parse().map_err(|_| invalid())?;
-    if !(100..=599).contains(&status) {
-        return Err(invalid());
-    }
-    bytes.truncate(cut);
-    let line = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .ok_or_else(invalid)?;
-    let scopes = scopes(&bytes[line + 1..]);
-    bytes.truncate(line);
-    if bytes.len() > BODY_BYTES_MAX {
-        return Err(invalid());
-    }
-    Ok(Reply {
-        status,
-        body: bytes,
-        scopes,
+/// The engine code of an exchange that gave no reply. Input: the kernel's reason. Output:
+/// `github_unreachable` or `github_reply_invalid`.
+fn code(error: ExchangeError) -> EngineError {
+    failure(match error {
+        ExchangeError::Unreachable => "github_unreachable",
+        ExchangeError::ReplyInvalid => "github_reply_invalid",
     })
 }
 
-/// Reads the `X-OAuth-Scopes` line: the comma-separated scopes of a classic token.
-/// Input: the line curl wrote. Output: the scopes, or None for an empty line (a token
-/// kind GitHub names no scopes for), a curl too old to print headers, which writes the
-/// variable as it is, or any line that is not a list of scope names.
-fn scopes(line: &[u8]) -> Option<Vec<String>> {
-    if line.is_empty() || line.len() > SCOPES_LINE_MAX {
-        return None;
-    }
-    let scopes: Vec<String> = std::str::from_utf8(line)
-        .ok()?
-        .split(',')
-        .map(str::trim)
-        .map(str::to_owned)
-        .collect();
-    let named = scopes.iter().all(|scope| {
-        !scope.is_empty()
-            && scope
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b':' || byte == b'_')
-    });
-    named.then_some(scopes)
-}
+#[cfg(test)]
+mod tests;

@@ -1041,9 +1041,15 @@ version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-security",
+ "crazyagent-linux-supervisor",
+ "crazyagent-win-sandbox",
  "getrandom 0.4.3",
+ "landlock",
+ "libc",
  "nix",
  "rustix 1.1.5",
+ "seccompiler",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1085,6 +1091,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]

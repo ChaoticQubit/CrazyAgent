@@ -2,6 +2,19 @@
 
 /// What the project access lists read from the engine that runs them.
 pub mod access;
+/// How the tmux host wraps a confined pane: the value the kernel tmux host is opened with,
+/// built from this crate's runner, keeper, pane shim and variable gate.
+#[cfg(unix)]
+mod confinement;
+#[cfg(unix)]
+pub use confinement::confinement;
+/// The Seatbelt profile an IDE server runs under: its grants, the profile built over the
+/// agent profile and installed beside the project's IDE data, and the command that runs it.
+#[cfg(unix)]
+pub mod editor;
+/// Egress through the system curl: one request exchange with its bounds, and the per-plugin
+/// host allowlist and send the kernel's `net.request` calls through.
+pub mod egress;
 /// The ELF reader: whether a Linux program is loaded by glibc, and so resolves names over
 /// TCP when the sandbox asks it to, judged from its program headers alone.
 pub mod elf;
@@ -20,9 +33,15 @@ pub mod hidden_paths;
 /// What this Linux holds for an agent beyond its Landlock rules: namespaces, signal scope,
 /// the call supervisor, root, AppArmor and its own network.
 pub mod host;
+/// The Sandboxed IDE terminal: its launch, the confined shell command and pane command
+/// built from it, and the owner's login shell.
+pub mod ide_shell;
 /// The plain lines and refusal codes a launch shows when a Linux or Windows sandbox cannot
 /// hold something, and the check that tells the Windows loopback refusal apart.
 pub mod lines;
+/// The Linux sandbox helper: its request parse, Landlock and seccomp rules, bridge and egress.
+#[cfg(target_os = "linux")]
+pub mod linux;
 /// One agent's model proxy: the loopback CONNECT tunnel to the agent's listed model hosts,
 /// the variables that send a harness through it and the rule for which addresses it dials.
 pub mod model_proxy;
@@ -65,5 +84,13 @@ pub mod windows;
 
 #[cfg(test)]
 mod low_ports_tests;
+/// The test agents rows start under the real project profile: a private project, home,
+/// peer home and engine runtime, and a shell run inside the sandbox.
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub mod test_agent;
+/// The stand-in profile hooks the kernel's own rows build sandboxes on, in place of the
+/// engine's real ones.
+#[cfg(all(test, unix))]
+pub(crate) mod test_hooks;
 #[cfg(test)]
 mod tests;

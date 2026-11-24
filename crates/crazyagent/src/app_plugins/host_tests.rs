@@ -96,7 +96,8 @@ fn the_start_sweep_removes_only_unreferenced_plugin_key_files() {
 fn on_linux_the_adapter_passes_the_handed_out_range() {
     let temp = tempfile::tempdir().unwrap();
     let engine = super::engine(temp.path());
-    let range = crate::sandbox::linux::read_picked_ports().expect("this Linux names its range");
+    let range =
+        kernel_sandbox::linux::helper::read_picked_ports().expect("this Linux names its range");
     assert_eq!(engine.handed_out, Some(range));
 }
 

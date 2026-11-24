@@ -298,7 +298,7 @@ fn a_kept_proxied_pane_whose_agent_killed_its_warden_is_not_recorded_plainly_sto
         (
             AgentStatus::Stopped,
             Some(with_code(
-                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
                 Some(crate::harnesses::leftovers::UNCERTAIN)
             ))
         )
@@ -329,7 +329,7 @@ fn a_kept_pane_whose_agent_killed_its_warden_fails_its_thaw_with_its_cleanup_nam
     assert!(
         fixture.note(&format!(
             "The terminal of team agent {id} was closed: it could not be continued after its freeze. {}.",
-            crate::sandbox::warden::CLEANUP_UNCERTAIN
+            kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN
         )),
         "the note names the cleanup uncertain"
     );
@@ -362,7 +362,7 @@ fn a_pane_refused_before_its_thaw_after_its_warden_was_killed_names_its_cleanup_
         fixture.note(&format!(
             "The terminal of team agent {id} was closed: its model proxy port {} is taken. {}.",
             pane.port,
-            crate::sandbox::warden::CLEANUP_UNCERTAIN
+            kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN
         )),
         "the note names the cleanup uncertain"
     );
@@ -408,7 +408,7 @@ fn an_agent_stopped_at_quit_after_its_warden_was_killed_is_not_recorded_plainly_
         (
             AgentStatus::Stopped,
             Some(with_code(
-                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN,
                 Some(crate::harnesses::leftovers::UNCERTAIN)
             ))
         )

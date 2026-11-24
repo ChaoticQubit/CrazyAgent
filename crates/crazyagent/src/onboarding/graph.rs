@@ -2,9 +2,9 @@ use crate::research::runner::RunError;
 #[cfg(unix)]
 use crate::research::runner::{AgentProcess, drain, private_directory};
 #[cfg(unix)]
-use crate::sandbox::ProjectSandbox;
-#[cfg(unix)]
 use kernel_sandbox::net::SandboxNetwork;
+#[cfg(unix)]
+use kernel_sandbox::profile::ProjectSandbox;
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]
@@ -220,7 +220,7 @@ pub(crate) fn update(
     for root in &roots {
         sandbox = sandbox.allow_read(root)?;
     }
-    sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
+    sandbox = sandbox.hide(&repo.join(kernel_common::names::CRAZYAGENT_DIRECTORY))?;
     for folder in hidden {
         sandbox = sandbox.hide(folder)?;
     }
@@ -325,7 +325,7 @@ fn kept_paths(repo: &Path, kept_out: &[String]) -> Vec<PathBuf> {
         .iter()
         .filter(|path| {
             let top = path.split('/').next().unwrap_or_default();
-            top != GRAPH_OUT && top != crate::projects_home::CRAZYAGENT_DIRECTORY
+            top != GRAPH_OUT && top != kernel_common::names::CRAZYAGENT_DIRECTORY
         })
         .map(|path| repo.join(path.trim_end_matches('/')))
         .collect()

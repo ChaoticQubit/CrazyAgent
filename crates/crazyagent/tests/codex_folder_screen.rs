@@ -163,7 +163,7 @@ fn world(codex_folder: bool) -> Option<World> {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &folder,
-        crazyagent::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crazyagent::terminal::tmux::tmux_hooks(),
     ));
     let (home, repo, bin) = (base.join("home"), base.join("repo"), base.join("bin"));

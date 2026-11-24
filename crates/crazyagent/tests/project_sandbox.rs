@@ -1,11 +1,11 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, tool_cache};
+use crazyagent::sandbox::tool_cache;
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
-use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::profile::env::agent_process_env;
+use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox, installed::InstalledSandbox};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::tool_cache::CacheShape;
 use std::collections::{BTreeMap, BTreeSet};
@@ -202,20 +202,6 @@ fn a_launch_gets_the_tool_cache_of_its_policy_level_and_shape() {
             .iter()
             .all(|root| root.starts_with(&runtime) && root.is_dir())
     );
-}
-
-/// T8: a tool cache inside another root, or a second one, is refused.
-#[test]
-fn a_tool_cache_inside_another_root_or_a_second_one_is_refused() {
-    let case = case();
-    let cache = tool_cache(&case, false);
-    let inside = case.project.join("cache");
-    fs::create_dir(&inside).unwrap();
-    let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
-    assert!(base.clone().allow_tool_cache(&inside, false).is_err());
-    assert!(base.clone().allow_tool_cache(&case.home, false).is_err());
-    let once = base.allow_tool_cache(&cache.root, false).unwrap();
-    assert!(once.allow_tool_cache(&cache.root, false).is_err());
 }
 
 /// T8 row 5 and P5: a sandbox with a tool cache points `pnpm_config_store_dir` into it, and
@@ -4285,3 +4271,6 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
 
 #[path = "project_sandbox/secret_rule.rs"]
 mod secret_rule;
+
+#[path = "project_sandbox/tool_cache_roots.rs"]
+mod tool_cache_roots;

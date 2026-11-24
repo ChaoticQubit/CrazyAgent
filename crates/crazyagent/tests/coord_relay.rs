@@ -632,7 +632,7 @@ fn under_overlaps_block_a_review_ready_claim_denies_the_edit_until_its_work_land
 #[test]
 fn under_overlaps_block_the_edit_hook_still_denies_from_an_engine_in_an_app_bundle_under_the_profile()
  {
-    use crazyagent::sandbox::ProjectSandbox;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::{net::SandboxNetwork, profile::command::SANDBOX_EXEC};
     let team = Team::new();
     let claimed = Claimed::new(&team);
@@ -1268,14 +1268,6 @@ fn engine_notes(db: &Connection, agent: i64) -> Vec<String> {
 }
 
 #[test]
-fn with_nudges_off_no_reminder_is_sent() {
-    let team = Team::new();
-    let (edits, notes) = nudged(&team, Nudges::Off);
-    assert_eq!(edits, ["", ""], "no hook reminder on an edit");
-    assert!(notes.is_empty(), "no engine reminder: {notes:?}");
-}
-
-#[test]
 fn with_ten_minutes_the_adoption_reminder_is_sent() {
     let team = Team::new();
     let (edits, notes) = nudged(&team, Nudges::TenMinutes);
@@ -1690,3 +1682,6 @@ fn the_monitor_prints_each_new_letter_for_its_session_once_and_exits_with_its_pa
     }
     assert_eq!(reader.join().unwrap(), "");
 }
+
+#[path = "coord_relay/nudges.rs"]
+mod nudges;

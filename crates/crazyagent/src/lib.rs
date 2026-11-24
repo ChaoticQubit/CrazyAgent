@@ -89,6 +89,9 @@ mod sdk_install;
 /// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
 /// gateway's grant check and the bundled agent-quit plugin.
 pub mod sdk_processes;
+/// The `sandbox.*` provider: the owner's sandbox settings read and saved through the same
+/// owner read and settings log save the Settings screens use.
+pub mod sdk_sandbox;
 mod sdk_slice;
 /// The SDK providers the kernel security crate backs: the secrets capabilities over the
 /// OS store, and `Absent`, which fails every call without opening anything.

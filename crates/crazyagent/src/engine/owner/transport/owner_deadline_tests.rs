@@ -148,7 +148,7 @@ fn git(home: &Path, dir: &Path, args: &[&str]) {
 /// repository.
 fn repository(under: &Path, home: &Path) -> PathBuf {
     let repo = under.join("repo");
-    std::fs::create_dir_all(repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir_all(repo.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     git(home, &repo, &["init", "-q", "--template=", "-b", "main"]);
     git(home, &repo, &["config", "user.name", "Repo Owner"]);
     git(

@@ -2,10 +2,10 @@ use super::master_launch::error;
 use crate::harnesses::leftovers::{self, Follower, HoldBy, Leftovers, Lineage, Unstopped};
 use crate::protocol::CredentialRef;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
-use crate::sandbox::warden::{self, Warden};
 use kernel_processes::spawn_gate::Keeper;
 use kernel_sandbox::profile::command::LineageCheck;
 use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
+use kernel_sandbox::profile::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
@@ -482,9 +482,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn cleanup_stops_what_a_sandboxed_rcli_master_detached() {
-        use crate::sandbox::warden::fixture::{DetachingRun, survivors};
+        use kernel_sandbox::profile::warden::fixture::{DetachingRun, survivors};
 
-        let run = DetachingRun::new();
+        let run = DetachingRun::new(&crate::sandbox::PROFILE_HOOKS);
         let mut command = run.command(&run.profile);
         command
             .stdin(Stdio::piped())
@@ -721,7 +721,7 @@ read -r _
     #[cfg(target_os = "linux")]
     #[test]
     fn a_host_outlives_a_runtime_worker_that_handed_its_core_off() {
-        let bwrap = crate::sandbox::linux::BWRAP_PATHS
+        let bwrap = kernel_sandbox::linux::helper::BWRAP_PATHS
             .iter()
             .map(std::path::Path::new)
             .find(|path| path.is_file())

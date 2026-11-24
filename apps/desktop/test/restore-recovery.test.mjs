@@ -47,7 +47,7 @@ test("a restore with no usable copy offers no button but the folder path and the
 
 test("a restore that wrote the 2.4 data is finished, not offered back, and a refused action shows its code", () => {
   const finished = view({ kind: "finished", copy: "replaced-20261117T093000000Z" });
-  assert.ok(finished.includes(restore.RESTORE_RUNNING), finished);
+  assert.ok(finished.includes(restore.RESTORE_RUNNING.replaceAll("'", "&#x27;")), finished);
   assert.doesNotMatch(finished, button(recovery.PUT_BACK));
   assert.doesNotMatch(finished, button(recovery.CONTINUE));
   const refused = view({ kind: "put_back", copy: "replaced-20261117T093000000Z" }, { problem: "storage_putback_busy" });
@@ -85,4 +85,18 @@ test("the TUI says the recovery words and labels the desktop says", () => {
   for (const line of [recovery.RECOVERY_BROKEN, recovery.RECOVERY_CONTINUE, recovery.PUT_BACK, recovery.CONTINUE]) {
     assert.ok(tui.includes(`"${line}"`), `the TUI says ${line}`);
   }
+});
+
+test("a refused finish clears its running flag and offers Try again, as the TUI reads again on r", async () => {
+  const finishing = { current: false };
+  const refused = await recovery.finishOnce(finishing, async () => ({ kind: "error", code: "storage_putback_busy" }));
+  assert.equal(refused, "storage_putback_busy");
+  assert.equal(finishing.current, false, "a refused finish can run again");
+  assert.equal(await recovery.finishOnce(finishing, async () => ({ kind: "ok" })), null);
+  assert.equal(finishing.current, true, "a finish that ran is not run twice");
+  const copy = "replaced-20261117T093000000Z";
+  assert.doesNotMatch(view({ kind: "finished", copy }), button("Try again"), "a running finish offers nothing");
+  const shown = view({ kind: "finished", copy }, { problem: "storage_putback_busy" });
+  assert.match(shown, button("Try again"));
+  assert.ok(shown.includes("storage_putback_busy"), shown);
 });

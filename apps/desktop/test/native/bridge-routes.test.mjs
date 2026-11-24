@@ -188,3 +188,14 @@ test("a route calls the method of the type its body names, by impl block, and re
   assert.throws(() => plan(filesCommand("state.0.listing().await"), two), /calls BridgeQueue::listing, which no impl BridgeQueue defines as pub/);
   assert.throws(() => plan(filesCommand("lock(&state).await?.remove_everything().await"), two), /calls NativeBridge::remove_everything, which no impl NativeBridge defines as pub/);
 });
+
+test("the recovery routes refuse in the bridge, which has no default engine, and the native terminal read is left out", () => {
+  const planned = new Map(commands(lib).map((command) => [command.name, plan(command, impls)]));
+  for (const name of ["desktop_restore_recovery", "desktop_restore_recover", "desktop_restore_open_backups"]) {
+    const route = planned.get(name).route;
+    assert.deepEqual(route.args, [], name);
+    assert.match(route.body, /code: "not_configured"/, name);
+    assert.doesNotMatch(route.body, /restore::/, name);
+  }
+  assert.ok(planned.get("desktop_native_terminal_enabled").skip, "native_enabled is the app's own");
+});

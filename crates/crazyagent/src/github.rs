@@ -30,7 +30,6 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
-pub(crate) use clone::NULL_DEVICE;
 #[cfg(not(unix))]
 pub(crate) use clone::git_program;
 pub use job::{
@@ -289,6 +288,9 @@ pub fn problem(code: &str) -> String {
         "github_token_refused" => "GitHub did not accept the token. Sign in again.",
         "github_unreachable" => "GitHub could not be reached. Check the network and try again.",
         "github_reply_invalid" => "GitHub sent a reply the engine could not read. Try again.",
+        "github_address_refused" => {
+            "GitHub resolved to a private or local address, so CrazyAgent sent nothing."
+        }
         "github_cli_missing" => "The GitHub CLI (gh) is not installed.",
         "github_cli_not_signed_in" => "The GitHub CLI is not signed in. Run gh auth login first.",
         "github_scope_missing_read_org" => {

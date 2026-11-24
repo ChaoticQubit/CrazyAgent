@@ -5,8 +5,8 @@ use crate::adapters::{NativeAction, NativeHarness};
 use crate::engine::claude_host::ClaudeHost;
 use crate::protocol::SessionId;
 use crate::routing::ResourceBudget;
-use crate::sandbox::warden::fixture::{detached_survivors, naming, processes_naming};
 use crate::team::runtime::managed_agent::SignedIn;
+use kernel_sandbox::profile::warden::fixture::{detached_survivors, naming, processes_naming};
 use std::os::unix::fs::PermissionsExt;
 
 fn private_directory(path: &Path) {

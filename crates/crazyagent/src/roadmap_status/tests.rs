@@ -797,7 +797,7 @@ fn a_check_falls_back_to_the_planned_roadmap_and_fails_plainly_without_any_items
         prepare(&case.db, &case.project, root).unwrap_err(),
         NO_ROADMAP
     );
-    let state = root.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = root.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     std::fs::create_dir_all(state.join("context")).unwrap();
     let planned = state.join(crate::planning::ROADMAP);
     std::fs::write(&planned, "# Roadmap\n\nNothing is planned yet.\n").unwrap();
@@ -1376,7 +1376,7 @@ fn a_status_check_whose_provider_refuses_connections_fails_at_once_with_the_reac
     private(&state);
     let root = base.join("repo");
     std::fs::create_dir(&root).unwrap();
-    std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(root.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let runner =
         ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
     let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();

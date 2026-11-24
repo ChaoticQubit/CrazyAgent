@@ -85,3 +85,15 @@ fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_fold
         "{refused:?}"
     );
 }
+
+#[test]
+fn landlock_holds_the_project_boundary_on_this_kernel() {
+    let case = case();
+    let sandbox = pinned(policy(&case, SandboxNetwork::Open));
+    assert!(
+        matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        sandbox.backend()
+    );
+    assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
+}

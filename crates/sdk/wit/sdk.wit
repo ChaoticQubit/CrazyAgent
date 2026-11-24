@@ -136,6 +136,48 @@ interface process {
   install: func(recipe: install-recipe) -> result<install-result, refusal>;
 }
 
+interface sandbox-types {
+  enum linux-sockets {
+    tcp-only,
+    refuse,
+    tcp-ports,
+  }
+
+  enum linux-supervisor {
+    on,
+    off,
+  }
+
+  enum linux-strict {
+    off,
+    on,
+  }
+
+  record sandbox-settings {
+    linux-sockets: linux-sockets,
+    linux-supervisor: linux-supervisor,
+    linux-strict: linux-strict,
+  }
+
+  record stored-sandbox-settings {
+    settings: sandbox-settings,
+    version: u64,
+  }
+
+  record sandbox-settings-saved {
+    settings: sandbox-settings,
+  }
+}
+
+interface sandbox {
+  use sdk-types.{refusal};
+  use sandbox-types.{sandbox-settings, stored-sandbox-settings};
+
+  save-settings: func(settings: sandbox-settings, version: u64) -> result<_, refusal>;
+
+  settings: func() -> result<stored-sandbox-settings, refusal>;
+}
+
 interface secrets-types {
   type secret = u64;
 }
@@ -219,6 +261,7 @@ world plugin {
   import editor;
   import net;
   import process;
+  import sandbox;
   import secrets;
   import service;
   import settings;

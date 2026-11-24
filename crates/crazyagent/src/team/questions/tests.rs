@@ -448,7 +448,7 @@ impl Engine {
     /// in the questions log. Output: nothing.
     fn register(&self) {
         let folder = self._dir.path().join("project");
-        std::fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        std::fs::create_dir_all(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         crate::ide::workspace::tests::add_project(&self.connection, self.project.as_str(), &folder);
     }
 

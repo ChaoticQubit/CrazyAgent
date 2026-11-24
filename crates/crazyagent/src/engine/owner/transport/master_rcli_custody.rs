@@ -2,7 +2,7 @@ use super::{EngineError, cleanup_uncertain, failure};
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::protocol::RequestId;
 use crate::rcli_host::{RcliMasterHost, RcliMasterLaunch, RcliMasterObservation};
-use crate::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use std::time::Duration;
 
 pub(super) struct RcliCustody {

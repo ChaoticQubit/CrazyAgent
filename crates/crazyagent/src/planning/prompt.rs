@@ -142,7 +142,7 @@ type LinkedReport = (ResearchKind, String, PathBuf, String, bool);
 /// Returns at most `LINKED_REPORTS_MAX` reports.
 fn linked_reports(state: &Path, linked: &[(ResearchKind, LinkedText)]) -> Vec<LinkedReport> {
     let folder = match state.file_name() {
-        Some(name) if name == crate::projects_home::CRAZYAGENT_DIRECTORY => {
+        Some(name) if name == kernel_common::names::CRAZYAGENT_DIRECTORY => {
             state.parent().unwrap_or(state)
         }
         _ => state,

@@ -1,13 +1,17 @@
 use super::*;
 use crate::project_setup::{StoredSetup, TeamPlan};
 use crate::sdk_slice::{EngineRefusals, bundled_grants};
-use bus_gateway::{AllOn, Gateway, Grants};
+#[cfg(target_os = "macos")]
+use bus_gateway::Grants;
+use bus_gateway::{AllOn, Gateway};
 use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
+#[cfg(target_os = "macos")]
 use sdk::Tier;
 use sdk::generated::editor::Provide;
 use sdk_host::{Bound, Providers};
 
 const KNOWN: &str = "editor-known";
+#[cfg(target_os = "macos")]
 const PID: u32 = 4242;
 
 /// An engine database holding one project the owner set up. Output: the connection.
@@ -51,6 +55,7 @@ fn never_run(_: &ProjectId) -> Result<u32, &'static str> {
     panic!("the spawner ran")
 }
 
+#[cfg(target_os = "macos")]
 fn started(project: &ProjectId) -> Result<u32, &'static str> {
     assert_eq!(project.as_str(), KNOWN);
     Ok(PID)
@@ -148,6 +153,7 @@ fn agent_quit_calling_editor_spawn_is_refused_and_logs_one_call_refused() {
         editor: &provider,
         net: &crate::security_caps::Absent,
         process: &crate::security_caps::Absent,
+        sandbox: &crate::security_caps::Absent,
         secrets: &crate::security_caps::Absent,
         settings: &crate::security_caps::Absent,
         service: &crate::security_caps::Absent,
@@ -177,6 +183,7 @@ fn a_test_grant_table_reaches_the_editor_provider() {
         editor: &provider,
         net: &crate::security_caps::Absent,
         process: &crate::security_caps::Absent,
+        sandbox: &crate::security_caps::Absent,
         secrets: &crate::security_caps::Absent,
         settings: &crate::security_caps::Absent,
         service: &crate::security_caps::Absent,

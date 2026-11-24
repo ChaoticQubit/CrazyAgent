@@ -4,7 +4,6 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::ipc::{OwnedWriteHalf, Stream};
 use crate::protocol::{ProjectId, encode_frame};
-use crate::sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
 use crate::terminal::{TerminalFrame, TerminalRequest};
 use kernel_processes::terminal::attach_again;
 use kernel_processes::terminal::buffer::Chunk;
@@ -12,6 +11,7 @@ use kernel_processes::terminal::{
     AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalStream,
 };
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
 use kernel_sandbox::policy::AgentAccess;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -222,7 +222,7 @@ pub(super) fn prepare(
     asked: AgentAccess,
     settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<InteractiveCommand, EngineError> {
-    let place = ide_shell::project_place(root, project)
+    let place = crate::sandbox::ide_shell::project_place(root, project)
         .map_err(|_| failure("ide_terminal_project_unavailable"))?;
     let level = terminal_level(place.access, asked).map_err(failure)?;
     let kept_ports = crate::ide::workspace::kept_ports(settings)?;
@@ -241,10 +241,11 @@ pub(super) fn prepare(
                 .any(|known| variable.as_os_str() == *known)
         })
         .collect();
-    let command = ide_shell::interactive(
+    let pane = ide_shell::interactive(
+        &crate::sandbox::PROFILE_HOOKS,
         &Launch {
             root,
-            project,
+            project: project.as_str(),
             folder: &place.folder,
             cwd: &place.folder,
             shell: &shell,
@@ -259,6 +260,7 @@ pub(super) fn prepare(
         place.access,
     )
     .map_err(shell_refusal)?;
+    let command = crate::ide::terminal::sandboxed_pane(pane);
     assert_eq!(
         command.argv.first().map(String::as_str),
         Some(kernel_sandbox::profile::command::SANDBOX_EXEC)

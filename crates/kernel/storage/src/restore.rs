@@ -106,6 +106,7 @@ fn restore_pinned_at(
     now: SystemTime,
     check: CopyCheck,
 ) -> Result<Restored, StorageError> {
+    let path = &real_database(path)?;
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
@@ -195,15 +196,36 @@ pub fn restore_failed(cause: impl std::fmt::Display) -> StorageError {
     error(format!("{RESTORE_FAILED}: {cause}"))
 }
 
+/// The path of engine.db through its folder's real path, so every path built beside it is
+/// real, while a link planted as engine.db itself stays a link for the no-follow open to
+/// refuse. Input: the database path, a bare name meaning the working folder. Output: that
+/// path, or `storage_restore_failed`.
+pub(crate) fn real_database(path: &Path) -> Result<PathBuf, StorageError> {
+    let folder = path
+        .parent()
+        .ok_or_else(|| restore_failed("the database has no folder"))?;
+    let folder = match folder.as_os_str().is_empty() {
+        true => Path::new("."),
+        false => folder,
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| restore_failed("the database has no name"))?;
+    Ok(std::fs::canonicalize(folder)
+        .map_err(restore_failed)?
+        .join(name))
+}
+
 /// Opens engine.db and holds it alone until the connection closes: exclusive locking mode
-/// and an exclusive transaction, with no wait, as the probe in changes.rs does. Any other
-/// connection, in this process or another, refuses the restore, and none can open while it
-/// runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
+/// and an exclusive transaction, with no wait. Its folder may be reached through a link, but
+/// engine.db itself never is. Any other connection refuses the restore, and none can open
+/// while it runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
 fn alone(path: &Path) -> Result<Connection, StorageError> {
+    let canonical = real_database(path)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let db = Connection::open_with_flags(path, flags).map_err(restore_failed)?;
+    let db = Connection::open_with_flags(&canonical, flags).map_err(restore_failed)?;
     db.busy_timeout(Duration::ZERO).map_err(restore_failed)?;
     match db.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;") {
         Ok(()) => {}

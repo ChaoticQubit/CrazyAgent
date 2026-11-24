@@ -1,11 +1,11 @@
-use crate::config::EffectiveConfig;
-use crate::engine::owner::native_auth as owner_auth;
 use crate::engine::owner::*;
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
+use crate::{config::EffectiveConfig, engine::owner::native_auth as owner_auth};
 #[cfg(windows)]
 use crazyagent_win_sandbox::private;
+use kernel_sandbox::host::{linux_host, linux_host_kept, linux_other_git};
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -2196,12 +2196,6 @@ pub fn engine_lock_released(root: &Path) -> bool {
     }
 }
 
-/// Releases the engine database lock and reports whether the unlock succeeded.
-/// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
-fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
-    unlock_database(&lock.file)
-}
-
 /// Unlocks the engine database lock file on Windows over the range `private::lock` took.
 /// Takes the locked file. Returns `database_lock_release_failed` when the unlock fails.
 #[cfg(windows)]
@@ -3728,10 +3722,9 @@ fn project_other_git(
         .ok()
         .map(|settings| settings.linux_supervisor);
     drop(tx);
-    let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+    let host = linux_host_kept().map(|host| host.under(calls));
     let other_git = kernel_sandbox::policy::LevelView::other_git;
-    let folder = setup.map(|setup| setup.project_folder());
-    Ok(folder.is_none_or(|folder| other_git(&crate::sandbox::POLICY_HOOKS, host, &folder)))
+    Ok(setup.is_none_or(|setup| other_git(host, &setup.project_folder(), linux_other_git)))
 }
 
 fn owner_read(
@@ -3745,7 +3738,7 @@ fn owner_read(
         query,
         OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
     ) {
-        kernel_sandbox::policy::LevelView::refresh(&crate::sandbox::POLICY_HOOKS);
+        linux_host();
     }
     let other_git = match query {
         OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
@@ -3834,6 +3827,7 @@ fn owner_read(
                 .map_err(error)?
                 .view(
                     &crate::sandbox::POLICY_HOOKS,
+                    linux_host_kept(),
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
@@ -4321,3 +4315,6 @@ mod configured_conversation_fixture;
 /// frame.
 mod state_snapshot;
 use state_snapshot::{enforce_snapshot_bound, snapshot};
+
+mod database_lock;
+use database_lock::release_database_lock;

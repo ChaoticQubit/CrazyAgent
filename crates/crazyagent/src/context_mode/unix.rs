@@ -1,8 +1,8 @@
 use super::refused;
 use crate::file_lock::HeldLock;
-use crate::sandbox::ProjectSandbox;
 use kernel_processes::run::InstallError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::settings::SandboxSettings;
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::fs::File;
@@ -156,8 +156,10 @@ pub(super) fn npm_wrap(
         let sandbox = sandbox.limit_sockets(settings.linux_sockets);
         let calls = settings.linux_supervisor;
         let strict = settings.linux_strict;
-        let sandbox = crate::sandbox::InstalledSandbox::install(sandbox, profile, calls, strict)
-            .map_err(refused)?;
+        let sandbox = kernel_sandbox::profile::installed::InstalledSandbox::install(
+            sandbox, profile, calls, strict,
+        )
+        .map_err(refused)?;
         let mut npm = Command::new(bin.join("npm"));
         npm.current_dir(cwd);
         sandbox.wrap(&npm).map_err(refused)?

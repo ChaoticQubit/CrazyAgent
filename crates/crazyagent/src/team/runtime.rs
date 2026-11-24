@@ -36,7 +36,6 @@ use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
@@ -45,9 +44,10 @@ use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
-use kernel_sandbox::settings::LinuxStrict;
-use kernel_sandbox::toolchains;
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+use kernel_sandbox::{host::linux_unbridged_notice, toolchains};
+use kernel_sandbox::{profile::ProjectSandbox, profile::warden, settings::LinuxStrict};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -3151,7 +3151,7 @@ impl TeamRuntime {
             worker.stop_for("engine_stop:shutdown");
         }
         let uncertain = with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            warden::CLEANUP_UNCERTAIN,
             Some(crate::harnesses::leftovers::UNCERTAIN),
         );
         let mut unconfirmed = BTreeSet::new();
@@ -9963,7 +9963,7 @@ impl TeamRuntime {
 
     /// Keeps in an agent's Messages timeline, once while it is kept, the engine's notice that
     /// this launch stays on this computer's network on a Linux that nests agents
-    /// ([`crate::sandbox::linux_unbridged_notice`]). Takes the project, the agent, the
+    /// ([`linux_unbridged_notice`]). Takes the project, the agent, the
     /// project's network choice and the agent's sandbox as launched, under the owner's call
     /// supervisor setting. Returns nothing; a notice that cannot be kept is logged, never a
     /// reason not to start.
@@ -9977,7 +9977,7 @@ impl TeamRuntime {
         let calls = crate::sandbox_settings::load(&self.connection)
             .ok()
             .map(|settings| settings.linux_supervisor);
-        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox, calls) else {
+        let Some(text) = linux_unbridged_notice(choice, sandbox, calls) else {
             return;
         };
         let kept = id > 0
@@ -12111,7 +12111,7 @@ fn settle_stop(
                 std::mem::forget(profile);
             }
             Some(with_code(
-                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                warden::CLEANUP_UNCERTAIN,
                 Some(crate::harnesses::leftovers::UNCERTAIN),
             ))
         }
@@ -13093,45 +13093,6 @@ fn quoted_lines(names: &[String], max: usize) -> String {
     text
 }
 
-/// Keeps the harness conversation a sub-agent's pane records, replacing the one kept
-/// before, so waking the agent continues it (DEC-102). A record path that is not plain text
-/// or too long, or an id out of bounds, is not kept. Takes the database, the agent, its
-/// project, launch harness and account, and the conversation. Returns any SQLite failure.
-fn keep_agent_conversation(
-    connection: &Connection,
-    agent: i64,
-    project: &ProjectId,
-    harness: &str,
-    account: &CredentialRef,
-    resume: &Resume,
-) -> Result<(), EngineError> {
-    let Some(record) = resume
-        .record
-        .to_str()
-        .filter(|record| !record.is_empty() && record.len() <= 4096)
-    else {
-        return Ok(());
-    };
-    if resume.id.is_empty() || resume.id.len() > 128 {
-        return Ok(());
-    }
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                agent,
-                project.as_str(),
-                harness,
-                account.as_str(),
-                resume.id,
-                record
-            ],
-        )
-        .map_err(error)?;
-    Ok(())
-}
-
 /// The newest result a sub-agent reported for a task, on one line and bounded, the handoff a
 /// woken agent gets when its harness conversation cannot continue. Takes the database and
 /// the agent. Returns the result, or none before its first.
@@ -13721,11 +13682,11 @@ fn start_problem(problem: &LaunchError) -> String {
 /// it is (SA vid 10). Inputs: whether the end was confirmed and the reason. Output: the
 /// reason to note.
 fn uncertain_unless(confirmed: bool, reason: String) -> String {
-    let named = reason.ends_with(crate::sandbox::warden::CLEANUP_UNCERTAIN);
+    let named = reason.ends_with(warden::CLEANUP_UNCERTAIN);
     if confirmed || named {
         reason
     } else {
-        format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN)
+        format!("{reason}. {}", warden::CLEANUP_UNCERTAIN)
     }
 }
 
@@ -15029,3 +14990,6 @@ mod live_stop_hook_tests;
 /// Where Git keeps a new agent worktree's metadata, read before any agent runs in it.
 mod worktree_git_dir;
 use worktree_git_dir::agent_git_dir;
+
+mod agent_conversation;
+use agent_conversation::keep_agent_conversation;

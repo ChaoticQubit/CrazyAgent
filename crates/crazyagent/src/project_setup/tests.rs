@@ -228,7 +228,7 @@ fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
     let catalog = catalog(&config(), None, &[], &BTreeSet::new(), None).unwrap();
     assert_eq!(
         catalog.agent_access,
-        LevelView::all(&crate::sandbox::POLICY_HOOKS, None)
+        LevelView::all(kernel_sandbox::host::linux_host_kept(), None)
     );
     let runs: Vec<(AgentAccess, bool)> = catalog
         .agent_access
@@ -719,18 +719,6 @@ fn claims_follow_pool_assignment_and_finish_records_the_report() {
         )
         .unwrap();
     assert_eq!(stored, "needs_pool");
-}
-
-#[test]
-fn markdown_sections_are_selected_by_heading() {
-    let report = "# Market\nintro\n## Size\nbig\n### Detail\nfine\n## Trends\nup\n";
-    assert_eq!(section(report, None).unwrap(), report.trim());
-    assert_eq!(
-        section(report, Some("Size")).unwrap(),
-        "## Size\nbig\n### Detail\nfine"
-    );
-    assert_eq!(section(report, Some("Trends")).unwrap(), "## Trends\nup");
-    assert!(section(report, Some("Absent")).is_none());
 }
 
 #[test]
@@ -1763,7 +1751,7 @@ fn a_new_project_build_counts_each_document_it_copies() {
     assert_eq!(staged.staging(), staging.as_path());
     assert!(
         staging
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
             .join(CONTEXT_DIRECTORY)
             .join("documents")
             .join("scope.md")
@@ -1792,3 +1780,5 @@ fn a_new_project_build_stopped_before_it_starts_leaves_no_staging_folder() {
     );
     assert!(!home.join("notes").exists());
 }
+
+mod markdown_sections;

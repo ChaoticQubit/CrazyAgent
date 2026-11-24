@@ -14,10 +14,10 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
     (folder, real)
 }
 
-/// A scratch folder for rows that need a folder kept, its real path. The probes keep only
-/// folders no other user can change, and a temp folder such as Linux's shared `/tmp` is
-/// one others can, so the folder sits beside the test binary
-/// ([`crate::service::test_support::durable_folder`]). Output: the folder and its real path.
+/// A scratch folder for rows that need a folder kept, its real path: beside the test binary,
+/// where no other user can change it ([`crate::service::test_support::durable_folder`]). The
+/// resolver's own kernel check drops a folder under a temp folder every user can write, such
+/// as Linux `/tmp`. Output: the folder and its real path.
 fn private_scratch() -> (tempfile::TempDir, PathBuf) {
     let folder = crate::service::test_support::durable_folder();
     let real = folder.path().canonicalize().unwrap();

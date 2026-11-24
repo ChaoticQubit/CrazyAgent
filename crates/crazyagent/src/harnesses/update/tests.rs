@@ -890,12 +890,6 @@ fn shown_output_drops_terminal_control_sequences() {
     assert_eq!(text.trim(), "Updated");
 }
 
-#[test]
-fn the_root_user_is_refused() {
-    assert_eq!(refused_user(0), Some("harness_update_as_root"));
-    assert_eq!(refused_user(501), None);
-}
-
 fn serve_once(reply: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
     use std::io::{Read, Write};
     let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
@@ -2813,7 +2807,7 @@ fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
         std::fs::create_dir_all(&folder).unwrap();
         folder
     });
-    let sandbox = crate::sandbox::ProjectSandbox::new(
+    let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &project,
         &home,

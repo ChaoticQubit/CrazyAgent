@@ -31,6 +31,23 @@ fn generated_from_caps() -> Vec<(String, String)> {
     rust(&borrowed).expect("the caps generate")
 }
 
+/// Lists the stems of the checked-in `.cap` files. Output: the stems, sorted.
+fn cap_stems() -> Vec<String> {
+    let mut stems: Vec<String> = fs::read_dir(sdk("caps"))
+        .expect("the caps folder reads")
+        .map(|entry| entry.expect("a caps entry reads").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("cap"))
+        .map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("a cap stem is text")
+                .to_owned()
+        })
+        .collect();
+    stems.sort();
+    stems
+}
+
 /// Runs capgen over sources that must be refused. Input: stems with sources.
 /// Output: the refusal code; panics when capgen accepts them.
 fn refused(sources: &[(&str, &str)]) -> &'static str {
@@ -43,22 +60,23 @@ fn refused(sources: &[(&str, &str)]) -> &'static str {
 #[test]
 fn settings_cap_generates_the_checked_in_files() {
     let files = generated_from_caps();
+    let mut expected = vec![
+        "envelope/mod.rs".to_owned(),
+        "host.rs".to_owned(),
+        "mod.rs".to_owned(),
+    ];
+    for stem in cap_stems() {
+        expected.push(format!("{stem}.rs"));
+        expected.push(format!("envelope/{stem}.rs"));
+    }
+    expected.sort();
+    assert!(expected.len() > 3, "the caps folder holds no cap");
     assert_eq!(
         files
             .iter()
-            .map(|(path, _)| path.as_str())
+            .map(|(path, _)| path.clone())
             .collect::<Vec<_>>(),
-        vec![
-            "envelope/mod.rs",
-            "envelope/net.rs",
-            "envelope/secrets.rs",
-            "envelope/settings.rs",
-            "host.rs",
-            "mod.rs",
-            "net.rs",
-            "secrets.rs",
-            "settings.rs"
-        ]
+        expected
     );
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
@@ -76,14 +94,24 @@ fn a_renamed_field_changes_the_output() {
     let source = fs::read_to_string(sdk("caps/settings.cap")).expect("settings.cap reads");
     let renamed = source.replace("hours: u16", "hour_count: u16");
     assert_ne!(renamed, source);
-    let secrets = fs::read_to_string(sdk("caps/secrets.cap")).expect("secrets.cap reads");
-    let net = fs::read_to_string(sdk("caps/net.cap")).expect("net.cap reads");
-    let files = rust(&parsed(&[
-        ("net", &net),
-        ("secrets", &secrets),
-        ("settings", &renamed),
-    ]))
-    .expect("generates");
+    let loaded = load(&sdk("caps")).expect("the caps load");
+    let fed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| match stem.as_str() {
+            "settings" => (
+                "settings",
+                crazyagent_cap::parse_as("settings", &renamed).expect("parses"),
+            ),
+            other => (other, file.clone()),
+        })
+        .collect();
+    assert_eq!(
+        fed.iter()
+            .map(|(stem, _)| stem.to_string())
+            .collect::<Vec<_>>(),
+        cap_stems()
+    );
+    let files = rust(&fed).expect("generates");
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
         vec!["settings.rs".to_owned()]
@@ -413,16 +441,35 @@ fn a_capability_named_like_a_generated_check_is_refused() {
     );
 }
 
-fn chain(leaf: &str) -> String {
+/// Fields of the type below on each level of [`chain`] above the first, as many as one
+/// record may hold, so a walk that does not share finished types visits
+/// `FIELDS_PER_LEVEL^(RECORD_DEPTH_MAX - 1)` paths, 64^7 or about 4.4 * 10^12 (more than the
+/// 2^40 of the chain this row once built), where shared work is one pass over 449 fields.
+const FIELDS_PER_LEVEL: usize = crazyagent_cap::FIELDS_MAX;
+
+/// A chain of record types as deep as the parser accepts: `T0` holds one `leaf` field and
+/// each of the `RECORD_DEPTH_MAX - 1` levels above holds [`FIELDS_PER_LEVEL`] fields of
+/// the level below, then one capability takes the top type. Input: the leaf type. Output:
+/// the source and the top type's name.
+fn chain(leaf: &str) -> (String, String) {
     let mut source = format!("type T0 {{ a: {leaf} }}\n");
-    for level in 1..=40 {
+    for level in 1..crazyagent_cap::RECORD_DEPTH_MAX {
         let below = level - 1;
-        source.push_str(&format!("type T{level} {{ a: T{below}, b: T{below} }}\n"));
+        let fields: Vec<String> = (0..FIELDS_PER_LEVEL)
+            .map(|at| format!("f{at}: T{below}"))
+            .collect();
+        source.push_str(&format!("type T{level} {{ {} }}\n", fields.join(", ")));
     }
-    source.push_str("capability s.a(t: T40) -> unit tier: t1 needs: s.w");
-    source
+    let top = format!("T{}", crazyagent_cap::RECORD_DEPTH_MAX - 1);
+    source.push_str(&format!(
+        "capability s.a(t: {top}) -> unit tier: t1 needs: s.w"
+    ));
+    (source, top)
 }
 
+/// Generates the test module for a source on another thread and waits for it. Inputs: the
+/// source and the time limit in seconds. Output: the module; panics when it is not done in
+/// time.
 fn generated_within(source: String, seconds: u64) -> String {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -432,31 +479,37 @@ fn generated_within(source: String, seconds: u64) -> String {
     });
     receiver
         .recv_timeout(std::time::Duration::from_secs(seconds))
-        .expect("a 41-type chain generates in linear work, not 2^40")
+        .expect("a chain of shared types generates in linear work, not once per path")
 }
 
+/// A chain of shared record types as deep as the bound generates within the time limit,
+/// with the plain chain `Copy` and unchecked and the text chain checked once per type.
 #[test]
 fn a_deep_chain_of_shared_types_generates_without_blowing_up() {
-    let plain = generated_within(chain("u16"), 30);
+    let (source, top) = chain("u16");
+    let low = top.to_lowercase();
+    let plain = generated_within(source, 30);
+    let declared = format!("pub struct {top}");
+    assert!(derive_of(&plain, &declared).contains("Copy"), "{plain}");
+    assert!(derive_of(&plain, &declared).contains("Debug"), "{plain}");
+    assert!(!plain.contains(&format!("fn fits_{low}(")), "{plain}");
     assert!(
-        derive_of(&plain, "pub struct T40").contains("Copy"),
+        plain.contains(&format!(
+            "pub fn check_a_input(_t: &{top}) -> Result<(), Refusal> {{\n    Ok(())\n}}\n"
+        )),
         "{plain}"
     );
+    let (source, _) = chain("text");
+    let bounded = generated_within(source, 30);
     assert!(
-        derive_of(&plain, "pub struct T40").contains("Debug"),
-        "{plain}"
-    );
-    assert!(!plain.contains("fn fits_t40("), "{plain}");
-    assert!(
-        plain.contains("pub fn check_a_input(_t: &T40) -> Result<(), Refusal> {\n    Ok(())\n}\n"),
-        "{plain}"
-    );
-    let bounded = generated_within(chain("text"), 30);
-    assert!(
-        !derive_of(&bounded, "pub struct T40").contains("Copy"),
+        !derive_of(&bounded, &declared).contains("Copy"),
         "{bounded}"
     );
-    assert_eq!(bounded.matches("fn fits_t40(").count(), 1, "{bounded}");
+    assert_eq!(
+        bounded.matches(&format!("fn fits_{low}(")).count(),
+        1,
+        "{bounded}"
+    );
     assert_eq!(bounded.matches("fn fits_t0(").count(), 1, "{bounded}");
     assert!(bounded.contains("fn check_a_input("), "{bounded}");
 }

@@ -258,10 +258,6 @@ fn missing(path: &Path) -> bool {
     matches!(std::fs::symlink_metadata(path), Err(problem) if problem.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn agent_folder(team: &Path, id: i64) -> PathBuf {
-    team.join("agents").join(format!("agent-{id}"))
-}
-
 fn profile(team: &Path, id: i64) -> PathBuf {
     team.join("profiles").join(format!("agent-{id}.sb"))
 }
@@ -380,7 +376,7 @@ fn placed(db: &Connection, project: &ProjectId, place: &Place) -> Result<bool, E
         return Ok(false);
     };
     assert!(folder.is_absolute());
-    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     let parent = place.worktree.parent();
     let inside = place.worktree.file_name().is_some()
         && [state.join("worktrees"), folder.join("worktrees")]
@@ -1978,3 +1974,6 @@ fn allocated(metadata: &std::fs::Metadata) -> u64 {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+mod agent_folder;
+use agent_folder::agent_folder;

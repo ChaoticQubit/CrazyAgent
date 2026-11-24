@@ -172,7 +172,7 @@ mod own_turns {
         let host: Arc<dyn Host> = Arc::new(Tmux::open(
             Some(tmux),
             &folder,
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ));
         let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
@@ -187,7 +187,7 @@ mod own_turns {
         let boundary = if unconfined {
             let tmp = base.join("full-access-tmp");
             private(&tmp);
-            let sandbox = crate::sandbox::ProjectSandbox::new(
+            let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
                 &crate::sandbox::PROFILE_HOOKS,
                 &work,
                 &home,
@@ -195,7 +195,7 @@ mod own_turns {
                 kernel_sandbox::net::SandboxNetwork::Open,
             )
             .unwrap();
-            let installed = crate::sandbox::InstalledSandbox::install(
+            let installed = kernel_sandbox::profile::installed::InstalledSandbox::install(
                 sandbox,
                 &base.join("full-access.sb"),
                 kernel_sandbox::settings::LinuxSupervisor::On,

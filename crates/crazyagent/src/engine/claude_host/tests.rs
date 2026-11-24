@@ -437,8 +437,8 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
     use crate::engine::owner::{HostStamp, NativeProfileBinding};
     use crate::protocol::{ConfigId, Cursor, SessionId};
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
     use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::profile::installed::InstalledSandbox;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 
     let reference = |value: &str| CredentialRef::new(value).unwrap();
@@ -501,7 +501,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     let tmp = root.path().join("agent-tmp");
     fs::create_dir(&tmp).unwrap();
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
-    let sandbox = ProjectSandbox::new(
+    let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &fs::canonicalize(&project).unwrap(),
         &fs::canonicalize(&home).unwrap(),
@@ -2618,17 +2618,6 @@ async fn passes_in_a_second(claude: &ClaudeHost, settle: Duration) -> u64 {
 }
 
 #[tokio::test]
-async fn a_quiet_claude_turn_wakes_the_drive_loop_a_few_times_a_second() {
-    use crate::engine::master_host_fixture::MasterFixture;
-
-    let mut fixture = MasterFixture::new("claude");
-    let mut claude = turn_until_marked(&mut fixture, WAKE_IDLE_HARNESS, "quiet").await;
-    let passes = passes_in_a_second(&claude, Duration::from_millis(300)).await;
-    assert!(passes <= 10, "{passes} drive passes in a quiet second");
-    claude.cancel().await.unwrap();
-}
-
-#[tokio::test]
 async fn cancelling_a_quiet_claude_turn_wakes_its_drive_loop_at_once() {
     use crate::engine::master_host_fixture::MasterFixture;
 
@@ -2722,3 +2711,6 @@ async fn a_reaped_claude_harness_with_a_half_written_turn_is_waited_for_without_
         "nothing the harness started is left running"
     );
 }
+
+#[path = "tests/drive_loop.rs"]
+mod drive_loop;

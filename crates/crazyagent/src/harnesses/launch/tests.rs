@@ -1,6 +1,6 @@
 use super::{AccountBinding, Driver, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest};
 #[cfg(unix)]
-use crate::sandbox::InstalledSandbox;
+use kernel_sandbox::profile::installed::InstalledSandbox;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::path::Path;
@@ -1469,8 +1469,8 @@ mod chatgpt_relay;
 /// folders. Output: the boundary.
 #[cfg(all(test, unix))]
 pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
-    use crate::sandbox::ProjectSandbox;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let home = scratch.join("full-access-home");
     let tmp = scratch.join("full-access-tmp");
