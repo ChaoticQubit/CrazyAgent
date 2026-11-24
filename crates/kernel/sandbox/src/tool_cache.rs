@@ -160,7 +160,6 @@ pub fn remove_agent(
     else {
         return Ok(());
     };
-    let folder = project_folder(runtime, project);
     for own in [agent.to_owned(), format!("{agent}-teammates")] {
         for access in AgentAccess::ALL {
             let Some(key) = key(ToolCacheScope::PerAgent, access, CacheShape::Worktree, &own)
@@ -172,13 +171,8 @@ pub fn remove_agent(
                     Err(Errno::NOENT) => {}
                     Err(problem) => return Err(problem.into()),
                     Ok(found) if FileType::from_raw_mode(found.st_mode) == FileType::Directory => {
-                        let by_path = rustix::fs::open(
-                            &folder,
-                            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-                            Mode::empty(),
-                        )?;
                         (hooks.remove_agent_entry)(
-                            by_path.as_fd(),
+                            owned.as_fd(),
                             name.as_str(),
                             "cleanup_folder_failed",
                         )
