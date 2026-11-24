@@ -707,8 +707,13 @@ fn filesec_entries(filesec: &[u8]) -> std::io::Result<Vec<AccessEntry>> {
     if count > 128 || filesec.len() != head + count * ACCESS_ENTRY_BYTES {
         return Err(malformed("the entry count does not match the filesec"));
     }
-    let entries: Vec<AccessEntry> = filesec[head..]
-        .chunks_exact(ACCESS_ENTRY_BYTES)
+    let (whole, rest) = filesec[head..].as_chunks::<ACCESS_ENTRY_BYTES>();
+    assert!(
+        rest.is_empty(),
+        "the length check leaves only whole entries"
+    );
+    let entries: Vec<AccessEntry> = whole
+        .iter()
         .map(|entry| AccessEntry {
             principal: entry[..16]
                 .try_into()
