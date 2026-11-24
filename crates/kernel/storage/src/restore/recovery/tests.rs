@@ -351,3 +351,43 @@ fn a_record_rewritten_before_continue_takes_the_lock_is_read_again_under_it() {
     assert!(refused.starts_with(PUTBACK_CHECK_FAILED), "{refused}");
     assert_eq!(read_restore_record(root.path()), Some(line));
 }
+
+/// A folder that links to an engine root, as a moved home or a data folder on another volume
+/// reaches it, kept beside the root in a canonical folder of its own. Input: the root.
+/// Output: the folder holding the link, removed on drop, and engine.db's path through it.
+fn linked(root: &Path) -> (tempfile::TempDir, PathBuf) {
+    let beside = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let link = beside.path().join("engine");
+    std::os::unix::fs::symlink(root, &link).unwrap();
+    (beside, link.join(DATABASE))
+}
+
+#[test]
+fn an_engine_folder_reached_through_a_link_reads_its_offer_and_restores() {
+    let (root, real) = upgraded(true);
+    let (_beside, path) = linked(root.path());
+
+    assert_eq!(recovery(&path).unwrap(), None);
+    let restored = restore_pinned(&path, &quiet_hooks());
+
+    assert!(restored.is_ok(), "{:?}", restored.err());
+    assert_eq!(read(&real), (vec!["one".to_owned()], 11));
+    assert_eq!(replaced(root.path()).len(), 1);
+}
+
+#[test]
+fn an_engine_db_that_is_itself_a_link_is_still_refused_before_any_write() {
+    let (root, path) = upgraded(true);
+    let (other, target) = upgraded(false);
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+
+    assert!(recovery(&path).is_err());
+    assert!(restore_pinned(&path, &quiet_hooks()).is_err());
+
+    assert_eq!(read(&target), (vec!["two".to_owned()], 12));
+    assert!(replaced(root.path()).is_empty());
+    assert!(replaced(other.path()).is_empty());
+}
