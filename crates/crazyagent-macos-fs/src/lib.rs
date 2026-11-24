@@ -602,7 +602,7 @@ pub fn access_list(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
     if done != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    if !volume_keeps_lists(&volume_reply, read.device) {
+    if !volume_keeps_lists(&volume_reply, read.device, None) {
         return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
     }
     Ok(read)
@@ -728,10 +728,10 @@ fn filesec_entries(filesec: &[u8]) -> std::io::Result<Vec<AccessEntry>> {
 
 /// Whether a volume reply of `getattrlist` names the entry's device and a volume that keeps
 /// extended access lists: the length must be the reply's, and the capability both valid and
-/// set. Inputs: the reply and the device the entry was read on. Output: the answer, false
-/// for a reply out of shape.
+/// set. Inputs: the reply, the device the entry was read on, and the root's pair. Output:
+/// the answer, false for a reply out of shape.
 #[cfg(target_os = "macos")]
-fn volume_keeps_lists(reply: &[u8], device: u64) -> bool {
+fn volume_keeps_lists(reply: &[u8], device: u64, _root: Option<(u64, u64)>) -> bool {
     let interfaces = libc::VOL_CAPABILITIES_INTERFACES * 4;
     let (Some(length), Some(on), Some(set), Some(valid)) = (
         u32_at(reply, 0),
@@ -1037,30 +1037,71 @@ mod tests {
         let length = u32::try_from(super::VOLUME_REPLY_BYTES).unwrap();
         assert!(super::volume_keeps_lists(
             &volume_reply(length, 5, lists, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 6, lists, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 5, 0, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 5, lists, 0),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length - 4, 5, lists, lists),
-            5
+            5,
+            None
         ));
         assert!(!super::volume_keeps_lists(
             &volume_reply(length, 5, lists, lists)[..20],
-            5
+            5,
+            None
         ));
         let negative = volume_reply(length, -2, lists, lists);
-        assert!(super::volume_keeps_lists(&negative, u64::MAX - 1));
+        assert!(super::volume_keeps_lists(&negative, u64::MAX - 1, None));
+    }
+
+    /// On a sealed system volume the volume reply names another device than the entry's, as
+    /// `/` itself reads: that one pair, read from `/`, keeps lists when the capability is set,
+    /// and any other device the volume reply names still reads as not keeping them.
+    #[test]
+    fn a_volume_keeps_lists_for_the_root_s_own_device_pair_and_no_other() {
+        let lists = libc::VOL_CAP_INT_EXTENDED_SECURITY;
+        let length = u32::try_from(super::VOLUME_REPLY_BYTES).unwrap();
+        let root = Some((5, 9));
+        assert!(super::volume_keeps_lists(
+            &volume_reply(length, 9, lists, lists),
+            5,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 7, lists, lists),
+            5,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 9, lists, lists),
+            6,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 9, 0, lists),
+            5,
+            root
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 9, lists, lists),
+            5,
+            None
+        ));
     }
 
     /// The GUIDs of root, wheel, daemon and admin are the well-known ones, and this user's

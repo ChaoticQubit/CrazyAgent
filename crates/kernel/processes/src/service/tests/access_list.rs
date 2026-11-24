@@ -640,6 +640,19 @@ fn a_mode_000_entry_has_its_access_list_read() {
     assert_eq!(read, vec![Some(true), Some(false), Some(true)]);
 }
 
+/// `/` itself, a tool folder on the sealed system volume, whose volume reply names another
+/// device than its entry, and a folder on the Data volume are all root's or this user's
+/// alone, so none reads as changeable by others.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_root_a_system_volume_folder_and_a_data_volume_folder_are_not_changeable() {
+    assert_eq!(changeable_by_others(Path::new("/")), None);
+    assert_eq!(changeable_by_others(Path::new("/usr/bin")), None);
+    let beside = std::env::current_exe().unwrap();
+    let temp = tempfile::tempdir_in(beside.parent().unwrap()).unwrap();
+    assert_eq!(changeable_by_others(temp.path()), None);
+}
+
 /// A disk image `hdiutil` made and mounted for one row, detached by its exact mount path
 /// when dropped.
 #[cfg(target_os = "macos")]
