@@ -237,7 +237,7 @@ export function dismissAllOf(questions: readonly OwnerQuestion[]): OwnerQuestion
  * the first urgent question waiting, as soon as it is read, unless the owner put the
  * keyboard somewhere (S4-R1).
  * Inputs: the project data and the route's section. Output: the tab; the list is read again
- * after each team change while it is open (v2.5 S4). */
+ * after each team change while it is open. */
 export function QuestionsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [first, setFirst] = useState<Result<QuestionPage>>();
   const [older, setOlder] = useState<OlderPages>({ items: [], next: null });

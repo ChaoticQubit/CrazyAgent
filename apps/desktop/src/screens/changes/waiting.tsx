@@ -16,7 +16,7 @@ export function WaitingChangesView({ projectId, count, place = "changes" }: { pr
 }
 
 /** Reads the project's change sets on the engine's watch, after each landing change, one read
- * at a time (v2.5 S4), and shows how many wait for the owner. Inputs: the project id and the
+ * at a time, and shows how many wait for the owner. Inputs: the project id and the
  * tab change sets are reviewed in. Output: the notice, or nothing while none wait or the list
  * can't be read. */
 export function WaitingChanges({ projectId, place }: { projectId: string; place: "changes" | "ide" }) {

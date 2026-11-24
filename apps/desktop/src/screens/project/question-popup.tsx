@@ -126,7 +126,7 @@ export function QuestionDock({ waiting, shown, now, busy, note, settled, onAnswe
 }
 
 /** The questions pop-up of one project page: reads the project's questions on the engine's
- * watch, after each team change (v2.5 S4), and once more each time a tab starts showing it,
+ * watch, after each team change, and once more each time a tab starts showing it,
  * so a question settled on the Questions tab is gone when it shows again, and settles them
  * with the Questions tab's own actions, so an answer here closes the question there too. Inputs: the project data and whether the tab
  * shown shows it. Output: the pop-up. */

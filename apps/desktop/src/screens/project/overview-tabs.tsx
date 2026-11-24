@@ -791,7 +791,7 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
 
 /** The Overview tabs of one project, read from the engine once per visit, on each tab pick (a
  * tab file can change outside CrazyAgent), after each action, and on the engine's watch after
- * each project change, which a run's writes and a due run's start are (v2.5 S4); keeps the
+ * each project change, which a run's writes and a due run's start are; keeps the
  * picked tab for the session.
  * Inputs: the project data, how Quick info renders a text, the Activity panel and the read.
  * Output: the strip and its panel. */

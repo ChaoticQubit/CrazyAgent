@@ -16,8 +16,8 @@ import { readOnChanges } from "../../engine-changes";
 import { NotReady } from "./shared";
 import type { ProjectData, TeamRead } from "./shared";
 
-/** Reads the project's live team once the page watches the engine, then after each team change
- * (v2.5 S4); stops asking when the engine has no team command. Input: the project id. Output:
+/** Reads the project's live team once the page watches the engine, then after each team change;
+ * stops asking when the engine has no team command. Input: the project id. Output:
  * the latest read with its time, and a reload. */
 export function useTeam(id: string): [TeamRead, () => void] {
   const [team, setTeam] = useState<TeamRead>({ result: undefined, at: 0 });

@@ -71,7 +71,7 @@ export function onChanged(topics: readonly WatchTopic[], listener: Listener): ()
   };
 }
 
-/** Reads on the engine's watch (v2.5 S4): subscribes to `topics`, awaits the page's watch, then
+/** Reads on the engine's watch: subscribes to `topics`, awaits the page's watch, then
  * reads once and again after each change to them or of unknown subject, one read at a time; a
  * change heard during a read runs it once more after it. Inputs: the topics, at least one, the
  * read, and what to do with each reply, which returns false to stop reading. Output: the
