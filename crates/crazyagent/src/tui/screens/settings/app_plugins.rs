@@ -633,7 +633,10 @@ impl AppPluginsPage {
                 self.failure = None;
             }
             (Open::Trust { scroll, .. }, Key::Up) => *scroll = scroll.saturating_sub(1),
-            (Open::Trust { scroll, .. }, Key::Down) => *scroll += 1,
+            (Open::Trust { scroll, trust, .. }, Key::Down) => {
+                let last = trust_lines(trust, usize::from(MODAL_WIDTH) - 4).len();
+                *scroll = (*scroll + 1).min(last.saturating_sub(1));
+            }
             (Open::TurnOff(form), Key::Tab | Key::BackTab) => form.choice = other(form.choice),
             (Open::Trust { approve: true, .. }, Key::Char('y')) if idle => self.confirm(ctx),
             (Open::Remove { .. } | Open::TurnOff(_), Key::Char('y')) if idle => {
