@@ -402,7 +402,7 @@ fn sources(folder: &Path) -> Vec<PathBuf> {
 fn namespace_is_made_only_by_the_bus_gateway() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let gateway = repo.join("crates/kernel/bus_gateway/src");
-    let own_tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/namespace/tests.rs");
+    let own_tests = repo.join("crates/kernel/storage/src/namespace/tests.rs");
     let walked: Vec<PathBuf> = ["crates", "apps"]
         .iter()
         .flat_map(|top| sources(&repo.join(top)))
