@@ -292,3 +292,18 @@ fn a_glob_re_export_or_a_type_alias_hides_the_draft() {
     assert!(!hides_draft(&code_only("use crate::state_log::*;")));
     assert!(!hides_draft(&code_only("type Kind = &'static str;")));
 }
+
+/// A comma inside a value nested in the draft literal does not end the field, so the
+/// draft's own kind is read and a `kind` field of a nested literal is not.
+#[test]
+fn a_comma_inside_a_nested_value_does_not_end_the_kind() {
+    let code = code_only(concat!(
+        "log.append(&Draft { body: &to_vec(&Note { id: 1, kind: INNER, n: 2 })?, ",
+        "kind: OUTER, schema: 1 });\n",
+        "log.append(&Draft { kind: pick(A, B), schema: 1 });\n",
+    ));
+    assert_eq!(
+        draft_kinds(&code),
+        [Some("OUTER".to_owned()), Some("pick(A,B)".to_owned())]
+    );
+}
