@@ -1,5 +1,5 @@
 {
-  "apps/desktop/src-tauri/src/bridge/intake.rs": 1730,
+  "apps/desktop/src-tauri/src/bridge/intake.rs": 1660,
   "apps/desktop/src-tauri/src/bridge/master.rs": 1609,
   "apps/desktop/src-tauri/src/bridge/terminal.rs": 1874,
   "apps/desktop/src-tauri/src/ide.rs": 1882,
