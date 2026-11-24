@@ -1,29 +1,36 @@
 /// Every source file outside tests, as its path under `src` with `/` between parts and its
 /// code ([`code_only`]). A file or folder whose name ends in `tests` or `tests.rs` is left
-/// out, and a link to a folder is not walked. Input: the source folder. Output: the files.
+/// out, and a link to a folder is not walked. Input: the source folder. Output: the files;
+/// a folder, entry or file it cannot read panics naming its path.
 pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
     const ENTRIES_MAX: usize = 100_000;
     let mut folders = vec![src.to_path_buf()];
     let mut found = Vec::new();
     let mut seen = 0;
     while let Some(folder) = folders.pop() {
-        for entry in std::fs::read_dir(&folder).unwrap() {
+        let entries =
+            std::fs::read_dir(&folder).unwrap_or_else(|error| panic!("read {folder:?}: {error}"));
+        for entry in entries {
             seen += 1;
             assert!(seen <= ENTRIES_MAX);
-            let entry = entry.unwrap();
+            let entry = entry.unwrap_or_else(|error| panic!("entry in {folder:?}: {error}"));
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             if name.ends_with("tests") || name.ends_with("tests.rs") {
                 continue;
             }
-            if entry.file_type().unwrap().is_dir() {
+            let kind = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
+            if kind.is_dir() {
                 folders.push(path);
                 continue;
             }
             if !name.ends_with(".rs") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).unwrap();
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {path:?}: {error}"));
             let parts: Vec<String> = path
                 .strip_prefix(src)
                 .unwrap()
@@ -284,7 +291,9 @@ fn the_draft_scan_reads_every_literal_shape() {
 #[test]
 fn a_glob_re_export_or_a_type_alias_hides_the_draft() {
     assert!(hides_draft(&code_only("pub use crate::state_log::*;")));
-    assert!(hides_draft(&code_only("pub(crate) use crate::state_log::*;")));
+    assert!(hides_draft(&code_only(
+        "pub(crate) use crate::state_log::*;"
+    )));
     assert!(hides_draft(&code_only("type D = Draft;")));
     assert!(hides_draft(&code_only(
         "type Entry<'a> = state_log::Draft<'a>;"
