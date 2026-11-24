@@ -7,15 +7,19 @@ use std::process::Command;
 #[test]
 fn an_agents_own_cache_goes_only_through_the_hooks_removal() {
     fn unpin(_parent: std::os::fd::BorrowedFd<'_>, _name: &str) {}
-    fn kept(_folder: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::other("kept by the stand-in"))
+    fn kept(
+        _parent: std::os::fd::BorrowedFd<'_>,
+        _name: &str,
+        _otherwise: &'static str,
+    ) -> Result<(), &'static str> {
+        Err("kept by the stand-in")
     }
     fn priming(_folder: &Path, _uv: &Path) -> Command {
         Command::new("/usr/bin/false")
     }
     let hooks = ToolCacheHooks {
         unpin,
-        remove_agent_tree: kept,
+        remove_agent_entry: kept,
         priming_command: priming,
     };
     let runtime = tempfile::tempdir().unwrap();
@@ -128,15 +132,12 @@ fn a_bucket_name_or_count_out_of_bounds_refuses_the_cache() {
 fn a_linked_folder_above_the_cache_removes_nothing_through_it() {
     use std::os::unix::fs::PermissionsExt;
     fn unpin(_parent: std::os::fd::BorrowedFd<'_>, _name: &str) {}
-    fn removed(folder: &Path) -> std::io::Result<()> {
-        std::fs::remove_dir_all(folder)
-    }
     fn priming(_folder: &Path, _uv: &Path) -> Command {
         Command::new("/usr/bin/false")
     }
     let hooks = ToolCacheHooks {
         unpin,
-        remove_agent_tree: removed,
+        remove_agent_entry: removed,
         priming_command: priming,
     };
     let key = key(
@@ -168,6 +169,94 @@ fn a_linked_folder_above_the_cache_removes_nothing_through_it() {
         assert!(remove_agent(&hooks, runtime.path(), "project", "mate").is_err());
         assert!(decoy.is_dir(), "linked project folder: {linked_project}");
     }
+}
+
+/// A stand-in by-handle removal: empties the folder `name` of `parent` through handles,
+/// never following a link, then removes it. Inputs: the open parent, the folder name and
+/// the refusal code. Output: done, or the code.
+fn removed(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    otherwise: &'static str,
+) -> Result<(), &'static str> {
+    let folder =
+        rustix::fs::openat(parent, name, OPEN_FOLDER, Mode::empty()).map_err(|_| otherwise)?;
+    let names: Vec<String> = rustix::fs::Dir::read_from(&folder)
+        .map_err(|_| otherwise)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|entry| entry != "." && entry != "..")
+        .collect();
+    for entry in &names {
+        removed(folder.as_fd(), entry, otherwise)?;
+    }
+    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|_| otherwise)
+}
+
+/// The project folder the swapping stand-in moves aside on its first call, and the folder
+/// the link it leaves in its place names.
+static SWAP: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
+
+/// A project folder swapped for a link after the folders above its caches were checked,
+/// once the first cache is gone, removes nothing through the link: the second cache goes
+/// from the folder that was checked, now moved aside, and the decoy the link names stays.
+#[test]
+fn a_project_folder_swapped_for_a_link_after_its_check_removes_nothing_through_it() {
+    use std::os::unix::fs::PermissionsExt;
+    fn unpin(_parent: std::os::fd::BorrowedFd<'_>, _name: &str) {}
+    fn swapping(
+        parent: std::os::fd::BorrowedFd<'_>,
+        name: &str,
+        otherwise: &'static str,
+    ) -> Result<(), &'static str> {
+        removed(parent, name, otherwise)?;
+        let swap = SWAP
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((project, outside)) = swap {
+            std::fs::rename(&project, project.with_extension("aside")).unwrap();
+            std::os::unix::fs::symlink(&outside, &project).unwrap();
+        }
+        Ok(())
+    }
+    fn priming(_folder: &Path, _uv: &Path) -> Command {
+        Command::new("/usr/bin/false")
+    }
+    let hooks = ToolCacheHooks {
+        unpin,
+        remove_agent_entry: swapping,
+        priming_command: priming,
+    };
+    let [own, mates] = ["mate", "mate-teammates"].map(|agent| {
+        key(
+            ToolCacheScope::PerAgent,
+            AgentAccess::Sandboxed,
+            CacheShape::Worktree,
+            agent,
+        )
+        .unwrap()
+    });
+    let runtime = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let project = project_folder(runtime.path(), "project");
+    for name in [&own, &mates] {
+        std::fs::create_dir_all(project.join(name)).unwrap();
+    }
+    std::fs::create_dir(outside.path().join(&mates)).unwrap();
+    for folder in [runtime.path().join(FOLDER), project.clone()] {
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    *SWAP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((project.clone(), outside.path().to_path_buf()));
+    let removal = remove_agent(&hooks, runtime.path(), "project", "mate");
+    assert!(removal.is_ok(), "{removal:?}");
+    assert!(outside.path().join(&mates).is_dir());
+    let aside = project.with_extension("aside");
+    assert!(!aside.join(&own).exists());
+    assert!(!aside.join(&mates).exists());
 }
 
 /// Opens a fresh folder the way `prepare` opens a project's folder. Output: the guard and

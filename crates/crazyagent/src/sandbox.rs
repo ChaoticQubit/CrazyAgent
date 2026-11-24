@@ -252,12 +252,12 @@ pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
 };
 
 /// The tool cache hooks the engine passes: the pinning flag clearing of
-/// [`tool_cache_unpin`], the agent tree removal of [`toolchain_remove_agent_tree`] and the
-/// engine's priming process.
+/// [`tool_cache_unpin`], the by-handle entry removal of [`toolchain_remove_home_entry`] and
+/// the engine's priming process.
 #[cfg(target_os = "macos")]
 pub const TOOL_CACHE_HOOKS: ToolCacheHooks = ToolCacheHooks {
     unpin: tool_cache_unpin,
-    remove_agent_tree: toolchain_remove_agent_tree,
+    remove_agent_entry: toolchain_remove_home_entry,
     priming_command: tool_cache::priming_command,
 };
 
