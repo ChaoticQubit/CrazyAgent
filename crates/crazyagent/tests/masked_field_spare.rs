@@ -47,26 +47,33 @@ fn holds_wide(bytes: &[u8], mark: &[u8; 16]) -> bool {
         })
 }
 
-/// The system allocator, which also reads every block freed while a row watches: one
-/// holding the row's mark, as bytes or as `char`s, one of the field's exact size holding
-/// any byte that is not zero, and one holding a typed character alone or two in a row.
+/// The system allocator, handing out zeroed blocks, which also reads the byte blocks
+/// (align 1) freed while a row watches for the row's mark, a field-sized block not all
+/// zero and typed characters, and the `char` blocks (align 4) for the mark as `char`s.
+/// Blocks of other layouts can hold padding, so they are never read.
 struct FreeScan;
 
 unsafe impl GlobalAlloc for FreeScan {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { System.alloc(layout) }
+        unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
-        if WATCHING.load(Ordering::SeqCst) {
+        let wide = layout.align() == 4 && layout.size() % 4 == 0;
+        if WATCHING.load(Ordering::SeqCst) && wide {
             let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
-            if let Some(mark) = mark() {
-                if bytes.windows(mark.len()).any(|window| window == mark) {
-                    MARK_FREED.fetch_add(1, Ordering::SeqCst);
-                }
-                if holds_wide(bytes, mark) {
-                    WIDE_MARK_FREED.fetch_add(1, Ordering::SeqCst);
-                }
+            if let Some(mark) = mark()
+                && holds_wide(bytes, mark)
+            {
+                WIDE_MARK_FREED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        if WATCHING.load(Ordering::SeqCst) && layout.align() == 1 {
+            let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
+            if let Some(mark) = mark()
+                && bytes.windows(mark.len()).any(|window| window == mark)
+            {
+                MARK_FREED.fetch_add(1, Ordering::SeqCst);
             }
             if bytes.len() == FIELD_BYTES && bytes.iter().any(|byte| *byte != 0) {
                 FIELD_DIRTY.fetch_add(1, Ordering::SeqCst);
