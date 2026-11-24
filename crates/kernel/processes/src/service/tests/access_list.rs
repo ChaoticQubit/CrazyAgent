@@ -45,212 +45,6 @@ fn a_part_an_access_list_opens_to_others_is_changeable() {
     }
 }
 
-/// RV-DS241-18: a macOS `ls -lde` listing names an entry changeable by others when an
-/// allow entry gives write, append, add or delete rights, or rights over the entry's own
-/// attributes, security or owner, to anyone but this user, root, wheel, daemon or admin; deny
-/// entries and read rights never do, and a listing it cannot read fails closed.
-#[cfg(unix)]
-#[test]
-fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
-    let listing = |entries: &[&str]| {
-        let mut text = String::from("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 /Users/me/bin\n");
-        for (index, entry) in entries.iter().enumerate() {
-            text.push_str(&format!(" {index}: {entry}\n"));
-        }
-        text
-    };
-    let me = Some("me");
-    assert_eq!(acl::listed_shared(&listing(&[]), me), Some(false));
-    for entry in [
-        "group:staff allow add_file,delete_child",
-        "group:everyone allow write",
-        "user:other allow append",
-        "user:other allow add_subdirectory",
-        "user:other allow delete",
-        "user:other allow writeattr",
-        "user:other allow writeextattr",
-        "user:other allow writesecurity",
-        "user:other allow chown",
-        "group:staff inherited allow add_file",
-        "ABCDEF01-2345-6789-ABCD-EF0123456789 allow write",
-    ] {
-        assert_eq!(
-            acl::listed_shared(&listing(&["group:everyone deny delete", entry]), me),
-            Some(true),
-            "{entry}"
-        );
-        assert_eq!(
-            acl::listed_shared(&listing(&[entry]), None),
-            Some(true),
-            "{entry}"
-        );
-    }
-    for entry in [
-        "group:everyone deny delete",
-        "user:me allow write,append,delete",
-        "user:root allow write",
-        "group:wheel allow add_file",
-        "group:daemon allow add_file",
-        "group:admin allow add_file",
-        "user:other allow read,list,search,readattr,readextattr,readsecurity,execute",
-        "group:staff inherited deny add_file,delete_child",
-    ] {
-        assert_eq!(
-            acl::listed_shared(&listing(&[entry]), me),
-            Some(false),
-            "{entry}"
-        );
-    }
-    assert_eq!(
-        acl::listed_shared(&listing(&["user:me allow write"]), None),
-        Some(true),
-        "without this user's name every user entry counts as someone else"
-    );
-    for broken in [
-        format!("{}x: group:staff allow write\n", listing(&[])),
-        format!("{} 0: group:staff\n", listing(&[])),
-        format!("{} 0: group:staff allow\n", listing(&[])),
-        String::new(),
-    ] {
-        assert_eq!(acl::listed_shared(&broken, me), None, "{broken:?}");
-    }
-}
-
-/// RV-DS241-18 r2: one `ls -lde` listing of several entries is read block by block, each
-/// block going to the one entry its first line ends with, the longest when one name ends
-/// another. An entry with no block or two gets none, and so does one whose block does not
-/// read, alone; a listing with a block for no entry or an access-list line before any entry
-/// gives none for every entry.
-#[cfg(unix)]
-#[test]
-fn a_listing_of_several_entries_is_read_block_by_block() {
-    let me = Some("me");
-    let line = |name: &str| format!("      7 drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
-    let open = " 0: group:staff allow add_file,delete_child\n";
-    let closed = " 0: group:everyone deny delete\n";
-    let entries = ["/Volumes/My /c", "/c", "/Users/me/bin", "/Users/me"];
-    let text = format!(
-        "{}{}{open}{}{closed}{}",
-        line("/Users/me"),
-        line("/Users/me/bin"),
-        line("/Volumes/My /c"),
-        line("/c")
-    );
-    assert_eq!(
-        acl::listed_shared_all(&text, &entries, &[7; 4], me, &|_| Some(false)),
-        vec![Some(false), Some(false), Some(true), Some(false)]
-    );
-    assert_eq!(
-        acl::listed_shared_all(
-            &line("/Users/me"),
-            &["/Users/me", "/gone"],
-            &[7; 2],
-            me,
-            &|_| Some(false)
-        ),
-        vec![Some(false), None],
-        "an entry the listing left out"
-    );
-    assert_eq!(
-        acl::listed_shared_all(
-            &format!("{0}{0}", line("/a")),
-            &["/a"],
-            &[7; 1],
-            me,
-            &|_| Some(false)
-        ),
-        vec![None],
-        "an entry listed twice"
-    );
-    assert_eq!(
-        acl::listed_shared_all(
-            &format!("{} 0: group:staff\n{}{open}", line("/a"), line("/b")),
-            &["/a", "/b"],
-            &[7; 2],
-            me,
-            &|_| Some(false)
-        ),
-        vec![None, Some(true)],
-        "a block that does not read fails alone"
-    );
-    for whole in [
-        format!("{open}{}", line("/a")),
-        format!("{}{}{open}", line("/a"), line("/zzz")),
-        String::new(),
-    ] {
-        assert_eq!(
-            acl::listed_shared_all(&whole, &["/a", "/b"], &[7; 2], me, &|_| Some(false)),
-            vec![None, None],
-            "{whole:?}"
-        );
-    }
-}
-
-/// An entry whose block printed no access-list lines takes the direct read's answer, as
-/// `ls` prints a list it could not read exactly as no list; an entry whose block printed
-/// lines is read from them and never read again.
-#[cfg(unix)]
-#[test]
-fn an_entry_listed_with_no_access_lines_takes_the_direct_read() {
-    let me = Some("me");
-    let line = |name: &str| format!("      7 drwxr-xr-x  2 me  staff  64 Nov 14 03:33 {name}\n");
-    let text = format!("{}{} 0: user:me allow write\n", line("/a"), line("/b"));
-    let unreadable = |index: usize| {
-        assert_eq!(index, 0, "an entry with access lines was read again");
-        None
-    };
-    assert_eq!(
-        acl::listed_shared_all(&text, &["/a", "/b"], &[7; 2], me, &unreadable),
-        vec![None, Some(false)]
-    );
-}
-
-/// A direct read that finds no list confirms none; one that finds a list `ls` did not print,
-/// or cannot read, is not known, so the entry counts as changeable.
-#[cfg(unix)]
-#[test]
-fn a_direct_read_confirms_only_a_list_that_is_not_there() {
-    assert_eq!(acl::confirmed(Ok(false)), Some(false));
-    assert_eq!(acl::confirmed(Ok(true)), None);
-    assert_eq!(
-        acl::confirmed(Err(std::io::Error::from_raw_os_error(13))),
-        None
-    );
-}
-
-/// Each block's first field is the inode `ls -i` read, padded to one width; a block whose
-/// inode is not the one the entry was stamped with, or does not parse, is about another
-/// file, so its entry reads none and is never read again.
-#[cfg(unix)]
-#[test]
-fn a_block_whose_inode_is_not_the_stamped_one_reads_none() {
-    let me = Some("me");
-    let text = concat!(
-        "        2 drwxr-xr-x  2 me  staff  64 Nov 14 03:33 /a\n",
-        "609424587 -rw-r--r--  1 me  staff   0 Nov 14 03:33 /b\n",
-        " 0: group:everyone allow write\n",
-    );
-    let entries = ["/a", "/b"];
-    let never = |index: usize| -> Option<bool> { panic!("entry {index} was read again") };
-    assert_eq!(
-        acl::listed_shared_all(text, &entries, &[2, 609424587], me, &|_| Some(false)),
-        vec![Some(false), Some(true)]
-    );
-    assert_eq!(
-        acl::listed_shared_all(text, &entries, &[3, 609424587], me, &never),
-        vec![None, Some(true)]
-    );
-    assert_eq!(
-        acl::listed_shared_all(text, &entries, &[2, 609424588], me, &|_| Some(false)),
-        vec![Some(false), None]
-    );
-    let bare = "drwxr-xr-x  2 me  staff  64 Nov 14 03:33 /a\n";
-    assert_eq!(
-        acl::listed_shared_all(bare, &["/a"], &[2], me, &never),
-        vec![None]
-    );
-}
-
 /// A macOS access list names an entry changeable by others when an allow entry gives a
 /// change right (write or add, delete, append or add a folder, delete a child, write
 /// attributes or extended attributes, write the list, take ownership, and the generic all
@@ -456,9 +250,8 @@ fn early_in_a_second() {
     panic!("the clock never read the first half of a second");
 }
 
-/// An answer is kept only when its entry settled before the listing, a second `lstat` after
-/// the listing finds the same device, inode and change time, and the answer came from the
-/// listing's own lines, never from the direct read.
+/// An answer is kept only when its entry settled before the listing and a second `lstat`
+/// after the listing finds the same device, inode and change time.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_access_answer_is_kept_only_for_the_file_its_stamp_names() {
@@ -496,7 +289,7 @@ fn an_access_answer_is_kept_only_once_its_entry_changed_in_an_earlier_second() {
 }
 
 /// Changes a tool's folder and reads the tool's access answer within one second, at most
-/// three tries, since a slow spawn can carry the listing into the next second: the first try
+/// three tries, since a slow run can carry the listing into the next second: the first try
 /// adds a deny-only entry to the folder's access list, a later one flips its mode, so the
 /// folder never reads as changeable. Each read lists the folder alone among the root's
 /// parts. Inputs: the tool, its folder, the root.
@@ -537,7 +330,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     panic!("no change and its listing shared a second in three tries");
 }
 
-/// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
+/// RV-DS241-18 r2: one access listing reads every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
 /// change moves only the changed part's change time, so that part alone is listed again: a
 /// grant there reads as changeable on the next call. HFS-CTIME: a part read in the second
@@ -721,7 +514,7 @@ fn churn_then_open(folder: PathBuf, made: u32, alone: u32) {
 /// A folder that keeps gaining files through every relisting, and gains an access list
 /// that lets another user write just after the first listing that follows them, reads as
 /// changeable by others: an answer read while the folder never held still needs a second
-/// listing that prints the same access list.
+/// listing that reads the same access list.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_access_list_added_after_the_relistings_of_a_busy_folder_still_reads_changeable() {

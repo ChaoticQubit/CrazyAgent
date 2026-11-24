@@ -1,29 +1,36 @@
 use std::path::Path;
 
-/// The access-list rights that let a principal change an entry, what a folder holds, or the
-/// entry's attributes, access list or owner, as macOS `ls -e` names them.
+/// The `KAUTH_VNODE_*` rights that let a principal change an entry, what a folder holds, or
+/// the entry's attributes, access list or owner: write data or add a file, delete, append or
+/// add a folder, delete a child, write attributes, write extended attributes, write the
+/// access list, take ownership, and the generic all and write rights a list may carry.
 #[cfg(any(test, target_os = "macos"))]
-const CHANGE_RIGHTS: [&str; 10] = [
-    "write",
-    "append",
-    "add_file",
-    "add_subdirectory",
-    "delete",
-    "delete_child",
-    "writeattr",
-    "writeextattr",
-    "writesecurity",
-    "chown",
-];
+const CHANGE_RIGHTS: u32 = (1 << 2)
+    | (1 << 4)
+    | (1 << 5)
+    | (1 << 6)
+    | (1 << 8)
+    | (1 << 10)
+    | (1 << 12)
+    | (1 << 13)
+    | (1 << 21)
+    | (1 << 23);
 
-/// The macOS principals that may change an entry without making it changeable by others:
-/// root and the groups whose members can already act as root, as `trusted_group` reads them.
+/// The low bits of an access-list entry's flags that name its kind.
 #[cfg(any(test, target_os = "macos"))]
-const TRUSTED_PRINCIPALS: [&str; 4] = ["user:root", "group:wheel", "group:daemon", "group:admin"];
+const KIND_MASK: u32 = 0xf;
 
-/// The longest a macOS access listing may take.
-#[cfg(target_os = "macos")]
-const LIST_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+/// The kind of an access-list entry that allows its rights.
+#[cfg(any(test, target_os = "macos"))]
+const KIND_ALLOW: u32 = 1;
+
+/// The kind of an access-list entry that denies its rights.
+#[cfg(any(test, target_os = "macos"))]
+const KIND_DENY: u32 = 2;
+
+/// One access-list entry: the principal's GUID, the flags and the rights.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) type Entry = ([u8; 16], u32, u32);
 
 /// The most entries whose access-list answer is kept for the life of the process; the store
 /// starts over when it fills.
@@ -36,27 +43,27 @@ const KEPT_MAX: usize = 4096;
 #[cfg(target_os = "macos")]
 type Stamp = (u64, u64, i64, i64);
 
-/// Whether an access answer read for an entry may be kept: only when its listing started in
+/// Whether an access answer read for an entry may be kept: only when its read started in
 /// a later second than the entry last changed, so any later change moves the stamp even
-/// where change times keep whole seconds (HFS-CTIME). Inputs: the entry's stamp and the
-/// whole second the listing started. Output: the answer.
+/// where change times keep whole seconds. Inputs: the entry's stamp and the whole second
+/// the read started. Output: the answer.
 #[cfg(target_os = "macos")]
 pub(super) fn settled(stamp: &Stamp, listed_secs: i64) -> bool {
     stamp.2 < listed_secs
 }
 
 /// Whether an access answer read for an entry may be kept: only a [`settled`] one, whose
-/// entry a second `lstat` after the listing found with the same device, inode and change
+/// entry a second `lstat` after the read found with the same device, inode and change
 /// time, so no change to its access list, mode or owner fell between the two. Inputs: the
-/// stamp before the listing, the one after, if read, and the whole second the listing
-/// started. Output: the answer.
+/// stamp before the read, the one after, if read, and the whole second the read started.
+/// Output: the answer.
 #[cfg(target_os = "macos")]
 pub(super) fn keep(before: &Stamp, after: Option<&Stamp>, listed_secs: i64) -> bool {
     settled(before, listed_secs) && after == Some(before)
 }
 
-/// How many times an entry whose stamp moved during its listing is listed again alone
-/// before one last direct read decides it.
+/// How many times an entry whose stamp moved during its read is read again alone before
+/// two last reads decide it.
 #[cfg(target_os = "macos")]
 const RELIST_TRIES: u32 = 3;
 
@@ -68,11 +75,11 @@ static KEPT: std::sync::LazyLock<
 
 /// Whether each entry carries an access-list entry that lets someone other than this user or
 /// root change it. An answer kept for an entry whose stamp has not moved is reused, and the
-/// rest are read in one `/bin/ls -lide` ([`list`]), each entry read again with `lstat` after
-/// the listing. An entry whose stamp moved meanwhile, as a folder's does when a file is made
-/// in it, is read again alone ([`moved_answer`]). Only answers [`keep`] allows are kept.
-/// Input: the entries, none a link, each with what `lstat` read of it first. Output: one
-/// answer per entry, in order; none when it cannot be read, which counts as changeable.
+/// rest are read once each ([`list`]), each entry read again with `lstat` after the reads.
+/// An entry whose stamp moved meanwhile, as a folder's does when a file is made in it, is
+/// read again alone ([`moved_answer`]). Only answers [`keep`] allows are kept. Input: the
+/// entries, none a link, each with what `lstat` read of it first. Output: one answer per
+/// entry, in order; none when it cannot be read, which counts as changeable.
 #[cfg(target_os = "macos")]
 pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<bool>> {
     use std::sync::PoisonError;
@@ -91,12 +98,12 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
         return answers;
     }
     let listed: Vec<&Path> = missed.iter().map(|index| entries[*index].0).collect();
-    let inodes: Vec<u64> = missed
+    let stamps: Vec<Stamp> = missed
         .iter()
-        .map(|index| std::os::unix::fs::MetadataExt::ino(entries[*index].1))
+        .map(|index| stamp(entries[*index].1))
         .collect();
     let listed_secs = now_secs();
-    let read = list(&listed, &inodes);
+    let read = list(&listed, &stamps);
     assert_eq!(read.len(), missed.len());
     let mut keeps = Vec::new();
     for (index, answer) in missed.into_iter().zip(read) {
@@ -130,15 +137,15 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
     answers
 }
 
-/// Reads again one entry whose stamp moved during its listing: listed alone up to
-/// [`RELIST_TRIES`] times, an answer counting once the `lstat` before and after one listing
-/// agree; past that, two last listings decide, since a busy folder's change time moves with
+/// Reads again one entry whose stamp moved during its read: read alone up to
+/// [`RELIST_TRIES`] times, an answer counting once the `lstat` before and after one read
+/// agree; past that, two last reads decide, since a busy folder's change time moves with
 /// every file made in it: shared when either reads shared, not shared only when both read
-/// so and print the same access-list lines, and that answer is never kept. Every read must
+/// so and hold the same access-list entries, and that answer is never kept. Every read must
 /// find the same file, mode and owner the caller judged from its first `lstat`, or the
 /// answer is none. Inputs: the entry and that first read. Output: the answer, none when it
 /// cannot be read or the entry was replaced or re-permissioned, and the stamps and start
-/// second of a listing that held still, for [`keep`].
+/// second of a read that held still, for [`keep`].
 #[cfg(target_os = "macos")]
 fn moved_answer(
     entry: &Path,
@@ -165,7 +172,7 @@ fn moved_answer(
             return (None, None);
         };
         let secs = now_secs();
-        let answer = list(&[entry], &[std::os::unix::fs::MetadataExt::ino(&before)])[0];
+        let answer = list(&[entry], &[stamp(&before)])[0];
         let Some(after) = read_now() else {
             return (None, None);
         };
@@ -178,8 +185,8 @@ fn moved_answer(
         let Some(before) = read_now() else {
             return (None, None);
         };
-        let (answers, text) = list_text(&[entry], &[std::os::unix::fs::MetadataExt::ino(&before)]);
-        last.push((answers[0], text.map(|text| access_lines(&text))));
+        let (answers, lists) = list_entries(&[entry], &[stamp(&before)]);
+        last.push((answers[0], lists.into_iter().next().flatten()));
     }
     assert_eq!(last.len(), 2);
     if read_now().is_none() {
@@ -191,38 +198,6 @@ fn moved_answer(
         _ => None,
     };
     (answer, None)
-}
-
-/// The access-list lines of an `ls -lide` listing, each ` <n>: `, in order; the first line
-/// of each block is left out, since its size and dates move with every file made in a
-/// folder. Input: the listing. Output: the lines.
-#[cfg(target_os = "macos")]
-fn access_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .filter(|line| access_line(line))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// Says whether a listing line is an access-list line, ` <n>: ` with digits only before the
-/// colon, rather than an entry's first line. Input: the line. Output: true for an
-/// access-list line.
-#[cfg(any(test, target_os = "macos"))]
-fn access_line(line: &str) -> bool {
-    line.starts_with(' ')
-        && line.trim_start().split_once(':').is_some_and(|(index, _)| {
-            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
-        })
-}
-
-/// Whether an entry still sits at its path as the same inode, read after a direct read that
-/// found no access list, since that read also finds none for a path that is gone or whose
-/// folder moved away. Inputs: the path and the inode it was listed as. Output: true when it
-/// is there as that inode.
-#[cfg(target_os = "macos")]
-fn still_there(entry: &Path, inode: u64) -> bool {
-    std::fs::symlink_metadata(entry)
-        .is_ok_and(|now| std::os::unix::fs::MetadataExt::ino(&now) == inode)
 }
 
 /// Drops every kept answer for the entries, so no answer read in a call that found a part
@@ -268,93 +243,94 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Lists entries in one `/bin/ls -lide` that follows no link and reads each one's block
-/// against the inode the entry was stamped with ([`listed_shared_all`]). A name that is not
-/// text or holds a line break gets none, and so does every entry when the listing fails,
-/// runs out of time or fills the output bound, as a cut listing could drop access-list
-/// lines. Inputs: the entries and their inodes. Output: one answer per entry, in order.
+/// Reads each entry's access list ([`list_entries`]). Inputs: the entries and their stamps.
+/// Output: one answer per entry, in order.
 #[cfg(target_os = "macos")]
-fn list(entries: &[&Path], inodes: &[u64]) -> Vec<Option<bool>> {
-    list_text(entries, inodes).0
+fn list(entries: &[&Path], stamps: &[Stamp]) -> Vec<Option<bool>> {
+    list_entries(entries, stamps).0
 }
 
-/// [`list`], with the listing's text as `ls` printed it. Inputs: the entries and their
-/// inodes. Output: one answer per entry, in order, and the text, none when the listing did
-/// not run, failed, ran out of time or filled the output bound.
+/// Reads each entry's access list with one `getattrlist` that follows no link
+/// ([`crazyagent_macos_fs::access_list`]), and answers it only for the object its stamp names
+/// ([`read_answer`]). A path with a trailing slash is read without it, so a link there is
+/// read itself and never followed. Inputs: the entries and their stamps. Output: one answer
+/// per entry, in order, and the entries of each list read for that object, none otherwise.
 #[cfg(target_os = "macos")]
-fn list_text(entries: &[&Path], inodes: &[u64]) -> (Vec<Option<bool>>, Option<String>) {
-    assert_eq!(entries.len(), inodes.len());
-    let names: Vec<Option<&str>> = entries
-        .iter()
-        .map(|entry| entry.to_str().filter(|name| !name.contains('\n')))
-        .collect();
-    let operands: Vec<&str> = names.iter().flatten().copied().collect();
-    let listed_inodes: Vec<u64> = names
-        .iter()
-        .zip(inodes)
-        .filter(|(name, _)| name.is_some())
-        .map(|(_, inode)| *inode)
-        .collect();
-    if operands.is_empty() {
-        return (vec![None; entries.len()], None);
-    }
+fn list_entries(
+    entries: &[&Path],
+    stamps: &[Stamp],
+) -> (Vec<Option<bool>>, Vec<Option<Vec<Entry>>>) {
+    assert_eq!(entries.len(), stamps.len());
     #[cfg(test)]
     LISTINGS.with(|listings| {
         listings
             .borrow_mut()
-            .push(operands.iter().map(std::path::PathBuf::from).collect())
+            .push(entries.iter().map(|entry| entry.to_path_buf()).collect())
     });
-    let mut command = std::process::Command::new("/bin/ls");
-    command
-        .env_clear()
-        .env("LC_ALL", "C")
-        .arg("-lide")
-        .arg("--")
-        .args(&operands);
-    let text = match crate::run::run_command(command, LIST_TIME) {
-        Ok((true, output)) if output.len() < crate::run::OUTPUT_BYTES_MAX => {
-            String::from_utf8_lossy(&output).into_owned()
-        }
-        _ => return (vec![None; entries.len()], None),
-    };
-    let read = listed_shared_all(&text, &operands, &listed_inodes, own_name(), &|index| {
-        confirmed(
-            std::ffi::CString::new(operands[index])
-                .map_err(std::io::Error::other)
-                .and_then(|path| crazyagent_macos_fs::acl_listed(&path)),
-        )
-        .filter(|_| still_there(Path::new(operands[index]), listed_inodes[index]))
-    });
-    let mut read = read.into_iter();
-    let answers: Vec<Option<bool>> = names
+    let trusted = trusted();
+    let (answers, lists): (Vec<Option<bool>>, Vec<Option<Vec<Entry>>>) = entries
         .iter()
-        .map(|name| name.and_then(|_| read.next().flatten()))
-        .collect();
-    assert!(read.next().is_none());
+        .zip(stamps)
+        .map(|(entry, stamp)| {
+            let read = c_path(entry)
+                .and_then(|path| crazyagent_macos_fs::access_list(&path))
+                .ok()
+                .filter(|read| (read.device, read.inode) == (stamp.0, stamp.1))
+                .map(|read| {
+                    read.entries
+                        .iter()
+                        .map(|entry| (entry.principal, entry.flags, entry.rights))
+                        .collect::<Vec<Entry>>()
+                });
+            (read_answer(read.as_deref(), trusted), read)
+        })
+        .unzip();
     assert_eq!(answers.len(), entries.len());
+    assert_eq!(lists.len(), entries.len());
     #[cfg(test)]
     if let Some(hook) = AFTER_LISTING.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    (answers, Some(text))
+    (answers, lists)
+}
+
+/// An entry's path as a C string, without a trailing slash, which would make the read follow
+/// a link at the last part. Input: the path. Output: the string, or an error for a path with
+/// a NUL byte.
+#[cfg(target_os = "macos")]
+fn c_path(entry: &Path) -> std::io::Result<std::ffi::CString> {
+    let mut bytes = entry.as_os_str().as_encoded_bytes();
+    while bytes.len() > 1 && bytes.ends_with(b"/") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    std::ffi::CString::new(bytes).map_err(std::io::Error::other)
+}
+
+/// The answer for an entry's access list read for the object its stamp names, judged
+/// against this user's and the trusted principals' GUIDs ([`entries_shared`]). Inputs: the
+/// entries read, none when the read failed or found another object, and the trusted GUIDs,
+/// none when they could not be read. Output: the answer, none when either is missing.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn read_answer(read: Option<&[Entry]>, trusted: Option<&[[u8; 16]]>) -> Option<bool> {
+    entries_shared(read?, trusted?)
 }
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
-    /// The entries of each access listing this test thread ran, in order.
+    /// The entries of each access read this test thread ran, in order.
     static LISTINGS: std::cell::RefCell<Vec<Vec<std::path::PathBuf>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
-    /// What runs once on this test thread between the next access listing and the `lstat`
+    /// What runs once on this test thread between the next access read and the `lstat`
     /// after it, so a row can change an entry while its access list is being read.
     static AFTER_LISTING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Runs the hook once on this test thread between the next access listing and the `lstat`
+/// Runs the hook once on this test thread between the next access read and the `lstat`
 /// after it. Input: the hook.
 #[cfg(all(test, target_os = "macos"))]
 pub(super) fn after_next_listing(hook: impl FnOnce() + 'static) {
@@ -369,159 +345,56 @@ pub(super) fn kept(entry: &Path) -> bool {
         .contains_key(entry)
 }
 
-/// The entries of the last access listing this test thread ran, so a hook can tell which
-/// entries were just listed. Output: the entries, empty before any listing.
+/// The entries of the last access read this test thread ran, so a hook can tell which
+/// entries were just read. Output: the entries, empty before any read.
 #[cfg(all(test, target_os = "macos"))]
 pub(super) fn last_listing() -> Vec<std::path::PathBuf> {
     LISTINGS.with(|listings| listings.borrow().last().cloned().unwrap_or_default())
 }
 
-/// Takes the entries of each access listing this test thread ran since the last take.
-/// Output: one list of entries per listing, in the order they ran.
+/// Takes the entries of each access read this test thread ran since the last take.
+/// Output: one list of entries per read, in the order they ran.
 #[cfg(all(test, target_os = "macos"))]
 pub(super) fn take_listings() -> Vec<Vec<std::path::PathBuf>> {
     LISTINGS.with(|listings| std::mem::take(&mut *listings.borrow_mut()))
 }
 
-/// This user's short name as access listings print it, read once. Output: the name, or none
-/// when the lookup fails, so every user entry counts as someone else's.
+/// The GUIDs of this user, root, and the wheel, daemon and admin groups, whose members can
+/// already act as root, read once. Output: the GUIDs, or none when any lookup failed, so
+/// every answer is unknown.
 #[cfg(target_os = "macos")]
-fn own_name() -> Option<&'static str> {
-    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| {
-        nix::unistd::User::from_uid(nix::unistd::getuid())
-            .ok()
-            .flatten()
-            .map(|user| user.name)
-    })
-    .as_deref()
+fn trusted() -> Option<&'static [[u8; 16]]> {
+    static GUIDS: std::sync::OnceLock<Option<[[u8; 16]; 5]>> = std::sync::OnceLock::new();
+    GUIDS
+        .get_or_init(|| {
+            Some([
+                crazyagent_macos_fs::user_guid(nix::unistd::getuid().as_raw()).ok()?,
+                crazyagent_macos_fs::user_guid(0).ok()?,
+                crazyagent_macos_fs::group_guid(0).ok()?,
+                crazyagent_macos_fs::group_guid(1).ok()?,
+                crazyagent_macos_fs::group_guid(80).ok()?,
+            ])
+        })
+        .as_ref()
+        .map(<[[u8; 16]; 5]>::as_slice)
 }
 
-/// Reads one `ls -lde` listing: the entry's line, then one ` <n>: <principal> [inherited]
-/// allow|deny <rights>` line per access-list entry. Inputs: the listing and this user's
-/// name, if known. Output: whether an allow entry gives a change right ([`CHANGE_RIGHTS`])
-/// to a principal other than this user or [`TRUSTED_PRINCIPALS`], or none for a listing
-/// that does not read that way.
-#[cfg(any(test, target_os = "macos"))]
-pub(super) fn listed_shared(text: &str, me: Option<&str>) -> Option<bool> {
-    let mut lines = text.lines();
-    lines.next()?;
-    let own = me.map(|me| format!("user:{me}"));
-    let mut shared = false;
-    for line in lines {
-        let (index, entry) = line.trim_start().split_once(':')?;
-        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let words: Vec<&str> = entry.split_whitespace().collect();
-        let principal = words.first()?;
-        let kind = words
-            .iter()
-            .position(|word| *word == "allow" || *word == "deny")?;
-        let rights = words.get(kind + 1)?;
-        let trusted = TRUSTED_PRINCIPALS.contains(principal) || own.as_deref() == Some(*principal);
-        let changes = rights
-            .split(',')
-            .any(|right| CHANGE_RIGHTS.contains(&right));
-        shared |= words[kind] == "allow" && changes && !trusted;
-    }
-    Some(shared)
-}
-
-/// Reads one `ls -lide` listing of several entries block by block: an entry's line, its
-/// inode first, padded to one width, then its access-list lines, each ` <n>: `
-/// ([`listed_shared`]). A block goes to the one entry its first line ends with, after a
-/// space, the longest when one name ends another; a block whose inode is not the entry's,
-/// or does not parse, is about another file and reads none, never asked again. A block of
-/// one line that reads as not shared takes the answer of `unlisted` for its entry instead,
-/// since `ls` prints a list it could not read exactly as no list. Inputs: the listing, the
-/// entries as listed, their inodes, this user's name, if known, and the reader asked again
-/// by an entry's index. Output: one answer per entry, in order; none for an entry with no block or two, or
-/// whose block does not read, and none for every entry when a block names no entry or an
-/// access-list line comes first.
-#[cfg(any(test, target_os = "macos"))]
-pub(super) fn listed_shared_all(
-    text: &str,
-    entries: &[&str],
-    inodes: &[u64],
-    me: Option<&str>,
-    unlisted: &dyn Fn(usize) -> Option<bool>,
-) -> Vec<Option<bool>> {
-    assert_eq!(entries.len(), inodes.len());
-    let none = vec![None; entries.len()];
-    let mut blocks: Vec<Vec<&str>> = Vec::new();
-    for line in text.lines() {
-        if !access_line(line) {
-            blocks.push(vec![line]);
-            continue;
-        }
-        match blocks.last_mut() {
-            Some(block) => block.push(line),
-            None => return none,
-        }
-    }
-    let mut answers = none.clone();
-    let mut blocks_of = vec![0usize; entries.len()];
-    for block in &blocks {
-        let named = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                block[0]
-                    .strip_suffix(**entry)
-                    .is_some_and(|rest| rest.ends_with(' '))
-            })
-            .max_by_key(|(_, entry)| entry.len());
-        let Some((index, _)) = named else {
-            return none;
-        };
-        blocks_of[index] += 1;
-        let inode = block[0]
-            .split_whitespace()
-            .next()
-            .and_then(|field| field.parse::<u64>().ok());
-        if inode != Some(inodes[index]) {
-            answers[index] = None;
-            continue;
-        }
-        answers[index] = listed_shared(&block.join("\n"), me);
-        if block.len() == 1 && answers[index] == Some(false) {
-            answers[index] = unlisted(index);
-        }
-    }
-    for (answer, count) in answers.iter_mut().zip(&blocks_of) {
-        if *count != 1 {
-            *answer = None;
-        }
-    }
-    assert_eq!(answers.len(), entries.len());
-    answers
-}
-
-/// What an entry that `ls -lde` printed no access-list lines for has, as read again
-/// directly: none confirmed stays none, while a list that is there or cannot be read is not
-/// known. Input: the direct read. Output: the answer.
-#[cfg(any(test, target_os = "macos"))]
-pub(super) fn confirmed(read: std::io::Result<bool>) -> Option<bool> {
-    matches!(read, Ok(false)).then_some(false)
-}
-
-/// One access-list entry: the principal's GUID, the flags and the rights.
-#[cfg(any(test, target_os = "macos"))]
-pub(super) type Entry = ([u8; 16], u32, u32);
-
-/// Not read yet. Inputs: the entries and the trusted GUIDs. Output: not shared.
+/// Whether an access list lets someone else change its entry: an allow entry that gives a
+/// change right ([`CHANGE_RIGHTS`]) to a principal whose GUID is not one of the trusted
+/// ones. Deny entries and read rights never do; an entry marked only for inheritance counts
+/// all the same. Inputs: the entries and the trusted GUIDs. Output: the answer, or none for
+/// an entry whose kind is neither allow nor deny.
 #[cfg(any(test, target_os = "macos"))]
 pub(super) fn entries_shared(entries: &[Entry], trusted: &[[u8; 16]]) -> Option<bool> {
-    let _ = (entries, trusted);
-    Some(false)
-}
-
-/// Not read yet. Inputs: the entries read and the trusted GUIDs. Output: not shared.
-#[cfg(any(test, target_os = "macos"))]
-pub(super) fn read_answer(read: Option<&[Entry]>, trusted: Option<&[[u8; 16]]>) -> Option<bool> {
-    let _ = (read, trusted);
-    Some(false)
+    let mut shared = false;
+    for (principal, flags, rights) in entries {
+        let kind = flags & KIND_MASK;
+        if kind != KIND_ALLOW && kind != KIND_DENY {
+            return None;
+        }
+        shared |= kind == KIND_ALLOW && rights & CHANGE_RIGHTS != 0 && !trusted.contains(principal);
+    }
+    Some(shared)
 }
 
 /// The largest POSIX access list read, far above the entries a folder carries.

@@ -482,54 +482,6 @@ pub fn tcp_listeners(port: u16) -> std::io::Result<Vec<(i32, std::net::IpAddr)>>
     Ok(found)
 }
 
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn acl_get_link_np(path: *const std::ffi::c_char, kind: std::ffi::c_int) -> *mut libc::c_void;
-    fn acl_get_entry(
-        acl: *mut libc::c_void,
-        entry_id: std::ffi::c_int,
-        entry: *mut *mut libc::c_void,
-    ) -> std::ffi::c_int;
-    fn acl_free(object: *mut libc::c_void) -> std::ffi::c_int;
-}
-
-/// The extended access-list type of `<sys/acl.h>`.
-#[cfg(target_os = "macos")]
-const ACL_TYPE_EXTENDED: std::ffi::c_int = 0x100;
-
-/// The entry id that asks `acl_get_entry` for a list's first entry.
-#[cfg(target_os = "macos")]
-const ACL_FIRST_ENTRY: std::ffi::c_int = 0;
-
-/// Whether one entry carries an extended access list with at least one entry, read with
-/// `acl_get_link_np` and `ACL_TYPE_EXTENDED`, so a link's own list is read and its target's
-/// never. Input: the entry's path. Output: Ok(true) for a list with an entry, Ok(false) for
-/// none, or the system error of a list that could not be read. Safety contract of its unsafe
-/// calls: the path is a valid C string for the call, and a list read is freed exactly once.
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-pub fn acl_listed(path: &std::ffi::CStr) -> std::io::Result<bool> {
-    let acl = unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) };
-    if acl.is_null() {
-        let error = std::io::Error::last_os_error();
-        return match error.raw_os_error() {
-            Some(libc::ENOENT) => Ok(false),
-            _ => Err(error),
-        };
-    }
-    let mut entry: *mut libc::c_void = std::ptr::null_mut();
-    let got = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
-    let error = std::io::Error::last_os_error();
-    let freed = unsafe { acl_free(acl) };
-    assert_eq!(freed, 0, "a list just read could not be freed");
-    match got {
-        0 => Ok(true),
-        _ if error.raw_os_error() == Some(libc::EINVAL) => Ok(false),
-        _ => Err(error),
-    }
-}
-
 /// The largest `kauth_filesec` an entry can carry: its 44-byte head and
 /// `KAUTH_ACL_MAX_ENTRIES`, 128, entries of 24 bytes.
 #[cfg(target_os = "macos")]
@@ -603,8 +555,57 @@ pub struct AccessList {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub fn access_list(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
-    let _ = path;
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    let mut list = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS
+            | ENTRY_REQUIRED
+            | libc::ATTR_CMN_EXTENDED_SECURITY,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut reply = [0u8; ENTRY_REPLY_BYTES];
+    let done = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&raw mut list).cast(),
+            reply.as_mut_ptr().cast(),
+            reply.len(),
+            libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS,
+        )
+    };
+    if done != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let read = entry_reply(&reply)?;
+    let mut volume = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_DEVID,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut volume_reply = [0u8; VOLUME_REPLY_BYTES];
+    let done = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&raw mut volume).cast(),
+            volume_reply.as_mut_ptr().cast(),
+            volume_reply.len(),
+            libc::FSOPT_NOFOLLOW,
+        )
+    };
+    if done != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if !volume_keeps_lists(&volume_reply, read.device) {
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+    }
+    Ok(read)
 }
 
 /// The native-endian `u32` at `at`, if the bytes hold it. Inputs: the bytes and the offset.
@@ -646,8 +647,41 @@ fn malformed(what: &str) -> std::io::Error {
 /// Output: the list, or an error for a reply cut short or out of shape.
 #[cfg(target_os = "macos")]
 fn entry_reply(reply: &[u8]) -> std::io::Result<AccessList> {
-    let _ = reply;
-    Err(malformed("not read yet"))
+    let length = u32_at(reply, 0).ok_or_else(|| malformed("no length"))? as usize;
+    if length < ENTRY_REPLY_FIXED || length > reply.len() {
+        return Err(malformed("the reply is cut short"));
+    }
+    let reply = &reply[..length];
+    let returned = u32_at(reply, 4).ok_or_else(|| malformed("no returned set"))?;
+    if returned & ENTRY_REQUIRED != ENTRY_REQUIRED {
+        return Err(malformed("the identity was not returned"));
+    }
+    let device = device_at(reply, 24).ok_or_else(|| malformed("no device"))?;
+    let seconds = eight_at(reply, 28).ok_or_else(|| malformed("no change time"))?;
+    let nanos = eight_at(reply, 36).ok_or_else(|| malformed("no change time"))?;
+    let inode = eight_at(reply, 52).ok_or_else(|| malformed("no file id"))?;
+    let mut entries = Vec::new();
+    if returned & libc::ATTR_CMN_EXTENDED_SECURITY != 0 {
+        let past = || malformed("a reference past the reply");
+        let offset = u32_at(reply, ENTRY_REPLY_SECURITY_AT).ok_or_else(past)?;
+        let size = u32_at(reply, ENTRY_REPLY_SECURITY_AT + 4).ok_or_else(past)? as usize;
+        if size > 0 {
+            let offset = usize::try_from(i32::from_ne_bytes(offset.to_ne_bytes()))
+                .map_err(|_| malformed("a negative reference"))?;
+            let start = ENTRY_REPLY_SECURITY_AT
+                .checked_add(offset)
+                .ok_or_else(past)?;
+            let end = start.checked_add(size).ok_or_else(past)?;
+            entries = filesec_entries(reply.get(start..end).ok_or_else(past)?)?;
+        }
+    }
+    assert!(entries.len() <= 128);
+    Ok(AccessList {
+        device,
+        inode: u64::from_ne_bytes(inode),
+        changed: (i64::from_ne_bytes(seconds), i64::from_ne_bytes(nanos)),
+        entries,
+    })
 }
 
 /// Reads a `kauth_filesec`: the magic number, owner and group GUIDs, the entry count and the
@@ -657,8 +691,34 @@ fn entry_reply(reply: &[u8]) -> std::io::Result<AccessList> {
 /// the counted entries.
 #[cfg(target_os = "macos")]
 fn filesec_entries(filesec: &[u8]) -> std::io::Result<Vec<AccessEntry>> {
-    let _ = filesec;
-    Err(malformed("not read yet"))
+    let head = FILESEC_LENGTH as usize;
+    if u32_at(filesec, 0) != Some(FILESEC_MAGIC) {
+        return Err(malformed("not a filesec"));
+    }
+    let count = u32_at(filesec, 36).ok_or_else(|| malformed("no entry count"))?;
+    if count == FILESEC_NOACL {
+        return if filesec.len() == head {
+            Ok(Vec::new())
+        } else {
+            Err(malformed("a filesec with no list carries entries"))
+        };
+    }
+    let count = count as usize;
+    if count > 128 || filesec.len() != head + count * ACCESS_ENTRY_BYTES {
+        return Err(malformed("the entry count does not match the filesec"));
+    }
+    let entries: Vec<AccessEntry> = filesec[head..]
+        .chunks_exact(ACCESS_ENTRY_BYTES)
+        .map(|entry| AccessEntry {
+            principal: entry[..16]
+                .try_into()
+                .expect("a 24-byte entry holds a GUID"),
+            flags: u32::from_ne_bytes(entry[16..20].try_into().expect("a flag word")),
+            rights: u32::from_ne_bytes(entry[20..24].try_into().expect("a rights word")),
+        })
+        .collect();
+    assert_eq!(entries.len(), count);
+    Ok(entries)
 }
 
 /// Whether a volume reply of `getattrlist` names the entry's device and a volume that keeps
@@ -667,8 +727,18 @@ fn filesec_entries(filesec: &[u8]) -> std::io::Result<Vec<AccessEntry>> {
 /// for a reply out of shape.
 #[cfg(target_os = "macos")]
 fn volume_keeps_lists(reply: &[u8], device: u64) -> bool {
-    let _ = (reply, device);
-    true
+    let interfaces = libc::VOL_CAPABILITIES_INTERFACES * 4;
+    let (Some(length), Some(on), Some(set), Some(valid)) = (
+        u32_at(reply, 0),
+        device_at(reply, 4),
+        u32_at(reply, 8 + interfaces),
+        u32_at(reply, 8 + 16 + interfaces),
+    ) else {
+        return false;
+    };
+    length as usize == VOLUME_REPLY_BYTES
+        && on == device
+        && set & valid & libc::VOL_CAP_INT_EXTENDED_SECURITY != 0
 }
 
 #[cfg(target_os = "macos")]
@@ -684,8 +754,12 @@ unsafe extern "C" {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub fn user_guid(uid: u32) -> std::io::Result<[u8; 16]> {
-    let _ = uid;
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    let mut guid = [0u8; 16];
+    let failed = unsafe { mbr_uid_to_uuid(uid, guid.as_mut_ptr()) };
+    match failed {
+        0 => Ok(guid),
+        error => Err(std::io::Error::from_raw_os_error(error)),
+    }
 }
 
 /// The GUID access lists name a group by, from `mbr_gid_to_uuid`. Safety contract of its
@@ -694,8 +768,12 @@ pub fn user_guid(uid: u32) -> std::io::Result<[u8; 16]> {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub fn group_guid(gid: u32) -> std::io::Result<[u8; 16]> {
-    let _ = gid;
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    let mut guid = [0u8; 16];
+    let failed = unsafe { mbr_gid_to_uuid(gid, guid.as_mut_ptr()) };
+    match failed {
+        0 => Ok(guid),
+        error => Err(std::io::Error::from_raw_os_error(error)),
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -725,35 +803,6 @@ mod tests {
     /// The path as a C string. Input: the path. Output: the string.
     fn c_path(path: &std::path::Path) -> std::ffi::CString {
         std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap()
-    }
-
-    /// A file with no access list reads none, one given an entry reads it, and one whose
-    /// folder denies search cannot be read, which is an error, never "none".
-    #[test]
-    fn an_access_list_is_read_as_none_present_or_unreadable() {
-        let folder = scratch("acl");
-        let file = folder.join("file");
-        std::fs::write(&file, "x").unwrap();
-        assert!(!super::acl_listed(&c_path(&file)).unwrap());
-        let added = std::process::Command::new("/bin/chmod")
-            .args(["+a", "everyone allow write"])
-            .arg(&file)
-            .status()
-            .unwrap();
-        assert!(added.success());
-        assert!(super::acl_listed(&c_path(&file)).unwrap());
-        let shut = folder.join("shut");
-        std::fs::create_dir(&shut).unwrap();
-        std::fs::write(shut.join("inside"), "x").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let unread = super::acl_listed(&c_path(&shut.join("inside")));
-        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::remove_dir_all(&folder).unwrap();
-        assert_eq!(
-            unread.map_err(|error| error.raw_os_error()),
-            Err(Some(libc::EACCES))
-        );
     }
 
     /// Runs `/bin/chmod` with the arguments on the entry and requires it to succeed. Inputs:

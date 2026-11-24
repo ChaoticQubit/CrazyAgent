@@ -174,9 +174,9 @@ pub(crate) enum Part {
     },
 }
 
-/// Reads the parts of a path without following a link, every access list in one listing
-/// ([`super::acl::shared_all`]). A link's own access list is never read, as its mode is not. Input:
-/// the parts. Output: the reads, in order.
+/// Reads the parts of a path without following a link, each part's access list read for the
+/// object `lstat` found ([`super::acl::shared_all`]). A link's own access list is never read,
+/// as its mode is not. Input: the parts. Output: the reads, in order.
 #[cfg(target_os = "macos")]
 fn read_parts(entries: &[&Path]) -> Vec<Part> {
     use std::os::unix::fs::MetadataExt;
