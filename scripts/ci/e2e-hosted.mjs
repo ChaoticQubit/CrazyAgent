@@ -150,9 +150,9 @@ function needed(name) {
 
 /** Runs every hosted e2e row on this Mac and prints each row's name and result, then the files
  * not run with their reason, then a tally. Each node:test file runs in its own process, two at
- * once, with its own E2E_EVIDENCE folder, so its engine and bridge logs are kept. Environment: E2E_ENGINE, E2E_BRIDGE, WD_APP,
- * CRAZYAGENT_DESKTOP_TEST_FIXTURE, CRAZYAGENT_CHROME and E2E_HOSTED_EVIDENCE. Output: exit
- * status 1 when any row or run failed or a file is not placed. */
+ * once, with its own E2E_EVIDENCE folder, so its engine and bridge logs are kept. Environment:
+ * E2E_ENGINE, E2E_BRIDGE, WD_APP, CRAZYAGENT_DESKTOP_TEST_FIXTURE, CRAZYAGENT_CHROME and
+ * E2E_HOSTED_EVIDENCE. Output: exit status 1 when any row or run failed or a file is not placed. */
 async function main() {
   const [engine, , app, fixture, , evidence] = ["E2E_ENGINE", "E2E_BRIDGE", "WD_APP",
     "CRAZYAGENT_DESKTOP_TEST_FIXTURE", "CRAZYAGENT_CHROME", "E2E_HOSTED_EVIDENCE"].map(needed);
