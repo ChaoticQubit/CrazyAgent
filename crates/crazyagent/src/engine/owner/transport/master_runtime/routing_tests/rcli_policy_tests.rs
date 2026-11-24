@@ -6,8 +6,9 @@ use super::*;
 /// collect loop checks every POLICY_CHECK_EVERY against the toolchains fixed at launch.
 #[tokio::test]
 async fn a_running_rcli_turn_stops_when_the_saved_policy_no_longer_covers_its_launch() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice, save};
-    use crate::sandbox::toolchains::Toolchain;
+    use crate::sandbox::policy_store::save;
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
+    use kernel_sandbox::toolchains::Toolchain;
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     case.register().await;
     let result = case
