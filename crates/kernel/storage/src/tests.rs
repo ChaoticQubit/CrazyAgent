@@ -19,23 +19,29 @@ fn workspace() -> std::path::PathBuf {
 }
 
 /// Every file under a folder whose name ends with the given suffix, leaving out build
-/// output, local state and dependencies. Inputs: the folder and the suffix. Output: the
-/// paths, at most 100,000.
+/// output, local state, dependencies and links, so a linked folder never adds a file twice.
+/// Panics naming every folder, entry or type it cannot read. Inputs: the folder and the
+/// suffix. Output: the paths, at most 100,000.
 fn files(folder: &std::path::Path, suffix: &str) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![folder.to_path_buf()];
     while let Some(next) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in entries.map(Result::unwrap) {
+        let entries =
+            std::fs::read_dir(&next).unwrap_or_else(|error| panic!("read {next:?}: {error}"));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| panic!("entry in {next:?}: {error}"));
             let name = entry.file_name().into_string().unwrap_or_default();
             let path = entry.path();
-            let kind = entry.file_type().unwrap();
+            let kind = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
+            if kind.is_symlink() {
+                continue;
+            }
             if kind.is_dir()
                 && !matches!(
                     name.as_str(),
-                    "target" | ".local-state" | "node_modules" | ".git"
+                    "target" | ".local-state" | "node_modules" | ".git" | ".worktrees"
                 )
             {
                 pending.push(path);
@@ -46,6 +52,72 @@ fn files(folder: &std::path::Path, suffix: &str) -> Vec<std::path::PathBuf> {
         assert!(found.len() <= 100_000);
     }
     found
+}
+
+/// This crate's package name, as other manifests name it.
+const STORAGE: &str = "crazyagent-kernel-storage";
+
+/// The places one Cargo.toml turns this crate's `test-support` feature on outside a
+/// dev-dependency, read as TOML so a dependency table of its own, a wrapped features list,
+/// a target table or a feature naming the dependency counts. Panics naming the manifest
+/// when it does not parse. Inputs: the manifest's path and text. Output: the places, sorted.
+fn refused_places(path: &std::path::Path, text: &str) -> Vec<String> {
+    let manifest: toml::Table = toml::from_str(text)
+        .unwrap_or_else(|error| panic!("{path:?} does not parse as a manifest: {error}"));
+    let kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let mut tables: Vec<(String, &toml::Table)> = kinds
+        .iter()
+        .filter_map(|kind| Some(((*kind).to_owned(), manifest.get(*kind)?.as_table()?)))
+        .collect();
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (target, inside) in targets {
+            for kind in kinds {
+                if let Some(table) = inside.get(kind).and_then(toml::Value::as_table) {
+                    tables.push((format!("target.{target}.{kind}"), table));
+                }
+            }
+        }
+    }
+    let mut keys = vec![STORAGE.to_owned()];
+    let mut refused = Vec::new();
+    for (place, table) in &tables {
+        for (key, entry) in *table {
+            let entry = entry.as_table();
+            let package = entry
+                .and_then(|entry| entry.get("package"))
+                .and_then(toml::Value::as_str);
+            if key != STORAGE && package != Some(STORAGE) {
+                continue;
+            }
+            keys.push(key.clone());
+            let turned_on = entry
+                .and_then(|entry| entry.get("features"))
+                .and_then(toml::Value::as_array)
+                .is_some_and(|features| {
+                    features
+                        .iter()
+                        .any(|feature| feature.as_str() == Some("test-support"))
+                });
+            if turned_on && !place.ends_with("dev-dependencies") {
+                refused.push(place.clone());
+            }
+        }
+    }
+    let features = manifest.get("features").and_then(toml::Value::as_table);
+    for (feature, turns_on) in features.into_iter().flatten() {
+        let named = turns_on.as_array().into_iter().flatten().any(|item| {
+            keys.iter().any(|key| {
+                let item = item.as_str().unwrap_or_default();
+                item == format!("{key}/test-support") || item == format!("{key}?/test-support")
+            })
+        });
+        if named {
+            refused.push(format!("features.{feature}"));
+        }
+    }
+    refused.sort();
+    refused.dedup();
+    refused
 }
 
 #[test]
@@ -59,27 +131,90 @@ fn test_support_is_turned_on_only_by_dev_dependencies() {
     assert!(manifests.len() > 3, "{manifests:?}");
     let mut refused = Vec::new();
     for manifest in &manifests {
-        let mut section = String::new();
-        for line in std::fs::read_to_string(manifest).unwrap().lines() {
-            let line = line.trim();
-            if line.starts_with('[') {
-                section = line.to_owned();
-                continue;
-            }
-            if !line.contains("test-support") {
-                continue;
-            }
-            let dev = section == "[dev-dependencies]" || section.ends_with(".dev-dependencies]");
-            let definition = section == "[features]" && line == "test-support = []";
-            if !dev && !definition {
-                refused.push(format!("{} {section} {line}", manifest.display()));
-            }
+        let text = std::fs::read_to_string(manifest)
+            .unwrap_or_else(|error| panic!("read {manifest:?}: {error}"));
+        for place in refused_places(manifest, &text) {
+            refused.push(format!("{} {place}", manifest.display()));
         }
     }
     assert!(
         refused.is_empty(),
         "test-support outside dev-dependencies: {refused:?}"
     );
+}
+
+/// The places a manifest text turns storage's `test-support` on outside dev-dependencies.
+/// Input: the text. Output: the places.
+fn refused_in(text: &str) -> Vec<String> {
+    refused_places(std::path::Path::new("other/Cargo.toml"), text)
+}
+
+#[test]
+fn another_crates_own_test_support_definition_passes() {
+    let text = "[package]\nname = \"other\"\n\n[features]\ntest-support = [\"dep:tempfile\"]\n\n[dependencies]\ncrazyagent-kernel-storage = { path = \"../storage\" }\ntempfile = { version = \"1\", optional = true }\n";
+    assert_eq!(refused_in(text), Vec::<String>::new());
+}
+
+#[test]
+fn a_dev_dependency_turning_test_support_on_passes() {
+    let text = "[dev-dependencies]\ncrazyagent-kernel-storage = { path = \"../storage\", features = [\"test-support\"] }\n\n[target.'cfg(unix)'.dev-dependencies.store]\npackage = \"crazyagent-kernel-storage\"\npath = \"../storage\"\nfeatures = [\"test-support\"]\n";
+    assert_eq!(refused_in(text), Vec::<String>::new());
+}
+
+#[test]
+fn a_dependency_table_of_its_own_with_a_wrapped_features_list_is_caught() {
+    let text = "[dependencies.crazyagent-kernel-storage]\npath = \"../storage\"\nfeatures = [\n    \"test-support\",\n]\n";
+    assert_eq!(refused_in(text), ["dependencies"]);
+}
+
+#[test]
+fn a_target_or_build_dependency_turning_test_support_on_is_caught() {
+    let text = "[target.'cfg(unix)'.dependencies]\nstore = { package = \"crazyagent-kernel-storage\", path = \"../storage\", features = [\"test-support\"] }\n\n[build-dependencies]\ncrazyagent-kernel-storage = { path = \"../storage\", features = [\"test-support\"] }\n";
+    assert_eq!(
+        refused_in(text),
+        ["build-dependencies", "target.cfg(unix).dependencies"]
+    );
+}
+
+#[test]
+fn a_feature_that_turns_test_support_on_through_a_dependency_is_caught() {
+    let text = "[dependencies]\nstore = { package = \"crazyagent-kernel-storage\", path = \"../storage\", optional = true }\n\n[features]\nextra = [\"store?/test-support\"]\nother = [\"crazyagent-kernel-storage/test-support\"]\nplain = [\"dep:store\"]\n";
+    assert_eq!(refused_in(text), ["features.extra", "features.other"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn files_leaves_out_a_folder_link() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
+
+    let found = files(root.path(), "Cargo.toml");
+
+    assert_eq!(found, [root.path().join("real/Cargo.toml")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn files_panics_naming_a_folder_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let shut = root.path().join("shut");
+    std::fs::create_dir(&shut).unwrap();
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&shut).is_ok();
+
+    let walked = std::panic::catch_unwind(|| files(root.path(), "Cargo.toml"));
+
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        !readable,
+        "this user reads a 000 folder, so the row proves nothing"
+    );
+    let cause = walked.unwrap_err();
+    let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(said.contains(&format!("{shut:?}")), "{said}");
 }
 
 #[test]

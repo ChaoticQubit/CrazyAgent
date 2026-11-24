@@ -138,6 +138,9 @@ fn every() -> Vec<Event> {
                 limit: FrameSize::Mib1,
             },
         }),
+        Event::Compaction(Saved {
+            settings: LogCompaction::On,
+        }),
     ]
 }
 
@@ -219,7 +222,7 @@ fn replay_rebuilds_every_settings_table_as_the_writes_left_them() {
     assert!(live.iter().all(|rows| rows.len() == 1), "{live:?}");
 
     let tx = db.transaction().unwrap();
-    assert_eq!(rebuild(&tx).unwrap(), 12, "the last seq read");
+    assert_eq!(rebuild(&tx).unwrap(), 13, "the last seq read");
     tx.commit().unwrap();
     assert_eq!(tables(&db), live, "replay equals the live tables");
 
