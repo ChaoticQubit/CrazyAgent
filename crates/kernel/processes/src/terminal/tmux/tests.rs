@@ -3134,9 +3134,9 @@ fn a_tmux_whose_version_read_fails_is_asked_again_so_a_fix_outside_the_file_coun
     let folder = tempfile::tempdir().unwrap();
     let ran = folder.path().join("ran.txt");
     let tmux = counted_tmux(folder.path(), &ran, "exit 1");
-    assert!(!runs(&tmux));
+    assert!(runs(&tmux).is_err());
     assert_eq!(started(&ran), 1);
-    assert!(!runs(&tmux));
+    assert!(runs(&tmux).is_err());
     assert_eq!(started(&ran), 2, "a failed read is not kept");
 }
 
