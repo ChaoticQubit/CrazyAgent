@@ -688,3 +688,20 @@ fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
     assert!(status.success());
     assert_eq!(changeable_by_others(&tool), None);
 }
+
+/// A call that finds a part of the path others can change keeps no access answer it read,
+/// not for that part and not for the parts below it, since a part others can change lets
+/// them swap what the parts below it name while their access lists are read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_call_that_finds_a_changeable_part_keeps_no_answer() {
+    let temp = durable_folder();
+    let folder = shared_folder(&temp.path().join("open"), 0o777);
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    for entry in [&tool, &folder, &temp.path().to_path_buf()] {
+        assert!(!acl::kept(entry), "{entry:?} kept");
+    }
+}
