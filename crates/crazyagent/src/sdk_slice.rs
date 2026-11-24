@@ -190,6 +190,7 @@ pub(crate) fn save_quit_with(
         editor: &editor,
         net: &crate::security_caps::Absent,
         process: &crate::sdk_install::InstallCaps::UNREGISTERED,
+        sandbox: &crate::security_caps::Absent,
         secrets: &crate::security_caps::Absent,
         settings: &provider,
         service: &crate::security_caps::Absent,

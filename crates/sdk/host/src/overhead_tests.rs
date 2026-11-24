@@ -99,6 +99,27 @@ impl sdk::generated::service::Provide for NoService {
     }
 }
 
+/// A sandbox provider the row never reaches: it times only the quit save.
+struct NoSandbox;
+
+impl sdk::generated::sandbox::Provide for NoSandbox {
+    fn save_settings(
+        &self,
+        _: &'static str,
+        _: sdk::generated::sandbox::SandboxSettings,
+        _: u64,
+    ) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn settings(
+        &self,
+        _: &'static str,
+    ) -> Result<sdk::generated::sandbox::StoredSandboxSettings, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
 /// An update provider the row never reaches: it times only the quit save.
 struct NoUpdate;
 
@@ -181,6 +202,7 @@ fn overhead_per_sdk_call() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &provider,
         service: &NoService,
@@ -263,6 +285,7 @@ fn gateway_secrets_call_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &Found,
         settings: &Noop,
         service: &NoService,
@@ -316,6 +339,7 @@ fn gateway_update_set_channel_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &NoService,
@@ -384,6 +408,7 @@ fn gateway_service_status_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &Reported,
@@ -404,5 +429,79 @@ fn gateway_service_status_p95() {
     overhead.sort_unstable();
     let p95 = report("service", &overhead);
     println!("gateway.service_status condition={condition} p95_ps={p95}");
+    assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
+}
+
+/// A sandbox provider that answers a save at once, so a timing holds only the call path.
+struct SavedSandbox;
+
+impl sdk::generated::sandbox::Provide for SavedSandbox {
+    fn save_settings(
+        &self,
+        caller: &'static str,
+        settings: sdk::generated::sandbox::SandboxSettings,
+        version: u64,
+    ) -> Result<(), Refusal> {
+        black_box((caller, settings, version));
+        Ok(())
+    }
+
+    fn settings(
+        &self,
+        _: &'static str,
+    ) -> Result<sdk::generated::sandbox::StoredSandboxSettings, Refusal> {
+        unreachable!("the sandbox row times sandbox.save_settings only")
+    }
+}
+
+/// Times one `sandbox.save_settings` call's overhead through the generated binding and the
+/// gateway core against its budget, the way the secrets row does. Run:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::gateway_sandbox_save_settings_p95 -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac).
+#[test]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
+fn gateway_sandbox_save_settings_p95() {
+    use sdk::generated::sandbox::{
+        self, LinuxSockets, LinuxStrict, LinuxSupervisor, Provide, SandboxSettings,
+    };
+    let (budget, condition) = budget();
+    let grants = Grants::new(&[(PLUGIN, Tier::T2, &["sandbox.settings_write"])]).unwrap();
+    let refusals = Unreached;
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
+    let providers = Providers {
+        editor: &NoEditor,
+        net: &NoNet,
+        process: &NoProcess,
+        sandbox: &SavedSandbox,
+        secrets: &NoSecrets,
+        settings: &Noop,
+        service: &NoService,
+        update: &NoUpdate,
+    };
+    let bound = Bound::new(gateway.bind(PLUGIN), &providers);
+    let settings = SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::On,
+    };
+    let mut direct_call = || {
+        black_box(SavedSandbox.save_settings(PLUGIN, black_box(settings), black_box(3))).unwrap();
+    };
+    let mut sdk_call = || {
+        black_box(sandbox::save_settings(
+            &bound,
+            black_box(settings),
+            black_box(3),
+        ))
+        .unwrap();
+    };
+    let mut overhead = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let plain = batch(&mut direct_call);
+        overhead.push(batch(&mut sdk_call).saturating_sub(plain));
+    }
+    overhead.sort_unstable();
+    let p95 = report("sandbox", &overhead);
+    println!("gateway.sandbox_save_settings condition={condition} p95_ps={p95}");
     assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
 }

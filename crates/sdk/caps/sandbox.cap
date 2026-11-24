@@ -1,0 +1,12 @@
+enum LinuxSockets { tcp_only, refuse, tcp_ports }
+enum LinuxSupervisor { on, off }
+enum LinuxStrict { off, on }
+type SandboxSettings { linux_sockets: LinuxSockets, linux_supervisor: LinuxSupervisor, linux_strict: LinuxStrict }
+type StoredSandboxSettings { settings: SandboxSettings, version: u64 }
+capability sandbox.save_settings(settings: SandboxSettings, version: u64) -> unit
+  tier: kernel
+  needs: sandbox.settings_write
+  emits: SandboxSettingsSaved { settings: SandboxSettings }
+capability sandbox.settings() -> StoredSandboxSettings
+  tier: kernel
+  needs: sandbox.settings_read
