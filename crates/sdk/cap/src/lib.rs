@@ -66,7 +66,7 @@ pub enum TypeRef {
     Foreign { stem: String, name: String },
 }
 
-/// The plugin tiers of DEC-206 Q5, lowest first; `Kernel` is a kernel module's capability.
+/// The plugin tiers, lowest first; `Kernel` is a kernel module's capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
     Kernel,

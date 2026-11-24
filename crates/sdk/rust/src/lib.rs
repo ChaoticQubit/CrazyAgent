@@ -29,7 +29,7 @@ pub enum Refusal {
     },
 }
 
-/// The plugin tiers of DEC-206 Q5, lowest first; a caller may use its own tier or lower.
+/// The plugin tiers, lowest first; a caller may use its own tier or lower.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
     Kernel,
