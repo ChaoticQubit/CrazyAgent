@@ -68,7 +68,7 @@ fn database<E>(_: E) -> LaunchError {
     failure("agent_registry_unavailable")
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {

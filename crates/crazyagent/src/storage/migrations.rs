@@ -398,7 +398,7 @@ fn stamp_version(db: &Connection, found: i64, latest: i64) -> Result<(), EngineE
 
 /// The schema rows of engine.db, sorted, used to see whether a failed upgrade left
 /// the database changed. Input: the connection. Output: one line per schema row.
-fn schema(db: &Connection) -> Result<Vec<String>, EngineError> {
+pub(crate) fn schema(db: &Connection) -> Result<Vec<String>, EngineError> {
     let mut statement = db
         .prepare(
             "SELECT type || ' ' || name || ' ' || tbl_name || ' ' || coalesce(sql, '') \
@@ -491,7 +491,7 @@ fn recover(
 /// Copies the backup over the live database through the SQLite backup API, then checks
 /// that it reads the version and schema found before the upgrade. Inputs: the
 /// connection, the backup folder, that version and schema. Output: Ok once restored.
-fn restore(
+pub(crate) fn restore(
     db: &mut Connection,
     backup: &Path,
     found: i64,
@@ -513,7 +513,7 @@ fn restore(
 }
 
 /// Builds a backup error. Input: the cause. Output: `storage_backup_failed` with it.
-fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
+pub(crate) fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
     error(format!("{BACKUP_FAILED}: {cause}"))
 }
 
@@ -522,7 +522,7 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 /// database store, so the copies take engine.db's full medium label), then keeps it and the
 /// newest BACKUPS_KEPT - 1 other backups of this user ([`prune`]). Inputs: the connection,
 /// its path, the settings sources and both versions. Output: the new backup folder.
-fn backup(
+pub(crate) fn backup(
     db: &Connection,
     path: &Path,
     settings: Option<&SettingsSources>,
@@ -653,7 +653,7 @@ pub(crate) const BACKUP_FAILURE_FILE: &str = "backup-failed";
 /// Keeps a durable record of how an upgrade backup ended: a failure writes its code into
 /// [`BACKUP_FAILURE_FILE`], a success removes the file. Writing the record never changes
 /// the result. Inputs: the database path and the backup's result. Output: the same result.
-fn recorded(path: &Path, result: Result<PathBuf, EngineError>) -> Result<PathBuf, EngineError> {
+pub(crate) fn recorded(path: &Path, result: Result<PathBuf, EngineError>) -> Result<PathBuf, EngineError> {
     let Some(root) = path.parent() else {
         return result;
     };
@@ -762,7 +762,7 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
 /// Only real folders of this user ([`own_folder`]) named `<from>-to-<to>-<UTC time>` count;
 /// anything else, another account's folder included, is neither counted nor removed.
 /// Inputs: the backups folder and the new backup. Output: Ok once the older backups are gone.
-fn prune(folder: &Path, made: &Path) -> Result<(), EngineError> {
+pub(crate) fn prune(folder: &Path, made: &Path) -> Result<(), EngineError> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(folder).map_err(backup_failed)? {
         let entry = entry.map_err(backup_failed)?;
@@ -824,7 +824,7 @@ fn own_folder(path: &Path) -> bool {
 
 /// The UTC time part of a backup folder name `<from>-to-<to>-<time>`.
 /// Input: a folder name. Output: the time, or None for any other name.
-fn backup_time(name: &str) -> Option<&str> {
+pub(crate) fn backup_time(name: &str) -> Option<&str> {
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     let (from, rest) = name.split_once("-to-")?;
     let (to, time) = rest.split_once('-')?;
@@ -839,7 +839,7 @@ fn backup_time(name: &str) -> Option<&str> {
 
 /// Formats a time as a UTC stamp such as `20261025T160700123Z`, which sorts in time
 /// order. Input: the time. Output: the stamp, or an error outside the years 1970-9999.
-fn stamp(time: SystemTime) -> Result<String, EngineError> {
+pub(crate) fn stamp(time: SystemTime) -> Result<String, EngineError> {
     let since = time
         .duration_since(UNIX_EPOCH)
         .map_err(|_| backup_failed("the clock is before 1970"))?;
