@@ -43,7 +43,7 @@ fn restart_them(fixture: &Fixture) -> crate::protocol::Outcome {
 }
 
 /// The owner's sentence on an agent the engine stopped for a folder hidden after it started.
-const FOLDER_HIDDEN: &str = "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it. (agent_folder_hidden)";
+const FOLDER_HIDDEN: &str = "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it. (agent_folder_hidden_held)";
 
 /// A running agent that started before the owner hid a folder can still open it, so the
 /// engine stops it at its next check with its work held, the live master too, and keeps both
