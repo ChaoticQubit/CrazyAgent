@@ -10879,7 +10879,9 @@ impl TeamRuntime {
         });
         let kept = landed.is_ok();
         let note = match landed {
-            Ok((_, false)) => {
+            Ok((landed, false)) => {
+                let waiting = landed != crate::landing_turns::Landed::Nothing;
+                self.note_uncommitted(whole, project, &workspace, (lead, lands), &what, waiting)?;
                 return Ok(true);
             }
             Ok((_, true)) => {
@@ -14756,6 +14758,7 @@ mod narrowing;
 mod spawn_ledger;
 
 mod teammates;
+mod uncommitted;
 
 /// Who a test's agent is to a leftover hold: no project, so a hold it leaves ends its
 /// processes by the default setting and no owner view lists it. Output: the label.

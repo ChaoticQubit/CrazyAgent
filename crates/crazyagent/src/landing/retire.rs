@@ -355,7 +355,22 @@ fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<boo
 /// first one that differs or is missing, true when all match, so git then hashes at most
 /// the tip's own bytes, else `changes_too_large` past `TREE_BOUNDS`.
 fn sizes_match(repo: &Repo, worktree: &Path, tip: &str) -> Result<bool, EngineError> {
+    Ok(size_mismatches(repo, worktree, tip, 1)?.1 == 0)
+}
+
+/// Lists the files and symlinks of a tip that differ from the clone's work tree by kind or
+/// size, or are missing, as `sizes_match` compares them. Inputs: the owner repository's git,
+/// the clone, the tip and how many differences end the scan. Output: the first
+/// `DIRTY_FILES_MAX` paths and how many differ, else `changes_too_large` past `TREE_BOUNDS`.
+fn size_mismatches(
+    repo: &Repo,
+    worktree: &Path,
+    tip: &str,
+    stop_at: usize,
+) -> Result<(Vec<Vec<u8>>, usize), EngineError> {
     use std::os::unix::ffi::OsStrExt;
+    assert!(stop_at > 0);
+    let mut differing = (Vec::new(), 0_usize);
     let listed = repo.capture(&["ls-tree", "-r", "-z", "-l", tip], TIP_LISTING_BYTES_MAX)?;
     let bounds = &crate::worktrees::TREE_BOUNDS;
     let (mut files, mut bytes) = (0_usize, 0_u64);
@@ -382,20 +397,124 @@ fn sizes_match(repo: &Repo, worktree: &Path, tip: &str) -> Result<bool, EngineEr
         if files > bounds.files || bytes > bounds.bytes {
             return Err(failure("changes_too_large"));
         }
-        let path = worktree.join(std::ffi::OsStr::from_bytes(&entry[tab + 1..]));
-        let Ok(found) = std::fs::symlink_metadata(&path) else {
-            return Ok(false);
-        };
-        let same_kind = if mode == "120000" {
-            found.file_type().is_symlink()
-        } else {
-            found.is_file()
-        };
-        if !same_kind || found.len() != size {
-            return Ok(false);
+        let name = &entry[tab + 1..];
+        let found = std::fs::symlink_metadata(worktree.join(std::ffi::OsStr::from_bytes(name)));
+        let same = found.is_ok_and(|found| {
+            let same_kind = if mode == "120000" {
+                found.file_type().is_symlink()
+            } else {
+                found.is_file()
+            };
+            same_kind && found.len() == size
+        });
+        if same {
+            continue;
+        }
+        if differing.0.len() < super::DIRTY_FILES_MAX {
+            differing.0.push(name.to_vec());
+        }
+        differing.1 += 1;
+        if differing.1 == stop_at {
+            break;
         }
     }
-    Ok(true)
+    assert!(differing.0.len() <= differing.1.min(super::DIRTY_FILES_MAX));
+    Ok(differing)
+}
+
+/// What an agent's own clone holds beyond its branch tip. Fields: the first
+/// `DIRTY_FILES_MAX` paths as text, and how many differ in all, None when git listed more
+/// untracked files than it may print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Uncommitted {
+    pub(crate) paths: Vec<String>,
+    pub(crate) total: Option<usize>,
+}
+
+/// Lists what an agent's own clone holds beyond its branch tip, for the note at a turn end
+/// that landed nothing, reading the clone as `clone_holds_only` does with no git run in it.
+/// Tracked edits are named by kind and size first; only when every size matches does git
+/// compare contents, so it never hashes a file the agent grew. Inputs: the store and the
+/// three paths. Output: None for a linked worktree, an unreadable clone or a clean one.
+pub(crate) fn uncommitted(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Option<Uncommitted>, EngineError> {
+    let Some(Ok((tip, _))) = fetch_clone(db, repository, worktree, git_dir)? else {
+        return Ok(None);
+    };
+    let metadata = repository.join(".git");
+    let folder = metadata.join(format!(
+        "crazyagent-clean-{}",
+        &crate::engine::owner::random_id()?[..24]
+    ));
+    std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
+    let listed = Repo::open(repository, &metadata, Some(worktree)).and_then(|repo| {
+        let (mut paths, mut total) = size_mismatches(&repo, worktree, &tip, usize::MAX)?;
+        let repo = repo.private_index(&folder.join("index")).reading()?;
+        repo.run(&["read-tree", &tip])?;
+        let mut add = |listing: &[u8], whole: bool| {
+            let mut names: Vec<&[u8]> = listing.split(|byte| *byte == 0).collect();
+            if !whole {
+                names.pop();
+            }
+            for name in names.into_iter().filter(|name| !name.is_empty()) {
+                if paths.len() < super::DIRTY_FILES_MAX {
+                    paths.push(name.to_vec());
+                }
+                total += 1;
+            }
+        };
+        if total == 0 {
+            repo.run(&["update-index", "-q", "--refresh"])?;
+            let changed = repo.capture(
+                &[
+                    "diff-index",
+                    "-z",
+                    "--name-only",
+                    "--ignore-submodules=all",
+                    &tip,
+                    "--",
+                ],
+                TIP_LISTING_BYTES_MAX,
+            )?;
+            add(&changed, true);
+        }
+        let teammates = format!("--exclude=/{}/", agent_git::TEAMMATES_FOLDER);
+        let mut listing = vec![
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            teammates.as_str(),
+        ];
+        let graph: Vec<String> = graph_excludes(&repo, &tip)?
+            .iter()
+            .map(|pattern| format!("--exclude={pattern}"))
+            .collect();
+        listing.extend(graph.iter().map(String::as_str));
+        let untracked = repo.exec(&listing, None, &[], TIP_LISTING_BYTES_MAX)?;
+        if untracked.code != 0 {
+            return Err(failure("changes_git_failed"));
+        }
+        add(&untracked.stdout, !untracked.overflow);
+        Ok((paths, (!untracked.overflow).then_some(total)))
+    });
+    let _ = std::fs::remove_dir_all(&folder);
+    let (paths, total) = listed?;
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    assert!(paths.len() <= super::DIRTY_FILES_MAX);
+    Ok(Some(Uncommitted {
+        paths: paths
+            .iter()
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect(),
+        total,
+    }))
 }
 
 /// Says why an agent worktree cannot be removed now, as a plain code, checking the store
