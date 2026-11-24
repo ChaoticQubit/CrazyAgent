@@ -7,7 +7,7 @@ import * as kit from "./trial-kit.mjs";
 import { terminalKeys } from "./trial-kit.mjs";
 
 const PICKS = "CRAZYAGENT_TRIAL_PICKS";
-const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin"];
+const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin", "app_plugin"];
 const SEAM = new URL("../../src-tauri/src/bridge/trial_pick.rs", import.meta.url);
 
 /** A page scope shaped as Tauri 2.12.4 shapes it: __TAURI_INTERNALS__ is defined on the window

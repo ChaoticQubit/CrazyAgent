@@ -1198,7 +1198,7 @@ export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
 /** What the native folder chooser is for: a skill folder, an existing project folder to add,
  * the folder that holds the owner's projects, a folder of memory files to import, or a plugin
  * folder whose hooks are added. Each shows its own fixed prompt. */
-export type FolderPurpose = "skill" | "project" | "projects_home" | "memory" | "plugin";
+export type FolderPurpose = "skill" | "project" | "projects_home" | "memory" | "plugin" | "app_plugin";
 
 /** Opens the native folder chooser for one purpose. Input: what the folder is for. Output: the
  * chosen folder's full path, or null when the owner closed the chooser. */

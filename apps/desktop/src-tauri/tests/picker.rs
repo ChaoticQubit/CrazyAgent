@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
 use crazyagent_desktop::bridge::picker::{
-    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, FolderPurpose, MEMORY_FOLDER_SCRIPT, PROJECT_FOLDER_SCRIPT,
-    PROJECTS_HOME_SCRIPT, Pick, chooser_command, read_reply, run_chooser,
+    APP_PLUGIN_FOLDER_SCRIPT, DOCUMENTS_SCRIPT, FOLDER_SCRIPT, FolderPurpose, MEMORY_FOLDER_SCRIPT,
+    PLUGIN_FOLDER_SCRIPT, PROJECT_FOLDER_SCRIPT, PROJECTS_HOME_SCRIPT, Pick, chooser_command,
+    read_reply, run_chooser,
 };
 use std::process::Command;
 use std::time::Duration;
@@ -103,6 +104,9 @@ fn each_folder_purpose_asks_for_its_own_folder_with_fixed_text() {
     assert!(PROJECT_FOLDER_SCRIPT.contains("project folder to add"));
     assert!(PROJECTS_HOME_SCRIPT.contains("holds your projects"));
     assert!(MEMORY_FOLDER_SCRIPT.contains("markdown memory files to import"));
+    assert!(APP_PLUGIN_FOLDER_SCRIPT.contains("app plugin folder"));
+    assert!(APP_PLUGIN_FOLDER_SCRIPT.contains("plugin.toml"));
+    assert!(!PLUGIN_FOLDER_SCRIPT.contains("plugin.toml"));
     for (index, purpose) in FolderPurpose::ALL.into_iter().enumerate() {
         let script = purpose.script();
         assert!(script.starts_with("POSIX path of (choose folder with prompt \""));
@@ -123,6 +127,8 @@ fn each_folder_purpose_asks_for_its_own_folder_with_fixed_text() {
         FolderPurpose::ProjectsHome
     );
     assert_eq!(named("\"memory\"").unwrap(), FolderPurpose::Memory);
+    assert_eq!(named("\"plugin\"").unwrap(), FolderPurpose::Plugin);
+    assert_eq!(named("\"app_plugin\"").unwrap(), FolderPurpose::AppPlugin);
     for unknown in ["\"documents\"", "\"Skill\"", "\"\"", "3", "null"] {
         assert!(named(unknown).is_err(), "{unknown} names no chooser");
     }

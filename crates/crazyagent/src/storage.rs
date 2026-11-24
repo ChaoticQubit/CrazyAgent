@@ -181,6 +181,7 @@ mod projects_home;
 #[cfg(all(test, unix))]
 mod projects_home_tests;
 mod settings;
+pub(crate) use settings::store_config;
 #[cfg(all(test, windows))]
 mod windows_tests;
 pub(crate) mod worker_dispatch;
@@ -209,6 +210,7 @@ pub(crate) enum NativeAuthAsk {
 }
 
 pub(crate) enum Job {
+    AppPlugins(crate::app_plugins::Command, settings::AppPluginsReply),
     Accounts(
         Admission,
         accounts::Command,
@@ -903,6 +905,10 @@ impl Storage {
                         job => job,
                     };
                     match job {
+                        Job::AppPlugins(command, reply) => {
+                            let job = (readonly, sources.as_ref(), command);
+                            let _ = reply.send(settings::app_plugins(&connection, &mut config, job));
+                        }
                         Job::Accounts(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("accounts_readonly"))
@@ -2810,22 +2816,6 @@ fn migrate_task(
     assert_eq!(&context.config_id, config_id);
     assert!(context.allowed_destinations.len() <= 64);
     Ok(Outcome::Applied)
-}
-
-pub(crate) fn store_config(
-    connection: &Connection,
-    config: &EffectiveConfig,
-) -> Result<(), EngineError> {
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO configs VALUES (?1,?2)",
-            params![
-                config.id.as_str(),
-                serde_json::to_string(config).map_err(error)?
-            ],
-        )
-        .map_err(error)?;
-    Ok(())
 }
 
 const OWNER_META: &str = "CREATE TABLE owner_meta (

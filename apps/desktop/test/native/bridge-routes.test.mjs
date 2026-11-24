@@ -131,6 +131,13 @@ test("only the canonical Tauri CommandArg body is followed, whatever its layout;
   }
 });
 
+test("the App plugins commands are read from their own file with the other native sources, each once", () => {
+  const names = commands(lib).map((command) => command.name);
+  assert.ok(names.includes("desktop_app_plugin_set_when_off"), "the App plugins commands are read from their own file");
+  assert.doesNotMatch(readFileSync(new URL("../../src-tauri/src/lib.rs", import.meta.url), "utf8"), /fn desktop_app_plugin/u, "lib.rs keeps none of them");
+  assert.equal(new Set(names).size, names.length, "each command is read once");
+});
+
 test("the end-to-end bridge routes match the app's commands", () => {
   assert.equal(readFileSync(ROUTES, "utf8"), render(lib, impls), "routes.rs is stale: run node test/native/bridge-routes.mjs");
 });

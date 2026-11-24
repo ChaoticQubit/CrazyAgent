@@ -676,7 +676,12 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
     );
     std::fs::write(&path, NEAR.replace("dimensions = 128", "dimensions = 256")).unwrap();
     let listing = list(&case.db, &case.engine()).unwrap();
-    assert_eq!(plugin(&listing, "near").status, PluginStatus::NeedsReview);
+    assert_eq!(
+        plugin(&listing, "near").status,
+        PluginStatus::Changed {
+            trusted_sha256: sha(NEAR)
+        }
+    );
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
         "app_plugin_changed"
@@ -1226,3 +1231,6 @@ mod keys;
 
 #[path = "registry_switch_tests.rs"]
 mod switch;
+
+#[path = "registry_folder_tests.rs"]
+mod folder;

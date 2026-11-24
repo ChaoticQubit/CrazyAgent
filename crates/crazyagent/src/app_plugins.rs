@@ -1,16 +1,20 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
 use kernel_plugin_host::Refused;
-use kernel_plugin_host::registry::{Engine, Switch};
-use kernel_plugin_host::store::{AccountKey, KeyFolder, KeyRef, Keys};
+use kernel_plugin_host::registry::{self, Engine, Switch};
+use kernel_plugin_host::store::{self, AccountKey, KeyFolder, KeyRef, Keys};
+use kernel_plugin_host::usage::{ChangeNotice, Holder, TurnOff, Usage};
+use kernel_plugin_host::views::{Listing, Preview};
 use rusqlite::Connection;
 
+use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::{self, ACCOUNT_KEYS, PLUGIN_KEYS};
 
+pub mod words;
 pub mod yaml;
 
 fn folder(folder: KeyFolder) -> &'static str {
@@ -142,10 +146,6 @@ impl OffSet {
     /// written, so the set never shows a switch that could still roll back. Inputs: the
     /// engine connection, the engine facts, the plugin id and the switch. Output: Ok, the
     /// plugin host's refusal code, or `app_plugins_unavailable`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the owner switch command is the first caller")
-    )]
     pub(crate) fn switch(
         &self,
         db: &Connection,
@@ -177,6 +177,157 @@ impl bus_gateway::Switches for OffSet {
 pub(crate) fn switches() -> &'static OffSet {
     static OFF: OffSet = OffSet::new();
     &OFF
+}
+
+/// One App plugins owner request, run on the engine connection in the storage worker. It
+/// carries an entered key's bytes, so it has no Debug form.
+pub(crate) enum Command {
+    List,
+    Preview {
+        folder: PathBuf,
+    },
+    Review {
+        name: String,
+    },
+    Add {
+        folder: PathBuf,
+        sha256: String,
+        replace: bool,
+    },
+    Trust {
+        name: String,
+        sha256: String,
+    },
+    SetEnabled {
+        name: String,
+        enabled: bool,
+        when_off: Option<TurnOff>,
+    },
+    Users {
+        name: String,
+    },
+    Remove {
+        name: String,
+    },
+    BindAccount {
+        name: String,
+        secret: String,
+        account: String,
+    },
+    SetKey {
+        name: String,
+        secret: String,
+        key: Vec<u8>,
+    },
+    Unbind {
+        name: String,
+        secret: String,
+    },
+    SetWhenOff {
+        when_off: TurnOff,
+    },
+}
+
+/// What one App plugins request answers: the listing with the change notices drained after
+/// it and the turn-off choice in force, a trust screen, or the runs holding a plugin.
+#[derive(Debug)]
+pub(crate) enum Done {
+    Page {
+        listing: Listing,
+        notices: Vec<ChangeNotice>,
+        when_turned_off: TurnOff,
+        project_override: bool,
+    },
+    Preview(Preview),
+    Users(Vec<Holder>),
+}
+
+/// The engine's one record of which runs hold which plugin and of the change notices not
+/// yet shown. Output: the record.
+pub(crate) fn usage() -> &'static Usage {
+    static USAGE: std::sync::LazyLock<Usage> = std::sync::LazyLock::new(Usage::default);
+    &USAGE
+}
+
+/// Runs one App plugins request on the engine connection outside a transaction. A change
+/// answers with the listing after it. Turning a plugin off follows the owner's setting for
+/// runs holding it unless the request picks a choice for this one call. Inputs: the engine
+/// connection, the resolved settings and the command; saving the choice itself is the
+/// storage worker's. Output: the answer, or the plugin store's refusal code.
+pub(crate) fn execute(
+    db: &Connection,
+    config: &EffectiveConfig,
+    command: Command,
+) -> Result<Done, EngineError> {
+    let policy = &config.settings.plugins;
+    let root = crate::storage::trash::engine_root(db)?;
+    let engine = engine(root);
+    let now = crate::team::now_ms();
+    match command {
+        Command::List => {}
+        Command::Preview { folder } => {
+            return registry::preview(db, &engine, &folder)
+                .map(Done::Preview)
+                .map_err(error);
+        }
+        Command::Review { name } => {
+            return registry::review(db, &engine, &name)
+                .map(Done::Preview)
+                .map_err(error);
+        }
+        Command::Users { name } => return Ok(Done::Users(usage().users(&name))),
+        Command::Add {
+            folder,
+            sha256,
+            replace,
+        } => registry::add(db, &engine, &folder, &sha256, replace, now).map_err(error)?,
+        Command::Trust { name, sha256 } => {
+            kernel_plugin_host::trust::trust_file(db, &engine, &name, &sha256, now)
+                .map_err(error)?;
+        }
+        Command::SetEnabled {
+            name,
+            enabled,
+            when_off,
+        } => {
+            let switch = if enabled {
+                Switch::On
+            } else {
+                Switch::Off {
+                    usage: usage(),
+                    when_off: when_off.unwrap_or(policy.when_turned_off),
+                    essential_unlocked: policy.essential_unlocked,
+                }
+            };
+            switches().switch(db, &engine, &name, switch)?;
+        }
+        Command::Remove { name } => registry::remove(db, &engine, &name).map_err(error)?,
+        Command::BindAccount {
+            name,
+            secret,
+            account,
+        } => store::bind_account(db, &engine, &name, &secret, &account).map_err(error)?,
+        Command::SetKey { name, secret, key } => {
+            store::set_key(db, &engine, &name, &secret, key).map_err(error)?;
+        }
+        Command::Unbind { name, secret } => {
+            store::unbind(db, &engine, &name, &secret).map_err(error)?;
+        }
+        Command::SetWhenOff { .. } => {
+            return Err(EngineError("app_plugin_setting_unavailable".into()));
+        }
+    }
+    let listing = registry::list(db, &engine).map_err(error)?;
+    usage().note_listed(&listing);
+    Ok(Done::Page {
+        listing,
+        notices: usage().take_notices(),
+        when_turned_off: policy.when_turned_off,
+        project_override: config
+            .descriptors
+            .get("plugins.when_turned_off")
+            .is_some_and(|descriptor| descriptor.origin == crate::config::Origin::Project),
+    })
 }
 
 /// Deletes what a crash left staged by the plugin store at the engine root. Input: the
@@ -228,3 +379,6 @@ mod host_tests;
 #[cfg(test)]
 #[path = "app_plugins/switch_tests.rs"]
 mod switch_tests;
+#[cfg(test)]
+#[path = "app_plugins/words_tests.rs"]
+mod words_tests;
