@@ -3,24 +3,36 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 
-globalThis.window = {
-  __TAURI_INTERNALS__: {
-    async invoke(command) {
-      assert.equal(command, "desktop_watch");
-      return null;
-    },
-    transformCallback: () => 1,
-  },
-};
-
 const { COALESCE_MS, changed, readOnChanges } = await import("../src/engine-changes.ts");
+
+/** Mocks both timers and gives the test its own window whose engine accepts the watch, so
+ * no real timer outlives the test; the window before it is put back when the test ends.
+ * Input: the test context. Output: the commands the page sent to the engine. */
+const watched = (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const before = globalThis.window;
+  const asked = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      async invoke(command) {
+        asked.push(command);
+        return null;
+      },
+      transformCallback: () => 1,
+    },
+  };
+  t.after(() => {
+    globalThis.window = before;
+  });
+  return asked;
+};
 
 const settle = async () => {
   for (let turn = 0; turn < 8; turn += 1) await new Promise((resolve) => setImmediate(resolve));
 };
 
 test("v2.5 S4: a watched read runs once the page watches, again on its topic and on unknown, one at a time, and stops when its apply says so", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const asked = watched(t);
   const answers = [];
   const applied = [];
   const stop = readOnChanges(["team"], () => new Promise((resolve) => answers.push(resolve)), (value) => {
@@ -29,6 +41,7 @@ test("v2.5 S4: a watched read runs once the page watches, again on its topic and
   });
   await settle();
   assert.equal(answers.length, 1, "the first read starts once the page watches");
+  assert.deepEqual(asked, ["desktop_watch"], "the page asks for the watch once, before the first read");
   changed({ topics: ["team"] });
   t.mock.timers.tick(COALESCE_MS);
   changed({ topics: ["team"] });
@@ -61,7 +74,7 @@ test("v2.5 S4: a watched read runs once the page watches, again on its topic and
 });
 
 test("v2.5 S4: a stopped watched read applies no reply still in flight and reads no more", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  watched(t);
   const answers = [];
   const applied = [];
   const stop = readOnChanges(["landing"], () => new Promise((resolve) => answers.push(resolve)), (value) => {
