@@ -810,9 +810,10 @@ fn a_nix_darwin_profile_tool_stays_usable_while_the_projects_cannot_be_read() {
     }
 }
 
-/// The failed-read fallback never trusts more than a successful read with no project
-/// does: every path agents can write with the projects read is agents' to write without
-/// them, so the fallback only adds refusals.
+/// The failed-read fallback never trusts more than a successful read that registers no
+/// project: every listed path agents can write after a read of an empty project list is
+/// agents' to write without the read. A read that registers a project is compared in
+/// [`a_first_failed_read_trusts_a_registered_repository_under_an_install_root`].
 #[test]
 fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     let (_folder, home) = scratch();
@@ -840,6 +841,24 @@ fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     assert!(read.agent_writable(&marked.join("bin/tool")));
     assert!(!read.agent_writable(Path::new("/srv/repo/bin/tool")));
     assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
+}
+
+/// A repository the engine registered under `/usr/local` or `/opt/homebrew` is agents' to
+/// write after a good read, and should stay so when the first read of engine.db fails with
+/// no last good read. Today the fallback reads every path under an install root as
+/// installed, so a tool in such a repository is trusted until one read succeeds.
+#[test]
+#[ignore = "known gap: a first failed read with no last good read trusts a repository registered under an install root"]
+fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
+    let (_folder, home) = scratch();
+    let canonical: fn(&Path) -> std::io::Result<PathBuf> = |path| Ok(path.to_path_buf());
+    for repo in ["/usr/local/src/repo", "/opt/homebrew/src/repo"] {
+        let tool = Path::new(repo).join("bin/tool");
+        let read = with_canonical(&home, canonical, Some(vec![PathBuf::from(repo)]));
+        let unread = with_canonical(&home, canonical, None);
+        assert!(read.agent_writable(&tool), "{}", tool.display());
+        assert!(unread.agent_writable(&tool), "{}", tool.display());
+    }
 }
 
 /// When the set-up projects cannot be read, a repository the engine may have
