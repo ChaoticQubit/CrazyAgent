@@ -1,8 +1,9 @@
 use kernel_security::error::StoreError;
 use kernel_security::net::{Egress, RawReply, Sealed};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// The most body bytes one exchange reads, and the size curl may download.
@@ -10,6 +11,20 @@ pub const BODY_BYTES_MAX: usize = 4 << 20;
 const SCOPES_LINE_MAX: usize = 1024;
 const TRAILER_BYTES_MAX: usize = SCOPES_LINE_MAX + 16;
 const REQUEST_TIME: Duration = Duration::from_secs(30);
+
+/// The longest one host lookup may take before its request is refused.
+pub const LOOKUP_TIME: Duration = Duration::from_secs(5);
+
+/// The most lookup threads alive at once, answered or not; one more is refused, so stalled
+/// lookups never pile up threads.
+pub const LOOKUPS_MAX: usize = 8;
+
+/// The lookup threads alive now, counted from before the spawn until each thread ends.
+static LOOKUPS: AtomicUsize = AtomicUsize::new(0);
+
+/// curl's `--max-time`, 25 s: what is left of the 30 s request time after the lookup's 5 s
+/// bound, so the lookup and curl together never pass 30 s.
+pub const CURL_TIME: Duration = Duration::from_secs(REQUEST_TIME.as_secs() - LOOKUP_TIME.as_secs());
 
 /// The one reply header the curl exchange reads back.
 const SCOPES_HEADER: &str = "x-oauth-scopes";
@@ -30,7 +45,7 @@ pub enum ExchangeError {
 }
 
 /// Runs a built curl command, writes its config to curl's stdin, wipes the config and
-/// reads the reply within the request time. Inputs: the command and its config. Output:
+/// reads the reply within [`CURL_TIME`] plus 5 s for curl to end. Inputs: the command and its config. Output:
 /// the reply, or [`ExchangeError::Unreachable`].
 pub fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, ExchangeError> {
     let spawned = kernel_processes::spawn_gate::spawn(&mut command);
@@ -53,7 +68,7 @@ pub fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, Exch
             .read_to_end(&mut bytes);
         (read, bytes)
     });
-    let deadline = Instant::now() + REQUEST_TIME + Duration::from_secs(5);
+    let deadline = Instant::now() + CURL_TIME + Duration::from_secs(5);
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|_| ExchangeError::Unreachable)? {
             break status;
@@ -179,10 +194,7 @@ impl Egress for Curl {
     }
 
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<IpAddr>, StoreError> {
-        let found = (host, port)
-            .to_socket_addrs()
-            .map_err(|_| StoreError::code("net_host_unresolved"))?;
-        Ok(found.map(|address| address.ip()).collect())
+        resolve_with(host, port, system_lookup)
     }
 
     fn send(&self, sealed: Sealed) -> Result<RawReply, StoreError> {
@@ -209,6 +221,67 @@ impl Egress for Curl {
     }
 }
 
+/// Resolves a plugin request's host through one lookup bounded by [`lookup_within`].
+/// Inputs: the host, port and lookup. Output: every address, or `net_host_unresolved` for a
+/// failed lookup or one past [`LOOKUP_TIME`].
+fn resolve_with(
+    host: &str,
+    port: u16,
+    lookup: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
+) -> Result<Vec<IpAddr>, StoreError> {
+    lookup_within(host, port, lookup).map_err(|_| StoreError::code("net_host_unresolved"))
+}
+
+/// Runs one host lookup on a thread of its own and waits at most [`LOOKUP_TIME`] for it,
+/// so a stalled resolver never holds a request. A lookup still running then keeps its
+/// thread, counted, until the resolver returns; with [`LOOKUPS_MAX`] threads alive a new
+/// lookup is refused at once, with no spawn. Inputs: the host, port and lookup. Output: the
+/// answer, or a `TimedOut` failure past the bound or at the cap.
+pub fn lookup_within(
+    host: &str,
+    port: u16,
+    lookup: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
+) -> io::Result<Vec<IpAddr>> {
+    assert!(!host.is_empty());
+    if LOOKUPS.fetch_add(1, Ordering::SeqCst) >= LOOKUPS_MAX {
+        LOOKUPS.fetch_sub(1, Ordering::SeqCst);
+        return Err(io::Error::from(io::ErrorKind::TimedOut));
+    }
+    let alive = Alive;
+    let host = host.to_owned();
+    let (answer, answered) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("host-lookup".to_owned())
+        .spawn(move || {
+            let _alive = alive;
+            let _ = answer.send(lookup(&host, port));
+        })?;
+    answered
+        .recv_timeout(LOOKUP_TIME)
+        .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)))
+}
+
+/// One counted lookup thread: dropping it, when the thread ends, unwinds, or never spawns,
+/// takes it off [`LOOKUPS`].
+struct Alive;
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        let before = LOOKUPS.fetch_sub(1, Ordering::SeqCst);
+        assert!(before > 0 && before <= LOOKUPS_MAX);
+    }
+}
+
+/// Looks a host name up once through the system resolver, with no bound of its own; callers
+/// go through [`lookup_within`]. Inputs: the host and port. Output: every address it
+/// resolved to, or the lookup failure.
+pub fn system_lookup(host: &str, port: u16) -> io::Result<Vec<IpAddr>> {
+    Ok((host, port)
+        .to_socket_addrs()?
+        .map(|found| found.ip())
+        .collect())
+}
+
 /// The `net.request` code of an exchange that gave no reply. Input: the reason. Output:
 /// `net_unreachable` or `net_reply_invalid`.
 fn net_code(error: ExchangeError) -> &'static str {
@@ -219,7 +292,7 @@ fn net_code(error: ExchangeError) -> &'static str {
 }
 
 /// The curl command of one request, with today's GitHub exchange flags: no `.curlrc`, no
-/// redirects, one allowed scheme, bounded time and size, the config only on stdin and an
+/// redirects, one allowed scheme, [`CURL_TIME`] and a bounded size, the config only on stdin and an
 /// empty environment. Input: whether the host is loopback, which allows plain http only.
 /// Output: the command, whose arguments and environment hold no URL, header or secret.
 fn curl(loopback: bool) -> Command {
@@ -230,7 +303,7 @@ fn curl(loopback: bool) -> Command {
         .args(["--proto", if loopback { "=http,https" } else { "=https" }])
         .args(["--max-redirs", "0"])
         .args(["--connect-timeout", "10"])
-        .args(["--max-time", "30"])
+        .args(["--max-time", &CURL_TIME.as_secs().to_string()])
         .args(["--max-filesize", &BODY_BYTES_MAX.to_string()])
         .args(["--write-out", "\n%header{x-oauth-scopes}\n%{http_code}"])
         .args(["--config", "-"])
