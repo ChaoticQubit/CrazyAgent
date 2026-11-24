@@ -45,6 +45,17 @@ pub(super) fn settled(stamp: &Stamp, listed_secs: i64) -> bool {
     stamp.2 < listed_secs
 }
 
+/// Whether an access answer read for an entry may be kept: only a [`settled`] one, whose
+/// entry a second `lstat` after the listing found with the same device, inode and change
+/// time, and that came from the listing's own lines, never from the direct read, which
+/// reads the path again. Inputs: the stamp before the listing, the one after, if read,
+/// whether the answer came from the direct read, and the whole second the listing started.
+/// Output: the answer.
+#[cfg(target_os = "macos")]
+pub(super) fn keep(before: &Stamp, after: Option<&Stamp>, direct: bool, listed_secs: i64) -> bool {
+    settled(before, listed_secs) && after == Some(before) && !direct
+}
+
 /// The access-list answers read so far, by entry, each with the stamp it was read at.
 #[cfg(target_os = "macos")]
 static KEPT: std::sync::LazyLock<
@@ -53,8 +64,8 @@ static KEPT: std::sync::LazyLock<
 
 /// Whether each entry carries an access-list entry that lets someone other than this user or
 /// root change it. An answer kept for an entry whose stamp has not moved is reused, and the
-/// rest are read in one `/bin/ls -lde` ([`list`]); only answers read are kept, and only
-/// [`settled`] ones. Input: the
+/// rest are read in one `/bin/ls -lide` ([`list`]); only answers read are kept, and only
+/// those [`keep`] allows, each entry read again with `lstat` after the listing. Input: the
 /// entries, none a link, each with what `lstat` read of it first. Output: one answer per
 /// entry, in order; none when it cannot be read, which counts as changeable.
 #[cfg(target_os = "macos")]
@@ -85,20 +96,27 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
         return answers;
     }
     let listed: Vec<&Path> = missed.iter().map(|index| entries[*index].0).collect();
+    let inodes: Vec<u64> = missed
+        .iter()
+        .map(|index| std::os::unix::fs::MetadataExt::ino(entries[*index].1))
+        .collect();
     let listed_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|since| i64::try_from(since.as_secs()).ok())
         .unwrap_or(0);
-    let read = list(&listed);
+    let read = list(&listed, &inodes);
     assert_eq!(read.len(), missed.len());
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
-    for (index, answer) in missed.into_iter().zip(read) {
+    for (index, (answer, direct)) in missed.into_iter().zip(read) {
         answers[index] = answer;
         let (entry, metadata) = entries[index];
         let read_at = stamp(metadata);
+        let after = std::fs::symlink_metadata(entry)
+            .ok()
+            .map(|again| stamp(&again));
         if let Some(answer) = answer
-            && settled(&read_at, listed_secs)
+            && keep(&read_at, after.as_ref(), direct, listed_secs)
         {
             if kept.len() >= KEPT_MAX {
                 kept.clear();
@@ -111,20 +129,28 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
     answers
 }
 
-/// Lists entries in one `/bin/ls -lde` that follows no link and reads each one's block
-/// ([`listed_shared_all`]). A name that is not text or holds a line break gets none, and so
-/// does every entry when the listing fails, runs out of time or fills the output bound, as a
-/// cut listing could drop access-list lines. Input: the entries. Output: one answer per
-/// entry, in order.
+/// Lists entries in one `/bin/ls -lide` that follows no link and reads each one's block
+/// against the inode the entry was stamped with ([`listed_shared_all`]). A name that is not
+/// text or holds a line break gets none, and so does every entry when the listing fails,
+/// runs out of time or fills the output bound, as a cut listing could drop access-list
+/// lines. Inputs: the entries and their inodes. Output: one answer per entry, in order, and
+/// whether it came from the direct read.
 #[cfg(target_os = "macos")]
-fn list(entries: &[&Path]) -> Vec<Option<bool>> {
+fn list(entries: &[&Path], inodes: &[u64]) -> Vec<(Option<bool>, bool)> {
+    assert_eq!(entries.len(), inodes.len());
     let names: Vec<Option<&str>> = entries
         .iter()
         .map(|entry| entry.to_str().filter(|name| !name.contains('\n')))
         .collect();
     let operands: Vec<&str> = names.iter().flatten().copied().collect();
+    let listed_inodes: Vec<u64> = names
+        .iter()
+        .zip(inodes)
+        .filter(|(name, _)| name.is_some())
+        .map(|(_, inode)| *inode)
+        .collect();
     if operands.is_empty() {
-        return vec![None; entries.len()];
+        return vec![(None, false); entries.len()];
     }
     #[cfg(test)]
     LISTINGS.with(|listings| {
@@ -136,26 +162,31 @@ fn list(entries: &[&Path]) -> Vec<Option<bool>> {
     command
         .env_clear()
         .env("LC_ALL", "C")
-        .arg("-lde")
+        .arg("-lide")
         .arg("--")
         .args(&operands);
     let text = match crate::run::run_command(command, LIST_TIME) {
         Ok((true, output)) if output.len() < crate::run::OUTPUT_BYTES_MAX => {
             String::from_utf8_lossy(&output).into_owned()
         }
-        _ => return vec![None; entries.len()],
+        _ => return vec![(None, false); entries.len()],
     };
-    let mut read = listed_shared_all(&text, &operands, own_name(), &|index| {
+    let direct = std::cell::RefCell::new(vec![false; operands.len()]);
+    let read = listed_shared_all(&text, &operands, &listed_inodes, own_name(), &|index| {
+        direct.borrow_mut()[index] = true;
         confirmed(
             std::ffi::CString::new(operands[index])
                 .map_err(std::io::Error::other)
                 .and_then(|path| crazyagent_macos_fs::acl_listed(&path)),
         )
-    })
-    .into_iter();
-    let answers: Vec<Option<bool>> = names
+    });
+    let mut read = read.into_iter().zip(direct.into_inner());
+    let answers: Vec<(Option<bool>, bool)> = names
         .iter()
-        .map(|name| name.and_then(|_| read.next().flatten()))
+        .map(|name| match name {
+            Some(_) => read.next().unwrap_or((None, false)),
+            None => (None, false),
+        })
         .collect();
     assert!(read.next().is_none());
     assert_eq!(answers.len(), entries.len());
@@ -221,26 +252,36 @@ pub(super) fn listed_shared(text: &str, me: Option<&str>) -> Option<bool> {
     Some(shared)
 }
 
-/// Reads one `ls -lde` listing of several entries block by block: an entry's line, then its
-/// access-list lines, each indented ([`listed_shared`]). A block goes to the one entry its
-/// first line ends with, after a space, the longest when one name ends another. A block of
+/// Reads one `ls -lide` listing of several entries block by block: an entry's line, its
+/// inode first, padded to one width, then its access-list lines, each ` <n>: `
+/// ([`listed_shared`]). A block goes to the one entry its first line ends with, after a
+/// space, the longest when one name ends another; a block whose inode is not the entry's,
+/// or does not parse, is about another file and reads none, never asked again. A block of
 /// one line that reads as not shared takes the answer of `unlisted` for its entry instead,
 /// since `ls` prints a list it could not read exactly as no list. Inputs: the listing, the
-/// entries as listed, this user's name, if known, and the reader asked again by an entry's
-/// index. Output: one answer per entry, in order; none for an entry with no block or two, or
+/// entries as listed, their inodes, this user's name, if known, and the reader asked again
+/// by an entry's index. Output: one answer per entry, in order; none for an entry with no block or two, or
 /// whose block does not read, and none for every entry when a block names no entry or an
 /// access-list line comes first.
 #[cfg(any(test, target_os = "macos"))]
 pub(super) fn listed_shared_all(
     text: &str,
     entries: &[&str],
+    inodes: &[u64],
     me: Option<&str>,
     unlisted: &dyn Fn(usize) -> Option<bool>,
 ) -> Vec<Option<bool>> {
+    assert_eq!(entries.len(), inodes.len());
     let none = vec![None; entries.len()];
+    let access_line = |line: &str| {
+        line.starts_with(' ')
+            && line.trim_start().split_once(':').is_some_and(|(index, _)| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    };
     let mut blocks: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
-        if !line.starts_with(' ') {
+        if !access_line(line) {
             blocks.push(vec![line]);
             continue;
         }
@@ -265,6 +306,14 @@ pub(super) fn listed_shared_all(
             return none;
         };
         blocks_of[index] += 1;
+        let inode = block[0]
+            .split_whitespace()
+            .next()
+            .and_then(|field| field.parse::<u64>().ok());
+        if inode != Some(inodes[index]) {
+            answers[index] = None;
+            continue;
+        }
         answers[index] = listed_shared(&block.join("\n"), me);
         if block.len() == 1 && answers[index] == Some(false) {
             answers[index] = unlisted(index);
