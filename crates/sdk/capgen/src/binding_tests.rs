@@ -71,15 +71,22 @@ fn the_host_binding_is_generated_for_every_capability() {
     assert!(flat.contains(&providers), "{providers}");
     assert!(flat.contains("pubstructBound<'g,'p>{caller:Caller<'g>,providers:&'pProviders<'p>,}"));
     let mut count = 0;
+    let mut without_inputs = 0;
     for (stem, file) in &loaded {
         for capability in &file.capabilities {
             let function = capability.name[stem.len() + 1..].replace('.', "_");
             let constant = function.to_ascii_uppercase();
+            let after = if capability.inputs.is_empty() {
+                without_inputs += 1;
+                ")"
+            } else {
+                ","
+            };
             for part in [
-                format!("fn{stem}_{function}(&self,"),
+                format!("fn{stem}_{function}(&self{after}"),
                 format!("self.caller.call(&{stem}::{constant},"),
                 format!("{stem}::check_{function}_input"),
-                format!("self.providers.{stem}.{function}(self.caller.plugin(),"),
+                format!("self.providers.{stem}.{function}(self.caller.plugin(){after}"),
                 format!("{stem}::check_{function}_output,)"),
             ] {
                 assert!(flat.contains(&part), "{part}");
@@ -87,7 +94,7 @@ fn the_host_binding_is_generated_for_every_capability() {
             count += 1;
         }
     }
-    assert!(count > 0);
+    assert!(count > without_inputs && without_inputs > 0);
     assert_eq!(flat.matches("self.caller.call(").count(), count);
     assert!(flat.contains(
         "fnsettings_save_quit(&self,settings:sdk::generated::settings::QuitSettings,)->Result<(),Refusal>{self.caller.call(&settings::SAVE_QUIT,settings,settings::check_save_quit_input,|settings|{self.providers.settings.save_quit(self.caller.plugin(),settings)},settings::check_save_quit_output,)}"

@@ -43,22 +43,22 @@ fn refused(sources: &[(&str, &str)]) -> &'static str {
 #[test]
 fn settings_cap_generates_the_checked_in_files() {
     let files = generated_from_caps();
+    let loaded = load(&sdk("caps")).expect("the caps load");
+    let mut expected: Vec<String> = ["envelope/mod.rs", "host.rs", "mod.rs"]
+        .map(str::to_owned)
+        .to_vec();
+    for (stem, _) in &loaded {
+        expected.push(format!("{stem}.rs"));
+        expected.push(format!("envelope/{stem}.rs"));
+    }
+    expected.sort_unstable();
+    assert!(expected.iter().any(|path| path == "settings.rs"));
     assert_eq!(
         files
             .iter()
             .map(|(path, _)| path.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "envelope/mod.rs",
-            "envelope/net.rs",
-            "envelope/secrets.rs",
-            "envelope/settings.rs",
-            "host.rs",
-            "mod.rs",
-            "net.rs",
-            "secrets.rs",
-            "settings.rs"
-        ]
+        expected
     );
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
@@ -76,14 +76,17 @@ fn a_renamed_field_changes_the_output() {
     let source = fs::read_to_string(sdk("caps/settings.cap")).expect("settings.cap reads");
     let renamed = source.replace("hours: u16", "hour_count: u16");
     assert_ne!(renamed, source);
-    let secrets = fs::read_to_string(sdk("caps/secrets.cap")).expect("secrets.cap reads");
-    let net = fs::read_to_string(sdk("caps/net.cap")).expect("net.cap reads");
-    let files = rust(&parsed(&[
-        ("net", &net),
-        ("secrets", &secrets),
-        ("settings", &renamed),
-    ]))
-    .expect("generates");
+    let renamed = crazyagent_cap::parse_as("settings", &renamed).expect("parses");
+    let loaded = load(&sdk("caps")).expect("the caps load");
+    assert!(loaded.iter().any(|(stem, _)| stem == "settings"));
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| {
+            let file = if stem == "settings" { &renamed } else { file };
+            (stem.as_str(), file.clone())
+        })
+        .collect();
+    let files = rust(&borrowed).expect("generates");
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
         vec!["settings.rs".to_owned()]
