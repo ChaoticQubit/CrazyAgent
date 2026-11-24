@@ -90,4 +90,6 @@ pub struct ProfileHooks {
     pub answer_part_suffix: &'static str,
     /// The engine folders that hold account and plugin keys.
     pub key_folders: &'static [&'static str],
+    /// The engine runtime folders that are engine secrets as a whole.
+    pub engine_secret_folders: &'static [&'static str],
 }

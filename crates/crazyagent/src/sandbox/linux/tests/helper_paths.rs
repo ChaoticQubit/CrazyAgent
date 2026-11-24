@@ -39,3 +39,22 @@ fn a_test_binary_in_cargos_deps_folder_takes_cargos_helper_build_only_when_none_
     fs::write(&beside, "").unwrap();
     assert_eq!(helper_for(&engine), beside, "the one beside it wins");
 }
+
+/// V243-LINUX-KEEP-FREE-REFUSAL-NAME: without the helper no agent starts on any network,
+/// and the refusal says the helper is missing, not that the kernel is too old.
+#[test]
+fn no_agent_starts_without_the_helper_and_the_refusal_says_so() {
+    for network in [
+        SandboxNetwork::Open,
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+        SandboxNetwork::Only(Vec::new()),
+    ] {
+        let (_absent, sandbox) = project(network.clone());
+        let missing = Path::new("/nonexistent/crazyagent-landlock");
+        assert_eq!(
+            refusal(LinuxSandbox::detect(sandbox, missing)),
+            HELPER_MISSING,
+            "{network:?}"
+        );
+    }
+}

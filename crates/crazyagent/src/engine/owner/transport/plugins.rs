@@ -6,9 +6,8 @@ use crate::plugins::{
 };
 use crate::protocol::encode_frame;
 use crate::storage::plugins::{Command, ResultValue, check_profile};
-use check_folders::{CheckOf, removed_server_checks};
+use check_folders::{CheckOf, CheckSlot, removed_server_checks};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
@@ -17,8 +16,6 @@ pub(super) const CHECK_FOLDER: &str = crate::storage::plugins::CHECK_FOLDER;
 pub(super) const CHECK_PROFILES: &str = crate::storage::plugins::CHECK_PROFILES;
 pub(super) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
-static CHECKS: AtomicUsize = AtomicUsize::new(0);
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
@@ -1371,25 +1368,6 @@ fn server(value: ResultValue) -> Result<Reply, EngineError> {
     match value {
         ResultValue::Server(server) => Ok(Reply::Server { server: *server }),
         _ => Err(unknown()),
-    }
-}
-
-struct CheckSlot;
-
-impl CheckSlot {
-    fn take() -> Result<Self, EngineError> {
-        if CHECKS.fetch_add(1, Ordering::SeqCst) >= CHECKS_MAX {
-            CHECKS.fetch_sub(1, Ordering::SeqCst);
-            return Err(failure("server_check_busy"));
-        }
-        Ok(Self)
-    }
-}
-
-impl Drop for CheckSlot {
-    fn drop(&mut self) {
-        let before = CHECKS.fetch_sub(1, Ordering::SeqCst);
-        assert!(before > 0);
     }
 }
 
