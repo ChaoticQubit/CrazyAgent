@@ -79,6 +79,15 @@ fn pinned() -> Vec<String> {
         .to_vec()
 }
 
+/// Stands in for the agent home's entries a launch keeps whole: its state folder, lock and
+/// relay folder, so the profile's flag and ACL deny names each. Output: the paths below the
+/// home.
+fn kept() -> Vec<String> {
+    ["stand-in-state", "stand-in.lock", "stand-in-relay"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
 pub(crate) static ACCESS: AccessHooks = AccessHooks {
     owner_git: no_owner_git,
     harness_folders: Vec::new,
@@ -108,7 +117,7 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     zsh_compiled: ".zwc",
     sh_startup: &[".profile"],
     pinned_entries: pinned,
-    kept_entries: Vec::new,
+    kept_entries: kept,
     relay_lead_part: "stand-in-lead",
     relay_plugin_folder: "stand-in-relay",
     relay_roster_file: "stand-in-roster",
@@ -120,16 +129,12 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     node_prefix: no_node,
     launch_state: "stand-in-state",
     launch_lock: "stand-in.lock",
-    codex_system_skills: "standin.skills",
+    codex_system_skills: ".bundle",
     crazyagent_directory: ".stand-in",
     binding_path: binding,
     mailbox_folder: "stand-in-mailbox",
     reply_suffix: ".stand-in-reply",
     answer_part_suffix: ".stand-in-part",
     key_folders: &["stand-in-keys"],
-    engine_secret_folders: &[
-        "stand-in-secrets",
-        "stand-in-profiles",
-        "stand-in-sdk-homes",
-    ],
+    engine_secret_folders: &["stand-in-secrets"],
 };
