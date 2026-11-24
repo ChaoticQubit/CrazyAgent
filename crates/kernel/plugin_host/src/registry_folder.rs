@@ -477,7 +477,8 @@ pub(super) fn removal(
 /// in: a removal's folder moved aside under its removal name, or a replace's older folder
 /// moved aside under its retired name. After the commit [`FolderStep::commit`] deletes
 /// what went; after a rollback [`FolderStep::roll_back`] puts the folder back under its
-/// name. A step never ended leaves the folder aside for the start sweeps.
+/// name. A step dropped with neither, as when the work unwinds, puts the folder back as a
+/// rollback does, since the transaction it waited for never commits.
 #[derive(Debug)]
 pub struct FolderStep {
     root: PathBuf,
@@ -491,19 +492,13 @@ impl FolderStep {
     /// Deletes what the committed change let go. A removal deletes its folder moved aside,
     /// first renamed without the plugin name so one it cannot delete is never put back, then
     /// any entry left under the plugin name; a replace deletes the older folder the same
-    /// way, best effort, as the start sweep finishes one it cannot. Output: Ok, or the
-    /// removal folder's refusal when it keeps the plugin name.
-    pub fn commit(self) -> Result<(), Refused> {
-        let Self {
-            root,
-            name,
-            aside,
-            replaced,
-            new_ref,
-        } = self;
-        assert!(valid_name(&name));
-        if let Some(aside) = aside {
-            let directory = open(&root, false)?.ok_or_else(unavailable)?;
+    /// way, best effort, as the start sweep finishes one it cannot. Once it starts, the
+    /// folder is never put back. Output: Ok, or the removal folder's refusal when it keeps
+    /// the plugin name.
+    pub fn commit(mut self) -> Result<(), Refused> {
+        assert!(valid_name(&self.name));
+        if let Some(aside) = self.aside.take() {
+            let directory = open(&self.root, false)?.ok_or_else(unavailable)?;
             let (_, id) = aside
                 .rsplit_once('.')
                 .expect("an aside name ends in its id");
@@ -512,23 +507,28 @@ impl FolderStep {
             let lost = os::rename(&directory, aside.as_ref(), nameless.as_ref()).is_ok();
             let gone = remove_tree(&directory, if lost { &nameless } else { &aside });
             os::sync(&directory).map_err(|()| unavailable())?;
-            if replaced {
+            if self.replaced {
                 return Ok(());
             }
             if !lost {
                 gone?;
             }
         }
-        assert!(!replaced);
-        remove(&root, &name, new_ref).map(drop)
+        assert!(!self.replaced);
+        remove(&self.root, &self.name, self.new_ref).map(drop)
     }
 
     /// Puts the folder moved aside back under the plugin name after the change rolled back.
-    /// A replace first moves the new folder off the name, renamed without it and deleted; if
-    /// that move fails both stay and the start sweep keeps the new one. Output: none; a
-    /// failed step is left to the start sweeps.
-    pub fn roll_back(self) {
-        let Some(aside) = self.aside else {
+    /// Output: none; a failed step is left to the start sweeps.
+    pub fn roll_back(mut self) {
+        self.put_back();
+    }
+
+    /// Puts the folder moved aside back under the plugin name, once. A replace first moves
+    /// the new folder off the name, renamed without it and deleted; if that move fails both
+    /// stay and the start sweep keeps the new one. Output: none.
+    fn put_back(&mut self) {
+        let Some(aside) = self.aside.take() else {
             return;
         };
         let Ok(Some(directory)) = open(&self.root, false) else {
@@ -547,6 +547,12 @@ impl FolderStep {
         }
         let _ = os::rename(&directory, aside.as_ref(), self.name.as_ref());
         let _ = os::sync(&directory);
+    }
+}
+
+impl Drop for FolderStep {
+    fn drop(&mut self) {
+        self.put_back();
     }
 }
 
