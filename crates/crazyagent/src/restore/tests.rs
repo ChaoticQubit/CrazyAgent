@@ -311,3 +311,35 @@ fn a_recovery_refusal_reaches_a_client_as_its_known_code() {
     let dir = root();
     assert_eq!(backups(dir.path()), dir.path().join("backups"));
 }
+
+/// An engine root holding an empty engine.db, and a folder that links to it, as a moved
+/// home or CRAZYAGENT_HOME through a link reaches it. Output: the root and the folder
+/// holding the link, both removed on drop, and the root's path through the link.
+fn linked_root() -> (tempfile::TempDir, tempfile::TempDir, std::path::PathBuf) {
+    let dir = root();
+    std::fs::write(dir.path().join("engine.db"), b"").unwrap();
+    let beside = root();
+    let link = beside.path().join("engine");
+    std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+    (dir, beside, link)
+}
+
+#[test]
+fn an_engine_folder_reached_through_a_link_reads_no_offer() {
+    let (_dir, _beside, link) = linked_root();
+
+    assert_eq!(recovery(&link, false), Ok(None));
+}
+
+#[test]
+fn an_engine_db_that_is_itself_a_link_is_still_refused() {
+    let (dir, _beside, _link) = linked_root();
+    let real = root();
+    std::fs::write(real.path().join("engine.db"), b"").unwrap();
+    std::fs::remove_file(dir.path().join("engine.db")).unwrap();
+    std::os::unix::fs::symlink(real.path().join("engine.db"), dir.path().join("engine.db"))
+        .unwrap();
+
+    assert!(recovery(dir.path(), false).is_err());
+    assert_eq!(std::fs::read(real.path().join("engine.db")).unwrap(), b"");
+}
