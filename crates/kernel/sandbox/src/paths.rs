@@ -323,15 +323,15 @@ fn identity(path: &Path) -> io::Result<Option<Identity>> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 thread_local! {
     /// How many walks [`Walk::of`] took on this thread, which rows read through [`walks`].
     static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The number of walks [`Walk::of`] took on this thread so far. Takes nothing. Returns the
-/// count.
-#[cfg(test)]
+/// The number of walks [`Walk::of`] took on this thread so far, read by the macOS profile
+/// rows. Takes nothing. Returns the count.
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn walks() -> usize {
     WALKS.with(std::cell::Cell::get)
 }
@@ -354,7 +354,7 @@ impl<'a> Walk<'a> {
     /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or the resolve fails other than
     /// not found.
     fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "macos"))]
         WALKS.with(|walks| walks.set(walks.get() + 1));
         let refused = |_| invalid(SECRET_ROOT_REFUSED);
         let parts: Vec<Component<'a>> = path.components().collect();
