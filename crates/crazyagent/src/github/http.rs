@@ -183,3 +183,6 @@ fn code(error: ExchangeError) -> EngineError {
         ExchangeError::ReplyInvalid => "github_reply_invalid",
     })
 }
+
+#[cfg(test)]
+mod tests;

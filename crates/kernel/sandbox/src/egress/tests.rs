@@ -98,3 +98,71 @@ fn a_reply_header_other_than_the_scopes_is_refused_before_curl() {
         Err(StoreError::code("net_reply_header_unsupported"))
     );
 }
+
+/// A stand-in for curl: a shell that reads its whole config from stdin, then prints the
+/// given output and exits with the given code. Inputs: the output and the exit code.
+/// Output: the command, piped as [`exchange`] expects.
+#[cfg(unix)]
+fn stand_in(output: &str, exit: u8) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args([
+            "-c",
+            "cat >/dev/null; printf '%s' \"$1\"; exit \"$2\"",
+            "sh",
+        ])
+        .args([output, &exit.to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exchange_reads_the_body_scopes_and_status() {
+    let reply = exchange(
+        stand_in("hello\nrepo, read:org\n201", 0),
+        b"url = x\n".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(reply.status, 201);
+    assert_eq!(reply.body, b"hello");
+    assert_eq!(
+        reply.scopes,
+        Some(vec!["repo".to_owned(), "read:org".to_owned()])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exchange_whose_output_is_not_a_reply_is_reply_invalid() {
+    for output in ["no status", "body\n\n99", "body\n\nabc"] {
+        assert_eq!(
+            exchange(stand_in(output, 0), b"url = x\n".to_vec()).err(),
+            Some(ExchangeError::ReplyInvalid),
+            "{output:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exchange_that_does_not_finish_is_unreachable() {
+    assert_eq!(
+        exchange(stand_in("body\n\n200", 7), b"url = x\n".to_vec()).err(),
+        Some(ExchangeError::Unreachable)
+    );
+    let mut missing = Command::new("/nonexistent/curl");
+    missing.stdin(Stdio::piped()).stdout(Stdio::piped());
+    assert_eq!(
+        exchange(missing, b"url = x\n".to_vec()).err(),
+        Some(ExchangeError::Unreachable)
+    );
+}
+
+#[test]
+fn each_exchange_failure_maps_to_its_net_code() {
+    assert_eq!(net_code(ExchangeError::Unreachable), "net_unreachable");
+    assert_eq!(net_code(ExchangeError::ReplyInvalid), "net_reply_invalid");
+}

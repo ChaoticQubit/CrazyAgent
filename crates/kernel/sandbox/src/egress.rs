@@ -194,12 +194,8 @@ impl Egress for Curl {
             return Err(StoreError::code("net_reply_header_unsupported"));
         }
         let loopback = matches!(sealed.host(), "127.0.0.1" | "[::1]" | "localhost");
-        let reply = exchange(curl(loopback), sealed.config().to_vec()).map_err(|error| {
-            StoreError::code(match error {
-                ExchangeError::ReplyInvalid => "net_reply_invalid",
-                ExchangeError::Unreachable => "net_unreachable",
-            })
-        })?;
+        let reply = exchange(curl(loopback), sealed.config().to_vec())
+            .map_err(|error| StoreError::code(net_code(error)))?;
         drop(sealed);
         let headers = match reply.scopes {
             Some(scopes) => vec![(SCOPES_HEADER.to_owned(), scopes.join(", "))],
@@ -210,6 +206,15 @@ impl Egress for Curl {
             headers,
             body: reply.body,
         })
+    }
+}
+
+/// The `net.request` code of an exchange that gave no reply. Input: the reason. Output:
+/// `net_unreachable` or `net_reply_invalid`.
+fn net_code(error: ExchangeError) -> &'static str {
+    match error {
+        ExchangeError::ReplyInvalid => "net_reply_invalid",
+        ExchangeError::Unreachable => "net_unreachable",
     }
 }
 
