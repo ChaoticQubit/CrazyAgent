@@ -1154,18 +1154,21 @@ pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>,
 }
 
 /// Whether the command line link at `link` leads to the old copy `old`: it names `old`
-/// exactly, even when that file is already gone, or it ends at the same file once both are
-/// read through every link, as a path relative to the link's folder or a chain of links
-/// does. Inputs: the link and the old copy. Output: the answer.
+/// exactly, even when that file is already gone, or, when `old` is a regular file and not a
+/// link, it ends at that file once read through every link, as a path relative to the
+/// link's folder or a chain of links does. An `old` that is a link never counts, so a
+/// writer of its folder cannot make a link to any other file look like the old copy.
+/// Inputs: the link and the old copy. Output: the answer.
 fn names_old_copy(link: &Path, old: &Path) -> bool {
     let Ok(named) = std::fs::read_link(link) else {
         return false;
     };
     named == old
-        || matches!(
-            (std::fs::canonicalize(link), std::fs::canonicalize(old)),
-            (Ok(led), Ok(copy)) if led == copy
-        )
+        || (std::fs::symlink_metadata(old).is_ok_and(|metadata| metadata.is_file())
+            && matches!(
+                (std::fs::canonicalize(link), std::fs::canonicalize(old)),
+                (Ok(led), Ok(copy)) if led == copy
+            ))
 }
 
 /// Whether `copy` is a regular file private to this user where Unix modes exist, so no other
