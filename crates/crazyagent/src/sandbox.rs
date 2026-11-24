@@ -11,27 +11,17 @@ use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::net::SandboxRemote;
 #[cfg(target_os = "windows")]
 use kernel_sandbox::paths::clean_absolute;
-#[cfg(all(test, target_os = "macos"))]
-use kernel_sandbox::paths::{any_case, fold_case};
 use kernel_sandbox::policy::PolicyHooks;
-#[cfg(all(test, target_os = "macos"))]
-use kernel_sandbox::ports::REMOTES_MAX;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
-#[cfg(unix)]
-use kernel_sandbox::profile::env::*;
 #[cfg(all(test, unix))]
 use kernel_sandbox::profile::linux_holds_fully;
 #[cfg(test)]
 use kernel_sandbox::profile::seatbelt::credential_places;
-#[cfg(all(test, target_os = "macos"))]
-use kernel_sandbox::profile::seatbelt::*;
 use kernel_sandbox::profile::{ProfileHooks, ProjectSandbox, linux_unbridged_notice_on};
 #[cfg(all(test, unix))]
 use kernel_sandbox::settings::LinuxSockets;
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
-#[cfg(all(test, target_os = "macos"))]
-use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
 #[cfg(target_os = "macos")]
 use kernel_sandbox::tool_cache::ToolCacheHooks;
 use kernel_sandbox::toolchains::ToolchainHooks;
@@ -51,14 +41,13 @@ pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod policy_store;
-pub mod shared_folders;
 #[cfg(all(test, target_os = "macos"))]
-pub(crate) mod test_agent;
+mod profile_engine_tests;
+pub mod shared_folders;
 #[cfg(target_os = "macos")]
 pub mod tool_cache;
 #[cfg(all(test, unix))]
 mod toolchains_tests;
-pub mod warden;
 #[cfg(target_os = "windows")]
 use kernel_sandbox::windows::{GRANTS_FOLDER, profile as windows};
 /// What the share-stop rows share on the test farm: the shares and the runner user that
@@ -68,27 +57,6 @@ use kernel_sandbox::windows::{GRANTS_FOLDER, profile as windows};
 pub(crate) mod windows_farm;
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests;
-
-/// How the tmux host wraps a confined pane, built from this module's sandbox values: the
-/// runner, the keeper and pane shim words and variables, and which variables reach a pane.
-/// Output: the value the kernel tmux host is opened with.
-#[cfg(unix)]
-pub fn confinement() -> kernel_processes::terminal::tmux::Confinement {
-    kernel_processes::terminal::tmux::Confinement {
-        sandbox_exec: SANDBOX_EXEC,
-        #[cfg(target_os = "macos")]
-        keeper: KEEPER,
-        #[cfg(target_os = "macos")]
-        keeper_deadline_variable: KEEPER_DEADLINE,
-        #[cfg(target_os = "macos")]
-        keeper_state_variable: KEEPER_STATE,
-        #[cfg(target_os = "macos")]
-        pane_shim: PANE_SHIM,
-        variable_allowed: agent_variable_allowed,
-        #[cfg(target_os = "macos")]
-        unkept_pane,
-    }
-}
 
 /// The loopback ports the owner's configured model endpoints listen on, which a tools-on
 /// agent must not bind before the owner's model server does. An endpoint URL that does not
@@ -202,7 +170,9 @@ pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
         #[cfg(target_os = "linux")]
         linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
         #[cfg(target_os = "linux")]
-        linux::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
+        kernel_sandbox::linux::helper::HIDDEN_MOUNTS_NOT_PRIVATE => {
+            Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE)
+        }
         _ => None,
     }
 }
@@ -250,13 +220,8 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
 }
 
 /// The engine's real agent policy hooks, the only [`PolicyHooks`] production code passes:
-/// this Linux read again ([`linux_host`]) and as last kept ([`linux_host_kept`]), the
-/// bounded read for another repository ([`linux_other_git`]) and a project's local folders
-/// ([`access_local_folders`]).
+/// a project's local folders ([`access_local_folders`]).
 pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
-    linux_host,
-    linux_host_kept,
-    linux_other_git,
     local_folders: access_local_folders,
 };
 
@@ -1021,7 +986,7 @@ mod linux_sockets_tests {
                 ],
             ),
             (
-                linux::HIDDEN_MOUNTS_NOT_PRIVATE,
+                kernel_sandbox::linux::helper::HIDDEN_MOUNTS_NOT_PRIVATE,
                 LINUX_HIDDEN_MOUNTS_NOT_PRIVATE,
                 ["user namespaces", "later mount", "Hidden folders"],
             ),
@@ -1079,546 +1044,5 @@ mod linux_sockets_tests {
                 "{program}"
             );
         }
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod order_tests {
-    use super::*;
-
-    /// CTX-M1 F1: the order check the profile asserts holds for a profile as the engine
-    /// writes it, and fails once a write allow follows a root pin or once a pin is gone, so
-    /// the profile's assert can trip.
-    #[test]
-    fn a_root_pin_a_later_write_allow_overrides_fails_the_order_check() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        for folder in ["project", "home", "tmp"] {
-            fs::create_dir_all(root.join(folder)).unwrap();
-        }
-        let sandbox = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &root.join("project"),
-            &root.join("home"),
-            &root.join("tmp"),
-            SandboxNetwork::Open,
-        )
-        .unwrap();
-        let pins: Vec<String> = sandbox
-            .writable_roots()
-            .map(|root| root_pin(root))
-            .collect();
-        assert_eq!(pins.len(), 3);
-        let text = sandbox.profile();
-        let allow = format!(
-            "(allow file-read* file-write* (subpath \"{}\"))\n",
-            root.join("home").display()
-        );
-
-        assert!(denies_follow_write_allows(&text, &pins));
-        assert!(!denies_follow_write_allows(
-            &format!("{text}{allow}"),
-            &pins
-        ));
-        assert!(!denies_follow_write_allows(
-            &text.replace(&pins[1], ""),
-            &pins
-        ));
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod access_grant_tests {
-    use super::*;
-    use kernel_sandbox::policy::AccessGrant;
-
-    fn case() -> (tempfile::TempDir, PathBuf) {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        for folder in ["project", "home", "tmp", "owner-tmp"] {
-            fs::create_dir_all(root.join(folder)).unwrap();
-        }
-        (temp, root)
-    }
-
-    /// F08: a socket grant is a connect-only rule ahead of the network section with its
-    /// write deny after every write allow, a port grant joins a limited network on
-    /// loopback, and the temp folder grant becomes a writable root handed over as TMPDIR
-    /// with every socket node in it kept unwritable.
-    #[test]
-    fn grants_add_a_connect_only_socket_a_loopback_port_and_the_owner_s_temp_folder() {
-        let (_temp, root) = case();
-        let socket = root.join("owner-tmp").join("discord-ipc-0");
-        let owner_tmp = root.join("owner-tmp");
-        let sandbox = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &root.join("project"),
-            &root.join("home"),
-            &root.join("tmp"),
-            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
-        )
-        .unwrap()
-        .grant_access(
-            &[
-                AccessGrant::Socket {
-                    path: socket.clone(),
-                },
-                AccessGrant::Port { port: 47_821 },
-                AccessGrant::TempFolder,
-            ],
-            Some(&owner_tmp),
-        )
-        .unwrap();
-        assert_eq!(
-            sandbox.network(),
-            &SandboxNetwork::Only(vec![
-                SandboxRemote::AnyHost(443),
-                SandboxRemote::Loopback(47_821)
-            ])
-        );
-        assert_eq!(sandbox.granted_sockets(), std::slice::from_ref(&socket));
-        assert_eq!(sandbox.owner_tmp(), Some(owner_tmp.as_path()));
-        assert!(sandbox.writes(&owner_tmp.join("note.txt")));
-        let text = sandbox.profile();
-        let path = socket.display();
-        assert!(text.contains(&format!(
-            "(allow network-outbound (remote unix-socket (path-literal \"{path}\")))"
-        )));
-        assert!(!text.contains(&format!(
-            "(allow network-bind (local unix-socket (path-literal \"{path}\")))"
-        )));
-        assert!(text.contains(&format!("(deny file-write* (literal \"{path}\"))")));
-        assert!(text.contains("(allow network-outbound (remote ip \"localhost:47821\"))"));
-        assert!(text.contains(&format!(
-            "(deny file-write*\n  (require-all\n    (subpath \"{}\")\n    (vnode-type SOCKET)))",
-            owner_tmp.display()
-        )));
-        let env = sandbox.base_env(true);
-        let tmpdir = env
-            .iter()
-            .find(|(name, _)| *name == "TMPDIR")
-            .map(|(_, value)| value.clone());
-        assert_eq!(tmpdir, Some(owner_tmp.clone().into_os_string()));
-    }
-
-    /// F08: a grant beyond its kind's bound, a socket in a missing folder, a temp folder
-    /// grant without the owner's folder and a port that overfills a limited network are
-    /// refused; an open network takes a port grant as it is.
-    #[test]
-    fn grants_that_cannot_be_held_are_refused() {
-        let (_temp, root) = case();
-        let fresh = |network| {
-            ProjectSandbox::new(
-                &crate::sandbox::PROFILE_HOOKS,
-                &root.join("project"),
-                &root.join("home"),
-                &root.join("tmp"),
-                network,
-            )
-            .unwrap()
-        };
-        let socket = |name: &str| AccessGrant::Socket {
-            path: root.join("owner-tmp").join(name),
-        };
-        let only = || SandboxNetwork::Only(Vec::new());
-        assert!(
-            fresh(only())
-                .grant_access(&[socket("a"), socket("b"), socket("c")], None)
-                .is_err()
-        );
-        let missing = AccessGrant::Socket {
-            path: root.join("gone").join("x"),
-        };
-        assert!(fresh(only()).grant_access(&[missing], None).is_err());
-        assert!(
-            fresh(only())
-                .grant_access(&[AccessGrant::TempFolder], None)
-                .is_err()
-        );
-        let full: Vec<SandboxRemote> = (1..=REMOTES_MAX as u16)
-            .map(SandboxRemote::AnyHost)
-            .collect();
-        assert!(
-            fresh(SandboxNetwork::Only(full))
-                .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
-                .is_err()
-        );
-        let open = fresh(SandboxNetwork::Open)
-            .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
-            .unwrap();
-        assert_eq!(open.network(), &SandboxNetwork::Open);
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod profile_string_tests {
-    use super::*;
-
-    /// The engine secrets name every engine secret folder the hooks list under the runtime,
-    /// and no engine folder the hooks leave out.
-    #[test]
-    fn the_engine_secrets_name_the_secret_folders_the_hooks_list() {
-        static STAND_IN: ProfileHooks = ProfileHooks {
-            engine_secret_folders: &["stand-in-secrets"],
-            ..PROFILE_HOOKS
-        };
-        let runtime = tempfile::tempdir().unwrap();
-        let secrets = engine_secrets_in(&STAND_IN, runtime.path()).unwrap();
-        assert!(
-            secrets.contains(&runtime.path().join("stand-in-secrets")),
-            "{secrets:?}"
-        );
-        assert!(
-            !secrets.contains(&runtime.path().join(crate::ide::FOLDER)),
-            "{secrets:?}"
-        );
-    }
-
-    /// The launch denies keep writes off the launch lock the hooks name, and name no other
-    /// lock.
-    #[test]
-    fn the_launch_denies_keep_writes_off_the_lock_the_hooks_name() {
-        static STAND_IN: ProfileHooks = ProfileHooks {
-            launch_lock: "stand-in.lock",
-            ..PROFILE_HOOKS
-        };
-        let denies = launch_denies(&STAND_IN, Path::new("/private/tmp/agent/home"));
-        assert!(denies.contains(&any_case("stand-in.lock")), "{denies}");
-        assert!(
-            !denies.contains(&any_case(crate::launch_context::LOCK)),
-            "{denies}"
-        );
-    }
-
-    /// v2.4.0 gate: the folded secret names, 1300 bytes as one regex, split into bodies each
-    /// Seatbelt reads, every name kept whole and in order; a list that fits stays one body
-    /// in the shape it had, and no names give no body.
-    #[test]
-    fn regex_bodies_pack_whole_names_under_the_reader_limit() {
-        let names: Vec<String> = kernel_sandbox::shared_folders::SECRET_NAMES
-            .iter()
-            .map(|name| fold_case(name))
-            .collect();
-        let prefix = format!("^/private/tmp/{}/(.*/)?", "p".repeat(200));
-        let bodies = regex_bodies(&prefix, &names, "(/.*)?$");
-        assert!(bodies.len() >= 2, "{bodies:#?}");
-        assert!(bodies.iter().all(|body| body.len() <= SBPL_STRING_MAX));
-        let mut at = 0;
-        for body in &bodies {
-            let group = &body[prefix.len() + 1..body.len() - "(/.*)?$".len() - 1];
-            let start = at;
-            while at < names.len() && names[start..=at].join("|").len() <= group.len() {
-                at += 1;
-            }
-            assert_eq!(names[start..at].join("|"), group);
-        }
-        assert_eq!(at, names.len());
-        assert_eq!(
-            regex_bodies("^/r/", &["a".into(), "b".into()], "(/.*)?$"),
-            vec!["^/r/(a|b)(/.*)?$".to_owned()]
-        );
-        assert!(regex_bodies("^/r/", &[], "(/.*)?$").is_empty());
-    }
-
-    /// The guard names every string past the limit, none in a profile that parses, and an
-    /// unclosed quote too.
-    #[test]
-    fn sbpl_overlong_names_every_string_past_the_reader_limit() {
-        let fits = "a".repeat(SBPL_STRING_MAX);
-        let long = "b".repeat(SBPL_STRING_MAX + 1);
-        let longer = "c".repeat(2 * SBPL_STRING_MAX);
-        let text = format!(
-            "(deny file-read* (subpath \"{fits}\") (literal \"{long}\") (regex #\"{longer}\"))"
-        );
-        assert_eq!(sbpl_overlong(&text), vec![long.as_str(), longer.as_str()]);
-        assert!(sbpl_overlong(&format!("(literal \"{fits}\")")).is_empty());
-        assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
-    }
-
-    /// SA vid 202: a name is spelled with every code point the case-insensitive volume folds
-    /// onto its letters, also those for two or three letters (U+00DF and U+1E9E for `ss`,
-    /// U+FB00 to U+FB06 for `ff`, `fi`, `fl`, `ffi`, `ffl` and `st`), and the Greek question
-    /// mark and varia for `;` and the backtick, and U+0131 for `i` as NTFS maps it. In a
-    /// pattern a fold reaches into a wildcard
-    /// next to the letters, never into a literal or an alternation, so the env templates the
-    /// secret rule gives back stay exact.
-    #[test]
-    fn a_name_is_spelled_with_every_fold_of_the_volume_also_for_two_or_three_letters() {
-        let spelled = [
-            ("config", "[cC][oO][nN]([fF](i|I|\u{131})|\u{fb01})[gG]"),
-            (
-                "instructions.md",
-                concat!(
-                    "(i|I|\u{131})[nN]((s|S|\u{17f})[tT]|\u{fb05}|\u{fb06})",
-                    "[rR][uU][cC][tT](i|I|\u{131})[oO][nN](s|S|\u{17f})\\.[mM][dD]",
-                ),
-            ),
-            (
-                ".ssh",
-                "\\.((s|S|\u{17f})(s|S|\u{17f})|\u{df}|\u{1e9e})[hH]",
-            ),
-            (
-                "ffi",
-                "([fF][fF](i|I|\u{131})|[fF]\u{fb01}|\u{fb00}(i|I|\u{131})|\u{fb03})",
-            ),
-            (".git", "\\.[gG](i|I|\u{131})[tT]"),
-            ("k", "(k|K|\u{212a})"),
-            (";`", "(;|\u{37e})(`|\u{1fef})"),
-        ];
-        for (name, pattern) in spelled {
-            assert_eq!(any_case(name), pattern, "{name}");
-        }
-        assert_eq!(
-            fold_case(".*service"),
-            ".*((s|S|\u{17f})|\u{df}|\u{1e9e})[eE][rR][vV](i|I|\u{131})[cC][eE]"
-        );
-        assert_eq!(
-            fold_case("of.*"),
-            "[oO]([fF]|\u{fb00}|\u{fb01}|\u{fb02}|\u{fb03}|\u{fb04}).*"
-        );
-        assert_eq!(
-            fold_case("secrets?"),
-            "(s|S|\u{17f})[eE][cC][rR][eE][tT](s|S|\u{17f})?"
-        );
-        let templates = fold_case(kernel_sandbox::shared_folders::SECRET_TEMPLATES);
-        assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
-    }
-
-    /// B5 r2 (rv-sec3 F1, rv-code4 F1): path text with a long fold run, such as a project
-    /// folder named with 7 `s` or 10 `f` or a top-level folder with 60, is spelled with no
-    /// panic and no runaway list: a stretch past the spelling limit takes one of its pieces
-    /// at each place, its fewest pieces' worth of places and the rest up to one per letter
-    /// optional, since Seatbelt reads no `{m,n}` count. A pattern keeps every stretch exact.
-    #[test]
-    fn a_long_fold_run_in_path_text_is_spelled_in_bounded_length_never_a_panic() {
-        let s = "((s|S|\u{17f})|\u{df}|\u{1e9e})";
-        assert_eq!(any_case("ssss"), format!("{s}{s}{s}?{s}?"));
-        let f = "([fF]|\u{fb00})";
-        assert_eq!(any_case("ffffff"), format!("{f}{f}{f}{f}?{f}?{f}?"));
-        let root = format!("/Users/o/Glasssssss/{}/{}", "f".repeat(10), "s".repeat(60));
-        let spelled = any_case(&root);
-        assert!(spelled.len() <= 20 * root.len(), "{}", spelled.len());
-        assert!(!spelled.contains('{'), "{spelled}");
-        assert!(std::panic::catch_unwind(|| fold_case("sssss")).is_err());
-    }
-
-    /// The default secret rule and 64 long open top-level names give a profile with no string
-    /// past the limit; a project folder so deep that one secret name no longer fits, and the
-    /// most open names at the longest length, which pass the 64 KiB cap, are each refused at
-    /// install with `Invalid`, never a panic, before a profile sandbox-exec cannot load is
-    /// written.
-    #[test]
-    fn a_profile_keeps_every_string_seatbelt_reads_or_is_refused_at_install() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let (home, tmp, profiles) = (base.join("home"), base.join("tmp"), base.join("sb"));
-        let project = base.join("project");
-        for folder in [&home, &tmp, &profiles, &project] {
-            fs::create_dir_all(folder).unwrap();
-        }
-        let open: Vec<String> = (0..64)
-            .map(|at| format!("{at:02}{}", "n".repeat(40)))
-            .collect();
-        let wide = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &project,
-            &home,
-            &tmp,
-            SandboxNetwork::Open,
-        )
-        .unwrap()
-        .keep_project_secrets(&project, &[])
-        .unwrap()
-        .open_only_tops(&open)
-        .unwrap();
-        let text = wide.profile();
-        assert!(sbpl_overlong(&text).is_empty());
-        assert!(text.matches("(require-not (regex #\"").count() >= 2);
-        assert!(text.matches(KEPT_OUT_DENY).count() >= 3);
-        wide.install(&profiles.join("wide.sb")).unwrap();
-
-        let most: Vec<String> = (0..OPEN_TOPS_MAX)
-            .map(|at| format!("{at:03}{}", "n".repeat(252)))
-            .collect();
-        let crowded = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &project,
-            &home,
-            &tmp,
-            SandboxNetwork::Only(Vec::new()),
-        )
-        .unwrap()
-        .keep_project_secrets(&project, &[])
-        .unwrap()
-        .open_only_tops(&most)
-        .unwrap();
-        let text = crowded.profile();
-        assert!(sbpl_overlong(&text).is_empty());
-        assert!(text.len() > PROFILE_BYTES_MAX);
-        let target = profiles.join("crowded.sb");
-        match crowded.install(&target) {
-            Err(SandboxError::Invalid(reason)) => {
-                assert_eq!(reason, "the sandbox profile is larger than its 64 KiB cap")
-            }
-            other => panic!("{other:?}"),
-        }
-        assert!(!target.exists());
-
-        let mut deep = base.join("deep");
-        while deep.as_os_str().len() < 1000 {
-            let room = 1000 - deep.as_os_str().len();
-            deep = deep.join("d".repeat(room.clamp(1, 200)));
-        }
-        fs::create_dir_all(&deep).unwrap();
-        let narrow = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &deep,
-            &home,
-            &tmp,
-            SandboxNetwork::Only(Vec::new()),
-        )
-        .unwrap()
-        .keep_project_secrets(&deep, &[])
-        .unwrap();
-        assert!(!sbpl_overlong(&narrow.profile()).is_empty());
-        let target = profiles.join("deep.sb");
-        match narrow.install(&target) {
-            Err(SandboxError::Invalid(reason)) => assert_eq!(
-                reason,
-                "a path or name in the sandbox profile is longer than Seatbelt reads"
-            ),
-            other => panic!("{other:?}"),
-        }
-        assert!(!target.exists());
-    }
-
-    /// V243-FARM2-PRODUCT-SMALL: the agent home's config and kept-entry denies and the
-    /// regranted flag and `.git` denies match a path and everything below it as one `X(/|$)`
-    /// regex, never with a `(/.*)` tail, which libsandbox fails to compile again in lower case
-    /// after a fold group with no bracket class before it (V243-PROFILE-CAP-ROW).
-    #[test]
-    fn home_denies_match_at_or_below_without_an_optional_tail() {
-        let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
-        let data = Path::new("/private/tmp/.tmpA1b2C3/data");
-        let config = agent_config_denies(&PROFILE_HOOKS, home);
-        assert!(!config.contains("(/.*)"), "{config}");
-        let regranted = regranted_denies(&PROFILE_HOOKS, home, &[data]);
-        assert!(!regranted.contains("(/.*)"), "{regranted}");
-        let flagged = seatbelt_pattern(home);
-        assert!(
-            regranted.contains(&format!(
-                "(deny file-write-flags file-write-acl (regex #\"^{flagged}(/|$)\"))"
-            )),
-            "{regranted}"
-        );
-        let git = any_case(".git");
-        for root in [home, data] {
-            let below = format!("{}/(.+/)?{git}", seatbelt_pattern(root));
-            assert!(
-                regranted.contains(&format!("(regex #\"^{below}(/|$)\")")),
-                "{regranted}"
-            );
-        }
-    }
-
-    /// V243-FARM2-PRODUCT-SMALL: no regex of a closed-tops agent's profile, a clone's store
-    /// denies or a home's config denies holds a `(/.*)` tail. libsandbox fails its second,
-    /// lower-case compile of one after a fold group with no bracket class or wildcard before
-    /// it, as `^/x/(s|S)(/.*)?$` (probed 11-17), so each is one `X(/|$)` regex instead
-    /// (V243-PROFILE-CAP-ROW). The HFS rule alone keeps a tail, after its leading `(.*/)?`,
-    /// which compiles.
-    #[test]
-    fn no_profile_regex_has_a_slash_tail() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let (home, tmp, project) = (base.join("home"), base.join("tmp"), base.join("project"));
-        for folder in [&home, &tmp, &project] {
-            fs::create_dir_all(folder).unwrap();
-        }
-        let sandbox = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &project,
-            &home,
-            &tmp,
-            SandboxNetwork::Only(Vec::new()),
-        )
-        .unwrap()
-        .keep_project_secrets(&project, &[])
-        .unwrap()
-        .open_only_tops(&["notes".to_string()])
-        .unwrap();
-        let text = [
-            sandbox.profile(),
-            clone_store_denies(&base.join("clone")),
-            agent_config_denies(&PROFILE_HOOKS, &home),
-        ]
-        .concat();
-        let hfs = hfs_ignored_deny();
-        assert_eq!(text.matches(hfs.as_str()).count(), 1);
-        let text = text.replace(hfs.as_str(), "");
-        let bodies: Vec<&str> = text
-            .split("#\"")
-            .skip(1)
-            .filter_map(|rest| rest.split_once('"').map(|(body, _)| body))
-            .collect();
-        assert!(bodies.len() > 20, "{text}");
-        let tailed: Vec<&&str> = bodies
-            .iter()
-            .filter(|body| body.contains("(/.*)"))
-            .collect();
-        assert!(tailed.is_empty(), "{tailed:#?}");
-        let below = bodies.iter().filter(|body| body.ends_with("(/|$)")).count();
-        assert!(below >= 20, "{below}");
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod firmlink_tests {
-    use super::*;
-
-    /// V243-FIRMLINK-SANDBOX-ROOT (sweep #3): a root named through /System/Volumes/Data is
-    /// refused, since Seatbelt matches only the short name and every rule written in the long
-    /// one would never match; an extra read path typed that way is checked under its short
-    /// name, so one holding the engine's data is refused.
-    #[test]
-    fn a_root_named_through_the_data_volume_is_refused_and_a_read_path_is_checked_short() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        for folder in ["project", "home", "tmp", "engine"] {
-            fs::create_dir_all(root.join(folder)).unwrap();
-        }
-        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
-        assert!(long(&root.join("project")).is_dir());
-        let network = || SandboxNetwork::Only(Vec::new());
-        let (home, tmp) = (root.join("home"), root.join("tmp"));
-        let refused = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &long(&root.join("project")),
-            &home,
-            &tmp,
-            network(),
-        );
-        assert!(
-            matches!(&refused, Err(SandboxError::Invalid(reason)) if reason.contains("canonical")),
-            "{refused:?}"
-        );
-        assert!(
-            ProjectSandbox::new(
-                &crate::sandbox::PROFILE_HOOKS,
-                &root.join("project"),
-                &home,
-                &tmp,
-                network()
-            )
-            .is_ok()
-        );
-        assert_eq!(
-            kernel_sandbox::extra_paths::checked(
-                &ACCESS_HOOKS,
-                long(&root).to_str().unwrap(),
-                &root.join("engine")
-            ),
-            Err("read_path_engine_data")
-        );
     }
 }

@@ -157,7 +157,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let host = Tmux::open(
         Some(terminals.tmux.clone()),
         &base.join(FOLDER),
-        crazyagent::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crazyagent::terminal::tmux::tmux_hooks(),
     );
     let typed = base.join("typed.txt");

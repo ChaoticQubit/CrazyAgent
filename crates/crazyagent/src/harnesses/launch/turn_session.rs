@@ -95,7 +95,7 @@ impl Turns {
 /// lifeline, which ends the group if the engine dies first.
 struct Running {
     child: Child,
-    warden: Option<crate::sandbox::warden::Warden>,
+    warden: Option<kernel_sandbox::profile::warden::Warden>,
     lines: Receiver<Line>,
     stopping: Option<Instant>,
     #[cfg(unix)]
@@ -318,8 +318,8 @@ impl TurnSession {
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
         let (sender, lines) = sync_channel(LINES_AHEAD_MAX);
-        let (mut child, warden) =
-            crate::sandbox::warden::spawn(command).map_err(|_| failure("launch_spawn_failed"))?;
+        let (mut child, warden) = kernel_sandbox::profile::warden::spawn(command)
+            .map_err(|_| failure("launch_spawn_failed"))?;
         drop(child.stdin.take());
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -401,7 +401,8 @@ impl TurnSession {
             lifeline.release();
         }
         self.uncertain |=
-            crate::sandbox::warden::fire_reported(running.warden.take(), "harness").is_err();
+            kernel_sandbox::profile::warden::fire_reported(running.warden.take(), "harness")
+                .is_err();
         assert!(running.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))
     }

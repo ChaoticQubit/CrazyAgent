@@ -2,6 +2,12 @@
 
 /// What the project access lists read from the engine that runs them.
 pub mod access;
+/// How the tmux host wraps a confined pane: the value the kernel tmux host is opened with,
+/// built from this crate's runner, keeper, pane shim and variable gate.
+#[cfg(unix)]
+mod confinement;
+#[cfg(unix)]
+pub use confinement::confinement;
 /// The ELF reader: whether a Linux program is loaded by glibc, and so resolves names over
 /// TCP when the sandbox asks it to, judged from its program headers alone.
 pub mod elf;
@@ -23,6 +29,9 @@ pub mod host;
 /// The plain lines and refusal codes a launch shows when a Linux or Windows sandbox cannot
 /// hold something, and the check that tells the Windows loopback refusal apart.
 pub mod lines;
+/// The Linux sandbox helper: its request parse, Landlock and seccomp rules, bridge and egress.
+#[cfg(target_os = "linux")]
+pub mod linux;
 /// One agent's model proxy: the loopback CONNECT tunnel to the agent's listed model hosts,
 /// the variables that send a harness through it and the rule for which addresses it dials.
 pub mod model_proxy;
@@ -65,5 +74,13 @@ pub mod windows;
 
 #[cfg(test)]
 mod low_ports_tests;
+/// The test agents rows start under the real project profile: a private project, home,
+/// peer home and engine runtime, and a shell run inside the sandbox.
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+pub mod test_agent;
+/// The stand-in profile hooks the kernel's own rows build sandboxes on, in place of the
+/// engine's real ones.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod test_hooks;
 #[cfg(test)]
 mod tests;

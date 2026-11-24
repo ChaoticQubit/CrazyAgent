@@ -1186,7 +1186,7 @@ fn listed(folders: &[&Path]) -> String {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
-    let agents = crate::sandbox::test_agent::TestAgent::new();
+    let agents = kernel_sandbox::test_agent::TestAgent::new(&crate::sandbox::PROFILE_HOOKS);
     let outside = agents.peer.join("skills");
     let _unpinned = Unpinned(outside.clone());
     let system = outside.join(CODEX_SYSTEM_SKILLS);
@@ -1687,7 +1687,7 @@ fn a_home_released_by_its_path_is_never_a_link() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_home() {
-    let agents = crate::sandbox::test_agent::TestAgent::new();
+    let agents = kernel_sandbox::test_agent::TestAgent::new(&crate::sandbox::PROFILE_HOOKS);
     let marker = agents.peer.join(STATE).join("marker");
     fs::create_dir(agents.peer.join(STATE)).unwrap();
     fs::write(&marker, "peer").unwrap();
@@ -2381,7 +2381,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
             Some(tmux),
             &root.join(crate::terminal::FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ));
     let pane = crate::harnesses::terminal_session::TerminalSession::start(
@@ -2490,7 +2490,7 @@ impl LeftPane {
             std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
                 Some(tmux.clone()),
                 &root.join(crate::terminal::FOLDER),
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             ));
         let agent = kernel_processes::terminal::AgentId::team(team).unwrap();

@@ -272,7 +272,7 @@ fn in_a_pane(prefix: &str) -> (tempfile::TempDir, Closing, ManagedAgent) {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let agent = ManagedAgent::in_pane("codex", &real_codex(), host.clone(), AgentRole::Sub);

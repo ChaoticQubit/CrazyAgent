@@ -100,7 +100,7 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crazyagent::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crazyagent::terminal::tmux::tmux_hooks(),
             );
             launcher
@@ -298,7 +298,7 @@ impl SubAgent {
                 let launcher = Tmux::open(
                     Some(tmux),
                     &folder,
-                    crazyagent::sandbox::confinement(),
+                    kernel_sandbox::confinement(),
                     crazyagent::terminal::tmux::tmux_hooks(),
                 );
                 launcher

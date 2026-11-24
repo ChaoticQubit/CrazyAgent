@@ -363,7 +363,7 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
     let host = Tmux::open(
         Some(tmux.clone()),
         &root.join(FOLDER),
-        crazyagent::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crazyagent::terminal::tmux::tmux_hooks(),
     );
     until("the live master's pane runs", || {
