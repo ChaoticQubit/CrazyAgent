@@ -1,6 +1,6 @@
 /// Every source file outside tests, as its path under `src` with `/` between parts and its
 /// code ([`code_only`]). A file or folder whose name ends in `tests` or `tests.rs` is left
-/// out. Input: the source folder. Output: the files.
+/// out, and a link to a folder is not walked. Input: the source folder. Output: the files.
 pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
     const ENTRIES_MAX: usize = 100_000;
     let mut folders = vec![src.to_path_buf()];
@@ -10,12 +10,13 @@ pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
         for entry in std::fs::read_dir(&folder).unwrap() {
             seen += 1;
             assert!(seen <= ENTRIES_MAX);
-            let path = entry.unwrap().path();
+            let entry = entry.unwrap();
+            let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             if name.ends_with("tests") || name.ends_with("tests.rs") {
                 continue;
             }
-            if path.is_dir() {
+            if entry.file_type().unwrap().is_dir() {
                 folders.push(path);
                 continue;
             }
