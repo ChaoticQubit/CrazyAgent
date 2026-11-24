@@ -349,3 +349,17 @@ fn a_drive_relative_or_folder_relative_program_is_refused_and_a_bare_name_is_not
 fn the_low_port_block_is_unchanged() {
     assert_eq!(super::LOW_PORTS, 20_000..=28_999);
 }
+
+/// A row run alone under a name no row of this binary has fails and names that row, rather
+/// than passing with nothing run.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "spawn_gate::tests::no_row_has_this_name")]
+fn a_row_alone_under_a_name_no_row_has_fails_naming_it() {
+    let folder = tempfile::tempdir().unwrap();
+    super::row_alone(
+        "spawn_gate::tests::no_row_has_this_name",
+        ":",
+        folder.path(),
+    );
+}
