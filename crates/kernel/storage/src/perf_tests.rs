@@ -9,13 +9,17 @@ use crate::state_log::{
     AggregateName, Chunk, Clock, Draft, SNAPSHOT_CHUNK, check, read_chunk, snapshot_bodies,
 };
 
+#[cfg(unix)]
+mod root_files;
+mod store;
+
 const BATCH: usize = 1000;
 const SNAPSHOT_BATCH: usize = 10;
 const PLUGIN: &str = "acme-embeddings-small-model-ranker-v2-plus";
 const BACKUP_NAME: &str = "9-to-10-20261124T082500123Z";
 const STAMP: &str = "20261124T082500123Z";
 const AGGREGATE: &str = "plugins";
-const AT_MS: u64 = 1_795_508_700_123;
+pub(crate) const AT_MS: u64 = 1_795_508_700_123;
 const BODY_BYTES: usize = 1024;
 const CHUNKS: usize = 4;
 const ROWS_PER_CHUNK: usize = 8;
@@ -32,13 +36,13 @@ pub(crate) fn row(name: &'static str, batch: usize) -> Row {
 }
 
 /// The time the pure rows format and read: 2026-11-24 08:25:00.123 UTC. Output: the time.
-fn at() -> SystemTime {
+pub(crate) fn at() -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(AT_MS)
 }
 
 /// A snapshot run of [`CHUNKS`] chunks of [`ROWS_PER_CHUNK`] rows each, about 1 KiB of
 /// JSON per chunk. Output: the chunks.
-fn chunks() -> Vec<Chunk> {
+pub(crate) fn chunks() -> Vec<Chunk> {
     (0..CHUNKS)
         .map(|at| Chunk {
             table: "plugin_records".to_owned(),
