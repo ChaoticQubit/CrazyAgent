@@ -506,6 +506,24 @@ pub(super) fn confirmed(read: std::io::Result<bool>) -> Option<bool> {
     matches!(read, Ok(false)).then_some(false)
 }
 
+/// One access-list entry: the principal's GUID, the flags and the rights.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) type Entry = ([u8; 16], u32, u32);
+
+/// Not read yet. Inputs: the entries and the trusted GUIDs. Output: not shared.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn entries_shared(entries: &[Entry], trusted: &[[u8; 16]]) -> Option<bool> {
+    let _ = (entries, trusted);
+    Some(false)
+}
+
+/// Not read yet. Inputs: the entries read and the trusted GUIDs. Output: not shared.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn read_answer(read: Option<&[Entry]>, trusted: Option<&[[u8; 16]]>) -> Option<bool> {
+    let _ = (read, trusted);
+    Some(false)
+}
+
 /// The largest POSIX access list read, far above the entries a folder carries.
 #[cfg(all(unix, not(target_os = "macos")))]
 const POSIX_ACL_BYTES_MAX: usize = 8 * 1024;

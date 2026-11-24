@@ -251,6 +251,69 @@ fn a_block_whose_inode_is_not_the_stamped_one_reads_none() {
     );
 }
 
+/// A macOS access list names an entry changeable by others when an allow entry gives a
+/// change right (write or add, delete, append or add a folder, delete a child, write
+/// attributes or extended attributes, write the list, take ownership, and the generic all
+/// and write rights) to anyone but this user, root, wheel, daemon or admin, inherited or
+/// only for inheritance alike; deny entries and read rights never do, and an entry of
+/// another kind, a list not read for the stamped object or trusted principals that could
+/// not be read all fail closed.
+#[cfg(unix)]
+#[test]
+fn an_access_list_entry_that_lets_others_change_an_entry_is_shared() {
+    const ME: [u8; 16] = [1; 16];
+    const ROOT: [u8; 16] = [2; 16];
+    const OTHER: [u8; 16] = [9; 16];
+    let trusted = [ME, ROOT, [3; 16], [4; 16], [5; 16]];
+    let shared = |entries: &[acl::Entry]| acl::entries_shared(entries, &trusted);
+    assert_eq!(shared(&[]), Some(false));
+    for bit in [2, 4, 5, 6, 8, 10, 12, 13, 21, 23] {
+        assert_eq!(
+            shared(&[(OTHER, 1, 1 << bit)]),
+            Some(true),
+            "change bit {bit}"
+        );
+        assert_eq!(
+            shared(&[(OTHER, 2, 1 << bit)]),
+            Some(false),
+            "denied bit {bit}"
+        );
+        for principal in trusted {
+            assert_eq!(
+                shared(&[(principal, 1, 1 << bit)]),
+                Some(false),
+                "trusted bit {bit}"
+            );
+        }
+    }
+    for bit in [1, 3, 7, 9, 11, 20, 22, 24] {
+        assert_eq!(
+            shared(&[(OTHER, 1, 1 << bit)]),
+            Some(false),
+            "read bit {bit}"
+        );
+    }
+    for flags in [1 | (1 << 4), 1 | (1 << 5) | (1 << 6), 1 | (1 << 8)] {
+        assert_eq!(
+            shared(&[(OTHER, flags, 1 << 2)]),
+            Some(true),
+            "flags {flags:#x}"
+        );
+    }
+    assert_eq!(
+        shared(&[(OTHER, 2, 1 << 2), (ME, 1, 1 << 2), (OTHER, 1, 1 << 23)]),
+        Some(true)
+    );
+    for kind in [0, 3, 4, 15] {
+        assert_eq!(shared(&[(ME, kind, 1 << 1)]), None, "kind {kind}");
+    }
+    let entries = [(OTHER, 1, 1 << 2)];
+    assert_eq!(acl::read_answer(Some(&entries), Some(&trusted)), Some(true));
+    assert_eq!(acl::read_answer(Some(&[]), Some(&trusted)), Some(false));
+    assert_eq!(acl::read_answer(None, Some(&trusted)), None, "no read");
+    assert_eq!(acl::read_answer(Some(&[]), None), None, "no trusted GUIDs");
+}
+
 /// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others
 /// when a named user other than this user or root, or a named group the trusted-group rule
 /// does not trust, has write; the owner, group and other entries stay with the mode bits,
@@ -732,4 +795,166 @@ fn a_call_that_finds_a_changeable_part_keeps_no_answer() {
     for entry in [&tool, &folder, &temp.path().to_path_buf()] {
         assert!(!acl::kept(entry), "{entry:?} kept");
     }
+}
+
+/// Runs `/bin/chmod` with the arguments on the entry and requires it to succeed. Inputs: the
+/// arguments and the entry.
+#[cfg(target_os = "macos")]
+fn chmod_entry(args: &[&str], entry: &Path) {
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .args(args)
+            .arg(entry),
+    )
+    .unwrap();
+    assert!(status.success(), "chmod {args:?} {entry:?}");
+}
+
+/// The access answer `shared_all` gives one entry, judged from what `lstat` reads of it now.
+/// Input: the entry. Output: the answer.
+#[cfg(target_os = "macos")]
+fn read_alone(entry: &Path) -> Option<bool> {
+    let metadata = std::fs::symlink_metadata(entry).unwrap();
+    acl::shared_all(&[(entry, &metadata)])[0]
+}
+
+/// A file and a folder whose mode is 000 still have their access lists read: an allow entry
+/// that lets staff change them reads as shared, and one with no list reads as not shared,
+/// though neither can be opened.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mode_000_entry_has_its_access_list_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = durable_folder();
+    let file = temp.path().join("file");
+    let plain = temp.path().join("plain");
+    let folder = temp.path().join("folder");
+    write_mode(&file, "", 0o644);
+    write_mode(&plain, "", 0o644);
+    std::fs::create_dir(&folder).unwrap();
+    chmod_entry(&["+a", "group:staff allow write"], &file);
+    chmod_entry(&["+a", "group:staff allow add_file"], &folder);
+    for entry in [&file, &plain, &folder] {
+        std::fs::set_permissions(entry, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let read: Vec<Option<bool>> = [&file, &plain, &folder]
+        .into_iter()
+        .map(|entry| read_alone(entry))
+        .collect();
+    for entry in [&file, &plain, &folder] {
+        std::fs::set_permissions(entry, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    assert_eq!(read, vec![Some(true), Some(false), Some(true)]);
+}
+
+/// A disk image `hdiutil` made and mounted for one row, detached by its exact mount path
+/// when dropped.
+#[cfg(target_os = "macos")]
+struct Mounted(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        let detached = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-quiet", "-force"])
+            .arg(&self.0)
+            .status();
+        assert!(
+            detached.is_ok_and(|status| status.success()),
+            "detach {:?}",
+            self.0
+        );
+    }
+}
+
+/// An entry on a volume that keeps no access lists, an MS-DOS disk image, reads as unknown,
+/// which counts as changeable, never as an entry without a list. A runner that cannot make
+/// or mount the image says SKIP and checks nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_entry_on_a_volume_without_access_lists_reads_unknown() {
+    let temp = durable_folder();
+    let image = temp.path().join("fat.dmg");
+    let mount = temp.path().join("mount");
+    std::fs::create_dir(&mount).unwrap();
+    let hdiutil = |args: &[&str], paths: &[&Path]| {
+        std::process::Command::new("/usr/bin/hdiutil")
+            .args(args)
+            .args(paths)
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let made = [
+        "create", "-quiet", "-size", "8m", "-fs", "MS-DOS", "-volname", "NOACL", "-o",
+    ];
+    if !hdiutil(&made, &[&image]) {
+        eprintln!("SKIP: hdiutil could not make an MS-DOS image");
+        return;
+    }
+    let attach = ["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint"];
+    if !hdiutil(&attach, &[&mount, &image]) {
+        eprintln!("SKIP: hdiutil could not mount the MS-DOS image");
+        return;
+    }
+    let mounted = Mounted(mount.clone());
+    let file = mount.join("file");
+    std::fs::write(&file, "").unwrap();
+    let read = [read_alone(&file), read_alone(&mount)];
+    drop(mounted);
+    eprintln!("RAN: the MS-DOS image was mounted and read");
+    assert_eq!(read, [None, None]);
+}
+
+/// An entry swapped for another file after `lstat` read it reads as none, since the list
+/// read belongs to another object, and nothing is kept for it.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_entry_swapped_after_its_lstat_reads_none_and_is_not_kept() {
+    let temp = durable_folder();
+    let entry = temp.path().join("entry");
+    let other = temp.path().join("other");
+    write_mode(&entry, "", 0o644);
+    write_mode(&other, "", 0o644);
+    settle(&[&entry, &other]);
+    let judged = std::fs::symlink_metadata(&entry).unwrap();
+    std::fs::rename(&other, &entry).unwrap();
+    assert_eq!(acl::shared_all(&[(&entry, &judged)]), vec![None]);
+    assert!(!acl::kept(&entry));
+}
+
+/// Allow entries that name this user or the admin group by name give no one else a change
+/// right, so the entry does not read as shared; one that names staff does.
+#[cfg(target_os = "macos")]
+#[test]
+fn allow_entries_for_this_user_and_the_admin_group_do_not_read_shared() {
+    let temp = durable_folder();
+    let entry = temp.path().join("entry");
+    write_mode(&entry, "", 0o644);
+    let me = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .unwrap()
+        .name;
+    chmod_entry(&["+a", &format!("user:{me} allow write,delete")], &entry);
+    chmod_entry(&["+a", "group:admin allow write,writesecurity"], &entry);
+    assert_eq!(read_alone(&entry), Some(false));
+    chmod_entry(&["+a", "group:staff allow append"], &entry);
+    assert_eq!(read_alone(&entry), Some(true));
+}
+
+/// A folder named with a trailing slash reads as it does without one, and a link to a
+/// folder named with one is read itself, which `lstat` with the slash did not find, so it
+/// reads as none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_trailing_slash_never_makes_the_read_follow_a_link() {
+    let temp = durable_folder();
+    let folder = temp.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    chmod_entry(&["+a", "group:staff allow add_file"], &folder);
+    let slashed = PathBuf::from(format!("{}/", folder.display()));
+    assert_eq!(read_alone(&slashed), Some(true));
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&folder, &link).unwrap();
+    let slashed_link = PathBuf::from(format!("{}/", link.display()));
+    assert_eq!(read_alone(&slashed_link), None);
 }

@@ -530,6 +530,174 @@ pub fn acl_listed(path: &std::ffi::CStr) -> std::io::Result<bool> {
     }
 }
 
+/// The largest `kauth_filesec` an entry can carry: its 44-byte head and
+/// `KAUTH_ACL_MAX_ENTRIES`, 128, entries of 24 bytes.
+#[cfg(target_os = "macos")]
+const FILESEC_BYTES_MAX: usize = 44 + 128 * ACCESS_ENTRY_BYTES;
+
+/// The bytes of one `kauth_ace`: the principal's GUID, its flags and its rights.
+#[cfg(target_os = "macos")]
+const ACCESS_ENTRY_BYTES: usize = 24;
+
+/// Where the fixed attributes of an entry reply end and the `kauth_filesec` may start: the
+/// length, the returned set, the device, the change time, the filesec reference and the
+/// file id, each packed on a 4-byte boundary.
+#[cfg(target_os = "macos")]
+const ENTRY_REPLY_FIXED: usize = 60;
+
+/// The buffer an entry reply is read into, room for the fixed attributes and the largest
+/// filesec.
+#[cfg(target_os = "macos")]
+const ENTRY_REPLY_BYTES: usize = 4096;
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(ENTRY_REPLY_FIXED + FILESEC_BYTES_MAX <= ENTRY_REPLY_BYTES);
+
+/// Where the filesec reference sits in an entry reply; its offset counts from here.
+#[cfg(target_os = "macos")]
+const ENTRY_REPLY_SECURITY_AT: usize = 44;
+
+/// The common attributes every entry reply must return: the device, the change time and the
+/// file id.
+#[cfg(target_os = "macos")]
+const ENTRY_REQUIRED: libc::attrgroup_t =
+    libc::ATTR_CMN_DEVID | libc::ATTR_CMN_CHGTIME | libc::ATTR_CMN_FILEID;
+
+/// The bytes of a volume reply: the length, the device and the volume capabilities.
+#[cfg(target_os = "macos")]
+const VOLUME_REPLY_BYTES: usize = 4 + 4 + 32;
+
+/// One entry of an extended access list as the kernel keeps it: the principal's GUID, the
+/// `KAUTH_ACE_*` flags, whose low four bits name allow or deny, and the `KAUTH_VNODE_*`
+/// rights.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessEntry {
+    pub principal: [u8; 16],
+    pub flags: u32,
+    pub rights: u32,
+}
+
+/// An entry's extended access list with the identity of the object it was read from: the
+/// device, the file id and the change time in seconds and nanoseconds, all from the one call
+/// that read the list.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccessList {
+    pub device: u64,
+    pub inode: u64,
+    pub changed: (i64, i64),
+    pub entries: Vec<AccessEntry>,
+}
+
+/// Reads one entry's extended access list with `getattrlist` and `FSOPT_NOFOLLOW`, so a
+/// link's own list is read and never its target's, and the list comes with the device, file
+/// id and change time of the object it was read from. A second `getattrlist` of the same path,
+/// also not following a link, must name the same device and a volume that keeps access lists,
+/// since an entry on a volume without them returns none, as an entry with no list does. No
+/// right on the entry itself is needed, only search on the folders above it. Safety contract
+/// of its unsafe calls: the path is a valid C string, and each attribute list and reply buffer
+/// is a local that outlives its call, whose length is passed as the buffer's own. Input: the
+/// path. Output: the list, or an error for a call that failed, a reply cut short or out of
+/// shape, or a volume without access lists or a device that moved between the two calls.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn access_list(path: &std::ffi::CStr) -> std::io::Result<AccessList> {
+    let _ = path;
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+/// The native-endian `u32` at `at`, if the bytes hold it. Inputs: the bytes and the offset.
+/// Output: the value.
+#[cfg(target_os = "macos")]
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    let end = at.checked_add(4)?;
+    Some(u32::from_ne_bytes(bytes.get(at..end)?.try_into().ok()?))
+}
+
+/// The native-endian 8 bytes at `at`, if the bytes hold them. Inputs: the bytes and the
+/// offset. Output: the bytes.
+#[cfg(target_os = "macos")]
+fn eight_at(bytes: &[u8], at: usize) -> Option<[u8; 8]> {
+    let end = at.checked_add(8)?;
+    bytes.get(at..end)?.try_into().ok()
+}
+
+/// The `dev_t` at `at`, widened as `st_dev` is widened into a `u64`, sign and all, so it
+/// equals what `lstat` reads of the same device. Inputs: the bytes and the offset. Output:
+/// the device.
+#[cfg(target_os = "macos")]
+fn device_at(bytes: &[u8], at: usize) -> Option<u64> {
+    let device = i32::from_ne_bytes(u32_at(bytes, at)?.to_ne_bytes());
+    Some(u64::from_ne_bytes(i64::from(device).to_ne_bytes()))
+}
+
+/// The error of a reply that is cut short or out of shape. Input: what is wrong. Output: the
+/// error.
+#[cfg(target_os = "macos")]
+fn malformed(what: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_owned())
+}
+
+/// Reads an entry reply of `getattrlist` packed with `FSOPT_PACK_INVAL_ATTRS`: the length
+/// the kernel needed, which must fit the reply, the returned set, which must hold the device,
+/// change time and file id, then those and the filesec reference, whose bytes must lie
+/// inside the length. A filesec that is not returned is an empty list. Input: the reply.
+/// Output: the list, or an error for a reply cut short or out of shape.
+#[cfg(target_os = "macos")]
+fn entry_reply(reply: &[u8]) -> std::io::Result<AccessList> {
+    let _ = reply;
+    Err(malformed("not read yet"))
+}
+
+/// Reads a `kauth_filesec`: the magic number, owner and group GUIDs, the entry count and the
+/// ACL flags, then exactly that many `kauth_ace` entries. A count of `KAUTH_FILESEC_NOACL`
+/// is an empty list. Input: the filesec's bytes. Output: the entries, or an error for a wrong
+/// magic number, a count past `KAUTH_ACL_MAX_ENTRIES` or a size that does not hold exactly
+/// the counted entries.
+#[cfg(target_os = "macos")]
+fn filesec_entries(filesec: &[u8]) -> std::io::Result<Vec<AccessEntry>> {
+    let _ = filesec;
+    Err(malformed("not read yet"))
+}
+
+/// Whether a volume reply of `getattrlist` names the entry's device and a volume that keeps
+/// extended access lists: the length must be the reply's, and the capability both valid and
+/// set. Inputs: the reply and the device the entry was read on. Output: the answer, false
+/// for a reply out of shape.
+#[cfg(target_os = "macos")]
+fn volume_keeps_lists(reply: &[u8], device: u64) -> bool {
+    let _ = (reply, device);
+    true
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn mbr_uid_to_uuid(uid: libc::uid_t, uuid: *mut u8) -> std::ffi::c_int;
+    fn mbr_gid_to_uuid(gid: libc::gid_t, uuid: *mut u8) -> std::ffi::c_int;
+}
+
+/// The GUID access lists name a user by, from `mbr_uid_to_uuid`. Safety contract of its
+/// unsafe call: the output is a local 16-byte buffer, the size of a `uuid_t`. Input: the user
+/// id. Output: the GUID, or the error the lookup returned.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn user_guid(uid: u32) -> std::io::Result<[u8; 16]> {
+    let _ = uid;
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+/// The GUID access lists name a group by, from `mbr_gid_to_uuid`. Safety contract of its
+/// unsafe call: the output is a local 16-byte buffer, the size of a `uuid_t`. Input: the
+/// group id. Output: the GUID, or the error the lookup returned.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn group_guid(gid: u32) -> std::io::Result<[u8; 16]> {
+    let _ = gid;
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
@@ -586,6 +754,292 @@ mod tests {
             unread.map_err(|error| error.raw_os_error()),
             Err(Some(libc::EACCES))
         );
+    }
+
+    /// Runs `/bin/chmod` with the arguments on the entry and requires it to succeed. Inputs:
+    /// the arguments and the entry.
+    fn chmod(args: &[&str], entry: &std::path::Path) {
+        let status = std::process::Command::new("/bin/chmod")
+            .args(args)
+            .arg(entry)
+            .status()
+            .unwrap();
+        assert!(status.success(), "chmod {args:?} {entry:?}");
+    }
+
+    /// The GUID `uuid` text names, as its 16 bytes. Input: the text. Output: the bytes.
+    fn guid(text: &str) -> [u8; 16] {
+        let hex: String = text.chars().filter(|c| *c != '-').collect();
+        assert_eq!(hex.len(), 32);
+        let mut bytes = [0u8; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
+        }
+        bytes
+    }
+
+    /// A list is read with the device and file id `lstat` reads of the same entry: none for
+    /// a file without one, the entry `chmod +a` adds, with its principal's GUID, allow kind and
+    /// write right, still read once the file's mode is 000, and an error for a file whose
+    /// folder denies search.
+    #[test]
+    fn an_access_list_is_read_with_the_identity_of_the_object_read() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let folder = scratch("acl");
+        let file = folder.join("file");
+        std::fs::write(&file, "x").unwrap();
+        let read = super::access_list(&c_path(&file)).unwrap();
+        let stat = std::fs::symlink_metadata(&file).unwrap();
+        assert_eq!((read.device, read.inode), (stat.dev(), stat.ino()));
+        assert_eq!(read.changed, (stat.ctime(), stat.ctime_nsec()));
+        assert!(read.entries.is_empty());
+        chmod(&["+a", "group:everyone allow write"], &file);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let read = super::access_list(&c_path(&file)).unwrap();
+        assert_eq!(read.inode, stat.ino());
+        assert_eq!(
+            read.entries,
+            vec![super::AccessEntry {
+                principal: guid("ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C"),
+                flags: 1,
+                rights: 1 << 2,
+            }]
+        );
+        let shut = folder.join("shut");
+        std::fs::create_dir(&shut).unwrap();
+        std::fs::write(shut.join("inside"), "x").unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unread = super::access_list(&c_path(&shut.join("inside")));
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert_eq!(
+            unread.map_err(|error| error.raw_os_error()),
+            Err(Some(libc::EACCES))
+        );
+    }
+
+    /// A link's own list is read, with the link's own file id, and never its target's: a
+    /// target with a list behind a link without one reads empty, and a link given its own list
+    /// with `chmod -h` reads that list.
+    #[test]
+    fn a_link_s_own_list_is_read_and_never_its_target_s() {
+        use std::os::unix::fs::MetadataExt;
+        let folder = scratch("acl-link");
+        let target = folder.join("target");
+        std::fs::write(&target, "x").unwrap();
+        chmod(&["+a", "group:everyone allow write"], &target);
+        let link = folder.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let read = super::access_list(&c_path(&link)).unwrap();
+        assert_eq!(read.inode, std::fs::symlink_metadata(&link).unwrap().ino());
+        assert_ne!(read.inode, std::fs::metadata(&target).unwrap().ino());
+        assert!(read.entries.is_empty(), "{read:?}");
+        chmod(&["-h", "+a", "group:staff allow delete"], &link);
+        let read = super::access_list(&c_path(&link)).unwrap();
+        assert_eq!(
+            read.entries,
+            vec![super::AccessEntry {
+                principal: guid("ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000014"),
+                flags: 1,
+                rights: 1 << 4,
+            }]
+        );
+        let target_read = super::access_list(&c_path(&target)).unwrap();
+        assert_eq!(target_read.entries[0].rights, 1 << 2);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// A `kauth_filesec` with the magic number, a 44-byte head and the given count field,
+    /// then the entries. Inputs: the count field and the entries. Output: the bytes.
+    fn filesec(count: u32, entries: &[([u8; 16], u32, u32)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x012c_c16du32.to_ne_bytes());
+        bytes.extend_from_slice(&[0u8; 32]);
+        bytes.extend_from_slice(&count.to_ne_bytes());
+        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        for (principal, flags, rights) in entries {
+            bytes.extend_from_slice(principal);
+            bytes.extend_from_slice(&flags.to_ne_bytes());
+            bytes.extend_from_slice(&rights.to_ne_bytes());
+        }
+        bytes
+    }
+
+    /// A filesec reads only in its exact shape: the counted entries, none for a count of
+    /// `KAUTH_FILESEC_NOACL` or zero, and an error for a wrong magic number, a head cut short,
+    /// a count past 128 or a count that does not match the bytes, so a cut list is never read
+    /// as a shorter one.
+    #[test]
+    fn a_filesec_reads_only_in_its_exact_shape() {
+        let one = ([7u8; 16], 1, 1 << 2);
+        let read = super::filesec_entries(&filesec(1, &[one])).unwrap();
+        assert_eq!(
+            read,
+            vec![super::AccessEntry {
+                principal: [7; 16],
+                flags: 1,
+                rights: 1 << 2,
+            }]
+        );
+        assert!(super::filesec_entries(&filesec(0, &[])).unwrap().is_empty());
+        assert!(
+            super::filesec_entries(&filesec(u32::MAX, &[]))
+                .unwrap()
+                .is_empty()
+        );
+        let mut wrong = filesec(1, &[one]);
+        wrong[0] ^= 1;
+        let refused = [
+            wrong,
+            filesec(1, &[one])[..40].to_vec(),
+            filesec(2, &[one]),
+            filesec(1, &[one, one]),
+            filesec(0, &[one]),
+            filesec(u32::MAX, &[one]),
+            filesec(129, &[one; 129]),
+            filesec(1, &[one])[..60].to_vec(),
+        ];
+        for (index, bytes) in refused.iter().enumerate() {
+            assert!(super::filesec_entries(bytes).is_err(), "case {index}");
+        }
+    }
+
+    /// An entry reply packed as `getattrlist` packs it: the length field, the returned set,
+    /// the device, the change time, the filesec reference and file id, then the filesec.
+    /// Inputs: the length field, the returned set and the filesec, if any. Output: the bytes.
+    fn entry_reply(length: Option<u32>, returned: u32, filesec: Option<&[u8]>) -> Vec<u8> {
+        let mut bytes = vec![0u8; super::ENTRY_REPLY_FIXED];
+        bytes[4..8].copy_from_slice(&returned.to_ne_bytes());
+        bytes[24..28].copy_from_slice(&5i32.to_ne_bytes());
+        bytes[28..36].copy_from_slice(&100i64.to_ne_bytes());
+        bytes[36..44].copy_from_slice(&7i64.to_ne_bytes());
+        bytes[52..60].copy_from_slice(&9u64.to_ne_bytes());
+        if let Some(filesec) = filesec {
+            let offset = i32::try_from(super::ENTRY_REPLY_FIXED - 44).unwrap();
+            bytes[44..48].copy_from_slice(&offset.to_ne_bytes());
+            bytes[48..52].copy_from_slice(&u32::try_from(filesec.len()).unwrap().to_ne_bytes());
+            bytes.extend_from_slice(filesec);
+        }
+        let own = u32::try_from(bytes.len()).unwrap();
+        bytes[0..4].copy_from_slice(&length.unwrap_or(own).to_ne_bytes());
+        bytes
+    }
+
+    /// An entry reply reads its identity and list only when whole: a length past the reply,
+    /// as a buffer too small for the list leaves it, a missing device, change time or file id,
+    /// or a reference past the length is an error, never an empty list.
+    #[test]
+    fn an_entry_reply_reads_only_when_whole() {
+        let full = 0x8000_0000 | super::ENTRY_REQUIRED | libc::ATTR_CMN_EXTENDED_SECURITY;
+        let list = filesec(1, &[([3u8; 16], 1, 1 << 4)]);
+        let read = super::entry_reply(&entry_reply(None, full, Some(&list))).unwrap();
+        assert_eq!((read.device, read.inode, read.changed), (5, 9, (100, 7)));
+        assert_eq!(read.entries.len(), 1);
+        let none = super::entry_reply(&entry_reply(
+            None,
+            full & !libc::ATTR_CMN_EXTENDED_SECURITY,
+            None,
+        ));
+        assert!(none.unwrap().entries.is_empty());
+        let whole = entry_reply(None, full, Some(&list));
+        let cut = u32::try_from(whole.len() + 1).unwrap();
+        assert!(super::entry_reply(&entry_reply(Some(cut), full, Some(&list))).is_err());
+        assert!(super::entry_reply(&whole[..whole.len() - 1]).is_err());
+        for missing in [
+            libc::ATTR_CMN_DEVID,
+            libc::ATTR_CMN_CHGTIME,
+            libc::ATTR_CMN_FILEID,
+        ] {
+            let reply = entry_reply(None, full & !missing, Some(&list));
+            assert!(super::entry_reply(&reply).is_err(), "{missing:#x}");
+        }
+        let mut past = whole.clone();
+        past[48..52].copy_from_slice(&u32::try_from(list.len() + 24).unwrap().to_ne_bytes());
+        assert!(super::entry_reply(&past).is_err());
+        let mut negative = whole;
+        negative[44..48].copy_from_slice(&(-4i32).to_ne_bytes());
+        assert!(super::entry_reply(&negative).is_err());
+    }
+
+    /// A volume reply as `getattrlist` packs it. Inputs: the length field, the device, the
+    /// interface capabilities set and the ones marked valid. Output: the bytes.
+    fn volume_reply(length: u32, device: i32, set: u32, valid: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; super::VOLUME_REPLY_BYTES];
+        bytes[0..4].copy_from_slice(&length.to_ne_bytes());
+        bytes[4..8].copy_from_slice(&device.to_ne_bytes());
+        bytes[12..16].copy_from_slice(&set.to_ne_bytes());
+        bytes[28..32].copy_from_slice(&valid.to_ne_bytes());
+        bytes
+    }
+
+    /// A volume keeps access lists for an entry only when the volume reply names the entry's
+    /// own device and its capability is both valid and set: a device that moved between the
+    /// two calls, a volume without the capability or one that does not say, and a reply out
+    /// of shape all read as not keeping them.
+    #[test]
+    fn a_volume_keeps_lists_only_on_the_entry_s_device_with_the_capability() {
+        let lists = libc::VOL_CAP_INT_EXTENDED_SECURITY;
+        let length = u32::try_from(super::VOLUME_REPLY_BYTES).unwrap();
+        assert!(super::volume_keeps_lists(
+            &volume_reply(length, 5, lists, lists),
+            5
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 6, lists, lists),
+            5
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 5, 0, lists),
+            5
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 5, lists, 0),
+            5
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length - 4, 5, lists, lists),
+            5
+        ));
+        assert!(!super::volume_keeps_lists(
+            &volume_reply(length, 5, lists, lists)[..20],
+            5
+        ));
+        let negative = volume_reply(length, -2, lists, lists);
+        assert!(super::volume_keeps_lists(&negative, u64::MAX - 1));
+    }
+
+    /// The GUIDs of root, wheel, daemon and admin are the well-known ones, and this user's
+    /// is neither of them.
+    #[test]
+    fn the_well_known_guids_are_read_for_root_and_the_trusted_groups() {
+        assert_eq!(
+            super::user_guid(0).unwrap(),
+            guid("FFFFEEEE-DDDD-CCCC-BBBB-AAAA00000000")
+        );
+        for (gid, text) in [
+            (0, "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000000"),
+            (1, "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000001"),
+            (80, "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000050"),
+        ] {
+            assert_eq!(super::group_guid(gid).unwrap(), guid(text), "{gid}");
+        }
+        let me = super::user_guid(own_uid()).unwrap();
+        assert_ne!(me, super::user_guid(0).unwrap());
+    }
+
+    /// This process's real user id, read from `id -u`.
+    /// Output: the id.
+    fn own_uid() -> u32 {
+        let output = std::process::Command::new("/usr/bin/id")
+            .arg("-u")
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
     }
 
     /// The C probe that prints, from the SDK header itself, every size, offset and constant
