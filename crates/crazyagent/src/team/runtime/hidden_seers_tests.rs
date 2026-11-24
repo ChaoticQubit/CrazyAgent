@@ -8,7 +8,7 @@ fn hid(folders: &[PathBuf]) -> Option<Vec<String>> {
     Some(
         folders
             .iter()
-            .map(|folder| crate::sandbox::hidden_paths::digest(folder))
+            .map(|folder| kernel_sandbox::hidden_paths::digest(folder))
             .collect(),
     )
 }
@@ -79,7 +79,7 @@ fn an_agent_started_before_a_folder_was_hidden_is_listed_until_the_owner_restart
     assert!(listed(&fixture).is_empty(), "nothing is hidden yet");
     assert_eq!(restart_them(&fixture), refused);
 
-    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
     team.mark_seers(&fixture.setup).unwrap();
     assert_eq!(
         listed(&fixture),
@@ -87,7 +87,7 @@ fn an_agent_started_before_a_folder_was_hidden_is_listed_until_the_owner_restart
         "the master's pane kept no hidden folders, so it hides none"
     );
     assert_eq!(
-        crate::sandbox::hidden_paths::seers(&fixture.connection, PROJECT).unwrap(),
+        crate::sandbox::access_store::hidden::seers(&fixture.connection, PROJECT).unwrap(),
         BTreeSet::from([before, master]),
         "never Full access or a teammate"
     );
@@ -129,16 +129,16 @@ fn a_pane_taken_over_after_a_folder_was_hidden_is_listed_by_what_its_record_hid(
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let secrets = fixture.setup.project_folder().join("secrets");
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
+        &kernel_sandbox::policy::AgentPolicy {
             access: AgentAccess::Sandboxed,
             ..Default::default()
         },
     )
     .unwrap();
-    crate::sandbox::hidden_paths::save(
+    crate::sandbox::access_store::hidden::save(
         &fixture.connection,
         PROJECT,
         std::slice::from_ref(&secrets),

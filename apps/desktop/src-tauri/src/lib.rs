@@ -374,74 +374,10 @@ async fn desktop_restart_engine(
     let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
-    if let Some(code) =
-        crazyagent::restore::restart_refusal(layout.root(), restore::service_running(&service))
-    {
-        return Err(engine_failure(code));
-    }
+    crazyagent::restore::refuse_restart(layout.root(), &service).map_err(engine_failure)?;
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
     bridge.connect().await
-}
-
-/// Reads what Settings shows about bringing back the default engine's 2.4 data (L5), without
-/// the engine: until when its pinned backup can be restored and how the last restore ended.
-/// Nothing to show while `CRAZYAGENT_DESKTOP_SOCKET` names another engine.
-#[tauri::command]
-async fn desktop_restore_status(webview: Webview) -> Result<restore::RestoreView, BridgeError> {
-    main_window(&webview)?;
-    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
-        return Ok(restore::RestoreView::default());
-    }
-    let layout =
-        crazyagent::paths::Layout::current().map_err(|_| engine_failure("not_configured"))?;
-    Ok(restore::view(layout.root()))
-}
-
-/// Asks the default engine to stop and bring back its pinned 2.4 backup after the owner's
-/// confirm (L5). Refused `storage_restore_unavailable` while `CRAZYAGENT_DESKTOP_SOCKET` names
-/// another engine, whose restore this window could not follow.
-#[tauri::command]
-async fn desktop_restore_pinned(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    generation: u64,
-) -> Result<(), BridgeError> {
-    main_window(&webview)?;
-    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
-        return Err(engine_failure("storage_restore_unavailable"));
-    }
-    lock(&state).await?.restore_pinned(generation).await
-}
-
-/// Reads what the recovery screen offers for the default engine's restore that did not
-/// finish, writing nothing (L5).
-#[tauri::command]
-async fn desktop_restore_recovery(webview: Webview) -> Result<restore::RecoveryView, BridgeError> {
-    main_window(&webview)?;
-    let (layout, running) = restore::engine()?;
-    restore::blocking(move || restore::recovery(layout.root(), running)).await
-}
-
-/// Runs one recovery action on the default engine: `put_back`, `continue` or `finish` (L5).
-#[tauri::command]
-async fn desktop_restore_recover(webview: Webview, action: String) -> Result<(), BridgeError> {
-    main_window(&webview)?;
-    let (layout, running) = restore::engine()?;
-    let settings = (layout.global_settings(), layout.project_settings());
-    restore::blocking(move || {
-        restore::recover(layout.root(), running, &action, (&settings.0, &settings.1))
-    })
-    .await
-}
-
-/// Opens the default engine's backups folder, which keeps the copies a restore left (L5).
-#[tauri::command]
-async fn desktop_restore_open_backups(webview: Webview) -> Result<(), BridgeError> {
-    main_window(&webview)?;
-    let (layout, _) = restore::engine()?;
-    let folder = crazyagent::restore::backups(layout.root());
-    restore::blocking(move || crazyagent::platform::reveal(&folder)).await
 }
 
 #[tauri::command]
@@ -1043,7 +979,7 @@ async fn desktop_project_agent_policy(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+) -> Result<kernel_sandbox::policy::PolicyView, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.project_agent_policy(&id).await
 }
@@ -1054,7 +990,7 @@ async fn desktop_set_project_agent_policy(
     state: State<'_, NativeState>,
     id: String,
     version: u64,
-    policy: crazyagent::sandbox::policy::AgentPolicy,
+    policy: kernel_sandbox::policy::AgentPolicy,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
@@ -4077,29 +4013,6 @@ async fn desktop_provider_retry(
 }
 
 #[tauri::command]
-async fn desktop_log_compaction(
-    webview: Webview,
-    state: State<'_, NativeState>,
-) -> Result<crazyagent::log_compaction::LogCompactionView, BridgeError> {
-    main_window(&webview)?;
-    lock(&state).await?.log_compaction().await
-}
-
-#[tauri::command]
-async fn desktop_set_log_compaction(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    choice: crazyagent::log_compaction::LogCompaction,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&webview)?;
-    lock(&state)
-        .await?
-        .set_log_compaction(choice, generation)
-        .await
-}
-
-#[tauri::command]
 async fn desktop_set_provider_retry(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -6026,23 +5939,38 @@ fn admit_pages<R: Runtime>(
     }
 }
 
+/// The name a window calls a command by: the last part of its path in `native_commands!`, so
+/// `restore::desktop_restore_status` and `desktop_status` give the bare function name.
+/// Input: a command function, bare or one module deep. Output: its name as a string literal.
+#[cfg(test)]
+macro_rules! command_name {
+    ($module:ident :: $command:ident) => {
+        stringify!($command)
+    };
+    ($command:ident) => {
+        stringify!($command)
+    };
+}
+
 /// Declares the native commands once: their names for whoever must walk them and their
 /// handler behind the page check. The commands after the first `;` serve only the webview
 /// terminal, which a macOS build does not have (DEC-203), so they exist off macOS only; the
 /// ones after the second exist only in a macOS native-webdriver build, for its trials.
 /// Input: the command functions. Output: `NATIVE_COMMANDS` and `native_handler`.
 macro_rules! native_commands {
-    ($($command:ident,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
+    ($($head:ident $(:: $tail:ident)?,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
         #[cfg(all(test, not(target_os = "macos")))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($webview),)+];
+        const NATIVE_COMMANDS: &[&str] =
+            &[$(command_name!($head $(:: $tail)?),)+ $(stringify!($webview),)+];
         #[cfg(all(test, target_os = "macos", not(feature = "native-webdriver")))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+        const NATIVE_COMMANDS: &[&str] = &[$(command_name!($head $(:: $tail)?),)+];
         #[cfg(all(test, target_os = "macos", feature = "native-webdriver"))]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($trial),)+];
+        const NATIVE_COMMANDS: &[&str] =
+            &[$(command_name!($head $(:: $tail)?),)+ $(stringify!($trial),)+];
 
         fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
             admit_pages::<tauri::Wry>(tauri::generate_handler![
-                $($command,)+
+                $($head $(:: $tail)?,)+
                 $(#[cfg(not(target_os = "macos"))] $webview,)+
                 $(#[cfg(all(target_os = "macos", feature = "native-webdriver"))] $trial,)+
             ])
@@ -6205,11 +6133,11 @@ native_commands! {
     desktop_install_dependency,
     desktop_fix_tool_permissions,
     desktop_set_refused_tool,
-    desktop_restore_status,
-    desktop_restore_pinned,
-    desktop_restore_recovery,
-    desktop_restore_recover,
-    desktop_restore_open_backups,
+    restore::desktop_restore_status,
+    restore::desktop_restore_pinned,
+    restore::desktop_restore_recovery,
+    restore::desktop_restore_recover,
+    restore::desktop_restore_open_backups,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,
@@ -6275,8 +6203,8 @@ native_commands! {
     desktop_set_quit_settings,
     desktop_provider_retry,
     desktop_set_provider_retry,
-    desktop_log_compaction,
-    desktop_set_log_compaction,
+    restore::desktop_log_compaction,
+    restore::desktop_set_log_compaction,
     desktop_learning_progress,
     desktop_set_learning_mark,
     desktop_master_step_settings,

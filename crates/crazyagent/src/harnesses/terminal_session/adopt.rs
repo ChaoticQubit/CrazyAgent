@@ -5,12 +5,12 @@ use super::{
 use crate::harnesses::interactive::settings::TerminalSettings;
 use crate::harnesses::interactive::{self, Transcript};
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
-use crate::harnesses::leftovers::LineageToken;
 use crate::harnesses::transcript::{READ_BYTES_MAX, TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
-use crate::sandbox::policy::{AgentAccess, AgentNetwork};
-use crate::sandbox::toolchains::Toolchain;
 use kernel_processes::terminal::{AgentId, Host};
+use kernel_sandbox::policy::{AgentAccess, AgentNetwork};
+use kernel_sandbox::profile::env::LineageToken;
+use kernel_sandbox::toolchains::Toolchain;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ pub enum RecordSource {
 /// keeps whether the pane's keeper was given the engine's freeze record, when the pane was
 /// last frozen, how long it was frozen before, and for a native lead the keepers of its
 /// servers, and the digests of the folders its sandbox hid, as
-/// [`crate::sandbox::hidden_paths::digest`] writes them. A record from an engine that did
+/// [`kernel_sandbox::hidden_paths::digest`] writes them. A record from an engine that did
 /// not keep the level, the files, the toolchains, the port, the network, the grants, the
 /// freeze facts or the hidden folders has none; no grants means none were held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ pub struct PaneRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<LineageToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grants: Option<Vec<crate::sandbox::policy::AccessGrant>>,
+    pub grants: Option<Vec<kernel_sandbox::policy::AccessGrant>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freeze: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,7 +196,7 @@ impl PaneRecord {
             .as_ref()
             .is_none_or(|files| files.home.is_absolute());
         let grants = record.grants.as_ref().is_none_or(|grants| {
-            crate::sandbox::policy::AgentPolicy {
+            kernel_sandbox::policy::AgentPolicy {
                 grants: grants.clone(),
                 ..Default::default()
             }
@@ -211,10 +211,10 @@ impl PaneRecord {
                     .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
         });
         let hidden = record.hidden.as_ref().is_none_or(|hidden| {
-            hidden.len() <= crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+            hidden.len() <= kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX
                 && hidden
                     .iter()
-                    .all(|digest| crate::sandbox::hidden_paths::digest_plain(digest))
+                    .all(|digest| kernel_sandbox::hidden_paths::digest_plain(digest))
         });
         let keepers = record.keepers.as_ref().is_none_or(|keepers| {
             keepers.len() <= KEEPERS_MAX

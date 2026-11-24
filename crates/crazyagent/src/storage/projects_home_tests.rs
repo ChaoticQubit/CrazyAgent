@@ -737,7 +737,7 @@ fn delete_everything_removes_the_projects_tool_cache_and_leaves_dev_null_alone()
     let base = root.path().canonicalize().unwrap();
     let web = base.join("home").join("web");
     std::fs::create_dir_all(&web).unwrap();
-    let cache = crate::sandbox::tool_cache::project_folder(&base, web.to_str().unwrap());
+    let cache = kernel_sandbox::tool_cache::project_folder(&base, web.to_str().unwrap());
     let bucket = cache
         .join("sandboxed-worktree")
         .join("uv")

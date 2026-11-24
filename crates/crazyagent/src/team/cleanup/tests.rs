@@ -1224,7 +1224,7 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
 }
 
 /// RV-DS241-204: while the next IDE terminal's launch gives its cargo `git` cache's name to the
-/// owner's ([`crate::sandbox::toolchains::prepare_cargo_home`]), a process left in a terminal
+/// owner's ([`kernel_sandbox::toolchains::prepare_cargo_home`]), a process left in a terminal
 /// keeps swapping that cache's folders, each at mode 000, for links to owner folders. No ACL
 /// or mode of an owner folder changes, and a launch with nothing swapping still links the
 /// owner's cache.
@@ -1301,15 +1301,24 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
             }
         })
     };
-    let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
+    let homes = kernel_sandbox::toolchains::ToolHomes::at(&account);
     let home = root.join("ide/home");
 
     let before = planted.load(Ordering::Relaxed);
-    let _ = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes);
+    let _ = kernel_sandbox::toolchains::prepare_cargo_home(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &home,
+        &homes,
+    );
     let landed = planted.load(Ordering::Relaxed) - before;
     stop.store(true, Ordering::Relaxed);
     swapper.join().unwrap();
-    let cargo = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes).unwrap();
+    let cargo = kernel_sandbox::toolchains::prepare_cargo_home(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &home,
+        &homes,
+    )
+    .unwrap();
 
     assert!(landed > 0, "no link was planted while the reset ran");
     assert_eq!(
@@ -1356,9 +1365,13 @@ fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_a
             std::os::unix::fs::symlink(&target, &moved).unwrap();
         });
         OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"c00".to_owned(), swap)));
-        let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
+        let homes = kernel_sandbox::toolchains::ToolHomes::at(&account);
 
-        let _ = crate::sandbox::toolchains::prepare_cargo_home(&root.join("ide/home"), &homes);
+        let _ = kernel_sandbox::toolchains::prepare_cargo_home(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &root.join("ide/home"),
+            &homes,
+        );
         let swapped = OPEN_UP_STEP.with(|slot| slot.borrow_mut().take().is_none());
         let mode = std::fs::symlink_metadata(&owned)
             .unwrap()
@@ -2522,8 +2535,8 @@ fn a_removal_preview_names_each_agent_s_unlanded_work_without_running_git_in_a_c
 #[cfg(target_os = "macos")]
 #[test]
 fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_ones() {
-    use crate::sandbox::policy::{AgentAccess, ToolCacheScope};
-    use crate::sandbox::tool_cache::{CacheShape, key, prepare, project_folder};
+    use kernel_sandbox::policy::{AgentAccess, ToolCacheScope};
+    use kernel_sandbox::tool_cache::{CacheShape, key, prepare, project_folder};
     let case = Case::new();
     case.agent(1, "sub", "stopped");
     case.agent(2, "sub", "stopped");
@@ -2566,7 +2579,14 @@ fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_on
     .collect();
     let folder = project_folder(runtime, project);
     for name in &names {
-        prepare(runtime, project, name, None).unwrap();
+        prepare(
+            &crate::sandbox::TOOL_CACHE_HOOKS,
+            runtime,
+            project,
+            name,
+            None,
+        )
+        .unwrap();
         write(&folder.join(format!("{name}.primed")), b"record\n");
     }
     assert_eq!(case.remove(&[1]), removed(&[1]));
@@ -2873,4 +2893,5 @@ fn removing_a_deleted_agent_s_files_removes_what_it_shut_and_pinned_in_its_home(
     assert!(!left, "the agent folder stayed");
 }
 
+#[cfg(target_os = "macos")]
 mod run_folder_tests;

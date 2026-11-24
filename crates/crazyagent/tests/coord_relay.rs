@@ -646,6 +646,7 @@ fn under_overlaps_block_the_edit_hook_still_denies_from_an_engine_in_an_app_bund
     std::fs::copy(env!("CARGO_BIN_EXE_crazyagent"), &engine).unwrap();
     let socket = crazyagent::team::caller::socket_for_mailbox(&team.mailbox).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &claimed.repo,
         &claimed.home,
         team.mailbox.parent().unwrap(),
@@ -1267,14 +1268,6 @@ fn engine_notes(db: &Connection, agent: i64) -> Vec<String> {
 }
 
 #[test]
-fn with_nudges_off_no_reminder_is_sent() {
-    let team = Team::new();
-    let (edits, notes) = nudged(&team, Nudges::Off);
-    assert_eq!(edits, ["", ""], "no hook reminder on an edit");
-    assert!(notes.is_empty(), "no engine reminder: {notes:?}");
-}
-
-#[test]
 fn with_ten_minutes_the_adoption_reminder_is_sent() {
     let team = Team::new();
     let (edits, notes) = nudged(&team, Nudges::TenMinutes);
@@ -1689,3 +1682,6 @@ fn the_monitor_prints_each_new_letter_for_its_session_once_and_exits_with_its_pa
     }
     assert_eq!(reader.join().unwrap(), "");
 }
+
+#[path = "coord_relay/nudges.rs"]
+mod nudges;

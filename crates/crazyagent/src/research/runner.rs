@@ -19,18 +19,19 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
-use crate::sandbox::hidden_paths::HiddenRun;
-use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
-use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::hidden_paths::HiddenRun;
+use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::toolchains;
+use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -1289,11 +1290,17 @@ impl ResearchRunner {
         private_directory(&tmp)?;
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
-        let scratch = toolchains::ScopedTmp::make(&home)?;
+        let scratch = toolchains::ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
         #[cfg(target_os = "macos")]
-        toolchains::write_getconf(&home, false)?;
-        toolchains::prepare_cargo_home(&home, &homes)?;
-        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
+        toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
+        kernel_sandbox::toolchains::prepare_cargo_home(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &home,
+            &homes,
+        )?;
+        let mut sandbox =
+            ProjectSandbox::new(&crate::sandbox::PROFILE_HOOKS, &root, &home, &tmp, network)?
+                .keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
         }
@@ -1323,8 +1330,8 @@ impl ResearchRunner {
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
             let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
-            let listed = crate::sandbox::hidden_paths::starting(
-                crate::sandbox::hidden_paths::RunKind::Research,
+            let listed = kernel_sandbox::hidden_paths::starting(
+                kernel_sandbox::hidden_paths::RunKind::Research,
                 project.as_str(),
             )
             .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?;
@@ -1332,7 +1339,11 @@ impl ResearchRunner {
                 .hidden_paths(&project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
             listed.hid(if unconfined { &[] } else { &hidden });
-            if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
+            if let Err(code) = kernel_sandbox::hidden_paths::none_tracked(
+                &crate::sandbox::ACCESS_HOOKS,
+                &root,
+                &hidden,
+            ) {
                 return Err(RunError::Invalid(code.into()));
             }
             for folder in &hidden {
@@ -1451,7 +1462,7 @@ impl ResearchRunner {
         };
         launch.current_dir(&worktree);
         if let Some(port) = installed.model_proxy() {
-            launch.envs(crate::sandbox::model_proxy::variables(port));
+            launch.envs(kernel_sandbox::model_proxy::variables(port));
         }
         let mut command = if unconfined {
             sandbox.wrap_unconfined(&launch)?
@@ -1916,7 +1927,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     #[cfg(unix)]
     pub agent: &'a str,
     #[cfg(unix)]
-    pub kind: Option<crate::sandbox::hidden_paths::RunKind>,
+    pub kind: Option<kernel_sandbox::hidden_paths::RunKind>,
     #[cfg(unix)]
     pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
@@ -2061,6 +2072,7 @@ impl ResearchRunner {
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
         let mut sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &work,
             &home,
             &tmp,
@@ -2076,7 +2088,7 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let listed = match (run.kind, run.project) {
             (Some(kind), Some(project)) => Some(
-                crate::sandbox::hidden_paths::starting(kind, project.as_str())
+                kernel_sandbox::hidden_paths::starting(kind, project.as_str())
                     .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?,
             ),
             _ => None,
@@ -2090,7 +2102,11 @@ impl ResearchRunner {
         if let Some(listed) = &listed {
             listed.hid(&hidden);
         }
-        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
+        if let Err(code) = kernel_sandbox::hidden_paths::none_tracked(
+            &crate::sandbox::ACCESS_HOOKS,
+            &folder,
+            &hidden,
+        ) {
             return Err(RunError::Invalid(code.into()));
         }
         for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
@@ -2103,10 +2119,10 @@ impl ResearchRunner {
                     .map_err(|_| RunError::Invalid("project agent policy unreadable".into()))?
                     .shared_folders
             }
-            None => crate::sandbox::shared_folders::SharedFolders::default(),
+            None => kernel_sandbox::shared_folders::SharedFolders::default(),
         };
-        let read_only = crate::sandbox::shared_folders::SharedFolders {
-            access: crate::sandbox::shared_folders::SharedAccess::ReadOnly,
+        let read_only = kernel_sandbox::shared_folders::SharedFolders {
+            access: kernel_sandbox::shared_folders::SharedAccess::ReadOnly,
             ..shared
         };
         sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &read_only)
@@ -2358,7 +2374,7 @@ fn job_kept_ports(
 /// refusal of a model this OS cannot reach, an endpoint no proxy names or a proxy that failed.
 pub(crate) fn job_reach(
     os: &str,
-    policy: &crate::sandbox::policy::AgentPolicy,
+    policy: &kernel_sandbox::policy::AgentPolicy,
     tools: bool,
     account: &ResearchAccount,
     job: i64,
@@ -3220,7 +3236,7 @@ pub(crate) fn add_worktree(
     _worktree: &Path,
 ) -> Result<(), RunError> {
     Err(RunError::Sandbox(SandboxError::Unavailable(
-        crate::sandbox::windows::SEATBELT_MISSING.into(),
+        kernel_sandbox::windows::SEATBELT_MISSING.into(),
     )))
 }
 
@@ -4789,7 +4805,7 @@ mod tests {
 
     #[test]
     fn a_research_job_network_follows_the_project_choice_only_with_tools() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let model = SandboxRemote::AnyHost(8443);
         let profile = |choice: AgentNetwork, tools: bool| {
             let policy = AgentPolicy {
@@ -4808,6 +4824,7 @@ mod tests {
                 .proxied("macos", tools, model)
                 .then_some(41_300);
             ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
                 &make("project"),
                 &make("home"),
                 &make("tmp"),
@@ -4905,7 +4922,7 @@ mod tests {
     /// model directly, and an endpoint no proxy can name is refused (S4B-M1).
     #[test]
     fn a_research_job_with_tools_under_no_network_reaches_its_model_only_through_a_model_proxy() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         use std::io::{BufRead, Write};
         let none = AgentPolicy {
             network: AgentNetwork::None,
@@ -4980,7 +4997,7 @@ mod tests {
     /// and the job fails once with the plain sentence for `model_loopback_unavailable_windows`.
     #[test]
     fn a_research_job_on_windows_with_a_model_on_this_computer_is_refused_under_every_choice() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let local = ResearchAccount::Endpoint {
             base_url: "http://localhost:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
@@ -5025,7 +5042,7 @@ mod tests {
     /// 06:42); on Linux and macOS the proxy row above still holds.
     #[test]
     fn a_windows_research_job_with_tools_under_no_network_starts_no_model_proxy() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let none = AgentPolicy {
             network: AgentNetwork::None,
             ..AgentPolicy::default()
@@ -5501,8 +5518,14 @@ mod tests {
                 .unwrap_err()
                 .line();
         assert!(matches!(harness_words(&program), Err(RunError::Invalid(code)) if code == line));
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         assert!(matches!(
             allow_harness(sandbox, &program),
             Err(RunError::Invalid(code)) if code == line
@@ -5926,7 +5949,7 @@ mod tests {
             let run = ReadOnlyRun {
                 name,
                 agent: "onboarding",
-                kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+                kind: Some(kernel_sandbox::hidden_paths::RunKind::Onboarding),
                 project: Some(&project),
                 folder,
                 prompt: "Map this repository.",
@@ -5961,7 +5984,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "onboard-m-alpha-1",
             agent: "onboarding",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Onboarding),
             project: Some(&project),
             folder: &folder,
             prompt: "Map this repository.",
@@ -6024,14 +6047,14 @@ mod tests {
         fs::write(folder.join(".env"), "TOKEN=1\n").unwrap();
         let project = ProjectId::new("alpha").unwrap();
         let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let policy = crate::sandbox::policy::AgentPolicy {
-            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+        let policy = kernel_sandbox::policy::AgentPolicy {
+            shared_folders: kernel_sandbox::shared_folders::SharedFolders {
                 secrets: vec![".env".into()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        crate::sandbox::policy_store::save(&connection, project.as_str(), &policy).unwrap();
         drop(connection);
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),
@@ -6041,7 +6064,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-1",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -6109,7 +6132,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-6",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -6163,16 +6186,16 @@ mod tests {
         }
         let project = ProjectId::new("alpha").unwrap();
         let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let policy = crate::sandbox::policy::AgentPolicy {
-            shared_folders: crate::sandbox::shared_folders::SharedFolders {
-                scope: crate::sandbox::shared_folders::SharedScope::Chosen,
-                access: crate::sandbox::shared_folders::SharedAccess::ReadWrite,
+        let policy = kernel_sandbox::policy::AgentPolicy {
+            shared_folders: kernel_sandbox::shared_folders::SharedFolders {
+                scope: kernel_sandbox::shared_folders::SharedScope::Chosen,
+                access: kernel_sandbox::shared_folders::SharedAccess::ReadWrite,
                 chosen: vec!["notes".into()],
                 secrets: Vec::new(),
             },
             ..Default::default()
         };
-        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        crate::sandbox::policy_store::save(&connection, project.as_str(), &policy).unwrap();
         drop(connection);
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),
@@ -6182,7 +6205,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-2",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -6294,7 +6317,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-3",
             agent: "overview",
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -6345,7 +6368,7 @@ mod tests {
             let run = ReadOnlyRun {
                 name,
                 agent: "overview",
-                kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+                kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
                 project: None,
                 folder: &folder,
                 prompt: "Describe this project.",
@@ -7020,90 +7043,6 @@ mod tests {
         assert_eq!(ends, [ResearchStatus::Queued; 5]);
     }
 
-    /// RV-DS241-159: only rate-limited ends in a row count toward the cap, so a run that is
-    /// saved, stopped, failed before its harness started or taken back stale starts the count
-    /// again. Each such end after two rate-limited ones leaves the count at zero, and the job
-    /// taken back stale takes two more rate-limited ends before the third fails it.
-    #[test]
-    fn an_end_other_than_a_rate_limit_starts_the_rate_limit_count_again() {
-        let root = engine_root();
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        register_project(&root.database, "alpha", &folder);
-        let jobs = ResearchJobs::open(&root.database).unwrap();
-        let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let account = reference("codex-connection");
-        let limited = |id: i64| -> i64 {
-            connection
-                .query_row(
-                    "SELECT limited FROM research_jobs WHERE id = ?1",
-                    [id],
-                    |row| row.get(0),
-                )
-                .unwrap()
-        };
-        let limited_twice = |kind: &str| {
-            let id = jobs.enqueue("alpha", kind, "codex", false).unwrap();
-            for _ in 0..2 {
-                let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-                assert_eq!(held.id, id);
-                assert_eq!(
-                    jobs.rate_limited(&held, &account).unwrap().0,
-                    ResearchStatus::Queued
-                );
-            }
-            assert_eq!(limited(id), 2);
-            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-            assert_eq!(held.id, id);
-            held
-        };
-
-        let saved = limited_twice("market_research");
-        jobs.finish(&saved, "context/research/market.md").unwrap();
-        assert_eq!(limited(saved.id), 0, "a saved run starts the count again");
-
-        let stopped = limited_twice("competitor_research");
-        jobs.cancelled(&stopped).unwrap();
-        assert_eq!(
-            limited(stopped.id),
-            0,
-            "a stopped run starts the count again"
-        );
-
-        let unspent = limited_twice("design_research");
-        assert_eq!(
-            jobs.fail_unspent(&unspent, "Provider refused").unwrap(),
-            ResearchStatus::Failed
-        );
-        assert_eq!(
-            limited(unspent.id),
-            0,
-            "a run failed before its harness started starts the count again"
-        );
-
-        let stale = limited_twice("tech_stack_research");
-        assert_eq!(jobs.recover_stale(0, 10).unwrap(), 1);
-        assert_eq!(
-            limited(stale.id),
-            0,
-            "a run taken back stale starts the count again"
-        );
-        let mut ends = Vec::new();
-        for _ in 0..3 {
-            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-            assert_eq!(held.id, stale.id);
-            ends.push(jobs.rate_limited(&held, &account).unwrap().0);
-        }
-        assert_eq!(
-            ends,
-            [
-                ResearchStatus::Queued,
-                ResearchStatus::Queued,
-                ResearchStatus::Failed
-            ]
-        );
-    }
-
     /// DEC-170 addendum 6 (RV-DS241-27): a research job its runner hands back because a
     /// projects home move holds its folder spends no attempt, is not claimed again until its
     /// backoff ends, shows why it waits and records no start, since no harness ran.
@@ -7346,8 +7285,14 @@ mod tests {
         )
         .unwrap();
         assert!(configured.success());
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = project.join("worktrees").join("agent-one");
@@ -7402,8 +7347,14 @@ mod tests {
                 .status
                 .success()
         );
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = project.join("worktrees").join("agent-one");
@@ -7490,8 +7441,14 @@ mod tests {
             fs::create_dir_all(folder).unwrap();
         }
         ensure_repository(&project, &tmp).unwrap();
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let printed = kernel_processes::spawn_gate::output(
@@ -7580,8 +7537,14 @@ mod tests {
                 assert!(engine_git(&project, &tmp, &["config", &key, &value]).unwrap());
             }
         }
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let refused = add_worktree(&sandbox, &profile, &worktrees.join("agent-1")).unwrap_err();
@@ -7615,9 +7578,14 @@ mod tests {
                 fs::create_dir_all(folder).unwrap();
             }
             ensure_repository(&project, &tmp).unwrap();
-            let sandbox =
-                ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-                    .unwrap();
+            let sandbox = ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                &project,
+                &home,
+                &tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .unwrap();
             let profile = profiles.join("agent.sb");
             sandbox.install(&profile).unwrap();
             setups.push((sandbox, profile, project));
@@ -7659,8 +7627,14 @@ mod tests {
         for folder in [&project, &home, &tmp] {
             fs::create_dir_all(folder).unwrap();
         }
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = base.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let refused = std::sync::Mutex::new(Vec::new());
@@ -7780,8 +7754,14 @@ mod tests {
             fs::create_dir_all(folder).unwrap();
         }
         repository_git(&project, &["init", "-q", "--template="]);
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = base.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = crate::projects_home::state_folder(&project)
@@ -7825,8 +7805,14 @@ mod tests {
             .unwrap();
         config.write_all(sections.as_bytes()).unwrap();
         drop(config);
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = base.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = crate::projects_home::state_folder(&project)
@@ -8032,9 +8018,14 @@ mod tests {
                 }
                 other => panic!("no setup for {other}"),
             }
-            let sandbox =
-                ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-                    .unwrap();
+            let sandbox = ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                &project,
+                &home,
+                &tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .unwrap();
             let profile = profiles.join("agent.sb");
             sandbox.install(&profile).unwrap();
             let worktree = project.join("worktrees").join("agent-one");
@@ -8431,6 +8422,8 @@ mod tests {
         assert_eq!(limited.answer(), None);
         assert!(limited.limited());
     }
+
+    mod rate_limit_count;
 }
 
 #[cfg(all(test, windows))]

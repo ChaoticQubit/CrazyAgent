@@ -1,4 +1,5 @@
 use super::{Dependency, Installer, Pin};
+use kernel_processes::install::{self, InstallPaths, InstallRecipe, SystemManager, Verb};
 use kernel_processes::run::run_bounded;
 use kernel_processes::run::{InstallError, Version};
 use std::path::{Path, PathBuf};
@@ -72,28 +73,47 @@ pub fn tmux_command(
         if kernel_processes::service::changeable_past_sticky(brew).is_some() {
             return Err(InstallError("setup_homebrew_unsafe"));
         }
-        let mut command = kept_environment(brew);
+        let recipe = InstallRecipe::BrewFormula {
+            name: formula.to_owned(),
+            verb: Verb::Install,
+        };
+        let mut command = kernel_command(&recipe, brew)?;
         command
-            .args(["install", "--formula", formula])
             .env("HOMEBREW_NO_AUTO_UPDATE", "1")
             .env("HOMEBREW_NO_ANALYTICS", "1");
         return Ok(command);
     }
-    match (root, manager) {
-        (true, Some(PackageManager::Apt)) => {
-            let mut command = kept_environment(Path::new(APT_GET));
-            command
-                .args(["install", "-y", "--no-install-recommends", formula])
-                .env("DEBIAN_FRONTEND", "noninteractive");
-            Ok(command)
-        }
-        (true, Some(PackageManager::Dnf)) => {
-            let mut command = kept_environment(Path::new(DNF));
-            command.args(["install", "-y", formula]);
-            Ok(command)
-        }
-        _ => Err(InstallError("setup_homebrew_missing")),
+    let (manager, program) = match (root, manager) {
+        (true, Some(PackageManager::Apt)) => (SystemManager::AptGet, APT_GET),
+        (true, Some(PackageManager::Dnf)) => (SystemManager::Dnf, DNF),
+        _ => return Err(InstallError("setup_homebrew_missing")),
+    };
+    let recipe = InstallRecipe::SystemPackage {
+        manager,
+        package: formula.to_owned(),
+    };
+    kernel_command(&recipe, Path::new(program))
+}
+
+/// The command of a recipe's one kernel step, its program and arguments from the kernel's
+/// template and its fixed environment on top of the kept one. Inputs: the recipe and the
+/// installer program. Output: the command, or `setup_pin_invalid` for a recipe the kernel
+/// refuses.
+fn kernel_command(recipe: &InstallRecipe, program: &Path) -> Result<Command, InstallError> {
+    let paths = InstallPaths {
+        program: Some(program.to_path_buf()),
+        ..InstallPaths::default()
+    };
+    let steps = install::steps(recipe, &paths).map_err(|_| InstallError("setup_pin_invalid"))?;
+    let [step] = steps.as_slice() else {
+        return Err(InstallError("setup_pin_invalid"));
+    };
+    let mut command = kept_environment(&step.program);
+    command.args(&step.args);
+    for (name, value) in &step.env {
+        command.env(name, value);
     }
+    Ok(command)
 }
 
 /// A command for one installer with the engine's environment cleared, keeping only a fixed

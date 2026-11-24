@@ -51,7 +51,14 @@ fn profile_build_p95() {
     let base = [("HOME", home.as_os_str()), ("TMPDIR", tmp.as_os_str())];
     let program = Path::new("/usr/bin/true");
     timed("profile_build_p95", || {
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap();
         sandbox.install(&profile).unwrap();
         let none = std::iter::empty::<(&OsStr, Option<&OsStr>)>();
         let command = agent_command(&profile, program, &base, none).unwrap();
@@ -61,18 +68,19 @@ fn profile_build_p95() {
 }
 
 /// Reading one project's saved agent policy from an engine database file, as every launch
-/// does through `sandbox::policy::load`. The policy is saved once first, so each read finds
+/// does through `sandbox::policy_store::load`. The policy is saved once first, so each read finds
 /// its row. Prints `budget policy_load_p95 p95_us=<n> runs=200`.
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
 fn policy_load_p95() {
-    use crazyagent::sandbox::policy::{self, AgentPolicy};
+    use crazyagent::sandbox::policy_store;
+    use kernel_sandbox::policy::AgentPolicy;
     let temp = tempfile::tempdir().unwrap();
     let connection = rusqlite::Connection::open(temp.path().join("engine.db")).unwrap();
     let saved = AgentPolicy::default();
-    policy::save(&connection, "budget-project", &saved).unwrap();
+    policy_store::save(&connection, "budget-project", &saved).unwrap();
     timed("policy_load_p95", || {
-        let loaded = policy::load(&connection, "budget-project").unwrap();
+        let loaded = policy_store::load(&connection, "budget-project").unwrap();
         assert_eq!(loaded, saved);
     });
 }
@@ -100,7 +108,14 @@ fn linux_policy_write_p95() {
     }
     let harness = Command::new("/bin/true");
     timed("linux_policy_write_p95", || {
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap();
         let linux = LinuxSandbox::detect(sandbox, helper).unwrap();
         let command = linux.wrap(&harness).unwrap();
         assert_ne!(command.get_program(), harness.get_program());

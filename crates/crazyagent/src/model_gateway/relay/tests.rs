@@ -1,4 +1,5 @@
 use super::*;
+use kernel_common::relay_names::{KEY_BYTES_MAX, LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use std::ffi::OsStr;
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -752,10 +753,7 @@ fn a_relay_listens_only_on_a_reserved_relay_port() {
         .collect();
     let mut ports: Vec<u16> = relays.iter().map(Relay::port).collect();
     for port in &ports {
-        assert!(
-            crate::sandbox::model_proxy::RELAY_PORTS.contains(port),
-            "{port}"
-        );
+        assert!(kernel_sandbox::ports::RELAY_PORTS.contains(port), "{port}");
     }
     ports.sort_unstable();
     ports.dedup();
@@ -769,7 +767,7 @@ fn a_relay_listens_only_on_a_reserved_relay_port() {
 #[test]
 fn an_open_agent_never_listens_on_a_model_relay_port() {
     let agent = crate::sandbox::test_agent::TestAgent::open();
-    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    let block = kernel_sandbox::ports::RELAY_PORTS;
     for port in [*block.start(), *block.end()] {
         for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
             let output = agent.run(&format!(
@@ -849,7 +847,10 @@ fn temp_files_holding(since: std::time::SystemTime, marker: &[u8]) -> Vec<PathBu
 /// request, no file in the temp folder holds its body.
 #[test]
 fn a_request_body_never_lands_in_the_temp_folder_an_agent_grant_reaches() {
-    let marker = format!("vid201-{}", random_hex(16).unwrap());
+    let marker = format!(
+        "vid201-{}",
+        &RelayToken::mint().unwrap().as_str()[TOKEN_PREFIX.len()..]
+    );
     let since = std::time::SystemTime::now();
     let during = Arc::new(Mutex::new(None));
     let (looked, probe) = (Arc::clone(&during), marker.clone());

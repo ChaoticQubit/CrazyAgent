@@ -2,9 +2,10 @@ use super::ports::{self, Ports};
 use super::workspace::IdePolicy;
 use super::{bridge, env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
-use crate::harnesses::leftovers::{self, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::harnesses::leftovers::{self, Lineage, Unstopped};
 use crate::protocol::ProjectId;
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 use rustix::process::{Pid, Signal};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -399,7 +400,8 @@ impl Servers {
             let mut command = command_off_thread(launch, &info, output, &mut start).await?;
             let lineage = lineage_env(&mut command, policy.access)?;
             self.prepare_extensions(&build, &folder).await?;
-            self.spawn(project, &slot, &info, &mut command)
+            let required = editor::required(policy.access);
+            self.spawn(project, &slot, &info, &mut command, required)
                 .map(|child| (child, lineage))
         }
         .await;
@@ -673,37 +675,6 @@ impl Servers {
         })
         .await
         .map_err(|_| failure("ide_extension_install_failed"))?
-    }
-
-    /// Starts a launch's server: refuses once [`Servers::stop_all`] began (a stop that begins
-    /// after this check is caught by [`ready`]), issues the project's capability for the
-    /// built-in extension at the launch's capability path, replacing any earlier one, then
-    /// spawns; a spawn that fails revokes it again. Inputs: the project, its slot with no
-    /// launch, the launch's info and its command. Output: the leader, or a plain refusal.
-    fn spawn(
-        &self,
-        project: &ProjectId,
-        slot: &Slot,
-        info: &ServerInfo,
-        command: &mut Command,
-    ) -> Result<Child, EngineError> {
-        {
-            let state = locked(&slot.state);
-            assert!(state.is_none());
-            if self.closed.load(Ordering::SeqCst) {
-                return Err(failure("ide_servers_closed"));
-            }
-        }
-        let data = self
-            .folder
-            .parent()
-            .ok_or_else(|| failure("ide_state_unavailable"))?;
-        let capability = self.grants.issue(data, project)?;
-        assert_eq!(capability, info.capability_path);
-        kernel_processes::spawn_gate::spawn(command).map_err(|_| {
-            let _ = self.grants.revoke(project);
-            failure("ide_server_start_failed")
-        })
     }
 
     /// The engine data root this register's IDE folder sits in, which holds the database the
@@ -1097,7 +1068,8 @@ fn command(
         record_tmp(folder, &tmp);
         tmp
     } else {
-        crate::sandbox::toolchains::make_tmp(&home).map_err(|_| failure("ide_state_unavailable"))?
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home)
+            .map_err(|_| failure("ide_state_unavailable"))?
     };
     let hooks = (confined && policy.hooks).then_some(launch.root);
     let index_project = confined.then_some(launch.root);
@@ -1200,7 +1172,7 @@ fn refuse_planted_git(home: &Path, limit: usize) -> Result<(), EngineError> {
 }
 
 /// Makes a confined start's own short temp folder, one no earlier start used: the folder
-/// [`crate::sandbox::toolchains::make_tmp`] keys by a fresh random name under the server
+/// [`kernel_sandbox::toolchains::make_tmp`] keys by a fresh random name under the server
 /// data folder's path, where nothing is made. What an earlier session left in its temp
 /// folder, a `.git`, a shut folder or any number of entries, is then outside this start's
 /// profile. Input: the server data folder. Output: the new folder,
@@ -1210,10 +1182,11 @@ fn fresh_tmp(home: &Path) -> Result<PathBuf, EngineError> {
     getrandom::fill(&mut start).map_err(|_| failure("ide_entropy_unavailable"))?;
     let name: String = start.iter().map(|byte| format!("{byte:02x}")).collect();
     let key = home.join(format!("start-{name}"));
-    if fs::symlink_metadata(crate::sandbox::toolchains::tmp_path(&key)).is_ok() {
+    if fs::symlink_metadata(kernel_sandbox::toolchains::tmp_path(&key)).is_ok() {
         return Err(failure("ide_state_unavailable"));
     }
-    crate::sandbox::toolchains::make_tmp(&key).map_err(|_| failure("ide_state_unavailable"))
+    kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &key)
+        .map_err(|_| failure("ide_state_unavailable"))
 }
 
 /// Records the temp folder a confined start made in the project's IDE folder, never through
@@ -1243,7 +1216,7 @@ fn record_tmp(folder: &Path, tmp: &Path) {
 fn remove_recorded_tmp(folder: &Path) {
     let record = folder.join(TMP_RECORD);
     if let Some(tmp) = recorded_tmp(&record)
-        && crate::sandbox::toolchains::own_short_tmp(&tmp)
+        && kernel_sandbox::toolchains::own_short_tmp(&tmp)
     {
         match retire(&tmp) {
             Some(gone) => remove_in_background(gone),
@@ -1294,7 +1267,7 @@ const TMP_GONE: &str = "-gone-";
 /// short temp folder's name, [`TMP_GONE`] and [`GONE_BYTES`] of lowercase hex, and a private
 /// folder of this user, never a link. Input: the path. Output: the answer.
 fn retired(path: &Path) -> bool {
-    let parent = Path::new(crate::sandbox::toolchains::TMP_PARENT);
+    let parent = Path::new(kernel_sandbox::toolchains::TMP_PARENT);
     let hex = |text: &str| {
         text.len() == 2 * GONE_BYTES
             && text
@@ -1309,9 +1282,9 @@ fn retired(path: &Path) -> bool {
         return false;
     };
     path.parent() == Some(parent)
-        && crate::sandbox::toolchains::in_agent_tmp(&parent.join(short))
+        && kernel_sandbox::toolchains::in_agent_tmp(&parent.join(short))
         && hex(suffix)
-        && crate::sandbox::toolchains::private_folder_pin(path).is_some()
+        && kernel_sandbox::toolchains::private_folder_pin(path).is_some()
 }
 
 /// Removes, on a thread of its own and as [`remove_in_background`] does, the folders
@@ -1323,7 +1296,7 @@ fn sweep_retired(limit: usize) -> Option<std::thread::JoinHandle<usize>> {
     std::thread::Builder::new()
         .name("ide-tmp-sweep".into())
         .spawn(move || {
-            let Ok(entries) = fs::read_dir(crate::sandbox::toolchains::TMP_PARENT) else {
+            let Ok(entries) = fs::read_dir(kernel_sandbox::toolchains::TMP_PARENT) else {
                 return 0;
             };
             let mut removed = 0;
@@ -1357,7 +1330,7 @@ fn recorded_tmp(record: &Path) -> Option<PathBuf> {
 
 /// The launcher's command at the project's level: under the Seatbelt profile installed for
 /// this launch at Sandboxed and Own branch, with the network
-/// [`crate::sandbox::policy::ide_network`] gives that level, and with no profile at Full
+/// [`kernel_sandbox::policy::ide_network`] gives that level, and with no profile at Full
 /// access. The profile keeps the Remote settings folder locked, the extensions folder read
 /// only and agent folders as the owner chose ([`super::workspace::agent_files_rule`]). Inputs: the launch, the server's info and its places. Output: the command, or the
 /// profile's refusal.
@@ -1390,7 +1363,7 @@ fn launcher_command(
         ],
         locked: &[machine.as_path()],
     };
-    let network = crate::sandbox::policy::ide_network(level, launch.policy.network);
+    let network = kernel_sandbox::policy::ide_network(level, launch.policy.network);
     let agent_files = super::workspace::agent_files_rule(
         places.data,
         launch.project,
@@ -1618,6 +1591,8 @@ pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
     assert!(named.iter().all(|(pid, _)| *pid > 0));
     Ok(named)
 }
+
+mod editor;
 
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod tests;

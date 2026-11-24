@@ -207,7 +207,7 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
         version: 0,
         paths,
     };
-    let limit = crate::sandbox::extra_paths::EXTRA_PATHS_MAX;
+    let limit = kernel_sandbox::extra_paths::EXTRA_PATHS_MAX;
     assert!(action(vec!["/tmp/a".into(); limit]).validate().is_ok());
     assert!(action(vec![]).validate().is_ok());
     for paths in [
@@ -224,9 +224,12 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
 /// here: every level on macOS, Sandboxed alone on Linux.
 #[test]
 fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
-    use crate::sandbox::policy::{AgentAccess, LevelView};
+    use kernel_sandbox::policy::{AgentAccess, LevelView};
     let catalog = catalog(&config(), None, &[], &BTreeSet::new(), None).unwrap();
-    assert_eq!(catalog.agent_access, LevelView::all(None));
+    assert_eq!(
+        catalog.agent_access,
+        LevelView::all(&crate::sandbox::POLICY_HOOKS, None)
+    );
     let runs: Vec<(AgentAccess, bool)> = catalog
         .agent_access
         .iter()
@@ -716,18 +719,6 @@ fn claims_follow_pool_assignment_and_finish_records_the_report() {
         )
         .unwrap();
     assert_eq!(stored, "needs_pool");
-}
-
-#[test]
-fn markdown_sections_are_selected_by_heading() {
-    let report = "# Market\nintro\n## Size\nbig\n### Detail\nfine\n## Trends\nup\n";
-    assert_eq!(section(report, None).unwrap(), report.trim());
-    assert_eq!(
-        section(report, Some("Size")).unwrap(),
-        "## Size\nbig\n### Detail\nfine"
-    );
-    assert_eq!(section(report, Some("Trends")).unwrap(), "## Trends\nup");
-    assert!(section(report, Some("Absent")).is_none());
 }
 
 #[test]
@@ -1789,3 +1780,5 @@ fn a_new_project_build_stopped_before_it_starts_leaves_no_staging_folder() {
     );
     assert!(!home.join("notes").exists());
 }
+
+mod markdown_sections;

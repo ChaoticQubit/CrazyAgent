@@ -282,8 +282,10 @@ impl Case {
                 params![agent, PROJECT, worktree],
             )
             .unwrap();
-        crate::sandbox::extra_paths::save(&self.db, PROJECT, &[self.repo.join("docs")]).unwrap();
-        crate::sandbox::hidden_paths::save(&self.db, PROJECT, &[self.repo.join("secret")]).unwrap();
+        crate::sandbox::access_store::read::save(&self.db, PROJECT, &[self.repo.join("docs")])
+            .unwrap();
+        crate::sandbox::access_store::hidden::save(&self.db, PROJECT, &[self.repo.join("secret")])
+            .unwrap();
     }
 
     /// Records one research job of the project. Input: its status.
@@ -1020,7 +1022,7 @@ fn a_long_stored_project_move_reroots_rows_recorded_under_the_short_name() {
         ))
     });
     let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
-    crate::sandbox::hidden_paths::save(&case.db, PROJECT, &[short.join("drafts")]).unwrap();
+    crate::sandbox::access_store::hidden::save(&case.db, PROJECT, &[short.join("drafts")]).unwrap();
     assert_eq!(
         case.move_project(AddMode::Move, &[]).unwrap(),
         Finished::Moved { repointed: 0 },
@@ -1028,7 +1030,7 @@ fn a_long_stored_project_move_reroots_rows_recorded_under_the_short_name() {
     );
     assert_eq!(case.stored_folder(), case.target());
     assert_eq!(
-        crate::sandbox::hidden_paths::load(&case.db, PROJECT).unwrap(),
+        crate::sandbox::access_store::hidden::load(&case.db, PROJECT).unwrap(),
         vec![case.target().join("drafts")]
     );
 }
@@ -1534,41 +1536,6 @@ fn work_that_starts_between_the_plan_and_the_disk_work_refuses_the_move() {
     assert_eq!(case.stored_folder(), case.target());
 }
 
-/// While a project move is pending, a master session cannot take a working copy of the
-/// repository in the folder being moved; it can once the move is finished or forgotten.
-#[test]
-fn a_pending_project_move_refuses_a_master_working_copy_of_its_repository() {
-    use crate::protocol::{Outcome, SessionId, TaskId};
-    let case = Case::new();
-    let project = ProjectId::new(PROJECT).unwrap();
-    let reserve = |case: &Case| {
-        let tx = case.db.unchecked_transaction().unwrap();
-        crate::worktrees::reserve_master_bootstrap(
-            &tx,
-            &case.engine,
-            &project,
-            &TaskId::new("task-1").unwrap(),
-            &SessionId::new("session-1").unwrap(),
-            text(&case.repo),
-        )
-        .unwrap()
-    };
-    case.plan(AddMode::Move, &[]).unwrap();
-    assert_eq!(
-        reserve(&case),
-        Outcome::Rejected {
-            code: "move_project_in_progress".into()
-        }
-    );
-    assert_eq!(case.finish(false), Some(Finished::Left));
-    assert_eq!(
-        reserve(&case),
-        Outcome::Rejected {
-            code: "repository_not_admitted".into()
-        }
-    );
-}
-
 #[test]
 fn landing_work_in_flight_holds_the_folder_and_the_move_holds_it_until_its_record() {
     let case = Case::new();
@@ -1642,3 +1609,5 @@ fn a_stop_while_a_move_waits_for_its_agents_ends_it_with_nothing_moved() {
     assert_eq!(case.finish(false), Some(Finished::Left));
     assert_eq!(case.stored_folder(), case.repo);
 }
+
+mod master_copy;

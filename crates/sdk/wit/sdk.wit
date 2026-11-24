@@ -9,9 +9,23 @@ interface sdk-types {
   variant refusal {
     not-granted(not-granted),
     tier-too-high(string),
+    plugin-off(string),
     rejected(string),
     failed(string),
   }
+}
+
+interface editor-types {
+  record editor-launch {
+    project: string,
+  }
+}
+
+interface editor {
+  use sdk-types.{refusal};
+  use editor-types.{editor-launch};
+
+  spawn: func(launch: editor-launch) -> result<u32, refusal>;
 }
 
 interface net-types {
@@ -202,6 +216,7 @@ interface update {
 }
 
 world plugin {
+  import editor;
   import net;
   import process;
   import secrets;

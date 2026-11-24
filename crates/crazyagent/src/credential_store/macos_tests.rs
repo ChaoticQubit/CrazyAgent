@@ -22,7 +22,7 @@ impl Scratch {
         let mut keychain = TestKeychain::temporary();
         keychain.serve(&namespace);
         Self {
-            store: Keychain::new(&namespace).unwrap(),
+            store: super::keychain(&namespace).unwrap(),
             namespace,
             keychain,
         }
@@ -61,7 +61,7 @@ fn token() -> String {
 #[test]
 fn a_lib_test_store_lives_in_its_own_temporary_keychain() {
     let scratch = Scratch::new();
-    assert_eq!(scratch.store.keychain, scratch.keychain.path());
+    assert_eq!(scratch.store.path(), scratch.keychain.path());
     let value = token();
     let service = scratch.service("github");
     scratch
@@ -87,7 +87,7 @@ fn a_lib_test_store_lives_in_its_own_temporary_keychain() {
 #[test]
 fn a_lib_test_store_with_no_temporary_keychain_is_refused() {
     let namespace = format!("dev.crazyagent.test-unserved-{}", suffix());
-    let refused = std::panic::catch_unwind(|| Keychain::new(&namespace).map(drop));
+    let refused = std::panic::catch_unwind(|| super::keychain(&namespace).map(drop));
     assert!(
         refused.is_err(),
         "{namespace} opened a store with no temporary keychain"
@@ -179,9 +179,9 @@ fn keychain_never_touches_items_outside_its_own_namespace() {
             "credential_name_invalid"
         );
     }
-    assert!(Keychain::new("dev").is_err());
-    assert!(Keychain::new("com.apple.x").is_err());
-    assert!(Keychain::new("dev.crazyagent.x'y").is_err());
+    assert!(super::keychain("dev").is_err());
+    assert!(super::keychain("com.apple.x").is_err());
+    assert!(super::keychain("dev.crazyagent.x'y").is_err());
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn a_bearer_token_of_up_to_16_kib_is_held_but_the_keychain_refuses_to_store_it()
     let scratch = Scratch::new();
     let service = scratch.service("github");
     let long =
-        SecretString::bearer(vec![b'z'; kernel_security::secret::SECRET_BYTES_MAX + 1]).unwrap();
+        SecretString::bearer(vec![b'z'; kernel_security::secret::STORED_BYTES_MAX + 1]).unwrap();
     assert_eq!(
         scratch.store.put(&service, "token", &long).unwrap_err().0,
         "credential_secret_invalid"
@@ -292,4 +292,37 @@ fn a_bearer_token_of_up_to_16_kib_is_held_but_the_keychain_refuses_to_store_it()
             .0,
         "credential_missing"
     );
+}
+
+#[test]
+#[should_panic(expected = "has no temporary test keychain; lib tests never open the owner's")]
+fn a_lib_test_keychain_for_an_unserved_namespace_panics() {
+    let namespace = format!("dev.crazyagent.test-unserved-{}", suffix());
+    let _ = super::keychain(&namespace);
+}
+
+#[test]
+fn keychain_uses_the_test_home_in_lib_tests() {
+    let namespace = format!("dev.crazyagent.test-{}", suffix());
+    let mut keychain = TestKeychain::temporary();
+    keychain.serve(&namespace);
+    let store = super::keychain(&namespace).unwrap();
+    let home = test_keychain::home_for(&namespace).unwrap();
+    assert_eq!(store.path(), keychain.path());
+    assert!(
+        store.path().starts_with(&home),
+        "{}",
+        store.path().display()
+    );
+}
+
+#[test]
+fn a_namespace_outside_the_engine_root_is_refused_before_any_home_is_looked_up() {
+    for namespace in ["dev", "dev.crazyagent.", "com.example.app"] {
+        assert_eq!(
+            super::keychain(namespace).map(drop),
+            Err(StoreError::code("credential_namespace_refused")),
+            "{namespace}"
+        );
+    }
 }

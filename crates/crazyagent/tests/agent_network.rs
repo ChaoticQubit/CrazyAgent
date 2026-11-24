@@ -7,7 +7,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::plugins::{Scope, ServerSpec, ServerStatus};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
-use crazyagent::sandbox::policy::{AgentNetwork, AgentPolicy};
+use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

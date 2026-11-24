@@ -174,11 +174,13 @@ pub(crate) fn update(
             },
         ));
     };
-    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(repo, hidden) {
+    if let Err(code) =
+        kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, repo, hidden)
+    {
         return Ok(GraphEnding::Failed(code));
     }
     let kept = kept_paths(repo, &kept_out);
-    if kept.len() > crate::sandbox::KEPT_OUT_MAX
+    if kept.len() > kernel_sandbox::profile::consts::KEPT_OUT_MAX
         || !kept.iter().all(|path| ProjectSandbox::keepable(path))
     {
         return Ok(GraphEnding::Failed(GRAPH_KEEP_OUT_REFUSED));
@@ -206,8 +208,14 @@ pub(crate) fn update(
     private_directory(&home)?;
     let tmp = agent.join("tmp");
     private_directory(&tmp)?;
-    let mut sandbox = ProjectSandbox::new(&out, &home, &tmp, SandboxNetwork::Only(Vec::new()))?
-        .allow_read(repo)?;
+    let mut sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &out,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )?
+    .allow_read(repo)?;
     let (roots, link) = read_roots(&graphify);
     for root in &roots {
         sandbox = sandbox.allow_read(root)?;

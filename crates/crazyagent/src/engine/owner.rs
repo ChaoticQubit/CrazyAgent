@@ -175,7 +175,7 @@ pub enum OwnerMutation {
     SetProjectAgentPolicy {
         project_id: ProjectId,
         version: u64,
-        policy: crate::sandbox::policy::AgentPolicy,
+        policy: kernel_sandbox::policy::AgentPolicy,
     },
     Team {
         action: crate::team::TeamAction,
@@ -927,6 +927,7 @@ pub enum OwnerRead {
         after: Cursor,
     },
     Capabilities,
+    PluginGrants,
 }
 
 impl OwnerRead {
@@ -944,6 +945,7 @@ impl OwnerRead {
             | Self::Page { .. }
             | Self::Baseline { .. }
             | Self::Capabilities
+            | Self::PluginGrants
             | Self::ConversationHistory { .. }
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
@@ -1259,13 +1261,13 @@ pub enum OwnerData {
         paths: Vec<String>,
         version: u64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        runs: Vec<crate::sandbox::hidden_paths::RunKind>,
+        runs: Vec<kernel_sandbox::hidden_paths::RunKind>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         unavailable: bool,
     },
     ProjectAgentPolicy {
         project_id: ProjectId,
-        policy: crate::sandbox::policy::PolicyView,
+        policy: kernel_sandbox::policy::PolicyView,
     },
     ResearchJobs {
         project_id: ProjectId,
@@ -1322,6 +1324,9 @@ pub enum OwnerData {
     },
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    PluginGrants {
+        plugins: Vec<kernel_plugin_host::grants::PluginGrants>,
     },
     ProviderRetry {
         settings: crate::provider_retry::ProviderRetryView,

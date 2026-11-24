@@ -559,7 +559,8 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
-    use crate::sandbox::toolchains::{self, ToolHomes};
+    use kernel_sandbox::toolchains;
+    use kernel_sandbox::toolchains::ToolHomes;
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-agent-git-")
@@ -595,17 +596,18 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
             .unwrap()
             .to_owned()
     };
-    let tools_on = toolchains::agent_path(&ToolHomes::owner().unwrap(), super::TOOLS_ON_PATH);
+    let tools_on =
+        kernel_sandbox::toolchains::agent_path(&ToolHomes::owner().unwrap(), super::TOOLS_ON_PATH);
     assert_eq!(path_of(true), tools_on);
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
-    let tmp = toolchains::make_tmp(&home).unwrap();
+    let tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let bin = tmp.join("bin");
     assert_eq!(path_of(true), format!("{}:{tools_on}", bin.display()));
     assert_eq!(
         path_of(false),
         format!("{}:{}", bin.display(), super::TOOLS_OFF_PATH)
     );
-    toolchains::remove_tmp(&home).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
 }
 
@@ -1234,7 +1236,7 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
     let token = format!(
         "{}{}",
-        crate::model_gateway::relay::TOKEN_PREFIX,
+        kernel_common::relay_names::TOKEN_PREFIX,
         "a".repeat(64)
     );
     launch.request.executable = harness;

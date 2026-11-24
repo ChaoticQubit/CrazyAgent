@@ -1670,8 +1670,14 @@ fn read_from_an_agent_container(hwnd: HWND, client: Client) -> Vec<String> {
             compiled_command(&binary, hwnd, "text")
         }
     };
-    let sandbox =
-        ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).expect("a policy");
+    let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Open,
+    )
+    .expect("a policy");
     let profile = profiles.join("agent.sb");
     let installed =
         InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off);
@@ -1830,20 +1836,6 @@ fn an_agent_container_reaches_the_view_and_reads_nothing_of_it() {
     let (parent, webview) = stand_ins();
     let (view, temp) = shown_for_readers(parent, webview);
     the_wall(&view, &temp.path().join("reader.ps1"));
-    drop(view);
-    assert_eq!(
-        draw::counts().1,
-        0,
-        "no surface setup, swap-chain wait or draw failed"
-    );
-}
-
-#[test]
-#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
-fn a_screen_reader_reads_lines_the_selection_bounds_and_events() {
-    let (parent, webview) = stand_ins();
-    let (view, _temp) = shown_for_readers(parent, webview);
-    read_in_full(&view);
     drop(view);
     assert_eq!(
         draw::counts().1,
@@ -2751,3 +2743,5 @@ fn a_later_style_reaches_the_render_thread_and_every_live_views_cell() {
     drop(view);
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
+
+mod screen_reader;

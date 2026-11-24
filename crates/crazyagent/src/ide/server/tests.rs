@@ -1,10 +1,10 @@
 use super::*;
 use crate::ide::workspace::{IdePolicy, ide_policy};
 use crate::sandbox::ProjectSandbox;
-use crate::sandbox::policy::{
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
 };
-use kernel_sandbox::net::SandboxNetwork;
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -415,6 +415,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
         fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700)).unwrap();
     }
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &root.join("project"),
         &root.join("home"),
         &root.join("tmp"),
@@ -428,7 +429,14 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     assert!(sandbox.clone().allow_read(&ide).is_err());
     assert!(sandbox.clone().allow_read(&folder).is_err());
     assert!(sandbox.clone().allow_worktree(&folder).is_err());
-    assert!(crate::sandbox::extra_paths::checked(folder.to_str().unwrap(), data.path()).is_err());
+    assert!(
+        kernel_sandbox::extra_paths::checked(
+            &crate::sandbox::ACCESS_HOOKS,
+            folder.to_str().unwrap(),
+            data.path()
+        )
+        .is_err()
+    );
     let profile = root.join("profiles").join("agent.sb");
     sandbox.install(&profile).unwrap();
     let mut cat = sandbox.command(&profile, Path::new("/bin/cat"));
@@ -1393,7 +1401,11 @@ fn a_git_moved_into_the_old_server_temp_folder_is_outside_the_next_confined_star
     let root = fs::canonicalize(checkout.path()).unwrap();
     let id = project("moved-to-tmp");
     let folder = servers.prepare(&id).unwrap();
-    let tmp = crate::sandbox::toolchains::make_tmp(&folder.join(SERVER_DATA)).unwrap();
+    let tmp = kernel_sandbox::toolchains::make_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &folder.join(SERVER_DATA),
+    )
+    .unwrap();
     let planted = tmp.join("x").join(".git");
     fs::create_dir_all(planted.join("hooks")).unwrap();
     let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
@@ -1472,7 +1484,7 @@ fn moved_aside(tmp: &Path) -> Vec<PathBuf> {
     let mut prefix = tmp.file_name().unwrap().to_os_string();
     prefix.push(TMP_GONE);
     let prefix = prefix.into_string().unwrap();
-    fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+    fs::read_dir(kernel_sandbox::toolchains::TMP_PARENT)
         .unwrap()
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
@@ -1513,11 +1525,15 @@ fn the_next_confined_start_removes_an_earlier_temp_folder_its_session_shut_and_p
 #[test]
 fn the_engine_start_sweep_removes_a_left_temp_folder_that_was_shut_and_pinned() {
     let home = scratch();
-    let tmp = crate::sandbox::toolchains::make_tmp(&home.path().join("left")).unwrap();
+    let tmp = kernel_sandbox::toolchains::make_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &home.path().join("left"),
+    )
+    .unwrap();
     shut_and_pin(&tmp);
     let gone = retire(&tmp).expect("the temp folder moves aside");
     assert!(retired(&gone), "{}", gone.display());
-    let entries = fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+    let entries = fs::read_dir(kernel_sandbox::toolchains::TMP_PARENT)
         .unwrap()
         .count();
     let removed = sweep_retired(entries + GONE_SCAN_MAX)
@@ -1614,7 +1630,11 @@ fn the_next_start_removes_the_temp_folder_a_crash_left_recorded() {
     let root = fs::canonicalize(checkout.path()).unwrap();
     let id = project("crash-left-tmp");
     let folder = servers.prepare(&id).unwrap();
-    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("crashed")).unwrap();
+    let left = kernel_sandbox::toolchains::make_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &keys.path().join("crashed"),
+    )
+    .unwrap();
     fs::create_dir_all(left.join("pip-req-build").join(".git")).unwrap();
     record_server_tmp(&folder, &left);
     let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
@@ -1640,9 +1660,13 @@ fn a_recorded_path_that_is_not_an_own_short_temp_folder_is_left_alone() {
     let root = fs::canonicalize(checkout.path()).unwrap();
     let keep = outside.path().join("keep");
     fs::write(&keep, "owner data\n").unwrap();
-    let link = crate::sandbox::toolchains::tmp_path(&keys.path().join("link"));
+    let link = kernel_sandbox::toolchains::tmp_path(&keys.path().join("link"));
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-    let open = crate::sandbox::toolchains::make_tmp(&keys.path().join("open")).unwrap();
+    let open = kernel_sandbox::toolchains::make_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &keys.path().join("open"),
+    )
+    .unwrap();
     fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
     let named = scratch();
     let plants: [(&str, Option<&Path>); 4] = [
@@ -1692,7 +1716,11 @@ fn removing_a_recorded_temp_folder_never_follows_a_link_in_it() {
     fs::write(&file, "owner data\n").unwrap();
     fs::create_dir_all(inner.parent().unwrap()).unwrap();
     fs::write(&inner, "owner data\n").unwrap();
-    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("links")).unwrap();
+    let left = kernel_sandbox::toolchains::make_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &keys.path().join("links"),
+    )
+    .unwrap();
     std::os::unix::fs::symlink(&file, left.join("file-link")).unwrap();
     std::os::unix::fs::symlink(inner.parent().unwrap(), left.join("folder-link")).unwrap();
     record_server_tmp(&folder, &left);
@@ -2562,7 +2590,7 @@ fn set_level(data: &Path, project: &ProjectId, access: AgentAccess) {
         access,
         ..AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Saves a project's access level and IDE hooks switch in the engine database of a test
@@ -2575,7 +2603,7 @@ fn set_policy(data: &Path, project: &ProjectId, access: AgentAccess, hooks: bool
         ide_git_hooks: hooks,
         ..AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Saves a project's access level and agent folders choice in the engine database of a test
@@ -2588,25 +2616,25 @@ fn set_agent_files(data: &Path, project: &ProjectId, access: AgentAccess, choice
         ide_agent_files: choice,
         ..AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Changes only the agent folders choice of a project's saved policy in a test data root.
 /// Inputs: the data root, the project and the choice.
 fn change_agent_files(data: &Path, project: &ProjectId, choice: IdeAgentFiles) {
     let db = crate::landing::open(data).unwrap();
-    let mut policy = crate::sandbox::policy::load(&db, project.as_str()).unwrap();
+    let mut policy = crate::sandbox::policy_store::load(&db, project.as_str()).unwrap();
     policy.ide_agent_files = choice;
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Changes only the network choice of a project's saved policy in a test data root. Inputs:
 /// the data root, the project and the choice.
 fn set_network(data: &Path, project: &ProjectId, network: AgentNetwork) {
     let db = crate::landing::open(data).unwrap();
-    let mut policy = crate::sandbox::policy::load(&db, project.as_str()).unwrap();
+    let mut policy = crate::sandbox::policy_store::load(&db, project.as_str()).unwrap();
     policy.network = network;
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Opens a project's server in a new checkout and data root at a saved level and hooks
@@ -2850,48 +2878,6 @@ fn a_launch_profile_holds_the_saved_agent_folders_choice() {
             }
         }
     }
-}
-
-/// DEC-124 r1 M1: in a project with no `.crazyagent` folder, an agent folder the engine makes
-/// under `<folder>/worktrees` after the IDE opened keeps every file under No delete or rename,
-/// while the owner's own files stay removable.
-#[test]
-fn a_project_without_a_crazyagent_folder_holds_agents_started_after_its_ide_opened() {
-    let (checkout, data) = (scratch(), scratch());
-    let servers = servers_in(data.path(), IDLE_LIMIT);
-    let root = fs::canonicalize(checkout.path()).unwrap();
-    assert_eq!(crate::projects_home::state_folder(&root), root);
-    let id = project("legacy-later-agent");
-    set_agent_files(
-        data.path(),
-        &id,
-        AgentAccess::Sandboxed,
-        IdeAgentFiles::NoDeleteOrRename,
-    );
-    let (_, folder) = built_server(&servers, &id, &root);
-    let agent = root.join("worktrees").join("agent-1");
-    fs::create_dir_all(&agent).unwrap();
-    let file = agent.join("a.txt");
-    fs::write(&file, "agent\n").unwrap();
-    let own = root.join("own.txt");
-    fs::write(&own, "owner\n").unwrap();
-    let removes = |path: &Path| {
-        let mut rm = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/bin/rm"));
-        rm.arg("-f")
-            .arg(path)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        kernel_processes::spawn_gate::output(&mut rm)
-            .unwrap()
-            .status
-            .success()
-    };
-    assert!(!removes(&file));
-    assert_eq!(fs::read_to_string(&file).unwrap(), "agent\n");
-    assert!(removes(&own));
-    assert!(!own.exists());
 }
 
 #[test]
@@ -3274,7 +3260,11 @@ fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path()
     let (data, keys) = (scratch(), scratch());
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let folder = servers.prepare(&project("tmp-aside")).unwrap();
-    let left = crate::sandbox::toolchains::make_tmp(&keys.path().join("aside")).unwrap();
+    let left = kernel_sandbox::toolchains::make_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &keys.path().join("aside"),
+    )
+    .unwrap();
     let shut = Path::new("deep").join("shut");
     fs::create_dir_all(left.join(&shut).join("inner")).unwrap();
     fs::set_permissions(left.join(&shut), fs::Permissions::from_mode(0o000)).unwrap();
@@ -3317,7 +3307,11 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
         tmp.with_file_name(format!("{short}{TMP_GONE}{suffix}"))
     };
     let aside = |key: &str, suffix: &str| {
-        let tmp = crate::sandbox::toolchains::make_tmp(&keys.path().join(key)).unwrap();
+        let tmp = kernel_sandbox::toolchains::make_tmp(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &keys.path().join(key),
+        )
+        .unwrap();
         let gone = gone_name(&tmp, suffix);
         fs::rename(&tmp, &gone).unwrap();
         gone
@@ -3330,7 +3324,7 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
     let keep = outside.path().join("keep");
     fs::write(&keep, "owner data\n").unwrap();
     let link = gone_name(
-        &crate::sandbox::toolchains::tmp_path(&keys.path().join("link")),
+        &kernel_sandbox::toolchains::tmp_path(&keys.path().join("link")),
         "2123456789abcdef",
     );
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
@@ -3378,3 +3372,5 @@ fn an_ide_token_write_cut_short_leaves_no_token_file() {
     assert!(status.success(), "the cut token write ended in {status}");
     assert!(std::fs::symlink_metadata(folder.path().join(token::FILE)).is_err());
 }
+
+mod agent_folders;

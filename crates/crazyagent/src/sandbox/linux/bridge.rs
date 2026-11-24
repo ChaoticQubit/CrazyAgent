@@ -1,5 +1,5 @@
-use super::super::{BRIDGE_PORT_MIN, REMOTES_MAX};
 use super::{HelperRequest, LandlockPolicy, NEST_ARGS, accepted, die_with_parent, enforce};
+use kernel_sandbox::ports::{BRIDGE_PORT_MIN, REMOTES_MAX};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::signal::SigSet;

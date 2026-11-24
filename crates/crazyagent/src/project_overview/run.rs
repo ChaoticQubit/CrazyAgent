@@ -219,7 +219,8 @@ pub fn brief(
     tree: &[String],
     now_ms: i64,
 ) -> Result<(String, bool), EngineError> {
-    let hidden = crate::sandbox::hidden_paths::load(db, project.as_str()).map_err(unavailable)?;
+    let hidden =
+        crate::sandbox::access_store::hidden::load(db, project.as_str()).map_err(unavailable)?;
     let below = names::below_root(folder, &hidden);
     let offered = |path: &str| {
         below

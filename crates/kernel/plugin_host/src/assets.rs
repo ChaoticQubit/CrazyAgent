@@ -74,7 +74,7 @@ impl Snapshot {
             self.content_hash,
             snapshot_hash(&self.project_id, &self.config_id, &self.assets)
         );
-        assert!(self.assets.len() <= 128);
+        assert!(self.assets.len() <= ASSET_SOURCES_MAX);
         for asset in &self.assets {
             assert_eq!(asset.content_hash, hash(&asset.bytes));
             assert_ne!(asset.source.kind, Kind::NativePlugin);
@@ -98,6 +98,9 @@ fn failed(value: impl std::fmt::Display) -> Failure {
 /// The engine's rule for whether pinned (device, inode) pairs still name the live files,
 /// given in pairs of the same order and length. Inputs: pinned and live. Output: a match.
 pub type SameFiles = fn(&[(u64, u64)], &[(u64, u64)]) -> bool;
+
+/// The most sources a project's snapshot selects, and so the most an admission may allow.
+const ASSET_SOURCES_MAX: usize = 128;
 
 /// Engine facts an admission needs: whether a project-scoped source's project exists
 /// (unused for a global source), the byte limit per asset and the source count limit.
@@ -244,6 +247,10 @@ fn open_regular(path: &Path) -> Result<std::fs::File, String> {
 /// inode) of the file it opened and stores the source. Inputs: the transaction, the
 /// engine facts and the source. Output: done, the refusal, or the store's failure.
 pub fn admit(tx: &Transaction<'_>, facts: &AdmitFacts, source: &Source) -> Result<(), Failure> {
+    assert!(
+        facts.asset_sources_max <= ASSET_SOURCES_MAX,
+        "asset sources stay within the selection limit"
+    );
     if source.name.is_empty()
         || source.name.len() > 128
         || !source
@@ -299,7 +306,7 @@ fn selected_sources(tx: &Transaction<'_>, project: &str) -> Result<Vec<Admitted>
     let error = |e: rusqlite::Error| e.to_string();
     let mut statement = tx
         .prepare(
-            "SELECT body,revoked FROM asset_sources WHERE scope IN (?1,?2) ORDER BY id LIMIT 128",
+            "SELECT body,revoked FROM asset_sources WHERE scope IN (?1,?2) ORDER BY id LIMIT ?3",
         )
         .map_err(error)?;
     let rows = statement
@@ -307,7 +314,8 @@ fn selected_sources(tx: &Transaction<'_>, project: &str) -> Result<Vec<Admitted>
             params![
                 serde_json::to_string(&Scope::Global).map_err(|e| e.to_string())?,
                 serde_json::to_string(&Scope::Project(project.to_owned()))
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?,
+                ASSET_SOURCES_MAX as i64
             ],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
         )
@@ -329,7 +337,7 @@ fn selected_sources(tx: &Transaction<'_>, project: &str) -> Result<Vec<Admitted>
         }
         sources.push(source);
     }
-    assert!(sources.len() <= 128);
+    assert!(sources.len() <= ASSET_SOURCES_MAX);
     assert!(
         sources.iter().all(|s| s.source.scope == Scope::Global
             || s.source.scope == Scope::Project(project.to_owned()))
@@ -337,32 +345,35 @@ fn selected_sources(tx: &Transaction<'_>, project: &str) -> Result<Vec<Admitted>
     Ok(sources)
 }
 
-/// Refuses to read an asset where its Unix identity and change times cannot be checked.
-/// Takes the admitted source, limit and identity rule, all unused. Returns
+/// Refuses to read an asset where its Unix change times cannot be checked. Takes the
+/// admitted source, the opened file, its metadata and the limit, all unused. Returns
 /// `asset_source_unavailable`.
 #[cfg(not(unix))]
-fn content(_source: &Admitted, _maximum: usize, _same_files: SameFiles) -> Result<Content, String> {
+fn content(
+    _source: &Admitted,
+    _file: &std::fs::File,
+    _before: &std::fs::Metadata,
+    _maximum: usize,
+) -> Result<Content, String> {
     Err("asset_source_unavailable".into())
 }
 
-/// Reads an admitted asset file for a snapshot when it is still the file that was admitted:
-/// the same inode, on the same device or on its volume renumbered at mount after a restart
-/// (the engine's `same_files` rule, passed in). Takes the admitted source, the byte limit
-/// and the rule. Returns its content, `asset_source_replaced` for another file, or the
-/// read or change refusal.
+/// Reads an admitted asset file already opened for a snapshot, whose identity the
+/// snapshot has checked, refusing a file that changed while it was read. Takes the
+/// admitted source, the opened file, its metadata taken before the read and the byte
+/// limit. Returns its content, `asset_bytes_capacity`, or the read or change refusal.
 #[cfg(unix)]
-fn content(source: &Admitted, maximum: usize, same_files: SameFiles) -> Result<Content, String> {
-    let file = open_regular(&source.source.path)?;
-    let before = file.metadata().map_err(|e| e.to_string())?;
-    if !same_files(&[(source.device, source.inode)], &[file_identity(&before)]) {
-        return Err("asset_source_replaced".into());
-    }
+fn content(
+    source: &Admitted,
+    file: &std::fs::File,
+    before: &std::fs::Metadata,
+    maximum: usize,
+) -> Result<Content, String> {
     if before.len() > maximum as u64 {
         return Err("asset_bytes_capacity".into());
     }
     let mut bytes = Vec::new();
-    (&file)
-        .take(maximum as u64 + 1)
+    file.take(maximum as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let after = file.metadata().map_err(|e| e.to_string())?;
@@ -392,6 +403,30 @@ fn content(source: &Admitted, maximum: usize, same_files: SameFiles) -> Result<C
     })
 }
 
+/// Opens every selected source and checks all their identities in one call to the
+/// engine's rule, so one volume renumbered at mount is accepted while files spread over
+/// other volumes are not. Inputs: the sources and the rule. Output: each source's open
+/// file and its metadata, `asset_source_replaced`, or the open refusal.
+fn opened(
+    sources: &[Admitted],
+    same_files: SameFiles,
+) -> Result<Vec<(std::fs::File, std::fs::Metadata)>, String> {
+    let mut files = Vec::with_capacity(sources.len());
+    for source in sources {
+        let file = open_regular(&source.source.path)?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        files.push((file, metadata));
+    }
+    let pinned: Vec<(u64, u64)> = sources.iter().map(|s| (s.device, s.inode)).collect();
+    let live: Vec<(u64, u64)> = files.iter().map(|(_, m)| file_identity(m)).collect();
+    if !same_files(&pinned, &live) {
+        return Err("asset_source_replaced".into());
+    }
+    assert_eq!(files.len(), sources.len());
+    assert!(files.len() <= ASSET_SOURCES_MAX);
+    Ok(files)
+}
+
 /// Takes a snapshot of the assets a project sees under a config and stores it. Inputs:
 /// the transaction, the engine facts and the snapshot id. Output: done, the refusal, or
 /// the store's failure.
@@ -405,11 +440,11 @@ pub fn snapshot(
         "a frame holds a snapshot's envelope"
     );
     let sources = selected_sources(tx, facts.project_id).map_err(Failure::Refused)?;
-    let mut assets = Vec::new();
-    for source in sources {
-        assets.push(
-            content(&source, facts.asset_bytes_max, facts.same_files).map_err(Failure::Refused)?,
-        );
+    let files = opened(&sources, facts.same_files).map_err(Failure::Refused)?;
+    let mut assets = Vec::with_capacity(sources.len());
+    for (source, (file, before)) in sources.iter().zip(&files) {
+        assets
+            .push(content(source, file, before, facts.asset_bytes_max).map_err(Failure::Refused)?);
     }
     let snapshot = Snapshot {
         id: snapshot_id.to_owned(),

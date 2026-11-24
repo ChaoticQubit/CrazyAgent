@@ -353,3 +353,127 @@ fn a_read_from_another_project_or_config_is_refused() {
         Err(Failure::Refused("asset_snapshot_missing".into()))
     );
 }
+
+#[cfg(unix)]
+type Pairs = Vec<(u64, u64)>;
+
+#[cfg(unix)]
+thread_local! {
+    static CALLS: std::cell::RefCell<Vec<(Pairs, Pairs)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LIVE: std::cell::RefCell<BTreeMap<(u64, u64), (u64, u64)>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// The engine's identity rule over live identities seen through the `LIVE` map, so a row
+/// can place files on volumes a scratch folder cannot reach, recording each call in
+/// `CALLS`. Inputs: pinned and live pairs. Output: whether they name the same files.
+#[cfg(unix)]
+fn renumbered(pinned: &[(u64, u64)], live: &[(u64, u64)]) -> bool {
+    let live: Pairs =
+        LIVE.with_borrow(|map| live.iter().map(|id| *map.get(id).unwrap_or(id)).collect());
+    CALLS.with_borrow_mut(|calls| calls.push((pinned.to_vec(), live.clone())));
+    assert_eq!(pinned.len(), live.len());
+    let one_device = |pairs: &[(u64, u64)]| pairs.windows(2).all(|pair| pair[0].0 == pair[1].0);
+    pinned
+        .iter()
+        .zip(&live)
+        .all(|(pinned, live)| pinned.1 == live.1)
+        && (pinned == live.as_slice() || (one_device(pinned) && one_device(&live)))
+}
+
+/// Admits two global files, empties the recorded calls and pins each source to the given
+/// identity while the live map shows each real file as the given live identity. Inputs:
+/// the transaction, a scratch folder and two (pinned, live) pairs, name order. Output: none.
+#[cfg(unix)]
+fn two_sources(tx: &Transaction<'_>, base: &Path, pairs: [((u64, u64), (u64, u64)); 2]) {
+    CALLS.with_borrow_mut(Vec::clear);
+    LIVE.with_borrow_mut(BTreeMap::clear);
+    for (index, (pinned, live)) in pairs.into_iter().enumerate() {
+        let name = format!("s{index}");
+        let path = file(base, &format!("{name}.md"), "text");
+        let admitted = source(&name, &name, Scope::Global, Kind::Skill, path.clone());
+        assert_eq!(admit(tx, &ADMIT, &admitted), Ok(()));
+        let real = std::fs::metadata(&path).unwrap();
+        LIVE.with_borrow_mut(|map| map.insert((real.dev(), real.ino()), live));
+        let body = serde_json::to_string(&Admitted {
+            source: admitted,
+            device: pinned.0,
+            inode: pinned.1,
+        })
+        .unwrap();
+        tx.execute(
+            "UPDATE asset_sources SET body=?1 WHERE id=?2",
+            params![body, name],
+        )
+        .unwrap();
+    }
+}
+
+/// Snapshot facts whose identity rule is `renumbered`. Output: the facts.
+#[cfg(unix)]
+fn through_renumbered() -> SnapshotFacts<'static> {
+    SnapshotFacts {
+        same_files: renumbered,
+        ..taken("p", "c")
+    }
+}
+
+/// The number of stored snapshots. Input: the transaction. Output: the count.
+#[cfg(unix)]
+fn snapshots(tx: &Transaction<'_>) -> i64 {
+    tx.query_row("SELECT COUNT(*) FROM asset_snapshots", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_snapshot_checks_every_source_identity_in_one_call() {
+    let (_root, base) = scratch();
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    two_sources(&tx, &base, [((10, 41), (10, 41)), ((10, 42), (10, 42))]);
+    assert_eq!(snapshot(&tx, &through_renumbered(), "s1"), Ok(()));
+    let calls = CALLS.with_borrow(Clone::clone);
+    assert_eq!(
+        calls,
+        [(vec![(10, 41), (10, 42)], vec![(10, 41), (10, 42)])]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_source_moved_to_another_volume_is_refused_as_replaced() {
+    let (_root, base) = scratch();
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    two_sources(&tx, &base, [((10, 41), (20, 41)), ((10, 42), (30, 42))]);
+    assert_eq!(
+        snapshot(&tx, &through_renumbered(), "s1"),
+        Err(Failure::Refused("asset_source_replaced".into()))
+    );
+    assert_eq!(snapshots(&tx), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_whole_volume_renumbered_at_mount_is_still_accepted() {
+    let (_root, base) = scratch();
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    two_sources(&tx, &base, [((10, 41), (20, 41)), ((10, 42), (20, 42))]);
+    assert_eq!(snapshot(&tx, &through_renumbered(), "s1"), Ok(()));
+    assert_eq!(snapshots(&tx), 1);
+}
+
+#[test]
+#[should_panic(expected = "asset sources stay within the selection limit")]
+fn admitting_with_a_sources_limit_over_the_selection_limit_panics() {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    let facts = AdmitFacts {
+        project_exists: true,
+        asset_bytes_max: 1024,
+        asset_sources_max: 129,
+    };
+    let absent = source("a", "a", Scope::Global, Kind::Rules, "/absent/a.md".into());
+    let _ = admit(&tx, &facts, &absent);
+}

@@ -15,7 +15,7 @@ pub fn installed(engine_root: &Path) -> Option<PathBuf> {
 pub fn lead_paths() -> LeadPaths {
     LeadPaths {
         agent_home: crate::team::runtime::agent_home,
-        tmp_path: crate::sandbox::toolchains::tmp_path,
+        tmp_path: kernel_sandbox::toolchains::tmp_path,
         agent_teammates_socket_name: crate::team::runtime::agent_teammates_socket_name,
         agent_teammates_server_pid: crate::team::runtime::agent_teammates_server_pid,
         agent_servers_deadline: crate::team::runtime::agent_servers_deadline,

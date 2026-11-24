@@ -408,32 +408,6 @@ fn a_terminal_folder_too_long_for_a_socket_address_still_runs_agents() {
     assert!(!socket.exists());
 }
 
-#[test]
-fn a_shared_terminal_folder_is_refused() {
-    let root = root();
-    let tmux = tmux(root.path());
-    let folder = root.path().join(FOLDER);
-    std::fs::create_dir(&folder).unwrap();
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let host = Tmux::open(
-        Some(tmux),
-        &folder,
-        crazyagent::sandbox::confinement(),
-        crazyagent::terminal::tmux::tmux_hooks(),
-    );
-    let agent = AgentId::team(1).unwrap();
-    let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
-    assert_eq!(
-        host.spawn(
-            &agent,
-            &kernel_processes::terminal::PaneCommand::from(&command)
-        )
-        .unwrap_err()
-        .0,
-        "terminal_folder_unsafe"
-    );
-}
-
 fn option(tmux: &Path, socket: &Path, name: &str) -> String {
     let output = kernel_processes::spawn_gate::output(
         Command::new(tmux)
@@ -1961,7 +1935,7 @@ impl Lead {
         let team = path.join("team");
         let home = crazyagent::team::runtime::agent_home(&team, 1);
         std::fs::create_dir_all(&home).unwrap();
-        crazyagent::sandbox::toolchains::make_tmp(&home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
         let profile = crazyagent::team::runtime::agent_profile(&team, 1);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
@@ -2048,7 +2022,10 @@ impl Drop for Lead {
                     .stderr(Stdio::null()),
             );
         }
-        let _ = crazyagent::sandbox::toolchains::remove_tmp(&self.home);
+        let _ = kernel_sandbox::toolchains::remove_tmp(
+            &crazyagent::sandbox::TOOLCHAIN_HOOKS,
+            &self.home,
+        );
     }
 }
 
@@ -2762,7 +2739,8 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     let (refused, next) = (AgentId::team(1).unwrap(), AgentId::team(2).unwrap());
     let next_home = crazyagent::team::runtime::agent_home(&team, 2);
     std::fs::create_dir_all(&next_home).unwrap();
-    crazyagent::sandbox::toolchains::make_tmp(&next_home).unwrap();
+    kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &next_home)
+        .unwrap();
     for profile in [
         crazyagent::team::runtime::agent_profile(&team, 2),
         crazyagent::team::runtime::agent_teammates_profile(&team, 2),
@@ -2816,7 +2794,8 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     );
     let after = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     assert_eq!(after.alive().unwrap(), Vec::<AgentId>::new());
-    crazyagent::sandbox::toolchains::remove_tmp(&next_home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &next_home)
+        .unwrap();
 }
 
 #[test]
@@ -2842,3 +2821,6 @@ fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     );
     host.close(&[]).unwrap();
 }
+
+#[path = "terminal_tmux/shared_folder.rs"]
+mod shared_folder;

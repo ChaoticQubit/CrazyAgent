@@ -1,5 +1,5 @@
 use super::*;
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
 use serde_json::json;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -546,7 +546,9 @@ fn sandboxed(case: &Case, script: &str) -> bool {
     for folder in [&project, &build] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    let tmp = crate::sandbox::toolchains::make_tmp(&case.server_data).unwrap();
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.server_data)
+            .unwrap();
     let locked = case.folder.join(LOCKED_FILE);
     let machine = machine_folder(&case.server_data);
     let grants = Grants {
@@ -566,7 +568,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         45_733,
         kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         &[],
-        crate::sandbox::policy::AgentFilesRule::default(),
+        kernel_sandbox::policy::AgentFilesRule::default(),
     )
     .unwrap();
     let mut shell = command(&profile, Path::new("/bin/sh"));
@@ -580,7 +582,8 @@ fn sandboxed(case: &Case, script: &str) -> bool {
     let ran = kernel_processes::spawn_gate::status(&mut shell)
         .unwrap()
         .success();
-    crate::sandbox::toolchains::remove_tmp(&case.server_data).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.server_data)
+        .unwrap();
     ran
 }
 

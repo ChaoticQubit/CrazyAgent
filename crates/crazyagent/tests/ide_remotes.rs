@@ -386,7 +386,7 @@ fn agent_sandbox_cannot_reach_owner_git_credentials() {
         OsStr::new("SSH_AUTH_SOCK"),
         socket.as_os_str()
     ));
-    let owner = crazyagent::sandbox::toolchains::ToolHomes::owner()
+    let owner = kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf();
@@ -394,7 +394,14 @@ fn agent_sandbox_cannot_reach_owner_git_credentials() {
         (SandboxNetwork::Open, "open.sb"),
         (SandboxNetwork::Only(Vec::new()), "closed.sb"),
     ] {
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, network).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            network,
+        )
+        .unwrap();
         let profile = profiles.join(name);
         sandbox.install(&profile).unwrap();
         let secrets = sandbox.secret_paths();

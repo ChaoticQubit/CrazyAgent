@@ -1,6 +1,6 @@
 use crate::harnesses::manifest::DriverKind;
 use crate::protocol::ProjectId;
-use crate::sandbox::policy::{AgentAccess, HomeCaches};
+use kernel_sandbox::policy::{AgentAccess, HomeCaches};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -198,7 +198,7 @@ enum Kept {
     /// flags and ACLs on the way.
     Cache,
     /// A link, never followed: a cache the engine links to the owner's read-only one
-    /// ([`crate::sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
+    /// ([`kernel_sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
     /// it from moving, removing or making itself.
     Link,
     /// A real folder holding only the entries its list keeps, none when the list is empty.
@@ -1377,7 +1377,7 @@ pub(crate) fn remove_shell_startup(home: &Path, engine_root: &Path) -> Result<()
 pub(crate) fn remove_home_code(
     home: &Path,
     engine_root: &Path,
-    homes: &crate::sandbox::toolchains::ToolHomes,
+    homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
     remove_shell_startup(home, engine_root)?;
     if home == engine_root || !home.starts_with(engine_root) {
@@ -1399,16 +1399,16 @@ pub(crate) fn remove_home_code(
 
 /// Links the `registry` and `git` of an rcli master's cargo home to the owner's read-only
 /// caches, as every agent home has them, making the cargo home when it is gone
-/// ([`crate::sandbox::toolchains::prepare_cargo_home`]). Inputs: the home and the owner's
+/// ([`kernel_sandbox::toolchains::prepare_cargo_home`]). Inputs: the home and the owner's
 /// tool homes. Output: unit, or `agent_home_unwritable` when a link will not be made, or
 /// `cleanup_walk_too_long` when clearing a name for it ran past its walk budget
 /// (RESET-WALK-CODE).
 #[cfg(unix)]
 fn link_owner_crates(
     home: &Path,
-    homes: &crate::sandbox::toolchains::ToolHomes,
+    homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
-    crate::sandbox::toolchains::prepare_cargo_home(home, homes)
+    kernel_sandbox::toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, home, homes)
         .map(drop)
         .map_err(|problem| {
             failure(match crate::team::cleanup::walk_too_long_io(&problem) {
@@ -1424,7 +1424,7 @@ fn link_owner_crates(
 #[cfg(not(unix))]
 fn link_owner_crates(
     _home: &Path,
-    _homes: &crate::sandbox::toolchains::ToolHomes,
+    _homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
     Ok(())
 }
@@ -1894,7 +1894,7 @@ pub(crate) fn reset_mates_home(mates: &Path) -> Result<(), AgentHomeError> {
 }
 
 /// What stays in a native lead's teammates' home: what [`kept_in`] names for Claude Code, with
-/// the folders [`crate::sandbox::CLAUDE_TEAM_SHARED`] names kept only as links, since there
+/// the folders [`kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED`] names kept only as links, since there
 /// they lead to the lead's own folders (RV-DS241-137 code r2 F1). Input: whether the download
 /// caches go. Output: the names with their kinds.
 #[cfg(unix)]
@@ -1902,7 +1902,7 @@ fn mates_kept(clear: bool) -> Vec<(&'static str, Kept)> {
     kept_in(Harness::Claude, clear)
         .into_iter()
         .map(|(name, kind)| {
-            if crate::sandbox::CLAUDE_TEAM_SHARED.contains(&name) {
+            if kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED.contains(&name) {
                 (name, Kept::Link)
             } else {
                 (name, kind)

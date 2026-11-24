@@ -91,14 +91,6 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn clip(text: &str, bytes: usize) -> String {
-    let mut end = text.len().min(bytes);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
-}
-
 /// Which part of a project's team an agent plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1862,8 +1854,10 @@ impl Stored {
             AgentState::Stopped => "Stopped".to_owned(),
             AgentState::Exited => match self.exit_code {
                 Some(0) | None => "Finished".to_owned(),
-                Some(code) => crate::sandbox::held_stop(std::env::consts::OS, code)
-                    .map_or_else(|| format!("Exited with code {code}"), str::to_owned),
+                Some(code) => {
+                    kernel_sandbox::profile::consts::held_stop(std::env::consts::OS, code)
+                        .map_or_else(|| format!("Exited with code {code}"), str::to_owned)
+                }
             },
             AgentState::Failed => "Failed".to_owned(),
             AgentState::Closed => "Stopped when CrazyAgent closed".to_owned(),
@@ -1894,3 +1888,6 @@ impl Stored {
 #[cfg(all(test, unix))]
 #[path = "agents/tests.rs"]
 pub(crate) mod tests;
+
+mod clip;
+use clip::clip;

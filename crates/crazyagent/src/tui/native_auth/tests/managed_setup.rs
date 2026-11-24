@@ -162,7 +162,10 @@ async fn managed_setup_local_endpoint_opens_private_profile_setup_without_a_hidd
         assert!(views::body(&ui.app).contains("Local endpoint"));
         ui.key(KeyCode::Enter);
         let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
-        assert!(!crate::sandbox::OWNER_PORTS.contains(&port), "{port}");
+        assert!(
+            !kernel_sandbox::ports::OWNER_PORTS.contains(&port),
+            "{port}"
+        );
         let url = format!("http://127.0.0.1:{port}/v1");
         for value in ["Laptop model", url.as_str(), "qwen2.5:0.5b"] {
             for character in value.chars() {

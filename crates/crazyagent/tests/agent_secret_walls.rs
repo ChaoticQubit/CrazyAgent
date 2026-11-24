@@ -4,17 +4,17 @@ mod keychain_support;
 
 use kernel_security::store::{Store, reference};
 
-use crazyagent::credentials::Keychain;
-use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
-use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
-    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, agent_command, agent_env_refused,
-    agent_variable_allowed,
+    ProjectSandbox, agent_command, agent_env_refused, agent_variable_allowed,
 };
+use kernel_common::relay_names::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::SECRET_ROOT_REFUSED;
+use kernel_sandbox::profile::consts::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV};
+use kernel_sandbox::toolchains::ToolHomes;
 use kernel_security::secret::SecretString;
+use kernel_security::store::macos::Keychain;
 use keychain_support::TemporaryKeychain;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -56,6 +56,7 @@ fn case() -> Case {
 
 fn sandbox(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -287,6 +288,7 @@ fn guard_refuses_agent_roots_inside_engine_secrets() {
     let inside = case.runtime.join("account-keys").join("home");
     fs::create_dir_all(&inside).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &inside,
         &case.tmp,
@@ -514,10 +516,16 @@ fn a_tools_on_agent_cannot_read_another_agents_key_file() {
     )
     .unwrap();
     let profile = case.profiles.join("other-agent.sb");
-    let other = ProjectSandbox::new(&case.project, &other_home, &other_tmp, SandboxNetwork::Open)
-        .unwrap()
-        .guard_engine(&case.runtime)
-        .unwrap();
+    let other = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &case.project,
+        &other_home,
+        &other_tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap()
+    .guard_engine(&case.runtime)
+    .unwrap();
     let own = run(&other, &profile, "/bin/cat", &[second.to_str().unwrap()]);
     assert!(
         own.status.success(),
@@ -575,7 +583,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
     let homes = ToolHomes::owner().unwrap();
-    let path = toolchains::agent_path(
+    let path = kernel_sandbox::toolchains::agent_path(
         &homes,
         "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
     );
@@ -595,7 +603,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
     expected.extend(
-        toolchains::agent_env(&case.home, &homes)
+        kernel_sandbox::toolchains::agent_env(&case.home, &homes)
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
     );
@@ -667,10 +675,16 @@ fn tools_on_agent_reaches_ip_endpoints_but_no_engine_unix_socket() {
     let endpoint = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
     let served = kernel_processes::spawn_gate::free_low_tcp_port().unwrap();
-    let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
-        .unwrap()
-        .guard_engine(&case.runtime)
-        .unwrap();
+    let open = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap()
+    .guard_engine(&case.runtime)
+    .unwrap();
     let guarded = open.secret_paths();
     for place in [&terminal, &sockets[1], &generation, &runner] {
         assert!(
@@ -961,10 +975,16 @@ fn a_tools_on_agent_cannot_drive_the_engine_tmux_server() {
         appears(&control),
         "the unsandboxed control must run a command through the server"
     );
-    let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
-        .unwrap()
-        .guard_engine(&case.runtime)
-        .unwrap();
+    let open = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap()
+    .guard_engine(&case.runtime)
+    .unwrap();
     let escaped = outside.join("escaped");
     let output = shell(
         &open,

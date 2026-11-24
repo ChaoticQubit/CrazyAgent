@@ -22,6 +22,7 @@ fn grant(tier: permission::Tier, permissions: &'static [&'static str]) -> [Bundl
         plugin: "p",
         tier,
         permissions,
+        essential: false,
     }]
 }
 

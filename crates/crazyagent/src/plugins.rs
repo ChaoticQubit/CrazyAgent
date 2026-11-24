@@ -1156,8 +1156,8 @@ mod tests {
 
     #[test]
     fn a_windows_check_under_a_host_or_port_limit_is_refused_with_the_firewall_reason() {
-        use crate::sandbox::policy::AgentNetwork;
         use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+        use kernel_sandbox::policy::AgentNetwork;
         let https = AgentNetwork::Https.sandbox(None);
         assert_eq!(
             https,

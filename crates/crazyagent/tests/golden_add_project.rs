@@ -13,8 +13,8 @@ use crazyagent::project_setup::{Platform, ProjectSetup};
 use crazyagent::projects_home::AddMode;
 use crazyagent::projects_home::job::{JobKind, JobState, JobSubject};
 use crazyagent::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, RequestId};
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy};
 use golden_support::{Golden, landed, wait_until};
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
 use std::path::Path;
 use std::time::Duration;
 

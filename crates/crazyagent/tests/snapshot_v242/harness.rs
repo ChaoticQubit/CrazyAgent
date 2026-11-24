@@ -7,10 +7,10 @@ use crazyagent::harnesses::launch::{
 };
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::protocol::ProjectId;
-use crazyagent::sandbox::policy::{
+use kernel_sandbox::policy::{
     AgentAccess, AgentPolicy, PolicyView, ToolchainChoice, ToolchainView,
 };
-use crazyagent::sandbox::toolchains::{ToolHomes, Toolchain};
+use kernel_sandbox::toolchains::{ToolHomes, Toolchain};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -906,7 +906,7 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
     }
     let homes = ToolHomes::owner().map_err(|error| format!("{error:?}"))?;
     let toolchains = toolchain_rows(&view.toolchains, |toolchain| toolchain.installed(&homes));
-    let owner_temp = crazyagent::sandbox::grants::owner_temp_folder().ok();
+    let owner_temp = kernel_sandbox::grants::owner_temp_folder().ok();
     let temp_folder_is_the_owners =
         view.temp_folder.path.as_deref() == owner_temp.as_deref().and_then(Path::to_str);
     let mut captured = serde_json::to_value(view).map_err(|error| error.to_string())?;

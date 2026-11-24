@@ -290,7 +290,7 @@ mod launch {
     use super::*;
     use crate::harnesses::launch::{AccountBinding, LaunchLimits};
     use crate::harnesses::registry::Registry;
-    use crate::model_gateway::relay::{LOCAL_PLACEHOLDER, is_relay_token};
+    use kernel_common::relay_names::{LOCAL_PLACEHOLDER, is_relay_token};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -616,7 +616,7 @@ mod launch {
         assert_eq!(env(&pairs, "OPENAI_BASE_URL"), Some(handover.base_url()));
         let home = turn.request.account.home().to_str().unwrap();
         assert_eq!(env(&pairs, "HOME"), Some(home));
-        let roots = crate::sandbox::AGENT_TLS_ENV[0].1;
+        let roots = kernel_sandbox::profile::consts::AGENT_TLS_ENV[0].1;
         assert_eq!(env(&pairs, "SSL_CERT_FILE"), Some(roots));
         assert_eq!(env(&pairs, "GIT_CONFIG_GLOBAL"), Some("/dev/null"));
         let given = args(&launch);
@@ -865,7 +865,7 @@ exec /bin/sleep 60
 /// its harness stopped leaves the list.
 #[test]
 fn a_listed_master_turn_not_surely_stopped_stays_listed_after_it_returns() {
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
     let saved = [PathBuf::from("/tmp/sa-vid14-listed-master/vault")];
     for (project, ran, kept) in [
         ("sa-vid14-listed-master-ok", Ok(()), false),

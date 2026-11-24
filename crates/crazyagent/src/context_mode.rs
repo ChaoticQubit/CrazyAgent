@@ -440,9 +440,9 @@ fn node_command(
     scratch: &Path,
     bin: &Path,
 ) -> Result<std::process::Command, InstallError> {
-    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     use crate::sandbox::{InstalledSandbox, ProjectSandbox};
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let mut folders = Vec::with_capacity(3);
     for name in ["project", "home", "tmp"] {
@@ -451,6 +451,7 @@ fn node_command(
     }
     let homes = ToolHomes::owner().map_err(refused)?;
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &folders[0],
         &folders[1],
         &folders[2],
@@ -781,7 +782,7 @@ fn npm_command(
     version: &str,
 ) -> Result<std::process::Command, InstallError> {
     use crate::sandbox::ProjectSandbox;
-    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let parent = staged
         .parent()
         .ok_or(InstallError("setup_store_unavailable"))?;
@@ -792,6 +793,7 @@ fn npm_command(
     let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let homes = ToolHomes::owner().map_err(refused)?;
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &canonical(staged)?,
         &canonical(&home)?,
         &canonical(&tmp)?,
