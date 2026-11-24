@@ -847,6 +847,10 @@ fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
             "agent_project_unreadable",
             "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
         ),
+        (
+            "agent_folder_hidden_held",
+            "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it.",
+        ),
     ] {
         assert_eq!(
             plain_problem(code),
