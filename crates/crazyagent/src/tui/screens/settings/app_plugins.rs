@@ -692,7 +692,9 @@ impl AppPluginsPage {
                 if let Open::Remove { .. } | Open::Trust { .. } | Open::TurnOff(_) = self.open {
                     self.open = Open::None;
                 }
-                if matches!(self.open, Open::None) {
+                if matches!(self.open, Open::None) && code == "access_change_pending" {
+                    ctx.say(Message::warning("Waiting.", &sentence(code)));
+                } else if matches!(self.open, Open::None) {
                     ctx.say(Message::error("Not saved.", &sentence(code)));
                 } else {
                     self.failure = Some(sentence(code));
