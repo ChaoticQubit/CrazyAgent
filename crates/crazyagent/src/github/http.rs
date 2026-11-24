@@ -1,9 +1,11 @@
 use crate::engine::EngineError;
-use kernel_sandbox::egress::{BODY_BYTES_MAX, ExchangeError, exchange};
+use kernel_sandbox::egress::{
+    BODY_BYTES_MAX, CURL_TIME, ExchangeError, exchange, lookup_within, system_lookup,
+};
 use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use kernel_security::secret::SecretString;
 use std::io;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
 const CURL: &str = "/usr/bin/curl";
@@ -13,8 +15,8 @@ const USER_AGENT: &str = "CrazyAgent";
 /// One HTTP exchange through the system curl. The URL, headers, token and form body go
 /// only into curl's config on stdin, so nothing secret reaches an argument or the
 /// environment; curl reads no `.curlrc`, follows no redirects and only uses the allowed
-/// schemes. A host name is looked up once and every address checked before curl runs, and
-/// curl is pinned to the checked address, so it never looks the name up again.
+/// schemes. A host name is looked up once, within 5 s, and every address checked before
+/// curl runs; curl is pinned to every checked address, so it never looks the name up again.
 pub(crate) struct Request<'a> {
     pub(crate) url: url::Url,
     pub(crate) accept: &'a str,
@@ -123,7 +125,7 @@ impl Request<'_> {
     /// config bytes for its stdin.
     pub(crate) fn command(
         &self,
-        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
     ) -> Result<(Command, Vec<u8>), EngineError> {
         self.command_with(None, resolve)
     }
@@ -134,7 +136,7 @@ impl Request<'_> {
     pub(crate) fn json_command(
         &self,
         json: &str,
-        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
     ) -> Result<(Command, Vec<u8>), EngineError> {
         self.command_with(Some((Verb::Post, Some(json))), resolve)
     }
@@ -142,7 +144,7 @@ impl Request<'_> {
     fn command_with(
         &self,
         body: Option<(Verb, Option<&str>)>,
-        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
     ) -> Result<(Command, Vec<u8>), EngineError> {
         let secure = self.url.scheme() == "https";
         let loopback = self.url.scheme() == "http"
@@ -158,7 +160,9 @@ impl Request<'_> {
         let pinned = kernel_security::net::pinned(
             &self.url,
             port,
-            |name, port| resolve(name, port).map_err(|_| failure("github_unreachable")),
+            |name, port| {
+                lookup_within(name, port, resolve).map_err(|_| failure("github_unreachable"))
+            },
             || failure("github_address_refused"),
         )?;
         let mut command = Command::new(CURL);
@@ -168,7 +172,7 @@ impl Request<'_> {
             .args(["--proto", if loopback { "=http" } else { "=https" }])
             .args(["--max-redirs", "0"])
             .args(["--connect-timeout", "10"])
-            .args(["--max-time", "30"])
+            .args(["--max-time", &CURL_TIME.as_secs().to_string()])
             .args(["--max-filesize", &BODY_BYTES_MAX.to_string()])
             .args(["--write-out", WRITE_OUT])
             .args(["--config", "-"])
@@ -181,18 +185,19 @@ impl Request<'_> {
         Ok((command, self.config(body, pinned.as_deref())?))
     }
 
-    /// Looks the host up once, then sends the request and waits at most 30 s for curl.
+    /// Looks the host up once, waiting at most 5 s, then sends the request and waits at most
+    /// 25 s for curl, 30 s in all.
     /// Output: the reply, `github_address_refused` for a refused address, or
     /// `github_unreachable` when the lookup or curl could not finish the exchange.
     pub(crate) fn send(&self) -> Result<Reply, EngineError> {
-        let (command, config) = self.command(system)?;
+        let (command, config) = self.command(system_lookup)?;
         exchange(command, config).map_err(code)
     }
 
     /// POSTs a JSON body after the one host lookup, as `send` does. Input: the body.
     /// Output: the reply, `github_address_refused`, or `github_unreachable`.
     pub(crate) fn send_json(&self, json: &str) -> Result<Reply, EngineError> {
-        let (command, config) = self.json_command(json, system)?;
+        let (command, config) = self.json_command(json, system_lookup)?;
         exchange(command, config).map_err(code)
     }
 
@@ -200,18 +205,9 @@ impl Request<'_> {
     /// as `send` does. Inputs: the method and the body. Output: the reply,
     /// `github_address_refused`, or `github_unreachable`.
     pub(crate) fn send_body(&self, verb: Verb, json: Option<&str>) -> Result<Reply, EngineError> {
-        let (command, config) = self.command_with(Some((verb, json)), system)?;
+        let (command, config) = self.command_with(Some((verb, json)), system_lookup)?;
         exchange(command, config).map_err(code)
     }
-}
-
-/// Looks a host name up once through the system resolver. Inputs: the host and port.
-/// Output: every address it resolved to, or the lookup failure.
-fn system(host: &str, port: u16) -> io::Result<Vec<IpAddr>> {
-    Ok((host, port)
-        .to_socket_addrs()?
-        .map(|found| found.ip())
-        .collect())
 }
 
 /// The engine code of an exchange that gave no reply. Input: the kernel's reason. Output:
