@@ -4725,7 +4725,7 @@ fn a_linux_launch_starts_at_its_installed_boundary_with_the_agent_environment() 
     );
 }
 
-#[path = "linux_sandbox/refused_launches.rs"]
-mod refused_launches;
 #[path = "linux_sandbox/installed_launches.rs"]
 mod installed_launches;
+#[path = "linux_sandbox/refused_launches.rs"]
+mod refused_launches;
