@@ -135,8 +135,8 @@ pub const DONT_ALLOW: &str = "Don't allow";
 /// The asker name prefix of the questions access requests raise.
 pub const ASKER_PREFIX: &str = "engine:access:";
 
-/// The one refusal code an agent's access request gets for every failed check of a socket
-/// path it wrote plainly (RV-DS241-87).
+/// The one refusal code an agent's access request gets for every failed check of a socket path it
+/// wrote plainly.
 pub const SOCKET_REFUSED: &str = "grant_socket_refused";
 
 const LAUNCHD_LISTENERS: &str = "/private/tmp/com.apple.launchd.";
