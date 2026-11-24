@@ -182,6 +182,7 @@ fn the_quit_gateway_never_opens_the_store() {
         editor: &Absent,
         net: &Absent,
         process: &Absent,
+        sandbox: &Absent,
         secrets: &Absent,
         settings: &Absent,
         service: &Absent,
