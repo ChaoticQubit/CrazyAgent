@@ -5,8 +5,9 @@ use std::{ffi::OsStr, path::Path};
 
 /// Hooks that answer nothing, for the kernel's own rows: no links, shims, prefixes,
 /// projects, stored last good reads, twins, agent temp folders or gate root; a path is
-/// its one spelling and canonical as std reads it. No row whose answer needs an engine
-/// check runs on these; those rows run in crazyagent on its real hooks.
+/// its one spelling and canonical as std reads it. The harness prefix lies in the data
+/// folder's `setup` folder, as the engine's does. No row whose answer needs an engine check
+/// runs on these; those rows run in crazyagent on its real hooks.
 pub(crate) const STUB_HOOKS: FindingHooks = FindingHooks {
     link_hops: |_| Some(Vec::new()),
     home_places: |_| Vec::new(),
@@ -21,7 +22,7 @@ pub(crate) const STUB_HOOKS: FindingHooks = FindingHooks {
     one_spelling: |path| path,
     canonical: |path| std::fs::canonicalize(path),
     in_agent_tmp: |_| false,
-    harness_prefix: |root| root.join(".stub-harness-prefix"),
+    harness_prefix: |root| root.join("setup").join("stub-harnesses"),
     gate_root: || None,
 };
 
