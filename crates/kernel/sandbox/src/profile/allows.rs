@@ -78,27 +78,27 @@ impl ProjectSandbox {
             if agents {
                 return Err(invalid("an interpreter sits where the agent can write"));
             }
-            let covered = SYSTEM_READ_ROOTS
-                .iter()
-                .map(Path::new)
-                .chain(self.read_roots.iter().map(PathBuf::as_path))
-                .chain(self.tool_roots.iter().map(PathBuf::as_path))
-                .any(|root| folder.starts_with(root));
-            if !covered {
+            if !self.reads(&folder) {
                 self = self.allow_node_folder(&folder)?;
             }
         }
         Ok(self)
     }
 
-    /// Whether a system, granted or toolchain folder already makes a path readable. Input: an
+    /// Whether a system, granted or toolchain folder already makes a path readable. Only
+    /// Seatbelt grants the toolchain folders, so elsewhere they never count. Input: an
     /// absolute path. Output: the answer.
     fn reads(&self, path: &Path) -> bool {
+        let tools: &[PathBuf] = if cfg!(target_os = "macos") {
+            &self.tool_roots
+        } else {
+            &[]
+        };
         SYSTEM_READ_ROOTS
             .iter()
             .map(Path::new)
             .chain(self.read_roots.iter().map(PathBuf::as_path))
-            .chain(self.tool_roots.iter().map(PathBuf::as_path))
+            .chain(tools.iter().map(PathBuf::as_path))
             .any(|root| path.starts_with(root))
     }
 
@@ -327,6 +327,7 @@ impl ProjectSandbox {
         }
         self.tool_cache = Some((root.to_path_buf(), uv));
         assert!(self.writes(root));
+        self.confinement_kept()?;
         Ok(self)
     }
 
@@ -375,6 +376,7 @@ impl ProjectSandbox {
             &(self.hooks.access.harness_folders)(),
         )?;
         self.scratch = Some(tmp.to_path_buf());
+        self.confinement_kept()?;
         Ok(self)
     }
 
@@ -514,6 +516,7 @@ impl ProjectSandbox {
         self.shared_writes.push(folder.to_path_buf());
         assert!(self.writes(folder));
         assert!(self.shared_writes.len() <= crate::shared_folders::SHARED_WRITES_MAX);
+        self.confinement_kept()?;
         Ok(self)
     }
 
@@ -819,6 +822,8 @@ impl ProjectSandbox {
             .shut_unix_socket(&binding)?;
         lead.fixed.push(answers.clone());
         lead.answers = Some(answers);
+        lead.confinement_kept()?;
+        teammates.confinement_kept()?;
         Ok((lead, teammates))
     }
 
@@ -1195,16 +1200,50 @@ impl ProjectSandbox {
     /// teammates the team folders they share in the lead's home, then its tool cache, the
     /// owner's temp folder when granted and each shared writable folder.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
+        self.project_writes().into_iter().chain(self.other_writes())
+    }
+
+    /// The writable roots in the project: the project folder, or a confinement's own roots.
+    /// Output: one to three roots.
+    fn project_writes(&self) -> Vec<&PathBuf> {
         assert!(self.confinements() <= 1);
-        let project: Vec<&PathBuf> = match (&self.checkout, &self.clone, &self.setup) {
+        match (&self.checkout, &self.clone, &self.setup) {
             (Some(checkout), _, _) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
             (None, Some(clone), _) => vec![clone],
             (None, None, Some(setup)) => vec![&setup.folder, &setup.records],
             (None, None, None) => vec![&self.project_root],
-        };
-        project
+        }
+    }
+
+    /// Refuses a confined sandbox whose writable roots outside its confinement reach the
+    /// project: one that holds the project folder or lies in it outside the confinement's
+    /// own roots would leave the project writable beside the confinement. Roots disjoint
+    /// from the project pass, as does any sandbox that is not confined. Output: Ok, or
+    /// `Invalid`.
+    pub(crate) fn confinement_kept(&self) -> Result<(), SandboxError> {
+        if self.confinements() == 0 {
+            return Ok(());
+        }
+        let own = self.project_writes();
+        let project = &self.project_root;
+        let reaches = self.other_writes().any(|root| {
+            (root.starts_with(project) || project.starts_with(root))
+                && !own.iter().any(|kept| root.starts_with(kept))
+        });
+        if reaches {
+            return Err(invalid(
+                "a writable root reaches the project outside the agent's confinement",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The writable roots besides the project's: the agent's home and temp folders, its short
+    /// temp folder, extra worktrees, team folders, tool cache, the owner's temp folder when
+    /// granted and each shared writable folder. Output: the roots.
+    fn other_writes(&self) -> impl Iterator<Item = &PathBuf> {
+        [&self.agent_home, &self.agent_tmp]
             .into_iter()
-            .chain([&self.agent_home, &self.agent_tmp])
             .chain(self.scratch.iter())
             .chain(self.worktrees.iter())
             .chain(self.shared.iter())

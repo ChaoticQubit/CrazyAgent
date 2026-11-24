@@ -467,12 +467,13 @@ pub fn holds_other_git(project: &Path) -> bool {
 /// runs inside the engine's read of the project's Agent access page.
 pub(super) const GIT_SEARCH_ENTRIES_MAX: usize = 4096;
 
-/// What is kept of this machine and when it was read.
-pub type KeptHost = Mutex<Option<(Instant, crate::host::LinuxHost)>>;
+/// How many times what is kept was marked unsupervised ([`forget_supervisor`]), then what is
+/// kept of this machine and when it was read.
+pub type KeptHost = Mutex<(u64, Option<(Instant, crate::host::LinuxHost)>)>;
 
 /// What [`host_within`] last read of this machine, which a launch whose own probe failed
 /// marks unsupervised ([`forget_supervisor`]).
-pub(super) static HOST_READ: KeptHost = Mutex::new(None);
+pub(super) static HOST_READ: KeptHost = Mutex::new((0, None));
 
 /// [`read_host`] for the helper launches take ([`helper_beside_engine`]) and the engine's
 /// data folder, read again once what is kept is older than `age_max`, or with no age only
@@ -480,7 +481,7 @@ pub(super) static HOST_READ: KeptHost = Mutex::new(None);
 /// kept never waits on it. Input: the age. Output: the facts, each false when it cannot be
 /// asked.
 fn host_within(age_max: Option<Duration>) -> crate::host::LinuxHost {
-    let kept = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
+    let (generation, kept) = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((at, host)) = kept
         && age_max.is_none_or(|age_max| at.elapsed() < age_max)
     {
@@ -491,20 +492,33 @@ fn host_within(age_max: Option<Duration>) -> crate::host::LinuxHost {
         &helper.unwrap_or_default(),
         kernel_processes::finding::engine_root(),
     );
-    *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
+    publish(&HOST_READ, generation, host);
     host
+}
+
+/// Keeps a read of this machine that began when what is kept had been marked unsupervised
+/// `generation` times, only if it has not been marked since, so a read that began before
+/// [`forget_supervisor`] never brings back a supervisor a launch found missing. Inputs: what
+/// is kept, the count the read began at and the facts read.
+pub(super) fn publish(kept: &KeptHost, generation: u64, host: crate::host::LinuxHost) {
+    let mut held = kept.lock().unwrap_or_else(PoisonError::into_inner);
+    if held.0 == generation {
+        held.1 = Some((Instant::now(), host));
+    }
+    assert!(held.0 >= generation);
 }
 
 /// Marks what is kept of this machine as running no call supervisor, after a launch with
 /// the setting On found it does not hold (rv-secreview linux-t4c F2), so the Agent access
-/// page shows the wider lines until the next read. Nothing kept stays nothing. Input: what
-/// is kept.
+/// page shows the wider lines until the next read, and counts the mark so a read that began
+/// before it is not kept ([`publish`]). Nothing kept stays nothing. Input: what is kept.
 pub fn forget_supervisor(kept: &KeptHost) {
     let mut held = kept.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, host)) = held.as_mut() {
+    held.0 += 1;
+    if let Some((_, host)) = held.1.as_mut() {
         host.supervised = false;
     }
-    assert!(held.as_ref().is_none_or(|(_, host)| !host.supervised));
+    assert!(held.1.as_ref().is_none_or(|(_, host)| !host.supervised));
 }
 
 /// What this machine holds, read again once what is kept is older than [`HOST_AGE_MAX`]:

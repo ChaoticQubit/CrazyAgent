@@ -1140,16 +1140,16 @@ fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
         routed: false,
     };
     let at = Instant::now();
-    let kept: KeptHost = Mutex::new(Some((at, host)));
+    let kept: KeptHost = Mutex::new((0, Some((at, host))));
     forget_supervisor(&kept);
     let marked = LinuxHost {
         supervised: false,
         ..host
     };
-    assert_eq!(*kept.lock().unwrap(), Some((at, marked)));
-    let nothing: KeptHost = Mutex::new(None);
+    assert_eq!(kept.lock().unwrap().1, Some((at, marked)));
+    let nothing: KeptHost = Mutex::new((0, None));
     forget_supervisor(&nothing);
-    assert_eq!(*nothing.lock().unwrap(), None);
+    assert_eq!(nothing.lock().unwrap().1, None);
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().canonicalize().unwrap();
     let (_project, sandbox) = project(SandboxNetwork::Only(Vec::new()));
