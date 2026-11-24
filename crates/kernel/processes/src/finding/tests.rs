@@ -1042,6 +1042,28 @@ fn a_refused_first_copy_resolves_to_the_later_copy_that_runs() {
     assert_eq!(resolved.entry, runs);
 }
 
+/// A name whose first copy names an interpreter that is not there resolves to a later copy
+/// that runs; alone, that first copy needs its interpreter.
+#[test]
+fn a_first_copy_needing_a_missing_interpreter_resolves_to_the_later_copy_that_runs() {
+    let (_folder, home) = scratch();
+    let first = home.join("first");
+    let later = home.join("later");
+    script_at(
+        &first.join("tool"),
+        b"#!/nonexistent-crazyagent-row/interp\n",
+    );
+    let runs = script_at(&later.join("tool"), b"#!/bin/sh\n");
+    let alone = stub_new(vec![first.clone()], Some(home.clone()));
+    let missing = resolve("tool", &alone).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.needs.as_deref()),
+        (Reason::NeedsInterpreter, Some("interp"))
+    );
+    let places = stub_new(vec![first, later], Some(home.clone()));
+    assert_eq!(resolve("tool", &places).unwrap().entry, runs);
+}
+
 /// When no copy of a name resolves, the refusal reported is the first copy's, not a later
 /// one's.
 #[test]
