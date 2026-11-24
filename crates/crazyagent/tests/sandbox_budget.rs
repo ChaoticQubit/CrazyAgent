@@ -96,7 +96,7 @@ fn policy_load_p95() {
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
 fn linux_policy_write_p95() {
-    use crazyagent::sandbox::linux::LinuxSandbox;
+    use kernel_sandbox::linux::launch::LinuxSandbox;
     use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::profile::command::Sandbox;
