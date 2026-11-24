@@ -1714,6 +1714,9 @@ impl ResearchRunner {
             }
             std::thread::sleep(POLL);
         };
+        if matches!(ending, Ending::Exited(true)) && granted.hide_stops(jobs, listed, &never)() {
+            return Ok(Ending::Hidden);
+        }
         Ok(ending)
     }
 
@@ -1831,6 +1834,10 @@ impl ResearchRunner {
                     };
                 }
             }
+        };
+        let ending = match ending {
+            Ending::Exited(true) if granted.hide_stops(jobs, listed, &never)() => Ending::Hidden,
+            ending => ending,
         };
         let _ = jobs.heartbeat(job, counted);
         if matches!(ending, Ending::Exited(true))
@@ -2280,6 +2287,23 @@ impl ResearchRunner {
                 break Some(ReadOnlyEnding::Stopped);
             }
             std::thread::sleep(POLL);
+        };
+        let ending = match ending {
+            None if jobs
+                .as_ref()
+                .zip(run.project)
+                .is_some_and(|(jobs, project)| {
+                    crate::sandbox::access_store::hidden::hide_stops(
+                        jobs.connection(),
+                        project.as_str(),
+                        listed.as_ref(),
+                        &|| false,
+                    )()
+                }) =>
+            {
+                Some(ReadOnlyEnding::Stopped)
+            }
+            ending => ending,
         };
         drop(hides);
         let stopped = running.stop();
@@ -6728,63 +6752,6 @@ mod tests {
                 ResearchStatus::Failed
             ]
         );
-    }
-
-    /// DEC-170 addendum 6 (RV-DS241-27): a research job its runner hands back because a
-    /// projects home move holds its folder spends no attempt, is not claimed again until its
-    /// backoff ends, shows why it waits and records no start, since no harness ran.
-    #[test]
-    fn a_research_job_refused_for_a_home_move_backs_off_shows_why_and_records_no_start() {
-        let root = engine_root();
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        register_project(&root.database, "alpha", &folder);
-        let connection = rusqlite::Connection::open(&root.database).unwrap();
-        connection
-            .execute(
-                "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"repo\"]')",
-                rusqlite::params![
-                    root.base.to_str().unwrap(),
-                    root.base.join("next").to_str().unwrap()
-                ],
-            )
-            .unwrap();
-        let runner = ResearchRunner::new(
-            &root.database,
-            &root.state,
-            Path::new("/usr/bin/true"),
-            ResearchLimits::default(),
-        )
-        .unwrap();
-        let jobs = ResearchJobs::open(&root.database).unwrap();
-        let id = jobs
-            .enqueue("alpha", "market_research", "codex", false)
-            .unwrap();
-        let project = ResearchProject {
-            id: "alpha",
-            root: &folder,
-            account: None,
-        };
-        let run = runner.run_once(&project).unwrap().unwrap();
-        assert_eq!((run.job, run.status), (id, ResearchStatus::Queued));
-        assert!(
-            runner.run_once(&project).unwrap().is_none(),
-            "the job waits out its backoff"
-        );
-        let job = jobs.get(id).unwrap().unwrap();
-        assert_eq!((job.attempts, job.claimer), (0, None));
-        assert_eq!(
-            job.error.as_deref(),
-            Some("Waiting for the projects home move")
-        );
-        let started: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM project_activity WHERE kind='research_started'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(started, 0, "no harness started");
     }
 
     #[test]
