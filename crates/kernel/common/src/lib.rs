@@ -16,6 +16,12 @@ mod names_tests;
 #[cfg(test)]
 mod net_tests;
 #[cfg(test)]
+mod perf_kit;
+#[cfg(test)]
+mod perf_kit_tests;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
 mod relay_names_tests;
 
 /// The three desktop platforms the data root and services are defined for.
