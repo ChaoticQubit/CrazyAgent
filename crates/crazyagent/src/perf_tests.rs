@@ -15,7 +15,7 @@ use sdk::{Capability, Refusal, Tier};
 use sdk_host::{Bound, Providers};
 
 use crate::keychain_support::TemporaryKeychain;
-use crate::perf_kit::{Row, SAMPLES, line, time};
+use crate::perf_kit::{Row, SAMPLES, line, line_ns, time};
 use crate::protocol::Outcome;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sdk_processes::{ServiceProvider, UpdateProvider};
@@ -165,6 +165,13 @@ fn print(row: &Row, mut samples: Vec<u64>) {
     println!("{}", line(row, &samples));
 }
 
+/// Prints the PERF line of one row in nanoseconds at any median, for a row whose builds
+/// fall on either side of 10 us. Inputs: the row and the unsorted per-call samples.
+fn print_ns(row: &Row, mut samples: Vec<u64>) {
+    samples.sort_unstable();
+    println!("{}", line_ns(row, &samples));
+}
+
 /// A data folder made private as the engine makes it. Output: the guard and its layout.
 fn data_root() -> (tempfile::TempDir, crate::paths::Layout) {
     let folder = tempfile::tempdir().unwrap();
@@ -212,7 +219,7 @@ fn settings_save_quit() {
     for _ in 0..SAMPLES / 10 {
         step();
     }
-    print(
+    print_ns(
         &row("provider.settings.save_quit", 1),
         (0..SAMPLES).map(|_| step()).collect(),
     );
