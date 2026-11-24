@@ -180,10 +180,13 @@ pub(crate) fn hide_stops<'a>(
         if stop() {
             return true;
         }
+        let Some(listed) = listed else {
+            return false;
+        };
         if !hid_too_little.get() && read.get().is_none_or(|at| at.elapsed() >= HIDE_POLL) {
             read.set(Some(Instant::now()));
             let covered = crate::sandbox::access_store::hidden::load(database, project)
-                .is_ok_and(|saved| listed.is_some_and(|listed| listed.covers_saved(&saved)));
+                .is_ok_and(|saved| listed.covers_saved(&saved));
             hid_too_little.set(!covered);
         }
         hid_too_little.get()
