@@ -510,6 +510,31 @@ fn a_link_chain_through_a_shared_folder_is_changeable_though_both_ends_are_priva
 
 #[cfg(unix)]
 #[test]
+fn a_missing_part_a_link_leads_to_is_checked_where_it_would_sit() {
+    let temp = durable_folder();
+    let private = shared_folder(&temp.path().join("private"), 0o755);
+    let shared = shared_folder(&temp.path().join("shared"), 0o777);
+    let leads = private.join("leads");
+    std::os::unix::fs::symlink(&shared, &leads).unwrap();
+    let dangling = private.join("dangling");
+    std::os::unix::fs::symlink(shared.join("gone"), &dangling).unwrap();
+    let shared = std::fs::canonicalize(&shared).unwrap();
+    for path in [leads.join("missing").join(".."), dangling] {
+        assert_eq!(
+            changeable_by_others(&path),
+            Some(shared.clone()),
+            "{path:?}"
+        );
+        assert_eq!(
+            changeable_past_sticky(&path),
+            Some(shared.clone()),
+            "{path:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_folder_link_mid_path_through_a_shared_folder_is_changeable() {
     let temp = durable_folder();
     let private = temp.path().join("private");

@@ -29,11 +29,11 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
     changeable(path, true)
 }
 
-/// Reads a path as written, with its links resolved, and every link and `..` folder its
-/// resolution passes through ([`link_chain`]), and names the first changeable part of
-/// any of them ([`first_changeable_part`]). A link that cannot be read, or a chain past
-/// [`LINK_HOPS_MAX`], counts as changeable. Inputs: the path and whether world-writable
-/// stores pass. Output: the entry, or none.
+/// Reads a path as written, with its links resolved, and every link, `..` folder and first
+/// missing part its resolution passes through ([`link_chain`]), and names the first
+/// changeable part of any of them ([`first_changeable_part`]). A link that cannot be read,
+/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. Inputs: the path and whether
+/// world-writable stores pass. Output: the entry, or none.
 #[cfg(unix)]
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
@@ -68,9 +68,10 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     None
 }
 
-/// Every link a path's resolution passes through, named where it sits, and every folder a
-/// `..` in it leaves, in the order the resolution meets them. A missing part ends the walk,
-/// since nothing past it exists to follow. Input: an absolute path. Output: those places,
+/// Every link a path's resolution passes through, named where it sits, every folder a `..`
+/// in it leaves, and the first missing part where it would sit, since whoever can write its
+/// folder can make it, in the order the resolution meets them. The missing part ends the
+/// walk, since nothing past it exists to follow. Input: an absolute path. Output: those places,
 /// or the entry that makes the path changeable: one that cannot be read, or the link past
 /// [`LINK_HOPS_MAX`]. A relative path is changeable as a whole, since what it names
 /// depends on the working folder.
@@ -105,7 +106,10 @@ fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
         let next = at.join(&part);
         let kind = match std::fs::symlink_metadata(&next) {
             Ok(metadata) => metadata.file_type(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                hops.push(next);
+                break;
+            }
             Err(_) => return Err(next),
         };
         if !kind.is_symlink() {
