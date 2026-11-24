@@ -5992,6 +5992,7 @@ mod tests {
         assert!(ProviderReach::system().refused_everywhere(&[address]));
     }
 
+    mod attempts;
     #[cfg(target_os = "macos")]
     mod read_only;
 

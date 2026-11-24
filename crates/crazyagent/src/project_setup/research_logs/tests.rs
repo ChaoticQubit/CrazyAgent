@@ -5,19 +5,51 @@ const END: &str = "-----END OPENSSH PRIVATE KEY-----";
 const BODY_NO_DIGIT: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz+/AbCdEfGhIjKlMnOpQrStUvWxYz+/AbCdEfGh";
 const BODY_SHORT: &str = "Zm9vYmFy==";
 
-/// Writes one research job's stderr log under a fresh runtime folder and reads it back the
-/// way the owner does. Input: the log text. Output: the folder, kept alive for the read, and
-/// the lines the reply holds.
-fn reply_of(log: &str) -> (tempfile::TempDir, Vec<String>) {
+const SCANNED_BEFORE: usize = 4096;
+const UNRELATED_MAX: usize = 1 << 16;
+
+/// Makes a fresh runtime folder with an empty research agents folder. Output: the folder,
+/// removed when dropped.
+fn runtime() -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix("research-log-")
         .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
         .unwrap();
-    let run = root.path().join("research/agents/job-1-1");
-    std::fs::create_dir_all(&run).unwrap();
+    std::fs::create_dir_all(root.path().join("research/agents")).unwrap();
+    root
+}
+
+/// Writes one run folder's stderr log. Inputs: the runtime folder, the run folder name and
+/// the log text. Output: none.
+fn write_run(root: &tempfile::TempDir, name: &str, log: &str) {
+    let run = root.path().join("research/agents").join(name);
+    std::fs::create_dir(&run).unwrap();
     std::fs::write(run.join("stderr.log"), log).unwrap();
-    let lines = research_log(&root.path().join("engine.db"), 1).unwrap();
+}
+
+/// Reads a job's log the way the owner does. Inputs: the runtime folder and the job id.
+/// Output: the lines the reply holds.
+fn read_job(root: &tempfile::TempDir, job: i64) -> Vec<String> {
+    research_log(&root.path().join("engine.db"), job).unwrap()
+}
+
+/// Writes one research job's stderr log under a fresh runtime folder and reads it back the
+/// way the owner does. Input: the log text. Output: the folder, kept alive for the read, and
+/// the lines the reply holds.
+fn reply_of(log: &str) -> (tempfile::TempDir, Vec<String>) {
+    let root = runtime();
+    write_run(&root, "job-1-1", log);
+    let lines = read_job(&root, 1);
     (root, lines)
+}
+
+/// Where a name sits in the folder's own listing order. Inputs: the folder and the name.
+/// Output: its index in that order.
+fn listed_at(folder: &Path, name: &str) -> usize {
+    std::fs::read_dir(folder)
+        .unwrap()
+        .position(|entry| entry.unwrap().file_name() == name)
+        .unwrap()
 }
 
 /// Asserts no reply line shows any of the given body rows. Inputs: the reply lines and the
@@ -105,4 +137,34 @@ fn only_an_end_before_any_marker_hides_the_lines_before_it() {
     );
     let joined = format!("before\nkey {BEGIN}\\n{BODY_SHORT}\\n{END}\nafter");
     assert_eq!(redact(&joined), ["before", HIDDEN_LINE, "after"].join("\n"));
+}
+
+#[test]
+fn a_run_listed_after_many_unrelated_entries_is_still_found() {
+    let root = runtime();
+    let agents = root.path().join("research/agents");
+    write_run(&root, "job-42-1", "found it");
+    let mut unrelated = 0;
+    while listed_at(&agents, "job-42-1") < SCANNED_BEFORE {
+        assert!(
+            unrelated < UNRELATED_MAX,
+            "the listing never put job 42 late"
+        );
+        for _ in 0..1024 {
+            unrelated += 1;
+            std::fs::File::create(agents.join(format!("job-{}-1", 1000 + unrelated))).unwrap();
+        }
+    }
+    assert_eq!(read_job(&root, 42), ["found it"]);
+}
+
+#[test]
+fn the_newest_attempt_then_the_newest_launch_is_read() {
+    let root = runtime();
+    write_run(&root, "job-42-1-5", "first attempt, sixth launch");
+    write_run(&root, "job-42-2", "second attempt, first launch");
+    write_run(&root, "job-42-2-3", "second attempt, fourth launch");
+    write_run(&root, "job-4-9", "another job");
+    assert_eq!(read_job(&root, 42), ["second attempt, fourth launch"]);
+    assert_eq!(read_job(&root, 7), Vec::<String>::new());
 }
