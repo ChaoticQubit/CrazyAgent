@@ -6,7 +6,7 @@ const BODY_NO_DIGIT: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz+/AbCdEfGhIjKlMnOpQrStUvW
 const BODY_SHORT: &str = "Zm9vYmFy==";
 
 const SCANNED_BEFORE: usize = 4096;
-const UNRELATED_MAX: usize = 1 << 16;
+const UNRELATED_AFTER: usize = 4096;
 
 /// Makes a fresh runtime folder with an empty research agents folder. Output: the folder,
 /// removed when dropped.
@@ -41,15 +41,6 @@ fn reply_of(log: &str) -> (tempfile::TempDir, Vec<String>) {
     write_run(&root, "job-1-1", log);
     let lines = read_job(&root, 1);
     (root, lines)
-}
-
-/// Where a name sits in the folder's own listing order. Inputs: the folder and the name.
-/// Output: its index in that order.
-fn listed_at(folder: &Path, name: &str) -> usize {
-    std::fs::read_dir(folder)
-        .unwrap()
-        .position(|entry| entry.unwrap().file_name() == name)
-        .unwrap()
 }
 
 /// Asserts no reply line shows any of the given body rows. Inputs: the reply lines and the
@@ -143,18 +134,14 @@ fn only_an_end_before_any_marker_hides_the_lines_before_it() {
 fn a_run_listed_after_many_unrelated_entries_is_still_found() {
     let root = runtime();
     let agents = root.path().join("research/agents");
-    write_run(&root, "job-42-1", "found it");
-    let mut unrelated = 0;
-    while listed_at(&agents, "job-42-1") < SCANNED_BEFORE {
-        assert!(
-            unrelated < UNRELATED_MAX,
-            "the listing never put job 42 late"
-        );
-        for _ in 0..1024 {
-            unrelated += 1;
-            std::fs::File::create(agents.join(format!("job-{}-1", 1000 + unrelated))).unwrap();
+    let unrelated = |from: usize, count: usize| {
+        for at in from..from + count {
+            std::fs::File::create(agents.join(format!("job-{}-1", 1000 + at))).unwrap();
         }
-    }
+    };
+    unrelated(0, SCANNED_BEFORE);
+    write_run(&root, "job-42-1", "found it");
+    unrelated(SCANNED_BEFORE, UNRELATED_AFTER);
     assert_eq!(read_job(&root, 42), ["found it"]);
 }
 
