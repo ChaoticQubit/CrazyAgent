@@ -242,12 +242,24 @@ pub fn lookup_within(
     port: u16,
     lookup: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
 ) -> io::Result<Vec<IpAddr>> {
+    lookup_counted(&LOOKUPS, host, port, lookup)
+}
+
+/// [`lookup_within`] counting its thread on the given counter, which the engine keeps as
+/// [`LOOKUPS`] and a test row keeps as its own. Inputs: the counter, host, port and lookup.
+/// Output: the answer, or a `TimedOut` failure past the bound or at the cap.
+fn lookup_counted(
+    lookups: &'static AtomicUsize,
+    host: &str,
+    port: u16,
+    lookup: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
+) -> io::Result<Vec<IpAddr>> {
     assert!(!host.is_empty());
-    if LOOKUPS.fetch_add(1, Ordering::SeqCst) >= LOOKUPS_MAX {
-        LOOKUPS.fetch_sub(1, Ordering::SeqCst);
+    if lookups.fetch_add(1, Ordering::SeqCst) >= LOOKUPS_MAX {
+        lookups.fetch_sub(1, Ordering::SeqCst);
         return Err(io::Error::from(io::ErrorKind::TimedOut));
     }
-    let alive = Alive;
+    let alive = Alive(lookups);
     let host = host.to_owned();
     let (answer, answered) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -262,12 +274,12 @@ pub fn lookup_within(
 }
 
 /// One counted lookup thread: dropping it, when the thread ends, unwinds, or never spawns,
-/// takes it off [`LOOKUPS`].
-struct Alive;
+/// takes it off the counter it was counted on.
+struct Alive(&'static AtomicUsize);
 
 impl Drop for Alive {
     fn drop(&mut self) {
-        let before = LOOKUPS.fetch_sub(1, Ordering::SeqCst);
+        let before = self.0.fetch_sub(1, Ordering::SeqCst);
         assert!(before > 0 && before <= LOOKUPS_MAX);
     }
 }

@@ -189,9 +189,11 @@ fn a_plugin_lookup_that_never_answers_is_unresolved_within_the_bound() {
 }
 
 /// While as many lookups as the cap are still running past their bound, a new lookup is
-/// refused at once as a timeout, and lookups answer again once those end.
+/// refused at once as a timeout, and lookups answer again once those end. The row counts on
+/// its own counter, so lookups of rows running beside it never take one of its places.
 #[test]
 fn stalled_lookups_at_the_cap_refuse_a_new_lookup_until_they_end() {
+    static COUNTED: AtomicUsize = AtomicUsize::new(0);
     let public = |_: &str, _: u16| Ok(vec![IpAddr::from([140, 82, 112, 4])]);
     let mut held = Vec::new();
     let mut calls = Vec::new();
@@ -199,7 +201,7 @@ fn stalled_lookups_at_the_cap_refuse_a_new_lookup_until_they_end() {
         let (hold, never) = std::sync::mpsc::channel::<()>();
         held.push(hold);
         calls.push(std::thread::spawn(move || {
-            lookup_within("stalled.example", 443, move |_, _| {
+            lookup_counted(&COUNTED, "stalled.example", 443, move |_, _| {
                 let _ = never.recv();
                 Ok(Vec::new())
             })
@@ -210,12 +212,13 @@ fn stalled_lookups_at_the_cap_refuse_a_new_lookup_until_they_end() {
         assert_eq!(call.join().unwrap(), Err(std::io::ErrorKind::TimedOut));
     }
     let started = Instant::now();
-    let refused = lookup_within("api.github.com", 443, public).map_err(|error| error.kind());
+    let refused =
+        lookup_counted(&COUNTED, "api.github.com", 443, public).map_err(|error| error.kind());
     assert_eq!(refused, Err(std::io::ErrorKind::TimedOut));
     assert!(started.elapsed() < LOOKUP_TIME);
     drop(held);
     let answered = loop {
-        match lookup_within("api.github.com", 443, public) {
+        match lookup_counted(&COUNTED, "api.github.com", 443, public) {
             Ok(found) => break found,
             Err(_) if started.elapsed() < LOOKUP_TIME * 2 => std::thread::yield_now(),
             Err(error) => panic!("{error}"),
