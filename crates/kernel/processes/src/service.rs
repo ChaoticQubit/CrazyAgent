@@ -1308,8 +1308,6 @@ pub use cli_link::{WINDOWS_PATH_FOLDER_VARIABLE, link_cli, windows_path_command}
 /// names the program, arguments, status and error text. Inputs: the commands. Outputs:
 /// their answers.
 mod run;
-#[cfg(not(unix))]
-use run::run_process;
 use run::{run_checked, run_quiet};
 
 /// The escapes and quotes each manager's definition format needs, and the bounded reads
