@@ -80,6 +80,9 @@ pub mod routing;
 pub mod sandbox;
 pub mod sandbox_settings;
 pub mod scheduling;
+/// The `editor.spawn` provider: a plugin names one project the engine knows, and gets back
+/// only the pid of the editor server the engine's spawner started for it.
+mod sdk_editor;
 /// The `process.install` provider: a plugin's recipe mapped onto the kernel recipe, run by
 /// the engine's executor, with its output redacted and bounded.
 mod sdk_install;
