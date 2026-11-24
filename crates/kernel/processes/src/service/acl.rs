@@ -300,6 +300,13 @@ pub(super) fn kept(entry: &Path) -> bool {
         .contains_key(entry)
 }
 
+/// The entries of the last access listing this test thread ran, so a hook can tell which
+/// entries were just listed. Output: the entries, empty before any listing.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn last_listing() -> Vec<std::path::PathBuf> {
+    LISTINGS.with(|listings| listings.borrow().last().cloned().unwrap_or_default())
+}
+
 /// Takes the entries of each access listing this test thread ran since the last take.
 /// Output: one list of entries per listing, in the order they ran.
 #[cfg(all(test, target_os = "macos"))]
