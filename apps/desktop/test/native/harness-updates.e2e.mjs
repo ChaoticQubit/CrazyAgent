@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, homeRoot, owner, removeHomeRoot, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -152,11 +152,18 @@ async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
-  const base = realpathSync(tmpdir());
-  for (let at = base; at !== dirname(at); at = dirname(at)) {
-    assert((statSync(at).mode & 0o002) === 0, `${at} is writable by every user, so the engine refuses a harness under it: set TMPDIR to a private folder`);
+  const root = homeRoot(prefix);
+  try {
+    await onRoot(t, root, prefix, steps, { offline, codexAtStart, local });
+  } finally {
+    if (!process.env.E2E_EVIDENCE) removeHomeRoot(root);
   }
-  const root = realpathSync(mkdtempSync(join(base, prefix)));
+}
+
+/** Runs onEngine's engine, bridge and page in the test root it made, so the root is removed
+ * however the run ends. Inputs: the test context, the root, its prefix, the steps and
+ * onEngine's options. Output: none. */
+async function onRoot(t, root, prefix, steps, { offline, codexAtStart, local }) {
   const runtime = join(root, "engine");
   const evidence = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? join(process.env.E2E_EVIDENCE, prefix) : join(root, "evidence");
   const home = join(root, "home");
@@ -268,7 +275,6 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     await stop(bridgeProcess);
     await stop(engine);
   }
-  if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
 /** Reads one harness's versions row straight from the bridge. Inputs: the bridge and the id.
