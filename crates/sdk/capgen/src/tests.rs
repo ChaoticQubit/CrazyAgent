@@ -31,6 +31,23 @@ fn generated_from_caps() -> Vec<(String, String)> {
     rust(&borrowed).expect("the caps generate")
 }
 
+/// Lists the stems of the checked-in `.cap` files. Output: the stems, sorted.
+fn cap_stems() -> Vec<String> {
+    let mut stems: Vec<String> = fs::read_dir(sdk("caps"))
+        .expect("the caps folder reads")
+        .map(|entry| entry.expect("a caps entry reads").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("cap"))
+        .map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("a cap stem is text")
+                .to_owned()
+        })
+        .collect();
+    stems.sort();
+    stems
+}
+
 /// Runs capgen over sources that must be refused. Input: stems with sources.
 /// Output: the refusal code; panics when capgen accepts them.
 fn refused(sources: &[(&str, &str)]) -> &'static str {
@@ -43,22 +60,23 @@ fn refused(sources: &[(&str, &str)]) -> &'static str {
 #[test]
 fn settings_cap_generates_the_checked_in_files() {
     let files = generated_from_caps();
+    let mut expected = vec![
+        "envelope/mod.rs".to_owned(),
+        "host.rs".to_owned(),
+        "mod.rs".to_owned(),
+    ];
+    for stem in cap_stems() {
+        expected.push(format!("{stem}.rs"));
+        expected.push(format!("envelope/{stem}.rs"));
+    }
+    expected.sort();
+    assert!(expected.len() > 3, "the caps folder holds no cap");
     assert_eq!(
         files
             .iter()
-            .map(|(path, _)| path.as_str())
+            .map(|(path, _)| path.clone())
             .collect::<Vec<_>>(),
-        vec![
-            "envelope/mod.rs",
-            "envelope/net.rs",
-            "envelope/secrets.rs",
-            "envelope/settings.rs",
-            "host.rs",
-            "mod.rs",
-            "net.rs",
-            "secrets.rs",
-            "settings.rs"
-        ]
+        expected
     );
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
@@ -76,14 +94,24 @@ fn a_renamed_field_changes_the_output() {
     let source = fs::read_to_string(sdk("caps/settings.cap")).expect("settings.cap reads");
     let renamed = source.replace("hours: u16", "hour_count: u16");
     assert_ne!(renamed, source);
-    let secrets = fs::read_to_string(sdk("caps/secrets.cap")).expect("secrets.cap reads");
-    let net = fs::read_to_string(sdk("caps/net.cap")).expect("net.cap reads");
-    let files = rust(&parsed(&[
-        ("net", &net),
-        ("secrets", &secrets),
-        ("settings", &renamed),
-    ]))
-    .expect("generates");
+    let loaded = load(&sdk("caps")).expect("the caps load");
+    let fed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| match stem.as_str() {
+            "settings" => (
+                "settings",
+                crazyagent_cap::parse_as("settings", &renamed).expect("parses"),
+            ),
+            other => (other, file.clone()),
+        })
+        .collect();
+    assert_eq!(
+        fed.iter()
+            .map(|(stem, _)| stem.to_string())
+            .collect::<Vec<_>>(),
+        cap_stems()
+    );
+    let files = rust(&fed).expect("generates");
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
         vec!["settings.rs".to_owned()]
