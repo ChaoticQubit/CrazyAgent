@@ -1,7 +1,7 @@
 use crate::Refused;
 use crate::registry::{FOLDER, MANIFEST_FILE};
 use crate::store::refused;
-use crazyagent_win_sandbox::{dacl, private};
+use crazyagent_win_sandbox::private;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
@@ -94,9 +94,11 @@ fn opened(path: &Path, access: u32) -> std::io::Result<File> {
         .open(path)
 }
 
-/// Whether an opened object is no reparse point, of the wanted shape, and, when asked, on
-/// a local volume with a trusted owner. Inputs: the handle, whether a folder is wanted and
-/// whether it must be owned. Output: the answer, false when it cannot be read.
+/// Whether an opened object is no reparse point, of the wanted shape, and, when asked,
+/// private to this user as every store judges what it opens: one name, a local volume, a
+/// trusted owner and no other account that may open it. Inputs: the handle, whether a
+/// folder is wanted and whether it must be owned. Output: the answer, false when it cannot
+/// be read.
 fn plain(object: &File, folder: bool, owned: bool) -> bool {
     let Ok(metadata) = object.metadata() else {
         return false;
@@ -105,13 +107,7 @@ fn plain(object: &File, folder: bool, owned: bool) -> bool {
     {
         return false;
     }
-    if !owned {
-        return true;
-    }
-    let (Ok(facts), Ok(user)) = (private::facts(object), private::user_sid()) else {
-        return false;
-    };
-    !facts.reparse && !facts.remote && dacl::trusted_owner(&facts.owner, &user)
+    !owned || private::check(object).is_ok()
 }
 
 fn held(path: PathBuf, owned: bool) -> Result<Dir, ()> {
@@ -162,12 +158,13 @@ pub(super) fn open_manifest(folder: &Dir, owned: bool) -> Result<Option<File>, (
 /// Deletes one entry through its own handle, a link or junction itself and never its
 /// target, the handle opened, marked and closed in this call. An entry the delete refuses
 /// for its read-only attribute has that attribute cleared through the same handle and is
-/// deleted again. Inputs: the held folder and the name. Output: whether it was there, or
-/// Err.
+/// deleted again, unless it has another name, which may sit outside the plugins folder and
+/// shares the attribute: that entry is left as it is and Err returned, for the sweep to
+/// retry. Inputs: the held folder and the name. Output: whether it was there, or Err.
 pub(super) fn unlink(directory: &Dir, name: &OsStr) -> Result<bool, ()> {
     let entry = match opened(
         &directory.path.join(name),
-        DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+        DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
     ) {
         Ok(entry) => entry,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
@@ -177,7 +174,8 @@ pub(super) fn unlink(directory: &Dir, name: &OsStr) -> Result<bool, ()> {
         let read_only = entry
             .metadata()
             .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_READONLY != 0);
-        if !read_only {
+        let one_name = private::facts(&entry).is_ok_and(|facts| facts.links == 1);
+        if !read_only || !one_name {
             return Err(());
         }
         private::clear_read_only(&entry).map_err(|_| ())?;

@@ -162,17 +162,40 @@ fn names(folder: &Path) -> Vec<String> {
     names
 }
 
-/// Makes a junction at `link` to the folder `target` with `mklink /J`, both paths with
-/// backslashes only, since mklink reads a forward slash as a switch.
-fn junction(link: &Path, target: &Path) {
-    assert!(!link.to_string_lossy().contains('/') && !target.to_string_lossy().contains('/'));
-    let status = Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
+/// Runs `mklink` through cmd.exe with each path as its own quoted argument. A path with a
+/// forward slash, which mklink reads as a switch, a quote or a character cmd.exe acts on is
+/// refused before cmd.exe starts, so a path is never read as a command. Inputs: the switch,
+/// if any, the link and the target. Output: whether mklink made the link.
+fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    let quoted = |path: &Path| {
+        let text = path.to_str().unwrap();
+        assert!(
+            !text.contains(['/', '"', '&', '|', '^', '<', '>', '%', '!', '(', ')']),
+            "{text}"
+        );
+        format!("\"{text}\"")
+    };
+    let mut command = Command::new("cmd");
+    command.args(["/D", "/C", "mklink"]);
+    if let Some(switch) = switch {
+        command.arg(switch);
+    }
+    command
+        .raw_arg(quoted(link))
+        .raw_arg(quoted(target))
         .status()
-        .unwrap();
-    assert!(status.success(), "junction {}", link.display());
+        .unwrap()
+        .success()
+}
+
+/// Makes a junction at `link` to the folder `target` with `mklink /J`.
+fn junction(link: &Path, target: &Path) {
+    assert!(
+        mklink(Some("/J"), link, target),
+        "junction {}",
+        link.display()
+    );
 }
 
 /// Makes a symbolic link at `link` to `target`, a folder or a file, falling back to
@@ -184,13 +207,8 @@ fn symlink(link: &Path, target: &Path, folder: bool) {
         std::os::windows::fs::symlink_file(target, link)
     };
     if made.is_err() {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "mklink"]);
-        if folder {
-            command.arg("/D");
-        }
-        let status = command.arg(link).arg(target).status().unwrap();
-        assert!(status.success(), "symlink {}", link.display());
+        let switch = folder.then_some("/D");
+        assert!(mklink(switch, link, target), "symlink {}", link.display());
     }
 }
 
@@ -500,4 +518,78 @@ fn windows_a_replace_over_a_folder_with_a_read_only_file_leaves_nothing_aside() 
     );
     remove_staged(&case.root).unwrap();
     assert_eq!(names(&plugins), ["near"]);
+}
+
+/// Gives every account write on one entry, the entry alone and nothing made in it later.
+/// Input: the path.
+fn everyone_writes(path: &Path) {
+    let status = Command::new("icacls")
+        .arg(path)
+        .args(["/grant", "*S-1-1-0:(W)"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "icacls {}", path.display());
+}
+
+/// A plugin folder, or its plugin.toml, that another account may write is listed refused as
+/// unsafe: a folder is refused before its plugin.toml is opened, so one with that file gone
+/// is still refused as unsafe and not as a missing manifest. What the app made passes.
+#[test]
+fn windows_a_plugin_folder_another_account_can_write_is_refused() {
+    for folder in [true, false] {
+        let case = case();
+        add_text(&case, NEAR, false, 1).unwrap();
+        let listing = list(&case.db, &case.engine()).unwrap();
+        let near = plugin(&listing, "near");
+        assert!(
+            !matches!(near.status, PluginStatus::Refused { .. }),
+            "{near:?}"
+        );
+        let path = case.root.join(FOLDER).join("near");
+        let manifest = path.join(MANIFEST_FILE);
+        if folder {
+            std::fs::remove_file(&manifest).unwrap();
+            everyone_writes(&path);
+        } else {
+            everyone_writes(&manifest);
+        }
+
+        let listing = list(&case.db, &case.engine()).unwrap();
+        assert_eq!(
+            refused_code(plugin(&listing, "near")),
+            "app_plugin_file_unsafe",
+            "folder {folder}"
+        );
+        assert!(ready(&case.db, &case.engine(), "near").is_err());
+    }
+}
+
+/// A read-only file in a plugin folder that is also a name of a file outside the plugins
+/// folder is never changed: replacing the plugin and the start sweep leave the outside file
+/// read-only with its bytes, the shared attribute never cleared.
+#[test]
+fn windows_a_read_only_file_hard_linked_from_outside_keeps_its_attribute() {
+    let case = case();
+    add_text(&case, NEAR, false, 1).unwrap();
+    let outside = case.temp.path().join("outside.txt");
+    std::fs::write(&outside, b"outside").unwrap();
+    std::fs::hard_link(
+        &outside,
+        case.root.join(FOLDER).join("near").join("linked.txt"),
+    )
+    .unwrap();
+    read_only(&outside);
+    let text = NEAR.replace("title = \"Near\"", "title = \"Near two\"");
+
+    add_text(&case, &text, true, 2).unwrap();
+    let _ = remove_staged(&case.root);
+
+    assert!(
+        std::fs::metadata(&outside)
+            .unwrap()
+            .permissions()
+            .readonly(),
+        "the outside file keeps its read-only attribute"
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
 }
