@@ -290,6 +290,10 @@ impl Capture {
 #[cfg(all(test, unix))]
 mod routing_tests;
 
+/// The hidden folders a master turn's sandbox keeps it out of.
+mod hidden;
+use hidden::master_turn_hides;
+
 /// Runs one master turn step again while another engine connection holds the database
 /// write lock past the storage wait, which rolls the step's write back (LB-28). Input: the
 /// step. Output: its result, or `storage_busy` when the lock never freed.
@@ -1479,18 +1483,6 @@ fn listed_master_turn(
         project.as_str(),
     )
     .ok_or_else(|| failure("master_sandbox_unavailable"))
-}
-
-/// The folders a headless master turn's sandbox keeps it out of, as the hidden folders list
-/// records them: the native and the RCLI sandbox hide `hidden_paths`, and under Full access
-/// the turn runs unconfined and hides none (SA-VID14 r1 sec F3). Input: the prepared turn.
-/// Output: the folders.
-fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
-    if prepared.agent_policy.access == kernel_sandbox::policy::AgentAccess::Full {
-        &[]
-    } else {
-        &prepared.hidden_paths
-    }
 }
 
 /// Keeps an RCLI or listed master turn on the hidden folders list after it returns when its
