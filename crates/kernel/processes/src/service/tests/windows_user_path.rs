@@ -1,5 +1,6 @@
 #![cfg(windows)]
 use super::*;
+use crate::update::test_support::{TestResult, at};
 
 /// A registry key of one row's own that stands in for the user's environment key, so no row
 /// writes the PATH of the machine running it or reads another row's:
@@ -77,26 +78,27 @@ Remove-Item -LiteralPath $env:CRAZYAGENT_TEST_KEY -Recurse",
 
 #[cfg(windows)]
 #[test]
-fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
+fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() -> TestResult {
     let key = ScratchKey::new("once", None);
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir()?;
     let folder = root.path().join("cra'zy$(exit 7)");
-    std::fs::create_dir(&folder).unwrap();
+    at(&folder, std::fs::create_dir(&folder))?;
     let executable = folder.join("crazyagent.exe");
     assert_eq!(link_cli_under(&executable, &key.name).unwrap(), folder);
     assert_eq!(link_cli_under(&executable, &key.name).unwrap(), folder);
     let shown = folder.to_str().unwrap();
     assert_eq!(key.path(), ("ExpandString".to_owned(), shown.to_owned()));
+    Ok(())
 }
 
 #[cfg(windows)]
 #[test]
-fn link_cli_refuses_a_folder_holding_a_semicolon_and_leaves_the_user_path() {
+fn link_cli_refuses_a_folder_holding_a_semicolon_and_leaves_the_user_path() -> TestResult {
     let before = ("String", r"C:\Windows");
     let key = ScratchKey::new("semicolon", Some(before));
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir()?;
     let folder = root.path().join("cra;zy");
-    std::fs::create_dir(&folder).unwrap();
+    at(&folder, std::fs::create_dir(&folder))?;
     let linked = link_cli_under(&folder.join("crazyagent.exe"), &key.name);
     let refusal = linked.unwrap_err().to_string();
     assert!(
@@ -104,15 +106,16 @@ fn link_cli_refuses_a_folder_holding_a_semicolon_and_leaves_the_user_path() {
         "{refusal}"
     );
     assert_eq!(key.path(), (before.0.to_owned(), before.1.to_owned()));
+    Ok(())
 }
 
 #[cfg(windows)]
 #[test]
-fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
+fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() -> TestResult {
     let before = r"%USERPROFILE%\crazyagent-kind-check;C:\Windows";
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir()?;
     let folder = root.path().join("bin");
-    std::fs::create_dir(&folder).unwrap();
+    at(&folder, std::fs::create_dir(&folder))?;
     let shown = folder.to_str().unwrap();
     for kind in ["ExpandString", "String"] {
         let key = ScratchKey::new(&kind.to_ascii_lowercase(), Some((kind, before)));
@@ -121,13 +124,14 @@ fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
         let after = (kind.to_owned(), format!("{before};{shown}"));
         assert_eq!(key.path(), after, "{kind}");
     }
+    Ok(())
 }
 
 /// While another install holds the PATH lock past the wait, link_cli is refused with a
 /// try-again line and the PATH value stays as it was.
 #[cfg(windows)]
 #[test]
-fn link_cli_refuses_while_another_install_holds_the_path_lock() {
+fn link_cli_refuses_while_another_install_holds_the_path_lock() -> TestResult {
     let before = ("ExpandString", r"C:\Windows");
     let key = ScratchKey::new("locked", Some(before));
     let lock = cli_link::path_lock_name(&key.name);
@@ -138,25 +142,26 @@ $m=[System.Threading.Mutex]::new($true, $env:CRAZYAGENT_TEST_LOCK); \
 Start-Sleep -Seconds 15; $m.ReleaseMutex()",
         &[("CRAZYAGENT_TEST_LOCK", &lock)],
     );
-    let mut child = crate::spawn_gate::spawn(holder.stdout(std::process::Stdio::piped())).unwrap();
+    let mut child = crate::spawn_gate::spawn(holder.stdout(std::process::Stdio::piped()))?;
     let mut held = String::new();
     let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
-    std::io::BufRead::read_line(&mut reader, &mut held).unwrap();
+    std::io::BufRead::read_line(&mut reader, &mut held)?;
     assert_eq!(held.trim(), "held");
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir()?;
     let linked = link_cli_under(&root.path().join("crazyagent.exe"), &key.name);
     let refusal = linked.unwrap_err().to_string();
     assert!(refusal.contains("try again"), "{refusal}");
     assert_eq!(key.path(), (before.0.to_owned(), before.1.to_owned()));
-    assert!(child.wait().unwrap().success());
+    assert!(child.wait()?.success());
+    Ok(())
 }
 
 /// Eight installs adding eight folders under one key at once all land in its PATH value.
 #[cfg(windows)]
 #[test]
-fn link_cli_from_eight_installs_at_once_keeps_every_folder() {
+fn link_cli_from_eight_installs_at_once_keeps_every_folder() -> TestResult {
     let key = ScratchKey::new("eight", None);
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir()?;
     let folders: Vec<PathBuf> = (0..8)
         .map(|index| root.path().join(format!("bin{index}")))
         .collect();
@@ -171,4 +176,5 @@ fn link_cli_from_eight_installs_at_once_keeps_every_folder() {
     for folder in &folders {
         assert!(entries.contains(&folder.to_str().unwrap()), "{value}");
     }
+    Ok(())
 }
