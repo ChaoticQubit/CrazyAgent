@@ -9,3 +9,9 @@ pub mod relay_token;
 pub mod secret;
 pub mod secrets;
 pub mod store;
+
+#[cfg(test)]
+#[path = "../../common/src/perf_kit.rs"]
+mod perf_kit;
+#[cfg(test)]
+mod perf_tests;
