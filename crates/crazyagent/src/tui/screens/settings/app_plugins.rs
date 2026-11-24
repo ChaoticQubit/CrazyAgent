@@ -26,6 +26,9 @@ use std::path::PathBuf;
 #[cfg(all(test, unix))]
 mod tests;
 
+#[cfg(all(test, windows))]
+mod path_hint_tests;
+
 mod sentence;
 pub(in crate::tui) use sentence::sentence;
 
