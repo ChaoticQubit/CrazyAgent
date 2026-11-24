@@ -244,10 +244,10 @@ fn service_calls() {
         black_box(black_box(&service).may_replace(&HOOKS));
     });
     time(&row("service.Service.uninstall", ONE), SAMPLES, || {
-        black_box(absent.uninstall().unwrap());
+        absent.uninstall().unwrap();
     });
     time(&row("service.Service.stop", ONE), SAMPLES, || {
-        black_box(absent.stop().unwrap());
+        absent.stop().unwrap();
     });
     time(&row("service.transient", FAST), SAMPLES, || {
         black_box(transient(black_box(Path::new(ON_IMAGE))));
@@ -271,7 +271,7 @@ fn service_calls() {
     });
     assert!(kept.next().is_none() && !roots[ONE_SHOT].0.join("bin").exists());
     time(&row("service.write_definition", ONE), SAMPLES, || {
-        black_box(write_definition(&service.definition, &text, Platform::MacOs).unwrap());
+        write_definition(&service.definition, &text, Platform::MacOs).unwrap();
     });
     time(
         &row("service.changeable.changeable_by_others", FILES),

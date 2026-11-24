@@ -186,7 +186,7 @@ fn update_calls() {
         black_box(read_channel(black_box(&root)).unwrap());
     });
     time(&row("update.write_channel", ONE), SAMPLES, || {
-        black_box(write_channel(black_box(&root), Channel::Dev).unwrap());
+        write_channel(black_box(&root), Channel::Dev).unwrap();
     });
     time(&row("update.parse_manifest", PARSE), SAMPLES, || {
         black_box(parse_manifest(black_box(MANIFEST)).unwrap());
@@ -206,7 +206,7 @@ fn update_calls() {
     });
     server.join().unwrap();
     time(&row("update.verify_file", ONE), SAMPLES, || {
-        black_box(verify_file(&archive, &sha256, &signature, &key, VERSION).unwrap());
+        verify_file(&archive, &sha256, &signature, &key, VERSION).unwrap();
     });
     time(&row("update.key_from_config", PARSE), SAMPLES, || {
         black_box(key_from_config(black_box(CONFIG)).unwrap());
@@ -225,7 +225,7 @@ fn update_calls() {
     let mut fresh = pairs.iter();
     time(&row("update.swap", ONE), SAMPLES, || {
         let (install, staged) = fresh.next().unwrap();
-        black_box(swap(install, staged, VERSION).unwrap());
+        swap(install, staged, VERSION).unwrap();
     });
     assert!(fresh.next().is_none() && !pairs[0].1.join("crazyagent").exists());
     time(&row("update.service_command", ONE), SAMPLES, || {
