@@ -72,6 +72,56 @@ interface net {
   request: func(request: net-request) -> result<reply, refusal>;
 }
 
+interface process-types {
+  enum installer {
+    uv-release,
+    uv-tool,
+    node-archive,
+    brew-formula,
+    brew-cask,
+    npm-global,
+    winget,
+    system-package,
+    self-update,
+  }
+
+  enum install-verb {
+    install,
+    update,
+  }
+
+  enum system-manager {
+    apt-get,
+    dnf,
+  }
+
+  record install-recipe {
+    installer: installer,
+    name: string,
+    verb: option<install-verb>,
+    version: option<string>,
+    target: option<string>,
+    python: option<string>,
+    lock: option<string>,
+    sha256: option<string>,
+    manager: option<system-manager>,
+    args: list<string>,
+    %flags: list<string>,
+  }
+
+  record install-result {
+    code: u32,
+    output: list<u8>,
+  }
+}
+
+interface process {
+  use sdk-types.{refusal};
+  use process-types.{install-recipe, install-result};
+
+  install: func(recipe: install-recipe) -> result<install-result, refusal>;
+}
+
 interface secrets-types {
   type secret = u64;
 }
@@ -153,6 +203,7 @@ interface update {
 
 world plugin {
   import net;
+  import process;
   import secrets;
   import service;
   import settings;

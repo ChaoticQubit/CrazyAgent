@@ -46,6 +46,19 @@ impl sdk::secrets::Provide for NoSecrets {
 /// A net provider the row never reaches: it times only the quit save.
 struct NoNet;
 
+/// The process provider of the overhead rows, which never call it.
+struct NoProcess;
+
+impl sdk::process::Provide for NoProcess {
+    fn install(
+        &self,
+        _: &'static str,
+        _: sdk::process::InstallRecipe,
+    ) -> Result<sdk::process::InstallResult, Refusal> {
+        unreachable!("the overhead rows call no process capability")
+    }
+}
+
 impl sdk::net::Provide for NoNet {
     fn request(&self, _: &'static str, _: sdk::net::Request) -> Result<sdk::net::Reply, Refusal> {
         unreachable!("the overhead row calls only settings.save_quit")
@@ -153,6 +166,7 @@ fn overhead_per_sdk_call() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &NoSecrets,
         settings: &provider,
         service: &NoService,
@@ -233,6 +247,7 @@ fn gateway_secrets_call_p95() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &Found,
         settings: &Noop,
         service: &NoService,
@@ -284,6 +299,7 @@ fn gateway_update_set_channel_p95() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &NoService,
@@ -350,6 +366,7 @@ fn gateway_service_status_p95() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &Reported,

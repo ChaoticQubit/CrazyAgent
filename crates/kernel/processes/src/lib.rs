@@ -9,6 +9,9 @@ pub mod finding;
 /// One path's hold on ending a process group, so a pane's stop and the terminal host's
 /// close never both signal one group and no path claims a number a new group may lead.
 pub mod group;
+/// Pinned installer recipes: the typed fields of each installer the engine runs, and the
+/// checks that keep every field to its bounds and the bundled lists.
+pub mod install;
 /// Setup's process helpers: bounded command runs, version reads, file hashes and the
 /// private folders setup stages into, with the error code and version types they return.
 pub mod run;
