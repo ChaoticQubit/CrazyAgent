@@ -2,6 +2,11 @@
 /// engine itself sets in every agent's environment.
 pub mod consts;
 
+/// The Seatbelt rule writers: the denies for app launches, a clone's object store and a
+/// lead's clone, the root pins and nested git denies, and the packing and bound checks of
+/// the regex strings a profile holds.
+pub mod seatbelt;
+
 use crate::access::AccessHooks;
 use crate::toolchains::ToolchainHooks;
 use std::path::{Path, PathBuf};

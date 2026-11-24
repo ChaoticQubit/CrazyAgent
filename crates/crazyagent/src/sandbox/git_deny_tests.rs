@@ -1,8 +1,9 @@
-use super::{ProjectSandbox, sbpl_overlong, seatbelt_pattern};
+use super::ProjectSandbox;
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::any_case;
 use kernel_sandbox::policy::AccessGrant;
 use kernel_sandbox::profile::consts::{ADMIN_LINKS, ADMIN_WRITES};
+use kernel_sandbox::profile::seatbelt::{sbpl_overlong, seatbelt_pattern};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
