@@ -587,19 +587,15 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
         return Err(refused("app_plugin_not_found"));
     }
     let present = folder::read(engine.root, name)?.is_some();
-    let known: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
-             OR EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1)
-             OR EXISTS(SELECT 1 FROM app_plugin_secrets WHERE plugin=?1)",
-            [name],
-            |row| row.get(0),
-        )
-        .map_err(sqlite)?;
+    let known = known(db, name)?;
     if !present && !known {
         return Err(refused("app_plugin_not_found"));
     }
-    let retired = folder::retire(engine.root, name, engine.keys.new_ref)?;
+    let retired = if known {
+        Some(folder::retire(engine.root, name, engine.keys.new_ref)?)
+    } else {
+        None
+    };
     let bindings = binding_rows(db, name)?;
     assert!(db.is_autocommit());
     db.execute_batch("SAVEPOINT app_plugin_remove")
@@ -619,7 +615,9 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     for (_, source, reference) in &bindings {
         forget_key_file(db, engine, source, reference);
     }
-    retired.finish()?;
+    if let Some(retired) = retired {
+        retired.finish()?;
+    }
     folder::remove(engine.root, name, engine.keys.new_ref)?;
     Ok(())
 }
@@ -694,15 +692,32 @@ pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
     folder::remove_staged(root)
 }
 
-/// Settles at start each folder a removal moved aside. Inputs: database and engine facts.
-/// Output: Ok.
+/// Whether any row a removal deletes names the plugin: its trust record, its switch or a
+/// secret binding. Inputs: the database and the name. Output: the answer, or the
+/// database's refusal.
+fn known(db: &Connection, name: &str) -> Result<bool, Refused> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
+         OR EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1)
+         OR EXISTS(SELECT 1 FROM app_plugin_secrets WHERE plugin=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(sqlite)
+}
+
+/// Settles at start each folder a removal moved aside, by the rows that removal deletes:
+/// while they still name the plugin, the removal never committed and the folder goes back
+/// under the name when that name is missing; otherwise it loses the name and is deleted.
+/// Inputs: database and engine facts. Output: Ok, or the first refusal after every entry
+/// was tried.
 pub fn sweep_removals(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
-    let _ = (db, engine);
-    Ok(())
+    folder::sweep_removals(engine.root, |name| known(db, name))
 }
 
 const STAGED: &str = ".add-";
 const RETIRED: &str = ".old-";
+const REMOVING: &str = ".rm-";
 
 /// The most folder levels below a plugin folder that deleting it goes down.
 const TREE_DEPTH_MAX: usize = 4;
@@ -727,6 +742,20 @@ fn retired(name: &str, id: &str) -> String {
 /// the name, or none when the entry is no retired folder or carries no valid name.
 fn retired_name(file: &str) -> Option<&str> {
     let (name, _id) = file.strip_prefix(RETIRED)?.rsplit_once('.')?;
+    embedding::valid_name(name).then_some(name)
+}
+
+/// The folder name a removal moves a plugin's folder to until its rows are gone: the plugin
+/// name and an id. Inputs: a valid name and the id. Output: the folder name.
+fn removing(name: &str, id: &str) -> String {
+    assert!(embedding::valid_name(name));
+    format!("{REMOVING}{name}.{id}")
+}
+
+/// The plugin name a removal moved a folder aside from. Input: the entry name. Output: the
+/// name, or none when the entry is no removal folder or carries no valid name.
+fn removing_name(file: &str) -> Option<&str> {
+    let (name, _id) = file.strip_prefix(REMOVING)?.rsplit_once('.')?;
     embedding::valid_name(name).then_some(name)
 }
 
