@@ -155,6 +155,8 @@ fn curl_config_bytes_stay_the_same() {
         concat!(
             r#"url = "https://api.github.com/user?probe=1""#,
             "\n",
+            r#"resolve = "api.github.com:443:140.82.112.6""#,
+            "\n",
             r#"header = "Accept: application/vnd.github+json""#,
             "\n",
             r#"user-agent = "CrazyAgent""#,
@@ -182,6 +184,8 @@ fn curl_config_bytes_stay_the_same() {
         String::from_utf8(config).unwrap(),
         concat!(
             r#"url = "https://api.github.com/repos/x/y""#,
+            "\n",
+            r#"resolve = "api.github.com:443:140.82.112.6""#,
             "\n",
             r#"header = "Accept: application/json""#,
             "\n",

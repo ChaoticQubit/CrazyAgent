@@ -261,7 +261,8 @@ fn the_curl_config_is_byte_equal_to_todays_github_request() {
     let kernel = String::from_utf8(egress.config.lock().unwrap().clone()).unwrap();
     let pinned = "resolve = \"api.github.com:443:140.82.112.6\"";
     assert_eq!(kernel.lines().filter(|line| *line == pinned).count(), 1);
-    let mut kernel_lines: Vec<&str> = kernel.lines().filter(|line| *line != pinned).collect();
+    assert_eq!(today.lines().filter(|line| *line == pinned).count(), 1);
+    let mut kernel_lines: Vec<&str> = kernel.lines().collect();
     let mut today_lines: Vec<&str> = today.lines().collect();
     assert_eq!(kernel_lines[0], today_lines[0]);
     kernel_lines.sort_unstable();

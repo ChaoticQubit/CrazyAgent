@@ -65,3 +65,40 @@ fn v6_allowed(ip: Ipv6Addr) -> bool {
         || (first == 0x2001 && segments[1] == 0)
         || (first == 0x0100 && segments[1..4] == [0; 3]))
 }
+
+/// Checks the address a request may connect to: an IP literal host directly, a host name
+/// through one lookup, every resolved address checked. Inputs: the parsed URL, its port,
+/// the lookup and the refusal to return. Output: the `resolve` line value for a host name,
+/// none for a literal, the refusal for a refused or missing address, or the lookup's own
+/// failure.
+pub fn pinned<E>(
+    parsed: &url::Url,
+    port: u16,
+    resolve: impl FnOnce(&str, u16) -> Result<Vec<IpAddr>, E>,
+    refused: impl Fn() -> E,
+) -> Result<Option<String>, E> {
+    let name = match parsed.host() {
+        Some(url::Host::Ipv4(address)) => {
+            return address_allowed(IpAddr::V4(address))
+                .then_some(None)
+                .ok_or_else(&refused);
+        }
+        Some(url::Host::Ipv6(address)) => {
+            return address_allowed(IpAddr::V6(address))
+                .then_some(None)
+                .ok_or_else(&refused);
+        }
+        Some(url::Host::Domain(name)) => name,
+        None => return Err(refused()),
+    };
+    let resolved = resolve(name, port)?;
+    let first = *resolved.first().ok_or_else(&refused)?;
+    if !resolved.iter().all(|address| address_allowed(*address)) {
+        return Err(refused());
+    }
+    let address = match first {
+        IpAddr::V4(address) => address.to_string(),
+        IpAddr::V6(address) => format!("[{address}]"),
+    };
+    Ok(Some(format!("{name}:{port}:{address}")))
+}
