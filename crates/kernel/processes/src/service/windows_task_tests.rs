@@ -1,6 +1,7 @@
 use super::markup::{WINDOWS_PATH_BYTES_MAX, windows_task_path};
 use super::test_support::service;
 use super::*;
+use crate::update::test_support::{TestResult, at};
 
 /// The Windows service at Windows paths, or at their Unix spelling on a host where a drive
 /// path is not absolute, with the given PATH. Input: the PATH. Output: the service.
@@ -100,28 +101,30 @@ fn a_windows_task_line_past_cmds_limit_is_refused() {
 /// it sets or whether it sets one, while one naming another engine does; with nothing
 /// installed it runs none.
 #[test]
-fn a_written_windows_task_is_judged_by_the_engine_it_names() {
-    let folder = tempfile::tempdir().unwrap();
+fn a_written_windows_task_is_judged_by_the_engine_it_names() -> TestResult {
+    let folder = tempfile::tempdir()?;
     let mut own = windows(r"C:\Tools\bin");
     own.definition = folder.path().join("crazyagent-engine-task.xml");
-    let install = |service: &Service| {
+    let install = |service: &Service| -> TestResult {
         let text = service.definition_text().unwrap();
-        write_definition(&service.definition, &text, Platform::Windows).unwrap();
+        write_definition(&service.definition, &text, Platform::Windows)?;
+        Ok(())
     };
-    install(&own);
+    install(&own)?;
     assert!(!own.runs_another_program());
     let mut other_path = own.clone();
     other_path.path = OsString::from(r"C:\Other\bin;C:\Tools\bin");
     assert!(!other_path.runs_another_program());
     let mut older = own.clone();
     older.path = OsString::new();
-    install(&older);
+    install(&older)?;
     assert!(!own.runs_another_program());
     let mut other = own.clone();
     other.executable = other.executable.with_file_name("crazyagent-old.exe");
     assert!(other.runs_another_program());
-    install(&other);
+    install(&other)?;
     assert!(own.runs_another_program());
-    std::fs::remove_file(&own.definition).unwrap();
+    at(&own.definition, std::fs::remove_file(&own.definition))?;
     assert!(!own.runs_another_program());
+    Ok(())
 }
