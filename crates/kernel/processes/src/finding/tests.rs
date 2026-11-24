@@ -3,24 +3,20 @@ use super::*;
 
 use std::os::unix::fs::PermissionsExt;
 
-/// A scratch HOME with no tools in it, its real path, so found files compare equal. It lies
-/// beside the test binary, where no other user can change it
-/// ([`crate::service::test_support::durable_folder`]): the resolver's own kernel check drops
-/// a folder under a temp folder every user can write, such as Linux `/tmp`. Output: the
-/// folder and its real path.
+/// A scratch HOME with no tools in it, its real path, so found files compare equal.
 fn scratch() -> (tempfile::TempDir, PathBuf) {
-    let folder = crate::service::test_support::durable_folder();
-    let home = folder.path().canonicalize().unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix("tools-resolve-")
+        .tempdir()
+        .unwrap();
+    let home = or_named(folder.path().canonicalize(), folder.path());
     (folder, home)
 }
 
 /// Writes an executable file with the given text, its folders made first.
 /// Inputs: the file and the text. Output: the file.
 fn program(file: &Path, text: &str) -> PathBuf {
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, text).unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
-    file.to_path_buf()
+    script_at(file, text.as_bytes())
 }
 
 /// A stand-in `node`: a shell script that says it ran the file it was given.
@@ -42,13 +38,6 @@ fn home_only(home: &Path) -> Places {
     )
 }
 
-/// Places on the stub seed that look only in the scratch HOME's `.local/bin`, since the stub
-/// hooks name no HOME folder of their own ([`home_only`] keeps none there). Input: HOME.
-/// Output: the places.
-fn owner_bin(home: &Path) -> Places {
-    stub_new(vec![home.join(".local/bin")], Some(home.to_path_buf()))
-}
-
 /// The newest of several installed Node versions is found first.
 #[test]
 fn the_newest_node_version_of_a_manager_is_found_first() {
@@ -62,10 +51,12 @@ fn the_newest_node_version_of_a_manager_is_found_first() {
 /// Writes a script with the given bytes and mode into the scratch HOME's `scripts` folder.
 /// Inputs: HOME, the script's name, its bytes and its mode. Output: the script.
 fn script(home: &Path, name: &str, bytes: &[u8], mode: u32) -> PathBuf {
-    let script = home.join("scripts").join(name);
-    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-    std::fs::write(&script, bytes).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+    let folder = home.join("scripts");
+    or_named(std::fs::create_dir_all(&folder), &folder);
+    let script = folder.join(name);
+    or_named(std::fs::write(&script, bytes), &script);
+    let permissions = std::fs::Permissions::from_mode(mode);
+    or_named(std::fs::set_permissions(&script, permissions), &script);
     script
 }
 
@@ -138,7 +129,7 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
 #[test]
 fn a_program_name_starting_with_a_drive_is_refused() {
     let (_folder, home) = scratch();
-    let places = owner_bin(&home);
+    let places = home_only(&home);
     for name in ["C:node", "c:tool"] {
         program(&home.join(".local/bin").join(name), NODE);
         let missing = resolve(name, &places).unwrap_err();
@@ -162,7 +153,7 @@ fn a_program_name_starting_with_a_drive_is_refused() {
 fn an_env_split_argument_holding_a_quote_escape_or_dollar_is_refused() {
     let (_folder, home) = scratch();
     program(&home.join(".local/bin/node"), NODE);
-    let places = owner_bin(&home);
+    let places = home_only(&home);
     let lines: Vec<(&str, &[u8])> = vec![
         ("double", b"#!/usr/bin/env -S node --opt \"a b\"\n"),
         ("single", b"#!/usr/bin/env -S node --opt 'a b'\n"),
@@ -678,10 +669,9 @@ fn the_release_build_sees_the_bundled_tmux_flag() {
 
 #[test]
 fn release_yml_sets_the_flag_for_the_kernel_crate() {
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.github/workflows/release.yml"),
-    )
-    .unwrap();
+    let release =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.github/workflows/release.yml");
+    let text = or_named(std::fs::read_to_string(&release), &release);
     let build = "cargo build --release --locked --target \"$TARGET\" -p crazyagent --bins";
     let build_at = text
         .find(build)
@@ -759,10 +749,20 @@ fn with_canonical(
 /// another prefix's `bin` as that prefix's `Cellar` file. Input: the path. Output: its one
 /// spelling.
 fn cellar(path: &Path) -> std::io::Result<PathBuf> {
-    let text = path.to_str().unwrap();
-    Ok(match text.rsplit_once("/bin/") {
-        Some((prefix, name)) => PathBuf::from(format!("{prefix}/Cellar/{name}/1/bin/{name}")),
-        None => path.to_path_buf(),
+    let parts: Vec<_> = path.components().collect();
+    let bin = parts.iter().rposition(|part| part.as_os_str() == "bin");
+    Ok(match bin {
+        Some(at) if at + 1 < parts.len() => {
+            let prefix: PathBuf = parts[..at].iter().collect();
+            let name: PathBuf = parts[at + 1..].iter().collect();
+            prefix
+                .join("Cellar")
+                .join(&name)
+                .join("1")
+                .join("bin")
+                .join(&name)
+        }
+        _ => path.to_path_buf(),
     })
 }
 
@@ -920,9 +920,13 @@ fn the_first_copys_refusal_is_kept_when_no_copy_resolves() {
 /// Writes an executable script with the given bytes, its folders made first. Inputs: the
 /// file and the bytes. Output: the file.
 fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, bytes).unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let folder = file
+        .parent()
+        .unwrap_or_else(|| panic!("{} has a parent folder", file.display()));
+    or_named(std::fs::create_dir_all(folder), folder);
+    or_named(std::fs::write(file, bytes), file);
+    let permissions = std::fs::Permissions::from_mode(0o755);
+    or_named(std::fs::set_permissions(file, permissions), file);
     file.to_path_buf()
 }
 

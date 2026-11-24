@@ -51,3 +51,10 @@ pub(crate) fn stub_engine(
 ) -> Places {
     Places::engine(engine_root, app_folder, home, path, stub_seed())
 }
+
+/// The value of a file operation a row's setup made, or a panic naming the path it touched.
+/// Inputs: the operation's result and its path. Output: the value.
+#[cfg(test)]
+pub(crate) fn or_named<T>(done: std::io::Result<T>, path: &std::path::Path) -> T {
+    done.unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
