@@ -648,10 +648,11 @@ struct Mounted(PathBuf);
 #[cfg(target_os = "macos")]
 impl Drop for Mounted {
     fn drop(&mut self) {
-        let detached = std::process::Command::new("/usr/bin/hdiutil")
-            .args(["detach", "-quiet", "-force"])
-            .arg(&self.0)
-            .status();
+        let detached = crate::spawn_gate::status(
+            std::process::Command::new("/usr/bin/hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&self.0),
+        );
         assert!(
             detached.is_ok_and(|status| status.success()),
             "detach {:?}",
@@ -671,11 +672,12 @@ fn an_entry_on_a_volume_without_access_lists_reads_unknown() {
     let mount = temp.path().join("mount");
     std::fs::create_dir(&mount).unwrap();
     let hdiutil = |args: &[&str], paths: &[&Path]| {
-        std::process::Command::new("/usr/bin/hdiutil")
-            .args(args)
-            .args(paths)
-            .status()
-            .is_ok_and(|status| status.success())
+        crate::spawn_gate::status(
+            std::process::Command::new("/usr/bin/hdiutil")
+                .args(args)
+                .args(paths),
+        )
+        .is_ok_and(|status| status.success())
     };
     let made = [
         "create", "-quiet", "-size", "8m", "-fs", "MS-DOS", "-volname", "NOACL", "-o",
