@@ -984,64 +984,74 @@ impl ProjectSandbox {
     }
 
     /// The extra worktrees, beside the project folder, the agent writes in and may start in.
-    pub fn worktrees(&self) -> &[PathBuf] {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn worktrees(&self) -> &[PathBuf] {
         &self.worktrees
     }
 
     /// The paths the agent can neither read nor list: secrets inside the project and the
     /// folders [`Self::hide`] took.
-    pub fn hidden(&self) -> &[PathBuf] {
+    pub(crate) fn hidden(&self) -> &[PathBuf] {
         &self.hidden
     }
 
     /// The project folders [`Self::keep_out`] keeps the agent out of.
-    pub fn kept_out(&self) -> &[PathBuf] {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn kept_out(&self) -> &[PathBuf] {
         &self.kept_out
     }
 
     /// The top-level project folders the agent alone may open, when [`Self::open_only_tops`]
     /// set them. Output: the names, or none when every top is open.
-    pub fn open_tops(&self) -> Option<&[String]> {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn open_tops(&self) -> Option<&[String]> {
         self.open_tops.as_deref()
     }
 
     /// The loopback ports [`Self::keep_ports`] keeps free of the agent's own servers.
-    pub fn kept_ports(&self) -> &[u16] {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn kept_ports(&self) -> &[u16] {
         &self.kept_ports
     }
 
     /// The carved home and the real home it stands in for, when the agent's home is carved
     /// out of the owner's. Output: the two folders, or none.
-    pub fn carved_home(&self) -> Option<&(PathBuf, PathBuf)> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn carved_home(&self) -> Option<&(PathBuf, PathBuf)> {
         self.carved_home.as_ref()
     }
 
     /// The worktree [`Self::confine_to_worktree`] confines the agent to, with its admin folder
     /// and object store. Output: the checkout, or none.
-    pub fn checkout(&self) -> Option<&Checkout> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn checkout(&self) -> Option<&Checkout> {
         self.checkout.as_ref()
     }
 
     /// The clone [`Self::confine_to_clone`] confines the agent to. Output: its root, or none.
-    pub fn clone_root(&self) -> Option<&PathBuf> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clone_root(&self) -> Option<&PathBuf> {
         self.clone.as_ref()
     }
 
     /// The teammates' folder and records [`Self::confine_to_teammates_setup`] grants. Output:
     /// the setup, or none.
-    pub fn teammates_setup(&self) -> Option<&TeammatesSetup> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn teammates_setup(&self) -> Option<&TeammatesSetup> {
         self.setup.as_ref()
     }
 
     /// Tells whether [`Self::adding_worktrees`] lets the engine's worktree-add step write the
     /// project's worktree folders. Output: the answer.
-    pub fn adds_worktrees(&self) -> bool {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adds_worktrees(&self) -> bool {
         self.adds_worktrees
     }
 
     /// The project's agent folders choice this sandbox holds, if any. Output: a copy of the
     /// rule, or none.
-    pub fn agent_files(&self) -> Option<crate::policy::AgentFilesRule> {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn agent_files(&self) -> Option<crate::policy::AgentFilesRule> {
         self.agent_files
     }
 
@@ -1187,7 +1197,7 @@ impl ProjectSandbox {
 
     /// How many confinements the sandbox holds: its own worktree, its own clone or the
     /// teammates' setup, at most one. Output: the count.
-    pub fn confinements(&self) -> usize {
+    pub(crate) fn confinements(&self) -> usize {
         usize::from(self.checkout.is_some())
             + usize::from(self.clone.is_some())
             + usize::from(self.setup.is_some())
