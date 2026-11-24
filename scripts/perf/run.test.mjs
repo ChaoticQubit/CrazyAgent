@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -90,4 +90,16 @@ test("two ABBA blocks print each build's median of its four runs and name the or
     "PERF-RUN build=2.4.4 commit=bbb date=2026-11-23T22:00 condition=loaded load1=4.50 slots=0 runs=4 order=ABBA",
     "PERF 1 common names.is_snake p50_ns=45 p95_ns=49 n=200 batch=1000",
   ]);
+});
+
+test("a caller that still sets PERF_RUNS is refused before any run", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const env = { ...process.env, PERF_RUNS: "3", PERF_SPRINT: path.join(folder, "missing") };
+    const result = spawnSync("bash", [script, "1"], { cwd: folder, env, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /PERF_RUNS is gone, use PERF_BLOCKS/);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
 });
