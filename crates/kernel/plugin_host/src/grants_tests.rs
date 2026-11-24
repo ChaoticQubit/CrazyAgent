@@ -29,6 +29,7 @@ fn the_listing_shows_each_plugins_granted_capabilities_with_their_tier() {
             tier: "t2".to_owned(),
             origin: Origin::Bundled,
             state: GrantState::On,
+            essential: true,
             capabilities: vec![GrantedCapability {
                 name: "settings.save_quit".to_owned(),
                 tier: "kernel".to_owned(),
@@ -37,8 +38,13 @@ fn the_listing_shows_each_plugins_granted_capabilities_with_their_tier() {
     );
     let near = entry(&listing, "near", Origin::User);
     assert_eq!(
-        (near.tier.as_str(), near.state, near.capabilities.len()),
-        ("t2", GrantState::On, 0)
+        (
+            near.tier.as_str(),
+            near.state,
+            near.essential,
+            near.capabilities.len()
+        ),
+        ("t2", GrantState::On, false, 0)
     );
     for bundled in ["ollama", "openai", "voyage"] {
         let grants = entry(&listing, bundled, Origin::Bundled);
@@ -67,4 +73,27 @@ fn a_turned_off_plugin_lists_as_off() {
     assert_eq!(state(), GrantState::Off);
     set_enabled(&case.db, &case.engine(), "near", Switch::On).unwrap();
     assert_eq!(state(), GrantState::On);
+}
+
+/// An essential bundled code plugin turned off with the lock lifted lists as off, and
+/// stays marked essential, so the owner's screen still shows its lock.
+#[test]
+fn an_unlocked_essential_plugin_turned_off_lists_as_off() {
+    let case = case();
+    let usage = crate::usage::Usage::default();
+    let switch = Switch::Off {
+        usage: &usage,
+        when_off: crate::usage::TurnOff::RefuseNewCalls,
+        essential_unlocked: true,
+    };
+    set_enabled(&case.db, &case.engine(), "agent-quit", switch).unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    let quit = entry(&listing, "agent-quit", Origin::Bundled);
+    assert_eq!((quit.state, quit.essential), (GrantState::Off, true));
+    set_enabled(&case.db, &case.engine(), "agent-quit", Switch::On).unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(
+        entry(&listing, "agent-quit", Origin::Bundled).state,
+        GrantState::On
+    );
 }

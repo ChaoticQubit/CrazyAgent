@@ -29,6 +29,7 @@ interface sdk-types {
   variant refusal {
     not-granted(not-granted),
     tier-too-high(string),
+    plugin-off(string),
     rejected(string),
     failed(string),
   }

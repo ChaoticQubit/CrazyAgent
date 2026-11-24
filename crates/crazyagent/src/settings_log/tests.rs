@@ -40,6 +40,7 @@ pub(crate) fn store() -> Connection {
     db.execute_batch(STATE).unwrap();
     seed(&db);
     initialize(&db).unwrap();
+    crate::app_plugins::initialize(&db).unwrap();
     db
 }
 

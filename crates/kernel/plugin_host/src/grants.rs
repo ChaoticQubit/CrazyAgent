@@ -32,7 +32,8 @@ pub struct GrantedCapability {
 }
 
 /// One plugin in the owner's grant listing: its id, tier, where it is from, whether it is
-/// on, and the capabilities it is granted.
+/// on, whether it is an essential bundled code plugin whose switch stays locked, and the
+/// capabilities it is granted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginGrants {
@@ -40,6 +41,7 @@ pub struct PluginGrants {
     pub tier: String,
     pub origin: Origin,
     pub state: GrantState,
+    pub essential: bool,
     pub capabilities: Vec<GrantedCapability>,
 }
 
@@ -68,17 +70,24 @@ fn granted(grant: &BundledGrant) -> Vec<GrantedCapability> {
 }
 
 /// Lists every plugin with the capabilities it is granted, sorted by plugin id. Bundled code
-/// plugins are always on and hold what their plugin.toml grants; app plugins hold none and
-/// read as on while turned on. Inputs: database and engine facts. Output: at most
+/// plugins read as on unless turned off, carry their essential mark and hold what their
+/// plugin.toml grants; app plugins hold none, are never essential and read as on while
+/// turned on. Inputs: database and engine facts. Output: at most
 /// [`GRANTS_MAX`] entries, or the registry's refusal.
 pub fn list(db: &Connection, engine: &Engine<'_>) -> Result<Vec<PluginGrants>, Refused> {
+    let off = registry::off_code_plugins(db)?;
     let mut listing: Vec<PluginGrants> = BUNDLED_GRANTS
         .iter()
         .map(|grant| PluginGrants {
             plugin: grant.plugin.to_owned(),
             tier: tier_word(grant.tier).to_owned(),
             origin: Origin::Bundled,
-            state: GrantState::On,
+            state: if off.contains(grant.plugin) {
+                GrantState::Off
+            } else {
+                GrantState::On
+            },
+            essential: grant.essential,
             capabilities: granted(grant),
         })
         .collect();
@@ -92,6 +101,7 @@ pub fn list(db: &Connection, engine: &Engine<'_>) -> Result<Vec<PluginGrants>, R
             } else {
                 GrantState::Off
             },
+            essential: false,
             capabilities: Vec::new(),
         });
     }

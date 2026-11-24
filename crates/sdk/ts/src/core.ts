@@ -8,6 +8,7 @@ export type Capability = { readonly name: string; readonly tier: Tier; readonly 
 export type Refusal =
   | { readonly kind: "not_granted"; readonly capability: string; readonly needs: string }
   | { readonly kind: "tier_too_high"; readonly capability: string }
+  | { readonly kind: "plugin_off"; readonly capability: string }
   | { readonly kind: "rejected"; readonly code: string }
   | { readonly kind: "failed"; readonly code: string };
 
