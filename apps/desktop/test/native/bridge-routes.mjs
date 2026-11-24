@@ -8,7 +8,9 @@ export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.me
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
 export const BRIDGE = fileURLToPath(new URL("../../src-tauri/src/bridge", import.meta.url));
 
-const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
+const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|native_enabled\(|SOCKET_OVERRIDE|state\.0/;
+const DEFAULT_ENGINE = /\brestore::engine\(\)/;
+const NOT_CONFIGURED = 'Err::<(), _>(BridgeError { code: "not_configured", cause: None, account: None })';
 const NATIVE_PARAM = /State<|AppHandle|Channel<|\bWebview\b/;
 const QUEUE_CALL = /^state\.0\.\w+\([^;]*\)\s*\.await$/;
 const IMPL_TYPES = ["NativeBridge", "BridgeQueue"];
@@ -212,7 +214,9 @@ function resolve(name, body, impls) {
 
 /** Decides how the end-to-end bridge serves one command: routed with its arguments and body,
  * or left out with the reason (it needs the native window, terminals, updates or a picker).
- * A body that is one call on the app's bridge queue calls the end-to-end bridge's queue.
+ * A body that is one call on the app's bridge queue calls the end-to-end bridge's queue, and
+ * one that acts on the default engine's folder refuses with `not_configured`, since the bridge
+ * serves an engine of its own.
  * Inputs: one command record and `methods` output, the app's bridge when omitted. Output:
  * `{ route }` or `{ skip }`; throws when a routed call does not match its type's impl block. */
 export function plan(command, impls = bridgeMethods()) {
@@ -223,6 +227,7 @@ export function plan(command, impls = bridgeMethods()) {
   if (!command.params.some((param) => param.name === "webview")) return { skip: "no window parameter" };
   if (args.some((param) => NATIVE_PARAM.test(param.type))) return { skip: "native parameter" };
   let body = command.body.slice(prefix.length).replace("ensure_default_engine().await?;", "").replace(/\s+/g, " ").trim();
+  if (DEFAULT_ENGINE.test(body)) return { route: { name: command.name, args: [], body: NOT_CONFIGURED } };
   const queued = QUEUE_CALL.test(body);
   if (queued) body = body.replace(/^state\.0\./, "state.");
   if (NATIVE_ONLY.test(body)) return { skip: "native-only body" };
