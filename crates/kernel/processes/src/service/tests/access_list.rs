@@ -330,7 +330,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     panic!("no change and its listing shared a second in three tries");
 }
 
-/// RV-DS241-18 r2: one access listing reads every part of a path the first time, names with a
+/// One access listing reads every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
 /// change moves only the changed part's change time, so that part alone is listed again: a
 /// grant there reads as changeable on the next call. HFS-CTIME: a part read in the second
