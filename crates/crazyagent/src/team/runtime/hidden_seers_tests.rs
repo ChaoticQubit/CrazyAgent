@@ -158,6 +158,34 @@ fn the_owner_restart_starts_a_seer_the_engine_stopped_again() {
     team.restarts.clear();
 }
 
+/// An agent whose process ended on its own before the owner hid a folder can open nothing,
+/// so the team status never lists it as a seer, while a running one that can still open the
+/// folder is stopped, held and listed.
+#[test]
+fn an_agent_that_ended_before_a_folder_was_hidden_is_not_listed() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let keys = fixture.setup.project_folder().join("secrets").join("keys");
+    let ended = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let running = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let (mut worker, _orders) = held_worker(&project, AgentRole::Sub);
+    worker.hidden = Some(Vec::new());
+    team.workers.insert(running, worker);
+
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(team.workers[&running].stopping, "the running seer stops");
+    assert_eq!(listed(&fixture), vec![running], "only the running seer");
+    let status = fixture.status();
+    let row = status.agents.iter().find(|agent| agent.id == ended);
+    assert!(
+        !row.expect("the ended agent is in the status").sees_hidden,
+        "an agent that ended before is not listed"
+    );
+    team.workers.clear();
+}
+
 /// macOS only, as team panes run only there (DEC-094): a pane a later engine takes over is
 /// judged by what its record says its sandbox hid, a pane from before the engine kept that
 /// list counting as hiding none. A pane that can still see the hidden folder is stopped,
