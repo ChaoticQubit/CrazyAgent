@@ -185,10 +185,10 @@ pub fn recovery(path: &Path) -> Result<Option<Recovery>, StorageError> {
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
+    let (_lock, db) = held(path)?;
     let Some(broken) = broken_record(root) else {
         return Ok(None);
     };
-    let (_lock, db) = held(path)?;
     let live = match broken {
         Broken::Restoring(_) => intact(&db).ok(),
         Broken::RollbackFailed(_) => None,
@@ -218,22 +218,28 @@ fn code(cause: &StorageError) -> &str {
 /// [`put_back_with`] says with `check_copy`. Input: the database path. Output: the folder
 /// that keeps the data it replaced.
 pub fn put_back(path: &Path) -> Result<PathBuf, StorageError> {
-    put_back_with(path, check_copy)
+    put_back_with(path, check_copy, |_| {})
 }
 
-/// Puts the copy back under the restore lock, with engine.db held alone: the copy passes its
-/// check before any write, engine.db is kept as it is in a new `replaced-<time>` folder, the
-/// copy is restored over it on the held connection and checked against it with `check`, and
-/// only then is the record removed. Inputs: the database path and the check. Output: the
-/// folder that keeps the replaced data, or the refusal with the record left as it was.
-pub(super) fn put_back_with(path: &Path, check: CopyCheck) -> Result<PathBuf, StorageError> {
+/// Puts the copy back under the restore lock, with engine.db held alone: the record is read
+/// under the lock, the copy it names passes its check before any write, engine.db is kept as
+/// it is in a new `replaced-<time>` folder, the copy is restored over it on the held
+/// connection and checked against it with `check`, and only then is the record removed.
+/// Inputs: the database path, the check and a step run on the root before the lock.
+/// Output: the folder that keeps the replaced data, or the refusal with the record as it was.
+pub(super) fn put_back_with(
+    path: &Path,
+    check: CopyCheck,
+    before_lock: fn(&Path),
+) -> Result<PathBuf, StorageError> {
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
+    before_lock(root);
+    let (_lock, mut db) = held(path)?;
     let name = broken_record(root)
         .and_then(|broken| broken.copy().map(str::to_owned))
         .ok_or_else(|| error(PUTBACK_COPY_MISSING))?;
-    let (_lock, mut db) = held(path)?;
     let (source, found, rows) = usable(root, &name)?;
     let saved = keep_live(path, root, SystemTime::now())?;
     restore(&mut db, &source, found, &rows).map_err(|cause| check_failed(cause.0))?;
@@ -278,13 +284,20 @@ fn clear(root: &Path) -> Result<(), StorageError> {
 /// restore lock, engine.db must pass its check again at a 2.5 version before the record is
 /// removed. Input: the database path. Output: Ok once the record is gone, or the refusal.
 pub fn continue_2_5(path: &Path) -> Result<(), StorageError> {
+    continue_2_5_with(path, |_| {})
+}
+
+/// [`continue_2_5`] with a step run on the root before the lock; the record is read under the
+/// lock. Inputs: the database path and the step. Output: as [`continue_2_5`].
+pub(super) fn continue_2_5_with(path: &Path, before_lock: fn(&Path)) -> Result<(), StorageError> {
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
+    before_lock(root);
+    let (_lock, db) = held(path)?;
     let Some(Broken::Restoring(_)) = broken_record(root) else {
         return Err(check_failed("the record is not a restore that stopped"));
     };
-    let (_lock, db) = held(path)?;
     let found = intact(&db)?;
     if found <= V24_VERSION_MAX {
         return Err(check_failed("engine.db holds 2.4 data"));
@@ -303,10 +316,10 @@ pub fn finish(
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
+    let (_lock, db) = held(path)?;
     let Some(Broken::Restoring(Some(name))) = broken_record(root) else {
         return Err(error(PUTBACK_COPY_MISSING));
     };
-    let (_lock, db) = held(path)?;
     if intact(&db)? > V24_VERSION_MAX {
         return Err(check_failed("engine.db holds 2.5 data"));
     }
