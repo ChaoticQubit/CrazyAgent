@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(target_os = "macos")]
+use crate::team::runtime::TeamLimits;
+#[cfg(target_os = "macos")]
+use crate::team::runtime::tests::{ENDPOINT, Fixture, hand_off, limited_runtime, owner};
 
 /// Opens a Codex stand-in whose every turn hits its usage limit, written the way a real
 /// Codex writes the limit error, then ends the turn with `end`. Input: the rollout line that
@@ -77,9 +81,8 @@ fn a_launched_turn_end_puts_the_limit_first_and_keeps_a_success_after_an_interru
         (false, false, true),
         (false, false, false),
     ];
-    let got = ends.map(|(limited, interrupted, success)| {
-        super::super::launched_end(limited, interrupted, success)
-    });
+    let got =
+        ends.map(|(limited, interrupted, success)| launched_end(limited, interrupted, success));
     assert_eq!(
         got,
         [
