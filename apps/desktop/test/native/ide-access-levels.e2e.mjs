@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { LIB, ROUTES, render } from "./bridge-routes.mjs";
+import { ROUTES, nativeSources, render } from "./bridge-routes.mjs";
 import { POLL_MS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
 import { FOLDER, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, WORKBENCH_MS, git, ideAnswers, input, onboard, openTab, setLevel, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
 
@@ -266,7 +266,7 @@ async function atLevel(t, level, shared) {
 test("a project's IDE server and default terminal run at its access level", { timeout: 2400000 }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
-  assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
+  assert.equal(readFileSync(ROUTES, "utf8"), render(nativeSources()), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ca-lv-")));
   const runtime = join(root, "engine");
