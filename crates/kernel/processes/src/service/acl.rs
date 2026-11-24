@@ -132,12 +132,13 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
 
 /// Reads again one entry whose stamp moved during its listing: listed alone up to
 /// [`RELIST_TRIES`] times, an answer counting once the `lstat` before and after one listing
-/// agree; past that, one last listing counts when only the device and inode agree, since a
-/// busy folder's change time moves with every file made in it, and that answer is never
-/// kept. Every read must find the same file, mode and owner the caller judged from its first
-/// `lstat`, or the answer is none. Inputs: the entry and that first read. Output: the
-/// answer, none when it cannot be read or the entry was replaced or re-permissioned, and
-/// the stamps and start second of a listing that held still, for [`keep`].
+/// agree; past that, two last listings decide, since a busy folder's change time moves with
+/// every file made in it: shared when either reads shared, not shared only when both read
+/// so and print the same access-list lines, and that answer is never kept. Every read must
+/// find the same file, mode and owner the caller judged from its first `lstat`, or the
+/// answer is none. Inputs: the entry and that first read. Output: the answer, none when it
+/// cannot be read or the entry was replaced or re-permissioned, and the stamps and start
+/// second of a listing that held still, for [`keep`].
 #[cfg(target_os = "macos")]
 fn moved_answer(
     entry: &Path,
@@ -172,11 +173,46 @@ fn moved_answer(
             return (answer, Some((stamp(&before), stamp(&after), secs)));
         }
     }
-    let Some(before) = read_now() else {
+    let mut last = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let Some(before) = read_now() else {
+            return (None, None);
+        };
+        let (answers, text) = list_text(&[entry], &[std::os::unix::fs::MetadataExt::ino(&before)]);
+        last.push((answers[0], text.map(|text| access_lines(&text))));
+    }
+    assert_eq!(last.len(), 2);
+    if read_now().is_none() {
         return (None, None);
+    }
+    let answer = match (&last[0], &last[1]) {
+        ((Some(true), _), _) | (_, (Some(true), _)) => Some(true),
+        ((Some(false), Some(first)), (Some(false), Some(second))) if first == second => Some(false),
+        _ => None,
     };
-    let answer = list(&[entry], &[std::os::unix::fs::MetadataExt::ino(&before)])[0];
-    (answer.filter(|_| read_now().is_some()), None)
+    (answer, None)
+}
+
+/// The access-list lines of an `ls -lide` listing, each ` <n>: `, in order; the first line
+/// of each block is left out, since its size and dates move with every file made in a
+/// folder. Input: the listing. Output: the lines.
+#[cfg(target_os = "macos")]
+fn access_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| access_line(line))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Says whether a listing line is an access-list line, ` <n>: ` with digits only before the
+/// colon, rather than an entry's first line. Input: the line. Output: true for an
+/// access-list line.
+#[cfg(any(test, target_os = "macos"))]
+fn access_line(line: &str) -> bool {
+    line.starts_with(' ')
+        && line.trim_start().split_once(':').is_some_and(|(index, _)| {
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// The stamp of what `lstat` read of an entry. Input: the read. Output: the stamp.
@@ -215,6 +251,14 @@ fn now_secs() -> i64 {
 /// lines. Inputs: the entries and their inodes. Output: one answer per entry, in order.
 #[cfg(target_os = "macos")]
 fn list(entries: &[&Path], inodes: &[u64]) -> Vec<Option<bool>> {
+    list_text(entries, inodes).0
+}
+
+/// [`list`], with the listing's text as `ls` printed it. Inputs: the entries and their
+/// inodes. Output: one answer per entry, in order, and the text, none when the listing did
+/// not run, failed, ran out of time or filled the output bound.
+#[cfg(target_os = "macos")]
+fn list_text(entries: &[&Path], inodes: &[u64]) -> (Vec<Option<bool>>, Option<String>) {
     assert_eq!(entries.len(), inodes.len());
     let names: Vec<Option<&str>> = entries
         .iter()
@@ -228,7 +272,7 @@ fn list(entries: &[&Path], inodes: &[u64]) -> Vec<Option<bool>> {
         .map(|(_, inode)| *inode)
         .collect();
     if operands.is_empty() {
-        return vec![None; entries.len()];
+        return (vec![None; entries.len()], None);
     }
     #[cfg(test)]
     LISTINGS.with(|listings| {
@@ -247,7 +291,7 @@ fn list(entries: &[&Path], inodes: &[u64]) -> Vec<Option<bool>> {
         Ok((true, output)) if output.len() < crate::run::OUTPUT_BYTES_MAX => {
             String::from_utf8_lossy(&output).into_owned()
         }
-        _ => return vec![None; entries.len()],
+        _ => return (vec![None; entries.len()], None),
     };
     let read = listed_shared_all(&text, &operands, &listed_inodes, own_name(), &|index| {
         confirmed(
@@ -267,7 +311,7 @@ fn list(entries: &[&Path], inodes: &[u64]) -> Vec<Option<bool>> {
     if let Some(hook) = AFTER_LISTING.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    answers
+    (answers, Some(text))
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -380,12 +424,6 @@ pub(super) fn listed_shared_all(
 ) -> Vec<Option<bool>> {
     assert_eq!(entries.len(), inodes.len());
     let none = vec![None; entries.len()];
-    let access_line = |line: &str| {
-        line.starts_with(' ')
-            && line.trim_start().split_once(':').is_some_and(|(index, _)| {
-                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
-            })
-    };
     let mut blocks: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
         if !access_line(line) {
