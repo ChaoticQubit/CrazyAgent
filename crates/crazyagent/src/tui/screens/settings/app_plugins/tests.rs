@@ -1255,10 +1255,7 @@ fn an_add_path_edited_while_its_check_runs_is_checked_again_and_never_added_as_t
         !shows(&mut shell, "Review Dock two"),
         "a review of another path is never offered for approval"
     );
-    assert!(shows(
-        &mut shell,
-        "The path changed while it was being checked."
-    ));
+    assert!(shows(&mut shell, PATH_CHANGED));
     shell.key(Key::Enter);
     let job = one(&mut shell);
     assert!(matches!(

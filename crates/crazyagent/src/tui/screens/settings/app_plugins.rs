@@ -41,6 +41,8 @@ const NOTICES_MAX: usize = 64;
 const INTRO: &str = "Plugins CrazyAgent itself runs, such as the embedding models search ranks with. Each one shows what it reaches before you approve it.";
 const ABSOLUTE: &str = "Type the full path of the plugin folder, starting with /.";
 const PATH_LONG: &str = "A folder path can be at most 1024 characters.";
+const PATH_CHANGED: &str =
+    "The path changed while it was being checked. Press Enter to check it again.";
 
 /// Plugin text made safe for one terminal row and bounded. Input: the text. Output: the text
 /// without control or hidden characters, at most `TEXT_CHARS_MAX` characters.
@@ -280,8 +282,9 @@ enum Open {
 /// Settings, App plugins: the plugins the listing carries, then each bundled code plugin
 /// the grants read names, with one label each, how it runs, where each secret's key comes
 /// from and, for a code plugin, its permissions in plain words. `a` adds a plugin folder
-/// by path only after its review is approved with `y`; Enter reviews an unapproved or
-/// changed plugin, shows a bundled one read-only, or switches an approved or code plugin;
+/// by path only after its review is approved with `y`, and only the path that review
+/// checked; Enter reviews an unapproved or changed plugin, shows a bundled one read-only,
+/// or switches an approved or code plugin;
 /// turning off always confirms, listing the runs holding it; `w` switches the stored
 /// choice for runs holding a plugin turned off. One request runs at a time.
 pub(in crate::tui) struct AppPluginsPage {
@@ -292,6 +295,7 @@ pub(in crate::tui) struct AppPluginsPage {
     pending: Option<Pending>,
     regrant: bool,
     reviewing: Option<bool>,
+    checking: Option<PathBuf>,
     failure: Option<String>,
     notices: Vec<String>,
 }
@@ -307,6 +311,7 @@ impl AppPluginsPage {
             pending: None,
             regrant: false,
             reviewing: None,
+            checking: None,
             failure: None,
             notices: Vec::new(),
         }
@@ -503,6 +508,7 @@ impl AppPluginsPage {
             self.failure = Some(ABSOLUTE.into());
             return;
         }
+        self.checking = Some(folder.clone());
         self.ask(AppPluginsJob::Preview { folder }, Pending::Check, ctx);
     }
 
@@ -712,8 +718,15 @@ impl AppPluginsPage {
     }
 
     fn previewed(&mut self, result: &Result<Preview, String>, ctx: &mut Ctx) {
+        let checked = self.checking.take();
         let (folder, approve) = match (&self.open, self.reviewing.take()) {
-            (Open::Add(field), _) => (Some(PathBuf::from(field.value().trim())), true),
+            (Open::Add(field), _) => match checked {
+                Some(sent) if PathBuf::from(field.value().trim()) == sent => (Some(sent), true),
+                _ => {
+                    self.failure = Some(PATH_CHANGED.into());
+                    return;
+                }
+            },
             (_, Some(approve)) => (None, approve),
             _ => return,
         };
