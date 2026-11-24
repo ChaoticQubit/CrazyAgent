@@ -25,15 +25,24 @@ export const HOME_ROOTS = join(homedir(), "Library", "Caches", "crazyagent-e2e")
  * process's own temp folder. */
 const ENGINE_TEMP_FOLDERS = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders", "/dev/shm"];
 
-/** Makes a fresh private test root for a stand-in HOME under HOME_ROOTS, never one reused, and
- * checks it lies under HOME_ROOTS, in no folder the engine counts as temp and under no folder
+/** Makes a fresh private test root for a stand-in HOME under HOME_ROOTS, never one reused,
+ * making HOME_ROOTS again when a file running alongside removed it, and checks it lies under
+ * HOME_ROOTS, in no folder the engine counts as temp and under no folder
  * every user can write. Input: the root's name prefix. Output: the root's real path. */
 export function homeRoot(prefix) {
   assert.match(prefix, /^[a-z0-9-]+-$/, "a plain root prefix");
-  mkdirSync(HOME_ROOTS, { recursive: true, mode: 0o700 });
+  let made = null;
+  for (let attempt = 1; made === null; attempt += 1) {
+    mkdirSync(HOME_ROOTS, { recursive: true, mode: 0o700 });
+    try {
+      made = mkdtempSync(join(HOME_ROOTS, prefix));
+    } catch (error) {
+      assert.ok(error.code === "ENOENT" && attempt < 5, `${HOME_ROOTS} could not hold a test root: ${error.code}`);
+    }
+  }
   const base = realpathSync(HOME_ROOTS);
   assert.equal(statSync(base).mode & 0o777, 0o700, `${base} is private to this user`);
-  const root = realpathSync(mkdtempSync(join(base, prefix)));
+  const root = realpathSync(made);
   assert.ok(root.startsWith(base + sep), `${root} lies under ${base}`);
   const temps = [...ENGINE_TEMP_FOLDERS, tmpdir(), realpathSync(tmpdir())];
   for (const temp of temps) {
