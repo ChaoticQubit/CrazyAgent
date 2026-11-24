@@ -491,6 +491,7 @@ fn dangling_secret_links_in_a_cycle_or_a_long_chain_are_refused() {
         .unwrap();
     }
     symlink(chain.join("l0"), home.join(".ssh")).unwrap();
+    assert!(DANGLING_LINK_HOPS < 20);
     assert!(
         std::fs::metadata(home.join(".ssh"))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
