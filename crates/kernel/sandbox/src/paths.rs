@@ -42,7 +42,7 @@ pub fn one_spelling(real: PathBuf) -> PathBuf {
     real
 }
 
-/// The plain Windows spelling of path text (rv-sec2 #717 C1): a verbatim disk path
+/// The plain Windows spelling of path text: a verbatim disk path
 /// `\\?\C:\...` gives `C:\...`, and plain text stays as it is, when the result passes
 /// [`windows_clean_text`]. A UNC, device or other verbatim form, or text Win32 would
 /// normalise to another name, gives none. Input: the text. Output: the plain text, or none.
@@ -173,9 +173,9 @@ pub fn plain_top(name: &str) -> bool {
 
 /// The Seatbelt filter for a path and everything below it: one `^X(/|$)` in place of
 /// `^X(/.*)?$`, whose `(/.*)` tail libsandbox fails to compile again in lower case after a
-/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`
-/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). One regex keeps the profile under its cap
-/// for long roots, where an `X$` and `X/` pair did not (V243-PROFILE-CAP-ROW, DEC-195 Q6).
+/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`.
+/// One regex keeps the profile under its cap
+/// for long roots, where an `X$` and `X/` pair did not.
 /// Input: the pattern after `^`, an absolute path first. Output: the filter.
 pub fn at_or_below(pattern: &str) -> String {
     assert!(pattern.starts_with('/'));
@@ -186,7 +186,7 @@ pub fn at_or_below(pattern: &str) -> String {
 /// ASCII they fold onto: on APFS the full case fold of their canonical decomposition, each
 /// checked on the volume (probe 2026-10-28), and U+0131 DOTLESS I, which the NTFS upcase
 /// table maps to `I`. The one list the landing checks, the name compares and the Seatbelt
-/// name spellings share (SA vid 202, DS-148 F1).
+/// name spellings share.
 pub const ASCII_FOLDS: [(char, &str); 14] = [
     ('\u{DF}', "ss"),
     ('\u{131}', "i"),
@@ -472,7 +472,7 @@ pub fn granted_root(
 
 /// The code points a case-insensitive HFS+ volume ignores in names (git's
 /// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
-/// compare that must match such a volume leaves out (RV-DS241-148).
+/// compare that must match such a volume leaves out.
 pub const HFS_IGNORED: [char; 16] = [
     '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
     '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
@@ -481,7 +481,7 @@ pub const HFS_IGNORED: [char; 16] = [
 /// Folds one path part the way the volume compares names, when the result is ASCII.
 /// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
 /// the code points HFS+ ignores in names left out
-/// ([`HFS_IGNORED`], RV-DS241-148), or None when a code point
+/// ([`HFS_IGNORED`]), or None when a code point
 /// stays outside ASCII.
 pub fn ascii_fold(part: &str) -> Option<String> {
     let mut folded = String::with_capacity(part.len());
@@ -516,7 +516,7 @@ pub fn same_name(one: &str, other: &str) -> bool {
 /// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
 /// finds under it: each letter in both cases with every code point that folds onto it or
 /// onto a run of two or three letters ([`spelled`]), so the rule never leans on how Seatbelt
-/// folds names itself (SA vid 202). A stretch with more than [`SPELLINGS_MAX`] spellings, a
+/// folds names itself. A stretch with more than [`SPELLINGS_MAX`] spellings, a
 /// long run of `s` or `f` in path text, is spelled as the [`superset`], which matches more,
 /// so the result holds in a deny. Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
@@ -535,7 +535,7 @@ pub fn fold_case(pattern: &str) -> String {
 }
 
 /// The most spellings one stretch of letters between two places no fold spans lists one by
-/// one; past it path text takes the [`superset`] (B5 r2).
+/// one; past it path text takes the [`superset`].
 const SPELLINGS_MAX: usize = 8;
 
 /// Spells text run by run from [`ASCII_FOLDS`]: each run of ASCII
@@ -588,7 +588,7 @@ fn joins_fold(characters: &[char], at: usize) -> bool {
 
 /// Spells one character as a case-insensitive volume finds it: an ASCII letter in both
 /// cases, with every code point that folds onto it alone, the non-ASCII ones in a group so
-/// each matches its whole UTF-8 sequence (LL2S-2). Input: the character. Output: the pattern.
+/// each matches its whole UTF-8 sequence. Input: the character. Output: the pattern.
 fn spelled_char(character: char) -> String {
     let lower = character.to_ascii_lowercase();
     let mut alternatives = vec![lower.to_string()];
@@ -764,8 +764,8 @@ pub fn regex_escape(text: &str) -> String {
 }
 
 /// Tells whether a name opens one of `names` on a case-insensitive volume, compared as
-/// [`folded`] compares names, so `.GIT`, `\u{feff}.git` and `.g\u{131}t` all open `.git`
-/// (DS-148 F1). Inputs: the name and the plain names. Output: true for one.
+/// [`folded`] compares names, so `.GIT`, `\u{feff}.git` and `.g\u{131}t` all open `.git`.
+/// Inputs: the name and the plain names. Output: true for one.
 pub fn names_one_of(name: &str, names: &[&str]) -> bool {
     let name = folded(name);
     names.iter().any(|known| folded(known) == name)
