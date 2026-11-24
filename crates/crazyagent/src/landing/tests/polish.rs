@@ -822,3 +822,61 @@ fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_
     assert_eq!(survivors(&token), Vec::<String>::new());
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
+
+/// A folder the owner saves hidden while the lockfile tool's version probe runs, and that the
+/// sandbox did not hide at its start, refuses the set even when every tool run exits on its
+/// own before its stop reads the saved folders again: nothing is committed, the set goes back
+/// to its agent and no process of the run is left.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuses_the_set() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let token = token(&case);
+    stand_in_cargo(
+        &case,
+        &format!("/usr/bin/perl -e 'select(undef, undef, undef, 0.4)' {token}"),
+        "",
+        Duration::from_secs(90),
+    );
+    let running = |token: &str| {
+        kernel_processes::spawn_gate::output(
+            Command::new("/usr/bin/pgrep")
+                .args(["-f", token])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+        .status
+        .success()
+    };
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !running(&token) {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in version probe never started"
+        );
+    }
+    crate::sandbox::access_store::hidden::save(
+        &case.db,
+        case.workspace.project.as_str(),
+        &[case.repo.join("secret")],
+    )
+    .unwrap();
+    let set = set_within(&case, &id, Duration::from_secs(15), |set| {
+        set.state == ChangeState::Updating || regenerated(&case, set)
+    });
+    assert!(
+        !regenerated(&case, &set),
+        "the late hide still let the commit land"
+    );
+    assert_eq!(
+        set.state,
+        ChangeState::Updating,
+        "the late hide refuses the set and the agent fixes the clash"
+    );
+    assert_eq!(survivors(&token), Vec::<String>::new());
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
