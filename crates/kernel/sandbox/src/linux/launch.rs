@@ -255,8 +255,8 @@ pub struct LinuxSandbox {
 /// supervised launch carries: `signals` where neither a process namespace nor the
 /// kernel's signal scope keeps the agent's signals to itself (DEC-179 T4c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Supervision {
-    pub signals: bool,
+pub(crate) struct Supervision {
+    pub(crate) signals: bool,
 }
 
 impl LinuxSandbox {
@@ -691,19 +691,19 @@ impl Sandbox for LinuxSandbox {
 /// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and
 /// a clone's store names, [`clone_store`]), which that supervisor must hold before a
 /// confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
-pub struct Grants {
-    pub read: Vec<PathBuf>,
-    pub write: Vec<PathBuf>,
-    pub git_write: Vec<PathBuf>,
-    pub guarded: Held,
+pub(crate) struct Grants {
+    pub(crate) read: Vec<PathBuf>,
+    pub(crate) write: Vec<PathBuf>,
+    pub(crate) git_write: Vec<PathBuf>,
+    pub(crate) guarded: Held,
     /// The hidden folders, each made empty first when absent so a folder made during the
     /// run lands under the cover (rv-sec2 F2), each covered by bubblewrap with an empty
     /// read-only folder; no write grant covers any hidden folder ([`split_above`]).
-    pub hidden: Vec<PathBuf>,
+    pub(crate) hidden: Vec<PathBuf>,
 }
 
 impl Grants {
-    pub fn of(sandbox: &ProjectSandbox) -> Result<Self, SandboxError> {
+    pub(crate) fn of(sandbox: &ProjectSandbox) -> Result<Self, SandboxError> {
         mounts_hold(sandbox)?;
         let project = sandbox.project_root();
         let git = project.join(".git");
@@ -950,7 +950,7 @@ fn writable_children(
 /// port the agent may also reach on any host; the agent's own git folders
 /// ([`git_own`]); and signals where [`Supervision`] says nothing else holds them. Inputs:
 /// the policy and what the supervisor holds here. Output: the guard.
-pub fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
+pub(crate) fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
     let loopback = match sandbox.network() {
         SandboxNetwork::Only(remotes) if sandbox.linux_sockets() == LinuxSockets::TcpOnly => {
             let anywhere = |port: u16| {

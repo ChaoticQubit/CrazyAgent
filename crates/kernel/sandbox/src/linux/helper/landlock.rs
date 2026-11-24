@@ -114,7 +114,7 @@ impl Guard {
 
     /// What the supervisor holds for this guard. Input: the policy's connect ports.
     /// Output: the guarded ports reached on this machine only and the others anywhere.
-    pub fn supervised(&self, connect: &[u16]) -> Supervised {
+    pub(crate) fn supervised(&self, connect: &[u16]) -> Supervised {
         assert!(self.loopback.iter().all(|port| connect.contains(port)));
         let any = connect
             .iter()
@@ -136,7 +136,7 @@ impl Guard {
 
 impl LandlockPolicy {
     /// The helper arguments for this policy, without the `--` and the harness command.
-    pub fn args(&self) -> Vec<OsString> {
+    pub(crate) fn args(&self) -> Vec<OsString> {
         let mut args = Vec::new();
         for path in &self.read {
             args.push(READ.into());

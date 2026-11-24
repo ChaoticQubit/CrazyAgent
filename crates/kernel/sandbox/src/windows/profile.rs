@@ -379,7 +379,7 @@ fn boundary_command(
     command
 }
 
-pub fn system_root() -> String {
+pub(crate) fn system_root() -> String {
     std::env::var("SystemRoot")
         .ok()
         .filter(|root| check_path(root).is_ok())
