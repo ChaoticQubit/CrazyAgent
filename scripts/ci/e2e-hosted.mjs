@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { cpSync, createWriteStream, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,9 @@ const REPORTER = join(ROOT, "scripts/ci/row-reporter.mjs");
 
 /** How long one wdio configuration or closed suite may run before the job stops it. */
 const RUN_MS = 45 * 60 * 1000;
+
+/** How many distinct error lines a failed run prints as its reasons. */
+const REASONS_MAX = 5;
 
 /** How many node:test e2e files run at once on the hosted runner's three cores. */
 const FILES_AT_ONCE = 2;
@@ -46,6 +49,7 @@ export const NOT_RUN = Object.freeze({
   "trial4.e2e.mjs": TRIAL_KIT,
   "v1-flow.e2e.mjs": "needs a local Ollama model and the real Claude Code, Codex and rcli harnesses (V1_*)",
   "speed-native.e2e.mjs": "the speed suite is a timing gate, and a shared hosted runner gives no stable number",
+  "speed-calls.e2e.mjs": "needs a built speed base (SPEED_BASE, build-speed-base.sh) and is a timing gate",
   "ide-window.e2e.mjs": "needs a local window id tool (IDE_WINDOW_ID_TOOL) and System Events keys under an Accessibility grant (E2E_REAL_KEYS)",
   "native-terminal-windows.e2e.mjs": "Windows only; this job runs on macos-15",
 });
@@ -66,7 +70,7 @@ export function classify(files, configs, read) {
   const sorted = { nodeTest: [], hosted: [], suites: [], notRun: [], unplaced: [], twice: [] };
   for (const file of files) {
     const places = [
-      ["nodeTest", !byConfig.has(file) && /from "node:test"/.test(read(file))],
+      ["nodeTest", !byConfig.has(file) && !Object.hasOwn(NOT_RUN, file) && /from "node:test"/.test(read(file))],
       ["hosted", hosted.has(file)],
       ["suites", suites.has(file)],
       ["notRun", Object.hasOwn(NOT_RUN, file)],
@@ -126,6 +130,10 @@ function report(rows, name, { code, text }, counts) {
     counts[row.result] += 1;
     process.stdout.write(rowLine(row.file, row.name, row.result));
   }
+  if (code !== 0) {
+    const errors = [...new Set(text.split("\n").filter((line) => /\b(?:\w*Error|BLOCKED)\b/.test(line) && !/^\s+at /.test(line)))];
+    for (const line of errors.slice(0, REASONS_MAX)) console.log(`REASON ${name} :: ${line.trim().slice(0, 300)}`);
+  }
   if (code !== 0 && !rows.some((row) => row.result === "not ok")) {
     counts["not ok"] += 1;
     const last = text.trim().split("\n").filter(Boolean).slice(-3).join(" | ");
@@ -169,8 +177,9 @@ async function main() {
     const run = await logged(process.execPath, [join(NATIVE, "run.mjs")], env, join(evidence, `suite-${suite}.log`));
     const completion = run.text.trim().split("\n").reverse().find((line) => line.endsWith("completion.json"));
     const driver = completion ? JSON.parse(readFileSync(completion, "utf8")).owned.find((entry) => entry.name === "webdriver") : null;
-    const rows = driver ? specRows(readFileSync(driver.streams[0].path, "utf8"), `suite ${suite}`) : [];
-    report(rows, `suite ${suite}`, run, counts);
+    const spec = driver ? readFileSync(driver.streams[0].path, "utf8") : "";
+    if (completion) cpSync(dirname(completion), join(evidence, `suite-${suite}`), { recursive: true });
+    report(specRows(spec, `suite ${suite}`), `suite ${suite}`, { code: run.code, text: `${run.text}\n${spec}` }, counts);
   }
   for (const config of HOSTED_CONFIGS) {
     const root = realpathSync(mkdtempSync("/tmp/ms-"));

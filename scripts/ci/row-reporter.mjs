@@ -28,7 +28,8 @@ export default async function* rowReporter(source) {
     const result = data.skip || data.todo ? "skip" : type === "test:pass" ? "ok" : "not ok";
     counts[result] += 1;
     const file = data.file ? relative(process.cwd(), data.file) : "(no file)";
-    const reason = result === "not ok" ? String(data.details?.error?.cause?.message ?? data.details?.error?.message ?? "").split("\n")[0]
+    const error = data.details?.error;
+    const reason = result === "not ok" ? String(error?.cause?.message || error?.message || error?.failureType || "").split("\n")[0]
       : typeof data.skip === "string" ? data.skip : "";
     yield rowLine(file, data.name, result, reason);
   }

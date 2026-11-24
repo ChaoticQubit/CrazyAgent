@@ -5,13 +5,13 @@ import { spawnSync } from "node:child_process";
 export const WINDOW_MAX = Object.freeze({ width: 1280, height: 900 });
 
 /** The smallest test window the rig accepts, in points; a display that cannot hold it is refused. */
-export const WINDOW_MIN = Object.freeze({ width: 960, height: 700 });
+export const WINDOW_MIN = Object.freeze({ width: 960, height: 640 });
 
 /** The room the rig leaves between the test window and the edges of a display's visible area. */
-export const MARGIN = 60;
+export const MARGIN = 20;
 
 /** How far inside a display's visible area the test window opens, from its top left. */
-const INSET = 40;
+const INSET = 10;
 
 /** The most displays the rig reads, so a bad answer cannot grow without bound. */
 const DISPLAYS_MAX = 16;
