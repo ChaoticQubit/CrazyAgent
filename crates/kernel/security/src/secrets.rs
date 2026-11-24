@@ -12,9 +12,9 @@ pub const PLUGIN_HANDLES_MAX: usize = 256;
 /// The most host keys one handle may be sent to.
 pub const HANDLE_HOSTS_MAX: usize = 32;
 /// The most bytes of the header of host keys stored ahead of a secret:
-/// `ca-hosts1|<host>,<host>|`.
+/// ` ca-hosts1|<host>,<host>|`, opened by a space no secret can hold.
 pub const HOSTS_HEADER_BYTES_MAX: usize = 512;
-const HOSTS_HEADER: &str = "ca-hosts1|";
+const HOSTS_HEADER: &str = " ca-hosts1|";
 
 const _: () = assert!(SECRET_BYTES_MAX + HOSTS_HEADER_BYTES_MAX <= STORED_BYTES_MAX);
 /// The most plugins that hold handles at once, so every one of them gets its full share.
@@ -550,15 +550,19 @@ impl<'r> Secrets<'r> {
 #[cfg(test)]
 mod tests;
 
-/// Frames a value for the store: `ca-hosts1|<host>,<host>|<secret>`, the host keys once
-/// each. Inputs: the host keys and the secret. Output: the keys and the framed item, or
-/// `secret_handles_full` past `HANDLE_HOSTS_MAX` keys, or `secret_hosts_invalid` for a key
+/// Frames a value for the store: ` ca-hosts1|<host>,<host>|<secret>`, opened by a space
+/// no secret can hold, the host keys once each. Inputs: the host keys and the secret.
+/// Output: the keys and the framed item, or `credential_secret_invalid` for a secret over
+/// `SECRET_BYTES_MAX`, or `secret_handles_full` past `HANDLE_HOSTS_MAX` keys, or `secret_hosts_invalid` for a key
 /// holding `|`, `,` or a byte that is not visible ASCII, or a header over
 /// `HOSTS_HEADER_BYTES_MAX`, which is never cut short.
 fn framed(
     hosts: &[String],
     value: &SecretString,
 ) -> Result<(Vec<String>, SecretString), StoreError> {
+    if value.expose().len() > SECRET_BYTES_MAX {
+        return Err(StoreError::code("credential_secret_invalid"));
+    }
     let mut kept: Vec<String> = Vec::with_capacity(hosts.len());
     for host in hosts {
         if host.is_empty()
@@ -585,8 +589,9 @@ fn framed(
     Ok((kept, SecretString::stored(bytes)?))
 }
 
-/// Splits a stored item into its host keys and secret. An item without the header, as
-/// written before host keys were stored, has no keys. Input: the item. Output: the keys
+/// Splits a stored item into its host keys and secret. An item without the header's
+/// opening space, as written before host keys were stored, has no keys and is the secret
+/// whole. Input: the item. Output: the keys
 /// and the secret, or `credential_secret_invalid`.
 fn unframed(item: SecretString) -> Result<(Vec<String>, SecretString), StoreError> {
     let text = item.expose();
