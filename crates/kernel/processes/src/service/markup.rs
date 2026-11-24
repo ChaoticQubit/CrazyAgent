@@ -126,33 +126,34 @@ pub(super) fn windows_quoted(text: &str) -> String {
     format!("\"{text}\"")
 }
 
-/// The most bytes of PATH a Windows logon task sets before it runs the engine, which keeps
-/// the task's whole cmd line well under cmd's 8191 characters.
-pub(super) const WINDOWS_PATH_BYTES_MAX: usize = 4096;
-const _: () = assert!(WINDOWS_PATH_BYTES_MAX < 8191);
+/// The characters of cmd's line a Windows logon task leaves unused, so a small difference
+/// in how cmd counts its line never makes the task's PATH carry it past 8191.
+pub(super) const TASK_LINE_MARGIN: usize = 64;
 
 /// The PATH a Windows logon task sets before it runs the engine: the service PATH's folders
 /// in order, leaving out empty entries and any folder holding `%`, which cmd expands even
-/// inside quotes, or `"`, and every folder from the first one past
-/// [`WINDOWS_PATH_BYTES_MAX`] on. Input: the service PATH. Output: the folders joined by `;`,
-/// or none when no folder is left.
-pub(super) fn windows_task_path(path: &OsStr) -> Option<String> {
+/// inside quotes, or `"`, and every folder from the first one past `budget` UTF-16 units
+/// on. Inputs: the service PATH and the units of cmd's line left for it. Output: the folders
+/// joined by `;`, or none when no folder is left.
+pub(super) fn windows_task_path(path: &OsStr, budget: usize) -> Option<String> {
     let text = path.to_string_lossy();
     let mut kept = String::new();
+    let mut units = 0;
     for folder in text.split(';') {
         if folder.is_empty() || folder.contains(['%', '"', char::REPLACEMENT_CHARACTER]) {
             continue;
         }
-        let joined = kept.len() + usize::from(!kept.is_empty()) + folder.len();
-        if joined > WINDOWS_PATH_BYTES_MAX {
+        let joined = units + usize::from(!kept.is_empty()) + folder.encode_utf16().count();
+        if joined > budget {
             break;
         }
         if !kept.is_empty() {
             kept.push(';');
         }
         kept.push_str(folder);
-        assert_eq!(kept.len(), joined);
+        units = joined;
+        assert_eq!(kept.encode_utf16().count(), units);
     }
-    assert!(kept.len() <= WINDOWS_PATH_BYTES_MAX);
+    assert!(units <= budget);
     (!kept.is_empty()).then_some(kept)
 }

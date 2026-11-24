@@ -1,4 +1,4 @@
-use super::markup::{WINDOWS_PATH_BYTES_MAX, windows_task_path};
+use super::markup::windows_task_path;
 use super::test_support::service;
 use super::*;
 use crate::update::test_support::{TestResult, at};
@@ -56,29 +56,32 @@ fn a_windows_task_sets_the_service_path_before_it_runs_the_engine() {
 }
 
 /// Empty entries and folders holding `%`, which cmd expands even inside quotes, or `"` are
-/// left out of the task's PATH; past [`WINDOWS_PATH_BYTES_MAX`] bytes the rest of the
-/// folders are left out whole, and the task's line stays under cmd's 8191 characters.
+/// left out of the task's PATH; past its budget of UTF-16 units the rest of the folders are
+/// left out whole, a budget of 0 sets none, and the task's line stays under cmd's 8191
+/// characters with a PATH longer than that line.
 #[test]
 fn a_windows_task_path_leaves_out_folders_cmd_cannot_carry_and_stops_at_its_budget() {
+    const BUDGET: usize = 4096;
     assert_eq!(
-        windows_task_path(OsStr::new(r#"C:\a;C:\50%\bin;;C:\"q"\bin;C:\%PATH%;C:\b"#)),
+        windows_task_path(
+            OsStr::new(r#"C:\a;C:\50%\bin;;C:\"q"\bin;C:\%PATH%;C:\b"#),
+            BUDGET
+        ),
         Some(r"C:\a;C:\b".to_owned())
     );
     for none in ["", ";", r"C:\50%", r#"C:\"q""#] {
-        assert_eq!(windows_task_path(OsStr::new(none)), None, "{none}");
+        assert_eq!(windows_task_path(OsStr::new(none), BUDGET), None, "{none}");
     }
-    let folders: Vec<String> = (0..400)
-        .map(|n| format!(r"C:\Tools\folder-{n:03}\bin"))
-        .collect();
-    let long = folders.join(";");
-    let kept = windows_task_path(OsStr::new(&long)).unwrap();
+    assert_eq!(windows_task_path(OsStr::new(r"C:\a"), 0), None);
+    let (folders, long) = tool_folders(400);
+    let kept = windows_task_path(OsStr::new(&long), BUDGET).unwrap();
     let count = kept.split(';').count();
-    assert!(kept.len() <= WINDOWS_PATH_BYTES_MAX);
+    assert!(kept.encode_utf16().count() <= BUDGET);
     assert!(count < folders.len());
     assert_eq!(kept, folders[..count].join(";"));
-    assert!(kept.len() + 1 + folders[count].len() > WINDOWS_PATH_BYTES_MAX);
+    assert!(kept.len() + 1 + folders[count].len() > BUDGET);
     let line = arguments(&windows(&long).definition_text().unwrap());
-    assert!(line.contains(&format!("set \"PATH={kept}\" && ")));
+    assert!(line.contains("set \"PATH=C:\\Tools\\folder-000\\bin;"));
     assert!(
         WINDOWS_SHELL.len() + 1 + line.encode_utf16().count() < CMD_LINE_CHARS_MAX,
         "{}",

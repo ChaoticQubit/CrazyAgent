@@ -1,7 +1,7 @@
 use kernel_common::Platform;
 use markup::{
-    bounded_definition, bounded_text, plist_string, systemd_environment_quoted, systemd_quoted,
-    systemd_specifiers, systemd_unquoted, windows_quoted, windows_task_path, xml,
+    TASK_LINE_MARGIN, bounded_definition, bounded_text, plist_string, systemd_environment_quoted,
+    systemd_quoted, systemd_specifiers, systemd_unquoted, windows_quoted, windows_task_path, xml,
 };
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -392,15 +392,23 @@ WantedBy=default.target\n",
                     .as_deref()
                     .map(|user| format!("<UserId>{}</UserId>", xml(user)))
                     .unwrap_or_default();
-                let line = format!(
-                    "/d /s /c \"{}{} engine --home {} >> {} 2>&1\"",
-                    windows_task_path(&self.path)
-                        .map(|path| format!("set \"PATH={path}\" && "))
-                        .unwrap_or_default(),
+                let head = "/d /s /c \"";
+                let tail = format!(
+                    "{} engine --home {} >> {} 2>&1\"",
                     windows_quoted(&executable),
                     windows_quoted(&root),
                     windows_quoted(&log),
                 );
+                let set = |path: &str| format!("set \"PATH={path}\" && ");
+                let fixed = WINDOWS_SHELL.len()
+                    + 1
+                    + head.encode_utf16().count()
+                    + set("").encode_utf16().count()
+                    + tail.encode_utf16().count()
+                    + TASK_LINE_MARGIN;
+                let budget = CMD_LINE_CHARS_MAX.saturating_sub(fixed);
+                let path = windows_task_path(&self.path, budget).map(|path| set(&path));
+                let line = format!("{head}{}{tail}", path.unwrap_or_default());
                 if WINDOWS_SHELL.len() + 1 + line.encode_utf16().count() >= CMD_LINE_CHARS_MAX {
                     return Err(failure(format!(
                         "the Windows logon task line is longer than cmd's \
