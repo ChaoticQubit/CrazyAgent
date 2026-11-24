@@ -1524,10 +1524,6 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state).await?.team_graph(&id).await }.await;
             routed(result)
         }
-        "desktop_native_terminal_enabled" => {
-            let result: Result<_, BridgeError> = async { Ok(native_enabled()) }.await;
-            routed(result)
-        }
         "desktop_team_terminals_per_window" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -4316,24 +4312,15 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_restore_recovery" => {
-            let result: Result<_, BridgeError> = async { let (layout, running) = restore::engine()?; restore::blocking(move || restore::recovery(layout.root(), running)).await }.await;
+            let result: Result<_, BridgeError> = async { Err::<(), _>(BridgeError { code: "not_configured", cause: None, account: None }) }.await;
             routed(result)
         }
         "desktop_restore_recover" => {
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                action: String,
-            }
-            let Args { action } = match parse(args) {
-                Ok(args) => args,
-                Err(invalid) => return invalid,
-            };
-            let result: Result<_, BridgeError> = async { let (layout, running) = restore::engine()?; let settings = (layout.global_settings(), layout.project_settings()); restore::blocking(move || { restore::recover(layout.root(), running, &action, (&settings.0, &settings.1)) }) .await }.await;
+            let result: Result<_, BridgeError> = async { Err::<(), _>(BridgeError { code: "not_configured", cause: None, account: None }) }.await;
             routed(result)
         }
         "desktop_restore_open_backups" => {
-            let result: Result<_, BridgeError> = async { let (layout, _) = restore::engine()?; let folder = crazyagent::restore::backups(layout.root()); restore::blocking(move || crazyagent::platform::reveal(&folder)).await }.await;
+            let result: Result<_, BridgeError> = async { Err::<(), _>(BridgeError { code: "not_configured", cause: None, account: None }) }.await;
             routed(result)
         }
         "desktop_log_compaction" => {
