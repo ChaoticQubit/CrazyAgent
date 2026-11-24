@@ -106,6 +106,7 @@ fn restore_pinned_at(
     now: SystemTime,
     check: CopyCheck,
 ) -> Result<Restored, StorageError> {
+    let path = &real_database(path)?;
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
@@ -195,20 +196,27 @@ pub fn restore_failed(cause: impl std::fmt::Display) -> StorageError {
     error(format!("{RESTORE_FAILED}: {cause}"))
 }
 
-/// Opens engine.db and holds it alone until the connection closes: exclusive locking mode
-/// and an exclusive transaction, with no wait. Its folder may be reached through a link, but
-/// engine.db itself never is. Any other connection refuses the restore, and none can open
-/// while it runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
-fn alone(path: &Path) -> Result<Connection, StorageError> {
+/// The path of engine.db through its folder's real path, so every path built beside it is
+/// real, while a link planted as engine.db itself stays a link for the no-follow open to
+/// refuse. Input: the database path. Output: that path, or `storage_restore_failed`.
+pub(crate) fn real_database(path: &Path) -> Result<PathBuf, StorageError> {
     let folder = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
     let name = path
         .file_name()
         .ok_or_else(|| restore_failed("the database has no name"))?;
-    let canonical = std::fs::canonicalize(folder)
+    Ok(std::fs::canonicalize(folder)
         .map_err(restore_failed)?
-        .join(name);
+        .join(name))
+}
+
+/// Opens engine.db and holds it alone until the connection closes: exclusive locking mode
+/// and an exclusive transaction, with no wait. Its folder may be reached through a link, but
+/// engine.db itself never is. Any other connection refuses the restore, and none can open
+/// while it runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
+fn alone(path: &Path) -> Result<Connection, StorageError> {
+    let canonical = real_database(path)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
