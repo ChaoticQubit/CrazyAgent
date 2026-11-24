@@ -156,10 +156,21 @@ pub(crate) struct Case {
     pub(crate) temp: tempfile::TempDir,
     pub(crate) root: PathBuf,
     pub(crate) db: rusqlite::Connection,
-    _held: crate::store_log::RowsHold,
+    held: Option<crate::store_log::RowsHold>,
 }
 
 impl Case {
+    /// Ends this row's store hold, so the next store call runs outside any capture.
+    fn release(&mut self) {
+        assert!(self.held.take().is_some());
+    }
+
+    /// Takes the store hold again after [`Case::release`].
+    fn hold(&mut self) {
+        assert!(self.held.is_none());
+        self.held = Some(crate::store_log::rows_hold());
+    }
+
     pub(crate) fn engine(&self) -> Engine<'_> {
         Engine {
             root: &self.root,
@@ -181,7 +192,7 @@ pub(crate) fn case() -> Case {
         temp,
         root,
         db,
-        _held: crate::store_log::rows_hold(),
+        held: Some(crate::store_log::rows_hold()),
     }
 }
 
@@ -1381,54 +1392,56 @@ fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
     );
 }
 
-/// A removal inside a caller's open transaction is refused before anything is written, so
-/// a rollback can never bring the rows back without the folder.
+/// A removal outside any capture is refused before anything is written: the folder stays
+/// under its name with no removal folder beside it, and the rows read as before.
 #[test]
-fn a_removal_inside_an_open_transaction_is_refused_and_leaves_the_folder_and_rows() {
-    let case = case();
+fn a_removal_outside_any_capture_is_refused_and_leaves_the_folder_and_rows() {
+    let mut case = case();
     add_text(&case, ACME, false, 1).unwrap();
     let before = plugin(&list(&case.db, &case.engine()).unwrap(), "acme")
         .status
         .clone();
-    case.db.execute_batch("BEGIN").unwrap();
+    case.release();
     assert_eq!(
         code(remove(&case.db, &case.engine(), "acme")),
         "app_plugins_unavailable"
     );
-    assert!(
-        plugins_folder(&case)
-            .join("acme")
-            .join(MANIFEST_FILE)
-            .exists()
-    );
-    case.db.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(names_in(&plugins_folder(&case)), ["acme"]);
+    case.hold();
     let after = plugin(&list(&case.db, &case.engine()).unwrap(), "acme")
         .status
         .clone();
     assert_eq!(after, before);
 }
 
-/// An add inside a caller's open transaction is refused before its folder is written, so a
-/// rollback never leaves a folder with no trust record.
+/// An add outside any capture is refused before its folder is written, so no folder is
+/// ever left with no trust record.
 #[test]
-fn an_add_inside_an_open_transaction_is_refused_and_writes_no_folder() {
-    let case = case();
-    case.db.execute_batch("BEGIN").unwrap();
+fn an_add_outside_any_capture_is_refused_and_writes_no_folder() {
+    let mut case = case();
+    case.release();
     assert_eq!(
         code(add_text(&case, ACME, false, 1)),
         "app_plugins_unavailable"
     );
-    assert!(!plugins_folder(&case).join("acme").exists());
-    case.db.execute_batch("ROLLBACK").unwrap();
+    assert!(names_in(&plugins_folder(&case)).is_empty());
+    case.hold();
+    assert!(
+        list(&case.db, &case.engine())
+            .unwrap()
+            .plugins
+            .iter()
+            .all(|view| view.name != "acme")
+    );
 }
 
-/// A key entered inside a caller's open transaction is refused before the key is saved, so
-/// a rollback never leaves a key no binding row names or a key it did not keep.
+/// A key entered outside any capture is refused before the key is saved, so no key file is
+/// ever left that no binding row names.
 #[test]
-fn a_key_set_inside_an_open_transaction_is_refused_and_saves_no_key_file() {
-    let case = case();
+fn a_key_set_outside_any_capture_is_refused_and_saves_no_key_file() {
+    let mut case = case();
     add_text(&case, ACME, false, 1).unwrap();
-    case.db.execute_batch("BEGIN").unwrap();
+    case.release();
     let refused = set_key(
         &case.db,
         &case.engine(),
@@ -1438,5 +1451,5 @@ fn a_key_set_inside_an_open_transaction_is_refused_and_saves_no_key_file() {
     );
     assert_eq!(code(refused), "app_plugins_unavailable");
     assert!(plugin_keys(&case).is_empty());
-    case.db.execute_batch("ROLLBACK").unwrap();
+    case.hold();
 }

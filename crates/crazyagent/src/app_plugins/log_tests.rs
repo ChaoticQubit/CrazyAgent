@@ -2,16 +2,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
-use kernel_plugin_host::registry::{Switch, off_code_plugins};
+use kernel_plugin_host::registry::{FOLDER, Switch, off_code_plugins, ready};
 use kernel_plugin_host::store::{KeyFolder, KeyRef};
 use kernel_plugin_host::usage::{TurnOff, Usage};
 use kernel_storage::state_log::replay::rows;
 use rusqlite::Connection;
 use rusqlite::types::Value;
 
-use super::log::rebuild;
+use super::log::{logged, rebuild};
 use super::{Command, KEYS, OffSet, engine, execute, initialize};
 use crate::config::{EffectiveConfig, SETTINGS_VERSION, resolve_config_bytes};
+use crate::engine::EngineError;
 use crate::state_log::fence::seed;
 
 /// The agent-quit plugin's id, a bundled code plugin.
@@ -418,6 +419,135 @@ fn a_dropped_key_file_is_deleted_after_the_commit() {
     })
     .unwrap();
     assert!(!third.exists(), "a removal deletes the key file");
+}
+
+/// The refusal a row's work returns to make `logged` roll back.
+const ROLLED_BACK: &str = "row_rolled_back";
+
+impl Case {
+    /// The entry names in the plugins folder, sorted. Output: the names.
+    fn plugin_entries(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.root.join(FOLDER))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The trusted digest of a plugin. Input: the name. Output: it, none when untrusted.
+    fn trusted_sha(&self, name: &str) -> Option<String> {
+        self.db
+            .query_row(
+                "SELECT sha256 FROM app_plugin_trust WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    /// Whether the plugin loads to run. Input: the name. Output: the answer.
+    fn loads(&self, name: &str) -> bool {
+        ready(&self.db, &engine(&self.root), name).is_ok()
+    }
+}
+
+/// A store call on a connection that already holds a transaction of its own is refused at
+/// `logged` with `app_plugins_unavailable`, and nothing is written: the folder, the rows,
+/// the key files and the log stay as they were.
+#[test]
+fn a_store_call_inside_a_caller_held_transaction_is_refused_at_logged_and_writes_nothing() {
+    let case = case(true);
+    case.add("acme", ACME, false).unwrap();
+    let tables = case.tables();
+    let logged_before = case.logged().len();
+    case.db.execute_batch("BEGIN").unwrap();
+    let remove = Command::Remove {
+        name: "acme".into(),
+    };
+    for command in [remove, set_key(b"sk-row-held-key-01")] {
+        assert_eq!(case.run(command), Err("app_plugins_unavailable".to_owned()));
+    }
+    assert_eq!(
+        case.add("near", NEAR, false),
+        Err("app_plugins_unavailable".to_owned())
+    );
+    case.db.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(case.plugin_entries(), ["acme"]);
+    assert_eq!(case.tables(), tables);
+    assert_eq!(case.logged().len(), logged_before);
+    assert!(case.key_file().is_none());
+}
+
+/// A removal whose capture rolls back after the folder was moved aside puts the folder back
+/// under its name, and the plugin lists and loads as before.
+#[test]
+fn a_removal_rolled_back_after_its_retire_puts_the_folder_back() {
+    let case = case(true);
+    case.add("near", NEAR, false).unwrap();
+    case.run(switch("near", true)).unwrap();
+    assert!(case.loads("near"));
+    let tables = case.tables();
+    let refused = logged(&case.db, &case.root, |db| {
+        kernel_plugin_host::registry::remove(db, &engine(&case.root), "near")
+            .map_err(|refused| EngineError(refused.code.into()))?;
+        Err::<(), _>(EngineError(ROLLED_BACK.into()))
+    });
+    assert_eq!(refused.unwrap_err().0, ROLLED_BACK);
+    assert_eq!(case.plugin_entries(), ["near"]);
+    assert_eq!(case.tables(), tables);
+    assert!(case.loads("near"));
+}
+
+/// A removal deletes the plugin's folder only after its commit: inside the capture, before
+/// the commit, the folder sits aside under its removal name, and once committed it is gone.
+#[test]
+fn a_removal_deletes_its_folder_only_after_the_commit() {
+    let case = case(true);
+    case.add("near", NEAR, false).unwrap();
+    logged(&case.db, &case.root, |db| {
+        kernel_plugin_host::registry::remove(db, &engine(&case.root), "near")
+            .map_err(|refused| EngineError(refused.code.into()))?;
+        let entries = case.plugin_entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(entries[0].starts_with(".rm-near."), "{entries:?}");
+        Ok(())
+    })
+    .unwrap();
+    assert!(case.plugin_entries().is_empty());
+}
+
+/// A replace whose capture rolls back keeps the old folder under the plugin name with the
+/// old trust row, and leaves no staged or retired folder.
+#[test]
+fn a_replace_rolled_back_keeps_the_old_folder_and_trust_row() {
+    let case = case(true);
+    case.add("near", NEAR, false).unwrap();
+    let old_sha = kernel_common::hash(NEAR.as_bytes());
+    assert_eq!(case.trusted_sha("near"), Some(old_sha.clone()));
+    let newer = NEAR.replace("title = \"Near\"", "title = \"Near two\"");
+    assert_ne!(newer, NEAR);
+    let picked = case.root.join("picked").join("near-two");
+    std::fs::create_dir_all(&picked).unwrap();
+    std::fs::write(picked.join("plugin.toml"), &newer).unwrap();
+    let refused = logged(&case.db, &case.root, |db| {
+        kernel_plugin_host::registry::add(
+            db,
+            &engine(&case.root),
+            &picked,
+            &kernel_common::hash(newer.as_bytes()),
+            true,
+            2,
+        )
+        .map_err(|refused| EngineError(refused.code.into()))?;
+        Err::<(), _>(EngineError(ROLLED_BACK.into()))
+    });
+    assert_eq!(refused.unwrap_err().0, ROLLED_BACK);
+    assert_eq!(case.plugin_entries(), ["near"]);
+    let kept =
+        std::fs::read_to_string(case.root.join(FOLDER).join("near").join("plugin.toml")).unwrap();
+    assert_eq!(kept, NEAR);
+    assert_eq!(case.trusted_sha("near"), Some(old_sha));
 }
 
 /// The plugin host modules that write the plugin store, or reach a write through their
