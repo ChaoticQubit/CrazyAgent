@@ -224,11 +224,17 @@ fn a_managed_account_is_offline_only_when_none_of_its_hosts_is_found_and_nothing
 }
 
 /// A lookup answers within its bound or reads TimedOut, and with the most lookups out at
-/// once the next one reads TimedOut at once without starting, until one of them ends.
+/// once the next one reads TimedOut at once without starting, until one of them ends. The
+/// row counts on its own counter, so lookups of rows running beside it never take one of its
+/// places.
 #[test]
 fn a_lookup_runs_within_its_bound_and_no_more_than_the_cap_are_out_at_once() {
+    static COUNTED: AtomicUsize = AtomicUsize::new(0);
     let address = at(TEST_NET, 443);
-    assert_eq!(bounded(move || Ok(vec![address])).unwrap(), [address]);
+    assert_eq!(
+        bounded_on(&COUNTED, move || Ok(vec![address])).unwrap(),
+        [address]
+    );
     let mut releases = Vec::new();
     let started = Instant::now();
     let callers: Vec<_> = (0..LOOKUPS_OUT_MAX)
@@ -236,7 +242,7 @@ fn a_lookup_runs_within_its_bound_and_no_more_than_the_cap_are_out_at_once() {
             let (release, held) = std::sync::mpsc::channel::<()>();
             releases.push(release);
             std::thread::spawn(move || {
-                bounded(move || {
+                bounded_on(&COUNTED, move || {
                     let _ = held.recv();
                     Ok(Vec::new())
                 })
@@ -257,7 +263,7 @@ fn a_lookup_runs_within_its_bound_and_no_more_than_the_cap_are_out_at_once() {
     let ran = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ran);
     let at_cap = Instant::now();
-    let refused = bounded(move || {
+    let refused = bounded_on(&COUNTED, move || {
         flag.store(true, Ordering::SeqCst);
         Ok(vec![address])
     });
@@ -270,7 +276,7 @@ fn a_lookup_runs_within_its_bound_and_no_more_than_the_cap_are_out_at_once() {
     drop(releases);
     let freed = Instant::now();
     loop {
-        match bounded(move || Ok(vec![address])) {
+        match bounded_on(&COUNTED, move || Ok(vec![address])) {
             Ok(found) => {
                 assert_eq!(found, [address]);
                 break;
