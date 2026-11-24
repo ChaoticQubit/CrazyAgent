@@ -786,12 +786,14 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         command.get_program(),
         kernel_sandbox::profile::command::SANDBOX_EXEC
     );
-    let pane = ide_shell::interactive(
-        &crate::sandbox::PROFILE_HOOKS,
-        &launch,
-        AgentAccess::Sandboxed,
-    )
-    .unwrap();
+    let pane = super::sandboxed_pane(
+        ide_shell::interactive(
+            &crate::sandbox::PROFILE_HOOKS,
+            &launch,
+            AgentAccess::Sandboxed,
+        )
+        .unwrap(),
+    );
     let argv: Vec<&std::ffi::OsStr> = std::iter::once(command.get_program())
         .chain(command.get_args())
         .collect();
@@ -808,6 +810,10 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         pane.env
             .iter()
             .all(|(name, _)| !name.starts_with("CRAZYAGENT_") && name != "GH_TOKEN")
+    );
+    assert_eq!(
+        pane.transcript,
+        crate::harnesses::interactive::Transcript::Unavailable
     );
     command
         .stdin(std::process::Stdio::null())

@@ -1,7 +1,7 @@
 use super::{IdeReply, hex, refusal};
 use crate::engine::EngineError;
 use crate::engine::owner::{OwnerRuntimeHandle, failure};
-use crate::harnesses::interactive::{InteractiveCommand, Transcript};
+use crate::harnesses::interactive::InteractiveCommand;
 use crate::ipc::{OwnedWriteHalf, Stream};
 use crate::protocol::{ProjectId, encode_frame};
 use crate::terminal::{TerminalFrame, TerminalRequest};
@@ -260,12 +260,7 @@ pub(super) fn prepare(
         place.access,
     )
     .map_err(shell_refusal)?;
-    let command = InteractiveCommand {
-        argv: pane.argv,
-        cwd: pane.cwd,
-        env: pane.env,
-        transcript: Transcript::Unavailable,
-    };
+    let command = crate::ide::terminal::sandboxed_pane(pane);
     assert_eq!(
         command.argv.first().map(String::as_str),
         Some(kernel_sandbox::profile::command::SANDBOX_EXEC)

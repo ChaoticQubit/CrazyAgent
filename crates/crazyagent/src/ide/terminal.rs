@@ -143,5 +143,20 @@ pub fn machine_profiles(access: AgentAccess) -> Result<Map<String, Value>, Engin
     Ok(profiles(Platform::CURRENT, Path::new(""), access))
 }
 
+/// The pane command a Sandboxed IDE terminal runs, kept out of every transcript: the
+/// kernel's argument list, working folder and environment with no session record, so no
+/// transcript reader ever sees the owner's shell. Input: the kernel's pane. Output: the
+/// command the terminal host starts.
+pub(crate) fn sandboxed_pane(
+    pane: kernel_processes::terminal::PaneCommand,
+) -> crate::harnesses::interactive::InteractiveCommand {
+    crate::harnesses::interactive::InteractiveCommand {
+        argv: pane.argv,
+        cwd: pane.cwd,
+        env: pane.env,
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    }
+}
+
 #[cfg(test)]
 mod tests;
