@@ -28,7 +28,8 @@ pub const GPU_FAULT: &str = "native_terminal_gpu";
 /// The longest releasing a lost device may hold the Windows render thread: wgpu-core 25's
 /// queue drop waits on the last submission for 100, 200, 400, 800, 1600 and 3200 ms, then
 /// panics. A removed D3D12 device's fence reads complete, so its release returns at once.
-#[cfg(windows)]
+/// Only the rows hold a release to it.
+#[cfg(all(windows, test))]
 pub const RELEASE_STALL_MAX: Duration = Duration::from_millis(6300);
 
 /// The fallback font files loaded beside the style's family, a fixed set instead of every
