@@ -230,6 +230,28 @@ fn confinement_equals_the_values_crazyagent_built() {
     }
 }
 
+/// The engine's host reads and the launch refusal codes live in the kernel on every system:
+/// off Linux no host is read and a project may hold another git, and the strict setting's
+/// refusal keeps its own code while any other line has none.
+#[test]
+fn the_host_reads_and_refusal_codes_live_in_the_kernel() {
+    use crate::error::SandboxError;
+    use crate::lines::{LINUX_NOT_FULL_LINE, refusal_code};
+    use crate::profile::consts::LINUX_NOT_FULL;
+    let kept: fn() -> Option<crate::host::LinuxHost> = crate::host::linux_host_kept;
+    let other: fn(&std::path::Path) -> bool = crate::host::linux_other_git;
+    let _ = crate::host::linux_unbridged_notice;
+    let strict = SandboxError::Unavailable(LINUX_NOT_FULL_LINE.to_owned());
+    assert_eq!(refusal_code(&strict), Some(LINUX_NOT_FULL));
+    let plain = SandboxError::Unavailable("no such line".to_owned());
+    assert_eq!(refusal_code(&plain), None);
+    if cfg!(not(target_os = "linux")) {
+        assert_eq!(crate::host::linux_host(), None);
+        assert_eq!(kept(), None);
+        assert!(other(std::path::Path::new("/")));
+    }
+}
+
 /// A Sandboxed IDE terminal names its own folder under the engine data root after the
 /// project, so the kernel refuses, before it writes anything, every project that is not a
 /// project id: empty, `.`, `..`, a nested path, an absolute path, a trailing dot, a space,

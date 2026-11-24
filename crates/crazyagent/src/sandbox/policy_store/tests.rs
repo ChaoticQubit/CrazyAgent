@@ -29,7 +29,7 @@ fn a_policy_saved_before_the_home_caches_setting_clears_when_access_is_raised() 
         assert_eq!(read.pinned(folder.path()).home_caches, choice);
         let view = read.view(
             &crate::sandbox::POLICY_HOOKS,
-            crate::sandbox::linux_host_kept(),
+            kernel_sandbox::host::linux_host_kept(),
             folder.path(),
             &ToolHomes::at(folder.path()),
             1,
@@ -103,7 +103,7 @@ fn a_saved_policy_round_trips_and_a_missing_or_tampered_one_is_never_wider() {
     assert_eq!(load(&connection, "p").unwrap(), policy);
     let view = policy.view(
         &crate::sandbox::POLICY_HOOKS,
-        crate::sandbox::linux_host_kept(),
+        kernel_sandbox::host::linux_host_kept(),
         Path::new("/nonexistent"),
         &ToolHomes::at(Path::new("/nonexistent")),
         0,
@@ -190,7 +190,7 @@ fn a_saved_agent_folders_choice_reads_back_and_an_older_policy_reads_allow_all()
         assert_eq!(
             read.view(
                 &crate::sandbox::POLICY_HOOKS,
-                crate::sandbox::linux_host_kept(),
+                kernel_sandbox::host::linux_host_kept(),
                 nowhere,
                 &ToolHomes::at(nowhere),
                 0,
@@ -303,7 +303,7 @@ fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hol
     let unread = LevelView::other_git(
         Some(held(true, false)),
         Path::new("/nonexistent"),
-        crate::sandbox::linux_other_git,
+        kernel_sandbox::host::linux_other_git,
     );
     assert!(unread, "a folder that cannot be read rules out none");
     let quiet = LevelView::on(Some(held(true, false)), false);
@@ -333,20 +333,20 @@ fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_
     assert!(LevelView::other_git(
         Some(host(true)),
         &project,
-        crate::sandbox::linux_other_git
+        kernel_sandbox::host::linux_other_git
     ));
     assert!(LevelView::other_git(
         Some(host(true)),
         &missing,
-        crate::sandbox::linux_other_git
+        kernel_sandbox::host::linux_other_git
     ));
     for unread in [Some(host(false)), None] {
         assert!(
-            !LevelView::other_git(unread, &project, crate::sandbox::linux_other_git),
+            !LevelView::other_git(unread, &project, kernel_sandbox::host::linux_other_git),
             "{unread:?}"
         );
         assert!(
-            !LevelView::other_git(unread, &missing, crate::sandbox::linux_other_git),
+            !LevelView::other_git(unread, &missing, kernel_sandbox::host::linux_other_git),
             "{unread:?}"
         );
     }

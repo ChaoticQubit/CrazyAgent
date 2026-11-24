@@ -1129,7 +1129,7 @@ pub fn catalog(
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
-        agent_access: LevelView::all(crate::sandbox::linux_host_kept(), calls),
+        agent_access: LevelView::all(kernel_sandbox::host::linux_host_kept(), calls),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)

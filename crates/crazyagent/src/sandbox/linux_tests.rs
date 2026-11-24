@@ -1,5 +1,10 @@
 use crazyagent_linux_supervisor::rules::{GitOwn, Held};
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::host::LinuxHost;
+use kernel_sandbox::lines::{
+    LINUX_PORTS_ANY_HOST_LINE, LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE,
+    linux_unbridged_line,
+};
 use kernel_sandbox::linux::helper::bridge::Bridge;
 use kernel_sandbox::linux::helper::landlock::*;
 use kernel_sandbox::linux::helper::*;
@@ -9,7 +14,7 @@ use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::ports::PICKED_PORTS_START;
 use kernel_sandbox::ports::PROXY_PORTS;
 use kernel_sandbox::profile::consts::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK;
-use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox};
+use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox, linux_unbridged_notice_on};
 use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -881,7 +886,6 @@ fn an_agent_kept_on_this_network_by_a_low_port_names_the_lowest_one() {
 
 #[test]
 fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
-    use super::{LinuxHost, linux_unbridged_line, linux_unbridged_notice_on};
     use SandboxRemote::{AnyHost, Loopback};
     use kernel_sandbox::policy::AgentNetwork;
     let host = |nested| {
@@ -912,8 +916,8 @@ fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
     assert_eq!(said(true, &launched(&[Loopback(11434)])), None, "bridged");
     let (_temp, open) = project(SandboxNetwork::Open);
     assert_eq!(said(true, &open), None);
-    let plain = Some(super::LINUX_PORTS_ANY_HOST_LINE.to_owned());
-    let unrouted = Some(super::LINUX_UNROUTED_LINE.to_owned());
+    let plain = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
+    let unrouted = Some(LINUX_UNROUTED_LINE.to_owned());
     let hosted = launched(&[AnyHost(443), Loopback(8080)]);
     assert_eq!(
         said(true, &hosted),
@@ -927,7 +931,7 @@ fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
     );
     let ports = launched(&[Loopback(8080)]).limit_sockets(LinuxSockets::TcpPorts);
     assert_eq!(said(true, &ports), plain);
-    let any_host = Some(super::LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
+    let any_host = Some(LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
     assert_eq!(
         said(true, &launched(&[AnyHost(443)])),
         any_host,
@@ -944,8 +948,6 @@ fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
 
 #[test]
 fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
-    use super::{LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE, LinuxHost};
-    use super::{linux_unbridged_line, linux_unbridged_notice_on};
     use SandboxRemote::{AnyHost, Loopback};
     use kernel_sandbox::policy::AgentNetwork;
     let host = |routed, supervised| {
@@ -1014,7 +1016,6 @@ fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself()
 
 #[test]
 fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
-    use super::{LINUX_UNROUTED_LINE, LinuxHost, linux_unbridged_notice_on};
     use SandboxRemote::{AnyHost, Loopback};
     use kernel_sandbox::policy::AgentNetwork;
     let host = |nested, routed| {
@@ -1130,7 +1131,6 @@ fn a_nested_agent_may_have_an_open_network_and_keeps_the_kept_port_check() {
 /// wider lines; nothing kept stays nothing (rv-secreview linux-t4c F2).
 #[test]
 fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
-    use super::LinuxHost;
     let host = LinuxHost {
         nested: true,
         scoped: true,

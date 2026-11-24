@@ -45,8 +45,8 @@ use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
-use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+use kernel_sandbox::{host::linux_unbridged_notice, toolchains};
 use kernel_sandbox::{profile::ProjectSandbox, profile::warden, settings::LinuxStrict};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -9963,7 +9963,7 @@ impl TeamRuntime {
 
     /// Keeps in an agent's Messages timeline, once while it is kept, the engine's notice that
     /// this launch stays on this computer's network on a Linux that nests agents
-    /// ([`crate::sandbox::linux_unbridged_notice`]). Takes the project, the agent, the
+    /// ([`linux_unbridged_notice`]). Takes the project, the agent, the
     /// project's network choice and the agent's sandbox as launched, under the owner's call
     /// supervisor setting. Returns nothing; a notice that cannot be kept is logged, never a
     /// reason not to start.
@@ -9977,7 +9977,7 @@ impl TeamRuntime {
         let calls = crate::sandbox_settings::load(&self.connection)
             .ok()
             .map(|settings| settings.linux_supervisor);
-        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox, calls) else {
+        let Some(text) = linux_unbridged_notice(choice, sandbox, calls) else {
             return;
         };
         let kept = id > 0
