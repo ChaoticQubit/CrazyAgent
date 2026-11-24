@@ -103,5 +103,26 @@ pub fn parts(reference: &SecretRef) -> Result<(&str, &str), StoreError> {
     ))
 }
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod os_keyring;
+#[cfg(target_os = "windows")]
+mod windows;
+
+/// Opens this computer's OS keyring, Linux Secret Service or Windows Credential Manager,
+/// for one engine namespace under `dev.crazyagent.`, with a git helper that runs this
+/// executable's `git-credential` command. Input: the namespace. Output: the shared store,
+/// or `credential_namespace_refused` / `credential_store_unavailable`.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub fn open_os_keyring(namespace: &str) -> Result<std::sync::Arc<dyn Store>, StoreError> {
+    let executable =
+        std::env::current_exe().map_err(|_| StoreError::code("credential_store_unavailable"))?;
+    Ok(std::sync::Arc::new(os_keyring::OsKeyring::open(
+        namespace,
+        &executable,
+    )?))
+}
+
 #[cfg(test)]
 mod tests;
