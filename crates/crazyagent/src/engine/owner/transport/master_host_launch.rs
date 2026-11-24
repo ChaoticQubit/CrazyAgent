@@ -1106,7 +1106,7 @@ fn turn_sandbox(
     let profile = runtime.path.join(MASTER_PROFILE);
     let installed =
         InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(|error| {
-            match crate::sandbox::refusal_code(&error) {
+            match kernel_sandbox::lines::refusal_code(&error) {
                 Some(code) => failure(code),
                 None => refused(error),
             }

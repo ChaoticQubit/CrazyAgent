@@ -1,5 +1,12 @@
 use crate::error::SandboxError;
+#[cfg(target_os = "linux")]
+use crate::linux::launch as linux;
 use crate::ports::BRIDGE_PORT_MIN;
+use crate::profile::consts::LINUX_NOT_FULL;
+#[cfg(target_os = "linux")]
+use crate::profile::consts::{
+    LINUX_HIDDEN_MOUNTED_AGAIN, LINUX_HIDDEN_MOUNTS_NOT_PRIVATE, LINUX_HIDDEN_NEEDS_NAMESPACES,
+};
 
 /// The Linux helper's exit code when its call supervisor could not take back an entry a
 /// case-folding folder read as a held name, and so stopped the run. The supervisor crate
@@ -96,4 +103,26 @@ pub fn linux_unbridged_line(port: u16) -> String {
     format!(
         "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
     )
+}
+
+/// The code a launch refusal has of its own, so a caller shows its plain line: the strict
+/// setting's ([`LINUX_NOT_FULL`]), the Windows loopback's
+/// ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]) and, on Linux, the hidden folders' three
+/// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`],
+/// [`LINUX_HIDDEN_MOUNTS_NOT_PRIVATE`]). Input: the refusal. Output: the code, or none.
+pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
+    let SandboxError::Unavailable(reason) = error else {
+        return None;
+    };
+    match reason.as_str() {
+        LINUX_NOT_FULL_LINE => Some(LINUX_NOT_FULL),
+        MODEL_LOOPBACK_WINDOWS_LINE => Some(MODEL_LOOPBACK_UNAVAILABLE_WINDOWS),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_NEEDS_NAMESPACES => Some(LINUX_HIDDEN_NEEDS_NAMESPACES),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
+        #[cfg(target_os = "linux")]
+        crate::linux::helper::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
+        _ => None,
+    }
 }

@@ -1,11 +1,11 @@
-use crate::engine::owner::native_auth as owner_auth;
 use crate::engine::owner::*;
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
-use crate::{config::EffectiveConfig, sandbox::linux_other_git};
+use crate::{config::EffectiveConfig, engine::owner::native_auth as owner_auth};
 #[cfg(windows)]
 use crazyagent_win_sandbox::private;
+use kernel_sandbox::host::{linux_host, linux_host_kept, linux_other_git};
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -3728,7 +3728,7 @@ fn project_other_git(
         .ok()
         .map(|settings| settings.linux_supervisor);
     drop(tx);
-    let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+    let host = linux_host_kept().map(|host| host.under(calls));
     let other_git = kernel_sandbox::policy::LevelView::other_git;
     Ok(setup.is_none_or(|setup| other_git(host, &setup.project_folder(), linux_other_git)))
 }
@@ -3744,7 +3744,7 @@ fn owner_read(
         query,
         OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
     ) {
-        crate::sandbox::linux_host();
+        linux_host();
     }
     let other_git = match query {
         OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
@@ -3833,7 +3833,7 @@ fn owner_read(
                 .map_err(error)?
                 .view(
                     &crate::sandbox::POLICY_HOOKS,
-                    crate::sandbox::linux_host_kept(),
+                    linux_host_kept(),
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,

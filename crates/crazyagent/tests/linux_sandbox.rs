@@ -2534,7 +2534,7 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
 /// process, so neither read has a data folder (V243-LANDLOCK-TEST-HELPER-PATH).
 #[test]
 fn the_engine_reads_this_machine_through_the_helper_its_launches_take() {
-    let host = crazyagent::sandbox::linux_host().unwrap();
+    let host = kernel_sandbox::host::linux_host().unwrap();
     let direct = read_host(Path::new(HELPER), None);
     assert_eq!(host, direct);
     assert_eq!(host.nested, nesting_bwrap().is_some(), "{host:?}");
