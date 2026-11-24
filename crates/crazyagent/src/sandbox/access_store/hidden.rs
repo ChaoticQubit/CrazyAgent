@@ -161,16 +161,17 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     Ok(paths)
 }
 
-/// The stop a code graph build polls: yes once `stop` says so, or once a folder the
-/// project saves hidden now is one the build's sandbox did not hide at its start, so the
-/// build ends and runs again hiding it. The saved folders are read at the first poll and
-/// then at most every [`HIDE_POLL`]; a read that fails counts as yes, and a yes stays yes.
-/// Takes the worker's database, the project, the build's hidden folders guard and `stop`.
+/// The stop a confined run polls: yes once `stop` says so, or once a folder the project
+/// saves hidden now is one the run's sandbox did not hide at its start, so the run ends and
+/// runs again hiding it. The saved folders are read at the first poll and then at most
+/// every [`HIDE_POLL`]; a read that fails counts as yes, and a yes stays yes. A run with
+/// full access hides nothing and passes no guard, so only `stop` ends it. Takes the
+/// database, the project, the run's hidden folders guard when confined and `stop`.
 /// Returns the stop.
 pub(crate) fn hide_stops<'a>(
     database: &'a Connection,
     project: &'a str,
-    listed: &'a kernel_sandbox::hidden_paths::HiddenRun,
+    listed: Option<&'a kernel_sandbox::hidden_paths::HiddenRun>,
     stop: &'a dyn Fn() -> bool,
 ) -> impl Fn() -> bool + 'a {
     let read: Cell<Option<Instant>> = Cell::new(None);
@@ -182,7 +183,7 @@ pub(crate) fn hide_stops<'a>(
         if !hid_too_little.get() && read.get().is_none_or(|at| at.elapsed() >= HIDE_POLL) {
             read.set(Some(Instant::now()));
             let covered = crate::sandbox::access_store::hidden::load(database, project)
-                .is_ok_and(|saved| listed.covers_saved(&saved));
+                .is_ok_and(|saved| listed.is_some_and(|listed| listed.covers_saved(&saved)));
             hid_too_little.set(!covered);
         }
         hid_too_little.get()

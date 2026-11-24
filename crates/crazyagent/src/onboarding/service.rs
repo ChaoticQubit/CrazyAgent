@@ -628,7 +628,7 @@ fn graph_step(
         &crate::sandbox::access_store::hidden::hide_stops(
             database,
             &claimed.project,
-            &listed,
+            Some(&listed),
             beat,
         ),
     );
@@ -949,7 +949,7 @@ fn refresh_build(
         &crate::sandbox::access_store::hidden::hide_stops(
             database,
             project,
-            &listed,
+            Some(&listed),
             &gives_way(database, repo, halted),
         ),
     );
