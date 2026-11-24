@@ -434,9 +434,9 @@ fn an_access_answer_is_kept_only_once_its_entry_changed_in_an_earlier_second() {
 
 /// Changes a tool's folder and reads the tool's access answer within one second, at most
 /// three tries, since a slow spawn can carry the listing into the next second: the first try
-/// gives staff `add_file` on the folder's access list, a later one flips its mode, which
-/// keeps that entry. Each read lists the folder alone among the root's parts. Inputs: the
-/// tool, its folder, the root.
+/// adds a deny-only entry to the folder's access list, a later one flips its mode, so the
+/// folder never reads as changeable. Each read lists the folder alone among the root's
+/// parts. Inputs: the tool, its folder, the root.
 #[cfg(target_os = "macos")]
 fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -446,7 +446,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
             let status = crate::spawn_gate::status(
                 std::process::Command::new("/bin/chmod")
                     .arg("+a")
-                    .arg("group:staff allow add_file,delete_child")
+                    .arg("group:everyone deny delete")
                     .arg(folder),
             )
             .unwrap();
@@ -455,7 +455,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
             let mode = if attempt == 1 { 0o750 } else { 0o755 };
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
         }
-        assert_eq!(changeable_by_others(tool), Some(folder.to_path_buf()));
+        assert_eq!(changeable_by_others(tool), None);
         let changed: Vec<Vec<PathBuf>> = acl::take_listings()
             .into_iter()
             .filter(|listing| listing.iter().any(|listed| listed.starts_with(root)))
@@ -476,8 +476,8 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
 
 /// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
-/// change moves only the changed part's change time, so that part alone is listed again and
-/// the change counts. HFS-CTIME: a part read in the second it changed is read again once
+/// change moves only the changed part's change time, so that part alone is listed again.
+/// HFS-CTIME: a part read in the second it changed is read again once
 /// that second has passed, and only then kept.
 #[cfg(target_os = "macos")]
 #[test]
@@ -520,13 +520,13 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
 
     changed_and_read_in_one_second(&tool, &folder, temp.path());
     settle(&[&folder]);
-    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(changeable_by_others(&tool), None);
     assert_eq!(
         ours(&acl::take_listings()),
         vec![folder.clone()],
         "a part read in the second it changed is read again"
     );
-    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(changeable_by_others(&tool), None);
     assert_eq!(
         ours(&acl::take_listings()),
         Vec::<PathBuf>::new(),
