@@ -601,6 +601,50 @@ fn a_folder_gaining_files_during_every_listing_does_not_read_changeable() {
     assert_eq!(changeable_by_others(&tool), None);
 }
 
+/// Makes one new file in the folder now and after every later access listing on this
+/// thread, and opens the folder to another user's writes right after the fourth listing of
+/// the folder alone, once three relistings have all seen it move. Inputs: the folder, the
+/// files made so far and the listings of the folder alone so far.
+#[cfg(target_os = "macos")]
+fn churn_then_open(folder: PathBuf, made: u32, alone: u32) {
+    assert!(
+        made < 64,
+        "the churn ran past every listing a read may make"
+    );
+    std::fs::write(folder.join(format!("churn-{made}")), "").unwrap();
+    let listed_alone = acl::last_listing() == [folder.clone()];
+    let alone = alone + u32::from(listed_alone);
+    if listed_alone && alone == 4 {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("user:nobody allow add_file,write")
+                .arg(&folder),
+        )
+        .unwrap();
+        assert!(status.success(), "chmod +a on {folder:?}");
+    }
+    acl::after_next_listing(move || churn_then_open(folder, made + 1, alone));
+}
+
+/// A folder that keeps gaining files through every relisting, and gains an access list
+/// that lets another user write just after the first listing that follows them, reads as
+/// changeable by others: an answer read while the folder never held still needs a second
+/// listing that prints the same access list.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_list_added_after_the_relistings_of_a_busy_folder_still_reads_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("busy");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    acl::take_listings();
+    let busy = folder.clone();
+    acl::after_next_listing(move || churn_then_open(busy, 0, 0));
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+}
+
 /// An access list that lets another user write, added while the folder's list is read,
 /// still makes the folder read as changeable by others.
 #[cfg(target_os = "macos")]
