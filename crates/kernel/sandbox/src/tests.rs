@@ -11,17 +11,20 @@ const ALLOWED_PATH_CRATES: [&str; 7] = [
     "crazyagent-linux-supervisor",
 ];
 
-/// The Rust files under a folder, depth first. Inputs: the folder and the list to fill.
-/// Output: none; every `.rs` file found is pushed onto `found`.
-fn rust_files(folder: &Path, found: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(folder).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
+/// The Rust files under a folder, depth first, never through a link. Inputs: the folder and
+/// the list to fill. Output: every `.rs` file found is pushed onto `found`, or the error
+/// that stopped the walk.
+fn rust_files(folder: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(folder)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            rust_files(&path, found)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             found.push(path);
         }
     }
+    Ok(())
 }
 
 /// The engine or hub paths a source text names: the engine crate's name followed by a path
@@ -37,70 +40,182 @@ fn upward_paths(text: &str) -> Vec<String> {
             found.push(engine.clone());
         }
     }
-    found.extend(text.match_indices(&hub).map(|(_, path)| path.to_owned()));
+    for (at, top) in text.match_indices("crate::") {
+        let rest = text[at + top.len()..].trim_start();
+        let named = match rest.strip_prefix('{') {
+            Some(group) => top_items(group).into_iter().any(names_hub),
+            None => names_hub(rest),
+        };
+        if named {
+            found.push(hub.clone());
+        }
+    }
     found
 }
 
+/// Whether a path, read from its start, names the hub module itself: its name followed by
+/// the end, `::` or any character that cannot continue a name. Input: the path text.
+/// Output: the answer.
+fn names_hub(path: &str) -> bool {
+    path.trim_start()
+        .strip_prefix("sandbox")
+        .is_some_and(|after| !after.starts_with(|next: char| next == '_' || next.is_alphanumeric()))
+}
+
+/// The top-level items of a `{..}` import group, read from just after its `{` up to the
+/// `}` that closes it, split on the commas outside any inner group. Input: the text after
+/// the `{`. Output: each item, untrimmed.
+fn top_items(group: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let (mut depth, mut start) = (0usize, 0);
+    for (at, character) in group.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' if depth == 0 => {
+                items.push(&group[start..at]);
+                return items;
+            }
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                items.push(&group[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&group[start..]);
+    items
+}
+
 /// The files under a folder that name an engine or hub path. Input: the folder. Output:
-/// each file with the paths it names; the row fails when the folder holds no Rust file.
-fn naming_upward(folder: &Path) -> Vec<(PathBuf, Vec<String>)> {
+/// each file with the paths it names, or the error a read gave; the row fails when the
+/// folder holds no Rust file.
+fn naming_upward(folder: &Path) -> std::io::Result<Vec<(PathBuf, Vec<String>)>> {
     let mut files = Vec::new();
-    rust_files(folder, &mut files);
+    rust_files(folder, &mut files)?;
     assert!(!files.is_empty(), "{} holds no Rust file", folder.display());
-    files
-        .into_iter()
-        .filter_map(|path| {
-            let named = upward_paths(&std::fs::read_to_string(&path).unwrap());
-            (!named.is_empty()).then_some((path, named))
-        })
-        .collect()
+    let mut naming = Vec::new();
+    for path in files {
+        let named = upward_paths(&std::fs::read_to_string(&path)?);
+        if !named.is_empty() {
+            naming.push((path, named));
+        }
+    }
+    Ok(naming)
 }
 
 /// kernel/sandbox names no item of the engine crate or of the engine's sandbox hub, so it
 /// never grows a dependency back on them; `crazyagent_win_sandbox::` paths are allowed,
 /// as the scan reads the character before the name.
 #[test]
-fn kernel_sandbox_names_no_crazyagent_item() {
+fn kernel_sandbox_names_no_crazyagent_item() -> std::io::Result<()> {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    assert_eq!(naming_upward(&source), []);
+    assert_eq!(naming_upward(&source)?, []);
+    Ok(())
 }
 
 /// The scan behind [`kernel_sandbox_names_no_crazyagent_item`] finds a planted engine path
 /// and a planted hub path, and lets the Windows platform crate's path through, so a green
 /// layering row means the scan looked.
 #[test]
-fn the_scan_finds_a_planted_crazyagent_path() {
-    let folder = tempfile::tempdir().unwrap();
+fn the_scan_finds_a_planted_crazyagent_path() -> std::io::Result<()> {
+    let folder = tempfile::tempdir()?;
     let engine = format!("use {}::sandbox::canonical;\n", ["crazy", "agent"].concat());
     let hub = format!("use {}::policy;\n", ["crate::", "sandbox"].concat());
-    std::fs::write(folder.path().join("planted.rs"), format!("{engine}{hub}")).unwrap();
+    std::fs::write(folder.path().join("planted.rs"), format!("{engine}{hub}"))?;
     std::fs::write(
         folder.path().join("platform.rs"),
         "use crazyagent_win_sandbox::name;\n",
-    )
-    .unwrap();
-    let found = naming_upward(folder.path());
+    )?;
+    let found = naming_upward(folder.path())?;
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].0, folder.path().join("planted.rs"));
     assert_eq!(found[0].1.len(), 2, "{found:?}");
+    Ok(())
 }
 
-/// The dependency lines of a manifest that neither pin an exact version (`"=`) nor name a
-/// path, in the `[dependencies]`, `[dev-dependencies]` and `target.*` dependency tables.
-/// Input: the manifest text. Output: each such line.
-fn unpinned(manifest: &str) -> Vec<&str> {
-    let mut table = "";
-    manifest
+/// The dependency tables of a manifest, as cargo reads them at the top and under each
+/// `target.*` table.
+const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+/// The dependencies of a manifest that neither pin an exact version (`=`) nor name a path,
+/// in every dependency table at the top and under each `target.*` table, however the
+/// manifest writes them. Input: the manifest text. Output: each such dependency's name, or
+/// the error when the text is not TOML.
+fn unpinned(manifest: &str) -> Result<Vec<String>, toml::de::Error> {
+    let parsed: toml::Table = manifest.parse()?;
+    let platforms = parsed
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|targets| targets.values().filter_map(toml::Value::as_table));
+    let mut names = Vec::new();
+    for owner in std::iter::once(&parsed).chain(platforms) {
+        for table in DEPENDENCY_TABLES
+            .iter()
+            .filter_map(|kind| owner.get(*kind).and_then(toml::Value::as_table))
+        {
+            names.extend(
+                table
+                    .iter()
+                    .filter(|(_, value)| !pinned(value))
+                    .map(|(name, _)| name.clone()),
+            );
+        }
+    }
+    Ok(names)
+}
+
+/// Whether one dependency's value pins an exact version or names a path. Input: the value.
+/// Output: the answer.
+fn pinned(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::String(version) => version.starts_with('='),
+        toml::Value::Table(table) => {
+            table.contains_key("path")
+                || table
+                    .get("version")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|version| version.starts_with('='))
+        }
+        _ => false,
+    }
+}
+
+/// The `cargo tree` listing of one package of the workspace at `root`, on the host target,
+/// one crate per line with no prefix, read offline from the lockfile as it stands. Inputs:
+/// the workspace folder and the package name. Output: the listing, or the error naming why
+/// cargo gave none.
+fn path_tree(root: &Path, package: &str) -> std::io::Result<String> {
+    let mut tree = Command::new(env!("CARGO"));
+    tree.args(["tree", "-p", package, "-e", "normal,build"])
+        .args(["--prefix", "none", "--offline", "--locked"])
+        .current_dir(root);
+    let output = kernel_processes::spawn_gate::collected(&mut tree)?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(std::io::Error::other)
+}
+
+/// The crates of a [`path_tree`] listing that lie outside the allowlist of path crates:
+/// every local crate, which cargo lists with its folder in parentheses, and every crate
+/// named as the engine's are, from wherever it comes. Input: the listing. Output: each such
+/// crate name, in listing order.
+fn outside(listed: &str) -> Vec<&str> {
+    listed
         .lines()
-        .filter(|line| {
-            if line.starts_with('[') {
-                table = line;
-                return false;
-            }
-            table.contains("dependencies]")
-                && line.contains(" = ")
-                && !line.contains("\"=")
-                && !line.contains("path = ")
+        .filter_map(|line| {
+            let name = line.split_whitespace().next()?;
+            let local = line
+                .split('(')
+                .skip(1)
+                .filter_map(|group| group.split(')').next())
+                .any(|group| Path::new(group).has_root());
+            ((local || name.starts_with("crazyagent")) && !ALLOWED_PATH_CRATES.contains(&name))
+                .then_some(name)
         })
         .collect()
 }
@@ -110,32 +225,110 @@ fn unpinned(manifest: &str) -> Vec<&str> {
 /// storage and the platform crates), never the engine, the SDK or the bus gateway; and its
 /// own manifest pins every third-party crate exactly.
 #[test]
-fn cargo_tree_is_the_allowlist() {
+fn cargo_tree_is_the_allowlist() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut tree = Command::new(env!("CARGO"));
-    tree.args(["tree", "-p", "crazyagent-kernel-sandbox", "-e", "normal"])
-        .args(["--prefix", "none", "--offline", "--locked"])
-        .current_dir(&root);
-    let output = kernel_processes::spawn_gate::collected(&mut tree).unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let listed = String::from_utf8(output.stdout).unwrap();
+    let listed = path_tree(&root, "crazyagent-kernel-sandbox")?;
     let names: Vec<&str> = listed
         .lines()
         .filter_map(|line| line.split_whitespace().next())
         .collect();
     assert_eq!(names.first(), Some(&"crazyagent-kernel-sandbox"));
-    let outside: Vec<&&str> = names
-        .iter()
-        .filter(|name| name.starts_with("crazyagent") && !ALLOWED_PATH_CRATES.contains(name))
-        .collect();
+    let outside = outside(&listed);
     assert!(outside.is_empty(), "{outside:?}");
-    assert_eq!(unpinned(include_str!("../Cargo.toml")), Vec::<&str>::new());
+    assert_eq!(
+        unpinned(include_str!("../Cargo.toml"))?,
+        Vec::<String>::new()
+    );
     let planted = "[dependencies]\nserde = \"1\"\n\n[target.'cfg(unix)'.dependencies]\nrustix = { version = \"=1.1.5\" }\nkernel = { path = \"../x\" }\n";
-    assert_eq!(unpinned(planted), ["serde = \"1\""]);
+    assert_eq!(unpinned(planted)?, ["serde"]);
+    Ok(())
+}
+
+/// A dependency declared in a table of its own, under a platform or not, or written with no
+/// spaces around its `=`, is read like any other, so an unpinned one there fails the row.
+#[test]
+fn a_dependency_in_its_own_table_or_with_no_spaces_is_read()
+-> Result<(), Box<dyn std::error::Error>> {
+    for manifest in [
+        "[dependencies.serde]\nversion = \"1\"\n",
+        "[target.'cfg(unix)'.dependencies.libc]\nversion = \"0.2\"\n",
+        "[dev-dependencies]\nserde=\"1\"\n",
+    ] {
+        assert_eq!(unpinned(manifest)?.len(), 1, "{manifest}");
+    }
+    let pinned = "[dependencies.serde]\nversion = \"=1.0.229\"\n\n[build-dependencies.kernel]\npath = \"../x\"\n";
+    assert_eq!(unpinned(pinned)?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Every local path crate a listing names is held to the allowlist, whatever its name, while
+/// a registry crate and a procedural macro are not path crates.
+#[test]
+fn a_path_crate_of_any_name_is_held_to_the_allowlist() {
+    let listed = "crazyagent-kernel-sandbox v2.5.0 (/w/crates/kernel/sandbox)\nsdk-gateway v0.1.0 (/w/crates/sdk/gateway)\nserde v1.0.229\nserde_derive v1.0.229 (proc-macro)\ncrazyagent-kernel-common v2.5.0 (/w/crates/kernel/common) (*)\n";
+    assert_eq!(outside(listed), ["sdk-gateway"]);
+}
+
+/// The hub named inside a grouped `crate::{..}` import is found like a plain hub path, and a
+/// module whose name only starts with the hub's is not the hub.
+#[test]
+fn a_grouped_import_of_the_hub_is_found() {
+    let (top, module) = ("crate::", ["sand", "box"].concat());
+    let hub = format!("{top}{module}");
+    for text in [
+        format!("use {top}{{error, {module}::policy}};\n"),
+        format!("use {top}{{{module}}};\n"),
+        format!("use {top}{{\n    error,\n    {module} as hub,\n}};\n"),
+    ] {
+        assert_eq!(upward_paths(&text), [hub.as_str()], "{text}");
+    }
+    assert_eq!(
+        upward_paths(&format!("use {hub}_settings::x;\n")),
+        Vec::<String>::new()
+    );
+}
+
+/// A build dependency on the SDK is listed and lies outside the allowlist, so the layering
+/// row reads build edges too; the workspace is a stand-in of two path crates in a temp
+/// folder, read offline.
+#[test]
+fn a_build_dependency_on_the_sdk_is_outside_the_allowlist() -> Result<(), Box<dyn std::error::Error>>
+{
+    let folder = tempfile::tempdir()?;
+    let root = folder.path();
+    for (path, text) in [
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"sandbox\", \"sdk\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "sandbox/Cargo.toml",
+            "[package]\nname = \"crazyagent-kernel-sandbox\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[build-dependencies]\ncrazyagent-sdk = { path = \"../sdk\" }\n",
+        ),
+        ("sandbox/build.rs", "fn main() {}\n"),
+        ("sandbox/src/lib.rs", ""),
+        (
+            "sdk/Cargo.toml",
+            "[package]\nname = \"crazyagent-sdk\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("sdk/src/lib.rs", ""),
+    ] {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().ok_or("a fixture file has a folder")?)?;
+        std::fs::write(path, text)?;
+    }
+    let mut lock = Command::new(env!("CARGO"));
+    lock.args(["generate-lockfile", "--offline"])
+        .current_dir(root);
+    let locked = kernel_processes::spawn_gate::collected(&mut lock)?;
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+    let listed = path_tree(root, "crazyagent-kernel-sandbox")?;
+    assert_eq!(outside(&listed), ["crazyagent-sdk"], "{listed}");
+    Ok(())
 }
 
 #[test]

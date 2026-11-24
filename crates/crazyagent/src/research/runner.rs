@@ -599,7 +599,12 @@ enum Ending {
     Interrupted,
     RateLimited,
     Narrowed(Narrowing),
+    Hidden,
 }
+
+/// The plain line a confined research job stopped because a folder was saved hidden after
+/// its start shows while it waits to run again, the next run hiding that folder.
+const HIDDEN_REQUEUED: &str = "A folder was hidden from agents, so this research was stopped and queued again; its next run cannot see it";
 
 /// What a running research job's sandbox profile was built with, checked against the saved
 /// policy while it runs: its project and canonical folder, the access level and the granted
@@ -622,6 +627,24 @@ impl Granted {
             Some(self.access),
             None,
             &self.toolchains,
+        )
+    }
+
+    /// The stop a running job polls for a folder saved hidden after its start that its
+    /// sandbox did not hide. A job with full access hid nothing and passes no guard, so a
+    /// saved folder never stops it. Takes the job store, the job's hidden folders guard and
+    /// the stop it wraps. Returns the stop.
+    fn hide_stops<'a>(
+        &'a self,
+        jobs: &'a ResearchJobs,
+        listed: &'a HiddenRun,
+        stop: &'a dyn Fn() -> bool,
+    ) -> impl Fn() -> bool + 'a {
+        crate::sandbox::access_store::hidden::hide_stops(
+            jobs.connection(),
+            self.project.as_str(),
+            (self.access != AgentAccess::Full).then_some(listed),
+            stop,
         )
     }
 }
@@ -1026,9 +1049,10 @@ impl ResearchRunner {
                     jobs.cancelled(&job)?;
                     return Ok(run(ResearchStatus::Cancelled, None, Some(group)));
                 }
-                if let Ending::Interrupted | Ending::Narrowed(_) = ending {
+                if let Ending::Interrupted | Ending::Narrowed(_) | Ending::Hidden = ending {
                     let reason = match ending {
                         Ending::Narrowed(cause) => Some(requeued_reason(cause)),
+                        Ending::Hidden => Some(HIDDEN_REQUEUED),
                         _ => None,
                     };
                     let _ = jobs.release(&job, reason);
@@ -1527,7 +1551,15 @@ impl ResearchRunner {
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let ending = self.supervise(jobs, job, &granted, &mut running, &counted, &limited)?;
+        let ending = self.supervise(
+            jobs,
+            job,
+            &granted,
+            &listed,
+            &mut running,
+            &counted,
+            &limited,
+        )?;
         let stopped = running.stop();
         let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         drop(running);
@@ -1633,19 +1665,24 @@ impl ResearchRunner {
 
     /// Follows a direct agent process until it exits, its stderr shows it waiting out a
     /// rate or usage limit, the job is cancelled, the saved policy no longer covers what it
-    /// was granted, the runner stops or a limit passes; the caller then stops it. Takes the
-    /// job store, the job, its grants, the process, its output count and the limit flag its
-    /// stderr drain sets. Returns how the run ended.
+    /// was granted, a folder it did not hide is saved hidden, the runner stops or a limit
+    /// passes; the caller then stops it. Takes the job store, the job, its grants, its
+    /// hidden folders guard, the process, its output count and the limit flag its stderr
+    /// drain sets. Returns how the run ended.
+    #[allow(clippy::too_many_arguments)]
     fn supervise(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
         granted: &Granted,
+        listed: &HiddenRun,
         agent: &mut AgentProcess,
         counted: &AtomicU64,
         limited: &AtomicBool,
     ) -> Result<Ending, RunError> {
         noted_launch(jobs, job);
+        let never = || false;
+        let hides = granted.hide_stops(jobs, listed, &never);
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
@@ -1670,6 +1707,9 @@ impl ResearchRunner {
                 }
                 if let Some(cause) = granted.narrowed(jobs) {
                     break Ending::Narrowed(cause);
+                }
+                if hides() {
+                    break Ending::Hidden;
                 }
             }
             std::thread::sleep(POLL);
@@ -1701,8 +1741,16 @@ impl ResearchRunner {
         let group = session.process_group();
         #[cfg(unix)]
         let mut lifeline = Lifeline::watch(group)?;
-        let ending =
-            self.supervise_pane(jobs, job, granted, &mut session, prompt, harness, &output);
+        let ending = self.supervise_pane(
+            jobs,
+            job,
+            granted,
+            &listed,
+            &mut session,
+            prompt,
+            harness,
+            &output,
+        );
         let stopped = session.stop();
         #[cfg(unix)]
         lifeline.release();
@@ -1719,14 +1767,16 @@ impl ResearchRunner {
     /// Types the research prompt into the agent's pane, or sends it to a listed harness's
     /// headless session, and follows its session record until
     /// the turn ends or reports a rate or usage limit, the job is cancelled, the saved policy
-    /// no longer covers what it was granted, the runner stops or a limit passes. The agent's
-    /// [`Reply`] becomes the report at `output`. Returns how the run ended.
+    /// no longer covers what it was granted, a folder it did not hide is saved hidden, the
+    /// runner stops or a limit passes. The agent's [`Reply`] becomes the report at `output`.
+    /// Returns how the run ended.
     #[allow(clippy::too_many_arguments)]
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
         granted: &Granted,
+        listed: &HiddenRun,
         session: &mut AgentSession,
         prompt: &str,
         harness: ResearchHarness,
@@ -1741,6 +1791,8 @@ impl ResearchRunner {
             return Ok(Ending::Exited(false));
         }
         noted_launch(jobs, job);
+        let never = || false;
+        let hides = granted.hide_stops(jobs, listed, &never);
         let mut beat = Instant::now();
         let ending = loop {
             if self.is_stopping() {
@@ -1755,6 +1807,9 @@ impl ResearchRunner {
                 }
                 if let Some(cause) = granted.narrowed(jobs) {
                     break Ending::Narrowed(cause);
+                }
+                if hides() {
+                    break Ending::Hidden;
                 }
             }
             match session.next_event(POLL) {
@@ -1961,8 +2016,9 @@ impl ResearchRunner {
     /// its model endpoint and none of the engine root's secrets, which no
     /// granted folder may hold. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
-    /// agent runs. Returns how it ended; the agent's process group is stopped
-    /// on every path, including a panic or an early error.
+    /// agent runs; a run of a project also ends Stopped once a folder it did not
+    /// hide at its start is saved hidden. Returns how it ended; the agent's
+    /// process group is stopped on every path, including a panic or an early error.
     #[cfg(unix)]
     pub(crate) fn run_read_only(
         &self,
@@ -2093,11 +2149,15 @@ impl ResearchRunner {
             ),
             _ => None,
         };
-        let hidden = match run.project {
-            Some(project) => ResearchJobs::open(&self.database)?
+        let jobs = match run.project {
+            Some(_) => Some(ResearchJobs::open(&self.database)?),
+            None => None,
+        };
+        let hidden = match (run.project, &jobs) {
+            (Some(project), Some(jobs)) => jobs
                 .hidden_paths(project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         if let Some(listed) = &listed {
             listed.hid(&hidden);
@@ -2198,6 +2258,14 @@ impl ResearchRunner {
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(run.prompt.as_bytes());
         }
+        let hides = jobs.as_ref().zip(run.project).map(|(jobs, project)| {
+            crate::sandbox::access_store::hidden::hide_stops(
+                jobs.connection(),
+                project.as_str(),
+                listed.as_ref(),
+                stop,
+            )
+        });
         let started = Instant::now();
         let mut exited_failing = false;
         let ending = loop {
@@ -2208,11 +2276,12 @@ impl ResearchRunner {
             if started.elapsed() >= run.wall_time {
                 break Some(ReadOnlyEnding::TimedOut);
             }
-            if stop() || self.is_stopping() {
+            if hides.as_ref().map_or_else(stop, |hides| hides()) || self.is_stopping() {
                 break Some(ReadOnlyEnding::Stopped);
             }
             std::thread::sleep(POLL);
         };
+        drop(hides);
         let stopped = running.stop();
         drop(running);
         for handle in drains {
@@ -5923,474 +5992,8 @@ mod tests {
         assert!(ProviderReach::system().refused_everywhere(&[address]));
     }
 
-    /// V243-FIRMLINK-LAUNCH-ROOT (rv-sec2 19:24): a read-only run's folder named through the
-    /// data volume passes the canonical-folder gate under its short name, and a folder reached
-    /// through a link is still refused there.
-    #[test]
     #[cfg(target_os = "macos")]
-    fn a_read_only_run_takes_the_long_name_of_its_folder_but_refuses_a_link() {
-        let root = engine_root();
-        let runner =
-            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
-                .unwrap();
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        let linked = root.base.join("linked");
-        std::os::unix::fs::symlink(&folder, &linked).unwrap();
-        let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", folder.display()));
-        assert!(long.is_dir());
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let project = ProjectId::new("alpha").unwrap();
-        let gated = |name: &str, folder: &std::path::Path| {
-            let run = ReadOnlyRun {
-                name,
-                agent: "onboarding",
-                kind: Some(kernel_sandbox::hidden_paths::RunKind::Onboarding),
-                project: Some(&project),
-                folder,
-                prompt: "Map this repository.",
-                account: &account,
-                wall_time: Duration::from_secs(5),
-                output_tokens: None,
-            };
-            matches!(
-                runner.run_read_only(&run, &|| false),
-                Err(RunError::Invalid(ref text)) if text == "read-only folder must be canonical"
-            )
-        };
-        assert!(!gated("onboard-m-alpha-1", &long));
-        assert!(gated("onboard-m-alpha-2", &linked));
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn a_read_only_run_counts_under_its_project_even_on_an_endpoint_account() {
-        let root = engine_root();
-        let runner =
-            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
-                .unwrap();
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let project = ProjectId::new("alpha").unwrap();
-        let run = ReadOnlyRun {
-            name: "onboard-m-alpha-1",
-            agent: "onboarding",
-            kind: Some(kernel_sandbox::hidden_paths::RunKind::Onboarding),
-            project: Some(&project),
-            folder: &folder,
-            prompt: "Map this repository.",
-            account: &account,
-            wall_time: Duration::from_secs(5),
-            output_tokens: None,
-        };
-        assert!(matches!(
-            runner.run_read_only(&run, &|| false),
-            Err(RunError::Invalid(_))
-        ));
-        let db = crate::usage::open(root.database.parent().unwrap()).unwrap();
-        let row: (String, String, String, String, String) = db
-            .query_row(
-                "SELECT home,project,account,agent,harness FROM usage_runs",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .unwrap();
-        let home = root.state.join("agents/onboard-m-alpha-1/home");
-        assert_eq!(row.0, home.to_string_lossy());
-        assert_eq!(
-            (
-                row.1.as_str(),
-                row.2.as_str(),
-                row.3.as_str(),
-                row.4.as_str()
-            ),
-            ("alpha", "", "onboarding", "codex")
-        );
-    }
-
-    /// DEC-147.9: a read-only run on a project folder runs under the secret deny of that
-    /// folder, with the secret the owner shared back readable again and nothing else.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn a_read_only_run_keeps_the_project_secrets_closed_but_the_shared_back_ones() {
-        let root = engine_root();
-        let codex = root.base.join("bin").join("codex");
-        fs::create_dir_all(codex.parent().unwrap()).unwrap();
-        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
-        let pinned = codex.clone();
-        let runner =
-            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
-                .unwrap()
-                .with_harness_lookup(Arc::new(move |harness: &str| {
-                    (harness == "codex").then(|| pinned.clone())
-                }));
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        fs::write(folder.join(".env"), "TOKEN=1\n").unwrap();
-        let project = ProjectId::new("alpha").unwrap();
-        let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let policy = kernel_sandbox::policy::AgentPolicy {
-            shared_folders: kernel_sandbox::shared_folders::SharedFolders {
-                secrets: vec![".env".into()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        crate::sandbox::policy_store::save(&connection, project.as_str(), &policy).unwrap();
-        drop(connection);
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let run = ReadOnlyRun {
-            name: "overview-alpha-1",
-            agent: "overview",
-            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
-            project: Some(&project),
-            folder: &folder,
-            prompt: "Describe this project.",
-            account: &account,
-            wall_time: Duration::from_secs(5),
-            output_tokens: None,
-        };
-        let _ = runner.run_read_only(&run, &|| false);
-        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-1.sb"))
-            .expect("the run installed its profile");
-        assert!(
-            profile.contains(&format!(
-                "(require-not (subpath \"{}/.git\"))",
-                folder.display()
-            )),
-            "{profile}"
-        );
-        assert!(
-            profile.contains(&format!(
-                "(allow file-read-data file-read-xattr\n  (subpath \"{}\")",
-                folder.join(".env").display()
-            )),
-            "{profile}"
-        );
-    }
-
-    /// CONFIGURED-HOMES-GUARD: a read-only run's profile denies the folder of configured SDK
-    /// homes in the engine root, as every guarded sandbox does, and its stand-in harness,
-    /// which reads a keyed account's dummy config there, never gets the text.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn a_read_only_run_denies_every_configured_sdk_home() {
-        let root = engine_root();
-        let engine = root.database.parent().unwrap().to_path_buf();
-        let homes = engine.join("configured-sdk-homes");
-        let config = homes
-            .join("6".repeat(64))
-            .join(".backboard")
-            .join("config.json");
-        fs::create_dir_all(config.parent().unwrap()).unwrap();
-        let dummy = "configured-homes-guard-dummy-read-only-config";
-        fs::write(&config, dummy).unwrap();
-        let codex = root.base.join("bin").join("codex");
-        fs::create_dir_all(codex.parent().unwrap()).unwrap();
-        fs::write(
-            &codex,
-            format!("#!/bin/sh\ncat '{}'\nexit 0\n", config.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
-        let pinned = codex.clone();
-        let runner =
-            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
-                .unwrap()
-                .with_harness_lookup(Arc::new(move |harness: &str| {
-                    (harness == "codex").then(|| pinned.clone())
-                }));
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let run = ReadOnlyRun {
-            name: "overview-alpha-6",
-            agent: "overview",
-            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
-            project: None,
-            folder: &folder,
-            prompt: "Describe this project.",
-            account: &account,
-            wall_time: Duration::from_secs(5),
-            output_tokens: None,
-        };
-        let _ = runner.run_read_only(&run, &|| false);
-        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-6.sb"))
-            .expect("the guarded run still installs its profile");
-        assert!(
-            profile.contains(&format!("\n  (subpath \"{}\")", homes.display())),
-            "{profile}"
-        );
-        let events = root
-            .state
-            .join("agents")
-            .join("overview-alpha-6")
-            .join("events.jsonl");
-        assert!(events.is_file());
-        assert!(!fs::read_to_string(&events).unwrap().contains(dummy));
-    }
-
-    /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
-    /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
-    /// opens the picked one for writes, since a read-only run only reads.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn a_read_only_run_keeps_the_folders_the_project_does_not_share_closed() {
-        let root = engine_root();
-        let codex = root.base.join("bin").join("codex");
-        fs::create_dir_all(codex.parent().unwrap()).unwrap();
-        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
-        let pinned = codex.clone();
-        let runner =
-            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
-                .unwrap()
-                .with_harness_lookup(Arc::new(move |harness: &str| {
-                    (harness == "codex").then(|| pinned.clone())
-                }));
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        fs::write(folder.join("README.md"), "readme\n").unwrap();
-        repository_git(&folder, &["init", "-q"]);
-        repository_git(&folder, &["add", "README.md"]);
-        repository_git(&folder, &["commit", "-q", "-m", "Start"]);
-        for name in ["notes", "drafts"] {
-            fs::create_dir(folder.join(name)).unwrap();
-            fs::write(folder.join(name).join("plan.txt"), "plan\n").unwrap();
-        }
-        let project = ProjectId::new("alpha").unwrap();
-        let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let policy = kernel_sandbox::policy::AgentPolicy {
-            shared_folders: kernel_sandbox::shared_folders::SharedFolders {
-                scope: kernel_sandbox::shared_folders::SharedScope::Chosen,
-                access: kernel_sandbox::shared_folders::SharedAccess::ReadWrite,
-                chosen: vec!["notes".into()],
-                secrets: Vec::new(),
-            },
-            ..Default::default()
-        };
-        crate::sandbox::policy_store::save(&connection, project.as_str(), &policy).unwrap();
-        drop(connection);
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let run = ReadOnlyRun {
-            name: "overview-alpha-2",
-            agent: "overview",
-            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
-            project: Some(&project),
-            folder: &folder,
-            prompt: "Describe this project.",
-            account: &account,
-            wall_time: Duration::from_secs(5),
-            output_tokens: None,
-        };
-        let _ = runner.run_read_only(&run, &|| false);
-        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-2.sb"))
-            .expect("the run installed its profile");
-        assert!(
-            profile.contains(&format!(
-                "(subpath \"{}\")",
-                folder.join("drafts").display()
-            )),
-            "{profile}"
-        );
-        let writes = profile
-            .split("(allow file-write*")
-            .nth(1)
-            .and_then(|rest| rest.split("))\n").next())
-            .expect("the profile allows its own writes");
-        assert!(!writes.contains(&folder.display().to_string()), "{writes}");
-        assert!(
-            !profile.contains(&format!(
-                "(deny file-write-unlink\n  (require-all\n    (subpath \"{}\")",
-                folder.join("notes").display()
-            )),
-            "{profile}"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    const PROFILE_CREDENTIAL: &str = "sec-ro-guard-dummy-profile-credential";
-
-    /// Writes a dummy sign-in credential where a native profile keeps its own, under
-    /// `<engine>/native-profiles/<key>/home`. Input: the engine root. Output: the path of
-    /// the dummy `.credentials.json`, which holds [`PROFILE_CREDENTIAL`].
-    #[cfg(target_os = "macos")]
-    fn native_profile_credential(engine: &Path) -> PathBuf {
-        let home = engine
-            .join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER)
-            .join("5".repeat(64))
-            .join("home");
-        fs::create_dir_all(&home).unwrap();
-        let credential = home.join(".credentials.json");
-        fs::write(&credential, PROFILE_CREDENTIAL).unwrap();
-        assert!(credential.starts_with(engine));
-        credential
-    }
-
-    /// A runner whose Codex is a stand-in at `codex` that prints the file at `target` and
-    /// exits. Inputs: the engine root fixture, the stand-in path and the file it reads.
-    /// Output: the runner.
-    #[cfg(target_os = "macos")]
-    fn reading_runner(root: &EngineRoot, codex: &Path, target: &Path) -> ResearchRunner {
-        fs::create_dir_all(codex.parent().unwrap()).unwrap();
-        fs::write(
-            codex,
-            format!("#!/bin/sh\ncat '{}'\nexit 0\n", target.display()),
-        )
-        .unwrap();
-        fs::set_permissions(codex, fs::Permissions::from_mode(0o700)).unwrap();
-        let pinned = codex.to_path_buf();
-        ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
-            .unwrap()
-            .with_harness_lookup(Arc::new(move |harness: &str| {
-                (harness == "codex").then(|| pinned.clone())
-            }))
-    }
-
-    /// Tells whether any regular file under `folder`, not following links, holds `text`.
-    /// Input: the folder and the text. Output: true when one does.
-    #[cfg(target_os = "macos")]
-    fn holds_text(folder: &Path, text: &str) -> bool {
-        fs::read_dir(folder)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|entry| match entry.file_type() {
-                Ok(kind) if kind.is_dir() => holds_text(&entry.path(), text),
-                Ok(kind) if kind.is_file() => fs::read(entry.path()).is_ok_and(|bytes| {
-                    bytes
-                        .windows(text.len())
-                        .any(|part| part == text.as_bytes())
-                }),
-                _ => false,
-            })
-    }
-
-    /// SEC-RO-GUARD: a read-only run gets the engine-secret wall every other sandbox gets.
-    /// Its Seatbelt profile names the native sign-in profiles folder, the run still starts
-    /// with its own home, work and temp folders inside the engine root, and a stand-in agent
-    /// that tries to read a profile's credentials gets nothing.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn a_read_only_run_cannot_read_a_native_profile_credential() {
-        let root = engine_root();
-        let engine = root.database.parent().unwrap().to_path_buf();
-        let credential = native_profile_credential(&engine);
-        let runner = reading_runner(&root, &root.base.join("bin").join("codex"), &credential);
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let run = ReadOnlyRun {
-            name: "overview-alpha-3",
-            agent: "overview",
-            kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
-            project: None,
-            folder: &folder,
-            prompt: "Describe this project.",
-            account: &account,
-            wall_time: Duration::from_secs(5),
-            output_tokens: None,
-        };
-        let _ = runner.run_read_only(&run, &|| false);
-        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-3.sb"))
-            .expect("the guarded run still installs its profile");
-        let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
-        assert!(
-            profile.contains(&format!("(subpath \"{}\")", profiles.display())),
-            "{profile}"
-        );
-        let agent = root.state.join("agents").join("overview-alpha-3");
-        assert!(agent.join("events.jsonl").is_file());
-        assert!(!holds_text(&agent, PROFILE_CREDENTIAL));
-    }
-
-    /// SEC-RO-GUARD: no read-only grant may hold the engine root. A run folder holding it
-    /// and a harness installed in it are each refused before the agent starts, so the
-    /// stand-in never reads a native profile's credentials.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn a_read_only_grant_that_holds_the_engine_root_is_refused() {
-        let root = engine_root();
-        let engine = root.database.parent().unwrap().to_path_buf();
-        let credential = native_profile_credential(&engine);
-        let repo = root.base.join("repo");
-        fs::create_dir(&repo).unwrap();
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let cases = [
-            (
-                "overview-alpha-4",
-                root.base.clone(),
-                root.base.join("bin").join("codex"),
-            ),
-            ("overview-alpha-5", repo, engine.join("codex")),
-        ];
-        for (name, folder, codex) in cases {
-            assert!(engine.starts_with(&folder) || engine.starts_with(codex.parent().unwrap()));
-            let runner = reading_runner(&root, &codex, &credential);
-            let run = ReadOnlyRun {
-                name,
-                agent: "overview",
-                kind: Some(kernel_sandbox::hidden_paths::RunKind::Overview),
-                project: None,
-                folder: &folder,
-                prompt: "Describe this project.",
-                account: &account,
-                wall_time: Duration::from_secs(5),
-                output_tokens: None,
-            };
-            let ending = runner.run_read_only(&run, &|| false);
-            assert!(
-                matches!(
-                    &ending,
-                    Err(RunError::Sandbox(SandboxError::Invalid(reason)))
-                        if reason == kernel_sandbox::paths::SECRET_ROOT_REFUSED
-                ),
-                "{name}: {ending:?}"
-            );
-            assert!(!holds_text(
-                &root.state.join("agents").join(name),
-                PROFILE_CREDENTIAL
-            ));
-        }
-    }
+    mod read_only;
 
     fn host() -> HostStamp {
         HostStamp {
@@ -7992,247 +7595,7 @@ mod tests {
         assert!(filter_overrides(&many).is_err());
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn adding_an_agent_worktree_runs_no_command_the_repository_configures() {
-        let mut problems = Vec::new();
-        for hostile in [
-            "smudge",
-            "process",
-            "required",
-            "dotted include",
-            "worktree include",
-            "info attributes",
-            "agent global config",
-            "post-checkout hook",
-            "unsafe driver name",
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let base = temp.path().canonicalize().unwrap();
-            let project = base.join("project");
-            let home = base.join("agent").join("home");
-            let tmp = base.join("agent").join("tmp");
-            let profiles = base.join("profiles");
-            for folder in [&project, &home, &tmp, &profiles] {
-                fs::create_dir_all(folder).unwrap();
-            }
-            ensure_repository(&project, &tmp).unwrap();
-            let marker = tmp.join("ran");
-            let command = format!("/usr/bin/touch '{}'; /bin/cat", marker.display());
-            fs::write(project.join("a.txt"), "plain\n").unwrap();
-            let attributes = match hostile {
-                "dotted include" => Some("* filter=a.b\n"),
-                "worktree include" => Some("* filter=late\n"),
-                "unsafe driver name" => Some("* filter=x=y\n"),
-                "info attributes" | "agent global config" | "post-checkout hook" => None,
-                _ => Some("* filter=hostile\n"),
-            };
-            if let Some(attributes) = attributes {
-                fs::write(project.join(".gitattributes"), attributes).unwrap();
-            }
-            repository_git(&project, &["add", "-A"]);
-            repository_git(&project, &["commit", "-q", "-m", "files"]);
-            let git_dir = project.join(".git");
-            match hostile {
-                "smudge" => {
-                    repository_git(&project, &["config", "filter.hostile.smudge", &command])
-                }
-                "process" => {
-                    repository_git(&project, &["config", "filter.hostile.process", &command])
-                }
-                "required" => {
-                    repository_git(&project, &["config", "filter.hostile.smudge", &command]);
-                    repository_git(&project, &["config", "filter.hostile.required", "true"]);
-                }
-                "dotted include" => {
-                    fs::write(
-                        git_dir.join("hostile.config"),
-                        format!("[filter \"a.b\"]\n\tsmudge = {command}\n"),
-                    )
-                    .unwrap();
-                    repository_git(&project, &["config", "include.path", "hostile.config"]);
-                }
-                "worktree include" => {
-                    fs::write(
-                        git_dir.join("late.config"),
-                        format!("[filter \"late\"]\n\tsmudge = {command}\n"),
-                    )
-                    .unwrap();
-                    repository_git(
-                        &project,
-                        &[
-                            "config",
-                            "includeIf.gitdir:**/worktrees/**.path",
-                            &git_dir.join("late.config").display().to_string(),
-                        ],
-                    );
-                }
-                "info attributes" => {
-                    fs::write(
-                        git_dir.join("info").join("attributes"),
-                        "* filter=hostile\n",
-                    )
-                    .unwrap();
-                    repository_git(&project, &["config", "filter.hostile.smudge", &command]);
-                }
-                "agent global config" => {
-                    fs::write(home.join("attributes"), "* filter=h\n").unwrap();
-                    fs::write(
-                        home.join(".gitconfig"),
-                        format!(
-                            "[core]\n\tattributesFile = {}\n[filter \"h\"]\n\tsmudge = {command}\n",
-                            home.join("attributes").display()
-                        ),
-                    )
-                    .unwrap();
-                }
-                "post-checkout hook" => {
-                    let hooks = git_dir.join("hooks");
-                    fs::create_dir_all(&hooks).unwrap();
-                    let hook = hooks.join("post-checkout");
-                    fs::write(
-                        &hook,
-                        format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
-                    )
-                    .unwrap();
-                    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-                }
-                "unsafe driver name" => {
-                    repository_git(&project, &["config", "filter.x=y.smudge", &command])
-                }
-                other => panic!("no setup for {other}"),
-            }
-            let sandbox = ProjectSandbox::new(
-                &crate::sandbox::PROFILE_HOOKS,
-                &project,
-                &home,
-                &tmp,
-                SandboxNetwork::Only(Vec::new()),
-            )
-            .unwrap();
-            let profile = profiles.join("agent.sb");
-            sandbox.install(&profile).unwrap();
-            let worktree = project.join("worktrees").join("agent-one");
-            let added = add_worktree(&sandbox, &profile, &worktree);
-            if marker.exists() {
-                problems.push(format!("{hostile}: the repository's command ran"));
-            }
-            let checked_out = fs::read_to_string(worktree.join("a.txt")).ok();
-            match (hostile, &added) {
-                ("unsafe driver name", Ok(())) => {
-                    problems.push(format!("{hostile}: the worktree was added"))
-                }
-                ("unsafe driver name", Err(_)) => {}
-                (_, Err(error)) => problems.push(format!("{hostile}: {error}")),
-                (_, Ok(())) if checked_out.as_deref() != Some("plain\n") => {
-                    problems.push(format!("{hostile}: checked out {checked_out:?}"))
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(problems, Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_tools_off_claude_run_takes_the_no_tools_prompt_one_turn_and_its_output_cap() {
-        let account = ResearchAccount::AnthropicEndpoint {
-            base_url: "http://127.0.0.1:11434".into(),
-            model: "local-model".into(),
-            key: None,
-        };
-        let launch = |tools: bool, output_tokens: Option<u32>| {
-            let mut command = Command::new("/usr/bin/true");
-            claude_arguments(
-                &mut command,
-                Path::new("/agent/home"),
-                Path::new("/agent/tmp"),
-                tools,
-                output_tokens,
-                &account,
-                crate::provider_retry::ProviderRetry::HarnessDefault,
-            )
-            .unwrap();
-            let arguments: Vec<String> = command
-                .get_args()
-                .map(|argument| argument.to_str().unwrap().to_owned())
-                .collect();
-            let cap = command
-                .get_envs()
-                .find(|(key, _)| *key == "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
-                .map(|(_, value)| value.unwrap().to_str().unwrap().to_owned());
-            (arguments, cap)
-        };
-        let has = |arguments: &[String], pair: [&str; 2]| {
-            arguments.windows(2).any(|window| window == pair)
-        };
-        let (off, cap) = launch(false, Some(16_000));
-        assert!(has(&off, ["--tools", ""]), "{off:?}");
-        assert!(
-            has(&off, ["--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
-            "{off:?}"
-        );
-        assert!(has(&off, ["--max-turns", "1"]), "{off:?}");
-        assert!(has(&off, ["--output-format", "stream-json"]), "{off:?}");
-        assert!(
-            off.iter().any(|argument| argument == "--verbose"),
-            "{off:?}"
-        );
-        assert!(!has(&off, ["--output-format", "text"]), "{off:?}");
-        assert_eq!(cap.as_deref(), Some("16000"));
-        assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
-        let (on, cap) = launch(true, None);
-        assert!(has(&on, ["--tools", "default"]), "{on:?}");
-        assert!(has(&on, ["--output-format", "stream-json"]), "{on:?}");
-        assert!(!has(&on, ["--output-format", "text"]), "{on:?}");
-        assert!(
-            !on.iter()
-                .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
-        );
-        assert_eq!(cap, None);
-    }
-
-    #[test]
-    fn the_engine_makes_a_repository_only_in_a_folder_it_created() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let home = base.join("git-home");
-        fs::create_dir(&home).unwrap();
-        let refused = |folder: &Path| match ensure_repository(folder, &home) {
-            Err(RunError::Invalid(reason)) => reason.contains("not a git repository"),
-            _ => false,
-        };
-
-        let owners = base.join("owners");
-        fs::create_dir_all(owners.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
-        fs::write(owners.join("notes.txt"), "the owner's file\n").unwrap();
-        assert!(refused(&owners), "an owner's folder gets no repository");
-        assert!(!owners.join(".git").exists());
-        let state = owners.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
-        assert!(refused(&state), "nor does its .crazyagent folder");
-        assert!(!state.join(".git").exists());
-
-        let linked = base.join("linked");
-        fs::create_dir(&linked).unwrap();
-        fs::write(
-            linked.join(".git"),
-            "gitdir: /elsewhere/.git/worktrees/linked\n",
-        )
-        .unwrap();
-        ensure_repository(&linked, &home).unwrap();
-        assert!(
-            fs::symlink_metadata(linked.join(".git")).unwrap().is_file(),
-            "a linked worktree stays as the owner made it"
-        );
-
-        let created = base.join("created");
-        fs::create_dir(&created).unwrap();
-        ensure_repository(&created, &home).unwrap();
-        assert!(
-            created.join(".git").is_dir(),
-            "a folder the engine made gets its repository"
-        );
-        ensure_repository(&created, &home).unwrap();
-    }
+    mod launch_setup;
 
     const STREAM_START: &str = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n";
     const STREAM_THINKING: &str = concat!(

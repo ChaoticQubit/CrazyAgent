@@ -43,8 +43,8 @@ const RUN_NAME_BYTES_MAX: usize = 96;
 const ONBOARDED_MAX: i64 = 256;
 #[cfg(unix)]
 const REFRESH_PREFIX: &str = "graph-main-";
-/// How often a main graph refresh build looks for a waiting onboarding step to give way to,
-/// and a code graph build reads the project's saved hidden folders again.
+/// How often a main graph refresh build looks for a waiting onboarding step to give way to.
+#[cfg(unix)]
 const STEP_POLL: Duration = Duration::from_secs(1);
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MAPPING_HARNESSES: [ResearchHarness; 2] =
@@ -592,34 +592,6 @@ fn run_step(
     waits
 }
 
-/// The stop a code graph build polls: yes once `stop` says so, or once a folder the
-/// project saves hidden now is one the build's sandbox did not hide at its start, so the
-/// build ends and runs again hiding it. The saved folders are read at the first poll and
-/// then at most every [`STEP_POLL`]; a read that fails counts as yes, and a yes stays yes.
-/// Takes the worker's database, the project, the build's hidden folders guard and `stop`.
-/// Returns the stop.
-fn hide_stops<'a>(
-    database: &'a Connection,
-    project: &'a str,
-    listed: &'a kernel_sandbox::hidden_paths::HiddenRun,
-    stop: &'a dyn Fn() -> bool,
-) -> impl Fn() -> bool + 'a {
-    let read: Cell<Option<Instant>> = Cell::new(None);
-    let hid_too_little = Cell::new(false);
-    move || {
-        if stop() {
-            return true;
-        }
-        if !hid_too_little.get() && read.get().is_none_or(|at| at.elapsed() >= STEP_POLL) {
-            read.set(Some(Instant::now()));
-            let covered = crate::sandbox::access_store::hidden::load(database, project)
-                .is_ok_and(|saved| listed.covers_saved(&saved));
-            hid_too_little.set(!covered);
-        }
-        hid_too_little.get()
-    }
-}
-
 fn graph_step(
     work: &Work,
     database: &rusqlite::Connection,
@@ -654,7 +626,12 @@ fn graph_step(
         &run_name(claimed, None),
         &hidden,
         work.limits.graph_time,
-        &hide_stops(database, &claimed.project, &listed, beat),
+        &crate::sandbox::access_store::hidden::hide_stops(
+            database,
+            &claimed.project,
+            Some(&listed),
+            beat,
+        ),
     );
     match ending {
         #[cfg(unix)]
@@ -941,8 +918,9 @@ enum Refreshed {
 /// publishes it at `tip` with the folders it hid ([`publish_main`]), then removes the
 /// build's run folder and profile unless its processes may still run. The build stops as
 /// soon as an onboarding step waits or a project move holds the folder ([`gives_way`]), or a
-/// folder is saved hidden that it did not hide ([`hide_stops`]), and
-/// a build a move holds by its end is not published. Takes the work, the worker's database,
+/// folder is saved hidden that it did not hide
+/// ([`crate::sandbox::access_store::hidden::hide_stops`]), and a build a move holds by its
+/// end is not published. Takes the work, the worker's database,
 /// the project, its run's hidden folders guard, kept when the build's processes may still
 /// run, its folder, the tip read before the build, its hidden folders and `halted`. Returns
 /// how the refresh ended.
@@ -969,10 +947,10 @@ fn refresh_build(
         &name,
         hidden,
         work.limits.graph_time,
-        &hide_stops(
+        &crate::sandbox::access_store::hidden::hide_stops(
             database,
             project,
-            &listed,
+            Some(&listed),
             &gives_way(database, repo, halted),
         ),
     );
@@ -1475,7 +1453,5 @@ pub(crate) const GRAPHIFY_REFUSED: &str = "graphify can't start: the file found 
 
 #[cfg(test)]
 mod claim_tests;
-#[cfg(test)]
-mod hide_tests;
 #[cfg(test)]
 mod start_tests;
