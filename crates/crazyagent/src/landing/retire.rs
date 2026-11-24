@@ -453,6 +453,7 @@ pub(crate) fn uncommitted(
     std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
     let listed = Repo::open(repository, &metadata, Some(worktree)).and_then(|repo| {
         let (mut paths, mut total) = size_mismatches(&repo, worktree, &tip, usize::MAX)?;
+        let sizes_held = total == 0;
         let repo = repo.private_index(&folder.join("index")).reading()?;
         repo.run(&["read-tree", &tip])?;
         let mut add = |listing: &[u8], whole: bool| {
@@ -467,7 +468,7 @@ pub(crate) fn uncommitted(
                 total += 1;
             }
         };
-        if total == 0 {
+        if sizes_held {
             repo.run(&["update-index", "-q", "--refresh"])?;
             let changed = repo.capture(
                 &[
