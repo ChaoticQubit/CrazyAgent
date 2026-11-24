@@ -1,2 +1,242 @@
+use kernel_security::error::StoreError;
+use kernel_security::net::{Egress, RawReply, Sealed};
+use std::io::{Read, Write};
+use std::net::{IpAddr, ToSocketAddrs};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// The most body bytes one exchange reads, and the size curl may download.
+pub const BODY_BYTES_MAX: usize = 4 << 20;
+const SCOPES_LINE_MAX: usize = 1024;
+const TRAILER_BYTES_MAX: usize = SCOPES_LINE_MAX + 16;
+const REQUEST_TIME: Duration = Duration::from_secs(30);
+
+/// The one reply header the curl exchange reads back.
+const SCOPES_HEADER: &str = "x-oauth-scopes";
+
+/// What came back: the HTTP status, at most 4 MiB of body, and the scopes a classic
+/// GitHub token holds when GitHub named them in `X-OAuth-Scopes`.
+pub struct Reply {
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub scopes: Option<Vec<String>>,
+}
+
+/// Why an exchange gave no reply: curl could not finish it, or its output was not a reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExchangeError {
+    Unreachable,
+    ReplyInvalid,
+}
+
+/// Runs a built curl command, writes its config to curl's stdin, wipes the config and
+/// reads the reply within the request time. Inputs: the command and its config. Output:
+/// the reply, or [`ExchangeError::Unreachable`].
+pub fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, ExchangeError> {
+    let spawned = kernel_processes::spawn_gate::spawn(&mut command);
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(_) => {
+            kernel_security::secret::wipe(&mut config);
+            return Err(ExchangeError::Unreachable);
+        }
+    };
+    let mut stdin = child.stdin.take().expect("curl stdin is piped");
+    let written = stdin.write_all(&config);
+    kernel_security::secret::wipe(&mut config);
+    drop(stdin);
+    let stdout = child.stdout.take().expect("curl stdout is piped");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout
+            .take((BODY_BYTES_MAX + TRAILER_BYTES_MAX) as u64)
+            .read_to_end(&mut bytes);
+        (read, bytes)
+    });
+    let deadline = Instant::now() + REQUEST_TIME + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|_| ExchangeError::Unreachable)? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(ExchangeError::Unreachable);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (read, bytes) = reader.join().map_err(|_| ExchangeError::Unreachable)?;
+    if written.is_err() || read.is_err() || !status.success() {
+        return Err(ExchangeError::Unreachable);
+    }
+    split(bytes)
+}
+
+/// Splits curl's output into the body, the `X-OAuth-Scopes` line and the status line
+/// that `WRITE_OUT` puts after it. Input: the output. Output: the reply, or
+/// [`ExchangeError::ReplyInvalid`] for a body past 4 MiB or a missing or bad status.
+fn split(mut bytes: Vec<u8>) -> Result<Reply, ExchangeError> {
+    let invalid = || ExchangeError::ReplyInvalid;
+    if bytes.len() > BODY_BYTES_MAX + TRAILER_BYTES_MAX {
+        return Err(invalid());
+    }
+    let cut = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .ok_or_else(invalid)?;
+    let code = std::str::from_utf8(&bytes[cut + 1..]).map_err(|_| invalid())?;
+    let status: u16 = code.parse().map_err(|_| invalid())?;
+    if !(100..=599).contains(&status) {
+        return Err(invalid());
+    }
+    bytes.truncate(cut);
+    let line = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .ok_or_else(invalid)?;
+    let scopes = scopes(&bytes[line + 1..]);
+    bytes.truncate(line);
+    if bytes.len() > BODY_BYTES_MAX {
+        return Err(invalid());
+    }
+    Ok(Reply {
+        status,
+        body: bytes,
+        scopes,
+    })
+}
+
+/// Reads the `X-OAuth-Scopes` line: the comma-separated scopes of a classic token.
+/// Input: the line curl wrote. Output: the scopes, or None for an empty line (a token
+/// kind GitHub names no scopes for), a curl too old to print headers, which writes the
+/// variable as it is, or any line that is not a list of scope names.
+fn scopes(line: &[u8]) -> Option<Vec<String>> {
+    if line.is_empty() || line.len() > SCOPES_LINE_MAX {
+        return None;
+    }
+    let scopes: Vec<String> = std::str::from_utf8(line)
+        .ok()?
+        .split(',')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect();
+    let named = scopes.iter().all(|scope| {
+        !scope.is_empty()
+            && scope
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b':' || byte == b'_')
+    });
+    named.then_some(scopes)
+}
+
+/// Egress through the system curl and [`exchange`], with a static per-plugin host
+/// allowlist.
+pub struct Curl {
+    hosts: &'static [(&'static str, &'static [&'static str])],
+}
+
+impl Curl {
+    /// Egress over one host table. Input: (plugin, hosts) rows. Output: the egress.
+    pub fn with_hosts(hosts: &'static [(&'static str, &'static [&'static str])]) -> Self {
+        Self { hosts }
+    }
+}
+
+/// The key a `[net].hosts` entry names an origin by: the host, with `:port` only for a
+/// port other than the scheme's default. Inputs: the scheme, host and port. Output: the key.
+fn host_key(scheme: &str, host: &str, port: u16) -> String {
+    let default = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => 0,
+    };
+    if port == default {
+        host.to_owned()
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+impl Egress for Curl {
+    fn allows(
+        &self,
+        caller: &'static str,
+        scheme: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<(), StoreError> {
+        let key = host_key(scheme, host, port);
+        let listed = self
+            .hosts
+            .iter()
+            .any(|(plugin, hosts)| *plugin == caller && hosts.contains(&key.as_str()));
+        if listed {
+            Ok(())
+        } else {
+            Err(StoreError::code("net_host_refused"))
+        }
+    }
+
+    fn resolve(&self, host: &str, port: u16) -> Result<Vec<IpAddr>, StoreError> {
+        let found = (host, port)
+            .to_socket_addrs()
+            .map_err(|_| StoreError::code("net_host_unresolved"))?;
+        Ok(found.map(|address| address.ip()).collect())
+    }
+
+    fn send(&self, sealed: Sealed) -> Result<RawReply, StoreError> {
+        if sealed
+            .reply_headers()
+            .iter()
+            .any(|name| !name.eq_ignore_ascii_case(SCOPES_HEADER))
+        {
+            return Err(StoreError::code("net_reply_header_unsupported"));
+        }
+        let loopback = matches!(sealed.host(), "127.0.0.1" | "[::1]" | "localhost");
+        let reply = exchange(curl(loopback), sealed.config().to_vec()).map_err(|error| {
+            StoreError::code(match error {
+                ExchangeError::ReplyInvalid => "net_reply_invalid",
+                ExchangeError::Unreachable => "net_unreachable",
+            })
+        })?;
+        drop(sealed);
+        let headers = match reply.scopes {
+            Some(scopes) => vec![(SCOPES_HEADER.to_owned(), scopes.join(", "))],
+            None => Vec::new(),
+        };
+        Ok(RawReply {
+            status: reply.status,
+            headers,
+            body: reply.body,
+        })
+    }
+}
+
+/// The curl command of one request, with today's GitHub exchange flags: no `.curlrc`, no
+/// redirects, one allowed scheme, bounded time and size, the config only on stdin and an
+/// empty environment. Input: whether the host is loopback, which allows plain http only.
+/// Output: the command, whose arguments and environment hold no URL, header or secret.
+fn curl(loopback: bool) -> Command {
+    let mut command = Command::new("/usr/bin/curl");
+    command
+        .arg("-q")
+        .args(["--silent", "--show-error", "--globoff"])
+        .args(["--proto", if loopback { "=http,https" } else { "=https" }])
+        .args(["--max-redirs", "0"])
+        .args(["--connect-timeout", "10"])
+        .args(["--max-time", "30"])
+        .args(["--max-filesize", &BODY_BYTES_MAX.to_string()])
+        .args(["--write-out", "\n%header{x-oauth-scopes}\n%{http_code}"])
+        .args(["--config", "-"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir("/")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
 #[cfg(test)]
 mod tests;

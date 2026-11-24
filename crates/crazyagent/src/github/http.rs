@@ -1,16 +1,11 @@
 use crate::engine::EngineError;
+use kernel_sandbox::egress::{BODY_BYTES_MAX, ExchangeError, exchange};
 use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use kernel_security::secret::SecretString;
-use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 const CURL: &str = "/usr/bin/curl";
-const BODY_BYTES_MAX: usize = 4 << 20;
-const SCOPES_LINE_MAX: usize = 1024;
-const TRAILER_BYTES_MAX: usize = SCOPES_LINE_MAX + 16;
 const WRITE_OUT: &str = "\n%header{x-oauth-scopes}\n%{http_code}";
-const REQUEST_TIME: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "CrazyAgent";
 
 /// One HTTP exchange through the system curl. The URL, headers, token and form body go
@@ -46,13 +41,8 @@ impl Verb {
     }
 }
 
-/// What came back: the HTTP status, at most 4 MiB of body, and the scopes a classic
-/// GitHub token holds when GitHub named them in `X-OAuth-Scopes`.
-pub(crate) struct Reply {
-    pub(crate) status: u16,
-    pub(crate) body: Vec<u8>,
-    pub(crate) scopes: Option<Vec<String>>,
-}
+/// What came back from [`exchange`], read by the GitHub API and rules calls.
+pub(crate) use kernel_sandbox::egress::Reply;
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
@@ -166,14 +156,14 @@ impl Request<'_> {
     /// `github_unreachable` when curl could not finish the exchange.
     pub(crate) fn send(&self) -> Result<Reply, EngineError> {
         let (command, config) = self.command()?;
-        exchange(command, config)
+        exchange(command, config).map_err(code)
     }
 
     /// POSTs a JSON body and waits at most 30 s, as `send` does. Input: the body.
     /// Output: the reply, or `github_unreachable` when curl could not finish the exchange.
     pub(crate) fn send_json(&self, json: &str) -> Result<Reply, EngineError> {
         let (command, config) = self.json_command(json)?;
-        exchange(command, config)
+        exchange(command, config).map_err(code)
     }
 
     /// Sends a request with a method and an optional JSON body and waits at most 30 s, as
@@ -181,110 +171,15 @@ impl Request<'_> {
     /// `github_unreachable` when curl could not finish the exchange.
     pub(crate) fn send_body(&self, verb: Verb, json: Option<&str>) -> Result<Reply, EngineError> {
         let (command, config) = self.command_with(Some((verb, json)))?;
-        exchange(command, config)
+        exchange(command, config).map_err(code)
     }
 }
 
-/// Runs a built curl command, writes its config to curl's stdin, wipes the config and
-/// reads the reply within the request time. Inputs: the command and its config. Output:
-/// the reply, or `github_unreachable`.
-pub(crate) fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, EngineError> {
-    let spawned = kernel_processes::spawn_gate::spawn(&mut command);
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(_) => {
-            kernel_security::secret::wipe(&mut config);
-            return Err(failure("github_unreachable"));
-        }
-    };
-    let mut stdin = child.stdin.take().expect("curl stdin is piped");
-    let written = stdin.write_all(&config);
-    kernel_security::secret::wipe(&mut config);
-    drop(stdin);
-    let stdout = child.stdout.take().expect("curl stdout is piped");
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout
-            .take((BODY_BYTES_MAX + TRAILER_BYTES_MAX) as u64)
-            .read_to_end(&mut bytes);
-        (read, bytes)
-    });
-    let deadline = Instant::now() + REQUEST_TIME + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|_| failure("github_unreachable"))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(failure("github_unreachable"));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let (read, bytes) = reader.join().map_err(|_| failure("github_unreachable"))?;
-    if written.is_err() || read.is_err() || !status.success() {
-        return Err(failure("github_unreachable"));
-    }
-    split(bytes)
-}
-
-/// Splits curl's output into the body, the `X-OAuth-Scopes` line and the status line
-/// that `WRITE_OUT` puts after it. Input: the output. Output: the reply, or
-/// `github_reply_invalid` for a body past 4 MiB or a missing or bad status.
-fn split(mut bytes: Vec<u8>) -> Result<Reply, EngineError> {
-    let invalid = || failure("github_reply_invalid");
-    if bytes.len() > BODY_BYTES_MAX + TRAILER_BYTES_MAX {
-        return Err(invalid());
-    }
-    let cut = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .ok_or_else(invalid)?;
-    let code = std::str::from_utf8(&bytes[cut + 1..]).map_err(|_| invalid())?;
-    let status: u16 = code.parse().map_err(|_| invalid())?;
-    if !(100..=599).contains(&status) {
-        return Err(invalid());
-    }
-    bytes.truncate(cut);
-    let line = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .ok_or_else(invalid)?;
-    let scopes = scopes(&bytes[line + 1..]);
-    bytes.truncate(line);
-    if bytes.len() > BODY_BYTES_MAX {
-        return Err(invalid());
-    }
-    Ok(Reply {
-        status,
-        body: bytes,
-        scopes,
+/// The engine code of an exchange that gave no reply. Input: the kernel's reason. Output:
+/// `github_unreachable` or `github_reply_invalid`.
+fn code(error: ExchangeError) -> EngineError {
+    failure(match error {
+        ExchangeError::Unreachable => "github_unreachable",
+        ExchangeError::ReplyInvalid => "github_reply_invalid",
     })
-}
-
-/// Reads the `X-OAuth-Scopes` line: the comma-separated scopes of a classic token.
-/// Input: the line curl wrote. Output: the scopes, or None for an empty line (a token
-/// kind GitHub names no scopes for), a curl too old to print headers, which writes the
-/// variable as it is, or any line that is not a list of scope names.
-fn scopes(line: &[u8]) -> Option<Vec<String>> {
-    if line.is_empty() || line.len() > SCOPES_LINE_MAX {
-        return None;
-    }
-    let scopes: Vec<String> = std::str::from_utf8(line)
-        .ok()?
-        .split(',')
-        .map(str::trim)
-        .map(str::to_owned)
-        .collect();
-    let named = scopes.iter().all(|scope| {
-        !scope.is_empty()
-            && scope
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b':' || byte == b'_')
-    });
-    named.then_some(scopes)
 }

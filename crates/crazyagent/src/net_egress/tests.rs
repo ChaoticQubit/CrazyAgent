@@ -3,54 +3,13 @@ use std::sync::Mutex;
 
 use super::*;
 use crazyagent_plugin_check as plugin_check;
-use kernel_security::net::{Field, Method, Request, Requests};
+use kernel_security::net::{Egress, Field, Method, RawReply, Request, Requests, Sealed};
 use kernel_security::secret::SecretString;
 use kernel_security::secrets::{Handles, OwnerEntry, Scopes, Secrets};
 use kernel_security::store::{SecretRef, Store, reference};
+use std::net::IpAddr;
 
 const TOKEN: &str = "ghp_net-egress-fixture-0123456789";
-
-/// The host table of the allowlist rows.
-const HOSTS: &[(&str, &[&str])] = &[
-    (
-        "github",
-        &["github.com", "api.github.com", "ghe.example:8443"],
-    ),
-    ("local", &["127.0.0.1:8080", "[::1]:9000"]),
-];
-
-#[test]
-fn a_host_outside_the_allowlist_is_refused() {
-    let egress = CurlEgress::with_hosts(HOSTS);
-    let refused = Err(StoreError::code("net_host_refused"));
-    assert_eq!(egress.allows("github", "https", "github.com", 443), Ok(()));
-    assert_eq!(
-        egress.allows("github", "https", "ghe.example", 8443),
-        Ok(())
-    );
-    assert_eq!(egress.allows("local", "http", "127.0.0.1", 8080), Ok(()));
-    assert_eq!(egress.allows("local", "http", "[::1]", 9000), Ok(()));
-    assert_eq!(egress.allows("local", "http", "::1", 9000), refused);
-    assert_eq!(
-        egress.allows("github", "https", "evil.example", 443),
-        refused
-    );
-    assert_eq!(
-        egress.allows("github", "https", "github.com", 8443),
-        refused
-    );
-    assert_eq!(
-        egress.allows("github", "https", "ghe.example", 443),
-        refused
-    );
-    assert_eq!(egress.allows("local", "https", "github.com", 443), refused);
-    assert_eq!(egress.allows("notes", "https", "github.com", 443), refused);
-    assert_eq!(egress.allows("local", "http", "127.0.0.1", 9090), refused);
-    assert_eq!(
-        CurlEgress::bundled().allows("github", "https", "github.com", 443),
-        refused
-    );
-}
 
 /// Every bundled plugin's `plugin.toml`, read through plugin_check's reader. Output: the
 /// manifests.
@@ -162,6 +121,10 @@ fn the_static_net_table_equals_each_bundled_manifest() {
         .collect();
     assert_eq!(table, sends);
     assert!(bundled_captures().is_ok());
+    assert_eq!(
+        bundled().allows("github", "https", "github.com", 443),
+        Err(StoreError::code("net_host_refused"))
+    );
     for manifest in &manifests {
         let asks = manifest
             .permissions
@@ -302,41 +265,6 @@ fn the_curl_config_is_byte_equal_to_todays_github_request() {
     kernel_lines.sort_unstable();
     today_lines.sort_unstable();
     assert_eq!(kernel_lines, today_lines);
-}
-
-#[test]
-fn a_reply_header_other_than_the_scopes_is_refused_before_curl() {
-    let store = OneToken::default();
-    let scopes = Scopes::new(&[("github", "github")]).unwrap();
-    let handles = Mutex::new(Handles::new());
-    let secrets = Secrets::for_request(
-        &store,
-        "dev.crazyagent.e0123456789ab",
-        &scopes,
-        &handles,
-        None,
-    );
-    let rules = CaptureRules::new(&[]).unwrap();
-    let egress = CurlEgress::with_hosts(&[("github", &["127.0.0.1:9"])]);
-    let requests = Requests::new(&secrets, &egress, &rules);
-    let refused = requests.request(
-        "github",
-        Request {
-            method: Method::Get,
-            url: "http://127.0.0.1:9/v1".to_owned(),
-            headers: Vec::new(),
-            bearer: None,
-            form: Vec::new(),
-            secret_form: Vec::new(),
-            json: None,
-            reply_headers: vec!["X-OAuth-Scopes".to_owned(), "set-cookie".to_owned()],
-            capture: Vec::new(),
-        },
-    );
-    assert_eq!(
-        refused,
-        Err(StoreError::code("net_reply_header_unsupported"))
-    );
 }
 
 #[test]
