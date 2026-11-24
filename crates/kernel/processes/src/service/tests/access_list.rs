@@ -434,9 +434,9 @@ fn an_access_answer_is_kept_only_once_its_entry_changed_in_an_earlier_second() {
 
 /// Changes a tool's folder and reads the tool's access answer within one second, at most
 /// three tries, since a slow spawn can carry the listing into the next second: the first try
-/// gives staff `add_file` on the folder's access list, a later one flips its mode, which
-/// keeps that entry. Each read lists the folder alone among the root's parts. Inputs: the
-/// tool, its folder, the root.
+/// adds a deny-only entry to the folder's access list, a later one flips its mode, so the
+/// folder never reads as changeable. Each read lists the folder alone among the root's
+/// parts. Inputs: the tool, its folder, the root.
 #[cfg(target_os = "macos")]
 fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -446,7 +446,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
             let status = crate::spawn_gate::status(
                 std::process::Command::new("/bin/chmod")
                     .arg("+a")
-                    .arg("group:staff allow add_file,delete_child")
+                    .arg("group:everyone deny delete")
                     .arg(folder),
             )
             .unwrap();
@@ -455,7 +455,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
             let mode = if attempt == 1 { 0o750 } else { 0o755 };
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
         }
-        assert_eq!(changeable_by_others(tool), Some(folder.to_path_buf()));
+        assert_eq!(changeable_by_others(tool), None);
         let changed: Vec<Vec<PathBuf>> = acl::take_listings()
             .into_iter()
             .filter(|listing| listing.iter().any(|listed| listed.starts_with(root)))
@@ -476,9 +476,9 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
 
 /// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
-/// change moves only the changed part's change time, so that part alone is listed again and
-/// the change counts. HFS-CTIME: a part read in the second it changed is read again once
-/// that second has passed, and only then kept.
+/// change moves only the changed part's change time, so that part alone is listed again: a
+/// grant there reads as changeable on the next call. HFS-CTIME: a part read in the second
+/// it changed is read again once that second has passed, and only then kept.
 #[cfg(target_os = "macos")]
 #[test]
 fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts() {
@@ -518,15 +518,43 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         "nothing read is listed again"
     );
 
+    let grant = |sign: &str| {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg(sign)
+                .arg("group:staff allow add_file,delete_child")
+                .arg(&folder),
+        )
+        .unwrap();
+        assert!(status.success(), "chmod {sign} on {folder:?}");
+    };
+    grant("+a");
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(
+        ours(&acl::take_listings()),
+        vec![folder.clone()],
+        "a grant on a kept part is read on the next call, that part alone"
+    );
+    grant("-a");
+    settle(&[&folder]);
+    assert_eq!(changeable_by_others(&tool), None);
+    acl::take_listings();
+    assert_eq!(changeable_by_others(&tool), None);
+    assert_eq!(
+        ours(&acl::take_listings()),
+        Vec::<PathBuf>::new(),
+        "once the grant is gone the path is kept again"
+    );
+
     changed_and_read_in_one_second(&tool, &folder, temp.path());
     settle(&[&folder]);
-    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(changeable_by_others(&tool), None);
     assert_eq!(
         ours(&acl::take_listings()),
         vec![folder.clone()],
         "a part read in the second it changed is read again"
     );
-    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(changeable_by_others(&tool), None);
     assert_eq!(
         ours(&acl::take_listings()),
         Vec::<PathBuf>::new(),
@@ -687,4 +715,21 @@ fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
     .unwrap();
     assert!(status.success());
     assert_eq!(changeable_by_others(&tool), None);
+}
+
+/// A call that finds a part of the path others can change keeps no access answer it read,
+/// not for that part and not for the parts below it, since a part others can change lets
+/// them swap what the parts below it name while their access lists are read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_call_that_finds_a_changeable_part_keeps_no_answer() {
+    let temp = durable_folder();
+    let folder = shared_folder(&temp.path().join("open"), 0o777);
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    for entry in [&tool, &folder, &temp.path().to_path_buf()] {
+        assert!(!acl::kept(entry), "{entry:?} kept");
+    }
 }
