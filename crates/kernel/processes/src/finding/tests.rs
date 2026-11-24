@@ -1008,6 +1008,28 @@ fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_can
     assert!(!places.agent_writable(Path::new("/bin/sh")));
 }
 
+/// While the set-up projects cannot be read, the app's own folder outside HOME and the
+/// install roots stays an ordinary place for every tool it ships, not only the bundled ones.
+#[cfg(unix)]
+#[test]
+fn the_app_folder_stays_a_place_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let outside = tempfile::Builder::new()
+        .prefix("tools-app-")
+        .tempdir()
+        .unwrap();
+    let app = outside.path().canonicalize().unwrap();
+    assert!(!app.starts_with(&home));
+    let engine = stub_engine(None, Some(&app), Some(home.clone()), Some(OsStr::new("")));
+    assert!(engine.folders.contains(&app), "{:?}", engine.folders);
+    let places = Places {
+        projects: None,
+        ..engine
+    }
+    .with_probed(Vec::new());
+    assert!(places.folders.contains(&app), "{:?}", places.folders);
+}
+
 /// A tool in a folder every user can write, with no sticky bit, is refused as changeable by
 /// others, the folder named: the resolver asks the kernel's own path check, which no seed can
 /// answer for it.
