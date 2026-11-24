@@ -1,9 +1,11 @@
 use super::*;
 use crate::ide::bridge::engine_step::{FORWARD_REQUEST, FORWARDER_VARIABLES};
+use kernel_sandbox::editor::{agent_admin, agent_config, locks};
 use kernel_sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles, ide_network,
 };
 use std::ffi::OsStr;
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
@@ -352,5 +354,4 @@ impl Server {
 mod agent_folder_rows;
 mod git_rows;
 mod ide_denies;
-mod profile_rows;
 mod server_rows;

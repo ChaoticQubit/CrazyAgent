@@ -8,6 +8,10 @@ pub mod access;
 mod confinement;
 #[cfg(unix)]
 pub use confinement::confinement;
+/// The Seatbelt profile an IDE server runs under: its grants, the profile built over the
+/// agent profile and installed beside the project's IDE data, and the command that runs it.
+#[cfg(unix)]
+pub mod editor;
 /// Egress through the system curl: one request exchange with its bounds, and the per-plugin
 /// host allowlist and send the kernel's `net.request` calls through.
 pub mod egress;
