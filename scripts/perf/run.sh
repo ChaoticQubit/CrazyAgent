@@ -1,42 +1,136 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-if [ "${1:-}" = "--measure" ]; then
-  shift
-  build=$1 sprint=$2
-  shift 2
-  load1=$(sysctl -n vm.loadavg | awk '{print $2}')
-  busy=0
+packages_of() {
+  local dir=$1 tests manifest
+  for tests in "$dir"/crates/*/src/perf_tests.rs "$dir"/crates/*/src/perf_tests "$dir"/crates/*/*/src/perf_tests.rs "$dir"/crates/*/*/src/perf_tests; do
+    [ -e "$tests" ] || continue
+    manifest=${tests%/src/*}/Cargo.toml
+    printf -- '-p\n%s\n' "$(awk -F'"' '/^name = / { print $2; exit }' "$manifest")"
+  done
+}
+
+busy_slots() {
+  local sprint=$1 busy=0 d p
   for d in "$sprint"/slots/[0-9]* "$sprint"/slots/L1; do
     [ -d "$d" ] || continue
     p=$(cat "$d/pid" 2>/dev/null || true)
     [ -n "$p" ] && kill -0 "$p" 2>/dev/null && busy=$((busy + 1))
   done
-  others=$((busy > 0 ? busy - 1 : 0))
-  condition=loaded
+  echo "$busy"
+}
+
+load_one() {
+  sysctl -n vm.loadavg | awk '{print $2}'
+}
+
+measure() {
+  local dir=$1 sprint=$2 build=2.4.4 load1 others condition=loaded
+  local -a packages
+  local word
+  packages=()
+  while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
+  [ -d "$dir/crates/kernel" ] && build=2.5
+  load1=$(load_one)
+  others=$(($(busy_slots "$sprint") - 1))
+  [ "$others" -ge 0 ] || others=0
   awk -v l="$load1" 'BEGIN { exit !(l < 4) }' && [ "$others" -eq 0 ] && condition=quiet
-  echo "PERF-RUN build=$build commit=$(git rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition load1=$load1 slots=$others runs=1"
-  cargo "$@" 2>&1 | sed -E 's/^test [^ ]+ \.\.\. (PERF )/\1/'
-  exit "${PIPESTATUS[0]}"
+  echo "PERF-RUN build=$build commit=$(git -C "$dir" rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition load1=$load1 slots=$others runs=1"
+  (cd "$dir" && CARGO_TARGET_DIR="$dir/.local-state/target" cargo test --release "${packages[@]}" --lib perf_tests -- --ignored --nocapture --test-threads=1 2>&1) | sed -E 's/^test [^ ]+ \.\.\. (PERF )/\1/'
+  return "${PIPESTATUS[0]}"
+}
+
+median() {
+  python3 -I - "$1" "$2" <<'PY'
+import statistics
+import sys
+
+path, want = sys.argv[1], int(sys.argv[2])
+builds = {}
+block = None
+for raw in open(path):
+    line = raw.rstrip("\n")
+    if line.startswith("PERF-RUN "):
+        header = dict(pair.split("=", 1) for pair in line.split()[1:])
+        block = (header, {})
+        builds.setdefault(header["build"], []).append(block)
+    elif line.startswith("PERF ") and block is not None:
+        words = line.split()
+        values = dict(pair.split("=", 1) for pair in words[4:])
+        if "p50_ns" in values:
+            p50, p95 = int(values["p50_ns"]), int(values["p95_ns"])
+        else:
+            p50, p95 = int(values["p50"]) * 1000, int(values["p95"]) * 1000
+        block[1][tuple(words[1:4])] = (p50, p95, values["n"], int(values.get("batch", "1")))
+for build, blocks in builds.items():
+    assert len(blocks) == want, f"{build}: {len(blocks)} runs, wanted {want}"
+    headers = [header for header, _ in blocks]
+    assert len({header["commit"] for header in headers}) == 1
+    condition = "quiet" if all(h["condition"] == "quiet" for h in headers) else "loaded"
+    load1 = statistics.median(float(h["load1"]) for h in headers)
+    slots = max(int(h["slots"]) for h in headers)
+    print(f"PERF-RUN build={build} commit={headers[0]['commit']} date={headers[0]['date']} condition={condition} load1={load1:.2f} slots={slots} runs={want}")
+    for key in blocks[0][1]:
+        rows = [rows.get(key) for _, rows in blocks]
+        if any(row is None for row in rows):
+            continue
+        p50 = sorted(row[0] for row in rows)[want // 2]
+        p95 = sorted(row[1] for row in rows)[want // 2]
+        n, batch = rows[0][2], rows[0][3]
+        head = "PERF " + " ".join(key)
+        if p50 < 10_000:
+            print(f"{head} p50_ns={p50} p95_ns={p95} n={n} batch={batch}")
+        elif batch == 1:
+            print(f"{head} p50={p50 // 1000} p95={p95 // 1000} n={n}")
+        else:
+            print(f"{head} p50={p50 // 1000} p95={p95 // 1000} n={n} batch={batch}")
+PY
+}
+
+if [ "${1:-}" = "--median" ]; then
+  median "${2:?}" "${3:?}"
+  exit 0
 fi
 
-layer=${1:?usage: run.sh <layer>}
-self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+if [ "${1:-}" = "--inner" ]; then
+  shift
+  sprint=$1 runs=$2 log=$3
+  shift 3
+  for _ in $(seq 1 "$runs"); do
+    for dir in "$@"; do
+      measure "$dir" "$sprint" >> "$log"
+    done
+  done
+  median "$log" "$runs"
+  exit 0
+fi
+
+layer=${1:?usage: run.sh <layer> [2.4.4 checkout]}
+other=${2:-}
+runs=${PERF_RUNS:-3}
 [ "$layer" = 1 ] || { echo "run.sh: layer $layer has no rows yet" >&2; exit 2; }
+self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 root=$(git rev-parse --show-toplevel)
-cd "$root"
 main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
 sprint=${PERF_SPRINT:-$main/.local-state/flow-sprint}
 [ -f "$sprint/slot.sh" ] && [ -f "$sprint/env.sh" ] || { echo "run.sh: no slot.sh or env.sh under $sprint" >&2; exit 2; }
-build=2.4.4
-[ -d crates/kernel ] && build=2.5
-packages=()
-for tests in crates/*/src/perf_tests.rs crates/*/src/perf_tests crates/*/*/src/perf_tests.rs crates/*/*/src/perf_tests; do
-  [ -e "$tests" ] || continue
-  manifest=${tests%/src/*}/Cargo.toml
-  packages+=(-p "$(awk -F'"' '/^name = / { print $2; exit }' "$manifest")")
-done
-[ ${#packages[@]} -gt 0 ] || { echo "run.sh: no perf_tests found" >&2; exit 2; }
+dirs=("$root")
+[ -n "$other" ] && dirs+=("$(cd "$other" && git rev-parse --show-toplevel)")
+cd "$root"
 source "$sprint/env.sh"
-SLOT_TASK=${SLOT_TASK:-perf} SLOT_LINE=${SLOT_LINE:-v250} bash "$sprint/slot.sh" cargo test --release "${packages[@]}" --lib --no-run
-SLOT_TASK=${SLOT_TASK:-perf} SLOT_LINE=${SLOT_LINE:-v250} bash "$sprint/slot.sh" bash "$self" --measure "$build" "$sprint" test --release "${packages[@]}" --lib perf_tests -- --ignored --nocapture --test-threads=1
+export SLOT_TASK=${SLOT_TASK:-perf} SLOT_LINE=${SLOT_LINE:-v250}
+for dir in "${dirs[@]}"; do
+  packages=()
+  while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
+  [ ${#packages[@]} -gt 0 ] || { echo "run.sh: no perf_tests under $dir" >&2; exit 2; }
+  (cd "$dir" && CARGO_TARGET_DIR="$dir/.local-state/target" bash "$sprint/slot.sh" cargo test --release "${packages[@]}" --lib --no-run)
+done
+if [ -n "${PERF_WAIT_QUIET:-}" ]; then
+  until awk -v l="$(load_one)" 'BEGIN { exit !(l < 4) }' && [ "$(busy_slots "$sprint")" -eq 0 ]; do
+    sleep 60
+  done
+fi
+mkdir -p "$root/.local-state/perf"
+log="$root/.local-state/perf/L$layer-$(date +%Y%m%dT%H%M%S).log"
+bash "$sprint/slot.sh" bash "$self" --inner "$sprint" "$runs" "$log" "${dirs[@]}"
+echo "raw runs: $log"
