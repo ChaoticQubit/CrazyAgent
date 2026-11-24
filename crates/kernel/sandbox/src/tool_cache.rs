@@ -455,8 +455,21 @@ fn staging_pid(name: &str, record: &str) -> Option<u32> {
         .strip_prefix('.')?
         .strip_suffix(".new")?;
     let (pid, count) = rest.split_once('.')?;
+    named_pid(pid, count)
+}
+
+/// The pid in a priming folder's name, exactly `.priming-{pid}-{nanos}` with both parts
+/// plain decimal digits. Input: the name. Output: the pid, or none for any other name.
+fn priming_pid(name: &str) -> Option<u32> {
+    let (pid, nanos) = name.strip_prefix(".priming-")?.split_once('-')?;
+    named_pid(pid, nanos)
+}
+
+/// The pid of a name's pid part when it and the part after it are plain decimal digits.
+/// Inputs: the two parts. Output: the pid, or none.
+fn named_pid(pid: &str, after: &str) -> Option<u32> {
     let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-    if !digits(pid) || !digits(count) {
+    if !digits(pid) || !digits(after) {
         return None;
     }
     pid.parse().ok()
@@ -501,6 +514,7 @@ fn prime(
     folder: &Path,
     uv: &Path,
 ) -> Result<Vec<String>, &'static str> {
+    sweep_priming(hooks, tools);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.subsec_nanos());
@@ -509,10 +523,30 @@ fn prime(
         .map_err(|_| "tool_cache_priming_failed")?;
     let priming = folder.join(&name);
     let found = run_priming(hooks, &priming, uv).and_then(|()| buckets_in(&priming.join("cache")));
-    let removed = std::fs::remove_dir_all(&priming);
+    let removed = (hooks.remove_agent_entry)(tools.as_fd(), &name, "tool_cache_priming_failed");
     let found = found?;
     removed.map_err(|_| "tool_cache_priming_failed")?;
     Ok(found)
+}
+
+/// Removes, through the hooks' entry removal, each priming folder in the tool cache folder
+/// whose pid is not this process's, as an engine that died while priming leaves. It holds
+/// only while one engine uses this data root, as its database lock keeps it, so every live
+/// priming has this pid; a folder the removal refuses stays for the next priming. Inputs:
+/// the hooks and the open tool cache folder.
+fn sweep_priming(hooks: &ToolCacheHooks, tools: &OwnedFd) {
+    let own = std::process::id();
+    let Ok(listed) = rustix::fs::Dir::read_from(tools) else {
+        return;
+    };
+    let left: Vec<String> = listed
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_owned))
+        .filter(|name| priming_pid(name).is_some_and(|pid| pid != own))
+        .collect();
+    for name in &left {
+        let _ = (hooks.remove_agent_entry)(tools.as_fd(), name, "tool_cache_priming_failed");
+    }
 }
 
 /// Runs the priming process until it ends or [`PRIMING_TIME`] passes, then ends its whole
