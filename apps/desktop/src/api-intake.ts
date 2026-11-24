@@ -1,5 +1,4 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
-import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
 import type { GitHubPromptAnswer } from "./engine-client";
@@ -16,6 +15,7 @@ import type {
 } from "./engine-client";
 import { githubRuleDefaults, githubRuleDefaultsSet, githubRules, githubRuleSet } from "./engine-client";
 import type { GitHubRepoRules } from "./engine-client";
+export { measuredLine } from "./api-intake-size";
 
 export const FOUND_PROJECTS_MAX = 500;
 export const GITHUB_TOKEN_CHARS_MAX = 255;
@@ -247,12 +247,6 @@ export const ADD_WARNINGS = {
   no_git: "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here.",
   git_unread: "CrazyAgent couldn't read this folder's git setup, so it can't tell what moving or copying it breaks.",
 } as const;
-
-/** The size line of the very large warning once the folder was measured. Input: its bytes.
- * Output: one sentence, such as "It is about 42 GB.". */
-export function measuredLine(bytes: number): string {
-  return `It is about ${formatBytes(bytes)}.`;
-}
 
 const MOVE_COPY: Record<string, string> = {
   move_project_busy: "The team is still stopping, or research or a change is still running. Move again in a few seconds.",

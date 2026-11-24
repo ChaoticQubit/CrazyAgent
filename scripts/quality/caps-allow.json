@@ -7,7 +7,6 @@
   "apps/desktop/src-tauri/src/native_term/render.rs": 1899,
   "apps/desktop/src-tauri/src/native_term/windows/rows.rs": 2747,
   "apps/desktop/src-tauri/tests/native_auth.rs": 1564,
-  "apps/desktop/src/api-intake.ts": 604,
   "apps/desktop/src/api-process.ts": 644,
   "apps/desktop/src/api-projects.ts": 1024,
   "apps/desktop/src/api.ts": 1726,
