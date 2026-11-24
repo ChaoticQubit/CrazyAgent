@@ -514,7 +514,10 @@ fn matched(fixed: Fixed, recipe: &InstallRecipe) -> Result<Fixed, &'static str> 
     let args: Vec<OsString> = fixed.args.iter().map(OsString::from).collect();
     match built.as_slice() {
         [step] if step.program == fixed.program && step.args == args => Ok(fixed),
-        _ => Err(TOOL_UNSAFE),
+        _ => {
+            eprintln!("harness_update_debug matched program={}", fixed.program.display());
+            Err(TOOL_UNSAFE)
+        }
     }
 }
 
@@ -535,9 +538,13 @@ fn checked(
     fixed: Fixed,
     places: &kernel_processes::finding::Places,
 ) -> Result<Fixed, &'static str> {
-    trusted(&fixed.program)?;
+    if let Err(code) = trusted(&fixed.program) {
+        eprintln!("harness_update_debug trusted {code} program={}", fixed.program.display());
+        return Err(code);
+    }
     vetted(&fixed, places)?;
     if !places.link_hops_kept(&fixed.program) {
+        eprintln!("harness_update_debug link_hops_kept program={} changeable={:?}", fixed.program.display(), kernel_processes::service::changeable_past_sticky(&fixed.program));
         return Err(TOOL_UNSAFE);
     }
     assert!(fixed.program.is_absolute());
@@ -562,13 +569,20 @@ fn vetted(
     places: &kernel_processes::finding::Places,
 ) -> Result<PathBuf, &'static str> {
     let kept = fixed.search.iter().all(|folder| {
-        std::fs::symlink_metadata(folder).is_err() || places.kept_for_children(folder)
+        let kept = std::fs::symlink_metadata(folder).is_err() || places.kept_for_children(folder);
+        if !kept {
+            eprintln!("harness_update_debug kept_for_children folder={} changeable_past_sticky={:?} changeable_by_others={:?} link_hops_kept={}", folder.display(), kernel_processes::service::changeable_past_sticky(folder), kernel_processes::service::changeable_by_others(folder), places.link_hops_kept(folder));
+        }
+        kept
     });
     if !kept {
         return Err(TOOL_UNSAFE);
     }
     let resolved = kernel_processes::finding::resolve_entry(&fixed.program, places)
-        .map_err(|_| TOOL_UNSAFE)?;
+        .map_err(|missing| {
+            eprintln!("harness_update_debug resolve_entry program={} missing={missing:?}", fixed.program.display());
+            TOOL_UNSAFE
+        })?;
     let program = resolved.program.clone();
     let mut at = resolved;
     for _ in 0..=kernel_processes::finding::INTERPRETER_DEPTH_MAX {
@@ -586,6 +600,7 @@ fn vetted(
             *interpreter
         };
         if !runs_its_script(&at.program, &arguments) {
+            eprintln!("harness_update_debug runs_its_script program={} interpreter={}", fixed.program.display(), at.program.display());
             return Err(TOOL_UNSAFE);
         }
     }
