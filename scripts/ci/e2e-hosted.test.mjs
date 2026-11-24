@@ -1,0 +1,54 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { test } from "node:test";
+import { HOSTED_CONFIGS, NOT_RUN, classify, specRows } from "./e2e-hosted.mjs";
+import rowReporter, { rowLine } from "./row-reporter.mjs";
+
+const NATIVE = new URL("../../apps/desktop/test/native/", import.meta.url);
+const listing = readdirSync(NATIVE);
+const read = (file) => readFileSync(new URL(file, NATIVE), "utf8");
+
+test("every native e2e file is run by the hosted job or named as not run, exactly once", () => {
+  const sorted = classify(listing.filter((file) => file.endsWith(".e2e.mjs")), listing.filter((file) => file.endsWith(".wdio.conf.mjs")), read);
+  assert.deepEqual([sorted.unplaced, sorted.twice], [[], []]);
+  assert.ok(sorted.nodeTest.length > 50 && sorted.hosted.length >= HOSTED_CONFIGS.length && sorted.suites.length > 10, JSON.stringify(sorted));
+  for (const name of [...Object.keys(NOT_RUN), ...HOSTED_CONFIGS]) assert.ok(existsSync(new URL(name, NATIVE)), name);
+});
+
+test("a file no configuration names and that is not a node:test file is unplaced", () => {
+  const texts = { "a.e2e.mjs": "describe('x')", "b.e2e.mjs": 'import { test } from "node:test";' };
+  const sorted = classify(["a.e2e.mjs", "b.e2e.mjs"], [], (file) => texts[file] ?? "");
+  assert.deepEqual([sorted.unplaced, sorted.nodeTest], [["a.e2e.mjs"], ["b.e2e.mjs"]]);
+});
+
+test("the spec reporter's rows are read with their spec file and result", () => {
+  const text = [
+    "[0-0] Running: tauri",
+    "[Tauri #0-0] » /home/runner/work/x/apps/desktop/test/native/master-switch.e2e.mjs",
+    "[Tauri #0-0] master switch",
+    "[Tauri #0-0]    ✓ saves the pick",
+    "[Tauri #0-0]    ✖ shows the pick again",
+    "[Tauri #0-0]    - a skipped row",
+    "------------------------------------------------------------------",
+    "[Tauri #0-0] 1 passing (3.2s)",
+  ].join("\n");
+  assert.deepEqual(specRows(text, "fallback"), [
+    { file: "master-switch.e2e.mjs", name: "saves the pick", result: "ok" },
+    { file: "master-switch.e2e.mjs", name: "shows the pick again", result: "not ok" },
+    { file: "master-switch.e2e.mjs", name: "a skipped row", result: "skip" },
+  ]);
+});
+
+test("the row reporter prints a line per row that is not a suite, then the tally", async () => {
+  const file = `${process.cwd()}/a.e2e.mjs`;
+  const events = [
+    { type: "test:pass", data: { name: "one", file, details: {} } },
+    { type: "test:fail", data: { name: "two", file, details: { error: { message: "wrong\nmore" } } } },
+    { type: "test:pass", data: { name: "three", file, skip: "no keys", details: {} } },
+    { type: "test:pass", data: { name: "group", file, details: { type: "suite" } } },
+  ];
+  const lines = [];
+  for await (const line of rowReporter((async function* () { yield* events; })())) lines.push(line);
+  assert.deepEqual(lines, [rowLine("a.e2e.mjs", "one", "ok"), rowLine("a.e2e.mjs", "two", "not ok", "wrong"),
+    rowLine("a.e2e.mjs", "three", "skip", "no keys"), "ROWS ok 1 not-ok 1 skip 1\n"]);
+});
