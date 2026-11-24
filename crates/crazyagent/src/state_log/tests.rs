@@ -1224,7 +1224,7 @@ fn no_event_body_can_carry_a_secret() {
             "the landing kind {kind} needs a body rule"
         );
     }
-    let sources = sources();
+    let sources = sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
     let mut writers: Vec<(&str, Vec<Option<String>>)> = Vec::new();
     for (name, code) in &sources {
         let scoped =

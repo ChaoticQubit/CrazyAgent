@@ -1,10 +1,9 @@
 /// Every source file outside tests, as its path under `src` with `/` between parts and its
 /// code ([`code_only`]). A file or folder whose name ends in `tests` or `tests.rs` is left
-/// out. Output: the files.
-pub(super) fn sources() -> Vec<(String, String)> {
+/// out. Input: the source folder. Output: the files.
+pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
     const ENTRIES_MAX: usize = 100_000;
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut folders = vec![src.clone()];
+    let mut folders = vec![src.to_path_buf()];
     let mut found = Vec::new();
     let mut seen = 0;
     while let Some(folder) = folders.pop() {
@@ -25,7 +24,7 @@ pub(super) fn sources() -> Vec<(String, String)> {
             }
             let text = std::fs::read_to_string(&path).unwrap();
             let parts: Vec<String> = path
-                .strip_prefix(&src)
+                .strip_prefix(src)
                 .unwrap()
                 .components()
                 .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -306,4 +305,20 @@ fn a_comma_inside_a_nested_value_does_not_end_the_kind() {
         draft_kinds(&code),
         [Some("OUTER".to_owned()), Some("pick(A,B)".to_owned())]
     );
+}
+
+/// A link to a folder under the source folder is not walked, so no file is read twice under
+/// two names.
+#[cfg(unix)]
+#[test]
+fn a_folder_link_under_the_sources_is_not_walked() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("real")).unwrap();
+    std::fs::write(src.join("real/a.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink(src.join("real"), src.join("linked")).unwrap();
+
+    let names: Vec<String> = sources(&src).into_iter().map(|(name, _)| name).collect();
+
+    assert_eq!(names, ["real/a.rs"]);
 }
