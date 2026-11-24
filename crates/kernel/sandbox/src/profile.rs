@@ -119,7 +119,8 @@ pub struct ProfileHooks {
     pub launch_state: &'static str,
     /// The launch lock file in an agent home.
     pub launch_lock: &'static str,
-    /// The folder of Codex's own skills in its home.
+    /// The folder of Codex's own skills in its home: letters, digits and dots only, since the
+    /// profile writes each of its characters into a bracket class.
     pub codex_system_skills: &'static str,
     /// The engine's folder in a project.
     pub crazyagent_directory: &'static str,

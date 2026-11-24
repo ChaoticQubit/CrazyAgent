@@ -111,7 +111,7 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     node_prefix: no_node,
     launch_state: "stand-in-state",
     launch_lock: "stand-in.lock",
-    codex_system_skills: "stand-in-skills",
+    codex_system_skills: "standin.skills",
     crazyagent_directory: ".stand-in",
     binding_path: binding,
     mailbox_folder: "stand-in-mailbox",
