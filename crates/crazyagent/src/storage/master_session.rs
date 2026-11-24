@@ -45,6 +45,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod delete;
 use delete::delete_session;
+mod sign_in;
+use sign_in::sign_in_gap;
 
 /// The device and inode that name the engine database file.
 /// Takes its path, unused here, and its metadata. Returns the pair.
@@ -214,7 +216,12 @@ pub(crate) enum MasterRuntimeResult {
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
-    Policy(Box<Option<kernel_sandbox::policy::AgentPolicy>>),
+    Policy(
+        Box<(
+            Option<kernel_sandbox::policy::AgentPolicy>,
+            Option<Vec<std::path::PathBuf>>,
+        )>,
+    ),
     Profile(Box<NativeProfileUse>),
     Checkout(Box<MasterCheckout>),
     Waiting,
@@ -2036,24 +2043,6 @@ fn listed_auth(
     assert_eq!(&proof.connection, member);
     assert!(session.admits_binding(&proof.config_id, &proof.source_hash, true));
     Ok(proof)
-}
-
-/// Names why the latest sign-in cannot authorize a master turn.
-/// Input: that sign-in's phase. Output: None when authenticated, the
-/// not-signed-in code when it finished without an account, else the stale code.
-fn sign_in_gap(phase: NativeAuthPhase) -> Option<&'static str> {
-    match phase {
-        NativeAuthPhase::AuthenticatedObserved => None,
-        NativeAuthPhase::UnauthenticatedObserved
-        | NativeAuthPhase::Failed
-        | NativeAuthPhase::Cancelled
-        | NativeAuthPhase::Unavailable => Some("master_authentication_unknown"),
-        NativeAuthPhase::Starting
-        | NativeAuthPhase::AwaitingOwner
-        | NativeAuthPhase::CheckingAccount
-        | NativeAuthPhase::Cancelling
-        | NativeAuthPhase::Uncertain => Some("master_authentication_stale"),
-    }
 }
 
 /// Proves one member of the master's pool can authorize its turns now.
@@ -4546,10 +4535,12 @@ pub(super) fn runtime(
         }
         MasterRuntimeCommand::Policy { ref host, .. } => {
             current_scope(&tx, config, sources, host, &session, &turn)?;
-            let policy = crate::sandbox::policy_store::load(&tx, session.project_id.as_str()).ok();
+            let project = session.project_id.as_str();
+            let policy = crate::sandbox::policy_store::load(&tx, project).ok();
+            let hidden = crate::sandbox::access_store::hidden::load(&tx, project).ok();
             assert_eq!(tx.total_changes(), written, "a policy read writes nothing");
             tx.commit().map_err(error)?;
-            Ok(MasterRuntimeResult::Policy(Box::new(policy)))
+            Ok(MasterRuntimeResult::Policy(Box::new((policy, hidden))))
         }
         MasterRuntimeCommand::AcquireProfile {
             ref host,

@@ -857,6 +857,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "agent_project_unreadable" => {
             "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again."
         }
+        "agent_folder_hidden" => {
+            "A folder was hidden from this project's agents, so the agent was stopped. Its next start cannot see it."
+        }
         "shared_folders_unlisted" => {
             "CrazyAgent couldn't list the project folder's files with git, so the agent didn't start. Choose All local folders with Read-only in Agent access, or check the project's git."
         }
