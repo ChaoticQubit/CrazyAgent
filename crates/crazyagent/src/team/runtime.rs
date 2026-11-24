@@ -14043,14 +14043,11 @@ fn turn(
             }
             Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
             Ok(Some(LaunchEvent::TurnFinished { success })) => {
-                break if success {
-                    TurnEnd::Success
-                } else if interrupted {
-                    TurnEnd::Interrupted
-                } else if limited {
-                    TurnEnd::RateLimited
-                } else {
-                    TurnEnd::Failed
+                break match (limited, interrupted, success) {
+                    (true, ..) => TurnEnd::RateLimited,
+                    (false, true, _) => TurnEnd::Interrupted,
+                    (false, false, true) => TurnEnd::Success,
+                    (false, false, false) => TurnEnd::Failed,
                 };
             }
             Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
