@@ -219,3 +219,30 @@ fn a_written_record_leaves_no_staging_file() {
         Some(("id 2".to_owned(), vec!["def".to_owned()]))
     );
 }
+
+/// A staging file left by a dead process that had this pid is removed once, the record is
+/// written, and no staging file is left.
+#[test]
+fn a_staging_file_left_under_this_name_is_replaced() {
+    let (folder, owned) = record_folder();
+    std::fs::write(folder.path().join("k.primed.1.0.new"), b"left").unwrap();
+    publish(&owned, "k.primed", "k.primed.1.0.new", b"id 1\nabc\n").unwrap();
+    assert_eq!(names_in(folder.path()), ["k.primed"]);
+    assert_eq!(
+        read_record(&owned, "k.primed"),
+        Some(("id 1".to_owned(), vec!["abc".to_owned()]))
+    );
+}
+
+/// A rename that fails removes the writer's staging file and refuses the record.
+#[test]
+fn a_failed_rename_removes_the_staging_file() {
+    let (folder, owned) = record_folder();
+    std::fs::create_dir(folder.path().join("k.primed")).unwrap();
+    std::fs::write(folder.path().join("k.primed").join("inside"), b"x").unwrap();
+    assert_eq!(
+        publish(&owned, "k.primed", "k.primed.1.0.new", b"id 1\n"),
+        Err("tool_cache_record_unwritten")
+    );
+    assert_eq!(names_in(folder.path()), ["k.primed"]);
+}
