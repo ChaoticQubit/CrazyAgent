@@ -6963,6 +6963,7 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
+            prompt.push_str(&self.uncommitted_line(project, agent));
             let wake_only = matches!(
                 task_text,
                 super::master::WAKE_TASK | super::master::WAKE_DELIVERED
@@ -8958,64 +8959,6 @@ impl TeamRuntime {
         .then_some(tools)
     }
 
-    /// What a harness reads about its git branch with each task (DEC-100): its task branch,
-    /// and for a native lead in its own clone (DEC-111 Q10) where its sub-agents work: each
-    /// teammate in `.worktrees/<name>` on `<task branch>--<name>`, merged before it reports
-    /// done, or, for a Codex lead with tools, its sub-agents in its own worktree (PA-7).
-    /// Takes the project and the agent. Returns the line, empty with no task branch.
-    fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
-        let row: Option<(String, String)> = self
-            .connection
-            .query_row(
-                "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
-                params![agent, project.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .ok()
-            .flatten();
-        let Some((worktree, git_dir)) = row else {
-            return String::new();
-        };
-        let branch = crate::landing::open(&self.root)
-            .and_then(|db| {
-                crate::landing::agent_branch(&db, Path::new(&worktree), Path::new(&git_dir))
-            })
-            .ok()
-            .flatten();
-        let Some(branch) = branch.filter(|branch| crate::agent_git::is_agent_branch(branch)) else {
-            return String::new();
-        };
-        if recorded_layout(&worktree, &git_dir) == Layout::Linked {
-            return format!("\nYour branch is {branch}; the engine commits your edits there.");
-        }
-        if self.has_lead(agent) {
-            return format!(
-                "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {finish}().",
-                finish = super::tool::FINISH_WORK_TOOL
-            );
-        }
-        let plain = format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
-        );
-        if !matches!(
-            super::lead_mode(&self.connection, project, agent),
-            Ok(crate::coord::settings::SubagentMode::Native)
-        ) {
-            return plain;
-        }
-        match self.threads_lead_tools(agent) {
-            Some(false) => plain,
-            Some(true) => format!(
-                "{plain} Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
-            ),
-            None => format!(
-                "{plain} Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
-                folder = crate::agent_git::TEAMMATES_FOLDER
-            ),
-        }
-    }
-
     /// The branch a new sub-agent of a lead works on (DEC-104 K5b, Q32): `<the lead's task
     /// branch>--<name>`, claimed and stored before its own clone or linked worktree is made,
     /// so it commits there and its lead merges it by that name. Takes the project, the new
@@ -10879,9 +10822,8 @@ impl TeamRuntime {
         });
         let kept = landed.is_ok();
         let note = match landed {
-            Ok((landed, false)) => {
-                let waiting = landed != crate::landing_turns::Landed::Nothing;
-                self.note_uncommitted(whole, project, &workspace, (lead, lands), &what, waiting)?;
+            Ok((_, false)) => {
+                self.note_uncommitted(whole, project, &workspace, (lead, lands), &what)?;
                 return Ok(true);
             }
             Ok((_, true)) => {
@@ -14757,8 +14699,8 @@ mod narrowing;
 #[path = "runtime/spawn_ledger.rs"]
 mod spawn_ledger;
 
+mod task_prompt_lines;
 mod teammates;
-mod uncommitted;
 
 /// Who a test's agent is to a leftover hold: no project, so a hold it leaves ends its
 /// processes by the default setting and no owner view lists it. Output: the label.

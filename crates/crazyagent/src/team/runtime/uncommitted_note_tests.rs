@@ -1,4 +1,5 @@
-use super::*;
+use super::super::tests::*;
+use super::super::*;
 
 const PROMPT: &str = "Edit the notes";
 

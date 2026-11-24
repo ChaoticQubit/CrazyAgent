@@ -11,6 +11,9 @@ use crate::engine::EngineError;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
+#[path = "uncommitted.rs"]
+pub(crate) mod uncommitted;
+
 const REMOVE_OUTPUT_BYTES_MAX: usize = 4096;
 const TIP_LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 
@@ -420,102 +423,6 @@ fn size_mismatches(
     }
     assert!(differing.0.len() <= differing.1.min(super::DIRTY_FILES_MAX));
     Ok(differing)
-}
-
-/// What an agent's own clone holds beyond its branch tip. Fields: the first
-/// `DIRTY_FILES_MAX` paths as text, and how many differ in all, None when git listed more
-/// untracked files than it may print.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Uncommitted {
-    pub(crate) paths: Vec<String>,
-    pub(crate) total: Option<usize>,
-}
-
-/// Lists what an agent's own clone holds beyond its branch tip, for the note at a turn end
-/// that landed nothing, reading the clone as `clone_holds_only` does with no git run in it.
-/// Tracked edits are named by kind and size first; only when every size matches does git
-/// compare contents, so it never hashes a file the agent grew. Inputs: the store and the
-/// three paths. Output: None for a linked worktree, an unreadable clone or a clean one.
-pub(crate) fn uncommitted(
-    db: &Connection,
-    repository: &Path,
-    worktree: &Path,
-    git_dir: &Path,
-) -> Result<Option<Uncommitted>, EngineError> {
-    let Some(Ok((tip, _))) = fetch_clone(db, repository, worktree, git_dir)? else {
-        return Ok(None);
-    };
-    let metadata = repository.join(".git");
-    let folder = metadata.join(format!(
-        "crazyagent-clean-{}",
-        &crate::engine::owner::random_id()?[..24]
-    ));
-    std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
-    let listed = Repo::open(repository, &metadata, Some(worktree)).and_then(|repo| {
-        let (mut paths, mut total) = size_mismatches(&repo, worktree, &tip, usize::MAX)?;
-        let sizes_held = total == 0;
-        let repo = repo.private_index(&folder.join("index")).reading()?;
-        repo.run(&["read-tree", &tip])?;
-        let mut add = |listing: &[u8], whole: bool| {
-            let mut names: Vec<&[u8]> = listing.split(|byte| *byte == 0).collect();
-            if !whole {
-                names.pop();
-            }
-            for name in names.into_iter().filter(|name| !name.is_empty()) {
-                if paths.len() < super::DIRTY_FILES_MAX {
-                    paths.push(name.to_vec());
-                }
-                total += 1;
-            }
-        };
-        if sizes_held {
-            repo.run(&["update-index", "-q", "--refresh"])?;
-            let changed = repo.capture(
-                &[
-                    "diff-index",
-                    "-z",
-                    "--name-only",
-                    "--ignore-submodules=all",
-                    &tip,
-                    "--",
-                ],
-                TIP_LISTING_BYTES_MAX,
-            )?;
-            add(&changed, true);
-        }
-        let teammates = format!("--exclude=/{}/", agent_git::TEAMMATES_FOLDER);
-        let mut listing = vec![
-            "ls-files",
-            "-z",
-            "--others",
-            "--exclude-standard",
-            teammates.as_str(),
-        ];
-        let graph: Vec<String> = graph_excludes(&repo, &tip)?
-            .iter()
-            .map(|pattern| format!("--exclude={pattern}"))
-            .collect();
-        listing.extend(graph.iter().map(String::as_str));
-        let untracked = repo.exec(&listing, None, &[], TIP_LISTING_BYTES_MAX)?;
-        if untracked.code != 0 {
-            return Err(failure("changes_git_failed"));
-        }
-        add(&untracked.stdout, !untracked.overflow);
-        Ok((paths, (!untracked.overflow).then_some(total)))
-    });
-    let _ = std::fs::remove_dir_all(&folder);
-    let (paths, total) = listed?;
-    if paths.is_empty() {
-        return Ok(None);
-    }
-    assert!(paths.len() <= super::DIRTY_FILES_MAX);
-    Ok(Some(Uncommitted {
-        paths: paths
-            .iter()
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect(),
-        total,
-    }))
 }
 
 /// Says why an agent worktree cannot be removed now, as a plain code, checking the store
