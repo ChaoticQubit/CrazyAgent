@@ -298,13 +298,11 @@ fn backoff(streak: u32) -> Duration {
 
 /// A folder run going on its thread: dropped without [`Running::finish`], such as when the
 /// run panics, it records the run as failed, so the next one can start after its backoff.
-#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub(crate) struct Running<'cache> {
     probes: &'cache Mutex<Probes>,
     finished: bool,
 }
 
-#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 impl<'cache> Running<'cache> {
     /// Takes charge of the run [`Probes::start`] marked as going. Input: the cache.
     /// Output: the guard.
@@ -400,14 +398,25 @@ fn lock<T>(cache: &Mutex<T>) -> MutexGuard<'_, T> {
     cache.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Starts one folder run on a background thread that records what it found. Unit tests
-/// never start one, so a developer's own shell files are never run, and where Unix shells
-/// do not exist nothing is probed. Input: what the run needs. Output: whether the run
+/// Whether a folder run may start: never in a row build of this crate, and otherwise only
+/// when the hooks allow it ([`super::FindingHooks::folder_probes`]), which the engine's hooks
+/// do outside its own unit rows. Inputs: whether this is a row build and the hooks. Output:
+/// the answer.
+fn may_probe(row_build: bool, hooks: &super::FindingHooks) -> bool {
+    !row_build && hooks.folder_probes
+}
+
+/// Starts one folder run on a background thread that records what it found, when
+/// [`may_probe`] allows it, so no unit row runs a developer's own shell files, and where Unix
+/// shells do not exist nothing is probed. Input: what the run needs. Output: whether the run
 /// started.
 fn start_folder_probe(seed: impl FnOnce() -> super::FindingSeed) -> bool {
-    #[cfg(all(unix, not(any(test, feature = "test-support"))))]
+    #[cfg(unix)]
     {
         let seed = seed();
+        if !may_probe(cfg!(test), &seed.hooks) {
+            return false;
+        }
         std::thread::Builder::new()
             .name("tools-probe".to_owned())
             .spawn(move || {
@@ -417,7 +426,7 @@ fn start_folder_probe(seed: impl FnOnce() -> super::FindingSeed) -> bool {
             })
             .is_ok()
     }
-    #[cfg(not(all(unix, not(any(test, feature = "test-support")))))]
+    #[cfg(not(unix))]
     {
         let _ = seed;
         false
@@ -463,7 +472,6 @@ fn start_version_probe(
 /// whether both answered (false when the account or HOME is unknown). Input: what the run
 /// needs to build the engine's places.
 #[cfg(unix)]
-#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 fn probe_folders(seed: &super::FindingSeed) -> (Vec<PathBuf>, bool) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)

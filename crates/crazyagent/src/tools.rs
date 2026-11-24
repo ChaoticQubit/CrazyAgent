@@ -35,6 +35,7 @@ pub const HOOKS: FindingHooks = FindingHooks {
     in_agent_tmp: kernel_sandbox::toolchains::in_agent_tmp,
     harness_prefix: crate::setup::harness_prefix,
     gate_root,
+    folder_probes: cfg!(not(test)),
 };
 
 /// The engine's finding seed: [`HOOKS`], the layout's data folder and the harness catalog's
