@@ -1,11 +1,11 @@
 #![cfg(target_os = "linux")]
-use crazyagent::sandbox::linux::{LinuxBackend, LinuxSandbox};
 use kernel_sandbox::linux::helper::egress::{
     NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS,
 };
 use kernel_sandbox::linux::helper::{
     BWRAP_PATHS, HelperRequest, LOADER_REFUSED, NEST_ARGS, loader_variable,
 };
+use kernel_sandbox::linux::launch::{LinuxBackend, LinuxSandbox, host::read_host};
 
 use crazyagent::sandbox::InstalledSandbox;
 use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox};
@@ -2512,7 +2512,7 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     assert_eq!(asked.code(), Some(if scoped { 0 } else { 1 }));
     let temp = tempfile::tempdir().unwrap();
     let data = Some(temp.path());
-    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), data);
+    let host = read_host(Path::new(HELPER), data);
     assert_eq!(host.scoped, scoped);
     assert_eq!(host.nested, nesting_bwrap().is_some());
     assert!(
@@ -2523,7 +2523,7 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
         !host.root,
         "the gate runs as its own user, where the supervisor starts"
     );
-    let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), data);
+    let absent = read_host(Path::new("/nonexistent/helper"), data);
     assert!(!absent.scoped && !absent.nested, "{absent:?}");
     assert!(!absent.supervised, "{absent:?}");
 }
@@ -2535,7 +2535,7 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
 #[test]
 fn the_engine_reads_this_machine_through_the_helper_its_launches_take() {
     let host = crazyagent::sandbox::linux_host().unwrap();
-    let direct = crazyagent::sandbox::linux::read_host(Path::new(HELPER), None);
+    let direct = read_host(Path::new(HELPER), None);
     assert_eq!(host, direct);
     assert_eq!(host.nested, nesting_bwrap().is_some(), "{host:?}");
 }
@@ -2550,7 +2550,7 @@ fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_
     let bwrap = BWRAP_PATHS.iter().any(|path| Path::new(path).is_file());
     assert!(bwrap, "Linux test machines need bubblewrap installed");
     let data = tempfile::tempdir().unwrap();
-    let host = crazyagent::sandbox::linux::read_host(refusing, Some(data.path()));
+    let host = read_host(refusing, Some(data.path()));
     assert!(!host.scoped, "{host:?}");
     assert!(host.nested, "{host:?}");
     assert!(
@@ -2568,10 +2568,10 @@ fn the_host_report_names_apparmor_only_where_it_restricts_and_nothing_nests() {
     let setting = fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns");
     let restricted = setting.is_ok_and(|text| text.trim_end_matches('\n') == "1");
     let temp = tempfile::tempdir().unwrap();
-    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(temp.path()));
+    let host = read_host(Path::new(HELPER), Some(temp.path()));
     let blamed = restricted && !host.nested && !host.root;
     assert_eq!(host.armored, blamed, "{host:?}");
-    let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), None);
+    let absent = read_host(Path::new("/nonexistent/helper"), None);
     assert!(!absent.nested, "{absent:?}");
     assert_eq!(absent.armored, restricted && !absent.root, "{absent:?}");
 }
@@ -2624,7 +2624,7 @@ fn planted_or_concurrent_probe_folders_never_turn_the_call_supervisor_off() {
     assert!(Path::new("/tmp/crazyagent-probe-2").is_dir());
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().canonicalize().unwrap();
-    let read = || crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.as_path()));
+    let read = || read_host(Path::new(HELPER), Some(data.as_path()));
     let alone = read();
     let both = std::thread::scope(|scope| {
         let one = scope.spawn(read);
@@ -2887,7 +2887,7 @@ fn routed(sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
         return None;
     }
     let data = tempfile::tempdir().unwrap();
-    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.path()));
+    let host = read_host(Path::new(HELPER), Some(data.path()));
     assert!(
         host.routed,
         "this machine can route agents, so the report says so: {host:?}"
@@ -3248,7 +3248,7 @@ fn without_slirp_the_agent_keeps_the_shared_network_and_the_supervisor() {
     }
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().canonicalize().unwrap();
-    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.as_path()));
+    let host = read_host(Path::new(HELPER), Some(data.as_path()));
     assert!(!host.routed, "{host:?}");
     let case = case();
     let other = outward_address();

@@ -242,7 +242,7 @@ fn landlock_helper() -> Option<PathBuf> {
     let engine = std::env::current_exe().ok()?;
     #[cfg(test)]
     let engine = engine.parent()?.to_path_buf();
-    Some(engine.with_file_name(crate::sandbox::linux::HELPER_NAME))
+    Some(engine.with_file_name(kernel_sandbox::linux::launch::HELPER_NAME))
 }
 
 /// The settings every engine git call carries on top of the research runner's
@@ -736,7 +736,7 @@ impl Repo {
     }
 
     /// This repository with its git calls started by the Landlock helper under
-    /// [`crate::sandbox::linux::git_step_policy`], for a step on a linked agent worktree whose
+    /// [`kernel_sandbox::linux::launch::git_step_policy`], for a step on a linked agent worktree whose
     /// agent may still be changing it, as `WORK_TREE_PROFILE` holds it on macOS. The step
     /// reads the system, the work tree, the repository's git folder and git. A step that may
     /// write never reads the owner's ignore file, which a link swapped in during a turn-end
@@ -770,7 +770,7 @@ impl Repo {
         let git = std::fs::canonicalize(crate::research::runner::sandboxed_git())
             .map_err(|_| unsupported())?;
         let helper = landlock_helper()
-            .filter(|helper| crate::sandbox::linux::holds_file_rules(helper))
+            .filter(|helper| kernel_sandbox::linux::launch::holds_file_rules(helper))
             .ok_or_else(unsupported)?;
         let reads_ignore = matches!(writes, Writes::Index);
         let excludes = self.step_excludes(writes);
@@ -782,7 +782,7 @@ impl Repo {
                 .and_then(|path| std::fs::canonicalize(path).ok()),
         );
         let wrapped = |read: &[PathBuf], write: &[PathBuf]| {
-            let policy = crate::sandbox::linux::git_step_policy(read, write);
+            let policy = kernel_sandbox::linux::launch::git_step_policy(read, write);
             let mut confinement = vec![helper.clone().into_os_string()];
             confinement.extend(policy.args());
             confinement.extend([OsString::from("--"), git.clone().into_os_string()]);
