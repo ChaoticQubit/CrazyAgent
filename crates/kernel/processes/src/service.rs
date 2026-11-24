@@ -1173,8 +1173,9 @@ const ACCOUNTS_BYTES_MAX: u64 = 4 * 1024 * 1024;
 
 /// Whether this process's own group is this user's private group ([`private_group`]), read
 /// once through the system's user and group lookup, which may ask a directory server, and
-/// the local account file for the accounts whose primary group it is ([`primary_users`]);
-/// a failed lookup or read counts as not private, so its folders fall to the stricter rule.
+/// the local account file for the accounts whose primary group it is ([`primary_users`]),
+/// trusted only when no directory can add accounts it lacks ([`accounts_complete`]); a
+/// failed lookup or read counts as not private, so its folders fall to the stricter rule.
 /// Output: the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn own_group_private() -> bool {
@@ -1185,7 +1186,9 @@ pub fn own_group_private() -> bool {
             .ok()
             .flatten();
         let group = nix::unistd::Group::from_gid(gid).ok().flatten();
-        let primary = local_accounts().and_then(|text| primary_users(&text, gid.as_raw()));
+        let primary = local_accounts()
+            .filter(|_| accounts_complete(Path::new("/etc")))
+            .and_then(|text| primary_users(&text, gid.as_raw()));
         match (user, group, primary) {
             (Some(user), Some(group), Some(primary)) => {
                 private_group(&group.name, &group.mem, &primary, &user.name)
@@ -1207,6 +1210,87 @@ fn local_accounts() -> Option<String> {
         .read_to_string(&mut text)
         .ok()?;
     (text.len() as u64 <= ACCOUNTS_BYTES_MAX).then_some(text)
+}
+
+/// The largest user lookup configuration read to find where accounts come from.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+const LOOKUP_CONFIG_BYTES_MAX: u64 = 64 * 1024;
+
+/// The most entries read from SSSD's drop-in folder before it counts as configured.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+const SSSD_DROP_INS_MAX: usize = 4096;
+
+/// Whether the local account file holds every account the system's user lookup can give a
+/// primary group: every `passwd` source in `nsswitch.conf` is `files`, `compat` or
+/// `systemd`, or `sss` while SSSD has no configuration ([`sssd_unconfigured`]). Action
+/// items and comments are skipped; a missing or unreadable file, a larger one or no
+/// `passwd` line gives no. Input: the folder holding `nsswitch.conf` and `sssd`, `/etc`
+/// outside rows. Output: the answer.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+fn accounts_complete(etc: &Path) -> bool {
+    use std::io::Read as _;
+    let mut text = String::new();
+    let read = std::fs::File::open(etc.join("nsswitch.conf")).and_then(|file| {
+        file.take(LOOKUP_CONFIG_BYTES_MAX + 1)
+            .read_to_string(&mut text)
+    });
+    if read.is_err() || text.len() as u64 > LOOKUP_CONFIG_BYTES_MAX {
+        return false;
+    }
+    let mut lines = 0;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        let Some(sources) = line.trim_start().strip_prefix("passwd:") else {
+            continue;
+        };
+        lines += 1;
+        let mut in_action = false;
+        for word in sources.split_whitespace() {
+            if in_action || word.starts_with('[') {
+                in_action = !word.ends_with(']');
+                continue;
+            }
+            let local = match word {
+                "files" | "compat" | "systemd" => true,
+                "sss" => sssd_unconfigured(&etc.join("sssd")),
+                _ => false,
+            };
+            if !local {
+                return false;
+            }
+        }
+    }
+    assert!(lines <= text.len());
+    lines > 0
+}
+
+/// Whether SSSD has no configuration, so it serves no directory: `sssd.conf` is missing and
+/// the `conf.d` drop-in folder is missing or holds no `.conf` entry. Any other answer, such
+/// as a folder this user cannot look into, counts as configured. Input: the SSSD folder.
+/// Output: the answer.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+fn sssd_unconfigured(sssd: &Path) -> bool {
+    let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    match std::fs::metadata(sssd.join("sssd.conf")) {
+        Err(error) if missing(&error) => {}
+        _ => return false,
+    }
+    let entries = match std::fs::read_dir(sssd.join("conf.d")) {
+        Ok(entries) => entries,
+        Err(error) => return missing(&error),
+    };
+    for (seen, entry) in entries.enumerate() {
+        if seen == SSSD_DROP_INS_MAX {
+            return false;
+        }
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if entry.file_name().as_encoded_bytes().ends_with(b".conf") {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether a group named `name`, listing `members`, is the user private group of the user

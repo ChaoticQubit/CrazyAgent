@@ -46,6 +46,17 @@ const render = (patch = {}) => renderToStaticMarkup(createElement(screen.AppPlug
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&quot;/gu, "\"").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const switchOf = (markup, name) => markup.match(new RegExp(`<button id="app-plugin-${name}"[^>]*>`, "u"))?.[0] ?? "";
+/** The value of the one checked radio of a group, read from each input tag's attributes in any
+ * order. Inputs: the markup and the group name. Output: that radio's value; fails unless exactly
+ * one radio of the group is checked. */
+const checkedValue = (markup, name) => {
+  const radios = [...markup.matchAll(/<input\b([^>]*)>/gu)]
+    .map((tag) => Object.fromEntries([...tag[1].matchAll(/([a-z-]+)="([^"]*)"/gu)].map((pair) => [pair[1], pair[2]])))
+    .filter((attributes) => attributes.name === name);
+  const checked = radios.filter((attributes) => Object.hasOwn(attributes, "checked"));
+  assert.equal(checked.length, 1, `one ${name} radio is checked of ${radios.length}`);
+  return checked[0].value;
+};
 
 test("App plugins: every status reads as one label, and a trusted plugin whose files changed reads Changed - review with Review", () => {
   const word = (patch) => api.pluginState(plugin(patch)).word;
@@ -106,15 +117,15 @@ test("App plugins: the turn-off confirm lists what uses the plugin and picks the
   assert.ok(shown.includes("This time") && shown.includes("Refuse new calls") && shown.includes("Stop runs using it"));
   const markup = render({ dialog: { kind: "off", plugin: "notes", title: "notes", users: [], choice: "stop_runs" } });
   assert.ok(text(markup).includes("Nothing is using it now."), "the confirm shows even when nothing uses it");
-  assert.match(markup, /name="app-plugin-when-off-once" value="stop_runs" checked=""/u);
+  assert.equal(checkedValue(markup, "app-plugin-when-off-once"), "stop_runs");
 });
 
 test("App plugins: the turn-off setting shows the choice in force and says when a project file sets it", () => {
   const plain = render();
-  assert.match(plain, /name="app-plugin-when-off" value="refuse_new_calls" checked=""/u);
+  assert.equal(checkedValue(plain, "app-plugin-when-off"), "refuse_new_calls");
   assert.ok(!text(plain).includes(api.PROJECT_OVERRIDE_LINE));
   const project = render({ page: { kind: "ok", value: page({ when_turned_off: { value: "stop_runs", project_override: true } }) } });
-  assert.match(project, /name="app-plugin-when-off" value="stop_runs" checked=""/u);
+  assert.equal(checkedValue(project, "app-plugin-when-off"), "stop_runs");
   assert.ok(text(project).includes(api.PROJECT_OVERRIDE_LINE));
 });
 
@@ -166,6 +177,14 @@ test("App plugins: every app plugin code the engine can answer has its own sente
   assert.ok(codes.includes("app_plugin_setting_unsafe") && codes.length >= 20, `the engine's codes were read: ${codes.length}`);
   for (const code of codes) assert.ok(Object.hasOwn(api.APP_PLUGIN_REFUSALS, code), `${code} has a sentence`);
   assert.match(api.appPluginRefusal({ code: "app_plugin_folder_unavailable" }), /^CrazyAgent couldn't open your plugins folder\. Try again\.$/u);
+  assert.match(api.appPluginRefusal({ code: "app_plugin_key_store_unavailable" }), /^CrazyAgent couldn't reach its saved keys\. Nothing was changed; try again\.$/u);
+});
+
+test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_not_found" }),
+    "That plugin is gone. Open App plugins again to see the current ones.",
+  );
 });
 
 test("App plugins: each action is a direct bridge call with its own arguments, and an entered key travels only in its own call", () => {
@@ -192,4 +211,22 @@ test("Settings lists App plugins under App next to the other app pages and keeps
   const index = source("../src/screens/settings/index.tsx");
   assert.match(index, /tab === "app-plugins" \? <AppPluginsSettings \/>/u);
   assert.match(index, /tab === "plugins" \? <PluginsAndSkills skill=\{skill\} \/>/u);
+});
+
+test("App plugins: a stopped engine actor reads as the unknown outcome, since the change may have landed", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_actor_stopped_outcome_unknown" }), api.APP_PLUGIN_REFUSALS.app_plugin_outcome_unknown);
+});
+
+test("App plugins: a lost owner answer reads as the unknown outcome, since the change may have landed", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_outcome_unknown_reconcile_same_identity" }), api.APP_PLUGIN_REFUSALS.app_plugin_outcome_unknown);
+});
+
+test("App plugins: a change waiting on the database is a warning on the page and in a dialog, and any other refusal stays danger", () => {
+  const dialog = { kind: "trust", folder: null, trust: trust(), review: false };
+  for (const patch of [{}, { dialog }]) {
+    const waiting = render({ ...patch, failure: "Waiting its turn.", failureCode: "access_change_pending" });
+    assert.match(waiting, /<div class="notice" role="alert">(?:(?!<\/div>).)*<div>Waiting its turn\.<\/div>/u);
+    const refused = render({ ...patch, failure: "Refused.", failureCode: "app_plugin_refused" });
+    assert.match(refused, /<div class="notice danger" role="alert">(?:(?!<\/div>).)*<div>Refused\.<\/div>/u);
+  }
 });

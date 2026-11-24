@@ -349,9 +349,10 @@ pub fn bind_account(
 /// replacing the one entered before in place with no binding write; a first key or one
 /// that replaces an account binding writes the binding and is deleted again if that write
 /// fails. The key is never logged, shown or put in argv
-/// or env, and is wiped. Inputs: database, engine facts, plugin, secret and key bytes.
-/// Output: Ok, or `app_plugin_key_invalid`, `_key_store_unavailable`,
-/// `_secret_not_declared`, `_needs_review`, `_not_found`.
+/// or env, and is wiped. Inside a caller's open transaction it is refused before the key is
+/// saved. Inputs: database, engine facts, plugin, secret and key bytes. Output: Ok, or
+/// `app_plugin_key_invalid`, `_key_store_unavailable`, `_secret_not_declared`,
+/// `_needs_review`, `_not_found`, or `app_plugins_unavailable`.
 pub fn set_key(
     db: &Connection,
     engine: &Engine<'_>,
@@ -360,6 +361,7 @@ pub fn set_key(
     mut key: Vec<u8>,
 ) -> Result<(), Refused> {
     let saved = (|| {
+        registry::outside_transaction(db)?;
         registry::prepare(db, engine)?;
         bindable(db, engine, name, secret)?;
         if key.is_empty()

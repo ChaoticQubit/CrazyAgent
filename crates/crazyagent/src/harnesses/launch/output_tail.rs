@@ -63,3 +63,52 @@ pub(super) fn tail(output: File, probe: File, sender: SyncSender<Line>) {
         }
     }
 }
+
+/// [`forward`], with every byte read also going to the run's events log, when it keeps one,
+/// up to its cap (T19b 19b-4, QUESTION-0151). Takes the stdout, the sender and the log.
+pub(super) fn forward_logged(
+    stdout: ChildStdout,
+    sender: SyncSender<Line>,
+    mut log: Option<Capped>,
+) {
+    let mut reader = BufReader::new(stdout);
+    let mut skipping = false;
+    loop {
+        let mut line = Vec::new();
+        let limit = u64::try_from(LINE_BYTES_MAX + 1).unwrap_or(u64::MAX);
+        match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => {
+                let _ = sender.send(Line::Closed);
+                return;
+            }
+            Ok(_) => {
+                if let Some(log) = log.as_mut() {
+                    log.write(&line);
+                }
+                let ended = line.last() == Some(&b'\n');
+                if skipping {
+                    skipping = !ended;
+                    continue;
+                }
+                if line.len() > LINE_BYTES_MAX && !ended {
+                    skipping = true;
+                    if sender.send(Line::Skipped).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                assert!(line.len() <= LINE_BYTES_MAX + 1);
+                if sender.send(Line::Bytes(line)).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Hands each line of a harness's stdout to the session until the output ends. A line
+/// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
+/// skipped, so no amount of output ends the session. Takes the stdout and the sender.
+pub(super) fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
+    forward_logged(stdout, sender, None);
+}

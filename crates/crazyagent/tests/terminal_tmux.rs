@@ -10,6 +10,8 @@ use kernel_processes::terminal::{
     AgentId, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream, VIEWER_BUFFER_BYTES_MAX,
     VIEWERS_MAX, quit,
 };
+#[cfg(target_os = "macos")]
+use kernel_sandbox::profile::command::SANDBOX_EXEC;
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -2004,7 +2006,7 @@ impl Lead {
     /// runtime starts a native lead. Takes the prompt and the argv. Returns the command.
     fn confined(&self, prompt: &str, argv: &[&str]) -> InteractiveCommand {
         let profile = self.profile.to_str().unwrap();
-        let mut confined = vec![crazyagent::sandbox::SANDBOX_EXEC, "-f", profile];
+        let mut confined = vec![SANDBOX_EXEC, "-f", profile];
         confined.extend_from_slice(argv);
         self.shell(prompt, &confined)
     }
@@ -2792,7 +2794,7 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     let next_command = lead.shell(
         "two$ ",
         &[
-            crazyagent::sandbox::SANDBOX_EXEC,
+            SANDBOX_EXEC,
             "-f",
             next_profile.to_str().unwrap(),
             "/bin/sh",
@@ -2824,26 +2826,5 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
         .unwrap();
 }
 
-#[test]
-fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
-    let root = root();
-    let tmux = tmux(root.path());
-    let path = root.path().canonicalize().unwrap();
-    let _server = Server {
-        tmux: tmux.clone(),
-        socket: path.join(FOLDER).join(SOCKET),
-    };
-    let host = crazyagent::terminal::tmux_host(&path, Some(tmux));
-    let agent = AgentId::team(4).unwrap();
-    host.spawn(
-        &agent,
-        &kernel_processes::terminal::PaneCommand::from(&shell(&path, Vec::new(), &["/bin/sh"])),
-    )
-    .unwrap();
-    let quiet = host.quiet(&agent).unwrap();
-    assert!(
-        quiet.is_some_and(|quiet| quiet < Duration::from_secs(60)),
-        "{quiet:?}"
-    );
-    host.close(&[]).unwrap();
-}
+#[path = "terminal_tmux/engine_host.rs"]
+mod engine_host;

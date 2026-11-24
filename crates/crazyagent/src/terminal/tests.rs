@@ -176,24 +176,36 @@ fn the_tmux_hooks_name_every_team_path_as_the_kernel_test_layout_does() {
 fn the_confinement_value_matches_the_sandbox_constants() {
     let real = crate::sandbox::confinement();
     let copy = kernel_processes::terminal::tmux::test_seams::test_confinement();
-    assert_eq!(real.sandbox_exec, crate::sandbox::SANDBOX_EXEC);
-    assert_eq!(copy.sandbox_exec, crate::sandbox::SANDBOX_EXEC);
+    assert_eq!(
+        real.sandbox_exec,
+        kernel_sandbox::profile::command::SANDBOX_EXEC
+    );
+    assert_eq!(
+        copy.sandbox_exec,
+        kernel_sandbox::profile::command::SANDBOX_EXEC
+    );
     #[cfg(target_os = "macos")]
     {
-        assert_eq!(real.keeper, crate::sandbox::KEEPER);
-        assert_eq!(copy.keeper, crate::sandbox::KEEPER);
-        assert_eq!(real.pane_shim, crate::sandbox::PANE_SHIM);
-        assert_eq!(copy.pane_shim, crate::sandbox::PANE_SHIM);
+        assert_eq!(real.keeper, kernel_sandbox::profile::command::KEEPER);
+        assert_eq!(copy.keeper, kernel_sandbox::profile::command::KEEPER);
+        assert_eq!(real.pane_shim, kernel_sandbox::profile::command::PANE_SHIM);
+        assert_eq!(copy.pane_shim, kernel_sandbox::profile::command::PANE_SHIM);
         assert_eq!(
             real.keeper_deadline_variable,
-            crate::sandbox::KEEPER_DEADLINE
+            kernel_sandbox::profile::command::KEEPER_DEADLINE
         );
         assert_eq!(
             copy.keeper_deadline_variable,
-            crate::sandbox::KEEPER_DEADLINE
+            kernel_sandbox::profile::command::KEEPER_DEADLINE
         );
-        assert_eq!(real.keeper_state_variable, crate::sandbox::KEEPER_STATE);
-        assert_eq!(copy.keeper_state_variable, crate::sandbox::KEEPER_STATE);
+        assert_eq!(
+            real.keeper_state_variable,
+            kernel_sandbox::profile::command::KEEPER_STATE
+        );
+        assert_eq!(
+            copy.keeper_state_variable,
+            kernel_sandbox::profile::command::KEEPER_STATE
+        );
     }
 }
 
@@ -205,7 +217,7 @@ fn the_kernel_keeper_copy_keeps_and_unkeeps_as_the_sandbox_does() {
     use kernel_processes::terminal::tmux::test_seams as copy;
     let plain = |profile: &str| -> Vec<String> {
         [
-            crate::sandbox::SANDBOX_EXEC,
+            kernel_sandbox::profile::command::SANDBOX_EXEC,
             "-f",
             profile,
             "/usr/local/bin/claude",
@@ -239,7 +251,7 @@ fn the_kernel_keeper_copy_keeps_and_unkeeps_as_the_sandbox_does() {
     for argv in &argvs {
         for record in records {
             let record = record.map(Path::new);
-            let kept = crate::sandbox::kept_pane(argv.clone(), record);
+            let kept = kernel_sandbox::profile::command::kept_pane(argv.clone(), record);
             assert_eq!(
                 kept,
                 copy::kept_pane(argv.clone(), record),
@@ -247,16 +259,22 @@ fn the_kernel_keeper_copy_keeps_and_unkeeps_as_the_sandbox_does() {
             );
             if let Some(kept) = kept {
                 assert_eq!(
-                    crate::sandbox::unkept_pane(&kept),
+                    kernel_sandbox::profile::command::unkept_pane(&kept),
                     copy::unkept_pane(&kept),
                     "{kept:?}"
                 );
                 let mut bent = kept.clone();
-                bent[crate::sandbox::KEEPER.len() - 2].push(' ');
-                assert_eq!(crate::sandbox::unkept_pane(&bent), copy::unkept_pane(&bent));
+                bent[kernel_sandbox::profile::command::KEEPER.len() - 2].push(' ');
+                assert_eq!(
+                    kernel_sandbox::profile::command::unkept_pane(&bent),
+                    copy::unkept_pane(&bent)
+                );
             }
         }
-        assert_eq!(crate::sandbox::unkept_pane(argv), copy::unkept_pane(argv));
+        assert_eq!(
+            kernel_sandbox::profile::command::unkept_pane(argv),
+            copy::unkept_pane(argv)
+        );
     }
 }
 
@@ -291,7 +309,7 @@ fn the_kernel_variable_gate_copy_refuses_the_names_the_sandbox_refuses() {
     ] {
         let value = OsStr::new("/private/tmp/planted");
         assert_eq!(
-            crate::sandbox::agent_variable_allowed(OsStr::new(name), value),
+            kernel_sandbox::profile::env::agent_variable_allowed(OsStr::new(name), value),
             copy(OsStr::new(name), value),
             "{name}"
         );

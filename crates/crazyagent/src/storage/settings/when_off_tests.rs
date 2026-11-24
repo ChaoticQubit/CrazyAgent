@@ -1,3 +1,4 @@
+use super::global_write::{AFTER_RENAME, SETTING_STAGED};
 use super::*;
 use crate::config::edit_when_turned_off;
 use kernel_plugin_host::usage::TurnOff;
@@ -50,6 +51,7 @@ impl Fixture {
             .write_global(&move |global: &str, project: &str| {
                 edit_when_turned_off(global, project, when_off)
             })
+            .map_err(|refused| refused.refused)
     }
 
     fn staged_left(&self) -> bool {
@@ -175,4 +177,160 @@ fn setting_refusals_map_to_listed_app_plugin_codes() {
             "{mapped}"
         );
     }
+}
+
+/// A turn-off choice storage cannot record leaves the global file as it was, so the files
+/// still resolve to the config the worker holds.
+#[test]
+fn a_turn_off_choice_storage_cannot_record_leaves_the_file_as_it_was() {
+    let fixture = Fixture::new();
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY, body BLOB)",
+    )
+    .unwrap();
+    let mut config = fixture.sources.config().unwrap();
+    let held = config.id.clone();
+    let command = crate::app_plugins::Command::SetWhenOff {
+        when_off: TurnOff::StopRuns,
+    };
+    let saved = app_plugins(&db, &mut config, (false, Some(&fixture.sources), command));
+    assert!(saved.is_err(), "storage could not record the new config");
+    assert_eq!(config.id, held);
+    assert_eq!(std::fs::read_to_string(&fixture.global).unwrap(), GLOBAL);
+    assert!(verified_source_hash(&config, Some(&fixture.sources)).is_ok());
+    assert!(!fixture.staged_left());
+}
+
+/// A turn-off choice storage cannot record is refused with a listed code before the global
+/// file is touched, so no put-back write can fail and leave the files and the worker apart.
+#[test]
+fn a_turn_off_choice_storage_cannot_record_never_touches_the_file() {
+    let fixture = Fixture::new();
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY, body BLOB)",
+    )
+    .unwrap();
+    let mut config = fixture.sources.config().unwrap();
+    let before = std::fs::metadata(&fixture.global).unwrap().ino();
+    let command = crate::app_plugins::Command::SetWhenOff {
+        when_off: TurnOff::StopRuns,
+    };
+    let refused = app_plugins(&db, &mut config, (false, Some(&fixture.sources), command))
+        .unwrap_err()
+        .0;
+    assert!(
+        crate::engine::owner::APP_PLUGINS_CODES.contains(&refused.as_str()),
+        "{refused}"
+    );
+    assert_eq!(std::fs::metadata(&fixture.global).unwrap().ino(), before);
+    assert_eq!(std::fs::read_to_string(&fixture.global).unwrap(), GLOBAL);
+    assert!(verified_source_hash(&config, Some(&fixture.sources)).is_ok());
+}
+
+/// Runs `step` once, right after the next settings rename on this thread.
+fn after_rename(step: impl FnOnce() -> Result<(), EngineError> + 'static) {
+    AFTER_RENAME.with(|hook| *hook.borrow_mut() = Some(Box::new(step)));
+}
+
+/// A database with the two tables a turn-off choice reads and writes.
+fn recording_db() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE settings_publication (singleton INTEGER PRIMARY KEY, body BLOB);
+         CREATE TABLE configs (id TEXT PRIMARY KEY, body TEXT NOT NULL);",
+    )
+    .unwrap();
+    db
+}
+
+/// Whether `id` has a stored config row.
+fn stored(db: &Connection, id: &str) -> bool {
+    db.query_row("SELECT COUNT(*) FROM configs WHERE id = ?1", [id], |row| {
+        row.get::<_, i64>(0)
+    })
+    .unwrap()
+        == 1
+}
+
+/// Saves the turn-off choice through the worker's App plugins command.
+fn set_when_off(
+    fixture: &Fixture,
+    db: &Connection,
+    config: &mut EffectiveConfig,
+) -> Result<crate::app_plugins::Done, EngineError> {
+    let command = crate::app_plugins::Command::SetWhenOff {
+        when_off: TurnOff::StopRuns,
+    };
+    app_plugins(db, config, (false, Some(&fixture.sources), command))
+}
+
+/// A folder sync that fails after the rename is refused as unavailable, and the worker
+/// takes the config the renamed file resolves to, stored, so the two never part.
+#[test]
+fn a_turn_off_choice_whose_folder_sync_fails_after_the_rename_leaves_the_worker_on_the_file() {
+    let fixture = Fixture::new();
+    let db = recording_db();
+    let mut config = fixture.sources.config().unwrap();
+    let next = edit_when_turned_off(GLOBAL, "", TurnOff::StopRuns)
+        .unwrap()
+        .1;
+    after_rename(|| Err(error("settings_sync_failed")));
+    let refused = set_when_off(&fixture, &db, &mut config).unwrap_err();
+    assert_eq!(refused.0, "app_plugin_setting_unavailable");
+    let on_file = fixture.sources.config().unwrap();
+    assert_eq!(on_file.id, next.id);
+    assert_eq!(config.id, on_file.id);
+    assert!(stored(&db, config.id.as_str()));
+}
+
+/// Another valid text that lands after the rename is followed: the worker takes the config
+/// that text resolves to, not the one it staged, and that config is stored.
+#[test]
+fn a_turn_off_choice_the_file_changes_under_after_the_rename_follows_the_file() {
+    let fixture = Fixture::new();
+    let db = recording_db();
+    let mut config = fixture.sources.config().unwrap();
+    let next = edit_when_turned_off(GLOBAL, "", TurnOff::StopRuns)
+        .unwrap()
+        .1;
+    let global = fixture.global.clone();
+    after_rename(move || {
+        std::fs::write(&global, "timeout_ms = 2000\n").unwrap();
+        Ok(())
+    });
+    let refused = set_when_off(&fixture, &db, &mut config).unwrap_err();
+    assert_eq!(refused.0, "app_plugin_setting_unavailable");
+    let on_file = fixture.sources.config().unwrap();
+    assert_ne!(on_file.id, next.id);
+    assert_eq!(config.id, on_file.id);
+    assert!(stored(&db, on_file.id.as_str()));
+}
+
+/// A text that stops resolving after the rename leaves the worker on its config, and the
+/// next turn-off choice is refused with the file left exactly as it is.
+#[test]
+fn a_turn_off_choice_whose_file_stops_resolving_after_the_rename_keeps_the_worker_and_refuses_the_next_write()
+ {
+    let fixture = Fixture::new();
+    let db = recording_db();
+    let mut config = fixture.sources.config().unwrap();
+    let held = config.id.clone();
+    let broken = "timeout_ms = \n[";
+    let global = fixture.global.clone();
+    after_rename(move || {
+        std::fs::write(&global, broken).unwrap();
+        Ok(())
+    });
+    let refused = set_when_off(&fixture, &db, &mut config).unwrap_err();
+    assert_eq!(refused.0, "app_plugin_setting_unavailable");
+    assert_eq!(config.id, held);
+    let before = std::fs::metadata(&fixture.global).unwrap().ino();
+    let again = set_when_off(&fixture, &db, &mut config).unwrap_err();
+    assert_eq!(again.0, "app_plugin_setting_unreadable");
+    assert_eq!(config.id, held);
+    assert_eq!(std::fs::read_to_string(&fixture.global).unwrap(), broken);
+    assert_eq!(std::fs::metadata(&fixture.global).unwrap().ino(), before);
+    assert!(!fixture.staged_left());
 }

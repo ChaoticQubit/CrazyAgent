@@ -180,7 +180,7 @@ fn given(recipe: &InstallRecipe) -> u16 {
 /// tokens and keys, which no install output may carry. Output: the values.
 fn engine_values() -> Vec<OsString> {
     std::env::vars_os()
-        .filter(|(name, _)| crate::sandbox::agent_env_refused(name))
+        .filter(|(name, _)| kernel_common::env_names::agent_env_refused(name))
         .map(|(_, value)| value)
         .collect()
 }

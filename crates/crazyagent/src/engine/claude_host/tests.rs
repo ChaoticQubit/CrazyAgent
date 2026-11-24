@@ -2165,7 +2165,7 @@ exit 122
 #[tokio::test]
 async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
     use crate::engine::master_host_fixture::{HarnessProcesses, MasterFixture, RUN_FOLDER};
-    use crate::sandbox::LineageCheck;
+    use kernel_sandbox::profile::command::LineageCheck;
 
     let mut fixture = MasterFixture::new("claude");
     let check = {

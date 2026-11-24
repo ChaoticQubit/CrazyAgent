@@ -97,11 +97,12 @@ struct Row {
 /// The device every native view draws with, made with the first view's surface, or after
 /// a loss with the next one's: the largest texture side it allows, whether its error
 /// handler recorded a wgpu error since the last render call took it, and whether wgpu
-/// reported the device lost.
+/// reported the device lost. The queue is the last field, so it drops last: its drop is the
+/// one that can panic (waiting on a hung device), and that panic then unwinds past no wgpu
+/// object whose own drop could panic again and abort.
 struct Device {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
-    queue: wgpu::Queue,
     format: wgpu::TextureFormat,
     rects: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -109,6 +110,7 @@ struct Device {
     side_max: u32,
     faulted: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
+    queue: wgpu::Queue,
 }
 
 impl Device {

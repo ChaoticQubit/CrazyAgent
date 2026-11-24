@@ -64,3 +64,19 @@ fn capture_refuses_owner_root_permission_drift() {
     assert!(allocate_master_capture(&root).is_err());
     assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
 }
+
+/// A master reads its sandbox settings from the engine database in the engine root, the
+/// folder around its owner generation, as the real layout has it; the generation holds
+/// no database and none is made there. Linux reads them before every master boundary.
+#[test]
+fn a_master_reads_its_sandbox_settings_from_the_engine_root_around_its_generation() {
+    let temporary = private_root();
+    let base = owner_generation(&temporary);
+    let root = Root::open(&base).unwrap();
+    let settings = stored_sandbox_settings(&root).unwrap();
+    assert_eq!(
+        settings.linux_sockets,
+        kernel_sandbox::settings::LinuxSockets::TcpPorts
+    );
+    assert!(!base.join("engine.db").exists());
+}

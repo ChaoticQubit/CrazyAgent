@@ -977,3 +977,32 @@ fn a_client_save_after_an_own_write_applies() {
         "a save at the caught-up revision"
     );
 }
+
+/// An App plugin turned off, removed or unbound from a secret narrows access, so its job is
+/// never withdrawn; turning one on does not.
+#[test]
+fn an_app_plugin_turned_off_removed_or_unbound_is_classed_narrowing() {
+    use crate::app_plugins::Command;
+    let job = |command| Job::AppPlugins(command, oneshot::channel().0);
+    let set = |enabled| Command::SetEnabled {
+        name: "acme".into(),
+        enabled,
+        when_off: None,
+    };
+    assert!(job(set(false)).narrows_access());
+    assert!(!job(set(true)).narrows_access());
+    assert!(
+        job(Command::Remove {
+            name: "acme".into()
+        })
+        .narrows_access()
+    );
+    assert!(
+        job(Command::Unbind {
+            name: "acme".into(),
+            secret: "token".into(),
+        })
+        .narrows_access()
+    );
+    assert!(!job(Command::List).narrows_access());
+}

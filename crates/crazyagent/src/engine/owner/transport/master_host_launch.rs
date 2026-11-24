@@ -1443,6 +1443,8 @@ mod tests {
     use super::super::Root;
     use super::*;
     use crate::provider_retry::{CODEX_UNBOUNDED_OFF, ProviderRetry};
+    #[cfg(target_os = "macos")]
+    use kernel_sandbox::profile::command::{SANDBOX_EXEC, SESSION_SHIM};
     use std::collections::BTreeMap;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
@@ -1561,22 +1563,6 @@ mod tests {
             !build(&repository, &linked),
             "a linked worktree must be refused, not followed"
         );
-    }
-
-    /// A master reads its sandbox settings from the engine database in the engine root, the
-    /// folder around its owner generation, as the real layout has it; the generation holds
-    /// no database and none is made there. Linux reads them before every master boundary.
-    #[test]
-    fn a_master_reads_its_sandbox_settings_from_the_engine_root_around_its_generation() {
-        let temporary = private_root();
-        let base = owner_generation(&temporary);
-        let root = Root::open(&base).unwrap();
-        let settings = stored_sandbox_settings(&root).unwrap();
-        assert_eq!(
-            settings.linux_sockets,
-            kernel_sandbox::settings::LinuxSockets::TcpPorts
-        );
-        assert!(!base.join("engine.db").exists());
     }
 
     /// rv-code2 b8 F1: a master turn whose home the owner chose outside the engine's data
@@ -2366,13 +2352,13 @@ mod tests {
         )
         .unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
-        assert_eq!(wrapped.get_program(), crate::sandbox::SANDBOX_EXEC);
+        assert_eq!(wrapped.get_program(), SANDBOX_EXEC);
         let args = wrapped
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
         let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
-        start.extend(crate::sandbox::SESSION_SHIM);
+        start.extend(SESSION_SHIM);
         start.push(executable.to_str().unwrap());
         assert_eq!(args[..start.len()], start);
         assert!(
@@ -2396,7 +2382,7 @@ mod tests {
         expected.extend(kernel_sandbox::profile::consts::AGENT_GIT_ENV);
         expected.extend(kernel_sandbox::profile::consts::AGENT_TLS_ENV);
         expected.extend(kernel_sandbox::profile::consts::AGENT_HOME_ENV);
-        let prefix = crate::sandbox::shell_tmp_prefix(&tmp);
+        let prefix = kernel_sandbox::profile::env::shell_tmp_prefix(&tmp);
         expected.insert("TMPPREFIX", prefix.to_str().unwrap());
         let tools = kernel_sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
         expected.extend(
@@ -2431,13 +2417,13 @@ mod tests {
         )
         .unwrap();
         let claude = sandbox.wrap(&claude).unwrap();
-        assert_eq!(claude.get_program(), crate::sandbox::SANDBOX_EXEC);
+        assert_eq!(claude.get_program(), SANDBOX_EXEC);
         let claude_args = claude
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
         let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
-        start.extend(crate::sandbox::SESSION_SHIM);
+        start.extend(SESSION_SHIM);
         start.push(executable.to_str().unwrap());
         assert_eq!(claude_args[..start.len()], start);
         assert!(claude_args.windows(2).any(|pair| pair == ["--tools", ""]));

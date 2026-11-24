@@ -4,14 +4,14 @@ mod keychain_support;
 
 use kernel_security::store::{Store, reference};
 
-use crazyagent::sandbox::{
-    ProjectSandbox, agent_command, agent_env_refused, agent_variable_allowed,
-};
+use crazyagent::sandbox::ProjectSandbox;
+use kernel_common::env_names::agent_env_refused;
 use kernel_common::relay_names::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::SECRET_ROOT_REFUSED;
 use kernel_sandbox::profile::consts::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV};
+use kernel_sandbox::profile::env::{agent_command, agent_variable_allowed};
 use kernel_sandbox::toolchains::ToolHomes;
 use kernel_security::secret::SecretString;
 use kernel_security::store::macos::Keychain;
@@ -609,7 +609,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     );
     expected.insert(
         "TMPPREFIX".to_owned(),
-        crazyagent::sandbox::shell_tmp_prefix(&case.tmp)
+        kernel_sandbox::profile::env::shell_tmp_prefix(&case.tmp)
             .to_str()
             .unwrap()
             .to_owned(),
@@ -1020,7 +1020,7 @@ fn git_dir_in(folder: &Path, home: &Path, agent: bool) -> Output {
         ("HOME", home.as_os_str()),
     ];
     let mut command = if agent {
-        crazyagent::sandbox::unconfined_command(
+        kernel_sandbox::profile::env::unconfined_command(
             Path::new(CLT_GIT),
             &base,
             std::iter::empty::<(&OsStr, Option<&OsStr>)>(),
@@ -1119,7 +1119,7 @@ fn every_agent_process_reads_no_global_git_config_and_no_python_user_site() {
             Some(OsStr::new("/private/tmp/ca-agent-home/.npmrc")),
         ),
     ];
-    let env = crazyagent::sandbox::agent_env(&base, reopened).unwrap();
+    let env = kernel_sandbox::profile::env::agent_process_env(&base, reopened).unwrap();
     for (name, value) in pinned {
         let values: Vec<&OsStr> = env
             .iter()
@@ -1132,10 +1132,10 @@ fn every_agent_process_reads_no_global_git_config_and_no_python_user_site() {
         OsStr::new("GIT_CONFIG_GLOBAL"),
         Some(OsStr::new("/private/tmp/ca-agent-home/.gitconfig")),
     )];
-    assert!(crazyagent::sandbox::agent_env(&base, elsewhere).is_err());
+    assert!(kernel_sandbox::profile::env::agent_process_env(&base, elsewhere).is_err());
     let program = Path::new("/usr/bin/true");
     let none = || std::iter::empty::<(&OsStr, Option<&OsStr>)>();
-    let full = crazyagent::sandbox::unconfined_command(program, &base, none()).unwrap();
+    let full = kernel_sandbox::profile::env::unconfined_command(program, &base, none()).unwrap();
     let confined =
         agent_command(Path::new("/private/tmp/agent.sb"), program, &base, none()).unwrap();
     for (level, command) in [("full", &full), ("confined", &confined)] {

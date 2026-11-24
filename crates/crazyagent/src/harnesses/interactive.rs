@@ -659,10 +659,11 @@ fn agent_env(
     let refused = |_: kernel_sandbox::error::SandboxError| failure("launch_environment_refused");
     let built = match handover {
         Some(handover) => {
-            let handed = crate::sandbox::Handed::new(&names, handover.token()).map_err(refused)?;
-            crate::sandbox::agent_env_handing(&base, harness, handed)
+            let handed = kernel_sandbox::profile::env::Handed::new(&names, handover.token())
+                .map_err(refused)?;
+            kernel_sandbox::profile::env::agent_process_env_handing(&base, harness, handed)
         }
-        None => crate::sandbox::agent_env(&base, harness),
+        None => kernel_sandbox::profile::env::agent_process_env(&base, harness),
     };
     built
         .map_err(refused)?
