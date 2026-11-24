@@ -60,7 +60,7 @@
   "crates/crazyagent/src/github/publish.rs": 2149,
   "crates/crazyagent/src/github/rules/rules_tests.rs": 1558,
   "crates/crazyagent/src/harnesses/interactive/tests.rs": 2451,
-  "crates/crazyagent/src/harnesses/launch.rs": 2748,
+  "crates/crazyagent/src/harnesses/launch.rs": 2736,
   "crates/crazyagent/src/harnesses/leftovers.rs": 3555,
   "crates/crazyagent/src/harnesses/terminal_session.rs": 1626,
   "crates/crazyagent/src/harnesses/transcript/tests.rs": 1952,

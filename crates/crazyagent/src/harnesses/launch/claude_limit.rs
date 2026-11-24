@@ -1,3 +1,23 @@
+/// Tells whether a provider error message says the account hit a rate or usage limit.
+/// Takes the provider's error text, which is never stored or shown.
+/// Returns true for rate limit, usage limit, quota and HTTP 429 wording, and for the
+/// limit lines Claude Code writes itself.
+pub fn rate_limited(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "usage_limit",
+        "quota",
+        "429",
+        "too many requests",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || claude_limit_line(message.trim_start())
+}
+
 /// Tells whether a line is one of Claude Code's own limit lines, by the check Claude
 /// Code 2.1.309 ships (`Bii`): one of its limit prefixes, or a model family, an optional
 /// name of 1 to 40 characters without a middle dot or line break, then

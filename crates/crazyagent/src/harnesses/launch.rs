@@ -391,26 +391,6 @@ pub enum LaunchEvent {
     LateOutput { lines: u64 },
 }
 
-/// Tells whether a provider error message says the account hit a rate or usage limit.
-/// Takes the provider's error text, which is never stored or shown.
-/// Returns true for rate limit, usage limit, quota and HTTP 429 wording, and for the
-/// limit lines Claude Code writes itself.
-pub fn rate_limited(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    [
-        "rate limit",
-        "rate_limit",
-        "usage limit",
-        "usage_limit",
-        "quota",
-        "429",
-        "too many requests",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-        || claude_limit_line(message.trim_start())
-}
-
 /// A plain failure code from a launch adapter. It never carries secrets or raw output; a
 /// `launch_secret_in_command` refusal also names the MCP server and secret, never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2729,7 +2709,7 @@ pub struct RunLogs {
 
 mod claude_limit;
 mod turn_session;
-use claude_limit::claude_limit_line;
+pub use claude_limit::rate_limited;
 pub use turn_session::TurnSession;
 
 #[cfg(test)]
