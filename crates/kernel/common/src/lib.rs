@@ -14,11 +14,13 @@ pub mod relay_names;
 #[cfg(test)]
 mod names_tests;
 #[cfg(test)]
+mod net_tests;
+#[cfg(test)]
 mod perf_kit;
 #[cfg(test)]
 mod perf_kit_tests;
 #[cfg(test)]
-mod net_tests;
+mod perf_tests;
 #[cfg(test)]
 mod relay_names_tests;
 
