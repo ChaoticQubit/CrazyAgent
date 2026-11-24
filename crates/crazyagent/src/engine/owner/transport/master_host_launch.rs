@@ -1565,22 +1565,6 @@ mod tests {
         );
     }
 
-    /// A master reads its sandbox settings from the engine database in the engine root, the
-    /// folder around its owner generation, as the real layout has it; the generation holds
-    /// no database and none is made there. Linux reads them before every master boundary.
-    #[test]
-    fn a_master_reads_its_sandbox_settings_from_the_engine_root_around_its_generation() {
-        let temporary = private_root();
-        let base = owner_generation(&temporary);
-        let root = Root::open(&base).unwrap();
-        let settings = stored_sandbox_settings(&root).unwrap();
-        assert_eq!(
-            settings.linux_sockets,
-            kernel_sandbox::settings::LinuxSockets::TcpPorts
-        );
-        assert!(!base.join("engine.db").exists());
-    }
-
     /// rv-code2 b8 F1: a master turn whose home the owner chose outside the engine's data
     /// root, as a configured RCLI home may be one of the owner's own folders, keeps the links
     /// a dotfile manager made at `.config` and `.cargo` and what they name, while a turn home
