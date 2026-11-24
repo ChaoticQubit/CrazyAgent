@@ -592,6 +592,11 @@ jobs:
       - name: Build the test app, its owner fixture and the e2e bridge
         timeout-minutes: 75
         run: cargo build -p crazyagent-desktop --features native-webdriver,e2e-bridge --bin crazyagent-desktop --bin desktop-owner-fixture --bin desktop-e2e-bridge --locked
+      - name: Build the owner fixture with the clean-Mac gate into its own target folder
+        timeout-minutes: 75
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/clean-mac-gate-target
+        run: cargo build -p crazyagent-desktop --features native-webdriver,e2e-bridge,crazyagent/clean-mac-gate --bin desktop-owner-fixture --locked
       - name: Select Xcode 26.3, whose git the engine runs
         run: |
           set -euo pipefail
@@ -610,6 +615,8 @@ jobs:
           export E2E_BRIDGE="$GITHUB_WORKSPACE/target/debug/desktop-e2e-bridge"
           export WD_APP="$GITHUB_WORKSPACE/target/debug/crazyagent-desktop"
           export CRAZYAGENT_DESKTOP_TEST_FIXTURE="$GITHUB_WORKSPACE/target/debug/desktop-owner-fixture"
+          export CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE="$RUNNER_TEMP/clean-mac-gate-target/debug/desktop-owner-fixture"
+          test -x "$CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE"
           export E2E_HOSTED_EVIDENCE="$RUNNER_TEMP/e2e-evidence"
           node scripts/ci/e2e-hosted.mjs
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

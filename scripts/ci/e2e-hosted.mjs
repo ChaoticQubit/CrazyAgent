@@ -22,6 +22,10 @@ const REASONS_MAX = 5;
 /** How many node:test e2e files run at once on the hosted runner's three cores. */
 const FILES_AT_ONCE = 2;
 
+/** The text an e2e file holds when it must run on the owner fixture built with the clean-Mac
+ * gate feature, which keeps this runner's own Node and Homebrew out of the engine's view. */
+const GATE_FEATURE = "crazyagent/clean-mac-gate";
+
 /** The closed suites `test/native/run.mjs` runs that need nothing outside the job. */
 export const SUITES = Object.freeze([
   "model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide",
@@ -99,6 +103,22 @@ export function specRows(text, fallback) {
   return rows;
 }
 
+/** The owner fixture an e2e file runs on: the clean-Mac gate build when the file's text names
+ * the feature, else the plain build. Inputs: the file's text and both fixture paths. Output:
+ * the path. */
+export function fixtureFor(text, plain, gated) {
+  assert.ok(isAbsolute(plain) && isAbsolute(gated) && plain !== gated, "two distinct absolute fixtures");
+  return text.includes(GATE_FEATURE) ? gated : plain;
+}
+
+/** Picks a file's owner fixture and prints a FIXTURE line when it is the gated one. Inputs: the
+ * file name, its text and both fixture paths. Output: the path. */
+function picked(file, text, plain, gated) {
+  const fixture = fixtureFor(text, plain, gated);
+  if (fixture === gated) console.log(`FIXTURE ${file} clean-mac-gate ${gated}`);
+  return fixture;
+}
+
 /** A free port on the loopback address above 1024. Output: the port. */
 async function freePort() {
   const server = createServer();
@@ -151,11 +171,13 @@ function needed(name) {
 /** Runs every hosted e2e row on this Mac and prints each row's name and result, then the files
  * not run with their reason, then a tally. Each node:test file runs in its own process, two at
  * once, with its own E2E_EVIDENCE folder, so its engine and bridge logs are kept. Environment:
- * E2E_ENGINE, E2E_BRIDGE, WD_APP, CRAZYAGENT_DESKTOP_TEST_FIXTURE, CRAZYAGENT_CHROME and
- * E2E_HOSTED_EVIDENCE. Output: exit status 1 when any row or run failed or a file is not placed. */
+ * E2E_ENGINE, E2E_BRIDGE, WD_APP, CRAZYAGENT_DESKTOP_TEST_FIXTURE, its clean-Mac gate build
+ * CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE, CRAZYAGENT_CHROME and E2E_HOSTED_EVIDENCE.
+ * A file whose text names the gate feature gets the gated fixture. Output: exit status 1 when any row or run failed or a file is not placed. */
 async function main() {
-  const [engine, , app, fixture, , evidence] = ["E2E_ENGINE", "E2E_BRIDGE", "WD_APP",
-    "CRAZYAGENT_DESKTOP_TEST_FIXTURE", "CRAZYAGENT_CHROME", "E2E_HOSTED_EVIDENCE"].map(needed);
+  const [engine, , app, fixture, gatedFixture, , evidence] = ["E2E_ENGINE", "E2E_BRIDGE", "WD_APP",
+    "CRAZYAGENT_DESKTOP_TEST_FIXTURE", "CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE", "CRAZYAGENT_CHROME",
+    "E2E_HOSTED_EVIDENCE"].map(needed);
   mkdirSync(evidence, { recursive: true, mode: 0o700 });
   printDisplays();
   const listing = readdirSync(NATIVE);
@@ -172,7 +194,8 @@ async function main() {
   const codes = [];
   const lane = async () => {
     for (let file = waiting.shift(); file; file = waiting.shift()) {
-      const env = { ...process.env, E2E_EVIDENCE: join(evidence, `node-${file.replace(/\.e2e\.mjs$/, "")}`) };
+      const env = { ...process.env, E2E_EVIDENCE: join(evidence, `node-${file.replace(/\.e2e\.mjs$/, "")}`),
+        CRAZYAGENT_DESKTOP_TEST_FIXTURE: picked(file, read(file), fixture, gatedFixture) };
       mkdirSync(env.E2E_EVIDENCE, { recursive: true, mode: 0o700 });
       const nodeTest = spawn(process.execPath, ["--test", `--test-reporter=${REPORTER}`, "--test-reporter-destination=stdout",
         join("test/native", file)], { cwd: APP, env, stdio: ["ignore", "inherit", "inherit"] });
@@ -184,7 +207,10 @@ async function main() {
   const nodeCode = codes.find((code) => code !== 0) ?? 0;
   console.log(`E2E node:test rc ${nodeCode}`);
   for (const suite of SUITES) {
-    const env = { ...process.env, CRAZYAGENT_DESKTOP_TEST_APP: app, CRAZYAGENT_DESKTOP_TEST_FIXTURE: fixture, CRAZYAGENT_DESKTOP_TEST_SUITE: suite };
+    const specFile = `${suite}.e2e.mjs`;
+    assert.ok(sorted.suites.includes(specFile), `the closed suite ${suite} runs ${specFile}`);
+    const env = { ...process.env, CRAZYAGENT_DESKTOP_TEST_APP: app, CRAZYAGENT_DESKTOP_TEST_SUITE: suite,
+      CRAZYAGENT_DESKTOP_TEST_FIXTURE: picked(specFile, read(specFile), fixture, gatedFixture) };
     const run = await logged(process.execPath, [join(NATIVE, "run.mjs")], env, join(evidence, `suite-${suite}.log`));
     const completion = run.text.trim().split("\n").reverse().find((line) => line.endsWith("completion.json"));
     const driver = completion ? JSON.parse(readFileSync(completion, "utf8")).owned.find((entry) => entry.name === "webdriver") : null;

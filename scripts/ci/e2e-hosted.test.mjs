@@ -24,6 +24,8 @@ test("a file no configuration names and that is not a node:test file is unplaced
 test("a file that names the clean-Mac gate feature runs on the gated owner fixture, every other on the plain one", () => {
   assert.equal(fixtureFor("must be built with --features crazyagent/clean-mac-gate", "/plain", "/gated"), "/gated");
   assert.equal(fixtureFor("describe('x')", "/plain", "/gated"), "/plain");
+  assert.throws(() => fixtureFor("", "/same", "/same"), /two distinct absolute fixtures/);
+  assert.throws(() => fixtureFor("", "plain", "/gated"), /two distinct absolute fixtures/);
   const sorted = classify(listing.filter((file) => file.endsWith(".e2e.mjs")), listing.filter((file) => file.endsWith(".wdio.conf.mjs")), read);
   for (const suite of SUITES) assert.ok(sorted.suites.includes(`${suite}.e2e.mjs`), suite);
   const gated = SUITES.filter((suite) => fixtureFor(read(`${suite}.e2e.mjs`), "/plain", "/gated") === "/gated");
