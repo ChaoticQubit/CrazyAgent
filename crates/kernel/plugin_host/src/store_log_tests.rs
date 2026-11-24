@@ -271,7 +271,7 @@ fn a_write_outside_a_capture_is_refused_and_leaves_no_row() {
     assert_eq!(code(record(&db, off())), Some(UNLOGGED));
     assert!(rows(&db, "app_plugin_state").is_empty());
 
-    let (other, captured) = capture(|| {
+    let (other, captured) = capture(&db, || {
         std::thread::spawn(move || {
             let db = Connection::open_in_memory().unwrap();
             initialize(&db).unwrap();
@@ -288,7 +288,7 @@ fn a_write_outside_a_capture_is_refused_and_leaves_no_row() {
     );
     assert!(captured.events.is_empty());
 
-    let ((), captured) = capture(|| record(&db, off()).unwrap());
+    let ((), captured) = capture(&db, || record(&db, off()).unwrap());
     assert_eq!(captured.events, [off()]);
     assert_eq!(rows(&db, "app_plugin_state").len(), 1);
 }

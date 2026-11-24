@@ -200,17 +200,6 @@ pub(crate) fn found(engine: &Engine<'_>, name: &str) -> Result<Found, Refused> {
     find(engine, name)?.ok_or_else(|| refused("app_plugin_not_found"))
 }
 
-/// Refuses a write that touches files while the caller holds an open transaction, before
-/// anything is written, so a rollback can never part the rows from the files on disk.
-/// Input: the connection. Output: Ok, or `app_plugins_unavailable`.
-pub(crate) fn outside_transaction(db: &Connection) -> Result<(), Refused> {
-    if db.is_autocommit() {
-        Ok(())
-    } else {
-        Err(refused("app_plugins_unavailable"))
-    }
-}
-
 /// Forgets what a reserved name holds that a bundled plugin or a bundled code plugin does
 /// not own: a trust record, which neither kind ever gets, marks an older plugin of the
 /// owner's of that name, and a switch row under a bare code plugin id is such a leftover
@@ -467,8 +456,9 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
 /// or `app_plugin_changed`, `_refused`, `_name_taken`, `_past_cap` (the listing would not
 /// show it, or would drop a listed plugin for it), `_port_handed_out` (its loopback port
-/// is in the range the engine reads now), or the folder's refusal; inside a caller's open
-/// transaction, `app_plugins_unavailable` before anything is written.
+/// is in the range the engine reads now), or the folder's refusal; outside the capture of
+/// its own transaction, `app_plugins_unavailable` before anything is written. A replaced
+/// folder is deleted only after the capture's commit and put back after its rollback.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -477,7 +467,7 @@ pub fn add(
     replace: bool,
     now_ms: i64,
 ) -> Result<(), Refused> {
-    outside_transaction(db)?;
+    store_log::in_capture(db)?;
     prepare(db, engine)?;
     let bytes = folder::read_source(source).map_err(|_| refused("app_plugin_refused"))?;
     if kernel_common::hash(&bytes) != sha256 {
@@ -497,7 +487,10 @@ pub fn add(
     if handed_problem(&manifest, engine.handed_out.as_ref()).is_some() {
         return Err(refused(PORT_HANDED_OUT));
     }
-    folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
+    let replaced = folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
+    if let Some(step) = replaced.and_then(store_log::after_commit) {
+        step.commit()?;
+    }
     trust::settle(db, engine, &manifest, now_ms)
 }
 
@@ -609,15 +602,17 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
         .collect())
 }
 
-/// Removes a user plugin: its bindings, trust record and state in one savepoint first, then,
-/// once those rows are gone, the keys entered for it and its folder (or the .yaml file an
-/// older version left). A failed row write or commit changes nothing. Account keys stay. Under a
-/// bundled plugin's name it removes only what the owner's folder still holds, which the
-/// bundled plugin shadows. Inside a caller's open transaction it is refused before anything
-/// is written. Inputs: database, engine facts and name. Output: Ok, or
-/// `app_plugin_bundled`, `app_plugin_not_found`, the database's or the folder's refusal.
+/// Removes a user plugin: its folder moved aside under its removal name, then its bindings,
+/// trust record and state as one Forgotten event in a savepoint, then the keys entered for
+/// it; the folder moved aside and any .yaml file an older version left are deleted only
+/// after the capture's commit, and the folder goes back after its rollback. A failed row
+/// write changes nothing. Account keys stay. Under a bundled plugin's name it removes only
+/// what the owner's folder still holds, which the bundled plugin shadows. Outside the
+/// capture of its own transaction it is refused before anything is written. Inputs:
+/// database, engine facts and name. Output: Ok, or `app_plugin_bundled`,
+/// `app_plugin_not_found`, `app_plugins_unavailable`, the database's or the folder's refusal.
 pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Refused> {
-    outside_transaction(db)?;
+    let captured = store_log::in_capture(db)?;
     prepare(db, engine)?;
     if is_bundled(name) {
         return if folder::remove(engine.root, name, engine.keys.new_ref)? {
@@ -641,6 +636,7 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     };
     let bindings = binding_rows(db, name)?;
     if known {
+        assert_eq!(db.is_autocommit(), !captured);
         db.execute_batch("SAVEPOINT app_plugin_remove")
             .map_err(sqlite)?;
         let forgotten = store_log::Event::Forgotten {
@@ -656,11 +652,14 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     for (_, source, reference) in &bindings {
         forget_key_file(db, engine, source, reference);
     }
-    if let Some(retired) = retired {
-        retired.finish()?;
+    let step = match retired {
+        Some(retired) => retired.into_step(engine.keys.new_ref),
+        None => folder::removal(engine.root, name, engine.keys.new_ref),
+    };
+    match store_log::after_commit(step) {
+        Some(step) => step.commit(),
+        None => Ok(()),
     }
-    folder::remove(engine.root, name, engine.keys.new_ref)?;
-    Ok(())
 }
 
 /// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
@@ -809,3 +808,5 @@ compile_error!("the plugins folder is built for Unix and Windows only");
 
 #[path = "registry_folder.rs"]
 mod folder;
+
+pub use folder::FolderStep;

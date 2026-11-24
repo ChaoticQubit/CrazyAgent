@@ -376,9 +376,10 @@ pub(crate) fn grants(
     tx: &rusqlite::Transaction<'_>,
 ) -> Result<crate::engine::owner::OwnerData, EngineError> {
     let root = crate::storage::trash::engine_root(tx)?;
-    let (plugins, _, _) = log::logged_in(tx, |db| {
+    let (plugins, captured, _) = log::logged_in(tx, |db| {
         kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)
     })?;
+    assert!(captured.folders.is_empty());
     assert!(plugins.len() <= kernel_plugin_host::grants::GRANTS_MAX);
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }

@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use crate::Refused;
 use crate::embedding::{HOSTS_MAX, valid_host, valid_name, valid_secret};
 use crate::manifest::HOST_BYTES_MAX;
-use crate::registry::{code_key, is_bundled, is_code_plugin, set_flag_row};
+use crate::registry::{FolderStep, code_key, is_bundled, is_code_plugin, set_flag_row};
 use crate::store::{KeyRef, is_entered_key, refused, sqlite};
 use rusqlite::Connection;
 use serde::de::DeserializeOwned;
@@ -395,12 +395,22 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), Refused> {
     }
 }
 
-/// What one captured run recorded: the events in the order they were applied, and the
-/// entered keys whose binding went, to delete once the change commits.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// What one captured run recorded: the events in the order they were applied, the
+/// entered keys whose binding went, to delete once the change commits, and the plugin
+/// folder steps, to end once the transaction does. It also keeps the address of the
+/// connection the capture was opened on.
+#[derive(Debug, Default)]
 pub struct Captured {
     pub events: Vec<Event>,
     pub forgotten_keys: Vec<KeyRef>,
+    pub folders: Vec<FolderStep>,
+    connection: usize,
+}
+
+/// The address of a connection, which names it while it is borrowed. Input: the
+/// connection. Output: the address.
+fn address(db: &Connection) -> usize {
+    std::ptr::from_ref(db).addr()
 }
 
 /// What this thread's plugin store work runs under: a capture keeping each change for the
@@ -424,12 +434,16 @@ impl Drop for Ending {
     }
 }
 
-/// Runs plugin store work and collects what it recorded, for the engine to append to its
-/// log in the same transaction. Captures never nest, and a change made on another thread
-/// holds no capture, so it is refused. Input: the work. Output: its result and what it
-/// recorded.
-pub fn capture<T>(work: impl FnOnce() -> T) -> (T, Captured) {
-    let outer = CAPTURE.with(|capture| capture.replace(Some(Held::Capture(Captured::default()))));
+/// Runs plugin store work on one connection and collects what it recorded, for the engine
+/// to append to its log in the transaction it holds open on that connection. Captures
+/// never nest, and a change made on another thread holds no capture, so it is refused.
+/// Inputs: the connection and the work. Output: its result and what it recorded.
+pub fn capture<T>(db: &Connection, work: impl FnOnce() -> T) -> (T, Captured) {
+    let opened = Captured {
+        connection: address(db),
+        ..Captured::default()
+    };
+    let outer = CAPTURE.with(|capture| capture.replace(Some(Held::Capture(opened))));
     assert!(outer.is_none(), "plugin store captures never nest");
     let ending = Ending;
     let result = work();
@@ -482,6 +496,40 @@ pub(crate) fn record(db: &Connection, event: Event) -> Result<(), Refused> {
         }
     });
     Ok(())
+}
+
+/// Refuses plugin store work that touches files unless it runs in the capture opened on
+/// this very connection while a transaction is open on it: the capture keeps the address
+/// of the connection it was opened on, and the engine opens it only inside the transaction
+/// it began itself, after refusing one the caller held. A call on another connection, or
+/// after that transaction ended, is refused before anything is written. In plugin host
+/// rows a hold stands in, outside any transaction. Input: the connection. Output: whether
+/// a capture holds the call, or `app_plugins_unavailable`.
+pub(crate) fn in_capture(db: &Connection) -> Result<bool, Refused> {
+    CAPTURE.with(|capture| match capture.borrow().as_ref() {
+        Some(Held::Capture(captured))
+            if captured.connection == address(db) && !db.is_autocommit() =>
+        {
+            Ok(true)
+        }
+        #[cfg(test)]
+        Some(Held::Rows) if db.is_autocommit() => Ok(false),
+        _ => Err(refused("app_plugins_unavailable")),
+    })
+}
+
+/// Keeps a plugin folder step for the capture's owner to end with its transaction. With no
+/// capture, as in a plugin host row's hold, the step is handed back to end at once. Input:
+/// the step. Output: none once the capture took it, else the step.
+pub(crate) fn after_commit(step: FolderStep) -> Option<FolderStep> {
+    CAPTURE.with(|capture| match capture.borrow_mut().as_mut() {
+        Some(Held::Capture(captured)) => {
+            assert!(captured.folders.len() < CAPTURED_EVENTS_MAX);
+            captured.folders.push(step);
+            None
+        }
+        _ => Some(step),
+    })
 }
 
 /// Keeps an entered key whose binding went for deletion after the capture's commit.
