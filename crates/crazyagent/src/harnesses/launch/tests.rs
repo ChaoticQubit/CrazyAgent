@@ -1,5 +1,7 @@
 use super::{AccountBinding, Driver, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest};
 #[cfg(unix)]
+use super::{GROUP_EXIT_WAIT, end_pane_group, end_pane_group_with};
+#[cfg(unix)]
 use crate::sandbox::InstalledSandbox;
 use serde_json::{Value, json};
 #[cfg(unix)]
@@ -7,6 +9,14 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::Arc;
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Names the path a filesystem step failed on. Inputs: the path and the step's result.
+/// Output: the value, or an error naming the path.
+fn at_path<T>(path: impl AsRef<std::path::Path>, result: std::io::Result<T>) -> TestResult<T> {
+    result.map_err(|error| format!("{:?}: {error}", path.as_ref()).into())
+}
 
 fn line(value: Value) -> Vec<u8> {
     serde_json::to_vec(&value).unwrap()
@@ -20,7 +30,7 @@ struct TeamLaunch {
 }
 
 #[cfg(target_os = "macos")]
-fn team_launch(harness: &str) -> TeamLaunch {
+fn team_launch(harness: &str) -> TestResult<TeamLaunch> {
     use std::os::unix::fs::PermissionsExt;
     let entry = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
         .into_iter()
@@ -29,22 +39,27 @@ fn team_launch(harness: &str) -> TeamLaunch {
         .unwrap_or_else(|| panic!("installed {harness}"));
     let directory = tempfile::Builder::new()
         .prefix("ca-team-launch-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let home = base.join("home");
     let work = base.join("work");
     for folder in [&home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
-    TeamLaunch {
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
+    Ok(TeamLaunch {
         _directory: directory,
         request: LaunchRequest {
             harness: harness.into(),
-            executable: std::fs::canonicalize(entry).unwrap(),
+            executable: at_path(&entry, std::fs::canonicalize(&entry))?,
             working_dir: work.clone(),
             account: AccountBinding::Subscription { home },
             model: None,
@@ -54,14 +69,15 @@ fn team_launch(harness: &str) -> TeamLaunch {
             limits: LaunchLimits::default(),
         },
         work,
-    }
+    })
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub_agent() {
+fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub_agent()
+-> TestResult {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
     let background_off = |command: &std::process::Command| {
@@ -69,23 +85,22 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
             name == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" && value == Some("1".as_ref())
         })
     };
-    let mut off = team_launch("claude-code");
+    let mut off = team_launch("claude-code")?;
     off.request.tools = false;
     assert!(!background_off(&super::command(&off.request).unwrap()));
-    let launch = team_launch("claude-code");
+    let launch = team_launch("claude-code")?;
     let mut command = super::command(&launch.request).unwrap();
     assert!(background_off(&command));
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command)?;
     child
         .stdin
         .take()
         .unwrap()
-        .write_all(b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")
-        .unwrap();
+        .write_all(b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")?;
     let stdout = child.stdout.take().unwrap();
     let (send, lines) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -104,11 +119,11 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
             continue;
         };
         if event["type"] == "system" && event["subtype"] == "init" {
-            break serde_json::from_value(event["tools"].clone()).unwrap();
+            break serde_json::from_value(event["tools"].clone())?;
         }
     };
     let _ = child.kill();
-    child.wait().unwrap();
+    child.wait()?;
     for kept in ["Bash", "Edit", "Read", "Write"] {
         assert!(tools.iter().any(|tool| tool == kept), "{kept}: {tools:?}");
     }
@@ -118,36 +133,38 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
             "{built_in}: {tools:?}"
         );
     }
+    Ok(())
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_tools_on_claude_team_agent_waits_long_enough_for_its_mcp_servers_to_connect() {
+fn a_tools_on_claude_team_agent_waits_long_enough_for_its_mcp_servers_to_connect() -> TestResult {
     let connect_limit = |command: &std::process::Command| {
         command
             .get_envs()
             .find(|(name, _)| *name == "MCP_TIMEOUT")
             .and_then(|(_, value)| value.map(std::ffi::OsStr::to_owned))
     };
-    let mut off = team_launch("claude-code");
+    let mut off = team_launch("claude-code")?;
     off.request.tools = false;
     assert_eq!(connect_limit(&super::command(&off.request).unwrap()), None);
-    let on = team_launch("claude-code");
+    let on = team_launch("claude-code")?;
     assert_eq!(
         connect_limit(&super::command(&on.request).unwrap()),
         Some("60000".into()),
         "Claude Code's own 30 s connect limit drops context-mode on a busy machine"
     );
+    Ok(())
 }
 
 /// macOS only: no agent launches elsewhere (`launch_sandbox_unavailable`), so a Linux build
 /// host installs no Codex whose reading of a team agent's configuration could be checked.
 #[cfg(target_os = "macos")]
 #[test]
-fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() {
-    let launch = team_launch("codex");
+fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() -> TestResult {
+    let launch = team_launch("codex")?;
     let mut features = std::process::Command::new(&launch.request.executable);
     features
         .args(
@@ -163,8 +180,8 @@ fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off()
         .current_dir(&launch.work)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = kernel_processes::spawn_gate::output(&mut features).unwrap();
-    let text = String::from_utf8(output.stdout).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut features)?;
+    let text = String::from_utf8(output.stdout)?;
     assert!(
         output.status.success(),
         "{}",
@@ -182,6 +199,7 @@ fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off()
     assert_eq!(state("multi_agent"), Some("false"), "{text}");
     assert_eq!(state("multi_agent_v2"), Some("false"), "{text}");
     assert_eq!(state("shell_tool"), Some("true"), "{text}");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -223,12 +241,16 @@ fn turn(session: &mut super::Session, prompt: &str) -> Vec<LaunchEvent> {
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_next_turn() {
+fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_next_turn()
+-> TestResult {
     use std::os::unix::fs::PermissionsExt;
-    let mut launch = team_launch("claude-code");
+    let mut launch = team_launch("claude-code")?;
     let harness = launch.work.parent().unwrap().join("late-harness");
-    std::fs::write(&harness, LATE_RESULT_HARNESS).unwrap();
-    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    at_path(&harness, std::fs::write(&harness, LATE_RESULT_HARNESS))?;
+    at_path(
+        &harness,
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)),
+    )?;
     launch.request.executable = harness;
     launch.request.tools = false;
     let mut session = super::Session::start(launch.request).unwrap();
@@ -267,6 +289,7 @@ fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_nex
         ]
     );
     session.stop().unwrap();
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -285,12 +308,15 @@ printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-2","session_i
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_piped_claude_turn_reports_the_usage_its_result_carries_before_it_finishes() {
+fn a_piped_claude_turn_reports_the_usage_its_result_carries_before_it_finishes() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
-    let mut launch = team_launch("claude-code");
+    let mut launch = team_launch("claude-code")?;
     let harness = launch.work.parent().unwrap().join("usage-harness");
-    std::fs::write(&harness, USAGE_RESULT_HARNESS).unwrap();
-    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    at_path(&harness, std::fs::write(&harness, USAGE_RESULT_HARNESS))?;
+    at_path(
+        &harness,
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)),
+    )?;
     launch.request.executable = harness;
     launch.request.tools = false;
     let mut session = super::Session::start(launch.request).unwrap();
@@ -317,41 +343,48 @@ fn a_piped_claude_turn_reports_the_usage_its_result_carries_before_it_finishes()
         "a result without usage reports none: {second:?}"
     );
     session.stop().unwrap();
+    Ok(())
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_off() {
+fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_off() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
     let directory = tempfile::Builder::new()
         .prefix("ca-identity-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let [repo, owner, home, work] = ["repo", "owner", "home", "work"].map(|name| base.join(name));
     for folder in [&repo, &owner, &home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
-    std::fs::write(
+    at_path(
         owner.join(".gitconfig"),
-        "[user]\n\tname = Repo Owner\n\temail = owner@example.invalid\n",
-    )
-    .unwrap();
+        std::fs::write(
+            owner.join(".gitconfig"),
+            "[user]\n\tname = Repo Owner\n\temail = owner@example.invalid\n",
+        ),
+    )?;
     let initialized = kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("HOME", &owner)
             .args(["init", "-q", "--template="])
             .arg(&repo),
-    )
-    .unwrap();
+    )?;
     assert!(initialized.success());
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
     let (name, email) = crate::landing::owner_git_identity(&repo, &owner).unwrap();
     assert!(super::GitIdentity::new("Bad <name>".into(), email.clone()).is_err());
     assert!(super::GitIdentity::new(name.clone(), "two\nlines".into()).is_err());
@@ -403,13 +436,17 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         String::from_utf8(output.stdout).unwrap()
     };
     git(&["init", "-q", "--template="]);
-    std::fs::write(work.join("file.txt"), "agent work\n").unwrap();
+    at_path(
+        work.join("file.txt"),
+        std::fs::write(work.join("file.txt"), "agent work\n"),
+    )?;
     git(&["add", "file.txt"]);
     git(&["commit", "-q", "-m", "Agent work"]);
     assert_eq!(
         git(&["log", "-1", "--format=%an|%ae|%cn|%ce"]),
         "Repo Owner|owner@example.invalid|Repo Owner|owner@example.invalid\n"
     );
+    Ok(())
 }
 
 /// Off macOS a Seatbelt profile path is no boundary (V244-LINUX-TEAM S5a, rv-sec2 #710 C5):
@@ -418,20 +455,25 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
 /// agent's home.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
-fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
+fn a_launch_off_macos_is_refused_with_the_sandbox_code() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-refused-launch-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let [home, work] = ["home", "work"].map(|name| base.join(name));
     for folder in [&home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
     for (harness, tools) in [
         ("claude-code", true),
         ("claude-code", false),
@@ -454,7 +496,8 @@ fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
             "{harness} with tools {tools}"
         );
     }
-    assert!(std::fs::read_dir(&home).unwrap().next().is_none());
+    assert!(at_path(&home, std::fs::read_dir(&home))?.next().is_none());
+    Ok(())
 }
 
 /// An npm-built harness is a script whose first line asks `env` for its interpreter, and a
@@ -464,29 +507,44 @@ fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
 /// The stand-in asks for `sh`, which the resolver finds in the system folders on every Mac.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_tools_off() {
+fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_tools_off()
+-> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-env-script-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let [home, work] = ["home", "work"].map(|name| base.join(name));
     for folder in [&home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
-    let install = tempfile::tempdir().unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
+    let install = tempfile::tempdir()?;
     let script = install
         .path()
         .canonicalize()
         .unwrap()
         .join("lib/node_modules/@anthropic-ai/claude-code/cli.js");
-    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-    std::fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    at_path(
+        script.parent().unwrap(),
+        std::fs::create_dir_all(script.parent().unwrap()),
+    )?;
+    at_path(
+        &script,
+        std::fs::write(&script, "#!/usr/bin/env sh\nexit 0\n"),
+    )?;
+    at_path(
+        &script,
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)),
+    )?;
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable: script.clone(),
@@ -499,8 +557,8 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
         limits: LaunchLimits::default(),
     };
     let command = super::command(&request).unwrap();
-    let interpreter =
-        kernel_processes::finding::resolve("sh", &crate::tools::tools_places(None)).unwrap();
+    let interpreter = kernel_processes::finding::resolve("sh", &crate::tools::tools_places(None))
+        .map_err(|missing| missing.line())?;
     assert!(interpreter.program.is_absolute());
     let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
     let at = args
@@ -514,6 +572,7 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
         .and_then(|(_, value)| value)
         .unwrap();
     assert_eq!(path, super::TOOLS_OFF_PATH);
+    Ok(())
 }
 
 /// A headless harness whose file sits inside a project, where agents can write, never
@@ -521,27 +580,41 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
 /// same answer the team, research and sign-in launches give.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
+fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-refused-entry-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let [home, work] = ["home", "work"].map(|name| base.join(name));
     for folder in [&home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
-    let install = tempfile::tempdir().unwrap();
-    let project = install.path().canonicalize().unwrap().join("project");
-    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
+    let install = tempfile::tempdir()?;
+    let project = install.path().canonicalize()?.join("project");
+    at_path(
+        project.join(".crazyagent"),
+        std::fs::create_dir_all(project.join(".crazyagent")),
+    )?;
     let entry = project.join("bin").join("claude");
-    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-    std::fs::write(&entry, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+    at_path(
+        entry.parent().unwrap(),
+        std::fs::create_dir_all(entry.parent().unwrap()),
+    )?;
+    at_path(&entry, std::fs::write(&entry, "#!/bin/sh\nexit 0\n"))?;
+    at_path(
+        &entry,
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)),
+    )?;
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable: entry.clone(),
@@ -560,26 +633,32 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
         super::command(&request).unwrap_err(),
         super::LaunchError(line, None)
     );
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
+fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() -> TestResult {
     use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::ToolHomes;
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-agent-git-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let [home, work] = ["home", "work"].map(|name| base.join(name));
     for folder in [&home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
     let path_of = |tools: bool| -> String {
         let request = LaunchRequest {
             harness: "claude-code".into(),
@@ -615,159 +694,7 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
     );
     toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
-}
-
-/// Starts `program` with `args` as the leader of a process group of its own. Inputs: the
-/// program and its arguments. Output: the child and its group as a pid.
-#[cfg(unix)]
-fn group_leader(program: &str, args: &[&str]) -> (std::process::Child, rustix::process::Pid) {
-    use std::os::unix::process::CommandExt;
-    let child = kernel_processes::spawn_gate::spawn(
-        std::process::Command::new(program)
-            .args(args)
-            .process_group(0)
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    )
-    .unwrap();
-    let group = rustix::process::Pid::from_child(&child);
-    (child, group)
-}
-
-/// CB-2 one signal: a pane group that already answered ESRCH gets no KILL from the stop
-/// that ends it, since its number may lead a new group by then. macOS answers EPERM for a
-/// group whose last member it just reaped, so the test first waits for ESRCH.
-#[cfg(unix)]
-#[test]
-fn a_pane_group_that_answered_esrch_is_never_signalled() {
-    let (mut ended, group) = group_leader("/usr/bin/true", &[]);
-    assert!(ended.wait().unwrap().success());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the reaped group answers ESRCH"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    let calls = std::cell::RefCell::new(Vec::new());
-
-    let gone = super::end_pane_group_with(
-        kernel_processes::group::Ending::claim(ended.id()),
-        std::time::Duration::from_secs(1),
-        || {
-            let answer = rustix::process::test_kill_process_group(group);
-            calls.borrow_mut().push(("test", answer));
-            answer != Err(rustix::io::Errno::SRCH)
-        },
-        || calls.borrow_mut().push(("kill", Ok(()))),
-    );
-    assert!(gone, "a group that answered ESRCH is gone");
-    assert_eq!(
-        calls.into_inner(),
-        [("test", Err(rustix::io::Errno::SRCH))],
-        "the gone group is tested once and never signalled"
-    );
-}
-
-/// CB-2 one signal: a stop that finds its pane's group held by another path, as the
-/// terminal host's close of that pane, only watches the group and never signals it, so the
-/// group is signalled from one path only. Once the hold is gone a stop ends the group.
-#[cfg(unix)]
-#[test]
-fn a_pane_group_another_path_holds_is_only_watched() {
-    use std::os::unix::process::ExitStatusExt;
-    let (mut survivor, group) = group_leader("/bin/sleep", &["120"]);
-    let id = survivor.id();
-    let other = kernel_processes::group::Ending::claim(id).expect("no path holds a new group");
-    assert!(
-        kernel_processes::group::Ending::claim(id).is_none(),
-        "a held group has one holder"
-    );
-    assert!(
-        kernel_processes::group::Ending::claim(id).is_none(),
-        "a refused claim leaves the holder's hold in place"
-    );
-    let reaped = std::thread::spawn(move || survivor.wait());
-    let kills = std::cell::Cell::new(0);
-
-    let gone = super::end_pane_group_with(
-        None,
-        std::time::Duration::from_millis(300),
-        || rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH),
-        || kills.set(kills.get() + 1),
-    );
-    drop(other);
-    let ended = super::end_pane_group(id, kernel_processes::group::Ending::claim(id));
-    if !ended {
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    }
-    let status = reaped.join().unwrap().unwrap();
-    assert!(!gone, "the held group still runs");
-    assert_eq!(
-        kills.get(),
-        0,
-        "a stop never signals a group another path holds"
-    );
-    assert!(
-        ended,
-        "a hold freed before its group ended leaves the group claimable, and a stop ends it"
-    );
-    assert_eq!(status.signal(), Some(9), "the group ended by KILL");
-}
-
-/// CB-2 r1 F1: once a holder saw its group answer ESRCH, the number stays refused for a
-/// while, so no later path, such as a session that notices its pane gone, claims and
-/// signals a number a new group may lead by then.
-#[cfg(unix)]
-#[test]
-fn a_group_its_holder_saw_end_stays_refused_to_later_paths() {
-    use std::os::unix::process::ExitStatusExt;
-    let (mut survivor, _) = group_leader("/bin/sleep", &["120"]);
-    let id = survivor.id();
-    let held = kernel_processes::group::Ending::claim(id).expect("no path holds a new group");
-    let reaped = std::thread::spawn(move || survivor.wait());
-
-    let ended = super::end_pane_group(id, Some(held));
-    let later = kernel_processes::group::Ending::claim(id);
-    let status = reaped.join().unwrap().unwrap();
-    assert!(ended, "the holder ends its group");
-    assert_eq!(status.signal(), Some(9), "the group ended by KILL");
-    assert!(
-        later.is_none(),
-        "a number whose group just ended is refused to a later path"
-    );
-}
-
-/// CB-2 r1 F1: a path that has no hold, because another path held the group or just ended
-/// it, only watches the group for the wait and never claims or signals it itself.
-#[cfg(unix)]
-#[test]
-fn a_path_without_a_hold_only_watches_and_never_claims() {
-    use std::os::unix::process::ExitStatusExt;
-    let (mut survivor, group) = group_leader("/bin/sleep", &["120"]);
-    let id = survivor.id();
-    let reaped = std::thread::spawn(move || survivor.wait());
-    let started = std::time::Instant::now();
-
-    let ended = super::end_pane_group(id, None);
-    let watched = started.elapsed();
-    if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    }
-    let status = reaped.join().unwrap().unwrap();
-    assert!(!ended, "a path without a hold never ends the group itself");
-    assert!(
-        watched >= super::GROUP_EXIT_WAIT,
-        "it watched the whole wait: {watched:?}"
-    );
-    assert_eq!(
-        status.signal(),
-        Some(9),
-        "the group ran until the test ended it"
-    );
+    Ok(())
 }
 
 /// Collects what an output reader hands the session until it ends, a skipped line as
@@ -789,7 +716,7 @@ fn handed(lines: std::sync::mpsc::Receiver<super::Line>) -> Vec<String> {
 /// output past the old 8 MiB total never ends the session.
 #[cfg(unix)]
 #[test]
-fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() {
+fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() -> TestResult {
     let mut child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -798,15 +725,15 @@ fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() {
                 2 * super::LINE_BYTES_MAX + 1
             ))
             .stdout(std::process::Stdio::piped()),
-    )
-    .unwrap();
+    )?;
     let stdout = child.stdout.take().unwrap();
     let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
     let reader = std::thread::spawn(move || super::forward(stdout, sender));
     let got = handed(lines);
     reader.join().unwrap();
-    assert!(child.wait().unwrap().success());
+    assert!(child.wait()?.success());
     assert_eq!(got, ["skipped", "next\n", "closed"]);
+    Ok(())
 }
 
 /// Owner 11-11: a durable harness output file with a line longer than `LINE_BYTES_MAX` is
@@ -814,8 +741,8 @@ fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() {
 /// hands none of its rest.
 #[cfg(unix)]
 #[test]
-fn a_durable_output_line_past_the_line_bound_is_skipped_and_never_handed_in_part() {
-    let folder = tempfile::tempdir().unwrap();
+fn a_durable_output_line_past_the_line_bound_is_skipped_and_never_handed_in_part() -> TestResult {
+    let folder = tempfile::tempdir()?;
     let long = "x".repeat(2 * super::LINE_BYTES_MAX + 1);
     for (body, want) in [
         (
@@ -825,15 +752,16 @@ fn a_durable_output_line_past_the_line_bound_is_skipped_and_never_handed_in_part
         (long.clone(), vec!["skipped", "closed"]),
     ] {
         let path = folder.path().join("output");
-        std::fs::write(&path, &body).unwrap();
-        let output = std::fs::File::open(&path).unwrap();
-        let probe = std::fs::File::open(&path).unwrap();
+        at_path(&path, std::fs::write(&path, &body))?;
+        let output = at_path(&path, std::fs::File::open(&path))?;
+        let probe = at_path(&path, std::fs::File::open(&path))?;
         let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
         let reader = std::thread::spawn(move || super::tail(output, probe, sender));
         let got = handed(lines);
         reader.join().unwrap();
         assert_eq!(got, want, "{} bytes", body.len());
     }
+    Ok(())
 }
 
 /// L1C r1 F2: a durable output log the session has read to its end past
@@ -842,46 +770,44 @@ fn a_durable_output_line_past_the_line_bound_is_skipped_and_never_handed_in_part
 /// stopped and the log on disk stays bounded.
 #[cfg(unix)]
 #[test]
-fn a_durable_output_log_read_past_its_bound_is_emptied_and_read_on() {
+fn a_durable_output_log_read_past_its_bound_is_emptied_and_read_on() -> TestResult {
     use std::io::Write;
-    let folder = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir()?;
     let path = folder.path().join("output.log");
     let mut writer = std::fs::OpenOptions::new()
         .append(true)
         .create_new(true)
-        .open(&path)
-        .unwrap();
+        .open(&path)?;
     rustix::fs::flock(
         &writer,
         rustix::fs::FlockOperation::NonBlockingLockExclusive,
-    )
-    .unwrap();
-    writer.set_len(super::DURABLE_OUTPUT_KEPT_MAX + 1).unwrap();
-    writer.write_all(b"\n").unwrap();
+    )?;
+    writer.set_len(super::DURABLE_OUTPUT_KEPT_MAX + 1)?;
+    writer.write_all(b"\n")?;
     let output = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&path)
-        .unwrap();
-    let probe = std::fs::File::open(&path).unwrap();
+        .open(&path)?;
+    let probe = at_path(&path, std::fs::File::open(&path))?;
     let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
     let reader = std::thread::spawn(move || super::tail(output, probe, sender));
     let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::fs::metadata(&path).unwrap().len() > super::DURABLE_OUTPUT_KEPT_MAX {
+    while at_path(&path, std::fs::metadata(&path))?.len() > super::DURABLE_OUTPUT_KEPT_MAX {
         assert!(
             std::time::Instant::now() < until,
             "the log was never emptied"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-    writer.write_all(b"next\n").unwrap();
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), 5);
+    assert_eq!(at_path(&path, std::fs::metadata(&path))?.len(), 0);
+    writer.write_all(b"next\n")?;
+    assert_eq!(at_path(&path, std::fs::metadata(&path))?.len(), 5);
     std::thread::sleep(std::time::Duration::from_millis(200));
     drop(writer);
     let got = handed(lines);
     reader.join().unwrap();
     assert_eq!(got, ["skipped", "next\n", "closed"]);
+    Ok(())
 }
 
 /// L1C r1 F2: the watcher of a reattached agent, whose log nothing reads, empties the log
@@ -889,33 +815,35 @@ fn a_durable_output_log_read_past_its_bound_is_emptied_and_read_on() {
 /// names another file are left alone.
 #[cfg(unix)]
 #[test]
-fn an_unread_durable_output_log_past_its_bound_is_emptied_only_when_it_is_the_probed_file() {
-    let folder = tempfile::tempdir().unwrap();
+fn an_unread_durable_output_log_past_its_bound_is_emptied_only_when_it_is_the_probed_file()
+-> TestResult {
+    let folder = tempfile::tempdir()?;
     let path = folder.path().join("output.log");
-    let log = std::fs::File::create(&path).unwrap();
-    log.set_len(super::DURABLE_OUTPUT_KEPT_MAX).unwrap();
-    let probe = std::fs::File::open(&path).unwrap();
+    let log = at_path(&path, std::fs::File::create(&path))?;
+    log.set_len(super::DURABLE_OUTPUT_KEPT_MAX)?;
+    let probe = at_path(&path, std::fs::File::open(&path))?;
     assert!(!super::trim_unread_output(&path, &probe));
     assert_eq!(
-        std::fs::metadata(&path).unwrap().len(),
+        at_path(&path, std::fs::metadata(&path))?.len(),
         super::DURABLE_OUTPUT_KEPT_MAX
     );
 
-    log.set_len(super::DURABLE_OUTPUT_KEPT_MAX + 1).unwrap();
+    log.set_len(super::DURABLE_OUTPUT_KEPT_MAX + 1)?;
     let moved = folder.path().join("moved.log");
-    std::fs::rename(&path, &moved).unwrap();
-    std::fs::write(&path, b"other\n").unwrap();
+    at_path(&path, std::fs::rename(&path, &moved))?;
+    at_path(&path, std::fs::write(&path, b"other\n"))?;
     assert!(!super::trim_unread_output(&path, &probe));
-    assert_eq!(std::fs::read(&path).unwrap(), b"other\n");
+    assert_eq!(at_path(&path, std::fs::read(&path))?, b"other\n");
     assert_eq!(
-        std::fs::metadata(&moved).unwrap().len(),
+        at_path(&moved, std::fs::metadata(&moved))?.len(),
         super::DURABLE_OUTPUT_KEPT_MAX + 1
     );
 
-    std::fs::remove_file(&path).unwrap();
-    std::fs::rename(&moved, &path).unwrap();
+    at_path(&path, std::fs::remove_file(&path))?;
+    at_path(&moved, std::fs::rename(&moved, &path))?;
     assert!(super::trim_unread_output(&path, &probe));
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    assert_eq!(at_path(&path, std::fs::metadata(&path))?.len(), 0);
+    Ok(())
 }
 
 /// A launch request for the retry rows: no file is read, so the paths need not exist.
@@ -1121,20 +1049,26 @@ fn an_acp_driver_opens_its_session_with_the_engine_servers_it_is_given() {
 /// home filled in, and with its own tools-off switch added only while tools are off.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_switch() {
+fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_switch()
+-> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-acp-launch-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let [home, work] = ["home", "work"].map(|name| base.join(name));
     for folder in [&home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
     let launched = |tools: bool, count: usize| {
         let request = LaunchRequest {
             harness: "standin-acp".into(),
@@ -1169,6 +1103,7 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
             "--no-tools".into()
         ])
     );
+    Ok(())
 }
 
 /// fix8 QUESTION-01:49 (leader 01:49): a durable ACP agent started with no project context
@@ -1176,23 +1111,28 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
 /// block sets, as one installed with a context does.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_context_less_acp_launch_runs_with_its_home_block_variables() {
+fn a_context_less_acp_launch_runs_with_its_home_block_variables() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-acp-lone-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let home = base.join("standin-acp").join("account-1");
     let work = base.join("work");
     for folder in [&home, &work] {
-        std::fs::create_dir_all(folder).unwrap();
+        at_path(folder, std::fs::create_dir_all(folder))?;
     }
     for folder in [base.clone(), base.join("standin-acp"), home.clone()] {
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(
+            &folder,
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
     let request = LaunchRequest {
         harness: "standin-acp".into(),
         executable: PathBuf::from("/usr/bin/true"),
@@ -1218,6 +1158,7 @@ fn a_context_less_acp_launch_runs_with_its_home_block_variables() {
         .find(|(name, _)| *name == "STANDIN_ACP_CONFIG")
         .and_then(|(_, value)| value);
     assert_eq!(config, Some(home.join("config").as_os_str()));
+    Ok(())
 }
 
 /// rv-secreview b6 r2 F1: a headless agent on pipes whose harness reaches its model through
@@ -1226,20 +1167,25 @@ fn a_context_less_acp_launch_runs_with_its_home_block_variables() {
 /// `done` stands in for the engine's death.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
+fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
-    let mut launch = team_launch("claude-code");
+    let mut launch = team_launch("claude-code")?;
     let base = launch.work.parent().unwrap().to_path_buf();
     let (harness, pid) = (base.join("pid-harness"), base.join("harness-pid"));
-    std::fs::write(
+    at_path(
         &harness,
-        format!(
-            "#!/bin/sh\necho $$ > {}\nexec /bin/cat > /dev/null\n",
-            pid.display()
+        std::fs::write(
+            &harness,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nexec /bin/cat > /dev/null\n",
+                pid.display()
+            ),
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    )?;
+    at_path(
+        &harness,
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)),
+    )?;
     let token = format!(
         "{}{}",
         kernel_common::relay_names::TOKEN_PREFIX,
@@ -1280,6 +1226,7 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
         ended,
         "the keyed harness outlived the engine that held its relay"
     );
+    Ok(())
 }
 
 /// T20 code r1 F2: a listed harness on pipes that reaches its model through the relay its
@@ -1288,16 +1235,23 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
 /// holds none. Its request names no key, as a listed hand-over carries the relay's token.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_one_none() {
+fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_one_none()
+-> TestResult {
     use crate::model_gateway::relay::Relay;
     use kernel_security::secret::SecretString;
     use std::os::unix::fs::PermissionsExt;
     const URL: &str = "http://127.0.0.1:9/v1";
     for keyed in [true, false] {
-        let mut launch = team_launch("claude-code");
+        let mut launch = team_launch("claude-code")?;
         let harness = launch.work.parent().unwrap().join("listed-harness");
-        std::fs::write(&harness, "#!/bin/sh\nexec /bin/cat > /dev/null\n").unwrap();
-        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(
+            &harness,
+            std::fs::write(&harness, "#!/bin/sh\nexec /bin/cat > /dev/null\n"),
+        )?;
+        at_path(
+            &harness,
+            std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)),
+        )?;
         launch.request.executable = harness;
         launch.request.tools = false;
         launch.request.account = AccountBinding::Url {
@@ -1314,6 +1268,7 @@ fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_o
         assert_eq!(session.lifeline.is_some(), keyed, "keyed: {keyed}");
         assert!(session.stop().is_ok());
     }
+    Ok(())
 }
 
 /// T20 r1 sec F1 follow-up: a write the harness can no longer take fails that call only, as
@@ -1321,23 +1276,26 @@ fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_o
 /// fails with `launch_input_closed`, and the session still reports the harness's exit.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported() {
+fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported() -> TestResult {
     use rustix::process::{Pid, Signal, kill_process_group};
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
-    let mut launch = team_launch("claude-code");
+    let mut launch = team_launch("claude-code")?;
     let harness = launch.work.parent().unwrap().join("gone-harness");
-    std::fs::write(&harness, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
-    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    at_path(
+        &harness,
+        std::fs::write(&harness, "#!/bin/sh\nexec /bin/sleep 60\n"),
+    )?;
+    at_path(
+        &harness,
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)),
+    )?;
     launch.request.executable = harness;
     launch.request.tools = false;
     let mut session = super::Session::start(launch.request).unwrap();
     let group = Pid::from_raw(i32::try_from(session.process_group()).unwrap()).unwrap();
     kill_process_group(group, Signal::KILL).unwrap();
-    assert!(
-        !session.child.wait().unwrap().success(),
-        "the harness was killed"
-    );
+    assert!(!session.child.wait()?.success(), "the harness was killed");
 
     let sent = session.send("Are you there?");
 
@@ -1350,6 +1308,7 @@ fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported()
         assert!(next.is_ok(), "{:?}", next.as_ref().err());
         exited = matches!(next.unwrap(), Some(LaunchEvent::Exited { .. }));
     }
+    Ok(())
 }
 
 /// RV-DS241-205: a piped Claude Code agent runs with auto-memory off, in its settings and in
@@ -1357,20 +1316,25 @@ fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported()
 /// loaded by a later run as standing instructions.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_piped_claude_agent_runs_with_auto_memory_off() {
+fn a_piped_claude_agent_runs_with_auto_memory_off() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()
         .prefix("ca-memory-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = directory.path().canonicalize().unwrap();
+        .tempdir_in(at_path("/tmp", std::fs::canonicalize("/tmp"))?)?;
+    let base = directory.path().canonicalize()?;
     let [home, work] = ["home", "work"].map(|name| base.join(name));
     for folder in [&home, &work] {
-        std::fs::create_dir(folder).unwrap();
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        at_path(folder, std::fs::create_dir(folder))?;
+        at_path(
+            folder,
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+        )?;
     }
     let profile = base.join("project.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    at_path(
+        &profile,
+        std::fs::write(&profile, "(version 1)\n(allow default)\n"),
+    )?;
 
     for tools in [true, false] {
         let request = LaunchRequest {
@@ -1403,6 +1367,7 @@ fn a_piped_claude_agent_runs_with_auto_memory_off() {
         assert_eq!(settings["autoMemoryEnabled"], json!(false), "tools {tools}");
         assert_eq!(memory, [Some(std::ffi::OsStr::new("1"))], "tools {tools}");
     }
+    Ok(())
 }
 
 /// V243-FIRMLINK-SWEEP D2: an account home that is the owner's `~/.codex` is refused whichever
@@ -1410,13 +1375,16 @@ fn a_piped_claude_agent_runs_with_auto_memory_off() {
 /// still meets the forbidden folders.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_owner_folder_named_through_the_data_volume_is_no_account_home() {
+fn an_owner_folder_named_through_the_data_volume_is_no_account_home() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
-    let base = tempfile::tempdir().unwrap();
-    let owner = base.path().canonicalize().unwrap().join("owner");
+    let base = tempfile::tempdir()?;
+    let owner = base.path().canonicalize()?.join("owner");
     let codex = owner.join(".codex");
-    std::fs::create_dir_all(&codex).unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    at_path(&codex, std::fs::create_dir_all(&codex))?;
+    at_path(
+        &codex,
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)),
+    )?;
     let long =
         |path: &std::path::Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
     assert!(long(&codex).is_dir());
@@ -1429,22 +1397,27 @@ fn an_owner_folder_named_through_the_data_volume_is_no_account_home() {
         let checked = super::validate_home_for(&home, Some(&given)).map_err(|error| error.0);
         assert_eq!(checked, forbidden, "home {home:?}, HOME {given:?}");
     }
+    Ok(())
 }
 
 /// T19b 19b-4 (rv-secreview note 2): a run log keeps a harness's output up to its cap and
 /// drops the rest, so a listed research run's log stays within the bound the bundled runs
 /// keep.
 #[test]
-fn a_run_log_keeps_output_up_to_its_cap_and_drops_the_rest() {
-    let folder = tempfile::tempdir().unwrap();
+fn a_run_log_keeps_output_up_to_its_cap_and_drops_the_rest() -> TestResult {
+    let folder = tempfile::tempdir()?;
     let path = folder.path().join("events.jsonl");
-    let mut log = super::Capped::new(std::fs::File::create(&path).unwrap(), 10);
+    let mut log = super::Capped::new(at_path(&path, std::fs::File::create(&path))?, 10);
 
     log.write(b"0123456");
     log.write(b"789abcdef");
     log.write(b"ghij");
 
-    assert_eq!(std::fs::read(&path).unwrap(), b"0123456789".to_vec());
+    assert_eq!(
+        at_path(&path, std::fs::read(&path))?,
+        b"0123456789".to_vec()
+    );
+    Ok(())
 }
 
 /// The Codex native sub-agent rows: a team Codex agent interrupts a native sub-agent and
@@ -1462,6 +1435,12 @@ mod rate_limits;
 /// managed home, its sandbox predates routing, or the format or key does not fit. Inputs:
 /// the launch fixtures. Output: none; each row asserts.
 mod chatgpt_relay;
+
+/// The pane group rows: a group that answered ESRCH is never signalled, a group another
+/// path holds is only watched, a group its holder saw end stays refused, and a path without
+/// a hold never claims. Inputs: process groups the rows start. Output: none; each row
+/// asserts.
+mod pane_groups;
 
 /// Builds the Full access boundary a unit row starts in (DEC-102): the project sandbox over
 /// `project`, installed with its home, temp folder and profile in `scratch`, then marked
