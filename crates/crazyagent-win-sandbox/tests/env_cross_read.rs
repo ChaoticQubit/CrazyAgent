@@ -401,7 +401,7 @@ fn an_agent_in_one_container_reads_another_containers_environment_or_not() {
     let cross_out = String::from_utf8_lossy(&cross.stdout).into_owned();
     let own = cross_out
         .lines()
-        .find(|line| line.starts_with("READ self "))
+        .find(|line| line.contains("READ self "))
         .unwrap_or_default();
     assert!(
         own.contains("env=ok") && own.contains("mode_seen=yes") && own.contains("marker=no"),
