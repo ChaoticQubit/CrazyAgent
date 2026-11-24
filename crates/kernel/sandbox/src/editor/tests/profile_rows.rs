@@ -260,9 +260,15 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
         .is_ok()
     );
     let invalid = |grants: &Grants| {
-        profile(grants, PORT, closed(), &[], AgentFilesRule::default())
-            .unwrap_err()
-            .0
+        profile(
+            &crate::test_hooks::STAND_IN,
+            grants,
+            PORT,
+            closed(),
+            &[],
+            AgentFilesRule::default(),
+        )
+        .unwrap_err()
     };
     for locked in [extensions.as_path(), home.as_path(), mine.as_path()] {
         let locks = [locked];
