@@ -377,7 +377,10 @@ pub struct Routed {
     pub bridged: Vec<u16>,
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod handed_tests;
 #[cfg(test)]
 mod tests;
