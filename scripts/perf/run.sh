@@ -25,17 +25,36 @@ busy_slots() {
   echo "$busy"
 }
 
+build_of() {
+  if [ -d "$1/crates/kernel" ]; then echo 2.5; else echo 2.4.4; fi
+}
+
+plan() {
+  local dir index forward="" backward=""
+  local -a first=() rest=() ordered=()
+  for dir in "$@"; do
+    if [ "$(build_of "$dir")" = 2.5 ]; then first+=("$dir"); else rest+=("$dir"); fi
+  done
+  ordered=(${first[@]+"${first[@]}"} ${rest[@]+"${rest[@]}"})
+  for dir in "${ordered[@]}"; do forward="$forward,$(build_of "$dir")"; done
+  for ((index = ${#ordered[@]} - 1; index >= 0; index--)); do
+    backward="$backward,$(build_of "${ordered[$index]}")"
+  done
+  echo "order=${forward#,}$backward"
+  printf '%s\n' "${ordered[@]}"
+}
+
 load_one() {
   sysctl -n vm.loadavg | awk '{print $2}'
 }
 
 measure() {
-  local dir=$1 sprint=$2 order=$3 build=2.4.4 load1 others condition=loaded
+  local dir=$1 sprint=$2 order=$3 build load1 others condition=loaded
   local -a packages
   local word
   packages=()
   while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
-  [ -d "$dir/crates/kernel" ] && build=2.5
+  build=$(build_of "$dir")
   load1=$(load_one)
   others=$(($(busy_slots "$sprint") - 1))
   [ "$others" -ge 0 ] || others=0
@@ -101,21 +120,29 @@ if [ "${1:-}" = "--median" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--plan" ]; then
+  shift
+  plan "$@"
+  exit 0
+fi
+
 if [ "${1:-}" = "--inner" ]; then
   shift
   sprint=$1 blocks=$2 log=$3
   shift 3
-  order=A
-  [ $# -eq 2 ] && order=ABBA
-  for dir in "$@"; do
+  planned=()
+  while IFS= read -r word; do planned+=("$word"); done < <(plan "$@")
+  order=${planned[0]#order=}
+  ordered=("${planned[@]:1}")
+  for dir in "${ordered[@]}"; do
     measure "$dir" "$sprint" "$order" > /dev/null
   done
   for _ in $(seq 1 "$blocks"); do
-    for dir in "$@"; do
+    for dir in "${ordered[@]}"; do
       measure "$dir" "$sprint" "$order" >> "$log"
     done
-    for ((index = $#; index >= 1; index--)); do
-      measure "${!index}" "$sprint" "$order" >> "$log"
+    for ((index = ${#ordered[@]} - 1; index >= 0; index--)); do
+      measure "${ordered[$index]}" "$sprint" "$order" >> "$log"
     done
   done
   median "$log" $((blocks * 2))
