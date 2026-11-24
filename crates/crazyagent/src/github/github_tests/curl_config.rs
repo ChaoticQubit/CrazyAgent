@@ -206,7 +206,7 @@ fn curl_config_bytes_stay_the_same() {
         ..form
     };
     assert_eq!(
-        refused.command(unreached).err().unwrap().0,
+        refused.command(public).err().unwrap().0,
         "github_request_invalid"
     );
 }
