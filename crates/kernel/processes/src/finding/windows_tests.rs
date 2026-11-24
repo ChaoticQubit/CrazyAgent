@@ -294,10 +294,15 @@ fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_
 
 /// A canonical hook that spells the `ProgramFiles` folder as `Z:\row-programs`, a third
 /// spelling neither the variable nor `canonicalize` gives, and leaves every other path as it
-/// is. Input: the path. Output: its one spelling.
+/// is. Input: the path. Output: its one spelling, or a not-found error when the
+/// `ProgramFiles` variable is unset.
 fn programs_elsewhere(path: &Path) -> std::io::Result<PathBuf> {
-    let programs =
-        PathBuf::from(std::env::var_os("ProgramFiles").expect("the ProgramFiles variable is set"));
+    let programs = PathBuf::from(std::env::var_os("ProgramFiles").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the ProgramFiles variable is not set",
+        )
+    })?);
     Ok(match path.strip_prefix(&programs) {
         Ok(rest) => Path::new(r"Z:\row-programs").join(rest),
         Err(_) => path.to_path_buf(),
