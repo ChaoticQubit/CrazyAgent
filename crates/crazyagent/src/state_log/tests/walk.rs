@@ -214,20 +214,27 @@ fn literal_kind(body: &str) -> Option<String> {
     None
 }
 
-/// Whether `code` renames the log's draft (`Draft as`) or re-exports it with a `pub use`,
-/// which would let another file build drafts under a name [`draft_kinds`] does not read.
-/// Input: code ([`code_only`]). Output: the answer.
+/// Whether `code` renames the log's draft (`Draft as`), re-exports it or the whole log
+/// module with a `pub use`, or names it in a type alias, any of which would let a file build
+/// drafts under a name [`draft_kinds`] does not read. Input: code ([`code_only`]). Output:
+/// the answer.
 pub(super) fn hides_draft(code: &str) -> bool {
-    word_starts(code, "use").any(|at| {
-        let statement = code[at..].split(';').next().unwrap_or_default();
-        let flat = statement.split_whitespace().collect::<Vec<_>>().join(" ");
-        let before = code[..at].trim_end();
-        let before = before
-            .strip_suffix(')')
-            .and_then(|rest| rest.rsplit_once('('))
-            .map_or(before, |(head, _)| head.trim_end());
-        has_word(statement, "Draft") && (flat.contains("Draft as ") || before.ends_with("pub"))
-    })
+    let aliased = word_starts(code, "type")
+        .any(|at| has_word(code[at..].split(';').next().unwrap_or_default(), "Draft"));
+    aliased
+        || word_starts(code, "use").any(|at| {
+            let statement = code[at..].split(';').next().unwrap_or_default();
+            let flat = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+            let before = code[..at].trim_end();
+            let before = before
+                .strip_suffix(')')
+                .and_then(|rest| rest.rsplit_once('('))
+                .map_or(before, |(head, _)| head.trim_end());
+            let public = before.ends_with("pub");
+            let glob = flat.ends_with('*') && has_word(statement, "state_log");
+            (has_word(statement, "Draft") && (flat.contains("Draft as ") || public))
+                || (glob && public)
+        })
 }
 
 /// V250-L1-N1-WALK-SHAPES: the draft scan reads a kind on the line after its field, refuses
