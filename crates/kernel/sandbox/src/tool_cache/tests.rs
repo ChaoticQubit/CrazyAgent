@@ -2,8 +2,8 @@ use super::*;
 use std::process::Command;
 
 /// An agent's own tool cache goes only through the hooks' tree removal: when that removal
-/// refuses, removing the agent's caches fails with the hooks' error and the cache folder
-/// stays.
+/// refuses, removing the agent's caches fails with the hooks' code and the cache folder that
+/// stays, and the folder stays.
 #[test]
 fn an_agents_own_cache_goes_only_through_the_hooks_removal() {
     fn unpin(_parent: std::os::fd::BorrowedFd<'_>, _name: &str) {}
@@ -38,6 +38,15 @@ fn an_agents_own_cache_goes_only_through_the_hooks_removal() {
     }
     let refused = remove_agent(&hooks, runtime.path(), "project", "mate").unwrap_err();
     assert_eq!(refused.to_string(), "kept by the stand-in");
+    assert_eq!(
+        refused
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<EntryRefused>()),
+        Some(&EntryRefused {
+            code: "kept by the stand-in",
+            folder: cache.clone(),
+        })
+    );
     assert!(cache.is_dir());
 }
 
