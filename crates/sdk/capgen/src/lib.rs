@@ -313,7 +313,8 @@ fn read_bounded(path: &Path) -> Result<String, (&'static str, String)> {
 
 /// Compares generated files with a folder's files, the folder's subfolders read one level
 /// deep with paths `<subfolder>/<file>`. A name that is not UTF-8 and a folder or entry
-/// that cannot be read are drift of their own, never skipped. Inputs: the folder and the
+/// that cannot be read are drift of their own, never skipped; an empty subfolder is extra
+/// only when no generated path lies below it. Inputs: the folder and the
 /// generated files. Output: every path that differs, is missing or is extra, sorted, once.
 pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
     let mut differing = Vec::new();
@@ -335,7 +336,11 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
                 Entry::File(file) | Entry::Folder(file) => format!("{name}/{file}"),
             });
         }
-        if inner.is_empty() {
+        let expected = files.iter().any(|(path, _)| {
+            path.strip_prefix(&name)
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if inner.is_empty() && !expected {
             present.push(name);
         }
     }
