@@ -1,7 +1,7 @@
 use kernel_common::Platform;
 use markup::{
     bounded_text, plist_string, systemd_environment_quoted, systemd_quoted, systemd_specifiers,
-    systemd_unquoted, windows_quoted, xml,
+    systemd_unquoted, windows_quoted, windows_task_path, xml,
 };
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -30,6 +30,8 @@ pub const SYSTEMCTL: &str = "systemctl";
 /// The Task Scheduler command a Windows service runs.
 pub const SCHTASKS: &str = "schtasks";
 const WINDOWS_SHELL: &str = r"%SystemRoot%\System32\cmd.exe";
+/// The most characters cmd reads in one command line, the Windows task's included.
+const CMD_LINE_CHARS_MAX: usize = 8191;
 const SERVICE_PATH_EXTRAS: [&str; 6] = [
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -307,7 +309,8 @@ impl Service {
     /// Task Scheduler XML document. It runs `<executable> engine --home <root>` with the
     /// service PATH (and on macOS the defining HOME), appends output to
     /// `<root>/logs/engine.log` (through `cmd.exe` on Windows, whose task has no output
-    /// redirection) and restarts after a crash.
+    /// redirection or environment, so cmd sets the PATH there) and restarts after a crash.
+    /// A Windows task line past cmd's limit is refused.
     pub fn definition_text(&self) -> Result<String, ServiceError> {
         self.checked()?;
         let executable = self.executable.to_string_lossy();
@@ -389,6 +392,22 @@ WantedBy=default.target\n",
                     .as_deref()
                     .map(|user| format!("<UserId>{}</UserId>", xml(user)))
                     .unwrap_or_default();
+                let line = format!(
+                    "/d /s /c \"{}{} engine --home {} >> {} 2>&1\"",
+                    windows_task_path(&self.path)
+                        .map(|path| format!("set \"PATH={path}\" && "))
+                        .unwrap_or_default(),
+                    windows_quoted(&executable),
+                    windows_quoted(&root),
+                    windows_quoted(&log),
+                );
+                if WINDOWS_SHELL.len() + 1 + line.encode_utf16().count() >= CMD_LINE_CHARS_MAX {
+                    return Err(failure(format!(
+                        "the Windows logon task line is longer than cmd's \
+                         {CMD_LINE_CHARS_MAX} characters; move CrazyAgent or set \
+                         CRAZYAGENT_HOME to a shorter folder"
+                    )));
+                }
                 format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n\
 <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n\
@@ -398,12 +417,7 @@ WantedBy=default.target\n",
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure><Hidden>true</Hidden></Settings>\r\n\
   <Actions Context=\"Author\"><Exec><Command>{WINDOWS_SHELL}</Command><Arguments>{arguments}</Arguments></Exec></Actions>\r\n\
 </Task>\r\n",
-                    arguments = xml(&format!(
-                        "/d /s /c \"{} engine --home {} >> {} 2>&1\"",
-                        windows_quoted(&executable),
-                        windows_quoted(&root),
-                        windows_quoted(&log),
-                    )),
+                    arguments = xml(&line),
                 )
             }
         };
@@ -1393,67 +1407,6 @@ pub fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(
     landed.map_err(fail)
 }
 
-/// Runs a service manager query. A manager that is not on this computer, such as `systemctl`
-/// on a host without systemd, has nothing installed or running, so it reads as a failed
-/// query. Input: the command. Output: whether it succeeded and its standard output.
-fn run_quiet(command: &[OsString]) -> Result<(bool, String), ServiceError> {
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| failure("empty service command"))?;
-    let output = match crate::spawn_gate::output(
-        std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    ) {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((false, String::new()));
-        }
-        Err(error) => return Err(failure(format!("{}: {error}", program.to_string_lossy()))),
-    };
-    Ok((
-        output.status.success(),
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-    ))
-}
-
-fn run_checked(command: &[OsString]) -> Result<(), ServiceError> {
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| failure("empty service command"))?;
-    run_process(std::process::Command::new(program).args(args))
-}
-
-/// Runs one service command to its end with no input, capturing its output. Input: the
-/// command. Output: Ok on success, else an error showing its program, arguments, status
-/// and error text, never its environment.
-fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> {
-    let program = process.get_program().to_string_lossy().into_owned();
-    let output = crate::spawn_gate::output(
-        process
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .map_err(|error| failure(format!("{program}: {error}")))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let shown: Vec<_> = std::iter::once(process.get_program())
-        .chain(process.get_args())
-        .map(|part| part.to_string_lossy())
-        .collect();
-    let detail = String::from_utf8_lossy(&output.stderr);
-    Err(failure(format!(
-        "`{}` failed ({}): {}",
-        shown.join(" "),
-        output.status,
-        detail.trim()
-    )))
-}
-
 #[cfg(unix)]
 mod acl;
 /// Whether someone other than this user or root can change an entry on a path, per platform:
@@ -1468,6 +1421,14 @@ mod cli_link;
 use cli_link::link_cli_under;
 pub use cli_link::{WINDOWS_PATH_FOLDER_VARIABLE, link_cli, windows_path_command};
 
+/// The runs of service manager commands: quiet queries and checked commands whose failure
+/// names the program, arguments, status and error text. Inputs: the commands. Outputs:
+/// their answers.
+mod run;
+#[cfg(not(unix))]
+use run::run_process;
+use run::{run_checked, run_quiet};
+
 /// The escapes and quotes each manager's definition format needs, and the bounded reads
 /// that take a written definition or Info.plist apart again. Inputs: text or a path.
 /// Outputs: the escaped, quoted or read-back text.
@@ -1478,3 +1439,6 @@ pub mod test_support;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod windows_task_tests;
