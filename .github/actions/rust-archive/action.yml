@@ -74,6 +74,12 @@ runs:
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked --offline
           cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe
         fi
+    - name: Check the end-to-end bridge binary builds
+      if: inputs.os == 'macos'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo check -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge --locked --offline
     - name: Build and archive every workspace test
       shell: bash
       run: |

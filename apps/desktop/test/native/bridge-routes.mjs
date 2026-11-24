@@ -8,7 +8,9 @@ export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.me
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
 export const BRIDGE = fileURLToPath(new URL("../../src-tauri/src/bridge", import.meta.url));
 
-const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
+const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|native_enabled\(|SOCKET_OVERRIDE|state\.0/;
+const DEFAULT_ENGINE = /\brestore::engine\(\)/;
+const NOT_CONFIGURED = 'Err::<(), _>(BridgeError { code: "not_configured", cause: None, account: None })';
 const NATIVE_PARAM = /State<|AppHandle|Channel<|\bWebview\b/;
 const QUEUE_CALL = /^state\.0\.\w+\([^;]*\)\s*\.await$/;
 const IMPL_TYPES = ["NativeBridge", "BridgeQueue"];
@@ -212,7 +214,9 @@ function resolve(name, body, impls) {
 
 /** Decides how the end-to-end bridge serves one command: routed with its arguments and body,
  * or left out with the reason (it needs the native window, terminals, updates or a picker).
- * A body that is one call on the app's bridge queue calls the end-to-end bridge's queue.
+ * A body that is one call on the app's bridge queue calls the end-to-end bridge's queue, and
+ * one that acts on the default engine's folder refuses with `not_configured`, since the bridge
+ * serves an engine of its own.
  * Inputs: one command record and `methods` output, the app's bridge when omitted. Output:
  * `{ route }` or `{ skip }`; throws when a routed call does not match its type's impl block. */
 export function plan(command, impls = bridgeMethods()) {
@@ -223,6 +227,7 @@ export function plan(command, impls = bridgeMethods()) {
   if (!command.params.some((param) => param.name === "webview")) return { skip: "no window parameter" };
   if (args.some((param) => NATIVE_PARAM.test(param.type))) return { skip: "native parameter" };
   let body = command.body.slice(prefix.length).replace("ensure_default_engine().await?;", "").replace(/\s+/g, " ").trim();
+  if (DEFAULT_ENGINE.test(body)) return { route: { name: command.name, args: [], body: NOT_CONFIGURED } };
   const queued = QUEUE_CALL.test(body);
   if (queued) body = body.replace(/^state\.0\./, "state.");
   if (NATIVE_ONLY.test(body)) return { skip: "native-only body" };
@@ -249,6 +254,36 @@ function imports(source) {
   return paths;
 }
 
+/** The commands whose bridge answer is fixed, not their body: the bridge page is a browser
+ * with no native view, so the native terminal read answers false on every OS. */
+const FIXED = new Map([["desktop_native_terminal_enabled", "Ok(false)"]]);
+
+/** The names the bridge binary gives every route from its own `main.rs`, which `render` imports
+ * at the head of the route table. */
+const BIN_NAMES = ["lock", "parse", "read", "routed", "Routed"];
+
+/** Lists the item names the native sources define at their top level, which a body can name
+ * only inside the lib: functions, modules, constants, statics and types. `bridge` is left out,
+ * since `plan` rewrites it to the lib's public path. Input: the sources. Output: the names. */
+function libItems(source) {
+  const items = source.matchAll(/^(?:pub(?:\([\w:]+\))? )?(?:async )?(?:fn|mod|const|static|struct|enum|type) (\w+)/gm);
+  return new Set([...items].map((item) => item[1]).filter((name) => name !== "bridge"));
+}
+
+/** Refuses a route whose body or argument types name a lib item, which the bridge binary, a
+ * crate of its own, cannot reach: a call or path head for a lowercase name, any use of a
+ * capitalised one. String literals, paths under another root, the binary's own names and the
+ * structs an arm declares for its arguments are ignored. Inputs: the route, `libItems` output
+ * and the leaves lib.rs imports. Throws. */
+function reachable(route, items, imported) {
+  const code = [route.body, ...route.args.filter((arg) => !arg.keys).map((arg) => arg.type)].join(" ").replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  for (const name of items) {
+    if (imported.has(name) || BIN_NAMES.includes(name) || route.args.some((arg) => arg.keys && arg.type === name)) continue;
+    const use = /^[A-Z]/.test(name) ? `\\b${name}\\b` : `\\b${name}\\s*(?:\\(|::)`;
+    if (new RegExp(`(?<![\\w.:])${use}`).test(code)) throw new Error(`routes: ${route.name} names ${name}, which the bridge binary cannot reach`);
+  }
+}
+
 /** Renders the bridge binary's route table from lib.rs: one arm per routed command that parses
  * its camelCase arguments like Tauri and runs the command body on the shared bridge. An argument
  * lib.rs reads through its own `CommandArg` gets a same-named struct in the arm that takes each
@@ -256,7 +291,12 @@ function imports(source) {
  * Inputs: the lib.rs source and `methods` output, the app's bridge when omitted. Output: the
  * routes.rs text. */
 export function render(source, impls = bridgeMethods()) {
-  const routes = commands(source).map((command) => plan(command, impls)).filter((planned) => planned.route).map((planned) => planned.route);
+  const listed = commands(source);
+  const planned = listed.filter((command) => !FIXED.has(command.name)).map((command) => plan(command, impls)).filter((result) => result.route).map((result) => result.route);
+  const items = libItems(source);
+  const imported = imports(source);
+  for (const route of planned) reachable(route, items, imported);
+  const routes = [...planned, ...listed.filter((command) => FIXED.has(command.name)).map((command) => ({ name: command.name, args: [], body: FIXED.get(command.name) }))];
   const arms = routes.map(({ name, args, body }) => {
     const structs = args.filter((arg) => arg.keys).map((arg) => `            #[derive(serde::Deserialize)]
             struct ${arg.type} {
@@ -282,7 +322,7 @@ ${parse}            let result: Result<_, BridgeError> = async { ${body} }.await
   const uses = [...imports(source)].filter(([leaf]) => used.has(leaf) && leaf !== "BridgeError").map(([, path]) => `    use ${path};\n`).sort().join("");
   return `#[rustfmt::skip]
 pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json::Value) -> super::Routed {
-    use super::{lock, parse, read, routed, Routed};
+    use super::{${BIN_NAMES.join(", ")}};
     use crazyagent_desktop::bridge::BridgeError;
 ${uses}    match command {
 ${arms}        _ => Routed::Unknown,
