@@ -2,7 +2,7 @@ use std::path::Path;
 
 use kernel_plugin_host::Refused;
 use kernel_plugin_host::registry::FolderStep;
-use kernel_plugin_host::store::KeyFolder;
+use kernel_plugin_host::store::{KeyFolder, KeyStep};
 use kernel_plugin_host::store_log::{self, Captured, Event, KINDS, REDACTED_ON_REMOVE, SCHEMA};
 use kernel_storage::state_log::Draft;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -25,8 +25,8 @@ fn refusal(refused: Refused) -> EngineError {
 /// already holds a transaction on, so plugin store work always runs in a transaction and
 /// capture of its own. Inputs: the connection, outside any transaction, the engine root
 /// and the work. Output: the work's result, its refusal with nothing written, a fence
-/// refusal, a folder step's refusal after the commit, or `app_plugins_unavailable` on a
-/// connection already inside a transaction.
+/// refusal, a folder or key step's refusal after the commit, or `app_plugins_unavailable`
+/// on a connection already inside a transaction.
 pub(crate) fn logged<T>(
     db: &Connection,
     root: &Path,
@@ -38,14 +38,20 @@ pub(crate) fn logged<T>(
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
     let (value, mut captured, redacted) = logged_in(&tx, work)?;
     let folders = std::mem::take(&mut captured.folders);
+    let keys = std::mem::take(&mut captured.keys);
     if let Err(failed) = tx.commit() {
         assert!(db.is_autocommit());
-        roll_back(folders);
+        roll_back(folders, keys);
         return Err(unavailable(failed));
     }
     assert!(db.is_autocommit());
     let mut ended = Ok(());
     for step in folders {
+        if let Err(refused) = step.commit() {
+            ended = ended.and(Err(refusal(refused)));
+        }
+    }
+    for step in keys {
         if let Err(refused) = step.commit() {
             ended = ended.and(Err(refusal(refused)));
         }
@@ -59,10 +65,13 @@ pub(crate) fn logged<T>(
     ended.map(|()| value)
 }
 
-/// Puts back each plugin folder a rolled-back change moved aside, the last one first.
-/// Input: the steps. Output: none.
-fn roll_back(folders: Vec<FolderStep>) {
+/// Puts back each plugin folder a rolled-back change moved aside, the last one first, and
+/// deletes each fresh key file it wrote. Inputs: the folder and key steps. Output: none.
+fn roll_back(folders: Vec<FolderStep>, keys: Vec<KeyStep>) {
     for step in folders.into_iter().rev() {
+        step.roll_back();
+    }
+    for step in keys.into_iter().rev() {
         step.roll_back();
     }
 }
@@ -94,7 +103,10 @@ pub(crate) fn logged_in<T>(
     match done {
         Ok((value, redacted)) => Ok((value, captured, redacted)),
         Err(failed) => {
-            roll_back(std::mem::take(&mut captured.folders));
+            roll_back(
+                std::mem::take(&mut captured.folders),
+                std::mem::take(&mut captured.keys),
+            );
             Err(failed)
         }
     }

@@ -380,6 +380,7 @@ pub(crate) fn grants(
         kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)
     })?;
     assert!(captured.folders.is_empty());
+    assert!(captured.keys.is_empty());
     assert!(plugins.len() <= kernel_plugin_host::grants::GRANTS_MAX);
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }

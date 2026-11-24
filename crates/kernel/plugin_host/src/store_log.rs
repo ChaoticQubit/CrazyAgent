@@ -4,7 +4,7 @@ use crate::Refused;
 use crate::embedding::{HOSTS_MAX, valid_host, valid_name, valid_secret};
 use crate::manifest::HOST_BYTES_MAX;
 use crate::registry::{FolderStep, code_key, is_bundled, is_code_plugin, set_flag_row};
-use crate::store::{KeyRef, is_entered_key, refused, sqlite};
+use crate::store::{KeyRef, KeyStep, is_entered_key, refused, sqlite};
 use rusqlite::Connection;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -397,13 +397,14 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), Refused> {
 
 /// What one captured run recorded: the events in the order they were applied, the
 /// entered keys whose binding went, to delete once the change commits, and the plugin
-/// folder steps, to end once the transaction does. It also keeps the address of the
+/// folder and key steps, to end once the transaction does. It also keeps the address of the
 /// connection the capture was opened on.
 #[derive(Debug, Default)]
 pub struct Captured {
     pub events: Vec<Event>,
     pub forgotten_keys: Vec<KeyRef>,
     pub folders: Vec<FolderStep>,
+    pub keys: Vec<KeyStep>,
     connection: usize,
 }
 
@@ -526,6 +527,20 @@ pub(crate) fn after_commit(step: FolderStep) -> Option<FolderStep> {
         Some(Held::Capture(captured)) => {
             assert!(captured.folders.len() < CAPTURED_EVENTS_MAX);
             captured.folders.push(step);
+            None
+        }
+        _ => Some(step),
+    })
+}
+
+/// Keeps an entered key's replace for the capture's owner to end with its transaction. With
+/// no capture, as in a plugin host row's hold, the step is handed back to end at once.
+/// Input: the step. Output: none once the capture took it, else the step.
+pub(crate) fn key_after_commit(step: KeyStep) -> Option<KeyStep> {
+    CAPTURE.with(|capture| match capture.borrow_mut().as_mut() {
+        Some(Held::Capture(captured)) => {
+            assert!(captured.keys.len() < CAPTURED_EVENTS_MAX);
+            captured.keys.push(step);
             None
         }
         _ => Some(step),
