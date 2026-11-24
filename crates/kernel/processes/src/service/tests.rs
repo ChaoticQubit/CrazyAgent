@@ -1277,3 +1277,51 @@ fn may_replace_reads_the_reported_version_it_is_given() {
     assert!(own.may_replace(&hooks(|_| Some("0.0.1".to_owned()))));
     assert!(!own.may_replace(&hooks(|_| Some("99.0.0".to_owned()))));
 }
+
+/// A link planted at the name a definition used to be staged under is never followed: the
+/// file it points at keeps its bytes, and the definition lands.
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_old_staged_name_is_not_followed() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("unit.service");
+    let target = temp.path().join("elsewhere");
+    std::fs::write(&target, "kept").unwrap();
+    std::os::unix::fs::symlink(&target, temp.path().join(".unit.service.staged")).unwrap();
+
+    write_definition(&file, "[Unit]\n", Platform::Linux).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "[Unit]\n");
+}
+
+/// Two definition writes in a row both land, the second replacing the first.
+#[test]
+fn two_definition_writes_in_a_row_both_land() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("unit.service");
+
+    write_definition(&file, "first\n", Platform::Linux).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "first\n");
+    write_definition(&file, "second\n", Platform::Linux).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "second\n");
+}
+
+/// A definition write that fails, here a rename onto a folder that holds a file, leaves no
+/// staged file behind.
+#[test]
+fn a_failed_definition_write_leaves_no_staged_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("unit.service");
+    std::fs::create_dir(&file).unwrap();
+    std::fs::write(file.join("held"), "held").unwrap();
+
+    assert!(write_definition(&file, "[Unit]\n", Platform::Linux).is_err());
+
+    let left: Vec<String> = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["unit.service"]);
+}
