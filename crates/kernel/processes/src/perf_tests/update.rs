@@ -183,59 +183,58 @@ fn update_calls() {
         black_box(data_root_from(environment));
     });
     time(&row("update.read_channel", FILES), SAMPLES, || {
-        let _ = black_box(read_channel(black_box(&root)));
+        black_box(read_channel(black_box(&root)).unwrap());
     });
     time(&row("update.write_channel", ONE), SAMPLES, || {
-        let _ = black_box(write_channel(black_box(&root), Channel::Dev));
+        black_box(write_channel(black_box(&root), Channel::Dev).unwrap());
     });
     time(&row("update.parse_manifest", PARSE), SAMPLES, || {
-        let _ = black_box(parse_manifest(black_box(MANIFEST)));
+        black_box(parse_manifest(black_box(MANIFEST)).unwrap());
     });
     time(&row("update.target", FAST), SAMPLES, || {
         black_box(target());
     });
     time(&row("update.is_newer", FAST), SAMPLES, || {
-        let _ = black_box(is_newer(black_box("0.2.1"), black_box(VERSION)));
+        black_box(is_newer(black_box("0.2.1"), black_box(VERSION)).unwrap());
     });
     time(&row("update.system_tool", FILES), SAMPLES, || {
         black_box(system_tool(black_box("curl")));
     });
     time(&row("update.download", ONE), SAMPLES, || {
         let mut fetched = Vec::with_capacity(body.len());
-        let _ = black_box(download(&url, &mut fetched, DOWNLOAD_LIMIT, DOWNLOAD_TIME));
+        black_box(download(&url, &mut fetched, DOWNLOAD_LIMIT, DOWNLOAD_TIME).unwrap());
     });
     server.join().unwrap();
     time(&row("update.verify_file", ONE), SAMPLES, || {
-        let _ = black_box(verify_file(&archive, &sha256, &signature, &key, VERSION));
+        black_box(verify_file(&archive, &sha256, &signature, &key, VERSION).unwrap());
     });
     time(&row("update.key_from_config", PARSE), SAMPLES, || {
-        let _ = black_box(key_from_config(black_box(CONFIG)));
+        black_box(key_from_config(black_box(CONFIG)).unwrap());
     });
     time(&row("update.public_key", PARSE), SAMPLES, || {
-        let _ = black_box(public_key());
+        black_box(public_key().unwrap());
     });
     time(&row("update.inside_app_bundle", FAST), SAMPLES, || {
         black_box(inside_app_bundle(black_box(&script)));
     });
     let mut fresh = unpacked.iter();
     time(&row("update.unpack", ONE), SAMPLES, || {
-        let _ = black_box(unpack(&tar, fresh.next().unwrap()));
+        black_box(unpack(&tar, fresh.next().unwrap()).unwrap());
     });
     assert!(fresh.next().is_none() && unpacked[0].join("crazyagent").is_file());
     let mut fresh = pairs.iter();
     time(&row("update.swap", ONE), SAMPLES, || {
         let (install, staged) = fresh.next().unwrap();
-        let _ = black_box(swap(install, staged, VERSION));
+        black_box(swap(install, staged, VERSION).unwrap());
     });
     assert!(fresh.next().is_none() && !pairs[0].1.join("crazyagent").exists());
     time(&row("update.service_command", ONE), SAMPLES, || {
-        let _ = black_box(service_command(&script, "status"));
+        black_box(service_command(&script, "status").unwrap());
     });
     time(&row("update.service_step", ONE), SAMPLES, || {
-        let _ = black_box(service_step(
-            Command::new(&script).arg("service").arg("status"),
-            "status",
-        ));
+        black_box(
+            service_step(Command::new(&script).arg("service").arg("status"), "status").unwrap(),
+        );
     });
     time(&row("update.not_published", FAST), SAMPLES, || {
         black_box(not_published(black_box(Channel::Dev)));

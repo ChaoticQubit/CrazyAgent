@@ -154,18 +154,21 @@ fn service_calls() {
         ));
     });
     time(&row("service.Service.current_user", ONE), SAMPLES, || {
-        let _ = black_box(Service::current_user(
-            Platform::MacOs,
-            service.executable.clone(),
-            &service.root,
-            None,
-        ));
+        black_box(
+            Service::current_user(
+                Platform::MacOs,
+                service.executable.clone(),
+                &service.root,
+                None,
+            )
+            .unwrap(),
+        );
     });
     time(
         &row("service.Service.definition_text", FAST),
         SAMPLES,
         || {
-            let _ = black_box(black_box(&service).definition_text());
+            black_box(black_box(&service).definition_text().unwrap());
         },
     );
     time(
@@ -199,7 +202,7 @@ fn service_calls() {
         black_box(black_box(&service).parse_status(true, black_box(STATUS_OUTPUT)));
     });
     time(&row("service.Service.status", ONE), SAMPLES, || {
-        let _ = black_box(absent.status());
+        black_box(absent.status().unwrap());
     });
     time(&row("service.Service.current", FILES), SAMPLES, || {
         black_box(black_box(&service).current());
@@ -241,10 +244,10 @@ fn service_calls() {
         black_box(black_box(&service).may_replace(&HOOKS));
     });
     time(&row("service.Service.uninstall", ONE), SAMPLES, || {
-        let _ = black_box(absent.uninstall());
+        black_box(absent.uninstall().unwrap());
     });
     time(&row("service.Service.stop", ONE), SAMPLES, || {
-        let _ = black_box(absent.stop());
+        black_box(absent.stop().unwrap());
     });
     time(&row("service.transient", FAST), SAMPLES, || {
         black_box(transient(black_box(Path::new(ON_IMAGE))));
@@ -253,12 +256,7 @@ fn service_calls() {
         black_box(transient_refused(black_box(Path::new(ON_IMAGE))));
     });
     time(&row("service.persistable", FILES), SAMPLES, || {
-        let _ = black_box(persistable(
-            &service.executable,
-            &service.root,
-            None,
-            &HOOKS,
-        ));
+        black_box(persistable(&service.executable, &service.root, None, &HOOKS).unwrap());
     });
     let mut kept = roots[..ONE_SHOT].iter();
     time(&row("service.retire_old_copies", ONE), SAMPLES, || {
@@ -273,11 +271,7 @@ fn service_calls() {
     });
     assert!(kept.next().is_none() && !roots[ONE_SHOT].0.join("bin").exists());
     time(&row("service.write_definition", ONE), SAMPLES, || {
-        let _ = black_box(write_definition(
-            &service.definition,
-            &text,
-            Platform::MacOs,
-        ));
+        black_box(write_definition(&service.definition, &text, Platform::MacOs).unwrap());
     });
     time(
         &row("service.changeable.changeable_by_others", FILES),
@@ -301,6 +295,6 @@ fn service_calls() {
         },
     );
     time(&row("service.cli_link.link_cli", ONE), SAMPLES, || {
-        let _ = black_box(link_cli(&service.executable, &bin));
+        black_box(link_cli(&service.executable, &bin).unwrap());
     });
 }
