@@ -14,6 +14,9 @@ const REQUEST_TIME: Duration = Duration::from_secs(30);
 /// The longest one host lookup may take before its request is refused.
 pub const LOOKUP_TIME: Duration = Duration::from_secs(5);
 
+/// The most lookups still running past [`LOOKUP_TIME`] before a new lookup is refused.
+pub const LOOKUPS_MAX: usize = 4;
+
 /// curl's `--max-time`, 25 s: what is left of the 30 s request time after the lookup's 5 s
 /// bound, so the lookup and curl together never pass 30 s.
 pub const CURL_TIME: Duration = Duration::from_secs(REQUEST_TIME.as_secs() - LOOKUP_TIME.as_secs());

@@ -129,3 +129,32 @@ fn a_query_is_refused_for_the_relay_and_allowed_for_net() {
         refused()
     );
 }
+
+/// A lookup past the address cap pins only the first distinct addresses, in the lookup's
+/// order, while every address, the dropped ones too, is still checked first.
+#[test]
+fn a_lookup_past_the_address_cap_pins_the_first_distinct_addresses() {
+    use super::address::{ADDRESSES_MAX, pinned};
+    use std::net::{IpAddr, Ipv4Addr};
+    let parsed = url::Url::parse("https://many.example/x").unwrap();
+    let count = u8::try_from(ADDRESSES_MAX + 4).unwrap();
+    let many: Vec<IpAddr> = (1..=count)
+        .flat_map(|last| [IpAddr::V4(Ipv4Addr::new(140, 82, 112, last)); 2])
+        .collect();
+    assert!(many.len() > ADDRESSES_MAX + 1);
+    let refusal = || StoreError::code("refused");
+    let pin = pinned(&parsed, 443, |_, _| Ok(many.clone()), refusal);
+    let kept: Vec<String> = (1..=ADDRESSES_MAX)
+        .map(|last| format!("140.82.112.{last}"))
+        .collect();
+    assert_eq!(
+        pin,
+        Ok(Some(format!("many.example:443:{}", kept.join(","))))
+    );
+    let mut last_refused = many;
+    last_refused.push(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
+    assert_eq!(
+        pinned(&parsed, 443, |_, _| Ok(last_refused), refusal),
+        Err(refusal())
+    );
+}

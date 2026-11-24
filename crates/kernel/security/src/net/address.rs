@@ -1,5 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+/// The most distinct addresses one `resolve` line names.
+pub const ADDRESSES_MAX: usize = 16;
+
 /// Whether a kernel request may connect to one address, as an IP literal in its URL or as
 /// any address its host name resolved to: loopback and public unicast only. Refused are the
 /// unspecified, private, shared (100.64/10), IETF protocol (192.0.0/24), benchmark
