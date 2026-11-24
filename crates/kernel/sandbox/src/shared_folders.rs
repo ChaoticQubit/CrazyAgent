@@ -1,7 +1,7 @@
 use crate::access::AccessHooks;
 use crate::paths::names_one_of;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The names the engine keeps for itself in a project folder, never shared or picked.
 pub const ENGINE_NAMES: [&str; 3] = [".git", ".crazyagent", "graphify-out"];
@@ -170,8 +170,9 @@ impl SharedFolders {
 }
 
 /// Tells whether a name is one plain top-level folder name an owner may pick: not empty, at
-/// most 255 bytes, not `.` or `..`, no engine name, no control character, slash or quote.
-/// Input: the name. Output: true when plain.
+/// most 255 bytes, not `.` or `..`, no engine name, no control character, slash, quote or
+/// colon, and one plain part of a path on this system, never a drive or a root. Input: the
+/// name. Output: true when plain.
 pub fn plain_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= NAME_BYTES_MAX
@@ -180,7 +181,11 @@ pub fn plain_name(name: &str) -> bool {
         && !names_one_of(name, &ENGINE_NAMES)
         && !name
             .chars()
-            .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))
+            .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\'' | ':'))
+        && matches!(
+            Path::new(name).components().collect::<Vec<_>>()[..],
+            [Component::Normal(_)]
+        )
 }
 
 fn plain_path(path: &str) -> bool {
@@ -304,10 +309,16 @@ pub fn plan(
         .secrets
         .iter()
         .map(|path| {
-            path.split('/')
-                .fold(root.to_path_buf(), |at, part| at.join(part))
+            path.split('/').fold(root.to_path_buf(), |at, part| {
+                assert!(matches!(
+                    Path::new(part).components().collect::<Vec<_>>()[..],
+                    [Component::Normal(_)]
+                ));
+                at.join(part)
+            })
         })
         .collect();
+    assert!(revealed.iter().all(|path| path.starts_with(root)));
     if shared.plain_reach() {
         return Ok(Plan {
             revealed,
