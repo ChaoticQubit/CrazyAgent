@@ -11,17 +11,20 @@ const ALLOWED_PATH_CRATES: [&str; 7] = [
     "crazyagent-linux-supervisor",
 ];
 
-/// The Rust files under a folder, depth first. Inputs: the folder and the list to fill.
-/// Output: none; every `.rs` file found is pushed onto `found`.
-fn rust_files(folder: &Path, found: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(folder).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
+/// The Rust files under a folder, depth first, never through a link. Inputs: the folder and
+/// the list to fill. Output: every `.rs` file found is pushed onto `found`, or the error
+/// that stopped the walk.
+fn rust_files(folder: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(folder)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            rust_files(&path, found)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             found.push(path);
         }
     }
+    Ok(())
 }
 
 /// The engine or hub paths a source text names: the engine crate's name followed by a path
@@ -85,47 +88,50 @@ fn top_items(group: &str) -> Vec<&str> {
 }
 
 /// The files under a folder that name an engine or hub path. Input: the folder. Output:
-/// each file with the paths it names; the row fails when the folder holds no Rust file.
-fn naming_upward(folder: &Path) -> Vec<(PathBuf, Vec<String>)> {
+/// each file with the paths it names, or the error a read gave; the row fails when the
+/// folder holds no Rust file.
+fn naming_upward(folder: &Path) -> std::io::Result<Vec<(PathBuf, Vec<String>)>> {
     let mut files = Vec::new();
-    rust_files(folder, &mut files);
+    rust_files(folder, &mut files)?;
     assert!(!files.is_empty(), "{} holds no Rust file", folder.display());
-    files
-        .into_iter()
-        .filter_map(|path| {
-            let named = upward_paths(&std::fs::read_to_string(&path).unwrap());
-            (!named.is_empty()).then_some((path, named))
-        })
-        .collect()
+    let mut naming = Vec::new();
+    for path in files {
+        let named = upward_paths(&std::fs::read_to_string(&path)?);
+        if !named.is_empty() {
+            naming.push((path, named));
+        }
+    }
+    Ok(naming)
 }
 
 /// kernel/sandbox names no item of the engine crate or of the engine's sandbox hub, so it
 /// never grows a dependency back on them; `crazyagent_win_sandbox::` paths are allowed,
 /// as the scan reads the character before the name.
 #[test]
-fn kernel_sandbox_names_no_crazyagent_item() {
+fn kernel_sandbox_names_no_crazyagent_item() -> std::io::Result<()> {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    assert_eq!(naming_upward(&source), []);
+    assert_eq!(naming_upward(&source)?, []);
+    Ok(())
 }
 
 /// The scan behind [`kernel_sandbox_names_no_crazyagent_item`] finds a planted engine path
 /// and a planted hub path, and lets the Windows platform crate's path through, so a green
 /// layering row means the scan looked.
 #[test]
-fn the_scan_finds_a_planted_crazyagent_path() {
-    let folder = tempfile::tempdir().unwrap();
+fn the_scan_finds_a_planted_crazyagent_path() -> std::io::Result<()> {
+    let folder = tempfile::tempdir()?;
     let engine = format!("use {}::sandbox::canonical;\n", ["crazy", "agent"].concat());
     let hub = format!("use {}::policy;\n", ["crate::", "sandbox"].concat());
-    std::fs::write(folder.path().join("planted.rs"), format!("{engine}{hub}")).unwrap();
+    std::fs::write(folder.path().join("planted.rs"), format!("{engine}{hub}"))?;
     std::fs::write(
         folder.path().join("platform.rs"),
         "use crazyagent_win_sandbox::name;\n",
-    )
-    .unwrap();
-    let found = naming_upward(folder.path());
+    )?;
+    let found = naming_upward(folder.path())?;
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].0, folder.path().join("planted.rs"));
     assert_eq!(found[0].1.len(), 2, "{found:?}");
+    Ok(())
 }
 
 /// The dependency tables of a manifest, as cargo reads them at the top and under each
