@@ -83,7 +83,7 @@ export const APP_PLUGIN_REFUSALS: Record<string, string> = {
   app_plugin_account_not_found: "That account is gone. Pick another one or enter a key.",
   app_plugin_account_has_no_key: "That account has no saved API key to share. Pick another one or enter a key.",
   app_plugin_key_invalid: "That key can't be used: it is empty, too long or has a line break.",
-  app_plugin_key_store_unavailable: "CrazyAgent couldn't save the key. Nothing was saved; try again.",
+  app_plugin_key_store_unavailable: "CrazyAgent couldn't reach its saved keys. Nothing was changed; try again.",
   app_plugin_setting_unsafe: "Your settings file isn't a plain file private to you, so CrazyAgent didn't change it.",
   app_plugin_setting_unreadable: "Your settings file has an error, so CrazyAgent didn't change it. Fix the file and try again.",
   app_plugin_setting_unavailable: "CrazyAgent couldn't save this setting. Nothing was changed; try again.",

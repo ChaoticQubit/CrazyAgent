@@ -177,6 +177,7 @@ test("App plugins: every app plugin code the engine can answer has its own sente
   assert.ok(codes.includes("app_plugin_setting_unsafe") && codes.length >= 20, `the engine's codes were read: ${codes.length}`);
   for (const code of codes) assert.ok(Object.hasOwn(api.APP_PLUGIN_REFUSALS, code), `${code} has a sentence`);
   assert.match(api.appPluginRefusal({ code: "app_plugin_folder_unavailable" }), /^CrazyAgent couldn't open your plugins folder\. Try again\.$/u);
+  assert.match(api.appPluginRefusal({ code: "app_plugin_key_store_unavailable" }), /^CrazyAgent couldn't reach its saved keys\. Nothing was changed; try again\.$/u);
 });
 
 test("App plugins: each action is a direct bridge call with its own arguments, and an entered key travels only in its own call", () => {
