@@ -205,6 +205,16 @@ pub fn owner_terminal_env<'a>(
     built_env(base, terminal, &[], None)
 }
 
+/// Whether two variable names name one variable: on Windows, which reads names in any
+/// case, equal ignoring ASCII case; elsewhere equal. Inputs: the names. Output: the answer.
+fn same_name(one: &OsStr, other: &OsStr) -> bool {
+    if cfg!(windows) {
+        one.eq_ignore_ascii_case(other)
+    } else {
+        one == other
+    }
+}
+
 /// Builds the environment [`agent_process_env`] describes, setting `home` after the fixed git and
 /// TLS settings. Inputs: the base and harness variables, the home settings and the launch's
 /// exception, if any. Output: the variables, or `Invalid` when any one fails
@@ -218,7 +228,7 @@ fn built_env<'a>(
     let refused = || invalid("agent environment holds an owner secret");
     let mut env: Vec<(OsString, OsString)> = Vec::new();
     let set = |env: &mut Vec<(OsString, OsString)>, name: &OsStr, value: Option<&OsStr>| {
-        let at = env.iter().position(|(known, _)| known == name);
+        let at = env.iter().position(|(known, _)| same_name(known, name));
         match (at, value) {
             (Some(at), Some(value)) => env[at].1 = value.to_owned(),
             (Some(at), None) => {
@@ -238,16 +248,23 @@ fn built_env<'a>(
         if value.is_some_and(|value| !handed_allowed(handed, name, value)) {
             return Err(refused());
         }
-        let pinned_cache = TOOL_CACHE_ENV.iter().any(|pinned| name == *pinned)
-            && base.iter().any(|(known, _)| name == *known);
-        if name == "HOME" || name == "TMPDIR" || name == "TMPPREFIX" || pinned_cache {
+        let pinned_cache = TOOL_CACHE_ENV
+            .iter()
+            .any(|pinned| same_name(name, OsStr::new(pinned)))
+            && base
+                .iter()
+                .any(|(known, _)| same_name(name, OsStr::new(known)));
+        let pinned = ["HOME", "TMPDIR", "TMPPREFIX"]
+            .iter()
+            .any(|fixed| same_name(name, OsStr::new(fixed)));
+        if pinned || pinned_cache {
             continue;
         }
         set(&mut env, name, value);
     }
     let prefix = env
         .iter()
-        .find(|(name, _)| name == "TMPDIR")
+        .find(|(name, _)| same_name(name, OsStr::new("TMPDIR")))
         .map(|(_, tmp)| shell_tmp_prefix(Path::new(tmp)));
     if let Some(prefix) = prefix {
         set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));

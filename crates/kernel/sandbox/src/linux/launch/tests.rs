@@ -1034,3 +1034,37 @@ fn the_helper_refuses_only_the_variables_that_load_code() {
         assert!(!loader_variable(OsStr::new(name)), "{name}");
     }
 }
+
+/// A read of this machine that began before a launch marked what is kept unsupervised
+/// cannot bring the supervisor back when it ends, while a read that began after it keeps
+/// its own facts.
+#[test]
+fn a_host_read_begun_before_a_forget_never_restores_the_supervisor() {
+    use super::host::{KeptHost, forget_supervisor, publish};
+    use std::sync::Mutex;
+    use std::time::Instant;
+    let supervised = crate::host::LinuxHost {
+        nested: true,
+        scoped: true,
+        supervised: true,
+        root: false,
+        armored: false,
+        routed: false,
+    };
+    let kept: KeptHost = Mutex::new((0, Some((Instant::now(), supervised))));
+    let began = kept.lock().unwrap().0;
+    forget_supervisor(&kept);
+    publish(&kept, began, supervised);
+    let after = *kept.lock().unwrap();
+    assert!(
+        after.1.is_some_and(|(_, host)| !host.supervised),
+        "{after:?}"
+    );
+    publish(&kept, after.0, supervised);
+    assert!(
+        kept.lock()
+            .unwrap()
+            .1
+            .is_some_and(|(_, host)| host.supervised)
+    );
+}
