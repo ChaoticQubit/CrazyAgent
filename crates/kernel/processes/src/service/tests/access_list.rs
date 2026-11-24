@@ -418,9 +418,10 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
     );
 }
 
-/// An entry whose change time moves between its access listing and the `lstat` after it
-/// gets no answer, which counts as changeable, and nothing is kept for it; an entry with the
-/// same read-only access list, left alone, reads as not shared and is kept.
+/// An entry whose mode changes while its access list is read gets no answer, which counts as
+/// changeable, and nothing is kept for it; an entry with the same read-only access list, left
+/// alone, reads as not shared and is kept. A move of the change time alone is read again
+/// instead (the relisting rows).
 #[cfg(target_os = "macos")]
 #[test]
 fn an_entry_changed_while_its_access_list_is_read_gets_no_answer_and_is_not_kept() {
@@ -466,7 +467,8 @@ fn churn(folder: PathBuf, made: u32) {
         made < 64,
         "the churn ran past every listing a read may make"
     );
-    std::fs::write(folder.join(format!("churn-{made}")), "").unwrap();
+    let made_file = folder.join(format!("churn-{made}"));
+    std::fs::write(&made_file, "").unwrap_or_else(|error| panic!("write {made_file:?}: {error}"));
     acl::after_next_listing(move || churn(folder, made + 1));
 }
 
@@ -495,7 +497,8 @@ fn churn_then_open(folder: PathBuf, made: u32, alone: u32) {
         made < 64,
         "the churn ran past every listing a read may make"
     );
-    std::fs::write(folder.join(format!("churn-{made}")), "").unwrap();
+    let made_file = folder.join(format!("churn-{made}"));
+    std::fs::write(&made_file, "").unwrap_or_else(|error| panic!("write {made_file:?}: {error}"));
     let listed_alone = acl::last_listing() == [folder.clone()];
     let alone = alone + u32::from(listed_alone);
     if listed_alone && alone == 4 {
@@ -505,10 +508,47 @@ fn churn_then_open(folder: PathBuf, made: u32, alone: u32) {
                 .arg("user:nobody allow add_file,write")
                 .arg(&folder),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("chmod +a on {folder:?}: {error}"));
         assert!(status.success(), "chmod +a on {folder:?}");
     }
     acl::after_next_listing(move || churn_then_open(folder, made + 1, alone));
+}
+
+/// A folder whose access list lets another user add files, and which keeps gaining files
+/// through every listing, so its read never holds still, reads as changeable by others from
+/// its last two reads, and that answer is never kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_shared_folder_gaining_files_through_every_listing_reads_changeable_and_is_not_kept() {
+    let temp = durable_folder();
+    let folder = temp.path().join("busy");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("user:nobody allow add_file")
+            .arg(&folder),
+    )
+    .unwrap_or_else(|error| panic!("chmod +a on {folder:?}: {error}"));
+    assert!(status.success(), "chmod +a on {folder:?}");
+    settle(&[&folder, &tool]);
+    acl::take_listings();
+    let busy = folder.clone();
+    acl::after_next_listing(move || churn(busy, 0));
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    let alone = acl::take_listings()
+        .iter()
+        .filter(|listing| **listing == [folder.clone()])
+        .count();
+    assert!(
+        alone >= 5,
+        "the folder was read alone {alone} times, short of the last reads"
+    );
+    assert!(
+        !acl::kept(&folder),
+        "an answer read while the folder never held is not kept"
+    );
 }
 
 /// A folder that keeps gaining files through every relisting, and gains an access list
@@ -547,8 +587,8 @@ fn an_access_list_added_during_the_listing_still_reads_changeable() {
                 .arg("user:nobody allow add_file,write")
                 .arg(&opened),
         )
-        .unwrap();
-        assert!(status.success());
+        .unwrap_or_else(|error| panic!("chmod +a on {opened:?}: {error}"));
+        assert!(status.success(), "chmod +a on {opened:?}");
     });
     assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
 }
@@ -568,8 +608,8 @@ fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
             .arg("group:everyone deny delete")
             .arg(&folder),
     )
-    .unwrap();
-    assert!(status.success());
+    .unwrap_or_else(|error| panic!("chmod +a on {folder:?}: {error}"));
+    assert!(status.success(), "chmod +a on {folder:?}");
     assert_eq!(changeable_by_others(&tool), None);
 }
 
