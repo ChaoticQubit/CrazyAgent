@@ -67,7 +67,8 @@ static KEPT: std::sync::LazyLock<
 /// rest are read in one `/bin/ls -lide` ([`list`]); only answers read are kept, and only
 /// those [`keep`] allows, each entry read again with `lstat` after the listing. Input: the
 /// entries, none a link, each with what `lstat` read of it first. Output: one answer per
-/// entry, in order; none when it cannot be read, which counts as changeable.
+/// entry, in order; none when it cannot be read or that second `lstat` finds it changed or
+/// gone, which counts as changeable.
 #[cfg(target_os = "macos")]
 pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<bool>> {
     use std::sync::PoisonError;
@@ -113,12 +114,13 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
     }
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     for (index, (answer, direct)) in missed.into_iter().zip(read) {
-        answers[index] = answer;
         let (entry, metadata) = entries[index];
         let read_at = stamp(metadata);
         let after = std::fs::symlink_metadata(entry)
             .ok()
             .map(|again| stamp(&again));
+        let answer = answer.filter(|_| after == Some(read_at));
+        answers[index] = answer;
         if let Some(answer) = answer
             && keep(&read_at, after.as_ref(), direct, listed_secs)
         {
