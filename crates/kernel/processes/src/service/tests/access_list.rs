@@ -125,7 +125,7 @@ fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
 #[test]
 fn a_listing_of_several_entries_is_read_block_by_block() {
     let me = Some("me");
-    let line = |name: &str| format!("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
+    let line = |name: &str| format!("      7 drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
     let open = " 0: group:staff allow add_file,delete_child\n";
     let closed = " 0: group:everyone deny delete\n";
     let entries = ["/Volumes/My /c", "/c", "/Users/me/bin", "/Users/me"];
@@ -137,16 +137,28 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         line("/c")
     );
     assert_eq!(
-        acl::listed_shared_all(&text, &entries, me),
+        acl::listed_shared_all(&text, &entries, &[7; 4], me, &|_| Some(false)),
         vec![Some(false), Some(false), Some(true), Some(false)]
     );
     assert_eq!(
-        acl::listed_shared_all(&line("/Users/me"), &["/Users/me", "/gone"], me),
+        acl::listed_shared_all(
+            &line("/Users/me"),
+            &["/Users/me", "/gone"],
+            &[7; 2],
+            me,
+            &|_| Some(false)
+        ),
         vec![Some(false), None],
         "an entry the listing left out"
     );
     assert_eq!(
-        acl::listed_shared_all(&format!("{0}{0}", line("/a")), &["/a"], me),
+        acl::listed_shared_all(
+            &format!("{0}{0}", line("/a")),
+            &["/a"],
+            &[7; 1],
+            me,
+            &|_| Some(false)
+        ),
         vec![None],
         "an entry listed twice"
     );
@@ -154,7 +166,9 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         acl::listed_shared_all(
             &format!("{} 0: group:staff\n{}{open}", line("/a"), line("/b")),
             &["/a", "/b"],
-            me
+            &[7; 2],
+            me,
+            &|_| Some(false)
         ),
         vec![None, Some(true)],
         "a block that does not read fails alone"
@@ -165,11 +179,76 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         String::new(),
     ] {
         assert_eq!(
-            acl::listed_shared_all(&whole, &["/a", "/b"], me),
+            acl::listed_shared_all(&whole, &["/a", "/b"], &[7; 2], me, &|_| Some(false)),
             vec![None, None],
             "{whole:?}"
         );
     }
+}
+
+/// An entry whose block printed no access-list lines takes the direct read's answer, as
+/// `ls` prints a list it could not read exactly as no list; an entry whose block printed
+/// lines is read from them and never read again.
+#[cfg(unix)]
+#[test]
+fn an_entry_listed_with_no_access_lines_takes_the_direct_read() {
+    let me = Some("me");
+    let line = |name: &str| format!("      7 drwxr-xr-x  2 me  staff  64 Nov 14 03:33 {name}\n");
+    let text = format!("{}{} 0: user:me allow write\n", line("/a"), line("/b"));
+    let unreadable = |index: usize| {
+        assert_eq!(index, 0, "an entry with access lines was read again");
+        None
+    };
+    assert_eq!(
+        acl::listed_shared_all(&text, &["/a", "/b"], &[7; 2], me, &unreadable),
+        vec![None, Some(false)]
+    );
+}
+
+/// A direct read that finds no list confirms none; one that finds a list `ls` did not print,
+/// or cannot read, is not known, so the entry counts as changeable.
+#[cfg(unix)]
+#[test]
+fn a_direct_read_confirms_only_a_list_that_is_not_there() {
+    assert_eq!(acl::confirmed(Ok(false)), Some(false));
+    assert_eq!(acl::confirmed(Ok(true)), None);
+    assert_eq!(
+        acl::confirmed(Err(std::io::Error::from_raw_os_error(13))),
+        None
+    );
+}
+
+/// Each block's first field is the inode `ls -i` read, padded to one width; a block whose
+/// inode is not the one the entry was stamped with, or does not parse, is about another
+/// file, so its entry reads none and is never read again.
+#[cfg(unix)]
+#[test]
+fn a_block_whose_inode_is_not_the_stamped_one_reads_none() {
+    let me = Some("me");
+    let text = concat!(
+        "        2 drwxr-xr-x  2 me  staff  64 Nov 14 03:33 /a\n",
+        "609424587 -rw-r--r--  1 me  staff   0 Nov 14 03:33 /b\n",
+        " 0: group:everyone allow write\n",
+    );
+    let entries = ["/a", "/b"];
+    let never = |index: usize| -> Option<bool> { panic!("entry {index} was read again") };
+    assert_eq!(
+        acl::listed_shared_all(text, &entries, &[2, 609424587], me, &|_| Some(false)),
+        vec![Some(false), Some(true)]
+    );
+    assert_eq!(
+        acl::listed_shared_all(text, &entries, &[3, 609424587], me, &never),
+        vec![None, Some(true)]
+    );
+    assert_eq!(
+        acl::listed_shared_all(text, &entries, &[2, 609424588], me, &|_| Some(false)),
+        vec![Some(false), None]
+    );
+    let bare = "drwxr-xr-x  2 me  staff  64 Nov 14 03:33 /a\n";
+    assert_eq!(
+        acl::listed_shared_all(bare, &["/a"], &[2], me, &never),
+        vec![None]
+    );
 }
 
 /// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others
@@ -314,6 +393,26 @@ fn early_in_a_second() {
     panic!("the clock never read the first half of a second");
 }
 
+/// An answer is kept only when its entry settled before the listing, a second `lstat` after
+/// the listing finds the same device, inode and change time, and the answer came from the
+/// listing's own lines, never from the direct read.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_answer_is_kept_only_for_the_file_its_stamp_names() {
+    let stamp = (1, 2, 100, 0);
+    assert!(acl::keep(&stamp, Some(&stamp), 101));
+    assert!(!acl::keep(&stamp, Some(&stamp), 100), "not settled");
+    assert!(!acl::keep(&stamp, None, 101), "no second lstat");
+    for moved in [
+        (9, 2, 100, 0),
+        (1, 9, 100, 0),
+        (1, 2, 101, 0),
+        (1, 2, 100, 1),
+    ] {
+        assert!(!acl::keep(&stamp, Some(&moved), 101), "{moved:?}");
+    }
+}
+
 /// HFS-CTIME: an access answer is kept only when its listing started in a later second than
 /// the entry last changed, so a later change moves the stamp even where change times keep
 /// whole seconds (HFS+), and an answer read in the second of the change is never kept.
@@ -336,7 +435,8 @@ fn an_access_answer_is_kept_only_once_its_entry_changed_in_an_earlier_second() {
 /// Changes a tool's folder and reads the tool's access answer within one second, at most
 /// three tries, since a slow spawn can carry the listing into the next second: the first try
 /// gives staff `add_file` on the folder's access list, a later one flips its mode, which
-/// keeps that entry. Each read lists the folder alone. Inputs: the tool, its folder, the root.
+/// keeps that entry. Each read lists the folder alone among the root's parts. Inputs: the
+/// tool, its folder, the root.
 #[cfg(target_os = "macos")]
 fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -356,7 +456,10 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
         }
         assert_eq!(changeable_by_others(tool), Some(folder.to_path_buf()));
-        let changed = acl::take_listings();
+        let changed: Vec<Vec<PathBuf>> = acl::take_listings()
+            .into_iter()
+            .filter(|listing| listing.iter().any(|listed| listed.starts_with(root)))
+            .collect();
         assert_eq!(changed.len(), 1, "{changed:?}");
         let ours: Vec<PathBuf> = changed[0]
             .iter()
@@ -393,9 +496,15 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
             .cloned()
             .collect()
     };
+    let touching = |listings: Vec<Vec<PathBuf>>| -> Vec<Vec<PathBuf>> {
+        listings
+            .into_iter()
+            .filter(|listing| listing.iter().any(|listed| listed.starts_with(temp.path())))
+            .collect()
+    };
     acl::take_listings();
     assert_eq!(changeable_by_others(&tool), None);
-    let first = acl::take_listings();
+    let first = touching(acl::take_listings());
     assert_eq!(first.len(), 1, "one listing for every part: {first:?}");
     for part in [&tool, &folder, &kit] {
         assert!(first[0].contains(part), "{part:?} in {first:?}");
@@ -403,7 +512,6 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
 
     assert_eq!(changeable_by_others(&tool), None);
     let repeat = acl::take_listings();
-    assert!(repeat.len() <= 1, "{repeat:?}");
     assert_eq!(
         ours(&repeat),
         Vec::<PathBuf>::new(),
@@ -424,4 +532,159 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         Vec::<PathBuf>::new(),
         "read in a later second, it is kept"
     );
+}
+
+/// An entry whose change time moves between its access listing and the `lstat` after it
+/// gets no answer, which counts as changeable, and nothing is kept for it; an entry with the
+/// same read-only access list, left alone, reads as not shared and is kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_entry_changed_while_its_access_list_is_read_gets_no_answer_and_is_not_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = durable_folder();
+    let still = temp.path().join("still");
+    let swapped = temp.path().join("swapped");
+    for entry in [&still, &swapped] {
+        write_mode(entry, "", 0o644);
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("group:staff allow read")
+                .arg(entry),
+        )
+        .unwrap();
+        assert!(status.success());
+    }
+    settle(&[&still, &swapped]);
+    let read = |entry: &Path| {
+        let metadata = std::fs::symlink_metadata(entry).unwrap();
+        acl::shared_all(&[(entry, &metadata)])
+    };
+    assert_eq!(read(&still), vec![Some(false)]);
+    assert!(acl::kept(&still), "an entry left alone is kept");
+    let moved = swapped.clone();
+    acl::after_next_listing(move || {
+        std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o600)).unwrap();
+    });
+    assert_eq!(read(&swapped), vec![None]);
+    assert!(
+        !acl::kept(&swapped),
+        "an entry changed during its listing is not kept"
+    );
+}
+
+/// Makes one new file in the folder now and again after every later access listing on this
+/// thread, as parallel work keeps adding files to a shared temp or home folder. Inputs: the
+/// folder and how many files it made so far.
+#[cfg(target_os = "macos")]
+fn churn(folder: PathBuf, made: u32) {
+    assert!(
+        made < 64,
+        "the churn ran past every listing a read may make"
+    );
+    std::fs::write(folder.join(format!("churn-{made}")), "").unwrap();
+    acl::after_next_listing(move || churn(folder, made + 1));
+}
+
+/// A folder that gains files while its access list is read, on every listing, never reads
+/// as changeable by others from that churn alone: its access list never changed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_gaining_files_during_every_listing_does_not_read_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("busy");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    let busy = folder.clone();
+    acl::after_next_listing(move || churn(busy, 0));
+    assert_eq!(changeable_by_others(&tool), None);
+}
+
+/// Makes one new file in the folder now and after every later access listing on this
+/// thread, and opens the folder to another user's writes right after the fourth listing of
+/// the folder alone, once three relistings have all seen it move. Inputs: the folder, the
+/// files made so far and the listings of the folder alone so far.
+#[cfg(target_os = "macos")]
+fn churn_then_open(folder: PathBuf, made: u32, alone: u32) {
+    assert!(
+        made < 64,
+        "the churn ran past every listing a read may make"
+    );
+    std::fs::write(folder.join(format!("churn-{made}")), "").unwrap();
+    let listed_alone = acl::last_listing() == [folder.clone()];
+    let alone = alone + u32::from(listed_alone);
+    if listed_alone && alone == 4 {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("user:nobody allow add_file,write")
+                .arg(&folder),
+        )
+        .unwrap();
+        assert!(status.success(), "chmod +a on {folder:?}");
+    }
+    acl::after_next_listing(move || churn_then_open(folder, made + 1, alone));
+}
+
+/// A folder that keeps gaining files through every relisting, and gains an access list
+/// that lets another user write just after the first listing that follows them, reads as
+/// changeable by others: an answer read while the folder never held still needs a second
+/// listing that prints the same access list.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_list_added_after_the_relistings_of_a_busy_folder_still_reads_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("busy");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    acl::take_listings();
+    let busy = folder.clone();
+    acl::after_next_listing(move || churn_then_open(busy, 0, 0));
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+}
+
+/// An access list that lets another user write, added while the folder's list is read,
+/// still makes the folder read as changeable by others.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_list_added_during_the_listing_still_reads_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    let opened = folder.clone();
+    acl::after_next_listing(move || {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("user:nobody allow add_file,write")
+                .arg(&opened),
+        )
+        .unwrap();
+        assert!(status.success());
+    });
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+}
+
+/// A deny-only access list, as a macOS home folder carries (`group:everyone deny delete`),
+/// lets no one else change the folder, so it never reads as changeable by others.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("home");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("group:everyone deny delete")
+            .arg(&folder),
+    )
+    .unwrap();
+    assert!(status.success());
+    assert_eq!(changeable_by_others(&tool), None);
 }

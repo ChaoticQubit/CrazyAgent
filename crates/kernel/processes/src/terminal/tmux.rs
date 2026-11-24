@@ -684,7 +684,7 @@ impl Tmux {
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
         }
-        clear_environment(&control)?;
+        clear_unmarked_environment(&control)?;
         Ok(control)
     }
 
@@ -1066,7 +1066,37 @@ impl Tmux {
         if self.confined.is_some() {
             Self::lead_environment(&control, command)?;
         }
-        let lines = control.run(&line)?;
+        self.settle(&control, agent, control.run(&line))
+    }
+
+    /// Settles the agent window a spawn asked for: on any error, from the reply that made it
+    /// on, it kills that window through an open control, reconnecting to the live server when
+    /// a timeout closed this one, so a failed spawn leaves none. Takes the control, the agent
+    /// and the reply. Returns the pane, or the code `placed` or the reply failed with.
+    fn settle(
+        &self,
+        control: &Control,
+        agent: &AgentId,
+        made: Result<Vec<Vec<u8>>, HostError>,
+    ) -> Result<PaneRef, HostError> {
+        let settled = made.and_then(|lines| self.placed(control, agent, &lines));
+        if settled.is_err() {
+            let kill = format!("kill-window -t {}", target(agent));
+            let _ = self.control_with(false).and_then(|open| open.run(&kill));
+        }
+        settled
+    }
+
+    /// Reads where a new agent window's pane runs from the reply that made it, or asks tmux
+    /// when the reply holds no whole line, then checks the pane is served and tags it as the
+    /// agent's app. Takes the control, the agent and the reply lines. Returns the pane, or
+    /// `terminal_command_failed` or the lookup's code.
+    fn placed(
+        &self,
+        control: &Control,
+        agent: &AgentId,
+        lines: &[Vec<u8>],
+    ) -> Result<PaneRef, HostError> {
         let placed = match lines.first().and_then(|line| whole(line)) {
             Some(placed) => placed.to_vec(),
             None => control
@@ -1092,13 +1122,8 @@ impl Tmux {
             pid,
             dead: false,
         };
-        if self.served(&[first]).is_empty() {
-            let _ = control.run(&format!("kill-window -t {}", target(agent)));
-            return Err(failure("terminal_command_failed"));
-        }
-        let tagged = pane_id_valid(pane) && Self::mark_app(&control, pane, agent).is_ok();
-        if !tagged {
-            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+        let untagged = || !pane_id_valid(pane) || Self::mark_app(control, pane, agent).is_err();
+        if self.served(&[first]).is_empty() || untagged() {
             return Err(failure("terminal_command_failed"));
         }
         Ok(PaneRef {
@@ -1444,6 +1469,9 @@ mod control;
 mod groups;
 /// The tmux command lines the host builds and the screen it renders from a pane.
 mod lines;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tmux/placement_tests.rs"]
+mod placement_tests;
 mod servers;
 
 /// The tmux program a row runs, found through the resolver with the stub seed. Input: the
@@ -1461,6 +1489,9 @@ pub(crate) fn installed(engine_root: &Path) -> Option<PathBuf> {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_seams;
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tmux/reattach_tests.rs"]
+mod reattach_tests;
 #[cfg(test)]
 #[path = "tmux/tests.rs"]
 mod tests;

@@ -14,16 +14,14 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
     (folder, real)
 }
 
-/// A scratch folder for rows that need a folder kept, its real path. The stub hooks count no
-/// folder as one others can change ([`crate::finding::stub::STUB_HOOKS`]), so any temp folder
-/// is kept here; the crazyagent rows on the real hooks use a private one. Output: the folder
-/// and its real path.
+/// A scratch folder for rows that need a folder kept, its real path. The probes keep only
+/// folders no other user can change, and a temp folder such as Linux's shared `/tmp` is
+/// one others can, so the folder sits beside the test binary
+/// ([`crate::service::test_support::durable_folder`]). Output: the folder and its real path.
 fn private_scratch() -> (tempfile::TempDir, PathBuf) {
-    let folder = tempfile::Builder::new()
-        .prefix("tools-probe-")
-        .tempdir()
-        .unwrap();
+    let folder = crate::service::test_support::durable_folder();
     let real = folder.path().canonicalize().unwrap();
+    assert_eq!(crate::service::changeable_by_others(&real), None);
     (folder, real)
 }
 

@@ -58,14 +58,8 @@ fn read(
     accounts::read_key_in(root, folder(key_folder), &credential(reference)).map_err(|_| ())
 }
 
-#[cfg(unix)]
 fn sweep(root: &Path, key_folder: KeyFolder) -> Result<(), ()> {
     accounts::remove_staged_in(root, folder(key_folder)).map_err(|_| ())
-}
-
-#[cfg(not(unix))]
-fn sweep(_root: &Path, _key_folder: KeyFolder) -> Result<(), ()> {
-    Ok(())
 }
 
 fn new_ref() -> Result<String, &'static str> {
@@ -358,30 +352,29 @@ pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData,
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
 
-/// Runs the plugin store's start sweeps: what a crash left staged, then on Unix every
-/// entered plugin key file in `plugin-keys` that no binding row names, as a committed
-/// removal or a crash between a binding change and its file delete leaves it. Off Unix no
-/// plugin key file is ever saved. Inputs: the engine connection and root. Output: none.
+/// Runs the plugin store's start sweeps: what a crash left staged, then every entered plugin
+/// key file in `plugin-keys` that no binding row names, as a committed removal or a crash
+/// between a binding change and its file delete leaves it. Inputs: the engine connection and
+/// root. Output: none.
 pub(crate) fn sweep_at_start(db: &Connection, root: &Path) {
     sweep_staged(root);
-    #[cfg(unix)]
     sweep_unnamed_keys(db, root);
-    #[cfg(not(unix))]
-    let _ = db;
 }
 
 /// Deletes every entered plugin key file in `plugin-keys` that no binding row names. A name
 /// that is no entered plugin key and the account key folder are never touched, and when the
 /// binding rows do not read, no key is deleted. Inputs: the engine connection and root.
 /// Output: none.
-#[cfg(unix)]
 fn sweep_unnamed_keys(db: &Connection, root: &Path) {
     let Ok(named) = kernel_plugin_host::store::named_keys(db) else {
         return;
     };
     let kept =
         |name: &str| Ok(!kernel_plugin_host::store::is_entered_key(name) || named.contains(name));
+    #[cfg(unix)]
     let _ = accounts::settle_unkept_in(root, PLUGIN_KEYS, root, kept, |_| Ok(false));
+    #[cfg(windows)]
+    let _ = accounts::remove_unkept_in(root, PLUGIN_KEYS, kept);
 }
 
 #[cfg(all(test, unix))]

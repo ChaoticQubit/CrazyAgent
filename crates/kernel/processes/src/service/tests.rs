@@ -492,6 +492,110 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
     assert_eq!(changeable_by_others(&gone), None);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_link_chain_through_a_shared_folder_is_changeable_though_both_ends_are_private() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real"), "engine", 0o755);
+    let shared = shared_folder(&temp.path().join("shared"), 0o777);
+    let middle = shared.join("l2");
+    std::os::unix::fs::symlink(private.join("real"), &middle).unwrap();
+    let first = private.join("l1");
+    std::os::unix::fs::symlink(&middle, &first).unwrap();
+    assert_eq!(changeable_by_others(&private.join("real")), None);
+    assert_eq!(changeable_by_others(&first), Some(shared.clone()));
+    assert_eq!(changeable_past_sticky(&first), Some(shared));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_part_a_link_leads_to_is_checked_where_it_would_sit() {
+    let temp = durable_folder();
+    let private = shared_folder(&temp.path().join("private"), 0o755);
+    let shared = shared_folder(&temp.path().join("shared"), 0o777);
+    let leads = private.join("leads");
+    std::os::unix::fs::symlink(&shared, &leads).unwrap();
+    let dangling = private.join("dangling");
+    std::os::unix::fs::symlink(shared.join("gone"), &dangling).unwrap();
+    let shared = std::fs::canonicalize(&shared).unwrap();
+    for path in [leads.join("missing").join(".."), dangling] {
+        assert_eq!(
+            changeable_by_others(&path),
+            Some(shared.clone()),
+            "{path:?}"
+        );
+        assert_eq!(
+            changeable_past_sticky(&path),
+            Some(shared.clone()),
+            "{path:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_link_mid_path_through_a_shared_folder_is_changeable() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real-dir").join("engine"), "engine", 0o755);
+    let shared = shared_folder(&temp.path().join("shared"), 0o777);
+    let middle = shared.join("d2");
+    std::os::unix::fs::symlink(private.join("real-dir"), &middle).unwrap();
+    let folder = private.join("dir");
+    std::os::unix::fs::symlink(&middle, &folder).unwrap();
+    let engine = folder.join("engine");
+    assert_eq!(
+        changeable_by_others(&private.join("real-dir").join("engine")),
+        None
+    );
+    assert_eq!(changeable_by_others(&engine), Some(shared.clone()));
+    assert_eq!(changeable_past_sticky(&engine), Some(shared));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_relative_path_is_changeable_rather_than_a_crash() {
+    let relative = Path::new("crazyagent").join("engine");
+    assert_eq!(changeable_by_others(&relative), Some(relative.clone()));
+    assert_eq!(changeable_past_sticky(&relative), Some(relative));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_chain_through_private_folders_only_still_passes() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real"), "engine", 0o755);
+    let other = shared_folder(&temp.path().join("other"), 0o755);
+    let middle = other.join("l2");
+    std::os::unix::fs::symlink(private.join("real"), &middle).unwrap();
+    let first = private.join("l1");
+    std::os::unix::fs::symlink(&middle, &first).unwrap();
+    assert_eq!(changeable_by_others(&first), None);
+    assert_eq!(changeable_past_sticky(&first), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_loop_or_a_chain_past_the_hop_cap_is_changeable() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real"), "engine", 0o755);
+    let (one, two) = (private.join("loop-1"), private.join("loop-2"));
+    std::os::unix::fs::symlink(&two, &one).unwrap();
+    std::os::unix::fs::symlink(&one, &two).unwrap();
+    assert!(changeable_by_others(&one).is_some());
+    let mut next = private.join("real");
+    for hop in 0..=changeable::LINK_HOPS_MAX {
+        let link = private.join(format!("hop-{hop}"));
+        std::os::unix::fs::symlink(&next, &link).unwrap();
+        next = link;
+    }
+    assert!(changeable_by_others(&next).is_some());
+    assert!(changeable_past_sticky(&next).is_some());
+}
+
 /// Changes who may write `path` with icacls. Inputs: the path and the icacls arguments.
 #[cfg(windows)]
 fn icacls(path: &Path, change: &[&str]) {
@@ -1092,6 +1196,96 @@ fn a_group_another_account_has_as_its_primary_group_is_not_private() {
     );
 }
 
+/// Writes a user lookup configuration into a scratch `etc` folder. Inputs: the folder and
+/// the file's text.
+#[cfg(unix)]
+fn lookup_config(etc: &Path, text: &str) {
+    std::fs::write(etc.join("nsswitch.conf"), text).unwrap();
+}
+
+/// A default Ubuntu desktop lists SSSD without configuring it, so its local account file
+/// still holds every account that can have a primary group; comments and action items on
+/// the line are not sources.
+#[cfg(unix)]
+#[test]
+fn an_unconfigured_sssd_leaves_the_account_file_complete() {
+    let etc = tempfile::tempdir().unwrap();
+    for line in [
+        "passwd: files sss systemd",
+        "passwd:\tfiles sss",
+        "passwd: compat",
+        "passwd: files [NOTFOUND=return] systemd # sss is set up later",
+        "passwd: files [ NOTFOUND=return ] sss\ngroup: files ldap",
+    ] {
+        lookup_config(etc.path(), line);
+        assert!(
+            accounts_complete(etc.path()),
+            "{line:?} with no sssd folder"
+        );
+    }
+    let drop_ins = etc.path().join("sssd").join("conf.d");
+    std::fs::create_dir_all(&drop_ins).unwrap();
+    std::fs::write(drop_ins.join("README"), "").unwrap();
+    lookup_config(etc.path(), "passwd: files sss systemd");
+    assert!(
+        accounts_complete(etc.path()),
+        "a drop-in folder with no .conf"
+    );
+}
+
+/// SSSD with a configuration file or a `.conf` drop-in can serve directory accounts the
+/// local account file never lists.
+#[cfg(unix)]
+#[test]
+fn a_configured_sssd_leaves_the_account_file_incomplete() {
+    let etc = tempfile::tempdir().unwrap();
+    lookup_config(etc.path(), "passwd: files sss systemd");
+    let sssd = etc.path().join("sssd");
+    std::fs::create_dir_all(sssd.join("conf.d")).unwrap();
+    std::fs::write(sssd.join("sssd.conf"), "").unwrap();
+    assert!(!accounts_complete(etc.path()), "sssd.conf");
+    std::fs::remove_file(sssd.join("sssd.conf")).unwrap();
+    std::fs::write(sssd.join("conf.d").join("ad.conf"), "").unwrap();
+    assert!(!accounts_complete(etc.path()), "a .conf drop-in");
+}
+
+/// An SSSD folder this user cannot look into reads as configured, since a configuration
+/// there cannot be ruled out.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_sssd_folder_leaves_the_account_file_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let etc = tempfile::tempdir().unwrap();
+    lookup_config(etc.path(), "passwd: files sss systemd");
+    let sssd = shared_folder(&etc.path().join("sssd"), 0o000);
+    let complete = accounts_complete(etc.path());
+    std::fs::set_permissions(&sssd, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!complete);
+}
+
+/// Any other account source, a missing `passwd` line or a missing configuration leaves the
+/// local account file incomplete.
+#[cfg(unix)]
+#[test]
+fn a_directory_source_or_no_lookup_line_leaves_the_account_file_incomplete() {
+    let etc = tempfile::tempdir().unwrap();
+    assert!(!accounts_complete(etc.path()), "no nsswitch.conf");
+    for line in [
+        "passwd: files ldap",
+        "passwd: files systemd sss nis",
+        "passwd: winbind files",
+        "passwd: files altfiles systemd",
+        "group: files",
+        "",
+    ] {
+        lookup_config(etc.path(), line);
+        assert!(!accounts_complete(etc.path()), "{line:?}");
+    }
+}
+
 /// The accounts whose primary group is a gid are read from the local account
 /// file's fourth field; comments and blank lines are skipped, and a line that cannot be read
 /// or that pulls accounts in from elsewhere (`+` or `-`) gives none, the stricter rule.
@@ -1124,6 +1318,12 @@ mod access_list;
 /// engine and how it escapes paths. Inputs: the macOS service from [`service`]. Output:
 /// none; each row asserts on the written text.
 mod launchd;
+
+/// The Windows link rows: a junction chain through a folder others can change is
+/// changeable though both its ends are private, and a link's target walks from a drive root
+/// or counts as changeable. Inputs: real junctions made with mklink and literal targets.
+/// Output: none.
+mod windows_links;
 
 /// The Windows user PATH rows of link_cli: a folder named like PowerShell code is added
 /// once, one holding a ';' is refused, and the PATH keeps its kind and unexpanded
@@ -1197,4 +1397,52 @@ fn may_replace_reads_the_reported_version_it_is_given() {
     })));
     assert!(own.may_replace(&hooks(|_| Some("0.0.1".to_owned()))));
     assert!(!own.may_replace(&hooks(|_| Some("99.0.0".to_owned()))));
+}
+
+/// A link planted at the name a definition used to be staged under is never followed: the
+/// file it points at keeps its bytes, and the definition lands.
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_old_staged_name_is_not_followed() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("unit.service");
+    let target = temp.path().join("elsewhere");
+    std::fs::write(&target, "kept").unwrap();
+    std::os::unix::fs::symlink(&target, temp.path().join(".unit.service.staged")).unwrap();
+
+    write_definition(&file, "[Unit]\n", Platform::Linux).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "[Unit]\n");
+}
+
+/// Two definition writes in a row both land, the second replacing the first.
+#[test]
+fn two_definition_writes_in_a_row_both_land() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("unit.service");
+
+    write_definition(&file, "first\n", Platform::Linux).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "first\n");
+    write_definition(&file, "second\n", Platform::Linux).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "second\n");
+}
+
+/// A definition write that fails, here a rename onto a folder that holds a file, leaves no
+/// staged file behind.
+#[test]
+fn a_failed_definition_write_leaves_no_staged_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("unit.service");
+    std::fs::create_dir(&file).unwrap();
+    std::fs::write(file.join("held"), "held").unwrap();
+
+    assert!(write_definition(&file, "[Unit]\n", Platform::Linux).is_err());
+
+    let left: Vec<String> = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["unit.service"]);
 }

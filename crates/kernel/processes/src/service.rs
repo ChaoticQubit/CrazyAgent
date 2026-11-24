@@ -1173,8 +1173,9 @@ const ACCOUNTS_BYTES_MAX: u64 = 4 * 1024 * 1024;
 
 /// Whether this process's own group is this user's private group ([`private_group`]), read
 /// once through the system's user and group lookup, which may ask a directory server, and
-/// the local account file for the accounts whose primary group it is ([`primary_users`]);
-/// a failed lookup or read counts as not private, so its folders fall to the stricter rule.
+/// the local account file for the accounts whose primary group it is ([`primary_users`]),
+/// trusted only when no directory can add accounts it lacks ([`accounts_complete`]); a
+/// failed lookup or read counts as not private, so its folders fall to the stricter rule.
 /// Output: the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn own_group_private() -> bool {
@@ -1185,7 +1186,9 @@ pub fn own_group_private() -> bool {
             .ok()
             .flatten();
         let group = nix::unistd::Group::from_gid(gid).ok().flatten();
-        let primary = local_accounts().and_then(|text| primary_users(&text, gid.as_raw()));
+        let primary = local_accounts()
+            .filter(|_| accounts_complete(Path::new("/etc")))
+            .and_then(|text| primary_users(&text, gid.as_raw()));
         match (user, group, primary) {
             (Some(user), Some(group), Some(primary)) => {
                 private_group(&group.name, &group.mem, &primary, &user.name)
@@ -1207,6 +1210,87 @@ fn local_accounts() -> Option<String> {
         .read_to_string(&mut text)
         .ok()?;
     (text.len() as u64 <= ACCOUNTS_BYTES_MAX).then_some(text)
+}
+
+/// The largest user lookup configuration read to find where accounts come from.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+const LOOKUP_CONFIG_BYTES_MAX: u64 = 64 * 1024;
+
+/// The most entries read from SSSD's drop-in folder before it counts as configured.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+const SSSD_DROP_INS_MAX: usize = 4096;
+
+/// Whether the local account file holds every account the system's user lookup can give a
+/// primary group: every `passwd` source in `nsswitch.conf` is `files`, `compat` or
+/// `systemd`, or `sss` while SSSD has no configuration ([`sssd_unconfigured`]). Action
+/// items and comments are skipped; a missing or unreadable file, a larger one or no
+/// `passwd` line gives no. Input: the folder holding `nsswitch.conf` and `sssd`, `/etc`
+/// outside rows. Output: the answer.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+fn accounts_complete(etc: &Path) -> bool {
+    use std::io::Read as _;
+    let mut text = String::new();
+    let read = std::fs::File::open(etc.join("nsswitch.conf")).and_then(|file| {
+        file.take(LOOKUP_CONFIG_BYTES_MAX + 1)
+            .read_to_string(&mut text)
+    });
+    if read.is_err() || text.len() as u64 > LOOKUP_CONFIG_BYTES_MAX {
+        return false;
+    }
+    let mut lines = 0;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        let Some(sources) = line.trim_start().strip_prefix("passwd:") else {
+            continue;
+        };
+        lines += 1;
+        let mut in_action = false;
+        for word in sources.split_whitespace() {
+            if in_action || word.starts_with('[') {
+                in_action = !word.ends_with(']');
+                continue;
+            }
+            let local = match word {
+                "files" | "compat" | "systemd" => true,
+                "sss" => sssd_unconfigured(&etc.join("sssd")),
+                _ => false,
+            };
+            if !local {
+                return false;
+            }
+        }
+    }
+    assert!(lines <= text.len());
+    lines > 0
+}
+
+/// Whether SSSD has no configuration, so it serves no directory: `sssd.conf` is missing and
+/// the `conf.d` drop-in folder is missing or holds no `.conf` entry. Any other answer, such
+/// as a folder this user cannot look into, counts as configured. Input: the SSSD folder.
+/// Output: the answer.
+#[cfg(all(unix, any(test, not(target_os = "macos"))))]
+fn sssd_unconfigured(sssd: &Path) -> bool {
+    let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    match std::fs::metadata(sssd.join("sssd.conf")) {
+        Err(error) if missing(&error) => {}
+        _ => return false,
+    }
+    let entries = match std::fs::read_dir(sssd.join("conf.d")) {
+        Ok(entries) => entries,
+        Err(error) => return missing(&error),
+    };
+    for (seen, entry) in entries.enumerate() {
+        if seen == SSSD_DROP_INS_MAX {
+            return false;
+        }
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if entry.file_name().as_encoded_bytes().ends_with(b".conf") {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether a group named `name`, listing `members`, is the user private group of the user
@@ -1269,8 +1353,9 @@ fn definition_bytes(text: &str, platform: Platform) -> Vec<u8> {
 }
 
 /// Writes a definition file through a staged copy and a rename, in the bytes its manager
-/// reads ([`definition_bytes`]). Inputs: the file, the definition text and the platform.
-/// Output: Ok, or an error naming the file.
+/// reads ([`definition_bytes`]). The copy gets a name of its own per call, is created new
+/// and never through a link, and is removed when the write fails. Inputs: the file, the
+/// definition text and the platform. Output: Ok, or an error naming the file.
 pub fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
     let fail = |error: std::io::Error| failure(format!("{}: {error}", path.display()));
     let parent = path
@@ -1278,22 +1363,34 @@ pub fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(
         .ok_or_else(|| failure("the service definition has no folder"))?;
     std::fs::create_dir_all(parent).map_err(fail)?;
     let bytes = definition_bytes(text, platform);
+    let unique = std::hash::BuildHasher::hash_one(
+        &std::collections::hash_map::RandomState::new(),
+        std::time::SystemTime::now(),
+    );
     let staged = parent.join(format!(
-        ".{}.staged",
+        ".{}.{}.{unique:016x}.staged",
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        std::process::id()
     ));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let nofollow = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
+            .expect("O_NOFOLLOW fits an open flag");
+        options.mode(0o644).custom_flags(nofollow);
+    }
     let mut file = options.open(&staged).map_err(fail)?;
-    std::io::Write::write_all(&mut file, &bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(fail)?;
+    let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| file.sync_all());
     drop(file);
-    std::fs::rename(&staged, path).map_err(fail)
+    let landed = written.and_then(|()| std::fs::rename(&staged, path));
+    if landed.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    landed.map_err(fail)
 }
 
 /// Runs a service manager query. A manager that is not on this computer, such as `systemctl`

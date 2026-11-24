@@ -1018,6 +1018,10 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
         checked += 1;
     }
     assert!(checked >= 20, "{checked}");
+    assert_eq!(
+        sentence("app_plugin_key_store_unavailable"),
+        "CrazyAgent couldn't reach its saved keys. Nothing was changed; try again."
+    );
 }
 
 #[test]
