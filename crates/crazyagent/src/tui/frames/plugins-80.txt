@@ -19,6 +19,6 @@
                                                                                 
   Hooks  0   Claude Code on a key or URL and RCLI run none                      
   No hooks yet. Press h to add a plugin folder's hooks.                         
-                                                                                
+    App plugins                                                                 
  a Add skill  m Add MCP server  h Add hooks  Space On or off  Enter Details     
  i Import  l Tools  d Remove  Shift-←→ Sections  Esc Home                ? Help 
