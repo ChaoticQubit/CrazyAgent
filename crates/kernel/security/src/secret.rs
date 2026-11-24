@@ -3,6 +3,14 @@ use std::fmt;
 
 pub const SECRET_BYTES_MAX: usize = 1024;
 pub const TOKEN_BYTES_MAX: usize = 16_384;
+/// The most bytes of one stored item: a secret with the header of host keys stored ahead
+/// of it.
+pub const STORED_BYTES_MAX: usize = 1_536;
+/// The most bytes Windows Credential Manager keeps in one credential blob.
+pub const CREDENTIAL_BLOB_BYTES_MAX: usize = 2_560;
+
+const _: () = assert!(SECRET_BYTES_MAX < STORED_BYTES_MAX);
+const _: () = assert!(STORED_BYTES_MAX < CREDENTIAL_BLOB_BYTES_MAX);
 
 /// A secret held only in memory: one to 1024 visible ASCII bytes, or up to 16 KiB for a
 /// provider's bearer token, zeroed on drop and redacted from Debug. Input: the raw bytes.
@@ -20,6 +28,13 @@ impl SecretString {
     /// 16 KiB, or `credential_secret_invalid`.
     pub fn bearer(bytes: Vec<u8>) -> Result<Self, StoreError> {
         Self::within(bytes, TOKEN_BYTES_MAX)
+    }
+
+    /// Holds one stored item as the store reads or writes it, such as a secret with its
+    /// header of host keys. Input: the raw bytes. Output: the item of up to
+    /// `STORED_BYTES_MAX` bytes, or `credential_secret_invalid`.
+    pub fn stored(bytes: Vec<u8>) -> Result<Self, StoreError> {
+        Self::within(bytes, STORED_BYTES_MAX)
     }
 
     /// Checks the bytes against the rules above with `bytes_max` as the length bound.
