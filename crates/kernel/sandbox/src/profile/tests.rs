@@ -1,4 +1,5 @@
-use super::ProjectSandbox;
+use super::{ProfileHooks, ProjectSandbox};
+use crate::access::AccessHooks;
 use crate::error::SandboxError;
 use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{any_case, canonical, fold_case};
@@ -523,12 +524,12 @@ mod clone_confinement_tests {
     }
 }
 
-/// A worktree folder in the stand-in state's `worktrees/` as `git worktree add` leaves it,
+/// A worktree folder in the hooks' state `worktrees/` as `git worktree add` leaves it,
 /// without running git: its `.git` link names an admin folder in the project's
 /// `.git/worktrees/`, whose `gitdir` names it back, beside the project's object store.
-/// Input: the project. Output: the canonical worktree.
-fn worktree_in(project: &Path) -> PathBuf {
-    let worktree = (STAND_IN.access.state_folder)(project)
+/// Input: the hooks and the project. Output: the canonical worktree.
+fn worktree_in(hooks: &ProfileHooks, project: &Path) -> PathBuf {
+    let worktree = (hooks.access.state_folder)(project)
         .join("worktrees")
         .join("agent-1");
     let admin = project.join(".git").join("worktrees").join("agent-1");
@@ -562,7 +563,7 @@ fn a_confined_sandbox_takes_a_shared_writable_top_level_folder() {
         let sandbox =
             ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, SandboxNetwork::Open).unwrap();
         let sandbox = match confined {
-            "worktree" => sandbox.confine_to_worktree(&worktree_in(&project)),
+            "worktree" => sandbox.confine_to_worktree(&worktree_in(&STAND_IN, &project)),
             "clone" => sandbox.confine_to_clone(&clone_confinement_tests::clone_in(&project)),
             _ => unreachable!(),
         }
@@ -572,6 +573,77 @@ fn a_confined_sandbox_takes_a_shared_writable_top_level_folder() {
         let shared = sandbox.allow_shared_write(&data);
         assert!(shared.is_ok(), "{confined}: {:?}", shared.err());
         assert!(shared.unwrap().writes(&data), "{confined}");
+    }
+}
+
+/// The refusal of a shared writable folder that holds or sits in another writable root.
+const NOT_OUTSIDE: &str = "a shared writable folder must lie outside every other writable root";
+
+/// Stand-in hooks whose project state folder is the plain top-level folder `agents`, so a
+/// worktree or clone sits in a folder the owner could share. No input. Output: the hooks,
+/// kept for the rest of the run.
+fn plain_state_hooks() -> &'static ProfileHooks {
+    let access = Box::leak(Box::new(AccessHooks {
+        state_folder: |root| root.join("agents"),
+        ..ACCESS
+    }));
+    Box::leak(Box::new(ProfileHooks { access, ..STAND_IN }))
+}
+
+/// A clone folder with a real `.git` folder in the hooks' state `worktrees/`, as
+/// `confine_to_clone` takes one. Input: the hooks and the project. Output: the clone.
+fn clone_under(hooks: &ProfileHooks, project: &Path) -> PathBuf {
+    let clone = (hooks.access.state_folder)(project)
+        .join("worktrees")
+        .join("agent-1");
+    fs::create_dir_all(clone.join(".git")).unwrap();
+    canonical(&clone).unwrap()
+}
+
+/// An unconfined sandbox takes no shared writable folder: its project folder is already a
+/// writable root holding every top-level folder, so a share never comes before a
+/// confinement, where the confinement check would let it hold the worktree or clone.
+#[test]
+fn an_unconfined_sandbox_takes_no_shared_writable_folder() {
+    let (_scratch, [project, home, tmp]) = folders();
+    let data = project.join("data");
+    fs::create_dir(&data).unwrap();
+    let sandbox = ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, SandboxNetwork::Open)
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap();
+    assert!(matches!(
+        sandbox.allow_shared_write(&data),
+        Err(SandboxError::Invalid(reason)) if reason == NOT_OUTSIDE
+    ));
+}
+
+/// A sandbox confined to a worktree, and one confined to a clone, each take no shared
+/// writable folder that holds the confinement: a plain top-level folder named `agents`,
+/// where these hooks keep the project state.
+#[test]
+fn a_confined_sandbox_takes_no_shared_writable_folder_holding_its_confinement() {
+    let hooks = plain_state_hooks();
+    for confined in ["worktree", "clone"] {
+        let (_scratch, [project, home, tmp]) = folders();
+        let sandbox =
+            ProjectSandbox::new(hooks, &project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let sandbox = match confined {
+            "worktree" => sandbox.confine_to_worktree(&worktree_in(hooks, &project)),
+            "clone" => sandbox.confine_to_clone(&clone_under(hooks, &project)),
+            _ => unreachable!(),
+        }
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap();
+        let agents = canonical(&project.join("agents")).unwrap();
+        assert!(
+            matches!(
+                sandbox.allow_shared_write(&agents),
+                Err(SandboxError::Invalid(reason)) if reason == NOT_OUTSIDE
+            ),
+            "{confined}"
+        );
     }
 }
 
