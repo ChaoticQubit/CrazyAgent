@@ -973,11 +973,10 @@ fn a_forged_last_good_entry_only_adds_refusals() {
 }
 
 /// A repository the engine registered under `/usr/local` or `/opt/homebrew` is agents' to
-/// write after a good read, and should stay so when the first read of engine.db fails with
-/// no last good read. Today the fallback reads every path under an install root as
-/// installed, so a tool in such a repository is trusted until one read succeeds.
+/// write after a good read, and stays so when the first read of engine.db fails with no last
+/// good read: under a Homebrew prefix only the folders Homebrew fills count as installed,
+/// whichever install root the path lies under, `/usr` included.
 #[test]
-#[ignore = "known gap: a first failed read with no last good read trusts a repository registered under an install root"]
 fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
     let (_folder, home) = scratch();
     let canonical: fn(&Path) -> std::io::Result<PathBuf> = |path| Ok(path.to_path_buf());
@@ -987,6 +986,38 @@ fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
         let unread = with_canonical(&home, canonical, None);
         assert!(read.agent_writable(&tool), "{}", tool.display());
         assert!(unread.agent_writable(&tool), "{}", tool.display());
+    }
+}
+
+/// While the set-up projects cannot be read, the tools Homebrew places stay usable in every
+/// folder this Mac's prefixes hold them: casks, formula kegs and their frameworks, npm's
+/// global packages, links in `bin` and `opt`, and Homebrew's own code. The names are made
+/// up, so no file on this computer is read.
+#[test]
+fn every_folder_homebrew_fills_stays_usable_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let places = with_canonical(&home, |path| Ok(path.to_path_buf()), None);
+    for tool in [
+        "/opt/homebrew/Caskroom/row-cask/1.0/row-tool",
+        "/opt/homebrew/Cellar/row/1.0/bin/row-tool",
+        "/opt/homebrew/Cellar/row/1.0/Frameworks/Row.framework/bin/row-tool",
+        "/opt/homebrew/Frameworks/Row.framework/bin/row-tool",
+        "/opt/homebrew/lib/node_modules/row/bin/row-tool.js",
+        "/opt/homebrew/opt/row/bin/row-tool",
+        "/opt/homebrew/Library/Homebrew/row-tool",
+        "/opt/homebrew/sbin/row-tool",
+        "/usr/local/bin/row-tool",
+        "/usr/local/lib/node_modules/row/bin/row-tool.js",
+        "/usr/local/Cellar/row/1.0/bin/row-tool",
+        "/usr/local/Homebrew/bin/row-tool",
+    ] {
+        assert!(!places.agent_writable(Path::new(tool)), "{tool}");
+    }
+    for tool in [
+        "/opt/homebrew/var/row/row-tool",
+        "/usr/local/row/bin/row-tool",
+    ] {
+        assert!(places.agent_writable(Path::new(tool)), "{tool}");
     }
 }
 
