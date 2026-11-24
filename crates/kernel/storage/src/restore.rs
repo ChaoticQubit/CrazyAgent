@@ -196,14 +196,23 @@ pub fn restore_failed(cause: impl std::fmt::Display) -> StorageError {
 }
 
 /// Opens engine.db and holds it alone until the connection closes: exclusive locking mode
-/// and an exclusive transaction, with no wait, as the probe in changes.rs does. Any other
-/// connection, in this process or another, refuses the restore, and none can open while it
-/// runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
+/// and an exclusive transaction, with no wait. Its folder may be reached through a link, but
+/// engine.db itself never is. Any other connection refuses the restore, and none can open
+/// while it runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
 fn alone(path: &Path) -> Result<Connection, StorageError> {
+    let folder = path
+        .parent()
+        .ok_or_else(|| restore_failed("the database has no folder"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| restore_failed("the database has no name"))?;
+    let canonical = std::fs::canonicalize(folder)
+        .map_err(restore_failed)?
+        .join(name);
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let db = Connection::open_with_flags(path, flags).map_err(restore_failed)?;
+    let db = Connection::open_with_flags(&canonical, flags).map_err(restore_failed)?;
     db.busy_timeout(Duration::ZERO).map_err(restore_failed)?;
     match db.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;") {
         Ok(()) => {}
