@@ -122,7 +122,7 @@ fn the_checked_address_is_pinned_in_the_curl_config() {
         "{config}"
     );
     let v6 = IpAddr::V6(Ipv6Addr::new(0x2606, 0x50c0, 0x8000, 0, 0, 0, 0, 0x0154));
-    let (_, config) = api.command(|_, _| Ok(vec![v6])).unwrap();
+    let (_, config) = api.command(move |_, _| Ok(vec![v6])).unwrap();
     let config = String::from_utf8(config).unwrap();
     assert!(
         config.contains("resolve = \"api.github.com:443:[2606:50c0:8000::154]\"\n"),
