@@ -277,6 +277,13 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   }
 }
 
+/** Writes a path the way the Harnesses page shows it, with the macOS home folder as "~",
+ * since each test root sits under the owner's home. Input: an absolute path. Output: the
+ * shown path. */
+function shownPath(path) {
+  return path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
+}
+
 /** Reads one harness's versions row straight from the bridge. Inputs: the bridge and the id.
  * Output: the row. */
 function versions(bridge, id) {
@@ -533,7 +540,7 @@ test("Choose the codex file: a file that isn't a program is refused with the rea
     picks.push(notes, program);
     await open();
     await me.click("Choose the codex file", "button");
-    await me.waitFor("the refusal of a file that isn't a program", (text) => text.includes(`CrazyAgent won't use ${notes}. That file isn't a program this Mac can run.`));
+    await me.waitFor("the refusal of a file that isn't a program", (text) => text.includes(`CrazyAgent won't use ${shownPath(notes)}. That file isn't a program this Mac can run.`));
     await me.capture("codex-choose-refused");
     const refusedAnswer = await bridgeCall(bridge, "desktop_harness_choose_path", { id: "codex", path: notes });
     assert.equal(refusedAnswer.failure?.code, "harness_path_not_executable", "a direct bridge call is refused the same way");
@@ -543,7 +550,7 @@ test("Choose the codex file: a file that isn't a program is refused with the rea
     assert.deepEqual(await value(bridge, "desktop_harness_find", { id: "codex" }), { kind: "ready", path: program }, "sign-in uses the chosen Codex");
     rmSync(program);
     await me.click("Check again", "button");
-    await me.waitFor("the chosen file that is gone, with Forget", (text) => text.includes(`CrazyAgent won't use ${program}. There's no file there.`) && text.includes("Forget the chosen file"));
+    await me.waitFor("the chosen file that is gone, with Forget", (text) => text.includes(`CrazyAgent won't use ${shownPath(program)}. There's no file there.`) && text.includes("Forget the chosen file"));
     assert.deepEqual(await value(bridge, "desktop_harness_find", { id: "codex" }), { kind: "refused", path: program, code: "harness_path_not_found" }, "a gone chosen file is refused, never pinned");
     await me.capture("codex-chosen-gone");
     await me.click("Forget the chosen file", "button");
