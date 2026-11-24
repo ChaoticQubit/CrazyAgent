@@ -91,7 +91,7 @@ pub fn wipe<Unit: zeroize::DefaultIsZeroes>(buffer: &mut [Unit]) {
 /// Overwrites an owned secret buffer with zeros over its whole capacity, so bytes a caller
 /// cut off past its length are wiped too, and empties it while keeping its allocation.
 /// Input: the buffer. Output: none; its length is zero.
-fn wipe_owned(buffer: &mut Vec<u8>) {
+pub fn wipe_owned(buffer: &mut Vec<u8>) {
     zeroize::Zeroize::zeroize(buffer);
     assert!(buffer.is_empty());
 }
