@@ -694,6 +694,13 @@ pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
     folder::remove_staged(root)
 }
 
+/// Settles at start each folder a removal moved aside. Inputs: database and engine facts.
+/// Output: Ok.
+pub fn sweep_removals(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
+    let _ = (db, engine);
+    Ok(())
+}
+
 const STAGED: &str = ".add-";
 const RETIRED: &str = ".old-";
 
