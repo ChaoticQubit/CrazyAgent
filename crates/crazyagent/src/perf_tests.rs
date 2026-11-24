@@ -21,7 +21,7 @@ use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sdk_processes::{ServiceProvider, UpdateProvider};
 use crate::sdk_sandbox::SandboxProvider;
 use crate::security_caps::{Absent, NetCaps, SecretsCaps};
-use crate::settings_log::tests::{moved, store};
+use crate::settings_log::tests::moved;
 
 const PLUGIN: &str = "perf";
 const LEAF: &str = "perf";
@@ -183,11 +183,21 @@ fn namespace() -> String {
     format!("dev.crazyagent.e{:012x}", mixed & 0xffff_ffff_ffff)
 }
 
+/// An in-memory store with every table the engine opens and the test host's owner tables,
+/// so each statement meets the schema size a running engine has. Output: the connection.
+fn engine_store() -> rusqlite::Connection {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::state_log::fence::seed(&db);
+    db
+}
+
 /// Times the quit save the engine runs: the bundled agent-quit plugin through the
 /// generated host, the gateway and the settings provider, writing one event in the
-/// request's transaction on an in-memory store, committed after each call.
+/// request's transaction on an in-memory store with the engine's full schema, committed after
+/// each call.
 fn settings_save_quit() {
-    let mut db = store();
+    let mut db = engine_store();
     let mut saved = 0_usize;
     let mut step = || {
         let tx = db.transaction().unwrap();
@@ -209,10 +219,10 @@ fn settings_save_quit() {
 }
 
 /// Times the two sandbox settings calls through the generated host and the gateway to
-/// the engine's provider on an in-memory store: a save at the version just read,
-/// committed after each call, and a read.
+/// the engine's provider on an in-memory store with the engine's full schema: a save at the
+/// version just read, committed after each call, and a read.
 fn sandbox_settings(grants: &Grants) {
-    let mut db = store();
+    let mut db = engine_store();
     let mut saved = 0_usize;
     let mut step = || {
         let tx = db.transaction().unwrap();
