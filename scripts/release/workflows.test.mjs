@@ -626,7 +626,7 @@ test("the test farm runs on a pushed integration batch or on demand, never for a
   assert.deepEqual(block(farm, 0, "permissions").filter(Boolean), ["permissions:", "  contents: read"]);
   assert.doesNotMatch(farm, /^ {4}permissions:/m, "no job widens the token");
   const jobs = jobsOf(farm).map(({ name }) => name);
-  assert.deepEqual(jobs, [...FARM_OS.map((os) => `build-${os}`), ...FARM_OS.map((os) => `rust-${os}`), "node", "typecheck", "report"]);
+  assert.deepEqual(jobs, [...FARM_OS.map((os) => `build-${os}`), ...FARM_OS.map((os) => `rust-${os}`), "node", "typecheck", "e2e-macos", "report"]);
   for (const job of jobs) {
     const [first] = steps(farm, job);
     assert(first.startsWith("      - name: Refuse a runner that is not GitHub-hosted\n"), job);
@@ -680,9 +680,9 @@ test("every test farm part is one matrix entry that uploads one JUnit report, ev
     const job = block(jobs, 2, `rust-${os}`);
     assert(job.includes("      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}") && job.includes("      FARM_JUNIT: target/nextest/farm/junit.xml"), `rust-${os} names the part and file the shard reports`);
   }
-  const count = (os) => [builds, rust, node].flat().filter((entry) => entry.os === os).length;
-  assert(count("macos") <= 5, "at most 5 macOS jobs, even if a build overlapped its shards");
-  assert(builds.length + rust.length + node.length + 2 <= 20, "at most 20 jobs at once, typecheck and report included");
+  const count = (entries, os) => entries.filter((entry) => entry.os === os).length;
+  for (const os of FARM_OS) assert(block(jobs, 2, `rust-${os}`).includes(`    needs: build-${os}`) && block(jobs, 2, "e2e-macos").includes("    runs-on: macos-15"), `rust-${os} starts after its build, and the native e2e job is one more macOS job`);
+  assert(Math.max(count(builds, "macos"), count(rust, "macos")) + count(node, "macos") + 1 <= 5 && builds.length + rust.length + node.length + 3 <= 20, "at most 5 macOS jobs at once (the build or its shards, the node part, the native e2e job) and 20 jobs (typecheck, native e2e and report included)");
 });
 
 test("the test farm report needs every other job and fails on any that did not succeed, so a red typecheck or build never reads green in the summary (DEC-191)", async () => {

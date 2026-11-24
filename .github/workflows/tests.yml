@@ -525,9 +525,104 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  e2e-macos:
+    name: Native e2e on macos-15
+    runs-on: macos-15
+    timeout-minutes: 240
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CHROME_PLATFORM: mac-arm64
+      CHROME_SHA256: 01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - name: Free disk on the macOS runner
+        run: |
+          set -euo pipefail
+          df -h /
+          case "${ANDROID_HOME:-}" in "$HOME"/?*) rm -rf "$ANDROID_HOME" ;; *) echo "no Android SDK under $HOME" ;; esac
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Print the displays the test window sizes to
+        run: node scripts/ci/e2e-hosted.mjs --displays
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Install the pinned Chrome for Testing
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/chrome"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$CHROME_PLATFORM/chrome-$CHROME_PLATFORM.zip"
+          echo "$CHROME_SHA256  $work/chrome.zip" | shasum -a 256 -c -
+          ditto -x -k "$work/chrome.zip" "$work"
+          chrome="$work/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+          "$chrome" --version
+          echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
+      - name: Install tmux on macOS
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Build the engine
+        timeout-minutes: 60
+        run: cargo build -p crazyagent --bin crazyagent --locked
+      - name: Build the test app, its owner fixture and the e2e bridge
+        timeout-minutes: 75
+        run: cargo build -p crazyagent-desktop --features native-webdriver,e2e-bridge --bin crazyagent-desktop --bin desktop-owner-fixture --bin desktop-e2e-bridge --locked
+      - name: Select Xcode 26.3, whose git the engine runs
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
+          version="$("$git" --version)"
+          echo "engine git $git: $version"
+          IFS=. read -r major minor _ <<< "${version#git version }"
+          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
+          echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
+      - name: Run every hosted native e2e row
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          export E2E_ENGINE="$GITHUB_WORKSPACE/target/debug/crazyagent"
+          export E2E_BRIDGE="$GITHUB_WORKSPACE/target/debug/desktop-e2e-bridge"
+          export WD_APP="$GITHUB_WORKSPACE/target/debug/crazyagent-desktop"
+          export CRAZYAGENT_DESKTOP_TEST_FIXTURE="$GITHUB_WORKSPACE/target/debug/desktop-owner-fixture"
+          export E2E_HOSTED_EVIDENCE="$RUNNER_TEMP/e2e-evidence"
+          node scripts/ci/e2e-hosted.mjs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: e2e-macos-evidence
+          path: ${{ runner.temp }}/e2e-evidence
+          if-no-files-found: ignore
+          retention-days: 7
+
   report:
     name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
+    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck, e2e-macos]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
