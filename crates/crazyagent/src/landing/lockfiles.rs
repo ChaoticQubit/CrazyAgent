@@ -702,6 +702,7 @@ fn confined(
 /// first on its PATH and the stop. Output: the exit code and the kept output, or None when
 /// it could not start, was stopped by a signal or by `stop`, ran past the time or its
 /// processes were not all ended.
+#[allow(clippy::too_many_arguments)]
 fn run(
     sandbox: &ProjectSandbox,
     profile: &Path,
