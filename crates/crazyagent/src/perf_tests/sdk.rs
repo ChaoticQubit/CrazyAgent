@@ -87,11 +87,19 @@ fn namespace() -> String {
     format!("dev.crazyagent.e{:012x}", mixed & 0xffff_ffff_ffff)
 }
 
+/// An in-memory store with every table the engine opens, so each statement meets the schema
+/// size a running engine has. Output: the connection.
+fn engine_store() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    db
+}
+
 /// Times the engine's quit save of an owner command: one write of the quit settings row
-/// in the request's transaction on an in-memory store, committed after each call.
+/// in the request's transaction on an in-memory store with the engine's full schema, committed
+/// after each call.
 fn settings_save_quit() {
-    let mut db = Connection::open_in_memory().unwrap();
-    crate::quit_settings::initialize(&db).unwrap();
+    let mut db = engine_store();
     let mut saved = 0_usize;
     let mut step = || {
         let tx = db.transaction().unwrap();
@@ -112,10 +120,10 @@ fn settings_save_quit() {
 }
 
 /// Times the engine's sandbox settings save of an owner command at the version just read,
-/// committed after each call, and the owner read, on an in-memory store.
+/// committed after each call, and the owner read, on an in-memory store with the engine's
+/// full schema.
 fn sandbox_settings() {
-    let mut db = Connection::open_in_memory().unwrap();
-    crate::sandbox_settings::initialize(&db).unwrap();
+    let mut db = engine_store();
     let mut saved = 0_usize;
     let mut step = || {
         let tx = db.transaction().unwrap();
@@ -183,13 +191,16 @@ fn secrets_calls() {
 fn service_and_update() {
     let (_guard, layout) = data_root();
     let executable = std::env::current_exe().unwrap();
-    let status = Service::current_user(Platform::CURRENT, executable.clone(), &layout)
+    let status = Service::current_user(Platform::CURRENT, executable, &layout)
         .unwrap()
         .status()
         .unwrap();
     assert!(!status.installed && !status.running);
     time(&row("provider.service.status", 1), SAMPLES, || {
-        let service = Service::current_user(Platform::CURRENT, executable.clone(), &layout);
+        let executable = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .unwrap();
+        let service = Service::current_user(Platform::CURRENT, executable, &layout);
         let _ = black_box(service.map(|service| service.status()));
     });
     let channels = [Channel::Dev, Channel::Stable];
