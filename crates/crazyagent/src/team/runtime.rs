@@ -8596,6 +8596,7 @@ impl TeamRuntime {
     ) -> Result<(ProjectSandbox, PathBuf), &'static str> {
         let unavailable = |_| "lead_sandbox_unavailable";
         let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &repository
                 .canonicalize()
                 .map(kernel_sandbox::paths::one_spelling)
@@ -9617,9 +9618,10 @@ impl TeamRuntime {
             &homes,
         )
         .map_err(|e| cargo_home_problem(&e))?;
-        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
-            .and_then(|sandbox| sandbox.keep_ports(&kept))
-            .map_err(sandboxed)?;
+        let mut sandbox =
+            ProjectSandbox::new(&crate::sandbox::PROFILE_HOOKS, &root, &home, &tmp, network)
+                .and_then(|sandbox| sandbox.keep_ports(&kept))
+                .map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }

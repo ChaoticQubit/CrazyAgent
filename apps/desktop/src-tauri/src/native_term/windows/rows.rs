@@ -1670,8 +1670,14 @@ fn read_from_an_agent_container(hwnd: HWND, client: Client) -> Vec<String> {
             compiled_command(&binary, hwnd, "text")
         }
     };
-    let sandbox =
-        ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).expect("a policy");
+    let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Open,
+    )
+    .expect("a policy");
     let profile = profiles.join("agent.sb");
     let installed =
         InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off);

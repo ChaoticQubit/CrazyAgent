@@ -222,6 +222,7 @@ fn read_write_keeps_hidden_and_engine_folders_read_only() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&tmp).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &root.join(".crazyagent").join("worktrees").join("agent-1"),
         &home,
         &tmp,
@@ -329,6 +330,7 @@ fn the_closed_tops_rule_keeps_the_own_folder_open_and_refuses_names_out_of_shape
     }
     let fresh = || {
         ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &own,
             &home,
             &tmp,
@@ -480,6 +482,7 @@ fn a_wider_choice_is_refused_off_macos() {
         std::fs::create_dir_all(folder).unwrap();
     }
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &project,
         &home,
         &tmp,
@@ -512,6 +515,7 @@ fn a_launch_working_in_the_project_folder_itself_keeps_its_secrets_closed() {
         std::fs::create_dir_all(folder).unwrap();
     }
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &project,
         &home,
         &tmp,

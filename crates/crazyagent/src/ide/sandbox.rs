@@ -114,12 +114,18 @@ pub fn profile(
         .ok_or_else(|| failure("ide_sandbox_invalid"))?;
     let homes = ToolHomes::owner().map_err(invalid)?;
     let closed = matches!(&network, SandboxNetwork::Only(remotes) if remotes.is_empty());
-    let sandbox = ProjectSandbox::new(grants.root, grants.home, grants.tmp, network)
-        .and_then(|sandbox| sandbox.keep_ports(kept_ports))
-        .and_then(|sandbox| sandbox.allow_read(grants.build))
-        .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
-        .map(ProjectSandbox::keep_owner_config)
-        .map_err(invalid)?;
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        grants.root,
+        grants.home,
+        grants.tmp,
+        network,
+    )
+    .and_then(|sandbox| sandbox.keep_ports(kept_ports))
+    .and_then(|sandbox| sandbox.allow_read(grants.build))
+    .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
+    .map(ProjectSandbox::keep_owner_config)
+    .map_err(invalid)?;
     let mut text = sandbox.profile();
     let base = text.len();
     text.push_str(&format!(
@@ -129,7 +135,11 @@ pub fn profile(
     for folder in std::iter::once(&grants.home).chain(grants.writable.iter()) {
         text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
     }
-    let regranted = crate::sandbox::regranted_denies(grants.home, grants.writable);
+    let regranted = crate::sandbox::regranted_denies(
+        &crate::sandbox::PROFILE_HOOKS,
+        grants.home,
+        grants.writable,
+    );
     text.push_str(")\n");
     text.push_str(regranted.trim_end());
     if !grants.readable.is_empty() || !grants.read_only.is_empty() {

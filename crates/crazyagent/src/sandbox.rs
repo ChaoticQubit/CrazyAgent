@@ -15,6 +15,7 @@ use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::ports::{
     BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
 };
+use kernel_sandbox::profile::ProfileHooks;
 use kernel_sandbox::profile::consts::*;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
@@ -852,6 +853,55 @@ pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
     untracked: access_untracked,
 };
 
+/// The engine's real profile hooks, the only [`ProfileHooks`] production code passes: its
+/// access and toolchain hooks, and the engine's own folder and file names, agent home lists
+/// and checks the Seatbelt rules name.
+pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
+    access: &ACCESS_HOOKS,
+    toolchain: &TOOLCHAIN_HOOKS,
+    linked_prefix: crate::agent_git::LINKED_PREFIX,
+    teammates_folder: crate::agent_git::TEAMMATES_FOLDER,
+    is_agent_branch: crate::agent_git::is_agent_branch,
+    #[cfg(unix)]
+    claude_bash_preludes: &crate::agent_home::CLAUDE_BASH_PRELUDES,
+    project_file: crate::agent_home::PROJECT_FILE,
+    claude_instruction_file: crate::agent_home::Harness::Claude.instruction_file(),
+    codex_instruction_file: crate::agent_home::Harness::Codex.instruction_file(),
+    zsh_startup: &crate::agent_home::ZSH_STARTUP,
+    zsh_compiled: crate::agent_home::ZSH_COMPILED,
+    sh_startup: &crate::agent_home::SH_STARTUP,
+    pinned_entries: crate::agent_home::pinned_entries,
+    kept_entries: crate::agent_home::kept_entries,
+    relay_lead_part: crate::coord::relay::LEAD_PART,
+    relay_plugin_folder: crate::coord::relay::PLUGIN_FOLDER,
+    relay_roster_file: crate::coord::relay::ROSTER_FILE,
+    configured_sdk_homes_folder: crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
+    native_profiles_folder: crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
+    #[cfg(unix)]
+    listed_slot_key: crate::engine::bootstrap::listed_slot_key,
+    #[cfg(unix)]
+    holds_no_sign_in: profile_holds_no_sign_in,
+    in_crazyagent_folder: crate::harnesses::in_crazyagent_folder,
+    node_prefix: crate::harnesses::node_prefix,
+    launch_state: crate::launch_context::STATE,
+    launch_lock: crate::launch_context::LOCK,
+    codex_system_skills: crate::launch_context::CODEX_SYSTEM_SKILLS,
+    crazyagent_directory: crate::projects_home::CRAZYAGENT_DIRECTORY,
+    #[cfg(unix)]
+    binding_path: crate::team::caller::binding_path,
+    mailbox_folder: crate::team::tool::MAILBOX_FOLDER,
+    reply_suffix: crate::team::tool::REPLY_SUFFIX,
+    answer_part_suffix: crate::team::tool::ANSWER_PART_SUFFIX,
+    key_folders: &crate::storage::accounts::KEY_FOLDERS,
+};
+
+/// Tells whether a folder holds no sign-in's record, as a listed master session's slot home
+/// must. Input: the folder. Output: the answer.
+#[cfg(unix)]
+fn profile_holds_no_sign_in(folder: &Path) -> bool {
+    crate::harnesses::launch::holds_no_sign_in(folder).is_ok()
+}
+
 /// The engine's real grant hooks, the only [`GrantHooks`] production code passes: the
 /// harness folders ([`harness_folders`]) and the IDE ports the engine recorded
 /// ([`grants::ide_ports`]).
@@ -961,6 +1011,7 @@ pub fn linux_other_git(project: &Path) -> bool {
 /// those roots, and network per [`SandboxNetwork`].
 #[derive(Debug, Clone)]
 pub struct ProjectSandbox {
+    hooks: &'static ProfileHooks,
     project_root: PathBuf,
     agent_home: PathBuf,
     agent_tmp: PathBuf,
@@ -1033,15 +1084,17 @@ impl ProjectSandbox {
     /// owner's home, do not sit inside a harness's own folder there, and neither hold nor
     /// sit inside an owner or system secret path. Output: the sandbox, or `Invalid`.
     pub fn new(
+        hooks: &'static ProfileHooks,
         project_root: &Path,
         agent_home: &Path,
         agent_tmp: &Path,
         network: SandboxNetwork,
     ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
-        let secrets: Vec<PathBuf> = owner_secrets(&owner, &harness_folders()).collect();
+        let secrets: Vec<PathBuf> =
+            owner_secrets(&owner, &(hooks.access.harness_folders)()).collect();
         for root in [project_root, agent_home, agent_tmp] {
-            granted_root(root, &owner, &secrets, &harness_folders())?;
+            granted_root(root, &owner, &secrets, &(hooks.access.harness_folders)())?;
         }
         if let SandboxNetwork::Only(remotes) = &network
             && (remotes.len() > REMOTES_MAX
@@ -1052,6 +1105,7 @@ impl ProjectSandbox {
             return Err(invalid("network remotes must be 1..8 nonzero ports"));
         }
         Ok(Self {
+            hooks,
             project_root: project_root.to_path_buf(),
             agent_home: agent_home.to_path_buf(),
             agent_tmp: agent_tmp.to_path_buf(),
@@ -1163,8 +1217,14 @@ impl ProjectSandbox {
                     let tmp = owner_tmp
                         .ok_or_else(|| invalid("the owner's temp folder cannot be given"))?;
                     let owner = owner_home()?;
-                    let secrets: Vec<PathBuf> = owner_secrets(&owner, &harness_folders()).collect();
-                    granted_root(tmp, &owner, &secrets, &harness_folders())?;
+                    let secrets: Vec<PathBuf> =
+                        owner_secrets(&owner, &(self.hooks.access.harness_folders)()).collect();
+                    granted_root(
+                        tmp,
+                        &owner,
+                        &secrets,
+                        &(self.hooks.access.harness_folders)(),
+                    )?;
                     clear_of_secrets(tmp, &self.engine_secrets)?;
                     self.owner_tmp = Some(tmp.to_path_buf());
                 }
@@ -1315,7 +1375,7 @@ impl ProjectSandbox {
         if !clean_absolute(&runtime) || !runtime.is_dir() {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
-        let secrets = engine_secrets_in(&runtime)?;
+        let secrets = engine_secrets_in(self.hooks, &runtime)?;
         for root in self
             .writable_roots()
             .chain(self.read_roots.iter())
@@ -1351,9 +1411,9 @@ impl ProjectSandbox {
                 "engine root must be the existing folder around the runtime",
             ));
         }
-        let carved = carved_folder(&engine, &self.agent_home)
+        let carved = carved_folder(self.hooks, &engine, &self.agent_home)
             .map(|folder| (self.agent_home.clone(), folder));
-        let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
+        let secrets: Vec<PathBuf> = engine_secrets_in(self.hooks, &engine)?
             .into_iter()
             .filter(|secret| *secret != runtime)
             .collect();
@@ -1397,7 +1457,8 @@ impl ProjectSandbox {
     /// it: the owner's Keychains, SSH, GPG, cloud, gh, git, Codex and Claude credentials,
     /// the system Keychains and, once guarded, the engine runtime's secrets.
     pub fn secret_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = owner_secrets(&self.owner_home, &harness_folders()).collect();
+        let mut paths: Vec<PathBuf> =
+            owner_secrets(&self.owner_home, &(self.hooks.access.harness_folders)()).collect();
         paths.extend(self.engine_secrets.iter().cloned());
         paths
     }
@@ -1414,7 +1475,7 @@ impl ProjectSandbox {
             worktree,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
@@ -1445,7 +1506,7 @@ impl ProjectSandbox {
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        let worktrees = (self.hooks.access.state_folder)(&self.project_root).join("worktrees");
         if !clean_absolute(worktree)
             || worktree.parent() != Some(worktrees.as_path())
             || canonical(worktree)? != worktree
@@ -1506,7 +1567,7 @@ impl ProjectSandbox {
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        let worktrees = (self.hooks.access.state_folder)(&self.project_root).join("worktrees");
         if !clean_absolute(worktree)
             || worktree.parent() != Some(worktrees.as_path())
             || canonical(worktree)? != worktree
@@ -1538,7 +1599,7 @@ impl ProjectSandbox {
                 "only a clone lead's sandbox names its branch, once",
             ));
         }
-        if !crate::agent_git::is_agent_branch(branch) {
+        if !(self.hooks.is_agent_branch)(branch) {
             return Err(invalid("the lead's branch must be an agent branch"));
         }
         self.lead_branch = Some(branch.to_owned());
@@ -1562,13 +1623,13 @@ impl ProjectSandbox {
         if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
         }
-        if !crate::agent_git::is_agent_branch(branch) {
+        if !(self.hooks.is_agent_branch)(branch) {
             return Err(invalid("the lead's branch must be an agent branch"));
         }
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        let worktrees = (self.hooks.access.state_folder)(&self.project_root).join("worktrees");
         if !clean_absolute(worktree)
             || worktree.parent() != Some(worktrees.as_path())
             || canonical(worktree)? != worktree
@@ -1584,7 +1645,7 @@ impl ProjectSandbox {
                 "the lead's worktree must be a linked worktree of the project",
             ));
         }
-        let folder = worktree.join(crate::agent_git::TEAMMATES_FOLDER);
+        let folder = worktree.join(self.hooks.teammates_folder);
         ensure_store(&folder).map_err(|problem| match problem.kind() {
             io::ErrorKind::InvalidData => invalid("the teammates' folder must be a plain folder"),
             _ => SandboxError::Io(problem),
@@ -1618,7 +1679,7 @@ impl ProjectSandbox {
             root,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.read_roots.push(root.to_path_buf());
         Ok(self)
@@ -1630,7 +1691,7 @@ impl ProjectSandbox {
     /// below each folder, and `bin` goes first on PATH; a prefix or node in the project or
     /// agent-writable is skipped. Input: the canonical program. Output: the sandbox, or a refusal.
     pub fn allow_node_for(mut self, program: &Path) -> Result<Self, SandboxError> {
-        let Some(prefix) = crate::harnesses::node_prefix(program) else {
+        let Some(prefix) = (self.hooks.node_prefix)(program) else {
             return Ok(self);
         };
         let Some(package) = node_package(&prefix, program) else {
@@ -1639,7 +1700,7 @@ impl ProjectSandbox {
         let folders = [canonical(&prefix.join("bin"))?, canonical(&package)?];
         let node = canonical(&prefix.join("bin").join("node"))?;
         let agents = folders.iter().chain([&node]).any(|path| {
-            crate::harnesses::in_crazyagent_folder(path)
+            (self.hooks.in_crazyagent_folder)(path)
                 || path.starts_with(&self.project_root)
                 || self
                     .writable_roots()
@@ -1676,7 +1737,7 @@ impl ProjectSandbox {
                 .parent()
                 .map(Path::to_path_buf)
                 .ok_or_else(|| invalid("an interpreter must sit in a folder"))?;
-            let agents = crate::harnesses::in_crazyagent_folder(&folder)
+            let agents = (self.hooks.in_crazyagent_folder)(&folder)
                 || folder.starts_with(&self.project_root)
                 || self
                     .writable_roots()
@@ -1749,7 +1810,7 @@ impl ProjectSandbox {
             folder,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.tool_roots.push(folder.to_path_buf());
         assert!(self.tool_roots.len() <= TOOL_ROOTS_MAX);
@@ -1848,7 +1909,12 @@ impl ProjectSandbox {
             if self.tool_roots.len() >= TOOL_ROOTS_MAX {
                 return Err(invalid("too many toolchain folders"));
             }
-            granted_root(root, &owner, &secrets, &harness_folders())?;
+            granted_root(
+                root,
+                &owner,
+                &secrets,
+                &(self.hooks.access.harness_folders)(),
+            )?;
             self.tool_roots.push(root.clone());
         }
         for file in tools.files() {
@@ -1883,7 +1949,13 @@ impl ProjectSandbox {
                 continue;
             }
             if self.tool_roots.len() >= TOOL_ROOTS_MAX
-                || granted_root(path, &owner, &secrets, &harness_folders()).is_err()
+                || granted_root(
+                    path,
+                    &owner,
+                    &secrets,
+                    &(self.hooks.access.harness_folders)(),
+                )
+                .is_err()
             {
                 skipped += 1;
                 continue;
@@ -1909,7 +1981,7 @@ impl ProjectSandbox {
             root,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         let overlaps = self
             .writable_roots()
@@ -1967,7 +2039,7 @@ impl ProjectSandbox {
             tmp,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         self.scratch = Some(tmp.to_path_buf());
         Ok(self)
@@ -2096,7 +2168,7 @@ impl ProjectSandbox {
             folder,
             &owner_home()?,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         if self
             .writable_roots()
@@ -2347,7 +2419,7 @@ impl ProjectSandbox {
             mates_home,
             &self.owner_home,
             &self.secret_paths(),
-            &harness_folders(),
+            &(self.hooks.access.harness_folders)(),
         )?;
         if mates_home.starts_with(&home) || home.starts_with(mates_home) {
             return Err(invalid("the teammates' home must sit beside the lead's"));
@@ -2361,12 +2433,12 @@ impl ProjectSandbox {
                 folder,
                 &self.owner_home,
                 &self.secret_paths(),
-                &harness_folders(),
+                &(self.hooks.access.harness_folders)(),
             )?;
         }
-        let binding = crate::team::caller::binding_path(callers);
-        let mailbox = self.agent_tmp.join(crate::team::tool::MAILBOX_FOLDER);
-        let lead_part = mailbox.join(crate::coord::relay::LEAD_PART);
+        let binding = (self.hooks.binding_path)(callers);
+        let mailbox = self.agent_tmp.join(self.hooks.mailbox_folder);
+        let lead_part = mailbox.join(self.hooks.relay_lead_part);
         let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
@@ -2382,13 +2454,14 @@ impl ProjectSandbox {
             .ok_or_else(|| invalid("a native team needs the agent temp folder"))?;
         teammates = teammates.hide(&lead_tmp)?;
         teammates.agent_home = mates_home.to_path_buf();
-        teammates.revealed = vec![lead_part.join(crate::coord::relay::ROSTER_FILE)];
+        teammates.revealed = vec![lead_part.join(self.hooks.relay_roster_file)];
         teammates.read_only = vec![
-            home.join(crate::launch_context::STATE),
-            home.join(crate::coord::relay::PLUGIN_FOLDER),
+            home.join(self.hooks.launch_state),
+            home.join(self.hooks.relay_plugin_folder),
         ];
         teammates.read_only.extend(
-            crate::agent_home::CLAUDE_BASH_PRELUDES
+            self.hooks
+                .claude_bash_preludes
                 .iter()
                 .map(|folder| home.join(folder)),
         );
@@ -2427,8 +2500,8 @@ impl ProjectSandbox {
         let rule = format!(
             "(regex #\"^{}/[^/]+({}|{})$\")",
             seatbelt_pattern(mailbox),
-            any_case(crate::team::tool::REPLY_SUFFIX),
-            any_case(crate::team::tool::ANSWER_PART_SUFFIX),
+            any_case(self.hooks.reply_suffix),
+            any_case(self.hooks.answer_part_suffix),
         );
         format!("(deny file-write* {rule})\n(allow file-write-unlink {rule})\n")
     }
@@ -2446,14 +2519,16 @@ impl ProjectSandbox {
             return String::new();
         }
         match (&self.clone, &self.checkout) {
-            (Some(clone), _) => teammates_clone_denies(clone, self.lead_branch.as_deref()),
+            (Some(clone), _) => {
+                teammates_clone_denies(self.hooks, clone, self.lead_branch.as_deref())
+            }
             (None, Some(checkout)) => {
                 let worktree = checkout.worktree.display();
                 let root = seatbelt_pattern(&checkout.worktree);
-                let teammates = any_case(crate::agent_git::TEAMMATES_FOLDER);
+                let teammates = any_case(self.hooks.teammates_folder);
                 let text = format!(
                     "(deny file-write*\n  (require-all\n    (subpath \"{worktree}\")\n    (require-not (subpath \"{worktree}/{}\"))))\n(deny file-write*\n  (subpath \"{}\")\n  (subpath \"{}\")\n  (regex #\"^{root}/{teammates}$\"))\n(deny file-write-create file-write-unlink\n  (regex #\"^{root}/{teammates}/[^/]+$\"))\n",
-                    crate::agent_git::TEAMMATES_FOLDER,
+                    self.hooks.teammates_folder,
                     checkout.admin.display(),
                     checkout.objects.display()
                 );
@@ -2698,7 +2773,7 @@ impl ProjectSandbox {
             self.project_root.join(".crazyagent").join("context"),
             self.project_root
                 .join(".crazyagent")
-                .join(crate::agent_home::PROJECT_FILE),
+                .join(self.hooks.project_file),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -2824,7 +2899,7 @@ impl ProjectSandbox {
             text.push_str(&format!(
                 "(allow file-write*\n  (regex #\"^{}/\\.git/(logs/)?refs/heads/({}|{}--[a-z0-9-]+(\\.lock)?)$\"))\n",
                 seatbelt_pattern(&self.project_root),
-                regex_escape(crate::agent_git::LINKED_PREFIX.trim_end_matches('/')),
+                regex_escape(self.hooks.linked_prefix.trim_end_matches('/')),
                 regex_escape(branch)
             ));
         }
@@ -2962,12 +3037,12 @@ impl ProjectSandbox {
                 folder.display()
             ));
         }
-        let launch = launch_denies(&self.agent_home);
+        let launch = launch_denies(self.hooks, &self.agent_home);
         text.push_str(&launch);
         let config = if self.owner_config {
             String::new()
         } else {
-            agent_config_denies(&self.agent_home)
+            agent_config_denies(self.hooks, &self.agent_home)
         };
         text.push_str(&config);
         for root in self.writable_roots() {
@@ -3115,14 +3190,14 @@ impl ProjectSandbox {
     fn project_denies(&self) -> String {
         let project = seatbelt_pattern(&self.project_root);
         let git = any_case(".git");
-        let state = any_case(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = any_case(self.hooks.crazyagent_directory);
         let context = any_case("context");
         let objects = format!("{git}/{}", any_case("objects"));
         let mut below = vec![context.clone(), format!("{state}/{context}")];
         below.extend(GIT_STATE_TREES.map(|name| format!("{git}/{}", any_case(name))));
         let mut entries = vec![
             git.clone(),
-            format!("{state}/{}", any_case(crate::agent_home::PROJECT_FILE)),
+            format!("{state}/{}", any_case(self.hooks.project_file)),
             state,
             format!("{objects}/{}", any_case("info")),
             objects,
@@ -3168,7 +3243,7 @@ impl ProjectSandbox {
         let pattern = seatbelt_pattern(&self.project_root);
         let git = any_case(".git");
         let worktrees = any_case("worktrees");
-        let state = any_case(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = any_case(self.hooks.crazyagent_directory);
         let admin = format!("{pattern}/{git}/{worktrees}/[^/]+");
         let checkouts = format!("{pattern}(/{state})?/{worktrees}/[^/]+");
         let mut moves = format!(
@@ -3270,7 +3345,7 @@ impl ProjectSandbox {
             exempt.push_str(&format!(
                 "\n    (require-not (regex #\"^{}/{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(clone),
-                regex_escape(crate::agent_git::TEAMMATES_FOLDER)
+                regex_escape(self.hooks.teammates_folder)
             ));
         }
         if let Some(setup) = &self.setup {
@@ -3398,7 +3473,7 @@ impl ProjectSandbox {
             ));
         }
         if !self.owner_config && self.engine_home != Some(false) {
-            make_config_parents(&self.agent_home, self.engine_home == Some(true))?;
+            make_config_parents(self.hooks, &self.agent_home, self.engine_home == Some(true))?;
         }
         let profile = self.profile();
         if !sbpl_overlong(&profile).is_empty() {
@@ -3472,11 +3547,7 @@ impl ProjectSandbox {
             None => path,
         };
         let path = if harness {
-            kernel_sandbox::toolchains::with_agent_git(
-                &crate::sandbox::TOOLCHAIN_HOOKS,
-                &self.agent_home,
-                path,
-            )
+            kernel_sandbox::toolchains::with_agent_git(self.hooks.toolchain, &self.agent_home, path)
         } else {
             path
         };
@@ -3953,11 +4024,11 @@ fn clone_store_denies(clone: &Path) -> String {
 /// teammates' folder entry, nor make, move or remove anything directly in it, such as a
 /// teammate's folder, where the engine's lead-rights `git worktree add` writes (OP9B-C1).
 /// It must follow every write allow, since the last match wins.
-/// Inputs: the clone and the lead's branch. Output: the rule text.
-fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
+/// Inputs: the profile hooks, the clone and the lead's branch. Output: the rule text.
+fn teammates_clone_denies(hooks: &ProfileHooks, clone: &Path, lead: Option<&str>) -> String {
     let path = clone.display();
     let root = seatbelt_pattern(clone);
-    let folder = crate::agent_git::TEAMMATES_FOLDER;
+    let folder = hooks.teammates_folder;
     let teammates = any_case(folder);
     let git = any_case(".git");
     let branches = lead
@@ -4096,9 +4167,9 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
 
 /// Names the credential files and folders the sandbox guards as they appear in a path: the
 /// owner's under the home, the system's without their leading `/` and the credential names
-/// no allowed root may hold. Takes nothing. Returns the names.
-pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
-    let owner: Vec<&'static str> = owner_secret_paths(&harness_folders()).collect();
+/// no allowed root may hold. Takes the profile hooks. Returns the names.
+pub(crate) fn credential_places(hooks: &ProfileHooks) -> impl Iterator<Item = &'static str> {
+    let owner: Vec<&'static str> = owner_secret_paths(&(hooks.access.harness_folders)()).collect();
     owner
         .into_iter()
         .chain(CREDENTIAL_NAMES.iter().copied())
@@ -4122,12 +4193,12 @@ pub(crate) fn harness_folders() -> Vec<&'static str> {
 
 /// The engine runtime's secrets: the fixed secret files and folders, plus every Unix socket
 /// directly in the runtime and every runtime folder that directly holds one (owner
-/// generations, runner roots, the terminal server). Input: the canonical runtime folder.
+/// generations, runner roots, the terminal server). Inputs: the profile hooks and the canonical runtime folder.
 /// Output: the secret paths, or a refusal for a runtime or folder over the entry bound.
-fn engine_secrets_in(runtime: &Path) -> Result<Vec<PathBuf>, SandboxError> {
+fn engine_secrets_in(hooks: &ProfileHooks, runtime: &Path) -> Result<Vec<PathBuf>, SandboxError> {
     let mut secrets: Vec<PathBuf> = ENGINE_SECRET_FILES
         .iter()
-        .chain(&crate::storage::accounts::KEY_FOLDERS)
+        .chain(hooks.key_folders)
         .chain(ENGINE_SECRET_FOLDERS)
         .map(|name| runtime.join(name))
         .collect();
@@ -4192,23 +4263,23 @@ fn bounded_entries(folder: &Path) -> Result<Vec<PathBuf>, SandboxError> {
 
 /// The engine secret folder a master's home may be carved back out of, the home alone: an
 /// rcli master's configured SDK home directly in its folder, or a listed master session's
-/// home in the native profiles folder ([`listed_master_folder`]). Inputs: the engine root and
+/// home in the native profiles folder ([`listed_master_folder`]). Inputs: the profile hooks, the engine root and
 /// the canonical home. Output: the folder, or none for any other home.
-fn carved_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
-    let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
+fn carved_folder(hooks: &ProfileHooks, engine: &Path, home: &Path) -> Option<PathBuf> {
+    let homes = engine.join(hooks.configured_sdk_homes_folder);
     if home.parent() == Some(homes.as_path()) {
         return Some(homes);
     }
-    listed_master_folder(engine, home)
+    listed_master_folder(hooks, engine, home)
 }
 
 /// The native profiles folder when the home is a listed master session's home,
 /// `<listed key of account>/home/<session>/<harness>/<account>` in it, so in that account's
 /// own listed slot, whose home holds no sign-in's record (DEC-180 Task 20). Inputs: the
-/// engine root and the canonical home. Output: the folder, or none for any other home.
+/// profile hooks, the engine root and the canonical home. Output: the folder, or none for any other home.
 #[cfg(unix)]
-fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
-    let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
+fn listed_master_folder(hooks: &ProfileHooks, engine: &Path, home: &Path) -> Option<PathBuf> {
+    let profiles = engine.join(hooks.native_profiles_folder);
     let parts: Vec<Component> = home.strip_prefix(&profiles).ok()?.components().collect();
     let [
         Component::Normal(key),
@@ -4220,19 +4291,17 @@ fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
     else {
         return None;
     };
-    let listed = crate::engine::bootstrap::listed_slot_key(account.to_str()?);
+    let listed = (hooks.listed_slot_key)(account.to_str()?);
     let slot_home = profiles.join(key).join(slot);
-    (*key == listed.as_str()
-        && *slot == "home"
-        && crate::harnesses::launch::holds_no_sign_in(&slot_home).is_ok())
-    .then_some(profiles)
+    (*key == listed.as_str() && *slot == "home" && (hooks.holds_no_sign_in)(&slot_home))
+        .then_some(profiles)
 }
 
 /// Carves no listed master home off Unix, where a listed master session's home is never made
-/// (its listed_home refuses with `launch_account_home_unavailable`). Takes the engine root
-/// and the home, both unused. Returns none.
+/// (its listed_home refuses with `launch_account_home_unavailable`). Takes the profile hooks,
+/// the engine root and the home, all unused. Returns none.
 #[cfg(not(unix))]
-fn listed_master_folder(_engine: &Path, _home: &Path) -> Option<PathBuf> {
+fn listed_master_folder(_hooks: &ProfileHooks, _engine: &Path, _home: &Path) -> Option<PathBuf> {
     None
 }
 
@@ -4260,15 +4329,13 @@ fn listed_master_folder(_engine: &Path, _home: &Path) -> Option<PathBuf> {
 /// not keep or a later cargo outside the home. They deny writes to the launch lock too, so
 /// no run links, removes or replaces it, since a launch refuses a lock with a second link
 /// (r3). Every home gets them; an agent home gets [`agent_config_denies`] as well. They must
-/// follow every write allow. Input: the home. Output: the rule text.
-fn launch_denies(home: &Path) -> String {
-    use crate::agent_home::Harness;
-    use crate::launch_context::{LOCK, STATE};
+/// follow every write allow. Inputs: the profile hooks and the home. Output: the rule text.
+fn launch_denies(hooks: &ProfileHooks, home: &Path) -> String {
     let home = seatbelt_pattern(home);
     let skills = format!("{home}/{}", any_case("skills"));
     let folders = [
-        STATE,
-        crate::coord::relay::PLUGIN_FOLDER,
+        hooks.launch_state,
+        hooks.relay_plugin_folder,
         "agents",
         "commands",
         "output-styles",
@@ -4277,13 +4344,13 @@ fn launch_denies(home: &Path) -> String {
         "Library/Keychains",
     ];
     let files = [
-        Harness::Claude.instruction_file(),
-        Harness::Codex.instruction_file(),
+        hooks.claude_instruction_file,
+        hooks.codex_instruction_file,
         "AGENTS.override.md",
         "config.toml",
         "settings.json",
         "Library/Preferences/com.apple.security.plist",
-        LOCK,
+        hooks.launch_lock,
     ];
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
@@ -4295,14 +4362,17 @@ fn launch_denies(home: &Path) -> String {
     for file in files {
         text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
     }
-    text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", shell_startup()));
-    let system = any_case(crate::launch_context::CODEX_SYSTEM_SKILLS);
+    text.push_str(&format!(
+        "  (regex #\"^{home}/{}$\")\n",
+        shell_startup(hooks)
+    ));
+    let system = any_case(hooks.codex_system_skills);
     text.push_str(&format!(
         "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags\n  (regex #\"^{skills}/{system}$\")\n  (regex #\"^{skills}/{system}/\"))\n",
-        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
+        other_than(hooks.codex_system_skills)
     ));
     let library = format!("{home}/{}", any_case("Library"));
-    let walked: Vec<String> = crate::agent_home::pinned_entries()
+    let walked: Vec<String> = (hooks.pinned_entries)()
         .iter()
         .map(|entry| format!("{home}/{}", any_case(entry)))
         .collect();
@@ -4350,11 +4420,12 @@ const CONFIG_PARENTS: [&str; 2] = [".cargo", ".config"];
 /// what holds a name as anything else, as a link an earlier run planted, goes first, and a
 /// name that is still no folder refuses; without it nothing is ever removed and such a name
 /// stays for the launch's reset to judge (rv-code2 b8 F1). Each step goes through the home's
-/// open handle and follows no link. Inputs: the home and `clear`. Output: unit, or `Invalid`
+/// open handle and follows no link. Inputs: the profile hooks, the home and `clear`. Output: unit, or `Invalid`
 /// when one cannot be made.
 #[cfg(unix)]
-fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
+fn make_config_parents(hooks: &ProfileHooks, home: &Path, clear: bool) -> Result<(), SandboxError> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use std::os::fd::AsFd;
     let refused = || invalid("a config folder of the agent home could not be made");
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let parent = rustix::fs::open(home, folder, Mode::empty()).map_err(|_| refused())?;
@@ -4362,8 +4433,10 @@ fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
         rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
             .map(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
     };
-    let remove =
-        |name: &str| crate::team::cleanup::remove_home_entry(&parent, name).map_err(|_| refused());
+    let remove = |name: &str| {
+        (hooks.toolchain.remove_home_entry)(parent.as_fd(), name, "config_parent")
+            .map_err(|_| refused())
+    };
     for name in CONFIG_PARENTS {
         match is_folder(name) {
             Ok(true) => continue,
@@ -4393,9 +4466,9 @@ fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
 /// engine uses, nor on anything in one ([`crate::agent_home::kept_entries`]), so none holds
 /// against the engine. Copies the agent's tools make elsewhere in its home and in its caches
 /// still take flags (RV-DS241-187), and the next reset clears those as it removes them.
-/// They must follow every write allow. Input: the home. Output: the rule text.
-fn agent_config_denies(home: &Path) -> String {
-    let pinned = crate::agent_home::pinned_entries();
+/// They must follow every write allow. Inputs: the profile hooks and the home. Output: the rule text.
+fn agent_config_denies(hooks: &ProfileHooks, home: &Path) -> String {
+    let pinned = (hooks.pinned_entries)();
     assert!(
         CONFIG_PARENTS
             .iter()
@@ -4418,7 +4491,7 @@ fn agent_config_denies(home: &Path) -> String {
             })
             .collect::<String>()
     };
-    let kept = crate::agent_home::kept_entries();
+    let kept = (hooks.kept_entries)();
     let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
     let text = format!(
         "(deny file-write*{})\n(deny file-write-create{})\n(deny file-write-flags file-write-acl{})\n",
@@ -4436,8 +4509,8 @@ fn agent_config_denies(home: &Path) -> String {
 
 /// Spells the Seatbelt pattern of the shell startup files directly in a home, each in any
 /// letter case: zsh's, alone or in the compiled form zsh runs in its place, and bash's and
-/// sh's (SA vid 12). Output: the pattern, a group without anchors.
-fn shell_startup() -> String {
+/// sh's (SA vid 12). Input: the profile hooks. Output: the pattern, a group without anchors.
+fn shell_startup(hooks: &ProfileHooks) -> String {
     let spelled = |names: &[&str]| {
         names
             .iter()
@@ -4447,9 +4520,9 @@ fn shell_startup() -> String {
     };
     let pattern = format!(
         "(({})({})?|{})",
-        spelled(&crate::agent_home::ZSH_STARTUP[..]),
-        any_case(crate::agent_home::ZSH_COMPILED),
-        spelled(&crate::agent_home::SH_STARTUP[..]),
+        spelled(hooks.zsh_startup),
+        any_case(hooks.zsh_compiled),
+        spelled(hooks.sh_startup),
     );
     assert!(pattern.len() <= SBPL_STRING_MAX / 2);
     pattern
@@ -4513,11 +4586,11 @@ fn any_depth_git(root: &Path) -> String {
 /// the engine walks and rewrites before each start, so none keeps the owner's IDE from
 /// starting (rv-sa241 b8 L1); never [`agent_config_denies`], since that home is one the
 /// owner keeps ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). They must follow that
-/// grant, since the last match wins. Inputs: the home and the other folders. Output: the
+/// grant, since the last match wins. Inputs: the profile hooks, the home and the other folders. Output: the
 /// rule text.
 #[cfg(unix)]
-pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
-    let mut text = launch_denies(home);
+pub(crate) fn regranted_denies(hooks: &ProfileHooks, home: &Path, folders: &[&Path]) -> String {
+    let mut text = launch_denies(hooks, home);
     text.push_str(&format!(
         "(deny file-write-flags file-write-acl {})\n",
         at_or_below(&seatbelt_pattern(home))
@@ -4696,7 +4769,7 @@ mod harness_folder_tests {
 
     #[test]
     fn the_owner_secret_list_holds_every_harness_folder_where_the_three_stood_before() {
-        let places: Vec<&str> = credential_places().collect();
+        let places: Vec<&str> = credential_places(&crate::sandbox::PROFILE_HOOKS).collect();
         let from = places.iter().position(|place| *place == ".kube").unwrap() + 1;
         let to = places
             .iter()
@@ -4755,6 +4828,7 @@ mod linux_sockets_tests {
 
     fn sandbox(case: &Case, network: SandboxNetwork, sockets: LinuxSockets) -> ProjectSandbox {
         ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &case.root.join("project"),
             &case.root.join("home"),
             &case.root.join("tmp"),
@@ -4776,6 +4850,7 @@ mod linux_sockets_tests {
     fn the_setting_defaults_to_tcp_only_and_keeps_its_wire_names() {
         let case = case();
         let fresh = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &case.root.join("project"),
             &case.root.join("home"),
             &case.root.join("tmp"),
@@ -5108,6 +5183,7 @@ mod order_tests {
             fs::create_dir_all(root.join(folder)).unwrap();
         }
         let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &root.join("project"),
             &root.join("home"),
             &root.join("tmp"),
@@ -5161,6 +5237,7 @@ mod access_grant_tests {
         let socket = root.join("owner-tmp").join("discord-ipc-0");
         let owner_tmp = root.join("owner-tmp");
         let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &root.join("project"),
             &root.join("home"),
             &root.join("tmp"),
@@ -5218,6 +5295,7 @@ mod access_grant_tests {
         let (_temp, root) = case();
         let fresh = |network| {
             ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
                 &root.join("project"),
                 &root.join("home"),
                 &root.join("tmp"),
@@ -5261,6 +5339,22 @@ mod access_grant_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod profile_string_tests {
     use super::*;
+
+    /// The launch denies keep writes off the launch lock the hooks name, and name no other
+    /// lock.
+    #[test]
+    fn the_launch_denies_keep_writes_off_the_lock_the_hooks_name() {
+        static STAND_IN: ProfileHooks = ProfileHooks {
+            launch_lock: "stand-in.lock",
+            ..PROFILE_HOOKS
+        };
+        let denies = launch_denies(&STAND_IN, Path::new("/private/tmp/agent/home"));
+        assert!(denies.contains(&any_case("stand-in.lock")), "{denies}");
+        assert!(
+            !denies.contains(&any_case(crate::launch_context::LOCK)),
+            "{denies}"
+        );
+    }
 
     /// v2.4.0 gate: the folded secret names, 1300 bytes as one regex, split into bodies each
     /// Seatbelt reads, every name kept whole and in order; a list that fits stays one body
@@ -5391,12 +5485,18 @@ mod profile_string_tests {
         let open: Vec<String> = (0..64)
             .map(|at| format!("{at:02}{}", "n".repeat(40)))
             .collect();
-        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open)
-            .unwrap()
-            .keep_project_secrets(&project, &[])
-            .unwrap()
-            .open_only_tops(&open)
-            .unwrap();
+        let wide = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap()
+        .open_only_tops(&open)
+        .unwrap();
         let text = wide.profile();
         assert!(sbpl_overlong(&text).is_empty());
         assert!(text.matches("(require-not (regex #\"").count() >= 2);
@@ -5406,12 +5506,18 @@ mod profile_string_tests {
         let most: Vec<String> = (0..OPEN_TOPS_MAX)
             .map(|at| format!("{at:03}{}", "n".repeat(252)))
             .collect();
-        let crowded = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-            .unwrap()
-            .keep_project_secrets(&project, &[])
-            .unwrap()
-            .open_only_tops(&most)
-            .unwrap();
+        let crowded = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap()
+        .open_only_tops(&most)
+        .unwrap();
         let text = crowded.profile();
         assert!(sbpl_overlong(&text).is_empty());
         assert!(text.len() > PROFILE_BYTES_MAX);
@@ -5430,10 +5536,16 @@ mod profile_string_tests {
             deep = deep.join("d".repeat(room.clamp(1, 200)));
         }
         fs::create_dir_all(&deep).unwrap();
-        let narrow = ProjectSandbox::new(&deep, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-            .unwrap()
-            .keep_project_secrets(&deep, &[])
-            .unwrap();
+        let narrow = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &deep,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .keep_project_secrets(&deep, &[])
+        .unwrap();
         assert!(!sbpl_overlong(&narrow.profile()).is_empty());
         let target = profiles.join("deep.sb");
         match narrow.install(&target) {
@@ -5454,9 +5566,9 @@ mod profile_string_tests {
     fn home_denies_match_at_or_below_without_an_optional_tail() {
         let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
         let data = Path::new("/private/tmp/.tmpA1b2C3/data");
-        let config = agent_config_denies(home);
+        let config = agent_config_denies(&PROFILE_HOOKS, home);
         assert!(!config.contains("(/.*)"), "{config}");
-        let regranted = regranted_denies(home, &[data]);
+        let regranted = regranted_denies(&PROFILE_HOOKS, home, &[data]);
         assert!(!regranted.contains("(/.*)"), "{regranted}");
         let flagged = seatbelt_pattern(home);
         assert!(
@@ -5489,16 +5601,22 @@ mod profile_string_tests {
         for folder in [&home, &tmp, &project] {
             fs::create_dir_all(folder).unwrap();
         }
-        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-            .unwrap()
-            .keep_project_secrets(&project, &[])
-            .unwrap()
-            .open_only_tops(&["notes".to_string()])
-            .unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap()
+        .open_only_tops(&["notes".to_string()])
+        .unwrap();
         let text = [
             sandbox.profile(),
             clone_store_denies(&base.join("clone")),
-            agent_config_denies(&home),
+            agent_config_denies(&PROFILE_HOOKS, &home),
         ]
         .concat();
         let hfs = hfs_ignored_deny();
@@ -5539,12 +5657,27 @@ mod firmlink_tests {
         assert!(long(&root.join("project")).is_dir());
         let network = || SandboxNetwork::Only(Vec::new());
         let (home, tmp) = (root.join("home"), root.join("tmp"));
-        let refused = ProjectSandbox::new(&long(&root.join("project")), &home, &tmp, network());
+        let refused = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &long(&root.join("project")),
+            &home,
+            &tmp,
+            network(),
+        );
         assert!(
             matches!(&refused, Err(SandboxError::Invalid(reason)) if reason.contains("canonical")),
             "{refused:?}"
         );
-        assert!(ProjectSandbox::new(&root.join("project"), &home, &tmp, network()).is_ok());
+        assert!(
+            ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                &root.join("project"),
+                &home,
+                &tmp,
+                network()
+            )
+            .is_ok()
+        );
         assert_eq!(
             kernel_sandbox::extra_paths::checked(
                 &ACCESS_HOOKS,

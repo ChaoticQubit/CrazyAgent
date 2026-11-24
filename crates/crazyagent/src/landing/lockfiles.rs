@@ -646,6 +646,7 @@ fn confined(
     )
     .map_err(|_| "cargo_home_unmade")?;
     let mut sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         root,
         &scratch.home,
         &scratch.tmp,

@@ -3399,7 +3399,14 @@ mod tests {
         for folder in &folders {
             fs::create_dir(folder).unwrap();
         }
-        let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &folders[0],
+            &folders[1],
+            &folders[2],
+            network,
+        )
+        .unwrap();
         (temp, sandbox)
     }
 
@@ -3443,8 +3450,14 @@ mod tests {
             &project,
             &["worktree", "add", "-q", "--detach", path, "HEAD"],
         );
-        let sandbox =
-            ProjectSandbox::new(&project, &folders[1], &folders[2], SandboxNetwork::Open).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &folders[1],
+            &folders[2],
+            SandboxNetwork::Open,
+        )
+        .unwrap();
         (temp, project, sandbox, worktree)
     }
 
