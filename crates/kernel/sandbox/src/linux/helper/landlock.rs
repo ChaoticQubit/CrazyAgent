@@ -74,7 +74,7 @@ pub struct Guard {
 
 impl Guard {
     /// The helper arguments for this guard, in the order the helper reads them back.
-    pub fn args(&self) -> Vec<OsString> {
+    pub(crate) fn args(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = Vec::new();
         for port in &self.loopback {
             args.push(GUARD_LOOPBACK.into());
@@ -114,7 +114,7 @@ impl Guard {
 
     /// What the supervisor holds for this guard. Input: the policy's connect ports.
     /// Output: the guarded ports reached on this machine only and the others anywhere.
-    pub fn supervised(&self, connect: &[u16]) -> Supervised {
+    pub(crate) fn supervised(&self, connect: &[u16]) -> Supervised {
         assert!(self.loopback.iter().all(|port| connect.contains(port)));
         let any = connect
             .iter()
