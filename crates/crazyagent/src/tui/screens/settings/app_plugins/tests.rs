@@ -1331,6 +1331,10 @@ fn the_key_source_list_scrolls_so_the_typed_key_source_and_its_input_stay_in_vie
     }
     let shown = render(&mut shell, 100, 24);
     assert!(
+        shown.iter().any(|row| row.contains("Key for api_key")),
+        "{shown:#?}"
+    );
+    assert!(
         shown
             .iter()
             .any(|row| row.contains("Enter a key for this plugin")),
