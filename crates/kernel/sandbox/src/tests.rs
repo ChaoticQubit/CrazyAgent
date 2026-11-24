@@ -105,6 +105,34 @@ fn unpinned(manifest: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The `cargo tree` listing of one package of the workspace at `root`, on the host target,
+/// one crate per line with no prefix, read offline from the lockfile as it stands. Inputs:
+/// the workspace folder and the package name. Output: the listing, or the error naming why
+/// cargo gave none.
+fn path_tree(root: &Path, package: &str) -> std::io::Result<String> {
+    let mut tree = Command::new(env!("CARGO"));
+    tree.args(["tree", "-p", package, "-e", "normal"])
+        .args(["--prefix", "none", "--offline", "--locked"])
+        .current_dir(root);
+    let output = kernel_processes::spawn_gate::collected(&mut tree)?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(std::io::Error::other)
+}
+
+/// The crates of a [`path_tree`] listing that lie outside the allowlist of path crates.
+/// Input: the listing. Output: each such crate name, in listing order.
+fn outside(listed: &str) -> Vec<&str> {
+    listed
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| name.starts_with("crazyagent") && !ALLOWED_PATH_CRATES.contains(name))
+        .collect()
+}
+
 /// `cargo tree` for kernel/sandbox on the host target, which the batch runs on each farm
 /// runner, names only the allowlisted path crates (kernel common, processes, security and
 /// storage and the platform crates), never the engine, the SDK or the bus gateway; and its
@@ -112,30 +140,102 @@ fn unpinned(manifest: &str) -> Vec<&str> {
 #[test]
 fn cargo_tree_is_the_allowlist() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut tree = Command::new(env!("CARGO"));
-    tree.args(["tree", "-p", "crazyagent-kernel-sandbox", "-e", "normal"])
-        .args(["--prefix", "none", "--offline", "--locked"])
-        .current_dir(&root);
-    let output = kernel_processes::spawn_gate::collected(&mut tree).unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let listed = String::from_utf8(output.stdout).unwrap();
+    let listed = path_tree(&root, "crazyagent-kernel-sandbox").unwrap();
     let names: Vec<&str> = listed
         .lines()
         .filter_map(|line| line.split_whitespace().next())
         .collect();
     assert_eq!(names.first(), Some(&"crazyagent-kernel-sandbox"));
-    let outside: Vec<&&str> = names
-        .iter()
-        .filter(|name| name.starts_with("crazyagent") && !ALLOWED_PATH_CRATES.contains(name))
-        .collect();
+    let outside = outside(&listed);
     assert!(outside.is_empty(), "{outside:?}");
     assert_eq!(unpinned(include_str!("../Cargo.toml")), Vec::<&str>::new());
     let planted = "[dependencies]\nserde = \"1\"\n\n[target.'cfg(unix)'.dependencies]\nrustix = { version = \"=1.1.5\" }\nkernel = { path = \"../x\" }\n";
     assert_eq!(unpinned(planted), ["serde = \"1\""]);
+}
+
+/// A dependency declared in a table of its own, under a platform or not, or written with no
+/// spaces around its `=`, is read like any other, so an unpinned one there fails the row.
+#[test]
+fn a_dependency_in_its_own_table_or_with_no_spaces_is_read() {
+    for manifest in [
+        "[dependencies.serde]\nversion = \"1\"\n",
+        "[target.'cfg(unix)'.dependencies.libc]\nversion = \"0.2\"\n",
+        "[dev-dependencies]\nserde=\"1\"\n",
+    ] {
+        assert_eq!(unpinned(manifest).len(), 1, "{manifest}");
+    }
+    let pinned = "[dependencies.serde]\nversion = \"=1.0.229\"\n\n[build-dependencies.kernel]\npath = \"../x\"\n";
+    assert_eq!(unpinned(pinned), Vec::<&str>::new());
+}
+
+/// Every local path crate a listing names is held to the allowlist, whatever its name, while
+/// a registry crate and a procedural macro are not path crates.
+#[test]
+fn a_path_crate_of_any_name_is_held_to_the_allowlist() {
+    let listed = "crazyagent-kernel-sandbox v2.5.0 (/w/crates/kernel/sandbox)\nsdk-gateway v0.1.0 (/w/crates/sdk/gateway)\nserde v1.0.229\nserde_derive v1.0.229 (proc-macro)\ncrazyagent-kernel-common v2.5.0 (/w/crates/kernel/common) (*)\n";
+    assert_eq!(outside(listed), ["sdk-gateway"]);
+}
+
+/// The hub named inside a grouped `crate::{..}` import is found like a plain hub path, and a
+/// module whose name only starts with the hub's is not the hub.
+#[test]
+fn a_grouped_import_of_the_hub_is_found() {
+    let (top, module) = ("crate::", ["sand", "box"].concat());
+    let hub = format!("{top}{module}");
+    for text in [
+        format!("use {top}{{error, {module}::policy}};\n"),
+        format!("use {top}{{{module}}};\n"),
+        format!("use {top}{{\n    error,\n    {module} as hub,\n}};\n"),
+    ] {
+        assert_eq!(upward_paths(&text), [hub.as_str()], "{text}");
+    }
+    assert_eq!(
+        upward_paths(&format!("use {hub}_settings::x;\n")),
+        Vec::<String>::new()
+    );
+}
+
+/// A build dependency on the SDK is listed and lies outside the allowlist, so the layering
+/// row reads build edges too; the workspace is a stand-in of two path crates in a temp
+/// folder, read offline.
+#[test]
+fn a_build_dependency_on_the_sdk_is_outside_the_allowlist() -> Result<(), Box<dyn std::error::Error>>
+{
+    let folder = tempfile::tempdir()?;
+    let root = folder.path();
+    for (path, text) in [
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"sandbox\", \"sdk\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "sandbox/Cargo.toml",
+            "[package]\nname = \"crazyagent-kernel-sandbox\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[build-dependencies]\ncrazyagent-sdk = { path = \"../sdk\" }\n",
+        ),
+        ("sandbox/build.rs", "fn main() {}\n"),
+        ("sandbox/src/lib.rs", ""),
+        (
+            "sdk/Cargo.toml",
+            "[package]\nname = \"crazyagent-sdk\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("sdk/src/lib.rs", ""),
+    ] {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().ok_or("a fixture file has a folder")?)?;
+        std::fs::write(path, text)?;
+    }
+    let mut lock = Command::new(env!("CARGO"));
+    lock.args(["generate-lockfile", "--offline"])
+        .current_dir(root);
+    let locked = kernel_processes::spawn_gate::collected(&mut lock)?;
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+    let listed = path_tree(root, "crazyagent-kernel-sandbox")?;
+    assert_eq!(outside(&listed), ["crazyagent-sdk"], "{listed}");
+    Ok(())
 }
 
 #[test]
