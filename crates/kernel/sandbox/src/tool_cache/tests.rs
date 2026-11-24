@@ -169,3 +169,53 @@ fn a_linked_folder_above_the_cache_removes_nothing_through_it() {
         assert!(decoy.is_dir(), "linked project folder: {linked_project}");
     }
 }
+
+/// Opens a fresh folder the way `prepare` opens a project's folder. Output: the guard and
+/// the open folder.
+fn record_folder() -> (tempfile::TempDir, OwnedFd) {
+    let folder = tempfile::tempdir().unwrap();
+    let owned = rustix::fs::open(folder.path(), OPEN_FOLDER, Mode::empty()).unwrap();
+    (folder, owned)
+}
+
+/// The names in a folder, sorted. Input: the folder. Output: the names.
+fn names_in(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// A launch still writing through a staging file it opened cannot change the record another
+/// launch published, since each writer stages in a file of its own.
+#[test]
+fn a_writer_still_holding_its_staging_file_cannot_change_the_record() {
+    let (folder, owned) = record_folder();
+    let mut held = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(folder.path().join("k.primed.new"))
+        .unwrap();
+    write_record(&owned, "k.primed", "id 1", &["abc".to_owned()]).unwrap();
+    held.write_all(b"zz\n").unwrap();
+    assert_eq!(
+        read_record(&owned, "k.primed"),
+        Some(("id 1".to_owned(), vec!["abc".to_owned()]))
+    );
+}
+
+/// Writing a record twice leaves only the record, holding the last write.
+#[test]
+fn a_written_record_leaves_no_staging_file() {
+    let (folder, owned) = record_folder();
+    write_record(&owned, "k.primed", "id 1", &["abc".to_owned()]).unwrap();
+    write_record(&owned, "k.primed", "id 2", &["def".to_owned()]).unwrap();
+    assert_eq!(names_in(folder.path()), ["k.primed"]);
+    assert_eq!(
+        read_record(&owned, "k.primed"),
+        Some(("id 2".to_owned(), vec!["def".to_owned()]))
+    );
+}
