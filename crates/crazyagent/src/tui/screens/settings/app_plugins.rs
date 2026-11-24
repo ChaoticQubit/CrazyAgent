@@ -39,7 +39,11 @@ const PATH_CHARS_MAX: usize = 1024;
 const USERS_SHOWN_MAX: usize = 8;
 const NOTICES_MAX: usize = 64;
 const INTRO: &str = "Plugins CrazyAgent itself runs, such as the embedding models search ranks with. Each one shows what it reaches before you approve it.";
+#[cfg(not(windows))]
 const ABSOLUTE: &str = "Type the full path of the plugin folder, starting with /.";
+#[cfg(windows)]
+const ABSOLUTE: &str =
+    "Type the full path of the plugin folder, starting with its drive, such as C:\\.";
 const PATH_LONG: &str = "A folder path can be at most 1024 characters.";
 const TURNING_OFF: &str = "Turning it off...";
 const PATH_CHANGED: &str =
