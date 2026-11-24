@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -25,46 +25,34 @@ export const HOME_ROOTS = join(homedir(), "Library", "Caches", "crazyagent-e2e")
  * process's own temp folder. */
 const ENGINE_TEMP_FOLDERS = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders", "/dev/shm"];
 
-/** Makes a fresh private test root for a stand-in HOME under HOME_ROOTS, never one reused,
- * making HOME_ROOTS again when a file running alongside removed it, and checks it lies under
- * HOME_ROOTS, in no folder the engine counts as temp and under no folder
- * every user can write. Input: the root's name prefix. Output: the root's real path. */
+/** Makes a fresh private test root for a stand-in HOME under HOME_ROOTS, never one reused.
+ * HOME_ROOTS is checked before the root is made: private to this user, in no folder the engine
+ * counts as temp and under no folder every user can write, so a refused check leaves nothing.
+ * Input: the root's name prefix. Output: the root's real path, a direct child of HOME_ROOTS. */
 export function homeRoot(prefix) {
   assert.match(prefix, /^[a-z0-9-]+-$/, "a plain root prefix");
-  let made = null;
-  for (let attempt = 1; made === null; attempt += 1) {
-    mkdirSync(HOME_ROOTS, { recursive: true, mode: 0o700 });
-    try {
-      made = mkdtempSync(join(HOME_ROOTS, prefix));
-    } catch (error) {
-      assert.ok(error.code === "ENOENT" && attempt < 5, `${HOME_ROOTS} could not hold a test root: ${error.code}`);
-    }
-  }
+  mkdirSync(HOME_ROOTS, { recursive: true, mode: 0o700 });
   const base = realpathSync(HOME_ROOTS);
   assert.equal(statSync(base).mode & 0o777, 0o700, `${base} is private to this user`);
-  const root = realpathSync(made);
-  assert.ok(root.startsWith(base + sep), `${root} lies under ${base}`);
   const temps = [...ENGINE_TEMP_FOLDERS, tmpdir(), realpathSync(tmpdir())];
   for (const temp of temps) {
-    assert.ok(root !== temp && !root.startsWith(temp + sep), `${root} lies in ${temp}, a folder the engine counts as temp, so it would refuse the test's harnesses`);
+    assert.ok(base !== temp && !base.startsWith(temp + sep), `${base} lies in ${temp}, a folder the engine counts as temp, so it would refuse the test's harnesses`);
   }
   for (let at = base; at !== dirname(at); at = dirname(at)) {
     assert.equal(statSync(at).mode & 0o002, 0, `${at} is writable by every user, so the engine refuses a harness under it`);
   }
+  const root = realpathSync(mkdtempSync(join(base, prefix)));
+  assert.equal(dirname(root), base, `${root} lies directly in ${base}`);
   return root;
 }
 
-/** Removes a test root homeRoot made, and HOME_ROOTS too once no root is left in it, so a run
- * leaves nothing behind. Input: the root. Output: none. */
+/** Removes one test root homeRoot made and nothing else: HOME_ROOTS stays, since files running
+ * alongside make their roots in it. Input: the root. Output: none. */
 export function removeHomeRoot(root) {
   const base = realpathSync(HOME_ROOTS);
-  assert.ok(root.startsWith(base + sep) && dirname(root) === base, `${root} is a root homeRoot made`);
+  assert.equal(dirname(root), base, `${root} is a root homeRoot made`);
   rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-  try {
-    rmdirSync(base);
-  } catch (error) {
-    assert.ok(["ENOTEMPTY", "EEXIST", "ENOENT"].includes(error.code), `${base} could not be removed: ${error.code}`);
-  }
+  assert.ok(!existsSync(root), `${root} is removed`);
 }
 
 /** Reads an absolute path from the environment or stops the run with what to set.

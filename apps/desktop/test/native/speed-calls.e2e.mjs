@@ -43,7 +43,12 @@ function newRun(label) {
   const root = homeRoot(`ca-sc-${label}-`);
   const run = { label, root, runtime: join(root, "engine"), home: join(root, "home"),
     log: { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false } };
-  for (const folder of [run.runtime, run.home, join(run.home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  try {
+    for (const folder of [run.runtime, run.home, join(run.home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    removeHomeRoot(root);
+    throw error;
+  }
   return run;
 }
 
