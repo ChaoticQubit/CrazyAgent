@@ -245,10 +245,10 @@ pub enum LinuxBackend {
 /// model proxy ports (`kept_free`), which bubblewrap cannot do.
 #[derive(Debug)]
 pub struct LinuxSandbox {
-    pub sandbox: ProjectSandbox,
-    pub backend: LinuxBackend,
-    pub supervision: Option<Supervision>,
-    pub routed: Option<Routed>,
+    sandbox: ProjectSandbox,
+    backend: LinuxBackend,
+    supervision: Option<Supervision>,
+    routed: Option<Routed>,
 }
 
 /// What the call supervisor holds for a launch on this host beyond the guards every
@@ -260,6 +260,41 @@ pub struct Supervision {
 }
 
 impl LinuxSandbox {
+    /// Test helper: assembles a launch from its parts with none of [`LinuxSandbox::new`]'s
+    /// checks, so a row can wrap a command for a policy or backend this machine would refuse.
+    /// Inputs: the policy, the backend, the supervision and the route. Output: the launch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn assembled(
+        sandbox: ProjectSandbox,
+        backend: LinuxBackend,
+        supervision: Option<Supervision>,
+        routed: Option<Routed>,
+    ) -> Self {
+        LinuxSandbox {
+            sandbox,
+            backend,
+            supervision,
+            routed,
+        }
+    }
+
+    /// Test helper: the same launch with another supervision. Input: the supervision, `None`
+    /// for an unsupervised launch. Output: the launch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_supervision(self, supervision: Option<Supervision>) -> Self {
+        LinuxSandbox {
+            supervision,
+            ..self
+        }
+    }
+
+    /// Test helper: the supervision this launch runs under. Output: the supervision, `None`
+    /// when no call supervisor runs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn supervision(&self) -> Option<Supervision> {
+        self.supervision
+    }
+
     /// Binds the policy to one backend. Input: the policy and the backend's absolute files. Output:
     /// the sandbox, `Invalid` for a bad executable, or `Unavailable` on bubblewrap for any network
     /// but a closed one with no host port, for a one-worktree policy, a limited network the sockets

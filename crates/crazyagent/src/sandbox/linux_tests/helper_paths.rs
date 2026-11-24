@@ -80,13 +80,19 @@ fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
         helper: helper.clone(),
     };
     let off = LinuxSandbox::new(sandbox.clone(), landlock).unwrap();
-    assert_eq!(off.supervise(LinuxSupervisor::Off, None).supervision, None);
+    assert_eq!(
+        off.supervise(LinuxSupervisor::Off, None).supervision(),
+        None
+    );
     let bubblewrap = LinuxBackend::Bubblewrap {
         bwrap: helper.clone(),
         helper,
     };
     let alone = LinuxSandbox::new(sandbox, bubblewrap).unwrap();
-    assert_eq!(alone.supervise(LinuxSupervisor::On, None).supervision, None);
+    assert_eq!(
+        alone.supervise(LinuxSupervisor::On, None).supervision(),
+        None
+    );
 }
 
 /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
