@@ -632,8 +632,8 @@ fn under_overlaps_block_a_review_ready_claim_denies_the_edit_until_its_work_land
 #[test]
 fn under_overlaps_block_the_edit_hook_still_denies_from_an_engine_in_an_app_bundle_under_the_profile()
  {
-    use crazyagent::sandbox::{ProjectSandbox, SANDBOX_EXEC};
-    use kernel_sandbox::net::SandboxNetwork;
+    use crazyagent::sandbox::ProjectSandbox;
+    use kernel_sandbox::{net::SandboxNetwork, profile::command::SANDBOX_EXEC};
     let team = Team::new();
     let claimed = Claimed::new(&team);
     let folder = team

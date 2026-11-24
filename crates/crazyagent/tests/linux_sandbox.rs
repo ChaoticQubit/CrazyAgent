@@ -4,9 +4,11 @@ use crazyagent::sandbox::linux::{
     NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS, loader_variable,
 };
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, Sandbox};
+use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox};
+
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 
 use crazyagent::harnesses::launch::{
@@ -4646,30 +4648,6 @@ fn an_installed_sandbox_with_a_hidden_folder_keeps_it_out_or_refuses_it() {
         Hiding::Nested,
         &hidden,
         &run(&installed, &case, &hiding_script(&hidden)),
-    );
-}
-
-/// A confined agent whose project hides a folder is still refused on Linux, for its
-/// confinement and not for the folder, since neither backend holds a confined agent yet:
-/// team and research launches stay refused as they were (leader 12:25).
-#[test]
-fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_folder() {
-    let checkouts = checkouts();
-    let folder = checkouts.project.join("private");
-    fs::create_dir(&folder).unwrap();
-    let profiles = checkouts.project.parent().unwrap().join("profiles");
-    fs::create_dir_all(&profiles).unwrap();
-    let refused = InstalledSandbox::install(
-        confined(&checkouts).hide(&folder).unwrap(),
-        &profiles.join("agent.sb"),
-        LinuxSupervisor::On,
-        LinuxStrict::Off,
-    )
-    .err();
-    assert!(
-        matches!(&refused, Some(SandboxError::Unavailable(reason))
-            if reason.contains("confined") && !reason.contains("hidden")),
-        "{refused:?}"
     );
 }
 

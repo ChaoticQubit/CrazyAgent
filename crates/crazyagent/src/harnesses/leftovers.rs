@@ -1,5 +1,5 @@
 use crate::protocol::CredentialRef;
-use crate::sandbox::LineageCheck;
+use kernel_sandbox::profile::command::LineageCheck;
 #[cfg(any(target_os = "macos", all(test, unix)))]
 use kernel_sandbox::profile::env::LINEAGE_VARIABLE;
 use kernel_sandbox::profile::env::LineageToken;
@@ -2605,11 +2605,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_lineage_variable_reaches_an_agent_only_holding_a_token() {
-        use std::ffi::OsStr;
+        use {kernel_sandbox::profile::env::agent_variable_allowed, std::ffi::OsStr};
         let token = LineageToken::new().unwrap();
-        let allowed = |name: &str, value: &str| {
-            crate::sandbox::agent_variable_allowed(OsStr::new(name), OsStr::new(value))
-        };
+        let allowed =
+            |name: &str, value: &str| agent_variable_allowed(OsStr::new(name), OsStr::new(value));
         assert!(allowed(LINEAGE_VARIABLE, token.as_str()));
         assert!(!allowed(LINEAGE_VARIABLE, "not-a-token"));
         assert!(!allowed(

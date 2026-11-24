@@ -261,7 +261,7 @@ pub(super) fn prepare(
     .map_err(shell_refusal)?;
     assert_eq!(
         command.argv.first().map(String::as_str),
-        Some(crate::sandbox::SANDBOX_EXEC)
+        Some(kernel_sandbox::profile::command::SANDBOX_EXEC)
     );
     Ok(command)
 }

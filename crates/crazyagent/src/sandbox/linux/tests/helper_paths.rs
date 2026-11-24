@@ -58,3 +58,56 @@ fn no_agent_starts_without_the_helper_and_the_refusal_says_so() {
         );
     }
 }
+
+#[test]
+fn without_the_helper_bubblewrap_starts_no_agent() {
+    let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+    match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
+        Err(SandboxError::Unavailable(reason)) => {
+            assert!(reason.contains("helper"), "{reason}");
+        }
+        other => panic!("bubblewrap without the socket filter must be refused: {other:?}"),
+    }
+}
+
+/// The owner's setting Off, and a host that only has bubblewrap, start no supervisor:
+/// the launch stays as it was before the supervisor (DEC-179 add.2 Q1).
+#[test]
+fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
+    let helper = std::env::current_exe().unwrap();
+    let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+    let landlock = LinuxBackend::Landlock {
+        helper: helper.clone(),
+    };
+    let off = LinuxSandbox::new(sandbox.clone(), landlock).unwrap();
+    assert_eq!(off.supervise(LinuxSupervisor::Off, None).supervision, None);
+    let bubblewrap = LinuxBackend::Bubblewrap {
+        bwrap: helper.clone(),
+        helper,
+    };
+    let alone = LinuxSandbox::new(sandbox, bubblewrap).unwrap();
+    assert_eq!(alone.supervise(LinuxSupervisor::On, None).supervision, None);
+}
+
+/// AppArmor keeps unprivileged programs out of user namespaces only where its setting
+/// reads 1; any other value, or no file, leaves them free, so the AppArmor line shows
+/// only where it is the reason nothing nests (DEC-179 SBX-3).
+#[test]
+fn only_an_apparmor_setting_of_one_restricts_user_namespaces() {
+    assert_eq!(
+        APPARMOR_USERNS,
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+    );
+    assert!(restricts(Some("1\n")));
+    assert!(restricts(Some("1")));
+    for free in [
+        Some("0\n"),
+        Some(""),
+        Some("2\n"),
+        Some("11\n"),
+        Some("1 0"),
+        None,
+    ] {
+        assert!(!restricts(free), "{free:?}");
+    }
+}
