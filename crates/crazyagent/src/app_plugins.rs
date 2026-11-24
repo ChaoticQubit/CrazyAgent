@@ -228,6 +228,18 @@ pub(crate) enum Command {
     },
 }
 
+impl Command {
+    /// Tells whether losing this command would leave more access than the owner asked for:
+    /// a plugin turned off, removed, or unbound from a secret. Input: the command. Output:
+    /// the answer.
+    pub(crate) fn narrows_access(&self) -> bool {
+        matches!(
+            self,
+            Self::SetEnabled { enabled: false, .. } | Self::Remove { .. } | Self::Unbind { .. }
+        )
+    }
+}
+
 /// What one App plugins request answers: the listing with the change notices drained after
 /// it and the turn-off choice in force, a trust screen, or the runs holding a plugin.
 #[derive(Debug)]
