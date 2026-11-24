@@ -472,6 +472,7 @@ impl ProjectSandbox {
             }
         }
         assert!(self.granted.len() <= crate::policy::GRANT_SOCKETS_MAX);
+        self.confinement_kept()?;
         Ok(self)
     }
 
@@ -720,6 +721,7 @@ impl ProjectSandbox {
         )?;
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
+        self.confinement_kept()?;
         Ok(self)
     }
 
@@ -792,6 +794,7 @@ impl ProjectSandbox {
             admin,
             objects,
         });
+        self.confinement_kept()?;
         Ok(self)
     }
 
@@ -826,6 +829,7 @@ impl ProjectSandbox {
         assert!(worktree.starts_with(&self.project_root) && worktree != self.project_root);
         self.read_roots.push(self.project_root.clone());
         self.clone = Some(worktree.to_path_buf());
+        self.confinement_kept()?;
         Ok(self)
     }
 
@@ -906,6 +910,7 @@ impl ProjectSandbox {
         self.read_roots.push(self.project_root.clone());
         self.setup = Some(TeammatesSetup { folder, records });
         self.lead_branch = Some(branch.to_owned());
+        self.confinement_kept()?;
         Ok(self)
     }
 }
