@@ -481,7 +481,7 @@ fn dangling_secret_links_in_a_cycle_or_a_long_chain_are_refused() {
         Some(SECRET_ROOT_REFUSED)
     );
     let (folder, home, secrets, workspace) = workspace_home();
-    let chain = folder.path().join("chain");
+    let chain = canonical(folder.path()).unwrap().join("chain");
     std::fs::create_dir(&chain).unwrap();
     for step in 0..20 {
         symlink(
