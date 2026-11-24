@@ -88,11 +88,7 @@ fn stopped_writer(
         own_clone,
         "the agent works in its own clone only under Own branch"
     );
-    let deadline = Instant::now() + WAIT;
-    while !ready(&folder) {
-        assert!(Instant::now() < deadline, "the sub-agent never wrote");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    fixture.until(&mut team, "the sub-agent writes", |_| ready(&folder));
     before_stop(member);
     let listed = agents
         .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
@@ -140,8 +136,8 @@ fn edit_notes(fixture: &Fixture) -> Vec<String> {
         .collect()
 }
 
-/// The notes the engine sent one agent. Inputs: the fixture and the agent. Output: their
-/// bodies.
+/// The notes about edits the engine sent one agent, leaving out its other notes, such as the
+/// stop report a lead gets. Inputs: the fixture and the agent. Output: their bodies.
 fn agent_notes(fixture: &Fixture, agent: i64) -> Vec<String> {
     let mut statement = fixture
         .connection
@@ -154,6 +150,7 @@ fn agent_notes(fixture: &Fixture, agent: i64) -> Vec<String> {
         .query_map([agent], |row| row.get::<_, String>(0))
         .unwrap()
         .map(Result::unwrap)
+        .filter(|body| body.contains("edits from task"))
         .collect()
 }
 
