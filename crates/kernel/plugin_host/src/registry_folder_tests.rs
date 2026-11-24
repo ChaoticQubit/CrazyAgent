@@ -381,8 +381,8 @@ fn a_replace_rolled_back_with_no_id_source_puts_the_original_back() {
 }
 
 /// A replace rolled back whose new folder cannot leave the plugin name keeps the original
-/// through the next start: the start sweep, once the name it was blocked on is free, puts
-/// the original back under the name in place of the new folder.
+/// through the next start: one start sweep deletes the folder that blocked the move, then
+/// puts the original back under the name in place of the new folder.
 #[test]
 fn a_replace_rollback_whose_new_folder_cannot_move_keeps_the_original_through_the_sweep() {
     let mut case = case();
@@ -391,7 +391,6 @@ fn a_replace_rollback_whose_new_folder_cannot_move_keeps_the_original_through_th
     let text = ACME.replace("Acme embeddings", "Acme embeddings two");
 
     replace_rolled_back(&mut case, &STUCK, &text, || take_nameless(&folder));
-    std::fs::remove_dir_all(folder.join(format!(".old-{STUCK_ID}"))).unwrap();
     sweep_staged(&case.engine());
 
     assert_eq!(names_in(&folder), ["acme"]);

@@ -279,8 +279,11 @@ pub(super) fn write(
     Ok(step)
 }
 
-/// Sweeps the staged and retired entries a crash between a write and its rename left, at
-/// most `USER_PLUGINS_MAX` a start, in name order. Input: the engine root. Output: Ok
+/// Sweeps the staged and retired entries a crash between a write and its rename left, and
+/// the folders a rolled-back replace owes back to their plugin names, at most
+/// `USER_PLUGINS_MAX` a start: every other entry first, in name order, then the owed ones,
+/// so a leftover that blocked a rollback is gone before its owed folder is put back.
+/// Input: the engine root. Output: Ok
 /// once each is restored or deleted or the folder is missing, else the first refusal
 /// after every entry was tried.
 pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
@@ -297,6 +300,7 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
     .map_err(|()| unavailable())?;
     assert!(left.len() <= USER_PLUGINS_MAX);
     left.sort();
+    left.sort_by_key(|file| file.to_str().and_then(owed_name).is_some());
     let mut first = None;
     for file in &left {
         let owed_to = file.to_str().and_then(owed_name);
