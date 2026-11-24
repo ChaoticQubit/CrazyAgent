@@ -338,7 +338,7 @@ pub fn parse(text: &str) -> Result<Manifest, Problem> {
 }
 
 /// Whether a plugin name is 1 to 40 lowercase letters, digits or `-`, starting with a
-/// letter. Input: the name. Output: true when valid.
+/// letter, and no name Windows opens as a device. Input: the name. Output: true when valid.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= NAME_BYTES_MAX
@@ -346,6 +346,7 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !kernel_common::windows_device(name)
 }
 
 /// The keys of one manifest table with the key path they sit under, read by key with each
