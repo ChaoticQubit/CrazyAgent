@@ -70,6 +70,15 @@ fn binding(home: &Path) -> PathBuf {
     home.join("stand-in-binding")
 }
 
+/// Stands in for the agent home's pinned entries, each folder ahead of what it holds: the
+/// folders a launch keeps only part of, cargo's registry link and each config folder, as
+/// the profile requires of every hooks value. Output: the paths below the home.
+fn pinned() -> Vec<String> {
+    ["Library", ".cargo", ".cargo/registry", ".config"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
 pub(crate) static ACCESS: AccessHooks = AccessHooks {
     owner_git: no_owner_git,
     harness_folders: Vec::new,
@@ -98,7 +107,7 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     zsh_startup: &[".zshrc"],
     zsh_compiled: ".zwc",
     sh_startup: &[".profile"],
-    pinned_entries: Vec::new,
+    pinned_entries: pinned,
     kept_entries: Vec::new,
     relay_lead_part: "stand-in-lead",
     relay_plugin_folder: "stand-in-relay",
@@ -118,5 +127,9 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     reply_suffix: ".stand-in-reply",
     answer_part_suffix: ".stand-in-part",
     key_folders: &["stand-in-keys"],
-    engine_secret_folders: &["stand-in-secrets"],
+    engine_secret_folders: &[
+        "stand-in-secrets",
+        "stand-in-profiles",
+        "stand-in-sdk-homes",
+    ],
 };
