@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  App plugins                                 
+────────────────────────────────────────────────────────────────────────────────
+      api_key: Key you entered                                                  
+    Harbor embeddings                                             Not approved  
+      harbor, version 1. Added by you.                                          
+      R┌─ Review Cove embeddings ───────────────────────────────────────┐       
+      R│ Changed since you approved it.                                 │       
+      a│ New hosts: api2.cove.invalid                                   │       
+  > Cov│ Embeds on the dock machine.                                    │eview  
+      c│ Kind: Embedding                                                │       
+      R│ Version 2                                                      │       
+      I│ Reaches api.cove.invalid, api2.cove.invalid (new)              │       
+      a│ Address: https://api.cove.invalid/v1/embed                     │       
+    Bro│ Secrets it needs: none                                         │fused  
+      b│ SHA-256                                                        │       
+      t│ 5f2c0d8e9a7b6c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c │,      
+      h│ 0d                                                             │       
+    age└────────────────────────────────────────────────────────────────┘l  On  
+      agent-quit, bundled code plugin. 1 permission.                            
+      Essential, stays on.                                                      
+    service-kit                                                    Bundled  On  
+      service-kit, bundled code plugin. 2 permissions.                          
+                                                                                
+ y Approve  ↑↓ Scroll  Esc Close                                         ? Help 
