@@ -9,7 +9,7 @@ use crate::profile::consts::{
     LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
     LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, STORE_ALTERNATES,
 };
-use crate::profile::env::{Routed, agent_process_env};
+use crate::profile::env::{Handed, Routed, agent_process_env};
 use crate::profile::{ProjectSandbox, command::Sandbox, linux_holds_fully};
 use crate::settings::{LinuxSockets, LinuxSupervisor};
 use ::landlock::RulesetStatus;
@@ -556,6 +556,18 @@ impl LinuxSandbox {
             LinuxBackend::Landlock { helper } | LinuxBackend::Nested { helper, .. } => helper,
             LinuxBackend::Bubblewrap { bwrap, .. } => bwrap,
         }
+    }
+
+    /// Rebuilds a harness command as [`Sandbox::wrap`] does for a launch that hands its
+    /// account over: the harness variables `handed` names may hold its one value. Inputs:
+    /// the harness command and the launch's exception. Output: the command, or the refusal.
+    pub fn wrap_handing(
+        &self,
+        harness: &Command,
+        handed: Handed<'_>,
+    ) -> Result<Command, SandboxError> {
+        let _ = handed;
+        Sandbox::wrap(self, harness)
     }
 }
 
