@@ -74,7 +74,7 @@ mod owner_git_rows {
         );
     }
 
-    /// CR-0443 unc9 r2: a share row waits while another holds the runner's sessions, so no
+    /// A share row waits while another holds the runner's sessions, so no
     /// reset or session read of one row falls inside another's; the waiting hold sees the
     /// first row's work already finished.
     #[test]
