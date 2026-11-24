@@ -6,13 +6,23 @@ use kernel_common::Platform;
 use kernel_processes::service::Service;
 use kernel_processes::spawn_gate;
 use kernel_processes::terminal::buffer::Chunk;
-use kernel_processes::terminal::tmux::Tmux;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host, TerminalStream, type_into};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// The budget row's terminal folder: a fixed name in the user's private temp root, so the
+/// next run finds the tmux server a hard-stopped run left on its socket.
+const TERMINAL_FOLDER: &str = "ca-budget-row";
+
+/// The folder the stale-server row plants its server in, apart from the budget row's.
+const STALE_FOLDER: &str = "ca-budget-stale";
+
+/// How long a reaped server and its panes may take to exit.
+const REAP_WAIT: Duration = Duration::from_secs(10);
 
 const PTY_LINE: &[u8] = b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r";
 const ARCHIVE_BYTES: usize = 1 << 20;
@@ -57,7 +67,6 @@ fn time(run: &mut dyn FnMut()) -> u128 {
 
 struct Fixtures {
     home: PathBuf,
-    tmux: PathBuf,
     host: Tmux,
     echo: AgentId,
     #[cfg(target_os = "macos")]
@@ -70,20 +79,17 @@ struct Fixtures {
     signature: String,
     key: String,
     service: Service,
+    _terminal: TerminalFolder,
 }
 
 impl Fixtures {
     fn new(home: &Path) -> TestResult<Self> {
-        let folder = home.join("terminal");
-        at(&folder, std::fs::create_dir(&folder))?;
-        at(
-            &folder,
-            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)),
-        )?;
-        let tmux = installed(home).expect("tmux is required for the budget row");
+        let tmux = tmux_for(home);
+        let folder = crate::harnesses::finding::private_root().join(TERMINAL_FOLDER);
+        let terminal = TerminalFolder::new(&tmux, folder)?;
         let host = Tmux::open(
-            Some(tmux.clone()),
-            &folder,
+            Some(tmux),
+            &terminal.folder,
             kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         );
@@ -119,7 +125,6 @@ impl Fixtures {
         };
         let fixtures = Self {
             home: home.to_path_buf(),
-            tmux,
             host,
             echo,
             #[cfg(target_os = "macos")]
@@ -132,6 +137,7 @@ impl Fixtures {
             signature,
             key,
             service,
+            _terminal: terminal,
         };
         fixtures.pty_echo();
         Ok(fixtures)
@@ -211,19 +217,161 @@ impl Fixtures {
     }
 }
 
-impl Drop for Fixtures {
+/// A row's terminal folder at a fixed name. Making it ends the server an earlier run left
+/// there; dropping it ends this run's server and removes the folder.
+struct TerminalFolder {
+    tmux: PathBuf,
+    folder: PathBuf,
+}
+
+impl TerminalFolder {
+    /// Sets the folder up fresh ([`fresh_terminal`]). Inputs: the tmux program and the
+    /// folder. Output: the guard, or the folder step that failed.
+    fn new(tmux: &Path, folder: PathBuf) -> TestResult<Self> {
+        fresh_terminal(tmux, &folder)?;
+        Ok(Self {
+            tmux: tmux.to_path_buf(),
+            folder,
+        })
+    }
+}
+
+impl Drop for TerminalFolder {
     fn drop(&mut self) {
-        let _ = spawn_gate::status(
-            Command::new(&self.tmux)
+        end_server(&self.tmux, &self.folder.join(SOCKET));
+        let _ = std::fs::remove_dir_all(&self.folder);
+    }
+}
+
+/// Ends the tmux server on a socket, by that socket only, when one answers there.
+/// Inputs: the tmux program and the socket. Output: none.
+fn end_server(tmux: &Path, socket: &Path) {
+    let _ = spawn_gate::status(
+        Command::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+}
+
+/// The tmux the rows time and plant with. Input: the engine root the resolver reads.
+/// Output: the tmux program.
+fn tmux_for(home: &Path) -> PathBuf {
+    installed(home).expect("tmux is required for the budget row")
+}
+
+/// Makes a row's terminal folder again, private and empty: when an earlier run left it, the
+/// tmux server on its socket is ended first, its holder and panes with it, and the folder is
+/// removed, which also ends a holder whose server did not answer. Inputs: the tmux program
+/// and the folder. Output: none, or the folder step that failed.
+fn fresh_terminal(tmux: &Path, folder: &Path) -> TestResult {
+    assert!(tmux.is_absolute());
+    if std::fs::symlink_metadata(folder).is_ok() {
+        end_server(tmux, &folder.join(SOCKET));
+        at(folder, std::fs::remove_dir_all(folder))?;
+    }
+    at(folder, std::fs::create_dir(folder))?;
+    at(
+        folder,
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)),
+    )
+}
+
+/// The pids of the tmux server on a socket and of every pane it runs, the holder's
+/// included. Inputs: the tmux program and the socket. Output: the pids, none when no
+/// server answers there.
+fn server_pids(tmux: &Path, socket: &Path) -> TestResult<Vec<i32>> {
+    let mut pids = Vec::new();
+    for asked in [
+        ["display-message", "-p", "#{pid}"].as_slice(),
+        ["list-panes", "-a", "-F", "#{pane_pid}"].as_slice(),
+    ] {
+        let output = spawn_gate::collected(
+            Command::new(tmux)
                 .arg("-S")
-                .arg(self.host.socket())
-                .arg("kill-server")
-                .env_clear()
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
+                .arg(socket)
+                .args(asked)
+                .env_clear(),
+        )
+        .map_err(|error| format!("{} at {}: {error}", tmux.display(), socket.display()))?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        pids.extend(
+            text.lines()
+                .filter_map(|line| line.trim().parse::<i32>().ok()),
         );
     }
+    Ok(pids)
+}
+
+/// Whether a process with this pid still runs. Input: the pid. Output: the answer.
+fn alive(pid: i32) -> bool {
+    rustix::process::Pid::from_raw(pid)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+}
+
+/// A tmux server a hard-stopped run left on the row's socket, with its holder and a `cat`
+/// pane, is gone once the next run sets its terminal folder up, and the folder is made again
+/// empty and private. It plants in its own folder, so it never ends the budget row's server.
+#[test]
+#[ignore = "budget row: run with --ignored --nocapture on a quiet and a loaded Mac"]
+fn a_server_an_earlier_run_left_is_gone_once_the_next_run_sets_up() -> TestResult {
+    let home = tempfile::tempdir()?;
+    let tmux = tmux_for(home.path());
+    let terminal = TerminalFolder::new(
+        &tmux,
+        crate::harnesses::finding::private_root().join(STALE_FOLDER),
+    )?;
+    let folder = terminal.folder.clone();
+    let planted = Tmux::open(
+        Some(tmux.clone()),
+        &folder,
+        kernel_sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    );
+    let command = InteractiveCommand {
+        argv: vec!["/bin/cat".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let agent = AgentId::team(1).unwrap();
+    planted
+        .spawn(
+            &agent,
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .map_err(|error| {
+            format!(
+                "tmux at {} spawns {agent:?}: {error}",
+                planted.socket().display()
+            )
+        })?;
+    let socket = planted.socket();
+    drop(planted);
+    let pids = server_pids(&tmux, &socket)?;
+    assert!(pids.len() >= 3, "server, holder and cat: {pids:?}");
+    assert!(pids.iter().all(|pid| alive(*pid)), "{pids:?}");
+
+    fresh_terminal(&tmux, &folder)?;
+    let gone = crate::poll_support::poll_until(Instant::now() + REAP_WAIT, || {
+        pids.iter().all(|pid| !alive(*pid))
+    });
+    let left: Vec<i32> = pids.iter().copied().filter(|pid| alive(*pid)).collect();
+    assert!(gone, "still running after setup: {left:?}");
+    let entries = at(&folder, std::fs::read_dir(&folder))?.count();
+    assert_eq!(entries, 0, "{}", folder.display());
+    let mode = at(&folder, std::fs::symlink_metadata(&folder))?
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+    Ok(())
 }
 
 fn spawn_true() {
