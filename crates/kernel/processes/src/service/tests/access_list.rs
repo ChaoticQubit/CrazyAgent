@@ -435,7 +435,8 @@ fn an_access_answer_is_kept_only_once_its_entry_changed_in_an_earlier_second() {
 /// Changes a tool's folder and reads the tool's access answer within one second, at most
 /// three tries, since a slow spawn can carry the listing into the next second: the first try
 /// gives staff `add_file` on the folder's access list, a later one flips its mode, which
-/// keeps that entry. Each read lists the folder alone. Inputs: the tool, its folder, the root.
+/// keeps that entry. Each read lists the folder alone among the root's parts. Inputs: the
+/// tool, its folder, the root.
 #[cfg(target_os = "macos")]
 fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -455,7 +456,10 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
             std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
         }
         assert_eq!(changeable_by_others(tool), Some(folder.to_path_buf()));
-        let changed = acl::take_listings();
+        let changed: Vec<Vec<PathBuf>> = acl::take_listings()
+            .into_iter()
+            .filter(|listing| listing.iter().any(|listed| listed.starts_with(root)))
+            .collect();
         assert_eq!(changed.len(), 1, "{changed:?}");
         let ours: Vec<PathBuf> = changed[0]
             .iter()
