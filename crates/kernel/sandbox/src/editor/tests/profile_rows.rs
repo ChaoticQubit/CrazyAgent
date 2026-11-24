@@ -13,7 +13,7 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
     for path in [&home, &build, &root] {
         folder(path);
     }
-    let tmp = crate::toolchains::make_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -69,7 +69,7 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         .unwrap_err(),
         "ide_sandbox_invalid"
     );
-    crate::toolchains::remove_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
@@ -94,7 +94,7 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
     for path in [&home, &build, &root] {
         folder(path);
     }
-    let tmp = crate::toolchains::make_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -121,7 +121,7 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
     .unwrap();
     let spelled = crate::paths::any_case(root.to_str().unwrap());
     assert!(text.contains(&format!("(regex #\"^{spelled}")), "{text}");
-    crate::toolchains::remove_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// The Remote settings folder the engine writes before each launch is locked inside the
@@ -149,7 +149,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
     let settings = machine.join("settings.json");
     let engine = "{\"chat.disableAIFeatures\": true}\n";
     fs::write(&settings, engine).unwrap();
-    let tmp = crate::toolchains::make_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -213,7 +213,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         1,
         "nothing was added next to the engine's settings"
     );
-    crate::toolchains::remove_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// A lock outside every writable folder, a read-only folder inside a writable one, and a
@@ -235,7 +235,7 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
     for path in [&home, &extensions, &build, &root] {
         folder(path);
     }
-    let tmp = crate::toolchains::make_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let machine = home.join("data").join("Machine");
     let grants = Grants {
         data: &data,
@@ -306,7 +306,7 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
             read_only.display()
         );
     }
-    crate::toolchains::remove_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// DEC-098 addendum 9: the server cannot read an agent's IDE config, any `.vscode` folder
@@ -372,7 +372,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         linked.join("team.code-workspace"),
         inner.join(".vscode").join("launch.json"),
     ];
-    let tmp = crate::toolchains::make_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -416,7 +416,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         (true, planted.to_owned()),
         "a link is refused for its name, not for being a link"
     );
-    crate::toolchains::remove_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
 /// A listener on a free loopback port, with nothing behind it. Output: the listener, held
@@ -449,7 +449,7 @@ fn kept_profile(network: SandboxNetwork, kept_ports: &[u16]) -> (tempfile::TempD
     for path in [&home, &build, &root] {
         folder(path);
     }
-    let tmp = crate::toolchains::make_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -580,7 +580,7 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
     let settings = machine.join("settings.json");
     let engine = "{\"chat.disableAIFeatures\": true}\n";
     fs::write(&settings, engine).unwrap();
-    let tmp = crate::toolchains::make_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -612,5 +612,5 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
     }
     assert_eq!(fs::read_to_string(&settings).unwrap(), engine);
     assert_eq!(fs::read_dir(&machine).unwrap().count(), 1);
-    crate::toolchains::remove_tmp(&crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
