@@ -606,7 +606,7 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
 /// trust record and state as one Forgotten event in a savepoint, then the keys entered for
 /// it; the folder moved aside and any .yaml file an older version left are deleted only
 /// after the capture's commit, and the folder goes back after its rollback. A failed row
-/// write changes nothing. Account keys stay. Under a bundled plugin's name it removes only
+/// write, or a savepoint release that cannot commit outside a capture, changes nothing. Account keys stay. Under a bundled plugin's name it removes only
 /// what the owner's folder still holds, which the bundled plugin shadows. Outside the
 /// capture of its own transaction it is refused before anything is written. Inputs:
 /// database, engine facts and name. Output: Ok, or `app_plugin_bundled`,
@@ -642,12 +642,19 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
         let forgotten = store_log::Event::Forgotten {
             plugin: name.to_owned(),
         };
-        if let Err(refusal) = store_log::record(db, forgotten) {
-            let _ = db.execute_batch("ROLLBACK TO app_plugin_remove; RELEASE app_plugin_remove");
+        let written = store_log::record(db, forgotten).and_then(|()| {
+            db.execute_batch("RELEASE app_plugin_remove")
+                .map_err(sqlite)
+        });
+        if let Err(refusal) = written {
+            let undo = if captured {
+                "ROLLBACK TO app_plugin_remove; RELEASE app_plugin_remove"
+            } else {
+                "ROLLBACK"
+            };
+            let _ = db.execute_batch(undo);
             return Err(refusal);
         }
-        db.execute_batch("RELEASE app_plugin_remove")
-            .map_err(sqlite)?;
     }
     for (_, source, reference) in &bindings {
         forget_key_file(db, engine, source, reference);
