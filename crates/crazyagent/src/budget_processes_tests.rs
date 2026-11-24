@@ -264,10 +264,16 @@ fn tmux_for(home: &Path) -> PathBuf {
     installed(home).expect("tmux is required for the budget row")
 }
 
-/// Makes a row's terminal folder, private and empty. Inputs: the tmux program and the
-/// folder. Output: none, or the folder step that failed.
+/// Makes a row's terminal folder again, private and empty: when an earlier run left it, the
+/// tmux server on its socket is ended first, its holder and panes with it, and the folder is
+/// removed, which also ends a holder whose server did not answer. Inputs: the tmux program
+/// and the folder. Output: none, or the folder step that failed.
 fn fresh_terminal(tmux: &Path, folder: &Path) -> TestResult {
     assert!(tmux.is_absolute());
+    if std::fs::symlink_metadata(folder).is_ok() {
+        end_server(tmux, &folder.join(SOCKET));
+        at(folder, std::fs::remove_dir_all(folder))?;
+    }
     at(folder, std::fs::create_dir(folder))?;
     at(
         folder,
