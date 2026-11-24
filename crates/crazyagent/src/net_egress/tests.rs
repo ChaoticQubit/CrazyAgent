@@ -213,7 +213,9 @@ fn the_curl_config_is_byte_equal_to_todays_github_request() {
         headers: Vec::new(),
         allow_http: false,
     };
-    let (_, config) = today.command().unwrap();
+    let (_, config) = today
+        .command(|_, _| Ok(vec![IpAddr::from([140, 82, 112, 6])]))
+        .unwrap();
     let today = String::from_utf8(config).unwrap();
     let store = OneToken::default();
     let scopes = Scopes::new(&[("github", "github")]).unwrap();

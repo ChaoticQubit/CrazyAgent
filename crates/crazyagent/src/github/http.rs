@@ -2,6 +2,8 @@ use crate::engine::EngineError;
 use kernel_sandbox::egress::{BODY_BYTES_MAX, ExchangeError, exchange};
 use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use kernel_security::secret::SecretString;
+use std::io;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::process::{Command, Stdio};
 
 const CURL: &str = "/usr/bin/curl";
@@ -108,22 +110,31 @@ impl Request<'_> {
         kernel_security::secret::sized(&pieces).ok_or_else(|| failure("github_request_invalid"))
     }
 
-    /// Builds the curl command without running it. Output: the command, whose arguments
-    /// and environment hold no URL, header or secret, and the config bytes for its stdin.
-    pub(crate) fn command(&self) -> Result<(Command, Vec<u8>), EngineError> {
-        self.command_with(None)
+    /// Builds the curl command without running it. Input: the host name lookup. Output:
+    /// the command, whose arguments and environment hold no URL, header or secret, and the
+    /// config bytes for its stdin.
+    pub(crate) fn command(
+        &self,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
+    ) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(None, resolve)
     }
 
-    /// Builds the curl command for a POST of a JSON body without running it. Input: the
-    /// body. Output: the command, whose arguments and environment hold no URL, header,
-    /// body or secret, and the config bytes for its stdin.
-    pub(crate) fn json_command(&self, json: &str) -> Result<(Command, Vec<u8>), EngineError> {
-        self.command_with(Some((Verb::Post, Some(json))))
+    /// Builds the curl command for a POST of a JSON body without running it. Inputs: the
+    /// body and the host name lookup. Output: the command, whose arguments and environment
+    /// hold no URL, header, body or secret, and the config bytes for its stdin.
+    pub(crate) fn json_command(
+        &self,
+        json: &str,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
+    ) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(Some((Verb::Post, Some(json))), resolve)
     }
 
     fn command_with(
         &self,
         body: Option<(Verb, Option<&str>)>,
+        _resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
     ) -> Result<(Command, Vec<u8>), EngineError> {
         let secure = self.url.scheme() == "https";
         let loopback = self.url.scheme() == "http"
@@ -155,14 +166,14 @@ impl Request<'_> {
     /// Sends the request and waits at most 30 s. Output: the reply, or
     /// `github_unreachable` when curl could not finish the exchange.
     pub(crate) fn send(&self) -> Result<Reply, EngineError> {
-        let (command, config) = self.command()?;
+        let (command, config) = self.command(system)?;
         exchange(command, config).map_err(code)
     }
 
     /// POSTs a JSON body and waits at most 30 s, as `send` does. Input: the body.
     /// Output: the reply, or `github_unreachable` when curl could not finish the exchange.
     pub(crate) fn send_json(&self, json: &str) -> Result<Reply, EngineError> {
-        let (command, config) = self.json_command(json)?;
+        let (command, config) = self.json_command(json, system)?;
         exchange(command, config).map_err(code)
     }
 
@@ -170,9 +181,18 @@ impl Request<'_> {
     /// `send` does. Inputs: the method and the body. Output: the reply, or
     /// `github_unreachable` when curl could not finish the exchange.
     pub(crate) fn send_body(&self, verb: Verb, json: Option<&str>) -> Result<Reply, EngineError> {
-        let (command, config) = self.command_with(Some((verb, json)))?;
+        let (command, config) = self.command_with(Some((verb, json)), system)?;
         exchange(command, config).map_err(code)
     }
+}
+
+/// Looks a host name up once through the system resolver. Inputs: the host and port.
+/// Output: every address it resolved to, or the lookup failure.
+fn system(host: &str, port: u16) -> io::Result<Vec<IpAddr>> {
+    Ok((host, port)
+        .to_socket_addrs()?
+        .map(|found| found.ip())
+        .collect())
 }
 
 /// The engine code of an exchange that gave no reply. Input: the kernel's reason. Output:
