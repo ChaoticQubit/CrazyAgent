@@ -16,7 +16,8 @@ if [ "${1:-}" = "--measure" ]; then
   condition=loaded
   awk -v l="$load1" 'BEGIN { exit !(l < 4) }' && [ "$others" -eq 0 ] && condition=quiet
   echo "PERF-RUN build=$build commit=$(git rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition load1=$load1 slots=$others runs=1"
-  exec cargo "$@"
+  cargo "$@" 2>&1 | sed -E 's/^test [^ ]+ \.\.\. (PERF )/\1/'
+  exit "${PIPESTATUS[0]}"
 fi
 
 layer=${1:?usage: run.sh <layer>}
