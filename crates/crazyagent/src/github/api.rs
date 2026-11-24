@@ -745,7 +745,9 @@ pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretSt
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            if let Ok((_, mut bytes)) = reader.join() {
+                kernel_security::secret::wipe(&mut bytes);
+            }
             return Err(unavailable());
         }
         std::thread::sleep(Duration::from_millis(20));

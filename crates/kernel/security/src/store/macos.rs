@@ -271,7 +271,9 @@ fn run(
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            if let Ok((_, mut bytes)) = reader.join() {
+                crate::secret::wipe(&mut bytes);
+            }
             return Err(unavailable());
         }
         std::thread::sleep(Duration::from_millis(10));

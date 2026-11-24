@@ -103,16 +103,26 @@ pub(crate) async fn get(
 }
 
 /// Writes one plain-HTTP GET request, with the bearer key in its Authorization header when
-/// one is given; the caller wipes the bytes once they are sent. Inputs: the request path,
-/// the host and port, and the key. Output: the request bytes.
+/// one is given, into one buffer of exactly its size, so no growth frees a copy of the key;
+/// the caller wipes the bytes once they are sent. Inputs: the request path, the host and
+/// port, and the key. Output: the request bytes.
 pub fn request(path: &str, address: &str, bearer: Option<&[u8]>) -> Vec<u8> {
-    let mut request = format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n").into_bytes();
+    const BEARER: &[u8] = b"Authorization: Bearer ";
+    let head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n"
+    );
+    let size = head.len() + bearer.map_or(0, |key| BEARER.len() + key.len() + 2) + 2;
+    let mut request = Vec::with_capacity(size);
+    let capacity = request.capacity();
+    request.extend_from_slice(head.as_bytes());
     if let Some(key) = bearer {
-        request.extend_from_slice(b"Authorization: Bearer ");
+        request.extend_from_slice(BEARER);
         request.extend_from_slice(key);
         request.extend_from_slice(b"\r\n");
     }
     request.extend_from_slice(b"\r\n");
+    assert_eq!(request.len(), size);
+    assert_eq!(request.capacity(), capacity);
     request
 }
 
