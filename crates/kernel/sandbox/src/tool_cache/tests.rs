@@ -323,6 +323,38 @@ fn a_staging_file_left_under_this_name_is_replaced() {
     );
 }
 
+/// A record write removes the staging files of this record that another process left, and
+/// keeps this process's own and every name that is not exactly a staging name of the record.
+#[test]
+fn a_record_write_sweeps_staging_files_another_process_left() {
+    let (folder, owned) = record_folder();
+    let own = std::process::id();
+    let other = own.wrapping_add(1);
+    assert_ne!(other, own);
+    let own_side = format!("k.primed.{own}.999999999.new");
+    let kept = [
+        own_side.as_str(),
+        "k.primed.x.0.new",
+        "k.primed..0.new",
+        "k.primed.1.new",
+        "k.primed.1.0.new.bak",
+        "other.primed.1.0.new",
+    ];
+    for name in kept {
+        std::fs::write(folder.path().join(name), b"kept").unwrap();
+    }
+    std::fs::write(folder.path().join(format!("k.primed.{other}.0.new")), b"left").unwrap();
+    write_record(&owned, "k.primed", "id 1", &["abc".to_owned()]).unwrap();
+    let mut expected: Vec<String> = kept.iter().map(|name| (*name).to_owned()).collect();
+    expected.push("k.primed".to_owned());
+    expected.sort_unstable();
+    assert_eq!(names_in(folder.path()), expected);
+    assert_eq!(
+        read_record(&owned, "k.primed"),
+        Some(("id 1".to_owned(), vec!["abc".to_owned()]))
+    );
+}
+
 /// A rename that fails removes the writer's staging file and refuses the record.
 #[test]
 fn a_failed_rename_removes_the_staging_file() {
