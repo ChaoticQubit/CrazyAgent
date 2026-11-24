@@ -45,11 +45,11 @@ mod freeze_tests;
 #[path = "hidden_seers_tests.rs"]
 mod hidden_seers_tests;
 
+#[path = "limit_order_tests.rs"]
+mod limit_order_tests;
 #[cfg(target_os = "macos")]
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
-#[path = "limit_order_tests.rs"]
-mod limit_order_tests;
 
 const PROJECT: &str = "team-panes";
 
