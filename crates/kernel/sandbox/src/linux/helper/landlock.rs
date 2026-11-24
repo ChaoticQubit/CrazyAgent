@@ -74,7 +74,7 @@ pub struct Guard {
 
 impl Guard {
     /// The helper arguments for this guard, in the order the helper reads them back.
-    pub fn args(&self) -> Vec<OsString> {
+    pub(crate) fn args(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = Vec::new();
         for port in &self.loopback {
             args.push(GUARD_LOOPBACK.into());
@@ -136,7 +136,7 @@ impl Guard {
 
 impl LandlockPolicy {
     /// The helper arguments for this policy, without the `--` and the harness command.
-    pub(crate) fn args(&self) -> Vec<OsString> {
+    pub fn args(&self) -> Vec<OsString> {
         let mut args = Vec::new();
         for path in &self.read {
             args.push(READ.into());
