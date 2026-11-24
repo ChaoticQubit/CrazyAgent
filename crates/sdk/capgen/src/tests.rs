@@ -76,14 +76,17 @@ fn a_renamed_field_changes_the_output() {
     let source = fs::read_to_string(sdk("caps/settings.cap")).expect("settings.cap reads");
     let renamed = source.replace("hours: u16", "hour_count: u16");
     assert_ne!(renamed, source);
-    let secrets = fs::read_to_string(sdk("caps/secrets.cap")).expect("secrets.cap reads");
-    let net = fs::read_to_string(sdk("caps/net.cap")).expect("net.cap reads");
-    let files = rust(&parsed(&[
-        ("net", &net),
-        ("secrets", &secrets),
-        ("settings", &renamed),
-    ]))
-    .expect("generates");
+    let renamed = crazyagent_cap::parse_as("settings", &renamed).expect("parses");
+    let loaded = load(&sdk("caps")).expect("the caps load");
+    assert!(loaded.iter().any(|(stem, _)| stem == "settings"));
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| {
+            let file = if stem == "settings" { &renamed } else { file };
+            (stem.as_str(), file.clone())
+        })
+        .collect();
+    let files = rust(&borrowed).expect("generates");
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
         vec!["settings.rs".to_owned()]
