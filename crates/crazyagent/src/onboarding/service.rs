@@ -642,7 +642,7 @@ fn graph_step(
         Ok(GraphEnding::Stopped) => Step::WAITING,
         Err(RunError::Uncertain(_)) => {
             std::mem::forget(listed);
-            Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN)
+            Step::failed(kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN)
         }
         Err(error) => not_started(Kind::Graph, &error),
     }
@@ -1205,7 +1205,7 @@ fn mapping_step(
             Err(RunError::Account(_)) => return (Step::failed(NO_ACCOUNT), kept),
             Err(RunError::Uncertain(_)) => {
                 return (
-                    Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
+                    Step::failed(kernel_sandbox::profile::warden::CLEANUP_UNCERTAIN),
                     kept,
                 );
             }
