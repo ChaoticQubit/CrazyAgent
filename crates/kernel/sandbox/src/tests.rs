@@ -293,3 +293,22 @@ fn an_ide_terminal_refuses_a_project_that_is_not_one_folder_name() {
         assert!(!root.join("ide-shell").exists(), "{project:?}");
     }
 }
+
+/// The installed boundary every launch takes lives in the kernel beside the profile it was
+/// installed from, and the kernel profile hooks name the Windows grants folder it installs
+/// with.
+#[test]
+fn the_installed_boundary_lives_in_the_kernel() {
+    let _: Option<crate::profile::installed::InstalledSandbox> = None;
+    let unconfined: fn(&crate::profile::installed::InstalledSandbox) -> bool =
+        crate::profile::installed::InstalledSandbox::is_unconfined;
+    let _ = unconfined;
+    #[cfg(target_os = "windows")]
+    {
+        let grants: fn(
+            &crate::profile::ProfileHooks,
+        ) -> fn() -> Result<std::path::PathBuf, crate::error::SandboxError> =
+            |hooks| hooks.grants_folder;
+        let _ = grants;
+    }
+}
