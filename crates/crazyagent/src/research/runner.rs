@@ -1961,8 +1961,9 @@ impl ResearchRunner {
     /// its model endpoint and none of the engine root's secrets, which no
     /// granted folder may hold. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
-    /// agent runs. Returns how it ended; the agent's process group is stopped
-    /// on every path, including a panic or an early error.
+    /// agent runs; a run of a project also ends Stopped once a folder it did not
+    /// hide at its start is saved hidden. Returns how it ended; the agent's
+    /// process group is stopped on every path, including a panic or an early error.
     #[cfg(unix)]
     pub(crate) fn run_read_only(
         &self,
@@ -2093,11 +2094,15 @@ impl ResearchRunner {
             ),
             _ => None,
         };
-        let hidden = match run.project {
-            Some(project) => ResearchJobs::open(&self.database)?
+        let jobs = match run.project {
+            Some(_) => Some(ResearchJobs::open(&self.database)?),
+            None => None,
+        };
+        let hidden = match (run.project, &jobs) {
+            (Some(project), Some(jobs)) => jobs
                 .hidden_paths(project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         if let Some(listed) = &listed {
             listed.hid(&hidden);
@@ -2198,6 +2203,14 @@ impl ResearchRunner {
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(run.prompt.as_bytes());
         }
+        let hides = jobs.as_ref().zip(run.project).map(|(jobs, project)| {
+            crate::sandbox::access_store::hidden::hide_stops(
+                jobs.connection(),
+                project.as_str(),
+                listed.as_ref(),
+                stop,
+            )
+        });
         let started = Instant::now();
         let mut exited_failing = false;
         let ending = loop {
@@ -2208,11 +2221,12 @@ impl ResearchRunner {
             if started.elapsed() >= run.wall_time {
                 break Some(ReadOnlyEnding::TimedOut);
             }
-            if stop() || self.is_stopping() {
+            if hides.as_ref().map_or_else(stop, |hides| hides()) || self.is_stopping() {
                 break Some(ReadOnlyEnding::Stopped);
             }
             std::thread::sleep(POLL);
         };
+        drop(hides);
         let stopped = running.stop();
         drop(running);
         for handle in drains {
