@@ -529,7 +529,7 @@ fn the_page_reads_then_lists_each_plugin_with_one_label_and_code_plugins_last() 
     assert!(bar(&mut shell).contains("r Try again"));
     shell.key(Key::Char('r'));
     serve(&mut shell, &mut fake);
-    assert_eq!(fake.seen, ["AppPlugins", "AppPlugins", "PluginGrants"]);
+    assert_eq!(fake.seen, ["AppPlugins", "PluginGrants"]);
 
     assert!(line(&mut shell, "OpenAI embeddings").contains("Bundled  Off"));
     assert!(line(&mut shell, "Ollama embeddings").contains("Bundled  On"));
