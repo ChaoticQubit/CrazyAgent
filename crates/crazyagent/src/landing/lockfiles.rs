@@ -276,7 +276,9 @@ pub(super) fn regenerate(
 /// set and merges the tip into its head in the owner repository, refusing an owner merge
 /// driver or filter on any path either side touched. Without the hold it takes the tip's
 /// side of each lockfile, runs each tool confined like an agent in a temporary linked
-/// worktree within one deadline, ends every process of each run, refuses any other path
+/// worktree within one deadline, stops the tools once the project saves a folder hidden
+/// that their sandbox did not hide, which refuses the set with no commit, ends every
+/// process of each run, refuses any other path
 /// the tools changed and reads each lockfile through handles that follow no link. Under
 /// the hold again, unless the set, main, the owner's stop or the team's pause changed, it
 /// saves the commit as the set's head, moves the pending ref and the agent's quiet
@@ -354,7 +356,7 @@ fn regenerated(
         return Ok(Regenerated::Refused);
     };
     let uv_clash = paths.iter().any(|path| program_for(path) == Some("uv"));
-    let (sandbox, _listed) = match confined(
+    let (sandbox, listed) = match confined(
         db, &record, &root, &runtime, &worktree, &scratch, settings, uv_clash,
     ) {
         Ok(confined) => confined,
@@ -369,6 +371,12 @@ fn regenerated(
         None => (None, REGENERATE_TIME),
     };
     let deadline = Instant::now() + total;
+    let stop = crate::sandbox::access_store::hidden::hide_stops(
+        db,
+        record.project.as_str(),
+        Some(&listed),
+        &|| false,
+    );
     let mut majors: BTreeMap<&str, Option<u32>> = BTreeMap::new();
     for path in paths {
         let program = program_for(path).ok_or_else(|| failure("changes_git_failed"))?;
@@ -388,6 +396,7 @@ fn regenerated(
                 deadline.min(Instant::now() + VERSION_TIME),
                 true,
                 first.as_deref(),
+                &stop,
             )
             .filter(|(code, _)| *code == 0)
             .and_then(|(_, printed)| major_of(&printed))
@@ -403,6 +412,7 @@ fn regenerated(
             deadline,
             false,
             first.as_deref(),
+            &stop,
         );
         if ran.map(|(code, _)| code) != Some(0) {
             return Ok(Regenerated::Refused);
@@ -685,12 +695,13 @@ fn confined(
 
 /// Runs one program through `/usr/bin/env` in the tool sandbox, from a folder of the
 /// temporary worktree, until `until`, stops its whole process group when it ends or runs
-/// past that, and fires the sandbox's warden so no process of the run outlives it. Its
-/// output is waited for until `until` only, never past it. Inputs: the sandbox, its
-/// profile, the program and its arguments, the folder, the time it must end by, whether
-/// to keep at most `VERSION_BYTES_MAX` bytes of its output and a folder to put first on
-/// its PATH. Output: the exit code and the kept output, or None when it could not start,
-/// was stopped by a signal, ran past the time or its processes were not all ended.
+/// past that or once `stop` says so, and fires the sandbox's warden so no process of the
+/// run outlives it. Its output is waited for until `until` only, never past it. Inputs: the
+/// sandbox, its profile, the program and its arguments, the folder, the time it must end
+/// by, whether to keep at most `VERSION_BYTES_MAX` bytes of its output, a folder to put
+/// first on its PATH and the stop. Output: the exit code and the kept output, or None when
+/// it could not start, was stopped by a signal or by `stop`, ran past the time or its
+/// processes were not all ended.
 fn run(
     sandbox: &ProjectSandbox,
     profile: &Path,
@@ -699,6 +710,7 @@ fn run(
     until: Instant,
     keep: bool,
     first: Option<&Path>,
+    stop: &dyn Fn() -> bool,
 ) -> Option<(i32, Vec<u8>)> {
     let mut command: Command = sandbox.command(profile, Path::new(ENV));
     command
@@ -736,7 +748,7 @@ fn run(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < until => std::thread::sleep(POLL),
+            Ok(None) if Instant::now() < until && !stop() => std::thread::sleep(POLL),
             _ => {
                 stop_group(group);
                 let _ = child.kill();
