@@ -1,9 +1,6 @@
 use super::*;
 
 const HOOKS: PolicyHooks = PolicyHooks {
-    linux_host: || None,
-    linux_host_kept: || None,
-    linux_other_git: |_| false,
     local_folders: |_| Vec::new(),
 };
 
@@ -53,6 +50,7 @@ fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_
     assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
     let view = own.view(
         &HOOKS,
+        None,
         folder.path(),
         &ToolHomes::at(folder.path()),
         1,
@@ -100,6 +98,7 @@ fn a_policy_saved_before_the_access_change_settings_reads_when_idle_and_no_grant
     assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
     let view = own.view(
         &HOOKS,
+        None,
         folder.path(),
         &ToolHomes::at(folder.path()),
         1,
@@ -862,4 +861,46 @@ fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
         armor.contains("sudo dpkg-reconfigure crazy-agent"),
         "{armor}"
     );
+}
+
+/// The level list and a project's view show the Linux host their caller read, under the
+/// owner's call supervisor setting, and the other-repository answer runs the caller's
+/// bounded folder read only for a supervised host.
+#[test]
+fn levels_views_and_other_git_read_the_host_their_caller_passes() {
+    use crate::settings::LinuxSupervisor;
+    let host = LinuxHost {
+        nested: false,
+        scoped: false,
+        supervised: true,
+        root: false,
+        armored: false,
+        routed: false,
+    };
+    let calls = Some(LinuxSupervisor::Off);
+    let levels = LevelView::all(Some(host), calls);
+    assert_eq!(levels, LevelView::on(Some(host.under(calls)), true));
+    assert_ne!(levels, LevelView::all(None, calls));
+    assert_eq!(LevelView::all(None, calls), LevelView::on(None, true));
+    let folder = tempfile::tempdir().unwrap();
+    let homes = ToolHomes::at(folder.path());
+    let own = AgentPolicy::default();
+    let view = own.view(&HOOKS, Some(host), folder.path(), &homes, 1, None, true);
+    assert_eq!(view.levels, LevelView::on(Some(host.under(None)), true));
+    let unhosted = own.view(&HOOKS, None, folder.path(), &homes, 1, None, true);
+    assert_eq!(unhosted.levels, LevelView::on(None, true));
+    let unsupervised = LinuxHost {
+        supervised: false,
+        ..host
+    };
+    assert!(LevelView::other_git(Some(host), folder.path(), |_| true));
+    assert!(!LevelView::other_git(Some(host), folder.path(), |_| false));
+    assert!(!LevelView::other_git(None, folder.path(), |_| panic!(
+        "read without a host"
+    )));
+    assert!(!LevelView::other_git(
+        Some(unsupervised),
+        folder.path(),
+        |_| panic!("read without a supervised host")
+    ));
 }
