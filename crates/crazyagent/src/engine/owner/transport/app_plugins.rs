@@ -14,8 +14,10 @@ const FOLDER_BYTES_MAX: usize = 4096;
 const ACTION_TIME: Duration = Duration::from_secs(30);
 
 /// Every code an App plugins request can answer an owner client with: the plugin store's
-/// refusals, this protocol's own, and the owner connection's.
+/// refusals, this protocol's own, the owner connection's, and storage's change that waits
+/// its turn.
 pub const APP_PLUGINS_CODES: &[&str] = &[
+    "access_change_pending",
     "app_plugin_account_has_no_key",
     "app_plugin_account_not_found",
     "app_plugin_bundled",
@@ -40,11 +42,13 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "app_plugin_setting_unsafe",
     "app_plugins_readonly",
     "app_plugins_unavailable",
+    "owner_actor_stopped_outcome_unknown",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
     "owner_entropy_unavailable",
     "owner_grant_stale_or_revoked",
+    "owner_outcome_unknown_reconcile_same_identity",
     "owner_request_failed",
     "owner_root_replaced_or_unsafe",
     "owner_root_unavailable",

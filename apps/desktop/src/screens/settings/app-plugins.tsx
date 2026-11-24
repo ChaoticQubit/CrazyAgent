@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { listAccounts, pickFolder, type AccountView, type Result } from "../../api";
 import {
-  addAppPlugin, appPluginRefusal, appPluginUsers, bindAppPluginAccount, changedLine, ESSENTIAL_NOTE, grantSummary, keyAccounts, keyHosts, loadAppPlugins,
+  addAppPlugin, appPluginRefusal, appPluginUsers, failureTone, bindAppPluginAccount, changedLine, ESSENTIAL_NOTE, grantSummary, keyAccounts, keyHosts, loadAppPlugins,
   loadPluginGrants, permissionWords, pluginState, previewAppPlugin, problemText, PROJECT_OVERRIDE_LINE, removeAppPlugin, REMOVE_KEY_LINE, reviewAppPlugin,
   reviewHosts, setAppPluginEnabled, setAppPluginKey, setAppPluginWhenOff, trustAppPlugin, TURN_OFF_WORDS, unbindAppPlugin,
   type AppPluginsPage, type PermissionWords, type PluginGrants, type PluginUser, type PluginView, type Preview, type Problem, type RunsView, type SecretView,
@@ -133,15 +133,16 @@ function TrustScreen({ trust }: { trust: TrustView }) {
   </div>;
 }
 
-function PluginDialogs({ dialog, accounts, busy, failure, keyRef, actions }: {
+function PluginDialogs({ dialog, accounts, busy, failure, failureCode, keyRef, actions }: {
   dialog: PluginDialog;
   accounts: readonly AccountView[];
   busy: boolean;
   failure: string;
+  failureCode: string;
   keyRef?: RefObject<HTMLInputElement | null>;
   actions: AppPluginActions;
 }) {
-  const problem = failure ? <Notice tone="danger" alert>{failure}</Notice> : null;
+  const problem = failure ? <Notice tone={failureTone(failureCode)} alert>{failure}</Notice> : null;
   if (dialog.kind === "trust") {
     return <Dialog open wide title={dialog.review ? `Review ${dialog.trust.title}` : `Trust ${dialog.trust.title}?`} onClose={actions.onClose} busy={busy}
       footer={<><Button disabled={busy} onClick={actions.onClose}>Cancel</Button>
@@ -204,15 +205,16 @@ function PluginDialogs({ dialog, accounts, busy, failure, keyRef, actions }: {
  * turned off" setting, the built-in code plugins with what each may do, then every plugin
  * with its one status label, where it came from, how it runs, where each secret's key comes
  * from, its switch, Review and Remove, and Add plugin; over it the open dialog. Inputs: the
- * page, the grants, the open dialog, the API-key accounts, a busy flag, the last failure,
- * the key field and the actions. Output: the tab. */
-export function AppPluginsView({ page, grants, dialog, accounts, busy, failure, keyRef, actions }: {
+ * page, the grants, the open dialog, the API-key accounts, a busy flag, the last failure
+ * and its code, the key field and the actions. Output: the tab. */
+export function AppPluginsView({ page, grants, dialog, accounts, busy, failure, failureCode = "", keyRef, actions }: {
   page: Loaded<AppPluginsPage>;
   grants: readonly PluginGrants[];
   dialog: PluginDialog;
   accounts: readonly AccountView[];
   busy: boolean;
   failure: string;
+  failureCode?: string;
   keyRef?: RefObject<HTMLInputElement | null>;
   actions: AppPluginActions;
 }) {
@@ -223,7 +225,7 @@ export function AppPluginsView({ page, grants, dialog, accounts, busy, failure, 
   return <>
     {TOP}
     <div className="pj set-groups">
-      {dialog.kind === "none" && failure && <Notice tone="danger" alert>{failure}</Notice>}
+      {dialog.kind === "none" && failure && <Notice tone={failureTone(failureCode)} alert>{failure}</Notice>}
       <SettingSection title="When a plugin is turned off" about="What happens to work already using a plugin when you turn it off. The confirm lets you pick differently for one time.">
         <div className="set-body">
           <fieldset className="field" disabled={busy}>
@@ -247,7 +249,7 @@ export function AppPluginsView({ page, grants, dialog, accounts, busy, failure, 
         </div>
       </SettingSection>
     </div>
-    <PluginDialogs dialog={dialog} accounts={accounts} busy={busy} failure={failure} keyRef={keyRef} actions={actions} />
+    <PluginDialogs dialog={dialog} accounts={accounts} busy={busy} failure={failure} failureCode={failureCode} keyRef={keyRef} actions={actions} />
   </>;
 }
 
@@ -263,6 +265,7 @@ export function AppPluginsSettings() {
   const [dialog, setDialog] = useState<PluginDialog>({ kind: "none" });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
+  const [failureCode, setFailureCode] = useState("");
   const keyRef = useRef<HTMLInputElement | null>(null);
   const accounts = keyAccounts(accountList.kind === "ok" ? accountList.value : []);
   const grants = grantList.kind === "ok" ? grantList.value : [];
@@ -282,13 +285,19 @@ export function AppPluginsSettings() {
 
   useEffect(() => { void reload(); }, []);
 
+  function fail(line: string, code = "") {
+    setFailure(line);
+    setFailureCode(code);
+  }
+
   async function attempt<T>(work: () => Promise<Result<T>>): Promise<T | undefined> {
     setBusy(true);
-    setFailure("");
+    fail("");
     const result = session.noteResult(await work());
     setBusy(false);
     if (result.kind === "ok") return result.value;
-    setFailure(result.kind === "not_ready" ? NOT_READY : appPluginRefusal(result));
+    if (result.kind === "not_ready") fail(NOT_READY);
+    else fail(appPluginRefusal(result), result.code);
     return undefined;
   }
 
@@ -349,7 +358,7 @@ export function AppPluginsSettings() {
     const key = keyRef.current.value;
     keyRef.current.value = "";
     if (key.trim() === "") {
-      setFailure("Enter a key.");
+      fail("Enter a key.");
       return;
     }
     await changed(() => setAppPluginKey(plugin, secret, key), `The key for ${secret} was saved.`);
@@ -358,7 +367,7 @@ export function AppPluginsSettings() {
   function close() {
     if (keyRef.current !== null) keyRef.current.value = "";
     setDialog({ kind: "none" });
-    setFailure("");
+    fail("");
   }
 
   const actions: AppPluginActions = {
@@ -375,12 +384,12 @@ export function AppPluginsSettings() {
     onWhenOff: (choice) => { if (!busy) void changed(() => setAppPluginWhenOff(choice), `Turning a plugin off now uses "${TURN_OFF_WORDS[choice].title}".`); },
     onReview: (name) => { if (!busy) void review(name); },
     onRemove: (plugin) => {
-      setFailure("");
+      fail("");
       setDialog({ kind: "remove", plugin: plugin.name, title: plugin.title, keyed: plugin.secrets.some((secret) => secret.binding.kind === "key") });
     },
     onConfirmRemove: () => { if (dialog.kind === "remove" && !busy) void changed(() => removeAppPlugin(dialog.plugin), `${dialog.title} was removed.`); },
     onBind: (plugin, secret) => {
-      setFailure("");
+      fail("");
       setDialog({ kind: "bind", plugin: plugin.name, title: plugin.title, secret, hosts: keyHosts(plugin), choice: accounts.length > 0 ? `account:${accounts[0].id}` : "key" });
     },
     onKeyChoice: (choice) => { if (dialog.kind === "bind") setDialog({ ...dialog, choice }); },
@@ -390,6 +399,6 @@ export function AppPluginsSettings() {
   };
 
   return <div className="stack">
-    <AppPluginsView page={page} grants={grants} dialog={dialog} accounts={accounts} busy={busy} failure={failure} keyRef={keyRef} actions={actions} />
+    <AppPluginsView page={page} grants={grants} dialog={dialog} accounts={accounts} busy={busy} failure={failure} failureCode={failureCode} keyRef={keyRef} actions={actions} />
   </div>;
 }
