@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { assertWindowGrants } from "./window-grants.mjs";
+import { commandFn, nativeSources } from "./native-commands.mjs";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -58,14 +59,15 @@ function specCalls() {
 
 test("every command any window file calls, through invoke or call, is registered in all four native places", () => {
   const build = read("src-tauri/build.rs");
-  const { lib, list } = registered();
+  const { list } = registered();
+  const native = nativeSources();
   const commands = called();
   assert.ok(commands.size > 100);
   assertWindowGrants(commands);
   for (const command of commands) {
     assert.ok(list.includes(command), `${command} missing from invoke_handler`);
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
-    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${command}(?:<[^>]*>)?\\(`), `${command} has no tauri command`);
+    assert.match(native, commandFn(command), `${command} has no tauri command`);
   }
 });
 
