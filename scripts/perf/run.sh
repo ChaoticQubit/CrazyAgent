@@ -82,11 +82,12 @@ for raw in open(path):
     elif line.startswith("PERF ") and block is not None:
         words = line.split()
         values = dict(pair.split("=", 1) for pair in words[4:])
-        if "p50_ns" in values:
+        nanoseconds = "p50_ns" in values
+        if nanoseconds:
             p50, p95 = int(values["p50_ns"]), int(values["p95_ns"])
         else:
             p50, p95 = int(values["p50"]) * 1000, int(values["p95"]) * 1000
-        block[1][tuple(words[1:4])] = (p50, p95, values["n"], int(values.get("batch", "1")))
+        block[1][tuple(words[1:4])] = (p50, p95, values["n"], int(values.get("batch", "1")), nanoseconds)
 for build, blocks in builds.items():
     assert len(blocks) == want, f"{build}: {len(blocks)} runs, wanted {want}"
     headers = [header for header, _ in blocks]
@@ -106,7 +107,7 @@ for build, blocks in builds.items():
         p95 = math.floor(statistics.median(row[1] for row in rows))
         n, batch = rows[0][2], rows[0][3]
         head = "PERF " + " ".join(key)
-        if p50 < 10_000:
+        if p50 < 10_000 or all(row[4] for row in rows):
             print(f"{head} p50_ns={p50} p95_ns={p95} n={n} batch={batch}")
         elif batch == 1:
             print(f"{head} p50={p50 // 1000} p95={p95 // 1000} n={n}")
