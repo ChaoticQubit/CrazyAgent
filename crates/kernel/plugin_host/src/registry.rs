@@ -951,16 +951,27 @@ mod folder {
     }
 
     /// Deletes a user plugin's folder and any `.yaml` file an older version left under its
-    /// name. Inputs: the engine root and a valid name. Output: whether anything was deleted,
-    /// or the folder's refusal.
+    /// name; an entry of that name that is not a folder, such as a link, is unlinked itself
+    /// without following it. Inputs: the engine root and a valid name. Output: whether
+    /// anything was deleted, or the folder's refusal.
     pub(super) fn remove(root: &Path, name: &str) -> Result<bool, Refused> {
         let Some(directory) = open(root, false)? else {
             return Ok(false);
         };
-        let folder = exists(&directory, name)?;
-        if folder {
-            remove_tree(&directory, name)?;
+        let kind = match rustix::fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Some(rustix::fs::FileType::from_raw_mode(stat.st_mode)),
+            Err(rustix::io::Errno::NOENT) => None,
+            Err(_) => return Err(unavailable()),
+        };
+        match kind {
+            Some(rustix::fs::FileType::Directory) => remove_tree(&directory, name)?,
+            Some(_) => match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(_) => return Err(unavailable()),
+            },
+            None => {}
         }
+        let folder = kind.is_some();
         let legacy = match rustix::fs::unlinkat(
             &directory,
             format!("{name}{LEGACY_SUFFIX}").as_str(),
