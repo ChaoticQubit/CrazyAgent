@@ -58,3 +58,9 @@ opt-level = 3
 
 [profile.test.package.crazyagent-kernel-common]
 opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-sandbox]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-sandbox]
+opt-level = 3
