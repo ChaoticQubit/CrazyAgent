@@ -38,3 +38,6 @@ fn an_agent_clone_inside_git_is_refused_under_either_data_volume_name() {
         assert!(!worktree.exists(), "{worktree:?}");
     }
 }
+
+#[path = "objects_link.rs"]
+mod objects_link;
