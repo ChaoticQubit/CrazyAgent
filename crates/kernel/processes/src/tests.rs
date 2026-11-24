@@ -128,8 +128,7 @@ fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
         .filter_map(|(_, table)| table.as_table())
         .flat_map(|table| table.iter())
         .filter(|(key, entry)| {
-            key.as_str() == name
-                || entry.get("package").and_then(toml::Value::as_str) == Some(name)
+            key.as_str() == name || entry.get("package").and_then(toml::Value::as_str) == Some(name)
         })
         .map(|(key, _)| key.as_str())
         .collect();
@@ -143,10 +142,12 @@ fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
                 .flatten()
                 .filter_map(toml::Value::as_str)
                 .any(|feature| {
-                    std::iter::once(name).chain(keys.iter().copied()).any(|key| {
-                        feature == format!("{key}/test-support")
-                            || feature == format!("{key}?/test-support")
-                    })
+                    std::iter::once(name)
+                        .chain(keys.iter().copied())
+                        .any(|key| {
+                            feature == format!("{key}/test-support")
+                                || feature == format!("{key}?/test-support")
+                        })
                 })
         });
     let mut found: Vec<String> = tables
