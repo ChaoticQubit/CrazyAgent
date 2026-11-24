@@ -343,7 +343,11 @@ fn a_record_write_sweeps_staging_files_another_process_left() {
     for name in kept {
         std::fs::write(folder.path().join(name), b"kept").unwrap();
     }
-    std::fs::write(folder.path().join(format!("k.primed.{other}.0.new")), b"left").unwrap();
+    std::fs::write(
+        folder.path().join(format!("k.primed.{other}.0.new")),
+        b"left",
+    )
+    .unwrap();
     write_record(&owned, "k.primed", "id 1", &["abc".to_owned()]).unwrap();
     let mut expected: Vec<String> = kept.iter().map(|name| (*name).to_owned()).collect();
     expected.push("k.primed".to_owned());
