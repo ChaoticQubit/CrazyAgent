@@ -123,6 +123,12 @@ pub const NEST_ARGS: [&str; 10] = [
 /// failure a kernel refusal names ([`probe_refusal`]).
 pub(crate) const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
 
+/// How the helper refuses a policy one of whose granted folders, or a folder above it, became
+/// a link after the engine checked it, so no rule follows the link to its target
+/// ([`landlock::enforce`]).
+pub(crate) const GRANT_BECAME_LINK: &str =
+    "a granted folder became a link after the engine checked it";
+
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
 /// ports and every model proxy and model relay port.
 pub(crate) const KEEP_FREE_MAX: usize = OWNER_PORTS.len()

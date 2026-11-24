@@ -1,17 +1,22 @@
 use super::*;
+use crate::linux::launch::{LANDLOCK_DEVICES, SYSTEM_READ_ROOTS};
 use ::landlock::{
-    ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, Scope, make_bitflags, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, RestrictionStatus, Ruleset,
+    RulesetAttr, RulesetCreatedAttr, RulesetError, Scope, make_bitflags,
 };
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach};
 use crazyagent_linux_supervisor::serve::Supervised;
+use rustix::fs::{FileType, Mode, OFlags};
+use rustix::io::Errno;
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
     SeccompRule, TargetArch,
 };
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -258,14 +263,100 @@ pub fn git_folder_rights() -> BitFlags<AccessFs> {
     })
 }
 
+/// Whether `path` is one of the fixed system folders and devices every policy reads or
+/// writes, some of which are links on this computer (`/bin` to `/usr/bin`), so their rules
+/// follow links as before; every other rule path is a granted folder. Input: the path.
+/// Output: the answer.
+fn fixed_place(path: &Path) -> bool {
+    SYSTEM_READ_ROOTS
+        .iter()
+        .chain(&["/proc"])
+        .chain(LANDLOCK_DEVICES)
+        .any(|fixed| path == Path::new(fixed))
+}
+
+/// Opens a granted folder or file one component at a time from `/`, each with `O_PATH` and
+/// `O_NOFOLLOW` and each checked not to be a link, since such an open of a link returns the
+/// link itself. Input: the absolute path. Output: the open place, none when it cannot be
+/// opened as today, or the refusal when any component is a link or not a folder.
+fn granted_place(path: &Path) -> Result<Option<OwnedFd>, String> {
+    assert!(path.is_absolute());
+    let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let link = || format!("{GRANT_BECAME_LINK}: {}", path.display());
+    let Ok(mut place) = rustix::fs::open("/", flags, Mode::empty()) else {
+        return Ok(None);
+    };
+    for component in path.components().skip(1) {
+        let Component::Normal(name) = component else {
+            return Err(link());
+        };
+        place = match rustix::fs::openat(&place, name, flags, Mode::empty()) {
+            Ok(next) => next,
+            Err(Errno::NOTDIR) => return Err(link()),
+            Err(_) => return Ok(None),
+        };
+        let Ok(stat) = rustix::fs::fstat(&place) else {
+            return Ok(None);
+        };
+        if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink {
+            return Err(link());
+        }
+    }
+    Ok(Some(place))
+}
+
+/// The rules for one list of policy paths: a fixed place opens as the crate opens it, a
+/// granted place through [`granted_place`]; a place that does not open gets no rule, and
+/// one that is not a folder gets only the file rights of `access`. Inputs: the paths and
+/// the rights. Output: the rules, or the refusal of a granted place that became a link.
+fn place_rules(
+    paths: &[PathBuf],
+    access: BitFlags<AccessFs>,
+) -> Result<Vec<PathBeneath<OwnedFd>>, String> {
+    let flags = OFlags::PATH | OFlags::CLOEXEC;
+    let mut rules = Vec::with_capacity(paths.len());
+    for path in paths {
+        let opened = if fixed_place(path) {
+            rustix::fs::open(path.as_path(), flags, Mode::empty()).ok()
+        } else {
+            granted_place(path)?
+        };
+        let Some(place) = opened else {
+            continue;
+        };
+        let folder = rustix::fs::fstat(&place)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory);
+        let rights = if folder {
+            access
+        } else {
+            access & AccessFs::from_file(FS_ABI)
+        };
+        rules.push(PathBeneath::new(place, rights));
+    }
+    assert!(rules.len() <= paths.len());
+    Ok(rules)
+}
+
 /// Applies the policy's Landlock rules to this process. A limited network handles every
 /// network right and allows only its `connect` ports. An open network with kept ports
 /// handles TCP bind alone and, with `rules`, allows every [`bindable`] port; without `rules`,
-/// as in a probe, it only proves this kernel handles the right. Inputs: the policy, and
-/// whether to add the bind rules. Output: what the kernel enforced, or the ruleset error.
-pub(super) fn enforce(
+/// as in a probe, it only proves this kernel handles the right. A granted folder that became
+/// a link is refused ([`granted_place`]). Inputs: the policy, and whether to add the bind
+/// rules. Output: what the kernel enforced, or the refusal or ruleset error as text.
+pub(super) fn enforce(policy: &LandlockPolicy, rules: bool) -> Result<RestrictionStatus, String> {
+    let read = place_rules(&policy.read, AccessFs::from_read(FS_ABI))?;
+    let write = place_rules(&policy.write, AccessFs::from_all(FS_ABI))?;
+    let git_write = place_rules(&policy.git_write, git_folder_rights())?;
+    held_ruleset(policy, rules, [read, write, git_write]).map_err(|error| error.to_string())
+}
+
+/// Builds and applies the ruleset [`enforce`] describes from the path rules already opened.
+/// Inputs: the policy, whether to add the bind rules and the read, write and git write
+/// rules. Output: what the kernel enforced, or the ruleset error.
+fn held_ruleset(
     policy: &LandlockPolicy,
     rules: bool,
+    places: [Vec<PathBeneath<OwnedFd>>; 3],
 ) -> Result<RestrictionStatus, RulesetError> {
     let keeps = !policy.limit_network && !policy.keep_free.is_empty();
     let mut ruleset = Ruleset::default().handle_access(AccessFs::from_all(FS_ABI))?;
@@ -274,17 +365,10 @@ pub(super) fn enforce(
     } else if keeps {
         ruleset = ruleset.handle_access(AccessNet::BindTcp)?;
     }
-    let mut created = ruleset
-        .create()?
-        .add_rules(path_beneath_rules(
-            &policy.read,
-            AccessFs::from_read(FS_ABI),
-        ))?
-        .add_rules(path_beneath_rules(
-            &policy.write,
-            AccessFs::from_all(FS_ABI),
-        ))?
-        .add_rules(path_beneath_rules(&policy.git_write, git_folder_rights()))?;
+    let mut created = ruleset.create()?;
+    for list in places {
+        created = created.add_rules(list.into_iter().map(Ok::<_, RulesetError>))?;
+    }
     for port in &policy.connect {
         created = created.add_rule(NetPort::new(*port, AccessNet::ConnectTcp))?;
     }
