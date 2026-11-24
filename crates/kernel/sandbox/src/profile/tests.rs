@@ -473,7 +473,7 @@ mod clone_confinement_tests {
 
     /// Makes a clone folder with a real `.git` folder in the stand-in project state's
     /// `worktrees/`, as `confine_to_clone` takes one. Input: the project. Output: the clone.
-    fn clone_in(project: &Path) -> PathBuf {
+    pub(super) fn clone_in(project: &Path) -> PathBuf {
         let clone = project
             .join(".stand-in-state")
             .join("worktrees")
@@ -520,6 +520,58 @@ mod clone_confinement_tests {
             confined.allow_worktree(&project),
             Err(SandboxError::Invalid(_))
         ));
+    }
+}
+
+/// A worktree folder in the stand-in state's `worktrees/` as `git worktree add` leaves it,
+/// without running git: its `.git` link names an admin folder in the project's
+/// `.git/worktrees/`, whose `gitdir` names it back, beside the project's object store.
+/// Input: the project. Output: the canonical worktree.
+fn worktree_in(project: &Path) -> PathBuf {
+    let worktree = (STAND_IN.access.state_folder)(project)
+        .join("worktrees")
+        .join("agent-1");
+    let admin = project.join(".git").join("worktrees").join("agent-1");
+    for made in [&worktree, &admin, &project.join(".git").join("objects")] {
+        fs::create_dir_all(made).unwrap();
+    }
+    let worktree = canonical(&worktree).unwrap();
+    let admin = canonical(&admin).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+    fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )
+    .unwrap();
+    worktree
+}
+
+/// A sandbox confined to a worktree, and one confined to a clone, each take the owner's
+/// Read-write choice of a top-level project folder: that shared writable folder is no root
+/// reaching the project beside the confinement, so the confinement check lets it through.
+#[test]
+fn a_confined_sandbox_takes_a_shared_writable_top_level_folder() {
+    for confined in ["worktree", "clone"] {
+        let (_scratch, [project, home, tmp]) = folders();
+        let data = project.join("data");
+        fs::create_dir(&data).unwrap();
+        let sandbox =
+            ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let sandbox = match confined {
+            "worktree" => sandbox.confine_to_worktree(&worktree_in(&project)),
+            "clone" => sandbox.confine_to_clone(&clone_confinement_tests::clone_in(&project)),
+            _ => unreachable!(),
+        }
+        .unwrap()
+        .keep_project_secrets(&project, &[])
+        .unwrap();
+        let shared = sandbox.allow_shared_write(&data);
+        assert!(shared.is_ok(), "{confined}: {:?}", shared.err());
+        assert!(shared.unwrap().writes(&data), "{confined}");
     }
 }
 
