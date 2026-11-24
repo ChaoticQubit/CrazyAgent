@@ -607,5 +607,5 @@ fn a_folder_run_starts_only_outside_row_builds_and_when_the_hooks_allow_it() {
     assert!(!may_probe(true, &on));
     assert!(!may_probe(false, &off));
     assert!(!may_probe(true, &off));
-    assert!(!crate::finding::stub::STUB_HOOKS.folder_probes);
+    assert!(!crate::finding::stub::stub_seed().hooks.folder_probes);
 }

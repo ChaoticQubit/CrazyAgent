@@ -96,5 +96,5 @@ fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_fol
 /// included.
 #[test]
 fn the_engine_hooks_turn_folder_runs_off_only_in_its_own_unit_rows() {
-    assert!(!crate::tools::HOOKS.folder_probes);
+    assert!(!crate::tools::finding_seed().hooks.folder_probes);
 }

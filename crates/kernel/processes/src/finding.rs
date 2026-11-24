@@ -36,6 +36,7 @@ pub struct FindingHooks {
     pub in_agent_tmp: fn(&Path) -> bool,
     pub harness_prefix: fn(&Path) -> PathBuf,
     pub gate_root: fn() -> Option<PathBuf>,
+    pub folder_probes: bool,
 }
 
 impl std::fmt::Debug for FindingHooks {
