@@ -380,7 +380,7 @@ fn an_engine_folder_reached_through_a_link_reads_its_offer_and_restores() {
 #[test]
 fn an_engine_db_that_is_itself_a_link_is_still_refused_before_any_write() {
     let (root, path) = upgraded(true);
-    let (other, target) = upgraded(false);
+    let (other, target) = upgraded(true);
     std::fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&target, &path).unwrap();
 
