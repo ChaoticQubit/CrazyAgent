@@ -83,14 +83,17 @@ fn refusal_of(entry: &Path, places: &Places) -> Option<(PathBuf, Refusal)> {
 /// setting or a flag other than -S, an `env` other than /usr/bin/env, a relative interpreter,
 /// one with a `..` part, a line that is not UTF-8, a line longer than the part read, and
 /// `/usr/bin/env` reached as the program `env` runs or through a link of another name, plus
-/// a CRLF line end, more words than the reader keeps and an `-S` program holding `$`
-/// (B11 r2 N1), each as [`Refusal::FirstLine`].
+/// a CRLF line end, more words than the reader keeps and an `-S` program holding `$`,
+/// each as [`Refusal::FirstLine`].
 /// `env -S` still resolves (`shebang_flags_and_absolute_interpreters_are_kept`).
 #[test]
 fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     let (_folder, home) = scratch();
     program(&home.join(".local/bin/node"), NODE);
-    std::os::unix::fs::symlink("/usr/bin/env", home.join(".local/bin/e")).unwrap();
+    or_named(
+        std::os::unix::fs::symlink("/usr/bin/env", home.join(".local/bin/e")),
+        &home.join(".local/bin/e"),
+    );
     let places = home_only(&home);
     let lines: Vec<(&str, Vec<u8>)> = vec![
         ("crlf", b"#!/bin/sh\r\n".to_vec()),
@@ -222,7 +225,10 @@ fn an_executable_file_the_engine_cannot_read_is_refused() {
         refusal_of(&locked, &places),
         Some((locked.clone(), Refusal::FirstLine))
     );
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    or_named(
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)),
+        &locked,
+    );
     assert!(resolve_entry(&locked, &places).is_ok());
 }
 
@@ -278,15 +284,21 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
     assert!(!engine.folders().contains(&agent), "{:?}", engine.folders());
 
     let planted = program(&agent.join("tmux"), NODE);
-    std::fs::create_dir_all(&setup).unwrap();
-    std::os::unix::fs::symlink(&planted, setup.join("tmux")).unwrap();
+    or_named(std::fs::create_dir_all(&setup), &setup);
+    or_named(
+        std::os::unix::fs::symlink(&planted, setup.join("tmux")),
+        &setup.join("tmux"),
+    );
     let places = stub_engine(Some(&root), None, Some(home.clone()), Some(OsStr::new("")));
     assert!(
         resolve("tmux", &places).map_or(true, |tmux| tmux.program != planted),
         "a link into an agent's HOME is never used"
     );
     assert!(resolve_entry(&setup.join("tmux"), &places).is_err());
-    std::fs::remove_file(setup.join("tmux")).unwrap();
+    or_named(
+        std::fs::remove_file(setup.join("tmux")),
+        &setup.join("tmux"),
+    );
     let own = program(&setup.join("tmux"), NODE);
     assert_eq!(
         resolve_entry(&setup.join("tmux"), &places).unwrap().program,
@@ -359,13 +371,13 @@ fn a_path_folder_in_a_temp_folder_is_refused() {
 #[test]
 fn a_probed_folder_in_a_temp_folder_is_refused_on_the_engine_places() {
     let (_folder, home) = scratch();
-    let owner_temp = tempfile::Builder::new()
-        .prefix("tools-probed-")
-        .tempdir()
-        .unwrap();
+    let owner_temp = or_named(
+        tempfile::Builder::new().prefix("tools-probed-").tempdir(),
+        &std::env::temp_dir(),
+    );
     let written = owner_temp.path().join("bin");
-    std::fs::create_dir_all(&written).unwrap();
-    let real = written.canonicalize().unwrap();
+    or_named(std::fs::create_dir_all(&written), &written);
+    let real = or_named(written.canonicalize(), &written);
     let shared = PathBuf::from("/private/tmp/tools-planted/bin");
     let engine = stub_engine(None, None, Some(home), Some(OsStr::new("")));
     let probed = engine.with_probed(vec![written.clone(), real.clone(), shared.clone()]);
@@ -378,7 +390,7 @@ fn a_probed_folder_in_a_temp_folder_is_refused_on_the_engine_places() {
     }
 }
 
-/// 2.4.1 r2 RH2-L1: a file found through a place outside every temp folder whose real file
+/// A file found through a place outside every temp folder whose real file
 /// lies in one, such as an owner link in `~/.local/bin` into the temp folder, leads into
 /// temp; one whose place is itself in a temp folder, or whose real file is not, does not.
 #[test]
@@ -430,9 +442,9 @@ fn a_link_from_a_place_outside_temp_into_a_temp_folder_leads_into_temp() {
 fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
     let folder = tempfile::Builder::new()
         .prefix("tools-tmp-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let own = folder.path().canonicalize().unwrap();
+        .tempdir_in("/tmp");
+    let folder = or_named(folder, Path::new("/tmp"));
+    let own = or_named(folder.path().canonicalize(), folder.path());
     let tool = program(&own.join("tool"), NODE);
     let places = stub_new(vec![own.clone()], None);
     assert_eq!(resolve("tool", &places).unwrap().program, tool);
@@ -470,7 +482,7 @@ fn the_bundled_tmux_beside_the_engine_wins_over_a_homebrew_tmux() {
     let (places, sidecar, brew) = bundled_layout(&home);
     let tmux = resolve("tmux", &places).unwrap();
     assert_eq!(tmux.entry, sidecar);
-    assert_eq!(tmux.program, sidecar.canonicalize().unwrap());
+    assert_eq!(tmux.program, or_named(sidecar.canonicalize(), &sidecar));
     assert_eq!(tmux.argv(), vec![sidecar.clone().into_os_string()]);
     let grants = tmux.grants();
     assert_eq!(grants[0], sidecar);
@@ -504,7 +516,7 @@ fn the_bundled_tmux_stays_first_once_the_probed_folders_are_added() {
 fn a_missing_bundled_tmux_falls_back_to_the_usual_search_order() {
     let (_folder, home) = scratch();
     let (places, sidecar, brew) = bundled_layout(&home);
-    std::fs::remove_file(&sidecar).unwrap();
+    or_named(std::fs::remove_file(&sidecar), &sidecar);
     assert_eq!(resolve("tmux", &places).unwrap().entry, brew);
     let (_other, home) = scratch();
     let (places, sidecar, _brew) = bundled_layout(&home);
@@ -516,8 +528,9 @@ fn a_missing_bundled_tmux_falls_back_to_the_usual_search_order() {
     }
 }
 
-/// Leader 20:08: a bundled tmux whose version read fails is passed over for the usual order,
-/// which says the bundled one can't run; only the bundled copy is ever asked whether it runs.
+/// A bundled tmux whose version read fails is passed over for the usual order, which says
+/// the bundled one can't run; the usual order's tmux is asked next, and one that cannot run
+/// either is still the one found.
 #[test]
 fn a_bundled_tmux_that_cannot_run_falls_back_to_the_usual_order_and_says_so() {
     let (_folder, home) = scratch();
@@ -525,12 +538,12 @@ fn a_bundled_tmux_that_cannot_run_falls_back_to_the_usual_order_and_says_so() {
     let asked = std::cell::RefCell::new(Vec::new());
     let (found, note) = resolve_tmux(&places, true, |tmux| {
         asked.borrow_mut().push(tmux.entry.clone());
-        false
+        Err(None)
     })
     .unwrap();
     assert_eq!(found.entry, brew);
     assert_eq!(note, Some(BundleNote::CannotRun));
-    assert_eq!(asked.into_inner(), vec![sidecar]);
+    assert_eq!(asked.into_inner(), vec![sidecar, brew]);
 }
 
 /// A bundled tmux that runs is the one used, with no note, whether or not the build is
@@ -540,7 +553,7 @@ fn a_bundled_tmux_that_runs_is_used_with_no_note() {
     let (_folder, home) = scratch();
     let (places, sidecar, _brew) = bundled_layout(&home);
     for ships in [true, false] {
-        let (found, note) = resolve_tmux(&places, ships, |_| true).unwrap();
+        let (found, note) = resolve_tmux(&places, ships, |_| Ok(())).unwrap();
         assert_eq!(found.entry, sidecar);
         assert_eq!(note, None);
     }
@@ -552,14 +565,29 @@ fn a_bundled_tmux_that_runs_is_used_with_no_note() {
 fn a_lost_bundled_tmux_says_it_is_missing_only_in_a_build_that_ships_one() {
     let (_folder, home) = scratch();
     let (places, sidecar, brew) = bundled_layout(&home);
-    std::fs::remove_file(&sidecar).unwrap();
-    let never = |_: &Resolved| -> bool { panic!("nothing to run") };
+    or_named(std::fs::remove_file(&sidecar), &sidecar);
+    let runs = |_: &Resolved| Ok(());
     assert_eq!(
-        resolve_tmux(&places, true, never).unwrap(),
+        resolve_tmux(&places, true, runs).unwrap(),
         (resolve("tmux", &places).unwrap(), Some(BundleNote::Missing))
     );
-    let (found, note) = resolve_tmux(&places, false, never).unwrap();
+    let (found, note) = resolve_tmux(&places, false, runs).unwrap();
     assert_eq!((found.entry, note), (brew, None));
+}
+
+/// A system tmux too old for agent terminals is never the tmux found, so setup and the
+/// terminal start give one answer: with a bundled copy that cannot run, or with no bundled
+/// copy at all, the only tmux left is the old one and none is found.
+#[test]
+fn a_system_tmux_too_old_for_the_terminal_is_never_the_one_found() {
+    let (_folder, home) = scratch();
+    let (places, sidecar, _brew) = bundled_layout(&home);
+    program(&sidecar, "#!/bin/sh\nexit 1\n");
+    assert_eq!(crate::terminal::tmux::installed_at(&places), None);
+    assert_eq!(
+        crate::terminal::tmux::installed_at(&places.without_bundled()),
+        None
+    );
 }
 
 /// The two notes, word for word as the TUI and the desktop app show them.
@@ -597,7 +625,7 @@ fn under_the_gate_root_a_probed_folder_outside_the_gate_mac_is_dropped() {
 
 #[test]
 fn places_that_differ_in_any_field_but_the_hooks_compare_unequal() {
-    let home = tempfile::tempdir().unwrap();
+    let home = or_named(tempfile::tempdir(), &std::env::temp_dir());
     let base = stub_new(
         vec![PathBuf::from("/usr/bin")],
         Some(home.path().to_path_buf()),
@@ -826,7 +854,10 @@ fn a_nix_darwin_profile_tool_stays_usable_while_the_projects_cannot_be_read() {
 fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     let (_folder, home) = scratch();
     let marked = home.join("work/marked");
-    std::fs::create_dir_all(marked.join(".crazyagent")).unwrap();
+    or_named(
+        std::fs::create_dir_all(marked.join(".crazyagent")),
+        &marked.join(".crazyagent"),
+    );
     let paths = [
         PathBuf::from("/usr/bin/env"),
         PathBuf::from("/usr/local/bin/tmux"),
@@ -890,10 +921,10 @@ fn data_folder() -> (tempfile::TempDir, PathBuf) {
 /// root still counts as agents' to write and a tool planted there is refused.
 #[test]
 fn a_last_good_read_outlives_the_engine_process_that_made_it() {
-    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let tool = Path::new("/usr/src/repo/bin/tool");
     let read = FindingSeed {
         hooks: FindingHooks {
-            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/src/repo")]),
             last_good_load: stored_load,
             last_good_store: stored_store,
             ..STUB_HOOKS
@@ -913,7 +944,7 @@ fn a_last_good_read_outlives_the_engine_process_that_made_it() {
     assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
     assert_eq!(
         stored_load(&root),
-        Some(vec![PathBuf::from("/usr/local/src/repo")])
+        Some(vec![PathBuf::from("/usr/src/repo")])
     );
     super::test_support::forget_last_good(&root);
     assert!(Places::at_roots(Some(&root), None, failed).agent_writable(tool));
@@ -965,21 +996,63 @@ fn a_forged_last_good_entry_only_adds_refusals() {
         .remove(&forged_root);
 }
 
-/// A repository the engine registered under `/usr/local` or `/opt/homebrew` is agents' to
-/// write after a good read, and should stay so when the first read of engine.db fails with
-/// no last good read. Today the fallback reads every path under an install root as
-/// installed, so a tool in such a repository is trusted until one read succeeds.
+/// When the first read of engine.db fails with no last good read and no engine data folder
+/// over the path, it fails closed: a path counts as agents' to write unless it is installed.
+/// So a repository the engine registered under a Homebrew prefix is agents' to write after a
+/// good read and still after that failed one, outside the folders Homebrew fills with tools,
+/// `share`, `etc`, `include` and `lib` outside `node_modules` included. Below `/usr` and
+/// outside a prefix a path counts as installed.
 #[test]
-#[ignore = "known gap: a first failed read with no last good read trusts a repository registered under an install root"]
-fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
+fn a_first_failed_read_keeps_a_registered_repository_in_a_homebrew_prefix_writable() {
     let (_folder, home) = scratch();
     let canonical: fn(&Path) -> std::io::Result<PathBuf> = |path| Ok(path.to_path_buf());
-    for repo in ["/usr/local/src/repo", "/opt/homebrew/src/repo"] {
+    for repo in [
+        "/usr/local/src/repo",
+        "/opt/homebrew/src/repo",
+        "/usr/local/share/repo",
+        "/usr/local/etc/repo",
+        "/usr/local/include/repo",
+        "/opt/homebrew/lib/repo",
+    ] {
         let tool = Path::new(repo).join("bin/tool");
         let read = with_canonical(&home, canonical, Some(vec![PathBuf::from(repo)]));
         let unread = with_canonical(&home, canonical, None);
         assert!(read.agent_writable(&tool), "{}", tool.display());
         assert!(unread.agent_writable(&tool), "{}", tool.display());
+    }
+    let unread = with_canonical(&home, canonical, None);
+    assert!(!unread.agent_writable(Path::new("/usr/src/repo/bin/tool")));
+}
+
+/// While the set-up projects cannot be read, the tools Homebrew places stay usable in every
+/// folder this Mac's prefixes hold them: casks, formula kegs and their frameworks, npm's
+/// global packages, links in `bin` and `opt`, and Homebrew's own code. The names are made
+/// up, so no file on this computer is read.
+#[test]
+fn every_folder_homebrew_fills_stays_usable_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let places = with_canonical(&home, |path| Ok(path.to_path_buf()), None);
+    for tool in [
+        "/opt/homebrew/Caskroom/row-cask/1.0/row-tool",
+        "/opt/homebrew/Cellar/row/1.0/bin/row-tool",
+        "/opt/homebrew/Cellar/row/1.0/Frameworks/Row.framework/bin/row-tool",
+        "/opt/homebrew/Frameworks/Row.framework/bin/row-tool",
+        "/opt/homebrew/lib/node_modules/row/bin/row-tool.js",
+        "/opt/homebrew/opt/row/bin/row-tool",
+        "/opt/homebrew/Library/Homebrew/row-tool",
+        "/opt/homebrew/sbin/row-tool",
+        "/usr/local/bin/row-tool",
+        "/usr/local/lib/node_modules/row/bin/row-tool.js",
+        "/usr/local/Cellar/row/1.0/bin/row-tool",
+        "/usr/local/Homebrew/bin/row-tool",
+    ] {
+        assert!(!places.agent_writable(Path::new(tool)), "{tool}");
+    }
+    for tool in [
+        "/opt/homebrew/var/row/row-tool",
+        "/usr/local/row/bin/row-tool",
+    ] {
+        assert!(places.agent_writable(Path::new(tool)), "{tool}");
     }
 }
 
@@ -989,11 +1062,11 @@ fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
 #[test]
 fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_cannot_be_read() {
     let (_folder, home) = scratch();
-    let outside = tempfile::Builder::new()
-        .prefix("tools-h8-repo-")
-        .tempdir()
-        .unwrap();
-    let repo = outside.path().canonicalize().unwrap();
+    let outside = or_named(
+        tempfile::Builder::new().prefix("tools-h8-repo-").tempdir(),
+        &std::env::temp_dir(),
+    );
+    let repo = or_named(outside.path().canonicalize(), outside.path());
     assert!(!repo.starts_with(&home));
     let tool = program(&repo.join("bin/tool"), "#!/bin/sh\n");
     let places = Places {
@@ -1014,11 +1087,11 @@ fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_can
 #[test]
 fn the_app_folder_stays_a_place_while_the_projects_cannot_be_read() {
     let (_folder, home) = scratch();
-    let outside = tempfile::Builder::new()
-        .prefix("tools-app-")
-        .tempdir()
-        .unwrap();
-    let app = outside.path().canonicalize().unwrap();
+    let outside = or_named(
+        tempfile::Builder::new().prefix("tools-app-").tempdir(),
+        &std::env::temp_dir(),
+    );
+    let app = or_named(outside.path().canonicalize(), outside.path());
     assert!(!app.starts_with(&home));
     let engine = stub_engine(None, Some(&app), Some(home.clone()), Some(OsStr::new("")));
     assert!(engine.folders.contains(&app), "{:?}", engine.folders);
@@ -1037,16 +1110,22 @@ fn the_app_folder_stays_a_place_while_the_projects_cannot_be_read() {
 fn a_tool_in_a_folder_others_can_change_is_refused_by_the_kernel_check() {
     let (_folder, home) = scratch();
     let fixture = crate::service::test_support::durable_folder();
-    let open = fixture.path().canonicalize().unwrap().join("open");
-    std::fs::create_dir(&open).unwrap();
-    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let open = or_named(fixture.path().canonicalize(), fixture.path()).join("open");
+    or_named(std::fs::create_dir(&open), &open);
+    or_named(
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)),
+        &open,
+    );
     let tool = program(&open.join("tool"), "#!/bin/sh\n");
     let places = stub_new(Vec::new(), Some(home));
     assert_eq!(
         check_place(&places, &tool),
         Some(Err(Refusal::OthersCanChange(open.clone())))
     );
-    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    or_named(
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)),
+        &open,
+    );
     assert_eq!(check_place(&places, &tool), Some(Ok(())));
 }
 
@@ -1121,10 +1200,10 @@ fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
 /// refused, and a data folder with no good read gains nothing from another one's.
 #[test]
 fn a_registered_folder_under_an_install_root_stays_writable_after_a_failed_read() {
-    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let tool = Path::new("/usr/src/repo/bin/tool");
     let read = FindingSeed {
         hooks: FindingHooks {
-            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/src/repo")]),
             ..STUB_HOOKS
         },
         ..stub_seed()
@@ -1136,11 +1215,11 @@ fn a_registered_folder_under_an_install_root_stays_writable_after_a_failed_read(
         },
         ..stub_seed()
     };
-    let named = tempfile::tempdir().unwrap();
-    let root = named.path().canonicalize().unwrap();
+    let named = or_named(tempfile::tempdir(), &std::env::temp_dir());
+    let root = or_named(named.path().canonicalize(), named.path());
     assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
     assert!(Places::at_roots(Some(&root), None, failed.clone()).agent_writable(tool));
-    let unread = tempfile::tempdir().unwrap();
-    let other = unread.path().canonicalize().unwrap();
+    let unread = or_named(tempfile::tempdir(), &std::env::temp_dir());
+    let other = or_named(unread.path().canonicalize(), unread.path());
     assert!(!Places::at_roots(Some(&other), None, failed).agent_writable(tool));
 }
