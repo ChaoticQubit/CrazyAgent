@@ -37,8 +37,51 @@ fn upward_paths(text: &str) -> Vec<String> {
             found.push(engine.clone());
         }
     }
-    found.extend(text.match_indices(&hub).map(|(_, path)| path.to_owned()));
+    for (at, top) in text.match_indices("crate::") {
+        let rest = text[at + top.len()..].trim_start();
+        let named = match rest.strip_prefix('{') {
+            Some(group) => top_items(group).into_iter().any(names_hub),
+            None => names_hub(rest),
+        };
+        if named {
+            found.push(hub.clone());
+        }
+    }
     found
+}
+
+/// Whether a path, read from its start, names the hub module itself: its name followed by
+/// the end, `::` or any character that cannot continue a name. Input: the path text.
+/// Output: the answer.
+fn names_hub(path: &str) -> bool {
+    path.trim_start()
+        .strip_prefix("sandbox")
+        .is_some_and(|after| !after.starts_with(|next: char| next == '_' || next.is_alphanumeric()))
+}
+
+/// The top-level items of a `{..}` import group, read from just after its `{` up to the
+/// `}` that closes it, split on the commas outside any inner group. Input: the text after
+/// the `{`. Output: each item, untrimmed.
+fn top_items(group: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let (mut depth, mut start) = (0usize, 0);
+    for (at, character) in group.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' if depth == 0 => {
+                items.push(&group[start..at]);
+                return items;
+            }
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                items.push(&group[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&group[start..]);
+    items
 }
 
 /// The files under a folder that name an engine or hub path. Input: the folder. Output:
@@ -85,24 +128,52 @@ fn the_scan_finds_a_planted_crazyagent_path() {
     assert_eq!(found[0].1.len(), 2, "{found:?}");
 }
 
-/// The dependency lines of a manifest that neither pin an exact version (`"=`) nor name a
-/// path, in the `[dependencies]`, `[dev-dependencies]` and `target.*` dependency tables.
-/// Input: the manifest text. Output: each such line.
-fn unpinned(manifest: &str) -> Vec<&str> {
-    let mut table = "";
-    manifest
-        .lines()
-        .filter(|line| {
-            if line.starts_with('[') {
-                table = line;
-                return false;
-            }
-            table.contains("dependencies]")
-                && line.contains(" = ")
-                && !line.contains("\"=")
-                && !line.contains("path = ")
-        })
-        .collect()
+/// The dependency tables of a manifest, as cargo reads them at the top and under each
+/// `target.*` table.
+const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+/// The dependencies of a manifest that neither pin an exact version (`=`) nor name a path,
+/// in every dependency table at the top and under each `target.*` table, however the
+/// manifest writes them. Input: the manifest text. Output: each such dependency's name, or
+/// the error when the text is not TOML.
+fn unpinned(manifest: &str) -> Result<Vec<String>, toml::de::Error> {
+    let parsed: toml::Table = manifest.parse()?;
+    let platforms = parsed
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|targets| targets.values().filter_map(toml::Value::as_table));
+    let mut names = Vec::new();
+    for owner in std::iter::once(&parsed).chain(platforms) {
+        for table in DEPENDENCY_TABLES
+            .iter()
+            .filter_map(|kind| owner.get(*kind).and_then(toml::Value::as_table))
+        {
+            names.extend(
+                table
+                    .iter()
+                    .filter(|(_, value)| !pinned(value))
+                    .map(|(name, _)| name.clone()),
+            );
+        }
+    }
+    Ok(names)
+}
+
+/// Whether one dependency's value pins an exact version or names a path. Input: the value.
+/// Output: the answer.
+fn pinned(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::String(version) => version.starts_with('='),
+        toml::Value::Table(table) => {
+            table.contains_key("path")
+                || table
+                    .get("version")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|version| version.starts_with('='))
+        }
+        _ => false,
+    }
 }
 
 /// The `cargo tree` listing of one package of the workspace at `root`, on the host target,
@@ -111,7 +182,7 @@ fn unpinned(manifest: &str) -> Vec<&str> {
 /// cargo gave none.
 fn path_tree(root: &Path, package: &str) -> std::io::Result<String> {
     let mut tree = Command::new(env!("CARGO"));
-    tree.args(["tree", "-p", package, "-e", "normal"])
+    tree.args(["tree", "-p", package, "-e", "normal,build"])
         .args(["--prefix", "none", "--offline", "--locked"])
         .current_dir(root);
     let output = kernel_processes::spawn_gate::collected(&mut tree)?;
@@ -123,13 +194,23 @@ fn path_tree(root: &Path, package: &str) -> std::io::Result<String> {
     String::from_utf8(output.stdout).map_err(std::io::Error::other)
 }
 
-/// The crates of a [`path_tree`] listing that lie outside the allowlist of path crates.
-/// Input: the listing. Output: each such crate name, in listing order.
+/// The crates of a [`path_tree`] listing that lie outside the allowlist of path crates:
+/// every local crate, which cargo lists with its folder in parentheses, and every crate
+/// named as the engine's are, from wherever it comes. Input: the listing. Output: each such
+/// crate name, in listing order.
 fn outside(listed: &str) -> Vec<&str> {
     listed
         .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|name| name.starts_with("crazyagent") && !ALLOWED_PATH_CRATES.contains(name))
+        .filter_map(|line| {
+            let name = line.split_whitespace().next()?;
+            let local = line
+                .split('(')
+                .skip(1)
+                .filter_map(|group| group.split(')').next())
+                .any(|group| Path::new(group).has_root());
+            ((local || name.starts_with("crazyagent")) && !ALLOWED_PATH_CRATES.contains(&name))
+                .then_some(name)
+        })
         .collect()
 }
 
@@ -138,9 +219,9 @@ fn outside(listed: &str) -> Vec<&str> {
 /// storage and the platform crates), never the engine, the SDK or the bus gateway; and its
 /// own manifest pins every third-party crate exactly.
 #[test]
-fn cargo_tree_is_the_allowlist() {
+fn cargo_tree_is_the_allowlist() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let listed = path_tree(&root, "crazyagent-kernel-sandbox").unwrap();
+    let listed = path_tree(&root, "crazyagent-kernel-sandbox")?;
     let names: Vec<&str> = listed
         .lines()
         .filter_map(|line| line.split_whitespace().next())
@@ -148,24 +229,30 @@ fn cargo_tree_is_the_allowlist() {
     assert_eq!(names.first(), Some(&"crazyagent-kernel-sandbox"));
     let outside = outside(&listed);
     assert!(outside.is_empty(), "{outside:?}");
-    assert_eq!(unpinned(include_str!("../Cargo.toml")), Vec::<&str>::new());
+    assert_eq!(
+        unpinned(include_str!("../Cargo.toml"))?,
+        Vec::<String>::new()
+    );
     let planted = "[dependencies]\nserde = \"1\"\n\n[target.'cfg(unix)'.dependencies]\nrustix = { version = \"=1.1.5\" }\nkernel = { path = \"../x\" }\n";
-    assert_eq!(unpinned(planted), ["serde = \"1\""]);
+    assert_eq!(unpinned(planted)?, ["serde"]);
+    Ok(())
 }
 
 /// A dependency declared in a table of its own, under a platform or not, or written with no
 /// spaces around its `=`, is read like any other, so an unpinned one there fails the row.
 #[test]
-fn a_dependency_in_its_own_table_or_with_no_spaces_is_read() {
+fn a_dependency_in_its_own_table_or_with_no_spaces_is_read()
+-> Result<(), Box<dyn std::error::Error>> {
     for manifest in [
         "[dependencies.serde]\nversion = \"1\"\n",
         "[target.'cfg(unix)'.dependencies.libc]\nversion = \"0.2\"\n",
         "[dev-dependencies]\nserde=\"1\"\n",
     ] {
-        assert_eq!(unpinned(manifest).len(), 1, "{manifest}");
+        assert_eq!(unpinned(manifest)?.len(), 1, "{manifest}");
     }
     let pinned = "[dependencies.serde]\nversion = \"=1.0.229\"\n\n[build-dependencies.kernel]\npath = \"../x\"\n";
-    assert_eq!(unpinned(pinned), Vec::<&str>::new());
+    assert_eq!(unpinned(pinned)?, Vec::<String>::new());
+    Ok(())
 }
 
 /// Every local path crate a listing names is held to the allowlist, whatever its name, while
