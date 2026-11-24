@@ -216,7 +216,12 @@ pub(crate) enum MasterRuntimeResult {
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
-    Policy(Box<Option<kernel_sandbox::policy::AgentPolicy>>),
+    Policy(
+        Box<(
+            Option<kernel_sandbox::policy::AgentPolicy>,
+            Option<Vec<std::path::PathBuf>>,
+        )>,
+    ),
     Profile(Box<NativeProfileUse>),
     Checkout(Box<MasterCheckout>),
     Waiting,
@@ -4530,10 +4535,12 @@ pub(super) fn runtime(
         }
         MasterRuntimeCommand::Policy { ref host, .. } => {
             current_scope(&tx, config, sources, host, &session, &turn)?;
-            let policy = crate::sandbox::policy_store::load(&tx, session.project_id.as_str()).ok();
+            let project = session.project_id.as_str();
+            let policy = crate::sandbox::policy_store::load(&tx, project).ok();
+            let hidden = crate::sandbox::access_store::hidden::load(&tx, project).ok();
             assert_eq!(tx.total_changes(), written, "a policy read writes nothing");
             tx.commit().map_err(error)?;
-            Ok(MasterRuntimeResult::Policy(Box::new(policy)))
+            Ok(MasterRuntimeResult::Policy(Box::new((policy, hidden))))
         }
         MasterRuntimeCommand::AcquireProfile {
             ref host,

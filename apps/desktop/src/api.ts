@@ -187,6 +187,7 @@ const COPY: Record<string, string> = {
   agent_network_narrowed: "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
   agent_toolchain_lowered: "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
   agent_project_unreadable: "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+  agent_folder_hidden: "A folder was hidden from this project's agents, so the agent was stopped. Its next start cannot see it.",
   agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
   project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
   temp_folder_shared: "Your temp folder is shared with other users on this computer, so it is never given to agents.",
