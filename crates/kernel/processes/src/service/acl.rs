@@ -67,7 +67,8 @@ static KEPT: std::sync::LazyLock<
 /// rest are read in one `/bin/ls -lide` ([`list`]); only answers read are kept, and only
 /// those [`keep`] allows, each entry read again with `lstat` after the listing. Input: the
 /// entries, none a link, each with what `lstat` read of it first. Output: one answer per
-/// entry, in order; none when it cannot be read, which counts as changeable.
+/// entry, in order; none when it cannot be read or that second `lstat` finds it changed or
+/// gone, which counts as changeable.
 #[cfg(target_os = "macos")]
 pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<bool>> {
     use std::sync::PoisonError;
@@ -107,14 +108,19 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
         .unwrap_or(0);
     let read = list(&listed, &inodes);
     assert_eq!(read.len(), missed.len());
+    #[cfg(test)]
+    if let Some(hook) = AFTER_LISTING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     for (index, (answer, direct)) in missed.into_iter().zip(read) {
-        answers[index] = answer;
         let (entry, metadata) = entries[index];
         let read_at = stamp(metadata);
         let after = std::fs::symlink_metadata(entry)
             .ok()
             .map(|again| stamp(&again));
+        let answer = answer.filter(|_| after == Some(read_at));
+        answers[index] = answer;
         if let Some(answer) = answer
             && keep(&read_at, after.as_ref(), direct, listed_secs)
         {
@@ -198,6 +204,29 @@ thread_local! {
     /// The entries of each access listing this test thread ran, in order.
     static LISTINGS: std::cell::RefCell<Vec<Vec<std::path::PathBuf>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// What runs once on this test thread between the next access listing and the `lstat`
+    /// after it, so a row can change an entry while its access list is being read.
+    static AFTER_LISTING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the hook once on this test thread between the next access listing and the `lstat`
+/// after it. Input: the hook.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn after_next_listing(hook: impl FnOnce() + 'static) {
+    AFTER_LISTING.with(|after| *after.borrow_mut() = Some(Box::new(hook)));
+}
+
+/// Whether an access answer is kept for the entry. Input: the entry. Output: the answer.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn kept(entry: &Path) -> bool {
+    KEPT.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(entry)
 }
 
 /// Takes the entries of each access listing this test thread ran since the last take.
