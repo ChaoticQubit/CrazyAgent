@@ -74,21 +74,18 @@ fn without_the_helper_bubblewrap_starts_no_agent() {
 /// the launch stays as it was before the supervisor (DEC-179 add.2 Q1).
 #[test]
 fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
-    let helper = std::env::current_exe().unwrap();
     let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
-    let landlock = LinuxBackend::Landlock {
-        helper: helper.clone(),
-    };
-    let off = LinuxSandbox::new(sandbox.clone(), landlock).unwrap();
+    let landlock = LinuxBackend::Landlock { helper: helper() };
+    let off = LinuxSandbox::assembled(sandbox.clone(), landlock, None, None);
     assert_eq!(
         off.supervise(LinuxSupervisor::Off, None).supervision(),
         None
     );
     let bubblewrap = LinuxBackend::Bubblewrap {
-        bwrap: helper.clone(),
-        helper,
+        bwrap: PathBuf::from("/usr/bin/bwrap"),
+        helper: helper(),
     };
-    let alone = LinuxSandbox::new(sandbox, bubblewrap).unwrap();
+    let alone = LinuxSandbox::assembled(sandbox, bubblewrap, None, None);
     assert_eq!(
         alone.supervise(LinuxSupervisor::On, None).supervision(),
         None

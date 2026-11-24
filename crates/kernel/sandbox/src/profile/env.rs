@@ -17,11 +17,10 @@ use std::process::Command;
 pub const LINEAGE_VARIABLE: &str = "CRAZYAGENT_LINEAGE";
 const TOKEN_BYTES: usize = 16;
 
-/// A random value every process of one launch inherits in [`LINEAGE_VARIABLE`], so the
-/// launch's stop finds a process that left its session and lost its parent while it kept
-/// its environment (SECAUDIT-SETSID-LEFTOVER M1). Not a secret: any process of the owner's
-/// user can read it, so it only lets a same-user process get itself named or, under End them
-/// (DEC-147.4), ended; an agent only ever learns its own launch's token.
+/// A random value every process of one launch inherits in [`LINEAGE_VARIABLE`], so the launch's
+/// stop finds a process that left its session and lost its parent while it kept its environment.
+/// Not a secret: any process of the owner's user can read it, so it only lets a same-user process
+/// get itself named or, under End them, ended; an agent only ever learns its own launch's token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct LineageToken(String);
@@ -69,9 +68,9 @@ impl From<LineageToken> for String {
     }
 }
 
-/// The variables that point an agent's tools at its tool cache (T8): uv's cache, and the
-/// pnpm store, the only store variable pnpm 12 reads (probe P5). [`agent_process_env`] keeps a
-/// harness from replacing either once the sandbox set it.
+/// The variables that point an agent's tools at its tool cache: uv's cache, and the pnpm store, the
+/// only store variable pnpm 12 reads. [`agent_process_env`] keeps a harness from replacing either
+/// once the sandbox set it.
 pub const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 
 /// Tells whether one variable may reach an agent process with this value: a name
@@ -130,9 +129,9 @@ pub fn agent_process_env<'a>(
     built_env(base, harness, &AGENT_HOME_ENV, None)
 }
 
-/// One launch's exception to the agent variable guard (DEC-180 Task 20, rv-sa241 ruling
-/// t20-q1): the names a listed master's manifest gives its account key, each allowed to
-/// hold only this launch's own relay token or the keyless placeholder.
+/// One launch's exception to the agent variable guard: the names a listed master's manifest gives
+/// its account key, each allowed to hold only this launch's own relay token or the keyless
+/// placeholder.
 #[derive(Clone, Copy)]
 pub struct Handed<'a> {
     names: &'a [&'a str],
@@ -197,11 +196,10 @@ fn handed_allowed(handed: Option<Handed<'_>>, name: &OsStr, value: &OsStr) -> bo
 }
 
 /// Builds the environment of the owner's confined IDE terminal as [`agent_process_env`] does for an
-/// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across
-/// terminals, so the global git config, Python user site and npm config the owner sets up
-/// there stay in use (RV-DS241-137 code r1 F3), and its profile leaves their files writable
-/// ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). Inputs: the base and terminal
-/// variables. Output: the variables, or `Invalid` when any one fails
+/// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across terminals, so
+/// the global git config, Python user site and npm config the owner sets up there stay in use, and
+/// its profile leaves their files writable ([`ProjectSandbox::keep_owner_config`]). Inputs: the
+/// base and terminal variables. Output: the variables, or `Invalid` when any one fails
 /// [`agent_variable_allowed`].
 pub fn owner_terminal_env<'a>(
     base: &[(&str, &OsStr)],
@@ -324,12 +322,12 @@ pub fn agent_command_handing<'a>(
     Ok(confined_command(profile, program, env))
 }
 
-/// Builds the command a Full access agent process starts from (DEC-102): the
-/// [`SESSION_SHIM`] and `<program>` with no `sandbox-exec` and no profile, so the agent has
-/// the owner's user permissions, yet the same cleared environment holding exactly
-/// [`agent_process_env`] and its own process group as a sandboxed agent. Inputs: the absolute
-/// program, the base variables and the harness's variables (None removes one). Output: the
-/// command, or `Invalid` when a variable fails [`agent_variable_allowed`].
+/// Builds the command a Full access agent process starts from: the [`SESSION_SHIM`] and `<program>`
+/// with no `sandbox-exec` and no profile, so the agent has the owner's user permissions, yet the
+/// same cleared environment holding exactly [`agent_process_env`] and its own process group as a
+/// sandboxed agent. Inputs: the absolute program, the base variables and the harness's variables
+/// (None removes one). Output: the command, or `Invalid` when a variable fails
+/// [`agent_variable_allowed`].
 #[cfg(unix)]
 pub fn unconfined_command<'a>(
     program: &Path,
@@ -356,9 +354,9 @@ pub fn unconfined_command<'a>(
     Ok(command)
 }
 
-/// Refuses a Full access agent on Windows (DEC-102): the level is unavailable there, so no
-/// command starts without the Windows boundary. Inputs: as the Unix version. Output:
-/// always `Unavailable` with [`FULL_ACCESS_NEEDS_MACOS`].
+/// Refuses a Full access agent on Windows: the level is unavailable there, so no command starts
+/// without the Windows boundary. Inputs: as the Unix version. Output: always `Unavailable` with
+/// [`FULL_ACCESS_NEEDS_MACOS`].
 #[cfg(target_os = "windows")]
 pub fn unconfined_command<'a>(
     program: &Path,
@@ -370,9 +368,9 @@ pub fn unconfined_command<'a>(
 }
 
 /// The network a Linux that nests agents gives one limited to ports on any host
-/// ([`ProjectSandbox::routed`]): `any`, the ports it leaves through on any host, and
-/// `bridged`, the loopback ports carried to this computer as for a bridged agent, each list
-/// rising and each port once (DEC-179 SBX-2).
+/// ([`ProjectSandbox::routed`]): `any`, the ports it leaves through on any host, and `bridged`, the
+/// loopback ports carried to this computer as for a bridged agent, each list rising and each port
+/// once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Routed {
     pub any: Vec<u16>,

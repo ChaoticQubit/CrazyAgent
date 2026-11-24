@@ -942,7 +942,8 @@ impl ProjectSandbox {
 
     /// Whether the project folder holds the project guards of [`Self::protected_paths`]:
     /// true but for a folder marked by [`Self::as_job_folder`]. Output: the answer.
-    pub fn holds_project_guards(&self) -> bool {
+    #[cfg(windows)]
+    pub(crate) fn holds_project_guards(&self) -> bool {
         !self.job_folder
     }
 

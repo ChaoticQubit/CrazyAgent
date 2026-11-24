@@ -56,9 +56,9 @@ fn a_sandbox_on_stand_in_hooks_refuses_a_remote_list_past_its_bound() {
 mod order_tests {
     use super::*;
 
-    /// CTX-M1 F1: the order check the profile asserts holds for a profile as the engine
-    /// writes it, and fails once a write allow follows a root pin or once a pin is gone, so
-    /// the profile's assert can trip.
+    /// The order check the profile asserts holds for a profile as the engine writes it, and fails
+    /// once a write allow follows a root pin or once a pin is gone, so the profile's assert can
+    /// trip.
     #[test]
     fn a_root_pin_a_later_write_allow_overrides_fails_the_order_check() {
         let temp = tempfile::tempdir().unwrap();
@@ -109,10 +109,10 @@ mod access_grant_tests {
         (temp, root)
     }
 
-    /// F08: a socket grant is a connect-only rule ahead of the network section with its
-    /// write deny after every write allow, a port grant joins a limited network on
-    /// loopback, and the temp folder grant becomes a writable root handed over as TMPDIR
-    /// with every socket node in it kept unwritable.
+    /// A socket grant is a connect-only rule ahead of the network section with its write deny after
+    /// every write allow, a port grant joins a limited network on loopback, and the temp folder
+    /// grant becomes a writable root handed over as TMPDIR with every socket node in it kept
+    /// unwritable.
     #[test]
     fn grants_add_a_connect_only_socket_a_loopback_port_and_the_owner_s_temp_folder() {
         let (_temp, root) = case();
@@ -169,9 +169,9 @@ mod access_grant_tests {
         assert_eq!(tmpdir, Some(owner_tmp.clone().into_os_string()));
     }
 
-    /// F08: a grant beyond its kind's bound, a socket in a missing folder, a temp folder
-    /// grant without the owner's folder and a port that overfills a limited network are
-    /// refused; an open network takes a port grant as it is.
+    /// A grant beyond its kind's bound, a socket in a missing folder, a temp folder grant without
+    /// the owner's folder and a port that overfills a limited network are refused; an open network
+    /// takes a port grant as it is.
     #[test]
     fn grants_that_cannot_be_held_are_refused() {
         let (_temp, root) = case();
@@ -266,13 +266,12 @@ mod profile_string_tests {
         assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
     }
 
-    /// SA vid 202: a name is spelled with every code point the case-insensitive volume folds
-    /// onto its letters, also those for two or three letters (U+00DF and U+1E9E for `ss`,
-    /// U+FB00 to U+FB06 for `ff`, `fi`, `fl`, `ffi`, `ffl` and `st`), and the Greek question
-    /// mark and varia for `;` and the backtick, and U+0131 for `i` as NTFS maps it. In a
-    /// pattern a fold reaches into a wildcard
-    /// next to the letters, never into a literal or an alternation, so the env templates the
-    /// secret rule gives back stay exact.
+    /// A name is spelled with every code point the case-insensitive volume folds onto its letters,
+    /// also those for two or three letters (U+00DF and U+1E9E for `ss`, U+FB00 to U+FB06 for `ff`,
+    /// `fi`, `fl`, `ffi`, `ffl` and `st`), and the Greek question mark and varia for `;` and the
+    /// backtick, and U+0131 for `i` as NTFS maps it. In a pattern a fold reaches into a wildcard
+    /// next to the letters, never into a literal or an alternation, so the env templates the secret
+    /// rule gives back stay exact.
     #[test]
     fn a_name_is_spelled_with_every_fold_of_the_volume_also_for_two_or_three_letters() {
         let spelled = [
@@ -315,11 +314,11 @@ mod profile_string_tests {
         assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
     }
 
-    /// B5 r2 (rv-sec3 F1, rv-code4 F1): path text with a long fold run, such as a project
-    /// folder named with 7 `s` or 10 `f` or a top-level folder with 60, is spelled with no
-    /// panic and no runaway list: a stretch past the spelling limit takes one of its pieces
-    /// at each place, its fewest pieces' worth of places and the rest up to one per letter
-    /// optional, since Seatbelt reads no `{m,n}` count. A pattern keeps every stretch exact.
+    /// Path text with a long fold run, such as a project folder named with 7 `s` or 10 `f` or a
+    /// top-level folder with 60, is spelled with no panic and no runaway list: a stretch past the
+    /// spelling limit takes one of its pieces at each place, its fewest pieces' worth of places and
+    /// the rest up to one per letter optional, since Seatbelt reads no `{m,n}` count. A pattern
+    /// keeps every stretch exact.
     #[test]
     fn a_long_fold_run_in_path_text_is_spelled_in_bounded_length_never_a_panic() {
         let s = "((s|S|\u{17f})|\u{df}|\u{1e9e})";
@@ -421,10 +420,9 @@ mod profile_string_tests {
 mod firmlink_tests {
     use super::*;
 
-    /// V243-FIRMLINK-SANDBOX-ROOT (sweep #3): a root named through /System/Volumes/Data is
-    /// refused, since Seatbelt matches only the short name and every rule written in the long
-    /// one would never match; an extra read path typed that way is checked under its short
-    /// name, so one holding the engine's data is refused.
+    /// A root named through /System/Volumes/Data is refused, since Seatbelt matches only the short
+    /// name and every rule written in the long one would never match; an extra read path typed that
+    /// way is checked under its short name, so one holding the engine's data is refused.
     #[test]
     fn a_root_named_through_the_data_volume_is_refused_and_a_read_path_is_checked_short() {
         let temp = tempfile::tempdir().unwrap();

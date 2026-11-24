@@ -30,10 +30,10 @@ fn passes_within(probe: &mut Command, time_max: Duration) -> bool {
     false
 }
 
-/// Makes a folder only this user may open under a random name in `data`, the engine's data
-/// folder, for one supervisor probe, so no stale, concurrent or planted folder takes its
-/// name (rv-secreview linux-t4c F1). Input: the absolute data folder. Output: the new empty
-/// folder, or none when no name was free or the data folder refused it.
+/// Makes a folder only this user may open under a random name in `data`, the engine's data folder,
+/// for one supervisor probe, so no stale, concurrent or planted folder takes its name. Input: the
+/// absolute data folder. Output: the new empty folder, or none when no name was free or the data
+/// folder refused it.
 pub(super) fn private_folder(data: &Path) -> Option<PathBuf> {
     assert!(data.is_absolute());
     for _ in 0..PROBE_FOLDER_TRIES_MAX {
@@ -51,11 +51,11 @@ pub(super) fn private_folder(data: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Tells whether the call supervisor holds every guard here as a launch starts it: the
-/// helper's probe ([`probe_supervisor`]), plain or inside bubblewrap's namespaces, in a new
-/// private folder under the engine's data folder ([`private_folder`]), removed after. Never
-/// as root (rv-sec3 linux-t4b N1). Inputs: the helper, the bubblewrap launches nest under,
-/// the data folder and whether this runs as root. Output: true only when the probe held.
+/// Tells whether the call supervisor holds every guard here as a launch starts it: the helper's
+/// probe ([`probe_supervisor`]), plain or inside bubblewrap's namespaces, in a new private folder
+/// under the engine's data folder ([`private_folder`]), removed after. Never as root. Inputs: the
+/// helper, the bubblewrap launches nest under, the data folder and whether this runs as root.
+/// Output: true only when the probe held.
 pub(super) fn supervises(helper: &Path, bwrap: Option<&Path>, data: &Path, root: bool) -> bool {
     if root || !(clean_absolute(helper) && helper.is_file() && clean_absolute(data)) {
         return false;
@@ -269,11 +269,10 @@ fn routes(bwrap: &Path, helper: &Path) -> bool {
 /// and whether the probe passed.
 pub(super) type KeptRoute = Mutex<Option<(PathBuf, PathBuf, bool)>>;
 
-/// Tells whether a nested agent gets a routed network of its own from one kept answer that
-/// the Agent access page, the launch notice and the launch all read (rv-code2 SX2-2,
-/// SX2B-1): false when `refused`, a true kept for this bubblewrap and helper for the
-/// engine's life, a kept false until `again` asks it anew (rv-sa241 SBX-2-R2 N1), else the
-/// probe's, kept, with no lock held while it runs and a true kept meanwhile left in place.
+/// Tells whether a nested agent gets a routed network of its own from one kept answer that the
+/// Agent access page, the launch notice and the launch all read: false when `refused`, a true kept
+/// for this bubblewrap and helper for the engine's life, a kept false until `again` asks it anew,
+/// else the probe's, kept, with no lock held while it runs and a true kept meanwhile left in place.
 /// Inputs: the cell, bubblewrap, the helper, the refusal, `again`, the probe. Output: it.
 pub(super) fn kept_route(
     kept: &KeptRoute,
@@ -311,12 +310,12 @@ pub(super) fn kept_route(
 /// What [`route_held`] answered, read by the host facts and every launch alike.
 static ROUTE_READ: KeptRoute = Mutex::new(None);
 
-/// [`kept_route`] for this machine: refused as root (rv-sa241 NOTE-2), where slirp4netns
-/// would run with root's network before it joins the agent's. The tools check runs inside
-/// the probe, so a kept true never changes for a key: a tool removed after it gives a routed
-/// launch whose setup fails, which the go byte refuses. Inputs: bubblewrap, the helper and
-/// `again`, which the host read sets to ask a kept false anew and a launch leaves unset, so
-/// a launch never waits on the probe for a kept answer. Output: true when it is routed.
+/// [`kept_route`] for this machine: refused as root, where slirp4netns would run with root's
+/// network before it joins the agent's. The tools check runs inside the probe, so a kept true never
+/// changes for a key: a tool removed after it gives a routed launch whose setup fails, which the go
+/// byte refuses. Inputs: bubblewrap, the helper and `again`, which the host read sets to ask a kept
+/// false anew and a launch leaves unset, so a launch never waits on the probe for a kept answer.
+/// Output: true when it is routed.
 pub(super) fn route_held(bwrap: &Path, helper: &Path, again: bool) -> bool {
     let root = rustix::process::geteuid().is_root();
     let probe = || {
@@ -332,12 +331,12 @@ pub(super) fn route_held(bwrap: &Path, helper: &Path, again: bool) -> bool {
 /// The bubblewrap and the helper [`kept_nest`] found a nest for.
 pub(super) type KeptNest = Mutex<Option<(PathBuf, PathBuf)>>;
 
-/// Tells whether this machine nests the helper in bubblewrap from one answer the Agent access
-/// page and every launch read (rv-sa241 SBX-2-R2 LOW-1): a nest found for this bubblewrap and
-/// helper is kept for the engine's life, and one not found is asked again each time, so a
-/// machine that starts to nest is seen at its next read. No lock is held while the probe
-/// runs, and a failed probe reads the cell again, so a nest another caller found meanwhile
-/// holds. Inputs: the cell, bubblewrap, the helper, the probe. Output: true when it nests.
+/// Tells whether this machine nests the helper in bubblewrap from one answer the Agent access page
+/// and every launch read: a nest found for this bubblewrap and helper is kept for the engine's
+/// life, and one not found is asked again each time, so a machine that starts to nest is seen at
+/// its next read. No lock is held while the probe runs, and a failed probe reads the cell again, so
+/// a nest another caller found meanwhile holds. Inputs: the cell, bubblewrap, the helper, the
+/// probe. Output: true when it nests.
 pub(super) fn kept_nest(
     kept: &KeptNest,
     bwrap: &Path,
@@ -508,10 +507,10 @@ pub(super) fn publish(kept: &KeptHost, generation: u64, host: crate::host::Linux
     assert!(held.0 >= generation);
 }
 
-/// Marks what is kept of this machine as running no call supervisor, after a launch with
-/// the setting On found it does not hold (rv-secreview linux-t4c F2), so the Agent access
-/// page shows the wider lines until the next read, and counts the mark so a read that began
-/// before it is not kept ([`publish`]). Nothing kept stays nothing. Input: what is kept.
+/// Marks what is kept of this machine as running no call supervisor, after a launch with the
+/// setting On found it does not hold, so the Agent access page shows the wider lines until the next
+/// read, and counts the mark so a read that began before it is not kept ([`publish`]). Nothing kept
+/// stays nothing. Input: what is kept.
 pub(crate) fn forget_supervisor(kept: &KeptHost) {
     let mut held = kept.lock().unwrap_or_else(PoisonError::into_inner);
     held.0 += 1;

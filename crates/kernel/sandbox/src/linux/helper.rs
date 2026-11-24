@@ -88,11 +88,10 @@ pub(crate) const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 
 const PROBE_SUPERVISED: &str = "--probe-supervised";
 
-/// Why the helper runs no mode while its environment holds a variable that makes glibc
-/// load code ([`loader_variable`]): every mode, and the bubblewrap a nest starts, runs in
-/// the helper's own AppArmor profile, which may make user namespaces, so the variable would
-/// load a caller's code there (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2). The engine
-/// never sets one.
+/// Why the helper runs no mode while its environment holds a variable that makes glibc load code
+/// ([`loader_variable`]): every mode, and the bubblewrap a nest starts, runs in the helper's own
+/// AppArmor profile, which may make user namespaces, so the variable would load a caller's code
+/// there. The engine never sets one.
 pub const LOADER_REFUSED: &str = "the helper refuses variables that load code";
 
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
@@ -149,10 +148,9 @@ const _: () = {
     }
 };
 
-/// Why an agent whose project hides a folder does not start where the sandbox helper cannot
-/// give it a mount tree of its own that no later mount on this computer reaches: a second
-/// mount of the folder's disk made during the turn would lead past the cover
-/// (V24x-LINUX-NEST-MOUNT-PROPAGATION, leader 19:09 Q5).
+/// Why an agent whose project hides a folder does not start where the sandbox helper cannot give it
+/// a mount tree of its own that no later mount on this computer reaches: a second mount of the
+/// folder's disk made during the turn would lead past the cover.
 pub const HIDDEN_MOUNTS_NOT_PRIVATE: &str = "hidden folders on Linux need an agent's mounts \
      cut off from this computer's, and this computer does not let the sandbox helper do it: \
      allow user namespaces for the programs bubblewrap starts, or stop hiding the folders, \
@@ -402,11 +400,11 @@ fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> 
     }
 }
 
-/// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
-/// optional `--unshare-net`, at most [`HIDDEN_MAX`] `--tmpfs P --remount-ro P`
-/// covers (P clean, absolute, below the root), an optional clean absolute `--chdir`, then `--`
-/// and the command, so no caller adds another bubblewrap option (rv-sa241 SBX-2-R2 N2,
-/// rv-code2 N5). Input: the words after the fixed arguments. Output: true when they are.
+/// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an optional
+/// `--unshare-net`, at most [`HIDDEN_MAX`] `--tmpfs P --remount-ro P` covers (P clean, absolute,
+/// below the root), an optional clean absolute `--chdir`, then `--` and the command, so no caller
+/// adds another bubblewrap option. Input: the words after the fixed arguments. Output: true when
+/// they are.
 fn own_options(words: &[OsString]) -> bool {
     let mut words = match words {
         [unshare, rest @ ..] if unshare == bridge::UNSHARE_NET => rest,
@@ -756,11 +754,11 @@ fn named_descriptor(request: &HelperRequest) -> Option<RawFd> {
     }
 }
 
-/// Closes every descriptor above the standard three that this process holds and `named`
-/// leaves out, before any mode runs. One the engine's own parent left open, not closed on
-/// exec, would otherwise reach bubblewrap, slirp4netns and the harness, or stay readable
-/// through `/proc` in a helper that stays a parent (V243-LINUX-HARNESS-FD-LEAK). Input: the
-/// named descriptors. Output: Ok, or the reason one cannot be listed or closed.
+/// Closes every descriptor above the standard three that this process holds and `named` leaves out,
+/// before any mode runs. One the engine's own parent left open, not closed on exec, would otherwise
+/// reach bubblewrap, slirp4netns and the harness, or stay readable through `/proc` in a helper that
+/// stays a parent. Input: the named descriptors. Output: Ok, or the reason one cannot be listed or
+/// closed.
 fn close_inherited(named: &[RawFd]) -> Result<(), String> {
     assert!(named.iter().all(|fd| *fd > 2));
     let failed = |error: std::io::Error| format!("inherited descriptors: {error}");
@@ -920,9 +918,9 @@ fn probe_supervisor(folder: &Path) -> ExitCode {
     }
 }
 
-/// Tells whether a folder is the private probe folder the engine made ([`private_folder`]):
-/// a real folder, not a link, that this user owns with mode 0700 and that holds nothing
-/// (rv-secreview linux-t4c F1). Input: the absolute folder. Output: true only then.
+/// Tells whether a folder is the private probe folder the engine made ([`private_folder`]): a real
+/// folder, not a link, that this user owns with mode 0700 and that holds nothing. Input: the
+/// absolute folder. Output: true only then.
 pub(crate) fn private_empty(folder: &Path) -> bool {
     assert!(folder.is_absolute());
     let Ok(held) = fs::symlink_metadata(folder) else {
@@ -933,11 +931,10 @@ pub(crate) fn private_empty(folder: &Path) -> bool {
     private && fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_none())
 }
 
-/// The call supervisor's check, run as its harness: the guarded port is reached on this
-/// machine and refused on another address, a new file is made and written, a `.git` is
-/// refused, and so are a signal to the supervisor, an open of its memory for writing and a
-/// take of its descriptor (rv-sec3 linux-t4b F1). Inputs: the guarded port and an empty
-/// folder. Output: 0 when all seven hold, else 1.
+/// The call supervisor's check, run as its harness: the guarded port is reached on this machine and
+/// refused on another address, a new file is made and written, a `.git` is refused, and so are a
+/// signal to the supervisor, an open of its memory for writing and a take of its descriptor.
+/// Inputs: the guarded port and an empty folder. Output: 0 when all seven hold, else 1.
 fn probe_supervised(port: u16, folder: &Path) -> ExitCode {
     let refused = |error: std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
     let elsewhere = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port));
@@ -1165,11 +1162,10 @@ fn unescaped(field: &str) -> Option<PathBuf> {
     Some(PathBuf::from(OsStr::from_bytes(&path)))
 }
 
-/// Gives the helper a mount tree of its own that no later mount on this computer reaches,
-/// before Landlock, and proves it (V24x-LINUX-NEST-MOUNT-PROPAGATION): one thread, a user
-/// and a mount namespace of its own mapped to the same ids, every mount private, each cover
-/// and `/proc` a mount that `umount2` refuses as locked, then no capability, bounding set
-/// included. Input: the covers. Output: Ok, or the reason.
+/// Gives the helper a mount tree of its own that no later mount on this computer reaches, before
+/// Landlock, and proves it: one thread, a user and a mount namespace of its own mapped to the same
+/// ids, every mount private, each cover and `/proc` a mount that `umount2` refuses as locked, then
+/// no capability, bounding set included. Input: the covers. Output: Ok, or the reason.
 fn cut(covers: &[PathBuf]) -> Result<(), String> {
     let read = |path: &str| fs::read_to_string(path).map_err(|error| format!("{path}: {error}"));
     let write = |path: &str, text: String| {

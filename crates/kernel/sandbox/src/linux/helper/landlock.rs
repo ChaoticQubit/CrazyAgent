@@ -58,12 +58,12 @@ pub struct LandlockPolicy {
     pub cut: Option<Vec<PathBuf>>,
 }
 
-/// What the helper's call supervisor holds for an agent on a host with no namespaces to
-/// nest it in (DEC-179): `loopback` names the connect ports it reaches on this machine
-/// only, `git` its own git folders, the only `.git` entries it may make, and `signals`
-/// keeps its signals inside the programs it started, and `held` names the entries it may
-/// not write, move, link or remove (DEC-185 S2). With none of them the helper becomes the
-/// harness; with any it stays as the harness's parent and answers its guarded calls.
+/// What the helper's call supervisor holds for an agent on a host with no namespaces to nest it in:
+/// `loopback` names the connect ports it reaches on this machine only, `git` its own git folders,
+/// the only `.git` entries it may make, and `signals` keeps its signals inside the programs it
+/// started, and `held` names the entries it may not write, move, link or remove. With none of them
+/// the helper becomes the harness; with any it stays as the harness's parent and answers its
+/// guarded calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Guard {
     pub loopback: Vec<u16>,
@@ -248,11 +248,10 @@ pub(crate) fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     Ok(())
 }
 
-/// The rights a git folder grant ([`LandlockPolicy::git_write`]) adds: read, write,
-/// truncate, make and remove files and folders, and no symlink, no move from or to another
-/// folder, no device, fifo or socket and no execute. Landlock unions a folder's rights with
-/// its ancestors', so a read grant above the folder still gives execute (DEC-185 S1).
-/// No input. Output: the rights.
+/// The rights a git folder grant ([`LandlockPolicy::git_write`]) adds: read, write, truncate, make
+/// and remove files and folders, and no symlink, no move from or to another folder, no device, fifo
+/// or socket and no execute. Landlock unions a folder's rights with its ancestors', so a read grant
+/// above the folder still gives execute. No input. Output: the rights.
 pub fn git_folder_rights() -> BitFlags<AccessFs> {
     make_bitflags!(AccessFs::{
         ReadFile | ReadDir | WriteFile | Truncate | MakeReg | MakeDir | RemoveFile | RemoveDir
@@ -408,8 +407,8 @@ pub(super) fn refused_sockets(tcp_only: bool, plain_tcp: bool) -> Result<Vec<Sec
 /// Starts a harness bubblewrap launched, after a private mount tree if it hides folders ([`cut`]),
 /// behind the socket filter a Landlock agent with a network limit gets ([`refuse_sockets`] with
 /// `tcp_only`): no Unix-domain socket, no io_uring ring, no family but TCP and routing netlink, so
-/// no AF_VSOCK leaves the closed network (RV-DS241-84 r2). Inputs: the harness and the covers.
-/// Output: 3 when the cut or the filter fails, 126 when the harness cannot start.
+/// no AF_VSOCK leaves the closed network. Inputs: the harness and the covers. Output: 3 when the
+/// cut or the filter fails, 126 when the harness cannot start.
 pub(super) fn filtered(
     program: &Path,
     args: Vec<OsString>,

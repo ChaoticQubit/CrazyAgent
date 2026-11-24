@@ -22,7 +22,7 @@ pub const ACTIVE_PROCESSES: u32 = 512;
 /// guarding a lock that is normally missing would keep `.git` from taking new entries, git's
 /// own `index.lock` among them. A lock an agent makes never becomes the config: `config` is
 /// read only, so no agent replaces or deletes it (DEC-193 D6, step 0c).
-pub const GIT_CONFIG_LOCK: &str = "config.lock";
+pub(crate) const GIT_CONFIG_LOCK: &str = "config.lock";
 
 const PROFILE_NAME_MAX: usize = 128;
 const SYSTEM_ROOT_DEFAULT: &str = r"C:\Windows";
@@ -355,7 +355,7 @@ fn make_guarded_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError>
     Ok(made)
 }
 
-pub fn drive_path(path: &Path) -> Result<String, SandboxError> {
+pub(crate) fn drive_path(path: &Path) -> Result<String, SandboxError> {
     path.to_str()
         .filter(|text| check_path(text).is_ok())
         .map(str::to_owned)
