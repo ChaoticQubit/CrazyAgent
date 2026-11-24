@@ -271,8 +271,7 @@ fn a_failed_located_reply_ends_the_attach_and_the_next_block_answers_the_next_re
 /// A capture block whose located reply came with no line at all, as when tmux cut the pane
 /// filter so no pane matched, has no row count either: the attach fails with `REPLY_CUT` and
 /// the reader drops its capture up to the attach's marker line, so the control reads on and
-/// a pane row that reads as the closing guard or as output forges nothing (rv-code4
-/// v241-tmux-fix F2, RV-DS241-100, RV-DS241-192).
+/// a pane row that reads as the closing guard or as output forges nothing.
 #[test]
 fn a_capture_whose_located_reply_has_no_line_drains_to_its_marker_and_forges_nothing() {
     let (reply, answer) = sync_channel(1);

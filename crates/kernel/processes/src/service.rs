@@ -1129,8 +1129,8 @@ pub fn retire_old_copies(root: &Path, installed: &Path, hooks: &Hooks) {
 /// then every release file there is removed and the folder goes once empty. A link that
 /// cannot be moved keeps the old copy, so it never dangles; anything CrazyAgent did not put
 /// there stays. Only a real, private folder of this user's (700, as 2.4.0 made it) is
-/// touched, so a linked or shared `bin` never leads a removal outside the data root (rv-code
-/// F1). Inputs: the data root, the engine kept, the link folder and the engine's checks.
+/// touched, so a linked or shared `bin` never leads a removal outside the data root.
+/// Inputs: the data root, the engine kept, the link folder and the engine's checks.
 pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>, hooks: &Hooks) {
     let old = &root.join("bin");
     if !installed.starts_with(root.join("setup").join("bin")) || !(hooks.is_private_folder)(old) {

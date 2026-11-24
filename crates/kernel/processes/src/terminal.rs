@@ -1046,7 +1046,7 @@ pub fn harness_socket(
     lead_temp_socket(engine_root, lead, HARNESS_SOCKET, paths)
 }
 
-/// The socket of a native lead's teammates' own tmux server (rv-audit S1 F1), in the lead's
+/// The socket of a native lead's teammates' own tmux server, in the lead's
 /// short private temp folder under the name its latest start chose (see
 /// [`renew_teammates_socket`]). That server and every teammate pane it forks run in the
 /// teammates' profile, which serves this socket but never reaches or unlinks it, nor the
