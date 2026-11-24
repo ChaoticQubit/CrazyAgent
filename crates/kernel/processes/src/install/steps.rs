@@ -303,9 +303,13 @@ fn brew(
 }
 
 /// The curl download into the archive file, then the tar unpack into the out folder, with
-/// the member last when one is named. Inputs: the paths and the member. Output: the two
-/// steps, or `install_template_mismatch` for a source that fails today's pin check.
+/// the member last when one is named. Windows names no curl or tar yet, so there it is
+/// refused. Inputs: the paths and the member. Output: the two steps, or
+/// `install_template_mismatch` on Windows or for a source that fails today's pin check.
 fn fetched(paths: &InstallPaths, member: Option<&str>) -> Result<Vec<Step>, &'static str> {
+    if cfg!(windows) {
+        return Err(TEMPLATE_MISMATCH);
+    }
     let source = paths.source.as_deref().unwrap_or_default();
     if !plain_source(source) {
         return Err(TEMPLATE_MISMATCH);

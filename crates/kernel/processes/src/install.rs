@@ -329,7 +329,13 @@ pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
             version(pinned).then_some(()).ok_or(VERSION_INVALID)
         }
         InstallRecipe::SystemPackage { package, .. } => {
-            setup_name(package).then_some(()).ok_or(NAME_INVALID)
+            let plain_end = package
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+            (setup_name(package) && plain_end && !package.ends_with(".rpm"))
+                .then_some(())
+                .ok_or(NAME_INVALID)
         }
         InstallRecipe::SelfUpdate { program, args } => {
             if !(program.len() <= NAME_BYTES_MAX && plain(program)) {
