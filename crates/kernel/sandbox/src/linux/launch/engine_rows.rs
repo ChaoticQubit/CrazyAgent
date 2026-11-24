@@ -1,4 +1,3 @@
-use crazyagent_linux_supervisor::rules::{GitOwn, Held};
 use crate::error::SandboxError;
 use crate::host::LinuxHost;
 use crate::lines::{
@@ -16,6 +15,7 @@ use crate::ports::PROXY_PORTS;
 use crate::profile::consts::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK;
 use crate::profile::{ProjectSandbox, command::Sandbox, linux_unbridged_notice_on};
 use crate::settings::{LinuxSockets, LinuxSupervisor};
+use crazyagent_linux_supervisor::rules::{GitOwn, Held};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -886,8 +886,8 @@ fn an_agent_kept_on_this_network_by_a_low_port_names_the_lowest_one() {
 
 #[test]
 fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
-    use SandboxRemote::{AnyHost, Loopback};
     use crate::policy::AgentNetwork;
+    use SandboxRemote::{AnyHost, Loopback};
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -948,8 +948,8 @@ fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
 
 #[test]
 fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
-    use SandboxRemote::{AnyHost, Loopback};
     use crate::policy::AgentNetwork;
+    use SandboxRemote::{AnyHost, Loopback};
     let host = |routed, supervised| {
         Some(LinuxHost {
             nested: true,
@@ -1016,8 +1016,8 @@ fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself()
 
 #[test]
 fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
-    use SandboxRemote::{AnyHost, Loopback};
     use crate::policy::AgentNetwork;
+    use SandboxRemote::{AnyHost, Loopback};
     let host = |nested, routed| {
         Some(LinuxHost {
             nested,
