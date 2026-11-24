@@ -336,11 +336,16 @@ pub(crate) fn walks() -> usize {
     WALKS.with(std::cell::Cell::get)
 }
 
+/// The most links whose targets do not exist yet one walk follows from its first missing
+/// run before it refuses the path.
+const DANGLING_LINK_HOPS: usize = 16;
+
 /// A path's parts with the identity of each leading run of them, top down: None from the
 /// first run that does not exist on, and None for a Windows drive prefix alone, which names
 /// the drive's current folder. `reached` holds the identities of the folders the deepest
-/// existing run resolves through once its links are followed, so a run that leads into a
-/// protected folder by a link is told too.
+/// existing run resolves through once its links are followed, and of the folders above
+/// where a first missing run that is a link leads ([`dangling_reach`]), so a run that leads
+/// into a protected folder by a link, made or still to be made, is told too.
 struct Walk<'a> {
     path: &'a Path,
     parts: Vec<Component<'a>>,
@@ -349,10 +354,11 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    /// Reads the identities of a path's leading runs, and of every folder above the deepest
-    /// existing run once its links are resolved. Input: the path. Output: the walk, or
-    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or the resolve fails other than
-    /// not found.
+    /// Reads the identities of a path's leading runs, of every folder above the deepest
+    /// existing run once its links are resolved, and of every folder above where its first
+    /// missing run leads when that run is a link. Input: the path. Output: the walk, or
+    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or a resolve fails other than not
+    /// found, or a missing run leads through more than [`DANGLING_LINK_HOPS`] links.
     fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
         #[cfg(all(test, target_os = "macos"))]
         WALKS.with(|walks| walks.set(walks.get() + 1));
@@ -361,8 +367,9 @@ impl<'a> Walk<'a> {
         let mut ids = Vec::with_capacity(parts.len());
         let mut run = PathBuf::new();
         let mut existing = None;
+        let mut missing = None;
         let mut gone = false;
-        for part in &parts {
+        for (at, part) in parts.iter().enumerate() {
             run.push(part);
             let prefix = matches!(part, Component::Prefix(_));
             let found = if gone || prefix {
@@ -372,14 +379,22 @@ impl<'a> Walk<'a> {
             };
             if found.is_some() {
                 existing = Some(run.clone());
-            } else if !prefix {
+            } else if !prefix && !gone {
+                missing = Some(at);
                 gone = true;
             }
             ids.push(found);
         }
-        let mut reached = Vec::new();
+        let mut reals = Vec::with_capacity(2);
         if let Some(existing) = existing {
-            let real = existing.canonicalize().map_err(refused)?;
+            reals.push(existing.canonicalize().map_err(refused)?);
+        }
+        if let Some(at) = missing {
+            let run: PathBuf = parts[..=at].iter().collect();
+            reals.extend(dangling_reach(&run, &parts[at + 1..])?);
+        }
+        let mut reached = Vec::new();
+        for real in &reals {
             for above in real.ancestors() {
                 if let Some(found) = identity(above).map_err(refused)? {
                     reached.push(found);
@@ -387,6 +402,7 @@ impl<'a> Walk<'a> {
             }
         }
         assert_eq!(ids.len(), parts.len());
+        assert!(reals.len() <= 2);
         Ok(Walk {
             path,
             parts,
@@ -438,6 +454,58 @@ impl<'a> Walk<'a> {
                 .zip(below)
                 .all(|(part, step)| plain_name(*step).is_some_and(|step| same_name(part, step)))
     }
+}
+
+/// Where a run that does not exist leads when it is a link whose target does not exist yet:
+/// the target, read against the link's own folder, with the parts after the run, walked top
+/// down again, and on through each further such link it meets, at most
+/// [`DANGLING_LINK_HOPS`] of them. Inputs: the missing run and the parts after it. Output:
+/// the canonical deepest existing folder of where it leads, None when the run is no link,
+/// or `Invalid` with [`SECRET_ROOT_REFUSED`] past the bound or when a read fails.
+fn dangling_reach(run: &Path, rest: &[Component<'_>]) -> Result<Option<PathBuf>, SandboxError> {
+    let refused = |_| invalid(SECRET_ROOT_REFUSED);
+    let mut link = run.to_path_buf();
+    let mut after: PathBuf = rest.iter().collect();
+    let mut deepest = None;
+    for hop in 0..=DANGLING_LINK_HOPS {
+        let linked = match std::fs::symlink_metadata(&link) {
+            Ok(found) => found.file_type().is_symlink(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(refused(error)),
+        };
+        if !linked {
+            break;
+        }
+        if hop == DANGLING_LINK_HOPS {
+            return Err(invalid(SECRET_ROOT_REFUSED));
+        }
+        let target = std::fs::read_link(&link).map_err(refused)?;
+        let folder = link.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        let led = folder.join(target).join(&after);
+        let parts: Vec<Component<'_>> = led.components().collect();
+        let mut walked = PathBuf::new();
+        let mut next = None;
+        deepest = None;
+        for (at, part) in parts.iter().enumerate() {
+            walked.push(part);
+            if matches!(part, Component::Prefix(_)) {
+                continue;
+            }
+            if identity(&walked).map_err(refused)?.is_none() {
+                next = Some(at);
+                break;
+            }
+            deepest = Some(walked.clone());
+        }
+        let Some(at) = next else {
+            break;
+        };
+        after = parts[at + 1..].iter().collect();
+        link = walked;
+    }
+    deepest
+        .map(|found| found.canonicalize().map_err(refused))
+        .transpose()
 }
 
 /// The text of a plain folder or file name part. Input: the part. Output: its text, or
