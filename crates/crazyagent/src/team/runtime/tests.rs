@@ -8758,15 +8758,45 @@ fn limited_task(end: &str) -> ((String, i64), Vec<String>) {
     (ended, rested)
 }
 
+/// An engine-typed turn's end: a rate limit wins over every app end, and with no limit a
+/// successful end stays a success after an interrupt, as before the limit moved first.
+#[test]
+fn a_launched_turn_end_puts_the_limit_first_and_keeps_a_success_after_an_interrupt() {
+    let ends = [
+        (true, true, true),
+        (true, false, false),
+        (false, true, true),
+        (false, true, false),
+        (false, false, true),
+        (false, false, false),
+    ];
+    let got = ends
+        .map(|(limited, interrupted, success)| super::launched_end(limited, interrupted, success));
+    assert_eq!(
+        got,
+        [
+            TurnEnd::RateLimited,
+            TurnEnd::RateLimited,
+            TurnEnd::Success,
+            TurnEnd::Interrupted,
+            TurnEnd::Success,
+            TurnEnd::Failed,
+        ]
+    );
+}
+
 /// A sub-agent turn whose transcript reports the usage limit and then completes is a rate
 /// limit, not a success: the task goes back to the queue and the account rests, so the pool
 /// can hand it to its next member.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_turn_that_hits_its_limit_and_then_completes_goes_back_to_the_queue() {
-    let (task, rested) =
-        limited_task(r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#);
-    assert_eq!(task, ("queued".to_owned(), 1), "the limit sends the task back");
+    let (task, rested) = limited_task(r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#);
+    assert_eq!(
+        task,
+        ("queued".to_owned(), 1),
+        "the limit sends the task back"
+    );
     assert_eq!(rested, [ENDPOINT], "the limited account rests");
 }
 
@@ -8779,7 +8809,11 @@ fn a_task_turn_that_hits_its_limit_and_then_aborts_goes_back_to_the_queue() {
     let (task, rested) = limited_task(
         r#"{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}"#,
     );
-    assert_eq!(task, ("queued".to_owned(), 1), "the limit sends the task back");
+    assert_eq!(
+        task,
+        ("queued".to_owned(), 1),
+        "the limit sends the task back"
+    );
     assert_eq!(rested, [ENDPOINT], "the limited account rests");
 }
 
