@@ -363,6 +363,43 @@ test("a module declared only for tests is test code with its folder; a shared on
   }
 });
 
+test("an item gated on the test-support feature is test code; another feature or an any() is not", () => {
+  const body = `    std::${THREAD}(D);`;
+  const item = (gate, name) => [gate, `fn ${name}() {`, body, "}"];
+  const text = [
+    ...item('#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]', "fixture"),
+    ...item('#[cfg(feature = "test-support")]', "seam"),
+    ...item('#[cfg(any(unix, feature = "test-support"))]', "shared"),
+    ...item('#[cfg(feature = "other")]', "other"),
+    ...item('#[cfg(not(any(test, feature = "test-support")))]', "live"),
+  ].join("\n");
+  assert.deepEqual(scan("crates/a/src/lib.rs", text), { test: true, lines: [3, 7], helpers: [] });
+});
+
+test("a module declared under a test-support gate is test code whole; one under any(unix, ..) is not", () => {
+  const sleeping = `fn f() {\n    std::${THREAD}(D);\n}\n`;
+  const root = repository({
+    "crates/a/src/lib.rs": [
+      '#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]',
+      "pub mod fixture;",
+      '#[cfg(any(unix, feature = "test-support"))]',
+      "mod live;",
+      "",
+    ].join("\n"),
+    "crates/a/src/fixture.rs": sleeping,
+    "crates/a/src/live.rs": sleeping,
+    "scripts/quality/sleeps-allow.json": "{}\n",
+  });
+  try {
+    assert.deepEqual(run(root), [
+      "crates/a/src/fixture.rs: 1 new sleep in test code (line 2); " +
+        "wait on an event or the one shared wait_until helper",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the command exits 1 with the problems on a planted sleep and 0 on a clean tree", () => {
   const allow = { "scripts/quality/sleeps-allow.json": "{}\n" };
   const planted = repository({ "apps/desktop/test/a.mjs": `${awaited("sleep")}\n`, ...allow });
