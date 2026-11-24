@@ -897,10 +897,10 @@ fn data_folder() -> (tempfile::TempDir, PathBuf) {
 /// root still counts as agents' to write and a tool planted there is refused.
 #[test]
 fn a_last_good_read_outlives_the_engine_process_that_made_it() {
-    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let tool = Path::new("/usr/src/repo/bin/tool");
     let read = FindingSeed {
         hooks: FindingHooks {
-            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/src/repo")]),
             last_good_load: stored_load,
             last_good_store: stored_store,
             ..STUB_HOOKS
@@ -920,7 +920,7 @@ fn a_last_good_read_outlives_the_engine_process_that_made_it() {
     assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
     assert_eq!(
         stored_load(&root),
-        Some(vec![PathBuf::from("/usr/local/src/repo")])
+        Some(vec![PathBuf::from("/usr/src/repo")])
     );
     super::test_support::forget_last_good(&root);
     assert!(Places::at_roots(Some(&root), None, failed).agent_writable(tool));
@@ -972,21 +972,32 @@ fn a_forged_last_good_entry_only_adds_refusals() {
         .remove(&forged_root);
 }
 
-/// A repository the engine registered under `/usr/local` or `/opt/homebrew` is agents' to
-/// write after a good read, and stays so when the first read of engine.db fails with no last
-/// good read: under a Homebrew prefix only the folders Homebrew fills count as installed,
-/// whichever install root the path lies under, `/usr` included.
+/// When the first read of engine.db fails with no last good read and no engine data folder
+/// over the path, it fails closed: a path counts as agents' to write unless it is installed.
+/// So a repository the engine registered under a Homebrew prefix is agents' to write after a
+/// good read and still after that failed one, outside the folders Homebrew fills with tools,
+/// `share`, `etc`, `include` and `lib` outside `node_modules` included. Below `/usr` and
+/// outside a prefix a path counts as installed.
 #[test]
-fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
+fn a_first_failed_read_keeps_a_registered_repository_in_a_homebrew_prefix_writable() {
     let (_folder, home) = scratch();
     let canonical: fn(&Path) -> std::io::Result<PathBuf> = |path| Ok(path.to_path_buf());
-    for repo in ["/usr/local/src/repo", "/opt/homebrew/src/repo"] {
+    for repo in [
+        "/usr/local/src/repo",
+        "/opt/homebrew/src/repo",
+        "/usr/local/share/repo",
+        "/usr/local/etc/repo",
+        "/usr/local/include/repo",
+        "/opt/homebrew/lib/repo",
+    ] {
         let tool = Path::new(repo).join("bin/tool");
         let read = with_canonical(&home, canonical, Some(vec![PathBuf::from(repo)]));
         let unread = with_canonical(&home, canonical, None);
         assert!(read.agent_writable(&tool), "{}", tool.display());
         assert!(unread.agent_writable(&tool), "{}", tool.display());
     }
+    let unread = with_canonical(&home, canonical, None);
+    assert!(!unread.agent_writable(Path::new("/usr/src/repo/bin/tool")));
 }
 
 /// While the set-up projects cannot be read, the tools Homebrew places stay usable in every
@@ -1165,10 +1176,10 @@ fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
 /// refused, and a data folder with no good read gains nothing from another one's.
 #[test]
 fn a_registered_folder_under_an_install_root_stays_writable_after_a_failed_read() {
-    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let tool = Path::new("/usr/src/repo/bin/tool");
     let read = FindingSeed {
         hooks: FindingHooks {
-            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/src/repo")]),
             ..STUB_HOOKS
         },
         ..stub_seed()
