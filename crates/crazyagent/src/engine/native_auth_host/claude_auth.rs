@@ -280,11 +280,11 @@ pub(in crate::engine) async fn run(
     }
     let home = session.profile_path()?;
     #[cfg(target_os = "macos")]
-    if let Err(error) = crate::engine::keychain::prepare_profile_keychain(
+    if let Err(error) = kernel_security::keychain::prepare_profile_keychain(
         &home,
         first == Some(ClaudeAuthCommand::Login),
     ) {
-        return finish_failure(session, channel, error).await;
+        return finish_failure(session, channel, error.into()).await;
     }
     if first.is_none()
         && let Err(error) = renew_lapsing(&mut session, channel, executable, &home, deadline).await

@@ -9435,14 +9435,13 @@ impl TeamRuntime {
         if kind == Some(crate::coord::settings::HarnessKind::ClaudeCode)
             && matches!(account.reach, TeamReach::Endpoint { .. })
         {
-            crate::engine::keychain::fresh_profile_keychain(&self.state, &own_home, &[]).map_err(
-                |_| {
+            kernel_security::keychain::fresh_profile_keychain(&self.state, &own_home, &[])
+                .map_err(|_| {
                     with_code(
                         "the agent's own keychain could not be made",
                         Some("agent_keychain_unavailable"),
                     )
-                },
-            )?;
+                })?;
         }
         let relay = match &account.reach {
             TeamReach::Endpoint {
