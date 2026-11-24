@@ -1,7 +1,7 @@
 #![cfg(unix)]
 use super::*;
 
-/// RV-DS241-18: a part an access list lets someone other than this user or root change
+/// A part an access list lets someone other than this user or root change
 /// counts as changeable at its depth, for the engine service and for the tools the resolver
 /// runs alike, even inside a store.
 #[cfg(unix)]
@@ -45,7 +45,7 @@ fn a_part_an_access_list_opens_to_others_is_changeable() {
     }
 }
 
-/// RV-DS241-18: a macOS `ls -lde` listing names an entry changeable by others when an
+/// A macOS `ls -lde` listing names an entry changeable by others when an
 /// allow entry gives write, append, add or delete rights, or rights over the entry's own
 /// attributes, security or owner, to anyone but this user, root, wheel, daemon or admin; deny
 /// entries and read rights never do, and a listing it cannot read fails closed.
@@ -116,7 +116,7 @@ fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
     }
 }
 
-/// RV-DS241-18 r2: one `ls -lde` listing of several entries is read block by block, each
+/// One `ls -lde` listing of several entries is read block by block, each
 /// block going to the one entry its first line ends with, the longest when one name ends
 /// another. An entry with no block or two gets none, and so does one whose block does not
 /// read, alone; a listing with a block for no entry or an access-list line before any entry
@@ -251,7 +251,7 @@ fn a_block_whose_inode_is_not_the_stamped_one_reads_none() {
     );
 }
 
-/// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others
+/// A Linux `system.posix_acl_access` value names an entry changeable by others
 /// when a named user other than this user or root, or a named group the trusted-group rule
 /// does not trust, has write; the owner, group and other entries stay with the mode bits,
 /// and a value it cannot read fails closed.
@@ -313,7 +313,7 @@ fn a_posix_access_list_that_lets_others_write_is_shared() {
     assert_eq!(acl::posix_shared(&[], ME, trusted), None);
 }
 
-/// RV-DS241-18: on macOS a folder whose mode bits are private but whose access list lets
+/// On macOS a folder whose mode bits are private but whose access list lets
 /// staff add and delete files is changeable by others, for the engine service and for the
 /// resolver's tools, while a deny-only list leaves it private.
 #[cfg(target_os = "macos")]
@@ -474,7 +474,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     panic!("no change and its listing shared a second in three tries");
 }
 
-/// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
+/// One `ls -lde` lists every part of a path the first time, names with a
 /// space or an accent included; a repeat lists none of the parts it read, and an access-list
 /// change moves only the changed part's change time, so that part alone is listed again and
 /// the change counts. HFS-CTIME: a part read in the second it changed is read again once

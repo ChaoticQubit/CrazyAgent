@@ -75,7 +75,7 @@ fn output_of(chunks: &mut crate::terminal::buffer::Chunks) -> Vec<u8> {
 /// with `REPLY_CUT`, so its caller asks again, and the reader drops every row of its capture up to the attach's
 /// own marker line. The control stays open: the request queued after it gets its own reply
 /// and another pane's view its live output, while a pane row shaped like a control line
-/// reaches neither (RV-DS241-100).
+/// reaches neither.
 #[test]
 fn a_capture_whose_row_count_is_unknown_fails_only_its_attach_and_forges_nothing() {
     let (cut, answer) = attach(Some(b"3 "), true);
@@ -328,9 +328,9 @@ fn a_capture_whose_located_reply_has_no_line_drains_to_its_marker_and_forges_not
 
 /// A capture block whose located reply tmux cut after both its row counts is read as that
 /// many rows of data, so a pane row that reads as the closing guard or as output forges
-/// nothing (RV-DS241-100), and the reader reads on past its marker block: the attach is
+/// nothing, and the reader reads on past its marker block: the attach is
 /// asked again while later output and replies still reach their own views and callers,
-/// rather than every view on the server ending under load (RV-DS241-192).
+/// rather than every view on the server ending under load.
 #[test]
 fn a_capture_cut_after_its_row_counts_is_read_as_data_and_the_control_reads_on() {
     let (reply, answer) = sync_channel(1);
