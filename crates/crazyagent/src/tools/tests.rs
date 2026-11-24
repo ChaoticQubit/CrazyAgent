@@ -1284,7 +1284,7 @@ fn an_app_installed_npm_harness_in_the_setup_prefix_resolves_and_the_old_prefix_
 /// An engine data folder whose `engine.db` is in WAL and written once, as an engine leaves
 /// it, holding one project setup per folder. Inputs: the data folder and the project folders.
 /// Output: none.
-fn engine_with_projects(root: &Path, folders: &[&Path]) {
+pub(super) fn engine_with_projects(root: &Path, folders: &[&Path]) {
     std::fs::create_dir_all(root).unwrap();
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     let mode: String = connection
