@@ -768,7 +768,7 @@ fn acp_invocation(request: &LaunchRequest) -> Result<Invocation, LaunchError> {
 /// one exception to the variable guard, as a listed master's does. Inputs: the checked
 /// request, the installed context, if any, the harness arguments and variables. Output: the
 /// command with piped standard streams in the working folder, or
-/// `launch_sandbox_unavailable` off macOS, `launch_account_handover_mismatch` for a
+/// `launch_sandbox_unavailable` off macOS and Linux, `launch_account_handover_mismatch` for a
 /// hand-over of another account than the binding's and `launch_environment_refused` when
 /// the environment cannot be built, which includes a hand-over at Full access.
 fn sandboxed(
@@ -922,9 +922,9 @@ fn confined<'a>(
 /// the launch's exception to the variable guard through
 /// [`kernel_sandbox::profile::env::agent_command_handing`], or the Full access session shim,
 /// which carries no exception; on Linux and Windows an installed
-/// sandbox with the account's home, through [`InstalledSandbox::wrap`], on Windows once
-/// [`home_containers`] passes, and never with an exception, which only macOS carries so far;
-/// anything else is `launch_sandbox_unavailable`. Inputs: the request, program, script
+/// sandbox with the account's home, through [`InstalledSandbox::wrap`], on Linux with the
+/// exception through `InstalledSandbox::wrap_handing`, on Windows once [`home_containers`]
+/// passes and never with an exception; anything else is `launch_sandbox_unavailable`. Inputs: the request, program, script
 /// words, arguments, base and harness variables and the exception, if any. Output: the
 /// command.
 fn bounded<'a>(
@@ -958,6 +958,7 @@ fn bounded<'a>(
     }
     #[cfg(any(target_os = "linux", windows))]
     {
+        #[cfg(windows)]
         if handed.is_some() {
             return Err(failure("launch_sandbox_unavailable"));
         }
@@ -982,7 +983,14 @@ fn bounded<'a>(
                 None => bare.env_remove(name),
             };
         }
-        let command = boundary.wrap(&bare).map_err(|error| match error {
+        #[cfg(target_os = "linux")]
+        let wrapped = match handed {
+            Some(handed) => boundary.wrap_handing(&bare, handed),
+            None => boundary.wrap(&bare),
+        };
+        #[cfg(windows)]
+        let wrapped = boundary.wrap(&bare);
+        let command = wrapped.map_err(|error| match error {
             kernel_sandbox::error::SandboxError::Invalid(_) => {
                 failure("launch_environment_refused")
             }

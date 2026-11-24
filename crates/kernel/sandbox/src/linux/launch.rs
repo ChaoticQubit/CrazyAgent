@@ -9,7 +9,7 @@ use crate::profile::consts::{
     LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
     LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, STORE_ALTERNATES,
 };
-use crate::profile::env::{Handed, Routed, agent_process_env};
+use crate::profile::env::{Handed, Routed, agent_process_env, agent_process_env_handing};
 use crate::profile::{ProjectSandbox, command::Sandbox, linux_holds_fully};
 use crate::settings::{LinuxSockets, LinuxSupervisor};
 use ::landlock::RulesetStatus;
@@ -566,13 +566,17 @@ impl LinuxSandbox {
         harness: &Command,
         handed: Handed<'_>,
     ) -> Result<Command, SandboxError> {
-        let _ = handed;
-        Sandbox::wrap(self, harness)
+        self.wrapped(harness, Some(handed))
     }
-}
 
-impl Sandbox for LinuxSandbox {
-    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+    /// Rebuilds a harness command to run in this sandbox, its environment built with the
+    /// launch's exception to the variable guard when it has one. Inputs: the harness command
+    /// and the exception, if any. Output: the command, or the refusal.
+    fn wrapped(
+        &self,
+        harness: &Command,
+        handed: Option<Handed<'_>>,
+    ) -> Result<Command, SandboxError> {
         let program = Path::new(harness.get_program());
         if !clean_absolute(program) {
             return Err(invalid("harness program must be an absolute plain path"));
@@ -658,7 +662,10 @@ impl Sandbox for LinuxSandbox {
         if self.sandbox.resolves_over_tcp() {
             base.push(("RES_OPTIONS", OsStr::new(DNS_OVER_TCP)));
         }
-        let env = agent_process_env(&base, harness.get_envs())?;
+        let env = match handed {
+            Some(handed) => agent_process_env_handing(&base, harness.get_envs(), handed)?,
+            None => agent_process_env(&base, harness.get_envs())?,
+        };
         command
             .arg("--")
             .arg(program)
@@ -669,6 +676,12 @@ impl Sandbox for LinuxSandbox {
             .process_group(0);
         assert!(command.get_args().any(|arg| arg == "--"));
         Ok(command)
+    }
+}
+
+impl Sandbox for LinuxSandbox {
+    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+        self.wrapped(harness, None)
     }
 }
 

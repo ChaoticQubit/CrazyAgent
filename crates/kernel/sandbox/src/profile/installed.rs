@@ -235,8 +235,12 @@ impl InstalledSandbox {
         harness: &Command,
         handed: crate::profile::env::Handed<'_>,
     ) -> Result<Command, SandboxError> {
-        let _ = handed;
-        self.wrap(harness)
+        if self.unconfined {
+            return Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()));
+        }
+        let command = self.linux.wrap_handing(harness, handed)?;
+        assert_eq!(command.get_program(), self.launcher().as_os_str());
+        Ok(command)
     }
 }
 
