@@ -47,14 +47,18 @@ pub(super) fn settled(stamp: &Stamp, listed_secs: i64) -> bool {
 
 /// Whether an access answer read for an entry may be kept: only a [`settled`] one, whose
 /// entry a second `lstat` after the listing found with the same device, inode and change
-/// time, and that came from the listing's own lines, never from the direct read, which
-/// reads the path again. Inputs: the stamp before the listing, the one after, if read,
-/// whether the answer came from the direct read, and the whole second the listing started.
-/// Output: the answer.
+/// time, so no change to its access list, mode or owner fell between the two. Inputs: the
+/// stamp before the listing, the one after, if read, and the whole second the listing
+/// started. Output: the answer.
 #[cfg(target_os = "macos")]
-pub(super) fn keep(before: &Stamp, after: Option<&Stamp>, direct: bool, listed_secs: i64) -> bool {
-    settled(before, listed_secs) && after == Some(before) && !direct
+pub(super) fn keep(before: &Stamp, after: Option<&Stamp>, listed_secs: i64) -> bool {
+    settled(before, listed_secs) && after == Some(before)
 }
+
+/// How many times an entry whose stamp moved during its listing is listed again alone
+/// before one last direct read decides it.
+#[cfg(target_os = "macos")]
+const RELIST_TRIES: u32 = 3;
 
 /// The access-list answers read so far, by entry, each with the stamp it was read at.
 #[cfg(target_os = "macos")]
@@ -64,24 +68,14 @@ static KEPT: std::sync::LazyLock<
 
 /// Whether each entry carries an access-list entry that lets someone other than this user or
 /// root change it. An answer kept for an entry whose stamp has not moved is reused, and the
-/// rest are read in one `/bin/ls -lide` ([`list`]); only answers read are kept, and only
-/// those [`keep`] allows, each entry read again with `lstat` after the listing. Input: the
-/// entries, none a link, each with what `lstat` read of it first. Output: one answer per
-/// entry, in order; none when it cannot be read or that second `lstat` finds it changed or
-/// gone, which counts as changeable.
+/// rest are read in one `/bin/ls -lide` ([`list`]), each entry read again with `lstat` after
+/// the listing. An entry whose stamp moved meanwhile, as a folder's does when a file is made
+/// in it, is read again alone ([`moved_answer`]). Only answers [`keep`] allows are kept.
+/// Input: the entries, none a link, each with what `lstat` read of it first. Output: one
+/// answer per entry, in order; none when it cannot be read, which counts as changeable.
 #[cfg(target_os = "macos")]
 pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<bool>> {
     use std::sync::PoisonError;
-    /// The stamp of what `lstat` read of an entry. Input: the read. Output: the stamp.
-    fn stamp(metadata: &std::fs::Metadata) -> Stamp {
-        use std::os::unix::fs::MetadataExt;
-        (
-            metadata.dev(),
-            metadata.ino(),
-            metadata.ctime(),
-            metadata.ctime_nsec(),
-        )
-    }
     let mut answers = vec![None; entries.len()];
     let mut missed = Vec::new();
     {
@@ -101,33 +95,34 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
         .iter()
         .map(|index| std::os::unix::fs::MetadataExt::ino(entries[*index].1))
         .collect();
-    let listed_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|since| i64::try_from(since.as_secs()).ok())
-        .unwrap_or(0);
+    let listed_secs = now_secs();
     let read = list(&listed, &inodes);
     assert_eq!(read.len(), missed.len());
-    #[cfg(test)]
-    if let Some(hook) = AFTER_LISTING.with(|hook| hook.borrow_mut().take()) {
-        hook();
-    }
-    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
-    for (index, (answer, direct)) in missed.into_iter().zip(read) {
+    let mut keeps = Vec::new();
+    for (index, answer) in missed.into_iter().zip(read) {
         let (entry, metadata) = entries[index];
         let read_at = stamp(metadata);
-        let after = std::fs::symlink_metadata(entry)
-            .ok()
-            .map(|again| stamp(&again));
-        let answer = answer.filter(|_| after == Some(read_at));
-        answers[index] = answer;
-        if let Some(answer) = answer
-            && keep(&read_at, after.as_ref(), direct, listed_secs)
+        let after = lstat_stamp(entry);
+        if after == Some(read_at) {
+            answers[index] = answer;
+            keeps.push((index, read_at, after, listed_secs));
+        } else {
+            let (answer, settled_read) = moved_answer(entry, metadata);
+            answers[index] = answer;
+            if let Some((before, after, secs)) = settled_read {
+                keeps.push((index, before, Some(after), secs));
+            }
+        }
+    }
+    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    for (index, read_at, after, secs) in keeps {
+        if let Some(answer) = answers[index]
+            && keep(&read_at, after.as_ref(), secs)
         {
             if kept.len() >= KEPT_MAX {
                 kept.clear();
             }
-            kept.insert(entry.to_path_buf(), (read_at, answer));
+            kept.insert(entries[index].0.to_path_buf(), (read_at, answer));
         }
     }
     assert!(kept.len() <= KEPT_MAX);
@@ -135,14 +130,91 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
     answers
 }
 
+/// Reads again one entry whose stamp moved during its listing: listed alone up to
+/// [`RELIST_TRIES`] times, an answer counting once the `lstat` before and after one listing
+/// agree; past that, one last listing counts when only the device and inode agree, since a
+/// busy folder's change time moves with every file made in it, and that answer is never
+/// kept. Every read must find the same file, mode and owner the caller judged from its first
+/// `lstat`, or the answer is none. Inputs: the entry and that first read. Output: the
+/// answer, none when it cannot be read or the entry was replaced or re-permissioned, and
+/// the stamps and start second of a listing that held still, for [`keep`].
+#[cfg(target_os = "macos")]
+fn moved_answer(
+    entry: &Path,
+    first: &std::fs::Metadata,
+) -> (Option<bool>, Option<(Stamp, Stamp, i64)>) {
+    let judged = |now: &std::fs::Metadata| {
+        use std::os::unix::fs::MetadataExt;
+        (now.dev(), now.ino(), now.mode(), now.uid(), now.gid())
+            == (
+                first.dev(),
+                first.ino(),
+                first.mode(),
+                first.uid(),
+                first.gid(),
+            )
+    };
+    let read_now = || {
+        std::fs::symlink_metadata(entry)
+            .ok()
+            .filter(|now| judged(now))
+    };
+    for _ in 0..RELIST_TRIES {
+        let Some(before) = read_now() else {
+            return (None, None);
+        };
+        let secs = now_secs();
+        let answer = list(&[entry], &[std::os::unix::fs::MetadataExt::ino(&before)])[0];
+        let Some(after) = read_now() else {
+            return (None, None);
+        };
+        if stamp(&after) == stamp(&before) {
+            return (answer, Some((stamp(&before), stamp(&after), secs)));
+        }
+    }
+    let Some(before) = read_now() else {
+        return (None, None);
+    };
+    let answer = list(&[entry], &[std::os::unix::fs::MetadataExt::ino(&before)])[0];
+    (answer.filter(|_| read_now().is_some()), None)
+}
+
+/// The stamp of what `lstat` read of an entry. Input: the read. Output: the stamp.
+#[cfg(target_os = "macos")]
+fn stamp(metadata: &std::fs::Metadata) -> Stamp {
+    use std::os::unix::fs::MetadataExt;
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+}
+
+/// The stamp of an entry read now with `lstat`. Input: the entry. Output: the stamp, or
+/// none when it is gone or unreadable.
+#[cfg(target_os = "macos")]
+fn lstat_stamp(entry: &Path) -> Option<Stamp> {
+    std::fs::symlink_metadata(entry).ok().map(|now| stamp(&now))
+}
+
+/// The wall clock's whole second. Output: the second, or 0 before the epoch.
+#[cfg(target_os = "macos")]
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .unwrap_or(0)
+}
+
 /// Lists entries in one `/bin/ls -lide` that follows no link and reads each one's block
 /// against the inode the entry was stamped with ([`listed_shared_all`]). A name that is not
 /// text or holds a line break gets none, and so does every entry when the listing fails,
 /// runs out of time or fills the output bound, as a cut listing could drop access-list
-/// lines. Inputs: the entries and their inodes. Output: one answer per entry, in order, and
-/// whether it came from the direct read.
+/// lines. Inputs: the entries and their inodes. Output: one answer per entry, in order.
 #[cfg(target_os = "macos")]
-fn list(entries: &[&Path], inodes: &[u64]) -> Vec<(Option<bool>, bool)> {
+fn list(entries: &[&Path], inodes: &[u64]) -> Vec<Option<bool>> {
     assert_eq!(entries.len(), inodes.len());
     let names: Vec<Option<&str>> = entries
         .iter()
@@ -156,7 +228,7 @@ fn list(entries: &[&Path], inodes: &[u64]) -> Vec<(Option<bool>, bool)> {
         .map(|(_, inode)| *inode)
         .collect();
     if operands.is_empty() {
-        return vec![(None, false); entries.len()];
+        return vec![None; entries.len()];
     }
     #[cfg(test)]
     LISTINGS.with(|listings| {
@@ -175,27 +247,26 @@ fn list(entries: &[&Path], inodes: &[u64]) -> Vec<(Option<bool>, bool)> {
         Ok((true, output)) if output.len() < crate::run::OUTPUT_BYTES_MAX => {
             String::from_utf8_lossy(&output).into_owned()
         }
-        _ => return vec![(None, false); entries.len()],
+        _ => return vec![None; entries.len()],
     };
-    let direct = std::cell::RefCell::new(vec![false; operands.len()]);
     let read = listed_shared_all(&text, &operands, &listed_inodes, own_name(), &|index| {
-        direct.borrow_mut()[index] = true;
         confirmed(
             std::ffi::CString::new(operands[index])
                 .map_err(std::io::Error::other)
                 .and_then(|path| crazyagent_macos_fs::acl_listed(&path)),
         )
     });
-    let mut read = read.into_iter().zip(direct.into_inner());
-    let answers: Vec<(Option<bool>, bool)> = names
+    let mut read = read.into_iter();
+    let answers: Vec<Option<bool>> = names
         .iter()
-        .map(|name| match name {
-            Some(_) => read.next().unwrap_or((None, false)),
-            None => (None, false),
-        })
+        .map(|name| name.and_then(|_| read.next().flatten()))
         .collect();
     assert!(read.next().is_none());
     assert_eq!(answers.len(), entries.len());
+    #[cfg(test)]
+    if let Some(hook) = AFTER_LISTING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     answers
 }
 

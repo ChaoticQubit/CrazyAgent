@@ -400,21 +400,17 @@ fn early_in_a_second() {
 #[test]
 fn an_access_answer_is_kept_only_for_the_file_its_stamp_names() {
     let stamp = (1, 2, 100, 0);
-    assert!(acl::keep(&stamp, Some(&stamp), false, 101));
-    assert!(!acl::keep(&stamp, Some(&stamp), false, 100), "not settled");
-    assert!(!acl::keep(&stamp, None, false, 101), "no second lstat");
+    assert!(acl::keep(&stamp, Some(&stamp), 101));
+    assert!(!acl::keep(&stamp, Some(&stamp), 100), "not settled");
+    assert!(!acl::keep(&stamp, None, 101), "no second lstat");
     for moved in [
         (9, 2, 100, 0),
         (1, 9, 100, 0),
         (1, 2, 101, 0),
         (1, 2, 100, 1),
     ] {
-        assert!(!acl::keep(&stamp, Some(&moved), false, 101), "{moved:?}");
+        assert!(!acl::keep(&stamp, Some(&moved), 101), "{moved:?}");
     }
-    assert!(
-        !acl::keep(&stamp, Some(&stamp), true, 101),
-        "the direct read"
-    );
 }
 
 /// HFS-CTIME: an access answer is kept only when its listing started in a later second than
