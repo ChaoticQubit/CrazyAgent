@@ -99,7 +99,10 @@ fn a_finished_restore_shows_it_running_and_a_refusal_shows_its_code() {
 #[cfg(unix)]
 #[test]
 fn a_job_reads_the_engine_the_screen_was_started_with() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("ca-recovery-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
     let layout = crate::paths::Layout::new(home.path().to_path_buf()).unwrap();
     std::fs::create_dir_all(layout.root()).unwrap();
     std::fs::write(
