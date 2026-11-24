@@ -174,7 +174,7 @@ impl Fixture {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
             &self.base.join(FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ))
     }
@@ -28630,7 +28630,7 @@ fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         None,
         &fixture.base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let mut team = fixture.runtime();

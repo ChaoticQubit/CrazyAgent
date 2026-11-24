@@ -73,7 +73,7 @@ impl Fixtures {
         let host = Tmux::open(
             Some(tmux.clone()),
             &folder,
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         );
         let cat = |agent: &AgentId| {

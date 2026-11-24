@@ -24,7 +24,7 @@ fn full_access_on_macos_passes_unconfined_not_editor_not_confined() {
     assert!(!required(AgentAccess::Full));
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "exit 0"]);
-    let confinement = crate::sandbox::confinement();
+    let confinement = kernel_sandbox::confinement();
     let mut child =
         kernel_processes::editor::spawn(&mut command, &confinement, required(AgentAccess::Full))
             .expect("the Full access command started unconfined");
@@ -34,7 +34,7 @@ fn full_access_on_macos_passes_unconfined_not_editor_not_confined() {
 #[test]
 fn every_level_but_full_refuses_an_unconfined_command_on_macos() {
     assert!(super::super::sandbox::qualified());
-    let confinement = crate::sandbox::confinement();
+    let confinement = kernel_sandbox::confinement();
     for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
         assert!(required(access), "{access:?}");
         let mut command = Command::new("/bin/sh");

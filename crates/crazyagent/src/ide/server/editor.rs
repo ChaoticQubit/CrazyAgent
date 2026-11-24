@@ -34,7 +34,7 @@ impl Servers {
             .ok_or_else(|| failure("ide_state_unavailable"))?;
         let capability = self.grants.issue(data, project)?;
         assert_eq!(capability, info.capability_path);
-        let confinement = crate::sandbox::confinement();
+        let confinement = kernel_sandbox::confinement();
         kernel_processes::editor::spawn(command, &confinement, required).map_err(|code| {
             let _ = self.grants.revoke(project);
             match code {

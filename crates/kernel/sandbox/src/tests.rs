@@ -179,3 +179,44 @@ fn the_linux_helper_entry_lives_in_the_kernel() {
     let main: fn(Vec<std::ffi::OsString>) -> std::process::ExitCode = crate::linux::helper::main;
     let _ = main;
 }
+
+/// The confinement the kernel builds for the tmux host holds the very values the engine built
+/// it from: the sandbox runner, the keeper and pane shim words and variables, and a variable
+/// gate and a keeper undo that answer as the sandbox's own do, for a kept and a refused case.
+#[cfg(unix)]
+#[test]
+fn confinement_equals_the_values_crazyagent_built() {
+    use crate::profile::command::SANDBOX_EXEC;
+    use crate::profile::consts::AGENT_GIT_ENV;
+    use crate::profile::env::agent_variable_allowed;
+    use std::ffi::OsStr;
+    let confinement = crate::confinement();
+    assert_eq!(confinement.sandbox_exec, SANDBOX_EXEC);
+    let (git, fixed) = AGENT_GIT_ENV[0];
+    let relay = format!("{}stand-in", kernel_common::relay_names::TOKEN_PREFIX);
+    for (name, value, allowed) in [
+        (git, fixed, true),
+        ("STAND_IN_TOKEN", relay.as_str(), false),
+    ] {
+        let (name, value) = (OsStr::new(name), OsStr::new(value));
+        assert_eq!(agent_variable_allowed(name, value), allowed);
+        assert_eq!((confinement.variable_allowed)(name, value), allowed);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use crate::profile::command::{
+            KEEPER, KEEPER_DEADLINE, KEEPER_STATE, PANE_SHIM, kept_pane, unkept_pane,
+        };
+        assert_eq!(confinement.keeper, KEEPER);
+        assert_eq!(confinement.keeper_deadline_variable, KEEPER_DEADLINE);
+        assert_eq!(confinement.keeper_state_variable, KEEPER_STATE);
+        assert_eq!(confinement.pane_shim, PANE_SHIM);
+        let plain: Vec<String> = [SANDBOX_EXEC, "-f", "/private/tmp/stand-in.sb", "/bin/sh"]
+            .map(str::to_owned)
+            .to_vec();
+        let kept = kept_pane(plain.clone(), None).unwrap();
+        assert_eq!(unkept_pane(&kept).as_ref(), Some(&plain));
+        assert_eq!((confinement.unkept_pane)(&kept), Some(plain.clone()));
+        assert_eq!((confinement.unkept_pane)(&plain), None);
+    }
+}

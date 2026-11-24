@@ -78,7 +78,7 @@ fn standin(kind: &'static str, first_screen: bool) -> Standin {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &folder,
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));

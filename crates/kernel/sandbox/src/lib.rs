@@ -2,6 +2,12 @@
 
 /// What the project access lists read from the engine that runs them.
 pub mod access;
+/// How the tmux host wraps a confined pane: the value the kernel tmux host is opened with,
+/// built from this crate's runner, keeper, pane shim and variable gate.
+#[cfg(unix)]
+mod confinement;
+#[cfg(unix)]
+pub use confinement::confinement;
 /// The ELF reader: whether a Linux program is loaded by glibc, and so resolves names over
 /// TCP when the sandbox asks it to, judged from its program headers alone.
 pub mod elf;

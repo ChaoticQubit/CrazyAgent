@@ -122,7 +122,7 @@ fn a_resumed_claude_agent_keeps_its_conversation_and_sees_an_edit_only_as_the_en
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let mut signed_in = SignedIn::claude();
@@ -228,7 +228,7 @@ fn under_stop_a_real_claude_agent_s_background_command_ends_with_its_task() {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
@@ -329,7 +329,7 @@ fn a_real_claude_agent_whose_background_command_ends_mid_turn_ends_its_task_with
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
@@ -418,7 +418,7 @@ fn a_real_claude_agent_s_bash_runs_lsof_on_its_own_process_and_port_inside_the_a
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let mut agent =

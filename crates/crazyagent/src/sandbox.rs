@@ -14,7 +14,6 @@ use kernel_sandbox::paths::clean_absolute;
 use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
-use kernel_sandbox::profile::env::*;
 #[cfg(all(test, unix))]
 use kernel_sandbox::profile::linux_holds_fully;
 #[cfg(test)]
@@ -77,27 +76,6 @@ impl OwnerGit {
     /// Never runs: no value of this type exists outside Windows. Output: none.
     pub fn git(&self) -> &Path {
         match *self {}
-    }
-}
-
-/// How the tmux host wraps a confined pane, built from this module's sandbox values: the
-/// runner, the keeper and pane shim words and variables, and which variables reach a pane.
-/// Output: the value the kernel tmux host is opened with.
-#[cfg(unix)]
-pub fn confinement() -> kernel_processes::terminal::tmux::Confinement {
-    kernel_processes::terminal::tmux::Confinement {
-        sandbox_exec: SANDBOX_EXEC,
-        #[cfg(target_os = "macos")]
-        keeper: KEEPER,
-        #[cfg(target_os = "macos")]
-        keeper_deadline_variable: KEEPER_DEADLINE,
-        #[cfg(target_os = "macos")]
-        keeper_state_variable: KEEPER_STATE,
-        #[cfg(target_os = "macos")]
-        pane_shim: PANE_SHIM,
-        variable_allowed: agent_variable_allowed,
-        #[cfg(target_os = "macos")]
-        unkept_pane,
     }
 }
 

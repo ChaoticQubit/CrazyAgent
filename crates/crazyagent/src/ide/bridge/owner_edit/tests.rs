@@ -86,7 +86,7 @@ fn listening_agent(case: &mut Case) -> (Server, Arc<dyn Host>, Agent, PathBuf) {
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &case.root.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let agent = case.agent("sub", "working");
