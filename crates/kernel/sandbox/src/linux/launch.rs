@@ -40,7 +40,7 @@ pub const HELPER_NAME: &str = "crazyagent-landlock";
 /// debug build, an executable whose own folder is cargo's `deps`, as a test binary's is, with
 /// no helper beside it takes cargo's build one folder up, the one candidate, and logs it.
 /// Input: the executable's absolute path. Output: the helper's path.
-pub fn helper_for(engine: &Path) -> PathBuf {
+pub(crate) fn helper_for(engine: &Path) -> PathBuf {
     assert!(engine.is_absolute());
     let beside = engine.with_file_name(HELPER_NAME);
     #[cfg(debug_assertions)]
@@ -67,7 +67,7 @@ const AGENT_PATH: &str =
     "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/linuxbrew/.linuxbrew/bin";
 /// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
 /// Ubuntu 23.10 and newer: `1` when it does ([`restricts`]).
-pub const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+pub(crate) const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
@@ -84,7 +84,7 @@ const PROBE_FOLDER_TRIES_MAX: usize = 4;
 /// How often [`passes_within`] looks whether its probe has ended.
 const PROBE_POLL: Duration = Duration::from_millis(20);
 const RESOLVER_ROOT: &str = "/run/systemd/resolve";
-pub const HELPER_MISSING: &str = "CrazyAgent's sandbox helper is missing, and no Linux agent \
+pub(crate) const HELPER_MISSING: &str = "CrazyAgent's sandbox helper is missing, and no Linux agent \
      starts without it; reinstall CrazyAgent.";
 /// How a refusal starts when the probe failed for any reason but the kernel's answer.
 const PROBE_FAILED: &str = "the sandbox check failed";
@@ -138,11 +138,11 @@ const GIT_FOLLOWED: &[&str] = &[
     "worktrees",
 ];
 
-pub const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot run on Linux yet: \
+pub(crate) const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot run on Linux yet: \
      neither Landlock nor bubblewrap can keep the worktree's git links and the existing git \
      objects read-only inside the git folders it must write";
 
-pub const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or clone needs \
+pub(crate) const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or clone needs \
      Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
      bubblewrap alone, which cannot give the git folders their own rights";
 
@@ -263,8 +263,8 @@ impl LinuxSandbox {
     /// Test helper: assembles a launch from its parts with none of [`LinuxSandbox::new`]'s
     /// checks, so a row can wrap a command for a policy or backend this machine would refuse.
     /// Inputs: the policy, the backend, the supervision and the route. Output: the launch.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn assembled(
+    #[cfg(test)]
+    pub(crate) fn assembled(
         sandbox: ProjectSandbox,
         backend: LinuxBackend,
         supervision: Option<Supervision>,
@@ -280,8 +280,8 @@ impl LinuxSandbox {
 
     /// Test helper: the same launch with another supervision. Input: the supervision, `None`
     /// for an unsupervised launch. Output: the launch.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_supervision(self, supervision: Option<Supervision>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_supervision(self, supervision: Option<Supervision>) -> Self {
         LinuxSandbox {
             supervision,
             ..self
@@ -291,7 +291,7 @@ impl LinuxSandbox {
     /// Test helper: the supervision this launch runs under. Output: the supervision, `None`
     /// when no call supervisor runs.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn supervision(&self) -> Option<Supervision> {
+    pub(crate) fn supervision(&self) -> Option<Supervision> {
         self.supervision
     }
 
@@ -524,7 +524,7 @@ impl LinuxSandbox {
     /// session of their own included: bubblewrap's process namespace ends with its outer
     /// process ([`NEST_ARGS`]), while under the plain Landlock helper such a process leaves
     /// the group a stop kills and outlives the run (LINUX-KILL-GROUP). Output: the answer.
-    pub fn ends_every_session(&self) -> bool {
+    pub(crate) fn ends_every_session(&self) -> bool {
         !matches!(self.backend, LinuxBackend::Landlock { .. })
     }
 
@@ -1022,7 +1022,7 @@ fn clone_store(clone: &Path) -> Held {
 /// a linked worktree the project's `.git` its admin folder sits in, where Landlock lets it
 /// write the admin folder alone (DEC-185 S2). Input: the policy. Output: the agent's own
 /// git folders.
-pub fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
+pub(crate) fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     let (working, _) = sandbox.git_deny_roots();
     let mut kids = Vec::new();
     if sandbox.adds_worktrees() {
@@ -1055,7 +1055,7 @@ pub fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     own
 }
 
-pub fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy {
+pub(crate) fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy {
     let mut read: Vec<PathBuf> = SYSTEM_READ_ROOTS
         .iter()
         .chain(&["/proc"])
@@ -1102,7 +1102,7 @@ pub fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPol
 /// The TCP ports no agent listens on: the owner's fixed ports, the kept local model ports
 /// and every model proxy and model relay port, as the macOS boundary keeps them. Input: the policy. Output:
 /// those ports, rising and each once.
-pub fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
+pub(crate) fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
     let mut ports: Vec<u16> = OWNER_PORTS
         .iter()
         .chain(sandbox.kept_ports())
@@ -1136,7 +1136,7 @@ pub(crate) fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 /// bubblewrap gives the agent a network of its own; an empty read-only folder covers each
 /// existing hidden folder. Inputs: bubblewrap, the helper, the nested policy, the hidden
 /// folders, the working folder, the bridged and route ports. Output: the command up to `--`.
-pub fn nest_command(
+pub(crate) fn nest_command(
     bwrap: &Path,
     helper: &Path,
     policy: &LandlockPolicy,
@@ -1247,5 +1247,7 @@ fn private_tree(hidden: &[PathBuf]) -> Option<&[PathBuf]> {
     (!hidden.is_empty()).then_some(hidden)
 }
 
+#[cfg(test)]
+mod engine_rows;
 #[cfg(test)]
 mod tests;

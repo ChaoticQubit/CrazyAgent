@@ -17,10 +17,10 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
-pub const BRIDGE: &str = "--bridge";
-pub const BRIDGE_FD: &str = "--bridge-fd";
+pub(crate) const BRIDGE: &str = "--bridge";
+pub(crate) const BRIDGE_FD: &str = "--bridge-fd";
 pub(super) const BROKER: &str = "--broker";
-pub const UNSHARE_NET: &str = "--unshare-net";
+pub(crate) const UNSHARE_NET: &str = "--unshare-net";
 /// The most ports one bridge carries: every remote a limited network may name.
 const PORTS_MAX: usize = REMOTES_MAX;
 /// One IPv4 and one IPv6 listener for each bridged port.
@@ -45,7 +45,7 @@ type Listener = (u8, u16, RawFd);
 /// lead the helper's arguments give it: the ports carried to this computer's loopback and,
 /// inside the nest only, the descriptor the helper hands its listeners over.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bridge {
+pub(crate) struct Bridge {
     pub fd: Option<RawFd>,
     pub ports: Vec<u16>,
 }

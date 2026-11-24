@@ -33,8 +33,6 @@ mod git_deny_tests;
 pub mod grants;
 pub mod grants_store;
 pub mod ide_shell;
-#[cfg(all(test, target_os = "linux"))]
-mod linux_tests;
 pub mod policy_store;
 #[cfg(all(test, target_os = "macos"))]
 mod profile_engine_tests;
