@@ -47,3 +47,77 @@ fn a_settings_file_with_one_plugin_setting_reads_back() {
     );
     config.validate().unwrap();
 }
+
+/// A settings file with a knowledge setting and a plugin setting opens the store, and the
+/// store's owner reads list every setting and return one of each kind, instead of
+/// stopping the store thread on its listed-settings bound.
+#[tokio::test]
+async fn the_store_reads_back_knowledge_and_plugin_settings() {
+    use crate::engine::owner::{OwnerData, OwnerRead};
+    use crate::storage::{Job, Storage};
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::Builder::new()
+        .prefix("ca-plugin-settings-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("global.toml");
+    let project = root.path().join("project.toml");
+    for (path, text) in [
+        (
+            &global,
+            format!(
+                "version = {SETTINGS_VERSION}\n[knowledge]\nrecords_max = 256\n[plugins]\nessential_unlocked = true\n"
+            ),
+        ),
+        (&project, format!("version = {SETTINGS_VERSION}\n")),
+    ] {
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let (storage, config) =
+        Storage::open_with_settings_sources(&root.path().join("engine.db"), &global, &project)
+            .await
+            .unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    storage
+        .sender
+        .try_send(Job::OwnerStart(send))
+        .unwrap_or_else(|_| panic!("storage queue unavailable"));
+    let admission = receive.await.unwrap().unwrap().owners[0].admission.clone();
+    let read = async |query: OwnerRead| {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        storage
+            .sender
+            .try_send(Job::OwnerRead(admission.clone(), query, send))
+            .unwrap_or_else(|_| panic!("storage queue unavailable"));
+        receive.await.unwrap().unwrap().data
+    };
+    let OwnerData::Settings { names } = read(OwnerRead::Settings).await else {
+        panic!("settings names required")
+    };
+    assert_eq!(
+        names,
+        config.descriptors.keys().cloned().collect::<Vec<_>>()
+    );
+    assert!(names.iter().any(|name| name == "knowledge.records_max"));
+    assert!(names.iter().any(|name| name == "plugins.when_turned_off"));
+    for (name, value) in [
+        ("knowledge.records_max", serde_json::json!(256)),
+        ("plugins.essential_unlocked", serde_json::json!(true)),
+    ] {
+        let OwnerData::Setting { descriptor } =
+            read(OwnerRead::Setting { name: name.into() }).await
+        else {
+            panic!("one setting required")
+        };
+        assert_eq!(descriptor.value, value);
+        assert_eq!(descriptor.origin, Origin::Global);
+    }
+    let (send, receive) = tokio::sync::oneshot::channel();
+    storage
+        .sender
+        .try_send(Job::Close(send))
+        .unwrap_or_else(|_| panic!("storage queue unavailable"));
+    receive.await.unwrap().unwrap();
+}
