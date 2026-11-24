@@ -13,7 +13,7 @@ fn git_run(dir: &Path, args: &[&str]) -> Output {
 }
 
 fn owner_git_run(dir: &Path, global: &Path, args: &[&str]) -> Output {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Process::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -364,9 +364,9 @@ async fn an_owner_rewrite_with_a_transport_allow_cannot_carry_an_agent_worktree_
 #[cfg(target_os = "macos")]
 #[test]
 fn agent_sandbox_cannot_reach_owner_git_credentials() {
-    use crazyagent::sandbox::{
-        ProjectSandbox, SandboxError, SandboxNetwork, agent_variable_allowed,
-    };
+    use crazyagent::sandbox::{ProjectSandbox, agent_variable_allowed};
+    use kernel_sandbox::error::SandboxError;
+    use kernel_sandbox::net::SandboxNetwork;
     use std::ffi::OsStr;
 
     let temporary = tempfile::tempdir().unwrap();
@@ -380,8 +380,8 @@ fn agent_sandbox_cannot_reach_owner_git_credentials() {
         std::fs::create_dir_all(folder).unwrap();
     }
     let socket = owner_agent.join("agent.sock");
-    let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
-    crazyagent::spawn_gate::connect_unix_std(&socket).unwrap();
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    kernel_processes::spawn_gate::connect_unix_std(&socket).unwrap();
     assert!(!agent_variable_allowed(
         OsStr::new("SSH_AUTH_SOCK"),
         socket.as_os_str()
@@ -422,7 +422,7 @@ fn agent_sandbox_cannot_reach_owner_git_credentials() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         assert!(
-            !crazyagent::spawn_gate::output(&mut connect)
+            !kernel_processes::spawn_gate::output(&mut connect)
                 .unwrap()
                 .status
                 .success(),
@@ -432,7 +432,7 @@ fn agent_sandbox_cannot_reach_owner_git_credentials() {
         env.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let printed = crazyagent::spawn_gate::output(&mut env).unwrap();
+        let printed = kernel_processes::spawn_gate::output(&mut env).unwrap();
         assert!(printed.status.success(), "{name}: {printed:?}");
         assert!(
             !String::from_utf8_lossy(&printed.stdout)

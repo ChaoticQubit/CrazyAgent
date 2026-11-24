@@ -6,9 +6,11 @@ use crazyagent::engine::owner::{OwnerResult, TerminalOutput, TerminalSession};
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::NodeKind;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host, TerminalFrame};
+use crazyagent::terminal::tmux::installed;
+use crazyagent::terminal::{FOLDER, TerminalFrame};
 use e2e_support::{Engine, Owner, TMUX, hex, scratch};
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -22,7 +24,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -92,8 +94,18 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         let agent = agent.clone();
         let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crazyagent::sandbox::confinement(),
+                crazyagent::terminal::tmux::tmux_hooks(),
+            );
+            launcher
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
+                .unwrap();
             launcher
         })
         .await
@@ -135,10 +147,10 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         read_until(
             &mut output,
             &mut seen,
-            format!("\r\ne2e-{marker}-42\r\n").as_bytes()
+            format!("\r\ne2e-{marker}-42\r\ne2e$ ").as_bytes()
         )
         .await,
-        "the shell ran the typed line: {}",
+        "the shell ran the typed line and prompts again: {}",
         String::from_utf8_lossy(&seen)
     );
     control.resize(100, 30).await.unwrap();
@@ -231,7 +243,7 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
 }
 
 fn server_pid(tmux: &std::path::Path, socket: &std::path::Path) -> u32 {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(tmux)
             .arg("-S")
             .arg(socket)
@@ -289,9 +301,19 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         let folder = folder.clone();
         let tmux = tmux.clone();
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crazyagent::sandbox::confinement(),
+                crazyagent::terminal::tmux::tmux_hooks(),
+            );
             for agent in &agents {
-                launcher.spawn(agent, &command).unwrap();
+                launcher
+                    .spawn(
+                        agent,
+                        &kernel_processes::terminal::PaneCommand::from(&command),
+                    )
+                    .unwrap();
             }
             launcher
         })

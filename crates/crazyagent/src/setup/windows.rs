@@ -1,8 +1,8 @@
-use super::run::{reported_version, run_bounded};
 use super::{
     Dependency, InstallError, Installer, LOCK_FILE, Pin, UV_WINGET_ID, Version, keep_only,
     locked_tool_args, tool_lock,
 };
+use kernel_processes::run::{reported_version, run_bounded};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -23,7 +23,7 @@ const NAME_BYTES_MAX: usize = 64;
 pub struct WindowsInstaller {
     app_data: PathBuf,
     local_app_data: PathBuf,
-    places: crate::tools::Places,
+    places: kernel_processes::finding::Places,
 }
 
 impl WindowsInstaller {
@@ -35,7 +35,7 @@ impl WindowsInstaller {
     pub fn new(
         app_data: &Path,
         local_app_data: Option<&Path>,
-        places: crate::tools::Places,
+        places: kernel_processes::finding::Places,
     ) -> Result<Self, InstallError> {
         let Some(local_app_data) = local_app_data.filter(|path| path.is_absolute()) else {
             return Err(InstallError("setup_local_app_data_missing"));
@@ -229,7 +229,7 @@ impl WindowsInstaller {
     }
 
     /// The PATH folders the programs setup finds and starts may use: absolute ones the
-    /// installer's places keep ([`crate::tools::Places::kept_for_children`]), so a relative or
+    /// installer's places keep ([`kernel_processes::finding::Places::kept_for_children`]), so a relative or
     /// empty entry, or a folder agents can write, never gives uv, its Python or what uv runs.
     /// Input: the PATH value. Output: the folders in PATH order.
     fn kept(&self, path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
@@ -287,20 +287,26 @@ impl Installer for WindowsInstaller {
     /// passes the tool resolver's place checks, any other name as `<name>.cmd`, then
     /// `<name>.exe`, in the resolver's places only. A name that is empty, hidden or holds a
     /// path or drive separator is refused. Input: the name. Output: the file, or why not.
-    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, kernel_processes::finding::Missing> {
         if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) {
             return Err(super::program_not_found(name));
         }
         if name == "uv" {
             return self
                 .uv()
-                .filter(|uv| matches!(crate::tools::check_place(&self.places, uv), Some(Ok(()))))
+                .filter(|uv| {
+                    matches!(
+                        kernel_processes::finding::check_place(&self.places, uv),
+                        Some(Ok(()))
+                    )
+                })
                 .ok_or_else(|| super::program_not_found(name));
         }
         ["cmd", "exe"]
             .iter()
             .find_map(|extension| {
-                crate::tools::resolve(&format!("{name}.{extension}"), &self.places).ok()
+                kernel_processes::finding::resolve(&format!("{name}.{extension}"), &self.places)
+                    .ok()
             })
             .map(|found| found.entry)
             .ok_or_else(|| super::program_not_found(name))
@@ -349,8 +355,8 @@ mod tests {
 
     /// Places with no folders and no HOME, whose refusals are the ones every place has, so a
     /// row's temp folders are kept and its project folders are not. Output: the places.
-    fn places() -> crate::tools::Places {
-        crate::tools::Places::new(Vec::new(), None)
+    fn places() -> kernel_processes::finding::Places {
+        crate::tools::tools_new(Vec::new(), None)
     }
 
     /// RV-DS241-95: setup on Windows finds uv only in an absolute PATH folder the tool
@@ -582,7 +588,7 @@ mod tests {
     #[test]
     fn a_pack_program_is_found_as_cmd_or_exe_in_kept_places_and_uv_as_setup_runs_it() {
         let temp = tempfile::tempdir().unwrap();
-        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
         let bin = base.join("bin");
         let links = base
             .join("local")
@@ -594,6 +600,10 @@ mod tests {
             bin.join("npx.cmd"),
             bin.join("npx.exe"),
             bin.join("node.exe"),
+            bin.join("node_modules")
+                .join("npm")
+                .join("bin")
+                .join("npx-cli.js"),
             bin.join("tool"),
             links.join("uv.exe"),
             elsewhere.join("other.cmd"),
@@ -606,7 +616,7 @@ mod tests {
                 std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        let places = crate::tools::tools_new(vec![bin.clone()], None);
         let installer =
             WindowsInstaller::new(&base.join("app"), Some(&base.join("local")), places).unwrap();
         assert_eq!(installer.program("npx"), Some(bin.join("npx.cmd")));
@@ -638,7 +648,7 @@ mod tests {
     #[test]
     fn a_pack_server_is_never_seeded_with_a_uv_agents_can_write() {
         let temp = tempfile::tempdir().unwrap();
-        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
         let local = base.join(".crazyagent").join("local");
         let links = local.join("Microsoft").join("WinGet").join("Links");
         std::fs::create_dir_all(&links).unwrap();

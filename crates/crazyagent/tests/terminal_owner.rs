@@ -9,8 +9,10 @@ use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::team::{AgentStatus, NodeKind};
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host, TerminalFrame};
+use crazyagent::terminal::tmux::installed;
+use crazyagent::terminal::{FOLDER, TerminalFrame};
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,7 +25,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -95,8 +97,18 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
         let agent = agent.clone();
         let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
-            launcher.spawn(&agent, &command).unwrap();
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crazyagent::sandbox::confinement(),
+                crazyagent::terminal::tmux::tmux_hooks(),
+            );
+            launcher
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
+                .unwrap();
             launcher
         })
         .await
@@ -182,7 +194,7 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
 /// Counts the tmux processes whose command line names `socket`: the server on it and any
 /// client still connected. Input: the server's socket path. Output: the count.
 fn servers(socket: &Path) -> usize {
-    let listed = crazyagent::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-o", "args="])
             .env_clear()
@@ -283,8 +295,18 @@ impl SubAgent {
         let launcher = {
             let agent = agent.clone();
             tokio::task::spawn_blocking(move || {
-                let launcher = Tmux::open(Some(tmux), &folder);
-                launcher.spawn(&agent, &command).unwrap();
+                let launcher = Tmux::open(
+                    Some(tmux),
+                    &folder,
+                    crazyagent::sandbox::confinement(),
+                    crazyagent::terminal::tmux::tmux_hooks(),
+                );
+                launcher
+                    .spawn(
+                        &agent,
+                        &kernel_processes::terminal::PaneCommand::from(&command),
+                    )
+                    .unwrap();
                 launcher
             })
             .await
@@ -346,10 +368,12 @@ impl SubAgent {
             .await
             .unwrap()
             .unwrap();
-        tokio::task::spawn_blocking(move || crazyagent::terminal::quit(terminal.as_ref(), true))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            kernel_processes::terminal::quit(terminal.as_ref(), true)
+        })
+        .await
+        .unwrap()
+        .unwrap();
         assert!(
             gone(&socket).await,
             "a stopped engine with no team agent left ends its tmux server while its folder remains"
@@ -492,6 +516,44 @@ async fn a_revoked_viewer_cannot_type_one_more_key_into_the_terminal() {
     control.detach().await.unwrap();
     assert_eq!(closed(&mut output).await, "terminal_detached");
     drop(tui);
+    sub.stop().await;
+}
+
+/// The input-only session a native view types through (DEC-203) sends no output, so nothing
+/// but the timed grant check ends it while its owner types nothing. Revoked while it idles,
+/// it closes with the revoke reason within one 5 s check, short of a second check at 10 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_input_only_session_closes_within_one_grant_check_of_a_revoke() {
+    use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
+    use crazyagent::protocol::RequestId;
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach_input(sub.agent.clone(), None, (80, 24), false)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let host = sub.service.owner_runtime().unwrap();
+    host.control(OwnerControl {
+        operation_id: RequestId::new("revoke-input-only-view").unwrap(),
+        target: OwnerClientKind::Desktop,
+        expected_epoch: host.epoch(OwnerClientKind::Desktop).unwrap(),
+        decision: OwnerDecision::Revoke,
+    })
+    .await
+    .unwrap();
+    let revoked = std::time::Instant::now();
+    assert_eq!(closed(&mut output).await, "owner_grant_stale_or_revoked");
+    let waited = revoked.elapsed();
+    assert!(
+        waited < Duration::from_secs(9),
+        "the idle input-only session closed {waited:?} after the revoke"
+    );
+    drop(control);
     sub.stop().await;
 }
 
@@ -871,7 +933,11 @@ async fn a_finished_sub_agent_opens_its_kept_last_screen_read_only() {
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
             };
-            host.spawn(&finished, &command).unwrap();
+            host.spawn(
+                &finished,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
             let shown = shows(host.as_ref(), &finished, b"kept-screen-42");
             host.kill(&finished).unwrap();
             shown

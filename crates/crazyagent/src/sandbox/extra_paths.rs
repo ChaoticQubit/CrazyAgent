@@ -1,4 +1,5 @@
-use super::{canonical, clear_of_secrets, granted_root, owner_home, owner_secrets};
+use kernel_sandbox::paths::{canonical, owner_home};
+use kernel_sandbox::paths::{clear_of_secrets, granted_root, owner_secrets};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
@@ -32,7 +33,7 @@ pub fn checked(text: &str, data_root: &Path) -> Result<PathBuf, &'static str> {
     if owner.starts_with(&real) {
         return Err("read_path_holds_home");
     }
-    let secrets: Vec<PathBuf> = owner_secrets(&owner).collect();
+    let secrets: Vec<PathBuf> = owner_secrets(&owner, &super::harness_folders()).collect();
     if clear_of_secrets(&real, &secrets).is_err() {
         return Err("read_path_credentials");
     }
@@ -40,7 +41,8 @@ pub fn checked(text: &str, data_root: &Path) -> Result<PathBuf, &'static str> {
     if real.starts_with(&data) || data.starts_with(&real) {
         return Err("read_path_engine_data");
     }
-    granted_root(&real, &owner, &secrets).map_err(|_| "read_path_refused")?;
+    granted_root(&real, &owner, &secrets, &super::harness_folders())
+        .map_err(|_| "read_path_refused")?;
     Ok(real)
 }
 
@@ -81,8 +83,9 @@ pub fn save(connection: &Connection, project: &str, paths: &[PathBuf]) -> rusqli
 }
 
 /// Reads a project's extra read-only folders in the order the owner saved them; none when
-/// nothing was ever saved. Inputs: the open connection or transaction and the project id.
-/// Output: the folders, or the database error.
+/// nothing was ever saved. A folder saved under the data volume's long name comes back under
+/// its short name, the one a sandbox rule matches. Inputs: the open connection or transaction
+/// and the project id. Output: the folders, or the database error.
 pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<PathBuf>> {
     let present: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_read_paths')",
@@ -97,7 +100,8 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     )?;
     let paths = statement
         .query_map(params![project, EXTRA_PATHS_MAX as i64], |row| {
-            row.get::<_, String>(0).map(PathBuf::from)
+            row.get::<_, String>(0)
+                .map(|text| kernel_sandbox::paths::one_spelling(PathBuf::from(text)))
         })?
         .collect::<rusqlite::Result<Vec<PathBuf>>>()?;
     assert!(paths.len() <= EXTRA_PATHS_MAX);

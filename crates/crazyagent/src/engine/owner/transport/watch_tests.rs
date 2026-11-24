@@ -192,6 +192,9 @@ async fn an_owner_request_wakes_a_watch_with_its_topic_and_the_next_watch_waits(
         crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
     let database = root.path().join(DATABASE);
     let engine = Engine::open(&database, config).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), engine.storage.started())
+        .await
+        .unwrap();
     let watches = Arc::new(Watches::new());
     let mark = first(&watches, &database).await;
     let watch = waiting(&watches, &database, 0, mark);
@@ -406,12 +409,12 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
             "watch": { "after": cursor, "mark": mark, "wait_ms": 10_000 }
         }))
         .unwrap();
-        let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+        let (server, client) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
         for end in [&server, &client] {
             end.set_nonblocking(true).unwrap();
         }
-        let mut server = UnixStream::from_std(server).unwrap();
-        let mut client = UnixStream::from_std(client).unwrap();
+        let mut server = Stream::from_std(server).unwrap();
+        let mut client = Stream::from_std(client).unwrap();
         let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
         let admission = admission.clone();
         let serving = tokio::spawn(async move {
@@ -458,7 +461,9 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
         };
         let (revoked, registration) = runtime
             .engine
-            .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, reply))
+            .owner_job(|reply| {
+                Job::OwnerControl(runtime.authority.host.clone(), control, None, reply)
+            })
             .await
             .unwrap();
         runtime

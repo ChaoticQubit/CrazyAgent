@@ -2,7 +2,9 @@ use crate::research::runner::RunError;
 #[cfg(unix)]
 use crate::research::runner::{AgentProcess, drain, private_directory};
 #[cfg(unix)]
-use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+use crate::sandbox::ProjectSandbox;
+#[cfg(unix)]
+use kernel_sandbox::net::SandboxNetwork;
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]
@@ -155,6 +157,7 @@ pub(crate) fn update(
     else {
         return Ok(GraphEnding::Failed(GRAPHIFY_MISSING));
     };
+    let repo = &kernel_sandbox::paths::one_spelling(repo.to_path_buf());
     let out = repo.join(GRAPH_OUT);
     let existing = match std::fs::symlink_metadata(&out) {
         Ok(metadata) if metadata.file_type().is_dir() => true,
@@ -300,6 +303,7 @@ pub(crate) fn update(
 /// or `None` when the paths to keep out cannot be listed, so no graph is read.
 #[cfg(unix)]
 pub(crate) fn current_mark(repo: &Path, hidden: &[PathBuf]) -> Option<String> {
+    let repo = &kernel_sandbox::paths::one_spelling(repo.to_path_buf());
     let kept_out = crate::onboarding::draft::kept_out(repo)?;
     Some(kept_out_mark(&kept_paths(repo, &kept_out), hidden))
 }

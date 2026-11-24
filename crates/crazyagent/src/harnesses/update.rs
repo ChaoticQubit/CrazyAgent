@@ -3,6 +3,8 @@ mod run;
 mod state;
 #[cfg(all(test, unix))]
 mod tests;
+mod turn;
+pub(crate) use turn::{Turns, wait_max};
 
 pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
@@ -117,8 +119,10 @@ pub struct LastUpdate {
 /// the code for why a button is not offered, `guide` the vendor's page for that case,
 /// `needs` what an installed harness lacks before it can run, as the tool resolver reads it,
 /// `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in,
-/// and `run_min` the oldest version CrazyAgent drives at all, from the manifest's
-/// `version.minimum`, shown as "needs X or newer" beside the Update line.
+/// `run_min` the oldest version CrazyAgent drives at all, from the manifest's
+/// `version.minimum`, shown as "needs X or newer" beside the Update line, and `waiting` the
+/// job this running job waits behind, since the two would change the same folder: a harness
+/// by its catalog id, a setup job by its name ([`crate::setup::job_name`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {
@@ -138,10 +142,12 @@ pub struct HarnessVersions {
     pub sign_in_min: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 /// What an installed harness lacks before it can run, from the tool resolver
-/// (`crate::tools::resolve_entry`): the program its first line asks for, such as `node`
+/// (`kernel_processes::finding::resolve_entry`): the program its first line asks for, such as `node`
 /// for an npm-built Codex, and the resolver's one owner line for it. No path is sent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,7 +219,7 @@ pub struct Roots {
     pub brew_prefixes: Vec<PathBuf>,
     pub casks: bool,
     pub npm: Option<NpmInstall>,
-    pub places: crate::tools::Places,
+    pub places: kernel_processes::finding::Places,
 }
 
 /// The npm an npm harness installs with and the node entry it runs, found by the one
@@ -292,7 +298,7 @@ enum Found<'a> {
 /// Matches a harness's real path against its table row, on whole path parts only, in the
 /// order own installer, Homebrew, npm (a formula may wrap an npm package inside its Cellar).
 /// The path is absolute and plain: roots and folder names, after at most a drive prefix such
-/// as `C:`, on Windows as plain drive text ([`crate::sandbox::windows_clean_text`]), never a
+/// as `C:`, on Windows as plain drive text ([`kernel_sandbox::paths::windows_clean_text`]), never a
 /// UNC, verbatim, device or forward-slash path, `.` or `..`.
 /// Inputs: the harness id, the real path and the roots. Output: the match or a refusal code.
 fn found<'a>(id: &str, real: &Path, roots: &'a Roots) -> Result<Found<'a>, &'static str> {
@@ -313,7 +319,7 @@ fn found<'a>(id: &str, real: &Path, roots: &'a Roots) -> Result<Found<'a>, &'sta
     #[cfg(windows)]
     if !real
         .to_str()
-        .is_some_and(crate::sandbox::windows_clean_text)
+        .is_some_and(kernel_sandbox::paths::windows_clean_text)
     {
         return Err(UNKNOWN_INSTALL);
     }
@@ -457,9 +463,12 @@ fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
 /// tool resolver would run: no part of its path, as written or real, that agents or another
 /// user can change, an interpreter its first line names vetted the same way, and no link on
 /// its way to the real file that could be moved before the command runs the path as written
-/// ([`crate::tools::Places::link_hops_kept`]). Inputs: the command and the resolver's
+/// ([`kernel_processes::finding::Places::link_hops_kept`]). Inputs: the command and the resolver's
 /// places. Output: the same command, or the refusal code of the tool check.
-fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'static str> {
+fn checked(
+    fixed: Fixed,
+    places: &kernel_processes::finding::Places,
+) -> Result<Fixed, &'static str> {
     trusted(&fixed.program)?;
     vetted(&fixed, places)?;
     if !places.link_hops_kept(&fixed.program) {
@@ -477,23 +486,27 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 /// the command's own search folders hold, since the child's PATH looks there first. That
 /// copy must resolve, a link whose target is not there yet included, and the walk goes on
 /// from it; a copy behind it never runs. Each of those folders that exists must be one a
-/// lookup would trust ([`crate::tools::Places::kept_for_children`]), so no copy can appear
+/// lookup would trust ([`kernel_processes::finding::Places::kept_for_children`]), so no copy can appear
 /// there before the run (RV-DS241-203). Every interpreter on the way must run the script it
 /// is given and nothing it looks up ([`runs_its_script`]). Inputs: the command and the
 /// resolver's places. Output: the real file the resolver resolved the program to and
 /// checked, or `TOOL_UNSAFE`.
-fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
+fn vetted(
+    fixed: &Fixed,
+    places: &kernel_processes::finding::Places,
+) -> Result<PathBuf, &'static str> {
     let kept = fixed.search.iter().all(|folder| {
         std::fs::symlink_metadata(folder).is_err() || places.kept_for_children(folder)
     });
     if !kept {
         return Err(TOOL_UNSAFE);
     }
-    let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
+    let resolved = kernel_processes::finding::resolve_entry(&fixed.program, places)
+        .map_err(|_| TOOL_UNSAFE)?;
     let program = resolved.program.clone();
     let mut at = resolved;
-    for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
-        let crate::tools::Kind::Script {
+    for _ in 0..=kernel_processes::finding::INTERPRETER_DEPTH_MAX {
+        let kernel_processes::finding::Kind::Script {
             interpreter,
             arguments,
             by_name,
@@ -516,8 +529,8 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'sta
 /// Whether an interpreter an update command's script names runs that script and nothing it
 /// looks up by name, read by its real file: a shell given only `-e`, `-u`, `-p` and `-x`
 /// flags, as stock Homebrew's `#!/bin/bash -pu` (privileged mode reads no startup or
-/// environment files, so it only narrows), or Node given only flags that change no code it
-/// runs. Any other program, such as a launcher
+/// environment files, so it only narrows), or Node (`node.exe` on Windows) given only flags
+/// that change no code it runs. Any other program, such as a launcher
 /// that runs a later word (`lockf`, `xargs`, `perl -S`), a shell given `-c` or another word,
 /// and Node given `-e`, is refused, so no shipped update command needs more (rv-sec3 B18 F2).
 /// Inputs: the interpreter's real file and the first line's words before the script.
@@ -530,9 +543,13 @@ fn runs_its_script(interpreter: &Path, arguments: &[String]) -> bool {
                 !flags.is_empty() && flags.chars().all(|flag| SHELL_FLAGS.contains(flag))
             })
         }),
-        Some("node" | "nodejs") => arguments
-            .iter()
-            .all(|word| NODE_FLAGS.contains(&word.as_str())),
+        Some(name)
+            if name == "node" || name == "nodejs" || (cfg!(windows) && name == "node.exe") =>
+        {
+            arguments
+                .iter()
+                .all(|word| NODE_FLAGS.contains(&word.as_str()))
+        }
         _ => false,
     }
 }
@@ -540,7 +557,7 @@ fn runs_its_script(interpreter: &Path, arguments: &[String]) -> bool {
 /// The copy of an interpreter named by name that `env` takes in a command's run: the first
 /// entry of that name in the command's search folders, a dangling link included, since an
 /// agent could fill its target before the run. A first copy the run's user cannot start,
-/// which `env` would pass over, does not resolve ([`crate::tools::resolve_entry`]), so the
+/// which `env` would pass over, does not resolve ([`kernel_processes::finding::resolve_entry`]), so the
 /// command fails closed rather than judging the copy behind it (rv-sec3 B18 F1). Inputs:
 /// the command, the interpreter the resolver found and the places. Output: that copy
 /// resolved, none when no search folder holds the name, or `TOOL_UNSAFE` when the first
@@ -548,8 +565,8 @@ fn runs_its_script(interpreter: &Path, arguments: &[String]) -> bool {
 fn taken_copy(
     fixed: &Fixed,
     found: &Path,
-    places: &crate::tools::Places,
-) -> Result<Option<crate::tools::Resolved>, &'static str> {
+    places: &kernel_processes::finding::Places,
+) -> Result<Option<kernel_processes::finding::Resolved>, &'static str> {
     let name = found.file_name().ok_or(TOOL_UNSAFE)?;
     let Some(copy) = fixed
         .search
@@ -559,7 +576,7 @@ fn taken_copy(
     else {
         return Ok(None);
     };
-    let taken = crate::tools::resolve_entry(&copy, places).map_err(|_| TOOL_UNSAFE)?;
+    let taken = kernel_processes::finding::resolve_entry(&copy, places).map_err(|_| TOOL_UNSAFE)?;
     assert_eq!(taken.entry.file_name(), Some(name));
     Ok(Some(taken))
 }
@@ -579,7 +596,7 @@ pub fn update_command(
     match found(id, real, roots)? {
         Found::Own(own) => {
             let folder = entry.parent().ok_or(TOOL_MISSING)?;
-            if crate::sandbox::canonical(entry).ok().as_deref() != Some(real) {
+            if kernel_sandbox::paths::canonical(entry).ok().as_deref() != Some(real) {
                 return Err(UNKNOWN_INSTALL);
             }
             checked(
@@ -801,11 +818,7 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
 /// refused or cannot be asked, prints no plain version, or the home is unknown.
 pub(crate) fn version_under_home(executable: &Path) -> Option<String> {
     let home = state::home_folder()?;
-    state::version_if_runs(
-        executable,
-        &home,
-        &crate::tools::Places::from_environment(None),
-    )
+    state::version_if_runs(executable, &home, &crate::tools::tools_places(None))
 }
 
 /// Tells whether text is a plain version: two to six numbers joined by single dots, at most
@@ -995,7 +1008,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1028,7 +1041,7 @@ mod windows_tests {
     #[test]
     fn a_windows_self_updating_install_is_named_and_its_update_stays_refused() {
         let folder = tempfile::tempdir().unwrap();
-        let home = crate::sandbox::canonical(folder.path()).unwrap();
+        let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let installed = home.join(".codex").join("packages").join("standalone");
         std::fs::create_dir_all(&installed).unwrap();
         let entry = installed.join("codex.exe");
@@ -1038,7 +1051,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
         assert_eq!(

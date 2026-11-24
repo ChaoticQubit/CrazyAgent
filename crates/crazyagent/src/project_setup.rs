@@ -444,7 +444,7 @@ pub struct ReadPaths {
 /// The folders a project's agents are kept out of in saved order, with the version the
 /// owner's screen sends back when it changes them, and the kinds of engine runs still
 /// running that started before one of them was hidden (SA-VID14-R2-N2), and whether this
-/// system offers hidden folders at all ([`crate::sandbox::hidden_paths::UNAVAILABLE`]).
+/// system's boundary cannot hold hidden folders at all ([`crate::sandbox::HIDDEN_UNHELD`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiddenPaths {
@@ -1092,7 +1092,7 @@ pub fn catalog(
     pool: Option<&CredentialRef>,
     research: &[ResearchKind],
     signed_in: &BTreeSet<CredentialRef>,
-    calls: Option<crate::sandbox::LinuxSupervisor>,
+    calls: Option<kernel_sandbox::settings::LinuxSupervisor>,
 ) -> Result<ProjectCatalog, &'static str> {
     if pool.is_some_and(|pool| !pool_exists(config, pool)) {
         return Err("pool_missing");
@@ -1167,7 +1167,7 @@ pub fn signed_in_connections(
         let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
             continue;
         };
-        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+        let key = kernel_common::hash(profile_ref.as_str().as_bytes());
         let phase: Option<String> = tx
             .query_row(
                 "SELECT phase FROM native_auth_operations WHERE profile_key=?1
@@ -2694,12 +2694,11 @@ fn set_read_paths(
     Ok(Outcome::Applied)
 }
 
-/// Saves a project's hidden folders once each passes
-/// [`crate::sandbox::hidden_paths::checked`] against the project's own folder, so agents are
-/// kept out of them, and the owner's screen showed the current ones. Takes the transaction,
-/// project, the version the screen showed and the typed paths. Returns Applied, or a plain
-/// rejection for an unknown project, a refused path or `stale_revision` when the folders
-/// changed since, so a stale screen never un-hides a folder.
+/// Saves a project's hidden folders once each passes [`crate::sandbox::hidden_paths::checked`]
+/// against the project's folder and the screen showed the current ones. Takes the transaction,
+/// project, the version shown and the typed paths. Returns Applied, or a plain rejection for an
+/// unknown project, a refused path, any folder where [`crate::sandbox::HIDDEN_UNHELD`], or
+/// `stale_revision` when the folders changed since, so a stale screen never un-hides a folder.
 fn set_hidden_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2709,6 +2708,9 @@ fn set_hidden_paths(
     let Some(setup) = load_setup(tx, project_id)? else {
         return Ok(rejected("invalid_project"));
     };
+    if crate::sandbox::HIDDEN_UNHELD && !paths.is_empty() {
+        return Ok(rejected("hidden_paths_need_macos"));
+    }
     let folder = setup.project_folder();
     let checked = match crate::sandbox::hidden_paths::checked_all(paths, &folder) {
         Ok(checked) => checked,
@@ -2750,8 +2752,8 @@ fn set_agent_policy(
     if let Err(code) = policy.validate() {
         return Ok(rejected(code));
     }
-    if policy.access.unavailable().is_some() {
-        return Ok(rejected("agent_access_unavailable"));
+    if let Some((_, code)) = policy.access.refusal() {
+        return Ok(rejected(code));
     }
     let before = crate::sandbox::policy::load(tx, project_id.as_str())
         .map(|saved| saved.grants)
@@ -2860,6 +2862,9 @@ fn remove(
     assert_eq!(removed, 1);
     crate::memory::log::forget_removed(tx, project_id, kept)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
+    if let Some(folder) = folder.as_deref() {
+        crate::storage::reinstall::forget(tx, folder)?;
+    }
     removed::record(
         tx,
         project_id,
@@ -3125,7 +3130,8 @@ impl NewProjectPlan {
 }
 
 /// Records a New Project whose folder the owner transport built, with a first agent
-/// policy that records the toolchains the owner has installed (F26).
+/// policy that records the toolchains the owner has installed (F26), and forgets any
+/// reinstall offer still kept at that path for a folder that is gone (#419 sec F2).
 /// Takes the transaction, configuration, the Create action, the staged result and, for
 /// Create demo, the owner's fence under which it clears what an earlier demo left first.
 /// Returns Applied once the rows are written, the brief is in place and the folder is moved
@@ -3171,6 +3177,7 @@ pub(crate) fn record_new(
         &staged.folder,
     )?;
     if outcome == Outcome::Applied {
+        crate::storage::reinstall::forget(tx, &staged.folder)?;
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
         if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
             let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
@@ -3279,7 +3286,6 @@ fn declared(spec: &ProjectSpec, stored: &StoredSetup) -> Result<ProjectSpec, Eng
 /// folder, repairing projects recorded before the folder was declared. Runs
 /// when the engine opens its database, at most 256 projects. Takes the
 /// connection. Returns any storage failure.
-#[cfg(unix)]
 pub(crate) fn repair_repositories(connection: &Connection) -> Result<(), EngineError> {
     const REPAIRED_MAX: i64 = 256;
     let tx = connection.unchecked_transaction().map_err(error)?;

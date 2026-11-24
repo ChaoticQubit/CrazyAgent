@@ -108,7 +108,6 @@ pub struct HostStamp {
     pub(crate) engine_epoch: String,
 }
 
-#[cfg(unix)]
 pub(crate) struct Started {
     pub(crate) host: HostStamp,
     pub(crate) owners: [Registration; 2],
@@ -273,7 +272,7 @@ pub enum OwnerMutation {
         profile: crate::owner_profile::OwnerProfile,
     },
     SetSandboxSettings {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     SetCleanupSettings {
@@ -284,6 +283,9 @@ pub enum OwnerMutation {
     },
     SetProviderRetry {
         choice: crate::provider_retry::ProviderRetry,
+    },
+    SetLogCompaction {
+        choice: crate::log_compaction::LogCompaction,
     },
     SetMasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
@@ -637,6 +639,7 @@ impl OwnerMutation {
                 settings: *settings,
             },
             Self::SetProviderRetry { choice } => Command::OwnerProviderRetry { choice: *choice },
+            Self::SetLogCompaction { choice } => Command::OwnerLogCompaction { choice: *choice },
             Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
                 settings: *settings,
             },
@@ -852,6 +855,7 @@ pub enum OwnerRead {
     CleanupSettings,
     QuitSettings,
     ProviderRetry,
+    LogCompaction,
     MasterStepSettings,
     MasterTimeSettings,
     MasterFrameSettings,
@@ -923,6 +927,7 @@ pub enum OwnerRead {
         after: Cursor,
     },
     Capabilities,
+    PluginGrants,
 }
 
 impl OwnerRead {
@@ -940,6 +945,7 @@ impl OwnerRead {
             | Self::Page { .. }
             | Self::Baseline { .. }
             | Self::Capabilities
+            | Self::PluginGrants
             | Self::ConversationHistory { .. }
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
@@ -958,6 +964,7 @@ impl OwnerRead {
             | Self::CleanupSettings
             | Self::QuitSettings
             | Self::ProviderRetry
+            | Self::LogCompaction
             | Self::MasterStepSettings
             | Self::MasterTimeSettings
             | Self::MasterFrameSettings
@@ -1309,7 +1316,7 @@ pub enum OwnerData {
         profile: Option<crate::owner_profile::OwnerProfile>,
     },
     SandboxSettings {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     CleanupSettings {
@@ -1318,8 +1325,14 @@ pub enum OwnerData {
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
     },
+    PluginGrants {
+        plugins: Vec<kernel_plugin_host::grants::PluginGrants>,
+    },
     ProviderRetry {
         settings: crate::provider_retry::ProviderRetryView,
+    },
+    LogCompaction {
+        settings: crate::log_compaction::LogCompactionView,
     },
     MasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
@@ -1349,6 +1362,10 @@ pub enum OwnerData {
         bytes: u64,
         #[serde(default, skip_serializing_if = "no_placeholders")]
         placeholders: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<crate::projects_home::icloud::Skipped>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skipped_more: Option<crate::projects_home::icloud::SkippedMore>,
     },
     Onboarding {
         onboarding: Box<crate::onboarding::OnboardingView>,

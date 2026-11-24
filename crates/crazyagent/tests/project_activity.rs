@@ -20,7 +20,7 @@ const GOAL: &str = "Ship the login page";
 /// fixed identity, and requires it to succeed. Takes the folder, the home and the
 /// arguments. Returns its trimmed standard output.
 fn git(folder: &Path, home: &Path, arguments: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

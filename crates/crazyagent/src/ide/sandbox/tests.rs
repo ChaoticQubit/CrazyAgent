@@ -31,7 +31,7 @@ fn run(profile: &Path, program: &str, args: &[&std::ffi::OsStr]) -> (bool, Strin
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     (
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -135,8 +135,8 @@ fn a_process_launched_the_ide_way_reads_its_capability_but_no_owner_key_or_engin
     let socket = owner.join("owner.sock");
     let stray = owner.join("other.sock");
     let _listeners = [
-        crate::spawn_gate::bind_unix_std(&socket).unwrap(),
-        crate::spawn_gate::bind_unix_std(&stray).unwrap(),
+        kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap(),
+        kernel_processes::spawn_gate::bind_unix_std(&stray).unwrap(),
     ];
     let connect = |path: &Path| {
         run(
@@ -245,7 +245,7 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
         older_agents: true,
     };
     let text = profile(&grants, PORT, closed(), &[], rule).unwrap();
-    let spelled = crate::sandbox::any_case(root.to_str().unwrap());
+    let spelled = kernel_sandbox::paths::any_case(root.to_str().unwrap());
     assert!(text.contains(&format!("(regex #\"^{spelled}")), "{text}");
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
@@ -760,7 +760,7 @@ const REAL_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 /// config, plus the given variables. Inputs: the folder, the variables and the arguments.
 /// Output: whether git exited 0, with what it printed on standard output.
 fn setup_git(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> (bool, String) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(REAL_GIT)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -819,6 +819,15 @@ fn ide_git(
         output.status.success(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+/// Whether git refused a folder as holding no repository it may use: git before 2.54 says
+/// "not a git repository", and Apple git 2.54 stops at the `.git` the profile hides there,
+/// "error reading '<folder>/.git'". Inputs: what git printed and the folder it ran in.
+/// Output: true for either refusal.
+fn no_repository(said: &str, dir: &Path) -> bool {
+    let hidden = format!("error reading '{}'", dir.join(".git").display());
+    said.contains("not a git repository") || said.contains(&hidden)
 }
 
 /// [`ide_git`] with everything git printed. Inputs: as [`ide_git`]. Output: git's output.
@@ -1063,12 +1072,12 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
             for args in [&["status", "--porcelain"][..], &["add", "notes.txt"]] {
                 let (worked, said) = ide_git(&profile, &shim, &home, &root, agent, args);
                 assert!(!worked, "{mode}: git {args:?} worked in {name}: {said}");
-                let reason = if *agent == &bare {
-                    "cannot use bare repository"
+                let refused = if *agent == &bare {
+                    said.contains("cannot use bare repository")
                 } else {
-                    "not a git repository"
+                    no_repository(&said, agent)
                 };
-                assert!(said.contains(reason), "{mode}: {name}: {said}");
+                assert!(refused, "{mode}: {name}: {said}");
             }
             assert!(!ran(name), "{mode}: {name}'s filter ran");
         }
@@ -1259,7 +1268,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         let env: &[(&str, &str)] = if *agent == &bare {
             &[]
         } else {
-            &crate::ide::git::CONFIG_ENV
+            crate::ide::git::config_env()
         };
         let (added, _) = setup_git(agent, env, &["add", "notes.txt"]);
         assert!(
@@ -1391,7 +1400,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         &["status", "--porcelain"],
     );
     assert!(
-        !inside && said.contains("not a git repository"),
+        !inside && no_repository(&said, &agent),
         "the older layout's agents root stops the IDE's git: {said}"
     );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
@@ -1485,16 +1494,23 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
     };
 
     let reached = top(false, &agent);
-    assert!(reached.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&reached.stdout).trim(),
-        root.to_str().unwrap(),
-        "with the new layout's root alone the IDE's git in the agent's folder acts on the project"
-    );
+    if reached.status.success() {
+        assert_eq!(
+            String::from_utf8_lossy(&reached.stdout).trim(),
+            root.to_str().unwrap(),
+            "with the new layout's root alone the IDE's git in the agent's folder acts on the project"
+        );
+    } else {
+        let said = String::from_utf8_lossy(&reached.stderr);
+        assert!(
+            no_repository(&said, &agent),
+            "a git that stops at the hidden .git stops there: {said}"
+        );
+    }
     let stopped = top(true, &agent);
     let said = String::from_utf8_lossy(&stopped.stderr);
     assert!(
-        !stopped.status.success() && said.contains("not a git repository"),
+        !stopped.status.success() && no_repository(&said, &agent),
         "the older root stops the IDE's git in the agent's folder: {said}"
     );
     let own = top(true, &root);
@@ -1606,7 +1622,7 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
     let stopped = top(&research);
     let said = String::from_utf8_lossy(&stopped.stderr);
     assert!(
-        !stopped.status.success() && said.contains("not a git repository"),
+        !stopped.status.success() && no_repository(&said, &research),
         "the IDE's git in the research worktree finds no repository: {said}"
     );
     let own = top(&root);
@@ -1801,7 +1817,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
     let ide = |args: &[&str]| {
         let mut command = server_git(&profile, &shim, &home, &root, false, "/usr/bin:/bin");
         command.args(args).current_dir(&root);
-        crate::spawn_gate::output(&mut command).unwrap()
+        kernel_processes::spawn_gate::output(&mut command).unwrap()
     };
 
     let status = ide(&["status", "--porcelain"]);
@@ -1834,7 +1850,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
 /// A listener on a free loopback port, with nothing behind it. Output: the listener, held
 /// while the row runs, and its port.
 fn local_listener() -> (std::net::TcpListener, u16) {
-    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     (listener, port)
 }
@@ -2071,7 +2087,7 @@ impl Server {
             command.env_remove(name);
         }
         command.args(["-c", line]).current_dir(&self.root);
-        crate::spawn_gate::output(&mut command).unwrap()
+        kernel_processes::spawn_gate::output(&mut command).unwrap()
     }
 
     /// The real index's path. Output: the path.
@@ -2222,7 +2238,7 @@ fn a_git_outside_the_shim_cannot_stage() {
     let real = Path::new(crate::research::runner::TOOLS_GIT);
     let mut command = server_git(&s.profile, real, &s.home, &s.root, false, "/usr/bin:/bin");
     command.args(["add", "a.txt"]).current_dir(&s.root);
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("index.lock"),
@@ -2393,7 +2409,7 @@ fn a_git_that_cannot_reach_the_engine_fails_before_it_runs() {
         direct.env_remove(name);
     }
     direct.args(["add", "a.txt"]).current_dir(&s.root);
-    held(&crate::spawn_gate::output(&mut direct).unwrap());
+    held(&kernel_processes::spawn_gate::output(&mut direct).unwrap());
     held(&s.task("git add a.txt"));
     let read = s.task("git branch --show-current");
     assert!(read.status.success(), "{read:?}");
@@ -3325,7 +3341,7 @@ fn the_project_instructions_file_is_read_only_to_the_ide_server() {
 /// V243-FARM2-PRODUCT-SMALL: no regex the IDE profile adds for its locks, the agents' IDE
 /// config, their git admin folders or the agent folders rule holds a `(/.*)` tail, which
 /// libsandbox fails to compile again in lower case after a fold group with no bracket class
-/// or wildcard before it; each matches a path and everything below it as `X$` and `X/`.
+/// or wildcard before it; each matches a path and everything below it as one `X(/|$)`.
 #[test]
 fn ide_denies_match_at_or_below_without_a_slash_tail() {
     let root = Path::new("/private/tmp/.tmpA1b2C3/project");
@@ -3352,4 +3368,6 @@ fn ide_denies_match_at_or_below_without_a_slash_tail() {
         .filter(|body| body.contains("(/.*)"))
         .collect();
     assert!(tailed.is_empty(), "{tailed:#?}");
+    let below = bodies.iter().filter(|body| body.ends_with("(/|$)")).count();
+    assert_eq!(below, 5, "{text}");
 }

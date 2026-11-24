@@ -214,7 +214,8 @@ pub(super) fn read(repo: &Path, readme: Option<&str>, hidden: &[String]) -> Opti
 /// One `check-ignore` call per ignore file ([`ignored`]) answers for all; a name git does
 /// not clear, or every name when git could not answer, counts as ignored, and so does a
 /// name in one of the `hidden` folders, given below the project folder, written relative
-/// or absolute. Takes the folder, the evidence and the hidden folders.
+/// or absolute, an absolute one under either macOS name of the folder. Takes the folder,
+/// the evidence and the hidden folders.
 pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
     let mut names: BTreeSet<String> = evidence.entries.iter().cloned().collect();
     let texts = evidence
@@ -247,15 +248,22 @@ pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
             })
             .collect()
     });
-    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let root = repo
+        .canonicalize()
+        .map(kernel_sandbox::paths::one_spelling)
+        .unwrap_or_else(|_| repo.to_path_buf());
+    let twin = crate::projects_home::data_twin(&root);
     let hidden_absolute = |path: &str| {
-        [root.as_path(), repo].iter().any(|base| {
-            Path::new(path)
-                .strip_prefix(base)
-                .ok()
-                .and_then(Path::to_str)
-                .is_some_and(|below| under(below, hidden))
-        })
+        [Some(root.as_path()), twin.as_deref(), Some(repo)]
+            .into_iter()
+            .flatten()
+            .any(|base| {
+                Path::new(path)
+                    .strip_prefix(base)
+                    .ok()
+                    .and_then(Path::to_str)
+                    .is_some_and(|below| under(below, hidden))
+            })
     };
     let shown = |line: &str| {
         paths_in(line).all(|path| {
@@ -599,7 +607,7 @@ fn git(repo: &Path, excludes: Option<&str>, args: &[&str]) -> Command {
         .env("GIT_ALLOW_PROTOCOL", "")
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE);
+        .args(crate::research::runner::git_safe());
     if let Some(excludes) = excludes {
         command.arg("-c").arg(excludes);
     }
@@ -752,7 +760,7 @@ fn listed(repo: &Path, excludes: Option<&str>, args: &[&str]) -> Option<Vec<Stri
 /// `None` when it cannot start, runs past the time, is stopped by a signal, does not take
 /// all its input or prints more.
 fn answer(command: &mut Command, input: Vec<u8>) -> Option<(i32, Vec<u8>)> {
-    let mut child = crate::spawn_gate::spawn(command).ok()?;
+    let mut child = kernel_processes::spawn_gate::spawn(command).ok()?;
     let writer = child
         .stdin
         .take()

@@ -1,6 +1,6 @@
 use super::*;
 use crate::setup::plain_reason;
-use crate::setup::process::{file_sha256, is_sha256};
+use kernel_processes::run::{file_sha256, is_sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
@@ -20,7 +20,7 @@ fn archive(dir: &Path, line: &str) -> (PathBuf, String) {
     let source = dir.join("source");
     script(&source.join("uv-test/uv"), line);
     let archive = dir.join("uv-test.tar.gz");
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/tar")
             .arg("-czf")
             .arg(&archive)
@@ -52,7 +52,7 @@ fn leftovers(setup: &Path) -> Vec<String> {
 }
 
 /// A clean-Mac gate build maps Homebrew's folders for every search the tool resolver makes
-/// ([`crate::tools::homebrew_folders`]); setup's Mac finder takes its `brew` and Homebrew
+/// ([`kernel_processes::finding::homebrew_folders`]); setup's Mac finder takes its `brew` and Homebrew
 /// folders from there too, each that exists, so under the gate it never runs this Mac's own.
 /// On a Mac with none of them the search half checks nothing and the fixed-folder half still
 /// does.
@@ -60,7 +60,7 @@ fn leftovers(setup: &Path) -> Vec<String> {
 fn setup_looks_for_homebrew_where_the_tool_resolver_does() {
     let root = root();
     let installer = MacInstaller::new(root.path());
-    let homebrew = crate::tools::homebrew_folders();
+    let homebrew = kernel_processes::finding::homebrew_folders(&crate::tools::HOOKS);
     let brew: Vec<PathBuf> = homebrew.iter().map(|folder| folder.join("brew")).collect();
     assert_eq!(installer.brew, brew);
     let search: Vec<PathBuf> = std::env::split_paths(&installer.search_path()).collect();

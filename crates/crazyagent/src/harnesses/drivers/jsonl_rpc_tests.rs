@@ -2,14 +2,13 @@ use super::*;
 use crate::adapters::LINE_BYTES_MAX;
 use crate::adapters::codex::FRAME_BYTES_MAX;
 use crate::harnesses::drivers::jsonl_turn::SESSION_BYTES_MAX;
+use crate::harnesses::drivers::test_paths::{CWD, HOME};
 use crate::harnesses::launch::PROMPT_BYTES_MAX;
 use crate::usage::capture::Tokens;
 use serde_json::{Value, json};
 use std::path::Path;
 
 const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-jsonl-rpc.yaml");
-const HOME: &str = "/agent/home";
-const CWD: &str = "/work/project";
 const ABORT: &[u8] = b"{\"type\":\"abort\"}\n";
 const PROMPT_LINE: &str = "  prompt: '{\"type\":\"prompt\",\"message\":\"{prompt}\"}'\n";
 const INTERRUPT_LINE: &str = "  interrupt: '{\"type\":\"abort\"}'\n";

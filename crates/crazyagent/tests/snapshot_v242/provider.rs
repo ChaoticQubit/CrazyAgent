@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Every provider the account screens offer, in display order.
-const PROVIDERS: [Provider; 7] = [
+/// Every provider the account screens offer, in display order; Gemini since 2.5 T21
+/// (dc4523033), an intended difference against the 2.4.2 capture.
+const PROVIDERS: [Provider; 8] = [
     Provider::Chatgpt,
     Provider::Claude,
+    Provider::Gemini,
     Provider::Openrouter,
     Provider::OpenaiApi,
     Provider::AnthropicApi,
@@ -330,7 +332,7 @@ impl Recorder {
     /// Starts the recorder on a free loopback port. Input: whether `/api/tags` answers.
     /// Output: the recorder, or why its port could not be opened.
     pub(super) fn start(tags: bool) -> Result<Self, String> {
-        let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0")
             .map_err(|error| error.to_string())?;
         let port = listener
             .local_addr()
@@ -339,7 +341,8 @@ impl Recorder {
         let heard_list = Arc::new(Mutex::new(Vec::new()));
         let kept = Arc::clone(&heard_list);
         std::thread::spawn(move || {
-            for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(HEARD_MAX) {
+            for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).take(HEARD_MAX)
+            {
                 let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(HEAD_WAIT));
                 let (record, reply) = heard(&read_head(&mut stream), tags);

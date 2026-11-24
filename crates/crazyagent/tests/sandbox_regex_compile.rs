@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
+use crazyagent::sandbox::ProjectSandbox;
+use kernel_sandbox::net::SandboxNetwork;
 use std::fs;
 use std::os::macos::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ impl Drop for Case {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let _ = crazyagent::spawn_gate::status(&mut command);
+        let _ = kernel_processes::spawn_gate::status(&mut command);
     }
 }
 
@@ -79,7 +80,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, program: &str, args: &[&str]) -
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let pid = child.id();
     let status = child.wait().unwrap();
     (status.success(), pid)
@@ -104,7 +105,7 @@ fn compile_errors(pids: &[u32]) -> Vec<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -133,7 +134,7 @@ fn log_caught_up(folder: &Path) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let pid = child.id();
     assert!(child.wait().unwrap().success());
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -149,8 +150,8 @@ fn log_caught_up(folder: &Path) {
 /// SANDBOX-REGEX: the LL-2 deny on flags in Codex's `skills/.system` compiles with no
 /// libsandbox error, and an agent still cannot set the immutable flag on `.system` or a file
 /// in it under any spelling that reaches it: plain, upper, mixed, long s, Kelvin sign or the
-/// Data volume path. No file in its home takes a flag at all (RV-DS241-137, -138), while a
-/// plain file in its own worktree still does.
+/// Data volume path. A file the next launch keeps in its home takes no flag either, while a
+/// plain file in its home (RV-DS241-187) and one in its own worktree still do.
 #[test]
 fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling() {
     let case = case();
@@ -158,6 +159,8 @@ fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling
     fs::create_dir_all(&system).unwrap();
     let skill = system.join("SKILL.md");
     fs::write(&skill, "skill").unwrap();
+    let kept = case.home.join("auth.json");
+    fs::write(&kept, "{}").unwrap();
     let homed = case.home.join("own.txt");
     fs::write(&homed, "own").unwrap();
     let own = case.own.join("own.txt");
@@ -192,30 +195,19 @@ fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling
             "{path}"
         );
     }
-    let (flagged, pid) = run(
-        &sandbox,
-        &profile,
-        "/usr/bin/chflags",
-        &["uchg", homed.to_str().unwrap()],
-    );
-    pids.push(pid);
-    assert!(!flagged, "a file in the agent's home takes no flag");
-    assert_eq!(fs::metadata(&homed).unwrap().st_flags() & UF_IMMUTABLE, 0);
-    let (flagged, pid) = run(
-        &sandbox,
-        &profile,
-        "/usr/bin/chflags",
-        &["uchg", own.to_str().unwrap()],
-    );
-    pids.push(pid);
-    assert!(
-        flagged,
-        "a plain file in the agent's own worktree still takes one"
-    );
-    assert_eq!(
-        fs::metadata(&own).unwrap().st_flags() & UF_IMMUTABLE,
-        UF_IMMUTABLE
-    );
+    for (path, takes) in [(&kept, false), (&homed, true), (&own, true)] {
+        let shown = path.display();
+        let (flagged, pid) = run(
+            &sandbox,
+            &profile,
+            "/usr/bin/chflags",
+            &["uchg", path.to_str().unwrap()],
+        );
+        pids.push(pid);
+        assert_eq!(flagged, takes, "{shown}");
+        let set = fs::metadata(path).unwrap().st_flags() & UF_IMMUTABLE;
+        assert_eq!(set == UF_IMMUTABLE, takes, "{shown}");
+    }
     log_caught_up(&case.profiles);
     let errors = compile_errors(&pids);
     assert!(errors.is_empty(), "{errors:#?}");

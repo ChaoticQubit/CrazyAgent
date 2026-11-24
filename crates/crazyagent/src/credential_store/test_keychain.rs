@@ -34,16 +34,30 @@ impl TestKeychain {
         keychain
     }
 
-    /// Creates an unlocked keychain at `<home>/Library/Keychains/login.keychain-db` and
-    /// makes it the home's default and only search-list keychain, which `security` keeps
-    /// per home. Input: an absolute temporary home. Output: the keychain.
+    /// Creates an unlocked keychain at `<home>/Library/Keychains/profile.keychain-db`, the
+    /// name the engine gives a profile home's keychain, and makes it the home's default and
+    /// only search-list keychain, which `security` keeps per home. Input: an absolute
+    /// temporary home. Output: the keychain.
     pub(crate) fn create(home: &Path) -> Self {
+        Self::create_named(home, "profile.keychain-db")
+    }
+
+    /// Creates an unlocked keychain under `name` in `<home>/Library/Keychains`, such as the
+    /// `login.keychain-db` an earlier engine gave a profile home, and makes it the home's
+    /// default and only search-list keychain, kept in `<home>/Library/Preferences` as the
+    /// engine keeps them. Inputs: an absolute temporary home and the file name. Output: the
+    /// keychain.
+    pub(crate) fn create_named(home: &Path, name: &str) -> Self {
+        assert!(name.ends_with(".keychain-db"));
+        assert!(!name.contains('/'));
         let folder = home.join("Library/Keychains");
+        let preferences = home.join("Library/Preferences");
         std::fs::create_dir_all(&folder).unwrap();
-        for private in [home.join("Library"), folder.clone()] {
+        std::fs::create_dir_all(&preferences).unwrap();
+        for private in [home.join("Library"), folder.clone(), preferences] {
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let keychain = Self::adopt(home, folder.join("login.keychain-db"));
+        let keychain = Self::adopt(home, folder.join(name));
         let path = keychain.text().to_owned();
         keychain.security(&["create-keychain", "-p", "", &path], None);
         keychain.security(&["list-keychains", "-d", "user", "-s", &path], None);
@@ -82,7 +96,7 @@ impl TestKeychain {
     }
 
     fn run(&self, args: &[&str], input: Option<&str>) -> Output {
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(SECURITY)
                 .args(args)
                 .env_clear()
@@ -223,7 +237,7 @@ mod tests {
     use super::*;
 
     fn preference(home: &Path, args: &[&str]) -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(SECURITY)
                 .args(args)
                 .env_clear()

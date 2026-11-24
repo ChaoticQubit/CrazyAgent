@@ -8,13 +8,16 @@ use crazyagent::coord::delivery::codex::{self, Bridged, CONTROL_SOCKET};
 use crazyagent::coord::delivery::{Deliveries, NOTICES_KEY, RETRY_MS, Reach};
 use crazyagent::coord::{MessageId, MessageKind, NewMessage, Party};
 use crazyagent::harnesses::interactive::{Run, command};
-use crazyagent::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest};
+use crazyagent::harnesses::launch::{AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::protocol::ProjectId;
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crazyagent::sandbox::ProjectSandbox;
 use crazyagent::team::runtime::agent_home;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use crazyagent::terminal::FOLDER;
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use std::collections::BTreeSet;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -63,7 +66,7 @@ impl Drop for Server {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -97,7 +100,7 @@ fn installed_codex() -> PathBuf {
         "UNAVAILABLE: codex must be installed for the live bridge check"
     );
     let executable = std::fs::canonicalize(entry.executable.as_ref().unwrap()).unwrap();
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(&executable)
             .arg("--version")
             .stdin(Stdio::null())
@@ -252,8 +255,7 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
         },
         model: Some(LOCAL_MODEL.into()),
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -275,8 +277,18 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
         socket: folder.join(SOCKET),
         group: None,
     };
-    let host = Tmux::open(Some(tmux), &folder);
-    let pane = host.spawn(agent, &built).unwrap();
+    let host = Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
+    let pane = host
+        .spawn(
+            agent,
+            &kernel_processes::terminal::PaneCommand::from(&built),
+        )
+        .unwrap();
     server.group = Some(pgid_support::pane_group(pane.pid));
     until(START, "the app server's control socket", || {
         std::fs::metadata(home.join(CONTROL_SOCKET))

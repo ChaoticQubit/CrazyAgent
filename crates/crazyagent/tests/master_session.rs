@@ -547,6 +547,7 @@ fn master_wire_types_are_closed_snake_case_without_producer_actions() {
         "protocol_fault",
         "frame_limit",
         "worktree_uncertain",
+        "git_too_old",
         "sandbox_stopped",
         "cancelled",
         "unknown",
@@ -1749,9 +1750,10 @@ async fn master_generic_worker_wire_cannot_submit_open_cancel_close_or_internal_
             let wire = json!({"protocol_version":PROTOCOL_VERSION,"client_id":"worker","request_id":format!("forged-{index}"),"expected_revision":before.3.to_string(),"command":{"kind":kind,"action":action}});
             assert!(serde_json::from_value::<WireRequest>(wire.clone()).is_err());
             let bytes = serde_json::to_vec(&wire).unwrap();
-            let mut socket = crazyagent::spawn_gate::connect_unix(f.root.path().join("e.sock"))
-                .await
-                .unwrap();
+            let mut socket =
+                kernel_processes::spawn_gate::connect_unix(f.root.path().join("e.sock"))
+                    .await
+                    .unwrap();
             socket
                 .write_all(&u32::try_from(bytes.len()).unwrap().to_be_bytes())
                 .await

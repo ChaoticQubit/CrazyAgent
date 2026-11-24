@@ -6,12 +6,13 @@ use crate::config::{ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::{AgentCredential, NativeProfileUse};
 use crate::engine::io_error;
 use crate::engine::owner::is_hex_id;
-#[cfg(unix)]
 use crate::engine::owner::random_id;
 use crate::master_session::MasterBackend;
 use crate::master_step_limit::StepLimit;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
+#[cfg(unix)]
+use crate::sandbox::ProjectSandbox;
 #[cfg(unix)]
 use crate::sandbox::policy::AgentAccess;
 #[cfg(unix)]
@@ -19,14 +20,15 @@ use crate::sandbox::policy::AgentNetwork;
 use crate::sandbox::policy::AgentPolicy;
 #[cfg(unix)]
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-#[cfg(unix)]
-use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 #[cfg(unix)]
+use kernel_sandbox::error::SandboxError;
+#[cfg(unix)]
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+#[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
-#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -38,18 +40,14 @@ use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
 
-#[cfg(unix)]
 const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
-#[cfg(unix)]
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
-#[cfg(unix)]
 const _: () = assert!(
     crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1
         < crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
 );
 #[cfg(unix)]
 const MASTER_TMP: &str = "tmp";
-#[cfg(unix)]
 const MASTER_HOME: &str = "home";
 #[cfg(unix)]
 const MASTER_PROFILE: &str = "sandbox.sb";
@@ -532,11 +530,28 @@ fn master_turn_home(root: &Root, runtime_ref: &RequestId) -> Result<PathBuf, Eng
     Ok(home)
 }
 
-/// Refuses a master turn home where the owner-only turn directory cannot be made.
-/// Takes the owner root and turn reference, both unused. Returns `master_capture_unavailable`.
-#[cfg(not(unix))]
-fn master_turn_home(_root: &Root, _runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
-    Err(failure("master_capture_unavailable"))
+/// Makes the private home of one master turn inside its turn folder on Windows (PLAN-0410
+/// D1): a new W1 private folder with no label, which S6 grants the turn's container alone.
+/// Any entry already at the name, a junction included, is refused, never followed, and the
+/// made home must be held at its own name in the turn folder. Input: the owner root and the
+/// turn's runtime reference. Output: the home, or `master_home_unsafe` when the name is
+/// taken, or a refusal when the folders are not the engine's.
+#[cfg(windows)]
+fn master_turn_home(root: &Root, runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    let path = runtime.path.join(MASTER_HOME);
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(failure("master_home_unsafe"));
+    }
+    runtime.create_directory(MASTER_HOME)?;
+    let home = Root::open(&path).map_err(|_| failure("master_home_unsafe"))?;
+    verify_master_runtime(&runtime, &home, MASTER_HOME)
+        .map_err(|_| failure("master_home_unsafe"))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    assert_eq!(home.path, path);
+    Ok(path)
 }
 
 /// Owns one master turn's private folder in the owner generation, with its capture,
@@ -781,8 +796,8 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
     {
         return Err(failure("master_runtime_binding"));
     }
-    if std::fs::canonicalize(&prepared.cwd).map_err(io_error)? != prepared.cwd
-        || std::fs::canonicalize(&prepared.repository).map_err(io_error)? != prepared.repository
+    if !crate::projects_home::is_canonical(&prepared.cwd).map_err(io_error)?
+        || !crate::projects_home::is_canonical(&prepared.repository).map_err(io_error)?
         || !std::fs::symlink_metadata(&prepared.cwd)
             .map_err(io_error)?
             .is_dir()
@@ -986,9 +1001,11 @@ fn turn_sandbox(
     policy: &AgentPolicy,
     hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
-    if policy.access.unavailable().is_some() {
-        return Err(failure("agent_access_unavailable"));
+    if let Some((_, code)) = policy.access.refusal() {
+        return Err(failure(code));
     }
+    let repository = &kernel_sandbox::paths::one_spelling(repository.to_path_buf());
+    let worktree = &kernel_sandbox::paths::one_spelling(worktree.to_path_buf());
     crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
@@ -1070,16 +1087,15 @@ fn turn_sandbox(
     };
     #[cfg(not(target_os = "linux"))]
     let (calls, strict) = (
-        crate::sandbox::LinuxSupervisor::On,
-        crate::sandbox::LinuxStrict::Off,
+        kernel_sandbox::settings::LinuxSupervisor::On,
+        kernel_sandbox::settings::LinuxStrict::Off,
     );
     let profile = runtime.path.join(MASTER_PROFILE);
     let installed =
         InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(|error| {
-            if crate::sandbox::linux_not_full(&error) {
-                failure(crate::sandbox::LINUX_NOT_FULL)
-            } else {
-                refused(error)
+            match crate::sandbox::refusal_code(&error) {
+                Some(code) => failure(code),
+                None => refused(error),
             }
         })?;
     let installed = if policy.access == AgentAccess::Full {
@@ -1111,7 +1127,7 @@ fn turn_sandbox(
 #[cfg(any(target_os = "linux", all(test, unix)))]
 fn stored_sandbox_settings(
     root: &Root,
-) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
+) -> Result<kernel_sandbox::settings::SandboxSettings, EngineError> {
     let engine = root
         .engine_root()
         .map_err(|_| failure("master_sandbox_unavailable"))?;
@@ -1157,7 +1173,11 @@ pub(super) fn master_tools_sandbox(
     Err(failure("master_sandbox_unavailable"))
 }
 
-#[cfg(unix)]
+/// Makes one master turn's private folder in the owner generation, with its empty capture
+/// file held open, and checks both are the engine's before and after they are written to
+/// disk. Input: the owner root. Output: the turn's runtime and capture references and the
+/// capture, `master_capture_unavailable` when every attempt met a taken name, or a refusal
+/// when the folder or file is not the engine's.
 pub(super) fn allocate_master_capture(
     root: &Root,
 ) -> Result<(RequestId, RequestId, File), EngineError> {
@@ -1169,10 +1189,8 @@ pub(super) fn allocate_master_capture(
             continue;
         }
         let name = format!("master-runtime-{}", runtime_ref.as_str());
-        match rustix::fs::mkdirat(&root.directory, name.as_str(), Mode::RWXU) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::EXIST) => continue,
-            Err(error) => return Err(io_error(error)),
+        if !make_master_runtime(root, &name)? {
+            continue;
         }
         root.verify()?;
         let runtime = Root::open(&root.path.join(&name))?;
@@ -1181,8 +1199,8 @@ pub(super) fn allocate_master_capture(
         let capture = runtime.open_key(&capture_name, true)?;
         verify_master_capture(&runtime, &capture_name, &capture)?;
         capture.sync_all().map_err(io_error)?;
-        runtime.directory.sync_all().map_err(io_error)?;
-        root.directory.sync_all().map_err(io_error)?;
+        runtime.sync()?;
+        root.sync()?;
         verify_master_runtime(root, &runtime, &name)?;
         verify_master_capture(&runtime, &capture_name, &capture)?;
         assert_ne!(runtime_ref, capture_ref);
@@ -1192,13 +1210,29 @@ pub(super) fn allocate_master_capture(
     Err(failure("master_capture_unavailable"))
 }
 
-/// Refuses a master capture where the owner-only turn directory cannot be made.
-/// Takes the owner root, unused. Returns `master_capture_unavailable`.
-#[cfg(not(unix))]
-pub(super) fn allocate_master_capture(
-    _root: &Root,
-) -> Result<(RequestId, RequestId, File), EngineError> {
-    Err(failure("master_capture_unavailable"))
+/// Makes the folder `name` of one master turn in the owner root on Unix: a 0700 folder made
+/// relative to the held root. Inputs: the root and the name. Output: true when made, false
+/// when the name is taken, or the I/O error.
+#[cfg(unix)]
+fn make_master_runtime(root: &Root, name: &str) -> Result<bool, EngineError> {
+    match rustix::fs::mkdirat(&root.directory, name, Mode::RWXU) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::EXIST) => Ok(false),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+/// Makes the folder `name` of one master turn in the owner root on Windows: a W1 private
+/// folder through W3's [`Root::create_directory`], which refuses one that is not new and
+/// empty. Inputs: the root and the name. Output: true when made, false when the name is
+/// taken, or the refusal.
+#[cfg(windows)]
+fn make_master_runtime(root: &Root, name: &str) -> Result<bool, EngineError> {
+    if std::fs::symlink_metadata(root.path.join(name)).is_ok() {
+        return Ok(false);
+    }
+    root.create_directory(name)?;
+    Ok(true)
 }
 
 /// Writes the master's startup instruction into its private turn directory as the 0600
@@ -1245,16 +1279,89 @@ pub(super) fn write_master_instructions(
     Ok(runtime.path.join(MASTER_INSTRUCTIONS))
 }
 
-/// Refuses the master instruction file where the owner-only turn directory cannot be made.
-/// Takes the owner root, turn reference and text, all unused.
-/// Returns `master_capture_unavailable`.
-#[cfg(not(unix))]
+/// Writes the master's startup instruction into its private turn folder on Windows as the
+/// file Claude Code reads through `--append-system-prompt-file` (PLAN-0410 D1, Q7): a new
+/// W1 private file with no label, so S6 can grant the turn's container read on it alone.
+/// An entry already at the name, a planted hard link included, is refused, never written
+/// through. Input: the owner root, the turn's runtime reference and the text. Output: the
+/// file's path, `master_instructions_too_large` past the Claude host's limit, or
+/// `master_instructions_identity` when the file is not the private one made at its name.
+#[cfg(windows)]
 pub(super) fn write_master_instructions(
-    _root: &Root,
-    _runtime_ref: &RequestId,
-    _text: &str,
+    root: &Root,
+    runtime_ref: &RequestId,
+    text: &str,
 ) -> Result<PathBuf, EngineError> {
-    Err(failure("master_capture_unavailable"))
+    use crazyagent_win_sandbox::private;
+    let refused = "master_instructions_identity";
+    if text.len() as u64 > crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX {
+        return Err(failure("master_instructions_too_large"));
+    }
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    let path = runtime.path.join(MASTER_INSTRUCTIONS);
+    let mut file = private::file(&path, true).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            failure(refused)
+        } else {
+            super::private_refusal(error, refused)
+        }
+    })?;
+    file.write_all(text.as_bytes()).map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    runtime.sync()?;
+    private::check(&file).map_err(|error| super::private_refusal(error, refused))?;
+    let held = file.metadata().map_err(io_error)?;
+    if !held.is_file()
+        || held.len() != text.len() as u64
+        || private::place(&file).map_err(io_error)? != entry_place(&runtime, MASTER_INSTRUCTIONS)?
+    {
+        return Err(failure(refused));
+    }
+    verify_master_runtime(root, &runtime, &name)?;
+    Ok(path)
+}
+
+/// The real place on Windows the entry `name` of a held folder must have: the folder's W1
+/// place, a `\` and the name, read with the same flags as the entry's own. Inputs: the
+/// folder and the name. Output: the place as UTF-16, or the I/O error.
+#[cfg(windows)]
+fn entry_place(folder: &Root, name: &str) -> Result<Vec<u16>, EngineError> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut place = crazyagent_win_sandbox::private::place(&folder.directory).map_err(io_error)?;
+    place.push(u16::from(b'\\'));
+    place.extend(std::ffi::OsStr::new(name).encode_wide());
+    Ok(place)
+}
+
+/// Confirms on Windows that a held folder is still the engine's private entry `name` of the
+/// held root: both verify through W3 (private, and their path still names them), and the
+/// folder's real place is the root's place plus the name. Inputs: the root, the folder and
+/// the name. Output: Ok, or the refusal.
+#[cfg(windows)]
+fn verify_master_runtime(root: &Root, runtime: &Root, name: &str) -> Result<(), EngineError> {
+    root.verify()?;
+    runtime.verify()?;
+    if crazyagent_win_sandbox::private::place(&runtime.directory).map_err(io_error)?
+        != entry_place(root, name)?
+    {
+        return Err(failure("master_capture_identity"));
+    }
+    Ok(())
+}
+
+/// Confirms on Windows that the capture is still the empty, private, secret-labelled entry
+/// `name` of the held turn folder, through W3's `held_entry`. Inputs: the turn folder, the
+/// name and the capture. Output: Ok, or `master_capture_identity`.
+#[cfg(windows)]
+fn verify_master_capture(runtime: &Root, name: &str, capture: &File) -> Result<(), EngineError> {
+    runtime.verify()?;
+    runtime.held_entry(name, capture, "master_capture_identity")?;
+    if capture.metadata().map_err(io_error)?.len() != 0 {
+        return Err(failure("master_capture_identity"));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1345,8 +1452,8 @@ mod tests {
         crate::sandbox_settings::initialize(&connection).unwrap();
         crate::sandbox_settings::save(
             &connection,
-            &crate::sandbox_settings::SandboxSettings {
-                linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+            &kernel_sandbox::settings::SandboxSettings {
+                linux_sockets: kernel_sandbox::settings::LinuxSockets::TcpPorts,
                 ..Default::default()
             },
         )
@@ -1395,6 +1502,54 @@ mod tests {
         )
     }
 
+    /// V243-FIRMLINK-LAUNCH-ROOT (rv-sec2 19:24): a master turn of a project stored under the
+    /// data volume's long name builds its sandbox on the short name, while a worktree reached
+    /// through a link is still refused, never followed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_master_turn_takes_the_long_name_of_its_folders_but_never_follows_a_link() {
+        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let linked = base.join("worktrees").join("linked");
+        std::os::unix::fs::symlink(&worktree, &linked).unwrap();
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let build = |repository: &Path, worktree: &Path| {
+            let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                repository,
+                worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                &[],
+            )
+            .is_ok()
+        };
+        assert!(long(&worktree).is_dir());
+        assert!(
+            build(&long(&repository), &long(&worktree)),
+            "a long-named project must build its master sandbox"
+        );
+        assert!(
+            !build(&repository, &linked),
+            "a linked worktree must be refused, not followed"
+        );
+    }
+
     /// A master reads its sandbox settings from the engine database in the engine root, the
     /// folder around its owner generation, as the real layout has it; the generation holds
     /// no database and none is made there. Linux reads them before every master boundary.
@@ -1406,7 +1561,7 @@ mod tests {
         let settings = stored_sandbox_settings(&root).unwrap();
         assert_eq!(
             settings.linux_sockets,
-            crate::sandbox::LinuxSockets::TcpPorts
+            kernel_sandbox::settings::LinuxSockets::TcpPorts
         );
         assert!(!base.join("engine.db").exists());
     }
@@ -1579,9 +1734,9 @@ mod tests {
         let older = engine.join("o0badc0de");
         private_directory(&older);
         let _sockets = [
-            crate::spawn_gate::bind_unix_std(engine.join("e.sock")).unwrap(),
-            crate::spawn_gate::bind_unix_std(older.join("owner.sock")).unwrap(),
-            crate::spawn_gate::bind_unix_std(base.join("owner.sock")).unwrap(),
+            kernel_processes::spawn_gate::bind_unix_std(engine.join("e.sock")).unwrap(),
+            kernel_processes::spawn_gate::bind_unix_std(older.join("owner.sock")).unwrap(),
+            kernel_processes::spawn_gate::bind_unix_std(base.join("owner.sock")).unwrap(),
         ];
         let sandbox = master_in_generation(&base).unwrap();
         let secrets = sandbox.sandbox().secret_paths();
@@ -1980,7 +2135,11 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        assert!(crate::spawn_gate::status(&mut child).unwrap().success());
+        assert!(
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
+        );
         assert!(tmp.join("work/scratch.txt").is_file());
         assert!(
             std::fs::symlink_metadata(tmp.join("link"))
@@ -2317,7 +2476,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         for allowed in [
             worktree.join("work.txt"),
@@ -2483,7 +2644,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            crate::spawn_gate::output(&mut child).unwrap()
+            kernel_processes::spawn_gate::output(&mut child).unwrap()
         };
         let quoted = |path: &Path| format!("'{}'", path.display());
         let own_config = own.join(".backboard").join("config.json");
@@ -2592,7 +2753,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            crate::spawn_gate::output(&mut child).unwrap()
+            kernel_processes::spawn_gate::output(&mut child).unwrap()
         };
         let quoted = |path: &Path| format!("'{}'", path.display());
         let read = run(&format!("cat {}", quoted(&own.join("mcp.json"))));
@@ -2693,8 +2854,8 @@ mod tests {
 
     /// A hidden folder inside the project reaches the master's own boundary: the installed
     /// master profile denies it and a real sandboxed read of a file inside it is refused,
-    /// while a plain file elsewhere in the repository stays readable. Runs on macOS only:
-    /// hiding a folder needs Seatbelt, and Linux refuses it (next test).
+    /// while a plain file elsewhere in the repository stays readable. Runs on macOS, where
+    /// Seatbelt hides it; the Linux twin follows.
     #[cfg(target_os = "macos")]
     #[test]
     fn master_sandbox_hides_a_listed_folder_from_a_real_child() {
@@ -2746,7 +2907,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         assert!(read(&repository.join("open.txt")));
         assert!(!read(&hidden.join("key.txt")));
@@ -2756,11 +2919,14 @@ mod tests {
         );
     }
 
-    /// Off macOS a master asked to hide a folder is refused as `master_sandbox_unavailable`,
-    /// since only Seatbelt can hide one, while the same master with nothing hidden starts.
-    #[cfg(not(target_os = "macos"))]
+    /// The same hidden folder reaches the master's Linux boundary on a computer whose
+    /// bubblewrap nests agents, as the Linux farm's does: a real sandboxed read of a file
+    /// inside it is refused, a plain file elsewhere in the repository stays readable, and
+    /// the file is unchanged (V243-LINUX-HIDDEN-BOUNDARY).
+    #[cfg(target_os = "linux")]
     #[test]
-    fn master_sandbox_refuses_a_listed_folder_off_macos() {
+    fn master_sandbox_hides_a_listed_folder_from_a_real_child_on_linux() {
+        use std::process::{Command, Stdio};
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
@@ -2772,32 +2938,57 @@ mod tests {
         for directory in [&repository, &worktree, &home, &install, &hidden] {
             private_directory(directory);
         }
+        std::fs::write(hidden.join("key.txt"), "owner secret\n").unwrap();
+        std::fs::write(repository.join("open.txt"), "open\n").unwrap();
         let executable = install.join("codex");
         std::fs::write(&executable, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let start = |listed: &[PathBuf]| {
-            let (runtime_ref, _, capture) = allocate_master_capture(&root).unwrap();
-            let started = master_sandbox(
-                &root,
-                &runtime_ref,
-                &repository,
-                &worktree,
-                &home,
-                &executable,
-                &ModelEndpoint::Native {},
-                &AgentPolicy::default(),
-                listed,
-            )
-            .map(drop)
-            .map_err(|error| error.0);
-            drop(capture);
-            drop(MasterRuntimeFolder::new(&root, &runtime_ref));
-            started
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            std::slice::from_ref(&hidden),
+        )
+        .map_err(|error| error.0)
+        .expect("a Linux master with a hidden folder starts where bubblewrap nests");
+        let read = |target: &Path| {
+            let mut harness = Command::new("/bin/sh");
+            harness
+                .arg("-c")
+                .arg("cat \"$0\"")
+                .arg(target)
+                .current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            kernel_processes::spawn_gate::output(&mut child).unwrap()
         };
-        assert_eq!(start(&[]), Ok(()));
+        let open = read(&repository.join("open.txt"));
+        assert!(
+            open.status.success() && open.stdout == b"open\n",
+            "{:?} {} {}",
+            open.status,
+            String::from_utf8_lossy(&open.stdout),
+            String::from_utf8_lossy(&open.stderr)
+        );
+        let key = read(&hidden.join("key.txt"));
+        assert!(
+            !key.status.success() && !String::from_utf8_lossy(&key.stdout).contains("secret"),
+            "{:?} {}",
+            key.status,
+            String::from_utf8_lossy(&key.stderr)
+        );
         assert_eq!(
-            start(std::slice::from_ref(&hidden)),
-            Err("master_sandbox_unavailable".to_owned())
+            std::fs::read_to_string(hidden.join("key.txt")).unwrap(),
+            "owner secret\n"
         );
     }
 
@@ -2829,7 +3020,11 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+            assert!(
+                kernel_processes::spawn_gate::status(&mut command)
+                    .unwrap()
+                    .success()
+            );
         };
         git(&["init", "-q"]);
         git(&["add", "secret/key.txt"]);
@@ -2878,7 +3073,7 @@ mod tests {
         }
         let git = crate::research::runner::setup_git();
         let owner = |args: &[&str]| -> String {
-            let output = crate::spawn_gate::output(
+            let output = kernel_processes::spawn_gate::output(
                 Command::new(git)
                     .args([
                         "-c",
@@ -2956,7 +3151,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         let repository_text = repository.to_str().unwrap();
         let other_admin = git_dir.join("worktrees/other");
@@ -3134,7 +3331,7 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let first = crate::spawn_gate::first_run(
+            let first = kernel_processes::spawn_gate::first_run(
                 Command::new(path).arg("first-exec").current_dir(&base),
             );
             assert_eq!(first.code(), Some(3));
@@ -3200,7 +3397,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         let write = |target: &Path| {
             run(
@@ -3315,6 +3514,10 @@ mod tests {
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "master_host_launch/turn_folder_windows_tests.rs"]
+mod turn_folder_windows_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/dec_090_tests.rs"]

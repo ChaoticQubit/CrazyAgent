@@ -7,9 +7,21 @@ use crate::engine::owner::{
 use crate::memory::library::{LibraryAction, MemoryScope};
 use crate::protocol::{PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use crate::storage::{Job, Storage};
+use kernel_storage::migrations::{BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS_KEPT, CHECKED};
+use kernel_storage::migrations::{
+    BACKUPS, PINNED_DAYS, backup_time, backups_in, check_copy, pinned, stamp, stamp_time,
+};
+use kernel_storage::migrations::{Texts, backup, backup_failure};
+use kernel_storage::restore::{
+    REPLACED, RESTORE_AGENTS_RUNNING, RESTORE_BUSY, RESTORE_FAILED, RESTORE_UNAVAILABLE,
+    restorable_until, restore_pinned_at_for_test,
+};
+use kernel_storage::upgrade::{Backup, StepRun, upgrade_at_for_test};
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime};
 use tokio::sync::oneshot;
 
 const GLOBAL: &str = r#"version = 1
@@ -239,23 +251,87 @@ fn refused<T>(result: Result<T, EngineError>) -> String {
     }
 }
 
-fn probe(tx: &Transaction<'_>) -> Result<(), EngineError> {
+fn probe(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch(&format!(
         "CREATE TABLE migration_probe (step INTEGER PRIMARY KEY); \
          INSERT INTO migration_probe VALUES ({});",
         latest(STEPS) + 1
     ))
-    .map_err(error)
+    .map_err(error)?;
+    Ok(())
 }
 
-fn broken(tx: &Transaction<'_>) -> Result<(), EngineError> {
+fn broken(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch("CREATE TABLE migration_broken (")
-        .map_err(error)
+        .map_err(error)?;
+    Ok(())
 }
 
-fn escaping(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    tx.execute_batch("COMMIT; DELETE FROM projects; CREATE TABLE migration_escaped (a);")
-        .map_err(error)
+/// A step that ends the upgrade transaction with no transaction statement, which the runner
+/// refuses: SQLite itself rolls it back on a duplicate under `OR ROLLBACK`, the step
+/// swallows that error, then deletes and creates a table in autocommit, so the backup has
+/// committed work to undo.
+fn escaping(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    tx.execute_batch(
+        "DELETE FROM projects; CREATE TABLE migration_escaped (a UNIQUE); \
+         INSERT INTO migration_escaped VALUES (1);",
+    )
+    .map_err(error)?;
+    let duplicate = tx.execute("INSERT OR ROLLBACK INTO migration_escaped VALUES (1)", []);
+    assert!(
+        duplicate.is_err(),
+        "the duplicate rolls the transaction back"
+    );
+    tx.execute_batch("DELETE FROM projects; CREATE TABLE migration_escaped_after (a);")
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The version of record, as the kernel reads it. Input: the connection. Output:
+/// `PRAGMA user_version`.
+fn version(db: &Connection) -> Result<i64, StorageError> {
+    db.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|cause| StorageError(cause.to_string()))
+}
+
+/// The engine's pinned restore at a given time, which ages the pin, with the engine's own
+/// hooks. Inputs: the database path, the settings sources and the time. Output: as the
+/// engine's restore.
+fn restore_pinned_at(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+    now: SystemTime,
+) -> Result<PathBuf, EngineError> {
+    with_hooks(settings, |hooks| {
+        Ok(restore_pinned_at_for_test(path, hooks, now)?.kept)
+    })
+}
+
+/// The newest version a list of steps reaches, which the kernel checks is numbered from 2
+/// without gaps. Input: the steps. Output: the last one's version, or 1 for none.
+fn latest(steps: &[Step]) -> i64 {
+    steps.last().map_or(1, |step| step.to)
+}
+
+/// The kernel upgrade with the time and backup given, so rows age backups and refuse copies
+/// on purpose; like the engine's upgrade it reads the settings texts it keeps from the
+/// sources. Inputs: as the engine's upgrade, plus the time and the backup. Output: as it.
+fn upgrade_at(
+    db: &mut Connection,
+    path: &Path,
+    settings: Option<&SettingsSources>,
+    steps: &[Step],
+    now: SystemTime,
+    take: Backup,
+) -> Result<(), EngineError> {
+    Ok(upgrade_at_for_test(
+        db,
+        path,
+        &|| settings_texts(settings),
+        steps,
+        now,
+        take,
+    )?)
 }
 
 /// The production steps followed by test-only steps numbered after them.
@@ -602,6 +678,46 @@ async fn only_the_newest_five_backups_are_kept() {
     );
 }
 
+/// #512 r2 (rv-sec2 F1, leader 05:13): the backup an upgrade just made is never removed,
+/// even when every other backup folder carries a later stamp, as one made under a clock set
+/// ahead or placed by another account would. Here it is also the pinned 2.4 copy, outside
+/// the count, so of the six later folders the newest BACKUPS_KEPT stay.
+#[tokio::test]
+async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
+    let root = Root::new();
+    legacy(&root).await;
+    let folder = root.path().join(BACKUPS);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .unwrap();
+    for day in 1..=BACKUPS_KEPT + 1 {
+        std::fs::create_dir(folder.join(format!("1-to-2-9999010{day}T000000000Z"))).unwrap();
+    }
+    let shaped_file = folder.join("1-to-2-99990107T000000000Z");
+    std::fs::write(&shaped_file, b"not a backup").unwrap();
+
+    close(root.open().await.unwrap()).await;
+
+    let names: Vec<String> = root
+        .backups()
+        .iter()
+        .filter(|path| path.is_dir())
+        .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names.len(), BACKUPS_KEPT + 1, "{names:?}");
+    assert!(
+        names[0].starts_with(&format!("1-to-{}-", latest(STEPS))),
+        "{names:?}"
+    );
+    let found = backups_in(&folder).unwrap();
+    let held = pinned(&folder, &found, SystemTime::now()).map(|index| found[index].1.as_str());
+    assert_eq!(held, Some(names[0].as_str()));
+    assert!(!folder.join("1-to-2-99990101T000000000Z").exists());
+    assert!(folder.join("1-to-2-99990102T000000000Z").is_dir());
+    assert_eq!(std::fs::read(&shaped_file).unwrap(), b"not a backup");
+}
+
 #[tokio::test]
 async fn newer_settings_file_is_refused_before_the_database_opens() {
     let root = Root::new();
@@ -615,40 +731,6 @@ async fn newer_settings_file_is_refused_before_the_database_opens() {
 
     assert!(refused.contains("settings_newer_than_engine:"), "{refused}");
     assert!(!root.database().exists());
-}
-
-#[test]
-#[should_panic(expected = "migration steps are numbered from 2 without gaps")]
-fn steps_must_be_numbered_from_two_without_gaps() {
-    latest(&[Step { to: 3, run: probe }]);
-}
-
-#[test]
-fn backup_names_use_a_sortable_utc_stamp() {
-    assert_eq!(stamp(UNIX_EPOCH).unwrap(), "19700101T000000000Z");
-    assert_eq!(
-        stamp(UNIX_EPOCH + Duration::from_secs(951_868_800)).unwrap(),
-        "20000301T000000000Z"
-    );
-    assert_eq!(
-        stamp(UNIX_EPOCH + Duration::from_millis(1_709_251_199_999)).unwrap(),
-        "20240229T235959999Z"
-    );
-    assert!(stamp(UNIX_EPOCH + Duration::from_secs(253_402_300_800)).is_err());
-    assert_eq!(
-        backup_time("1-to-2-20240229T235959999Z"),
-        Some("20240229T235959999Z")
-    );
-    for other in [
-        "keep-me",
-        "1-to-2-",
-        "x-to-2-20240229T235959999Z",
-        "1-to-2-20240229T235959999",
-        "1-to-2-2024022XT235959999Z",
-        "1-to-2-2024022\u{e9}T35959999Z",
-    ] {
-        assert_eq!(backup_time(other), None, "{other}");
-    }
 }
 
 /// A setup body as engines before DEC-096 addendum 3 saved it.
@@ -1245,31 +1327,6 @@ async fn a_refused_backup_is_recorded_for_clients_and_a_later_backup_clears_it()
     assert_eq!(backup_failure(root.path()), None);
     assert!(!root.path().join(BACKUP_FAILURE_FILE).exists());
     assert_eq!(root.backups().len(), 1);
-}
-
-/// F36: clients trust the failure record only as the engine writes it: a private regular
-/// file of this user holding one known code, never through a link.
-#[test]
-fn a_backup_failure_record_counts_only_as_the_engine_writes_it() {
-    let root = Root::new();
-    let record = root.path().join(BACKUP_FAILURE_FILE);
-    let write = |text: &[u8], mode: u32| {
-        let _ = std::fs::remove_file(&record);
-        std::fs::write(&record, text).unwrap();
-        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(mode)).unwrap();
-    };
-    write(b"storage_backup_failed", 0o600);
-    assert_eq!(backup_failure(root.path()), Some("storage_backup_failed"));
-    write(b"storage_backup_unsafe", 0o644);
-    assert_eq!(backup_failure(root.path()), None);
-    write(b"storage_backup_unsafe: /Users/someone", 0o600);
-    assert_eq!(backup_failure(root.path()), None);
-    std::fs::remove_file(&record).unwrap();
-    let target = root.path().join("elsewhere");
-    std::fs::write(&target, b"storage_backup_failed").unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
-    std::os::unix::fs::symlink(&target, &record).unwrap();
-    assert_eq!(backup_failure(root.path()), None);
 }
 
 mod pins;

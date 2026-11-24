@@ -1,4 +1,5 @@
-use super::{ProjectSandbox, SandboxNetwork};
+use super::ProjectSandbox;
+use kernel_sandbox::net::SandboxNetwork;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -82,7 +83,7 @@ impl TestAgent {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        crate::spawn_gate::output(&mut command).expect("the sandboxed shell starts")
+        kernel_processes::spawn_gate::output(&mut command).expect("the sandboxed shell starts")
     }
 
     /// Runs `script` in the sandbox and fails the test unless it succeeds.

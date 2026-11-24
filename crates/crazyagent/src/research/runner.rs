@@ -6,8 +6,8 @@ use crate::engine::bootstrap::{AgentCredential, NativeProfileUse, NativeProfileU
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
-    AccountBinding, CLAUDE_TOOLS_OFF, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    RunLogs, Session, rate_limited,
+    AccountBinding, CLAUDE_TOOLS_OFF, LaunchBoundary, LaunchError, LaunchEvent, LaunchLimits,
+    LaunchRequest, RunLogs, Session, rate_limited,
 };
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
@@ -24,10 +24,13 @@ use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
-use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -38,38 +41,130 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
-/// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
-/// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
-/// program the repository names (RV-DS241-39), and no signature check on a log or show at
-/// all, so a repository that turns `log.showSignature` on gets no check output mixed into
-/// what the engine reads (RV-DS241-39 r2 F2).
-pub(crate) const GIT_SAFE: [&str; 18] = [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.pager=cat",
-    "-c",
-    "submodule.recurse=false",
-    "-c",
-    "protocol.allow=never",
-    "-c",
-    "gpg.program=/usr/bin/false",
-    "-c",
-    "gpg.x509.program=/usr/bin/false",
-    "-c",
-    "gpg.ssh.program=/usr/bin/false",
-    "-c",
-    "log.showSignature=false",
-];
+/// fsmonitor, pager, submodule recursion or transport, no signature check on a log or show
+/// (RV-DS241-39 r2 F2), and [`no_program`] for the hook folder and every signature program
+/// the repository could name (RV-DS241-39). Output: the nine `-c` pairs, built once.
+pub(crate) fn git_safe() -> &'static [String; GIT_SAFE_LEN] {
+    static SAFE: LazyLock<[String; GIT_SAFE_LEN]> = LazyLock::new(|| safe_settings(no_program()));
+    LazyLock::force(&SAFE)
+}
+
+/// How many arguments [`git_safe`] holds: nine `-c` pairs.
+const GIT_SAFE_LEN: usize = 18;
+
+/// The [`git_safe`] arguments, naming `program` for the hook folder and every signature
+/// program. Input: the value. Output: the nine `-c` pairs.
+fn safe_settings(program: &str) -> [String; GIT_SAFE_LEN] {
+    [
+        "-c".to_owned(),
+        format!("core.hooksPath={program}"),
+        "-c".to_owned(),
+        "core.fsmonitor=false".to_owned(),
+        "-c".to_owned(),
+        "core.pager=cat".to_owned(),
+        "-c".to_owned(),
+        "submodule.recurse=false".to_owned(),
+        "-c".to_owned(),
+        "protocol.allow=never".to_owned(),
+        "-c".to_owned(),
+        format!("gpg.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.x509.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.ssh.program={program}"),
+        "-c".to_owned(),
+        "log.showSignature=false".to_owned(),
+    ]
+}
+
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Unix: `/dev/null`, which git cannot start and goes on without, where a
+/// started `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with
+/// SIGPIPE (V243-WORKTREES-GIT-FLAKE). Output: the value.
+#[cfg(unix)]
+pub(crate) fn no_program() -> &'static str {
+    "/dev/null"
+}
+
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Windows: [`windows_value`] of the system folder, read once, where a
+/// drive-relative `/dev/null` reached a hook any user can plant under `C:\dev\null`
+/// (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value; the engine start refuses an
+/// unusable folder first ([`git_safe_refusal`]), so the `expect` asserts that gate.
+#[cfg(windows)]
+pub(crate) fn no_program() -> &'static str {
+    WINDOWS_VALUE
+        .as_deref()
+        .expect("the engine start refuses git_safe_unavailable before any git runs")
+}
+
+/// [`no_program`]'s Windows value, read once and kept as a Result, so an unusable folder
+/// never panics inside the lock and poisons it for every later git (#598 sec N1).
+#[cfg(windows)]
+static WINDOWS_VALUE: LazyLock<Result<String, &'static str>> =
+    LazyLock::new(|| windows_value(crazyagent_win_sandbox::system_folder()));
+
+/// The code an engine start refuses with when this computer cannot give [`no_program`] its
+/// value, so no engine and no git runs there (#598 sec N1).
+pub const GIT_SAFE_UNAVAILABLE: &str = "git_safe_unavailable";
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Unix it always can. Output: None.
+#[cfg(unix)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    None
+}
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Windows not when the system folder can't be read or
+/// [`windows_no_program`] refuses it. Output: [`GIT_SAFE_UNAVAILABLE`], or None.
+#[cfg(windows)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    WINDOWS_VALUE.as_ref().err().copied()
+}
+
+/// The Windows value from the system folder GetSystemDirectoryW gave, as
+/// [`windows_no_program`] builds it. Input: the folder, or the read's error. Output: the
+/// value, or [`GIT_SAFE_UNAVAILABLE`] for an error or an unusable folder.
+#[cfg(any(windows, test))]
+fn windows_value(folder: io::Result<PathBuf>) -> Result<String, &'static str> {
+    folder
+        .ok()
+        .and_then(|folder| windows_no_program(&folder))
+        .ok_or(GIT_SAFE_UNAVAILABLE)
+}
+
+/// The Windows value for a hook folder or a program no git may run: `folder` with forward
+/// slashes, the shape Git for Windows starts without a shell, then `/crazyagent-none`.
+/// Input: the system folder. Output: the value, or None unless the folder is `<letter>:\`
+/// and parts of letters, digits, `.`, `_` and `-`, none empty, `.` or `..`.
+#[cfg(any(windows, test))]
+fn windows_no_program(folder: &Path) -> Option<String> {
+    let text = folder.to_str()?.replace('\\', "/");
+    let (drive, rest) = text.split_at_checked(3)?;
+    let mut drive = drive.chars();
+    let lettered = drive
+        .next()
+        .is_some_and(|letter| letter.is_ascii_alphabetic())
+        && drive.as_str() == ":/";
+    let plain = !rest.is_empty()
+        && rest.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        });
+    (lettered && plain).then(|| format!("{text}/crazyagent-none"))
+}
 /// The variables every engine git sets whatever else it needs: no lazy fetch of an object a
 /// partial clone lacks, so a repository's own promisor remote never runs a command on a read
 /// (RV-DS241-71), no system config or attributes and no prompt.
@@ -457,7 +552,7 @@ fn harness_words(program: &Path) -> Result<Vec<String>, RunError> {
 /// ([`ProjectSandbox::allow_interpreters`]), the same grants a team agent gets. Inputs: the
 /// sandbox and the harness's real file. Output: the sandbox, or the resolver's owner line.
 fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandbox, RunError> {
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let launched = crate::harnesses::interactive::launch_tool(program, &places)
         .map_err(|problem| RunError::Invalid(problem.0))?;
     let sandbox = sandbox
@@ -470,7 +565,7 @@ fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandb
 /// started, since that engine's jobs went back to the queue. Takes the host. Returns the
 /// host's plain code when it cannot list or end them.
 fn end_left_panes(host: &dyn Host) -> Result<(), RunError> {
-    let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
+    let host_error = |problem: kernel_processes::terminal::HostError| RunError::Invalid(problem.0);
     for agent in host.alive().map_err(host_error)? {
         if !agent.as_str().starts_with(PANE_PREFIX) {
             continue;
@@ -557,8 +652,8 @@ fn requeued_reason(cause: Narrowing) -> &'static str {
 
 impl ResearchRunner {
     /// `database` is the job store, `state` an engine-owned directory outside
-    /// every project for sandbox profiles and agent homes, `codex` the
-    /// absolute Codex executable.
+    /// every project, in its one spelling, for sandbox profiles and agent homes,
+    /// `codex` the absolute Codex executable.
     pub fn new(
         database: &Path,
         state: &Path,
@@ -591,7 +686,10 @@ impl ResearchRunner {
         codex: Option<&Path>,
         limits: ResearchLimits,
     ) -> Result<Self, RunError> {
-        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
+        if !state.is_absolute()
+            || !state.is_dir()
+            || kernel_sandbox::paths::one_spelling(state.canonicalize()?) != state
+        {
             return Err(RunError::Invalid(
                 "state directory must be canonical".into(),
             ));
@@ -970,21 +1068,7 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(error) => {
-                let (reason, attempts_max) = match &error {
-                    RunError::Context(problem) => (
-                        crate::launch_context::secret_in_command_text(problem).unwrap_or_else(
-                            || "Could not give the agent this project's context".to_owned(),
-                        ),
-                        self.limits.attempts_max,
-                    ),
-                    RunError::Uncertain(_) => {
-                        (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1)
-                    }
-                    _ => (
-                        "Could not prepare the research sandbox".to_owned(),
-                        self.limits.attempts_max,
-                    ),
-                };
+                let (reason, attempts_max) = launch_failure(&error, self.limits.attempts_max);
                 jobs.fail(&job, &reason, attempts_max)?;
                 Err(error)
             }
@@ -1040,8 +1124,11 @@ impl ResearchRunner {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
         still_held(jobs, job)?;
-        let root = project.root.canonicalize()?;
-        if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
+        let root = kernel_sandbox::paths::one_spelling(project.root.canonicalize()?);
+        if root != kernel_sandbox::paths::one_spelling(project.root.to_path_buf())
+            || !root.is_dir()
+            || root.starts_with(&self.state)
+        {
             return Err(RunError::Invalid("project folder must be canonical".into()));
         }
         let id = ProjectId::new(project.id).map_err(|_| RunError::Invalid("project id".into()))?;
@@ -1165,7 +1252,14 @@ impl ResearchRunner {
             }
         }
         let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
-        let (network, proxy) = job_reach(&policy, job.tools, account, job.id, &kept)?;
+        let (network, proxy) = job_reach(
+            std::env::consts::OS,
+            &policy,
+            job.tools,
+            account,
+            job.id,
+            &kept,
+        )?;
         let display = jobs
             .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
@@ -1224,7 +1318,7 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let (sandbox, listed) = self.keep_held(job, || -> Result<_, RunError> {
+        let (sandbox, boundary, listed) = self.keep_held(job, || -> Result<_, RunError> {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
@@ -1249,8 +1343,13 @@ impl ResearchRunner {
                     crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
                         .map_err(|code| RunError::Invalid(code.into()))?;
             }
-            sandbox.install(&profile)?;
-            Ok((sandbox, listed))
+            let boundary = InstalledSandbox::install(
+                sandbox.clone(),
+                &profile,
+                LinuxSupervisor::default(),
+                LinuxStrict::Off,
+            )?;
+            Ok((sandbox, boundary, listed))
         })??;
         still_held(jobs, job)?;
         let linked = self.linked_research(job, &root)?;
@@ -1265,8 +1364,11 @@ impl ResearchRunner {
                 account: binding,
                 model,
                 tools: job.tools,
-                sandbox_profile: (!unconfined).then(|| profile.clone()),
-                unconfined,
+                boundary: LaunchBoundary::Installed(Arc::new(if unconfined {
+                    boundary.unconfined()
+                } else {
+                    boundary
+                })),
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
@@ -1821,6 +1923,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub folder: &'a Path,
     #[cfg(unix)]
     pub prompt: &'a str,
+    #[cfg_attr(windows, expect(dead_code))]
     pub account: &'a ResearchAccount,
     pub wall_time: Duration,
     #[cfg(unix)]
@@ -1908,8 +2011,11 @@ impl ResearchRunner {
         }
         let (behind, relay) = relayed(self.engine_folder()?, run.account)?;
         let account = &behind;
-        let folder = run.folder.canonicalize()?;
-        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+        let folder = kernel_sandbox::paths::one_spelling(run.folder.canonicalize()?);
+        if folder != kernel_sandbox::paths::one_spelling(run.folder.to_path_buf())
+            || !folder.is_dir()
+            || folder.starts_with(&self.state)
+        {
             return Err(RunError::Invalid(
                 "read-only folder must be canonical".into(),
             ));
@@ -2134,10 +2240,8 @@ impl ResearchRunner {
     }
 
     /// Refuses a read-only run on Windows before any agent state is made: V1 runs no such
-    /// agent there, so the run fails with the owner's plain line. Past that line, the
-    /// AppContainer boundary refuses the endpoint-only reach until its firewall rule exists.
-    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, the plain failure,
-    /// or the boundary's `Unavailable` refusal.
+    /// agent there, so the run fails with the owner's plain line. Takes the run and `stop`,
+    /// unused. Returns `Invalid` for a bad run, else the plain failure.
     #[cfg(windows)]
     pub(crate) fn run_read_only(
         &self,
@@ -2147,13 +2251,9 @@ impl ResearchRunner {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
         }
-        if let Some(line) = confined_unavailable(std::env::consts::OS) {
-            return Ok(ReadOnlyEnding::Failed(line.into()));
-        }
-        let network = SandboxNetwork::Only(vec![model_remote(run.account)?]);
-        let refusal = crate::sandbox::windows::capabilities(&network)
-            .expect_err("an endpoint limit needs the AppContainer firewall rule");
-        Err(RunError::Sandbox(refusal))
+        let line = confined_unavailable(std::env::consts::OS)
+            .expect("V1 runs no read-only agent on Windows");
+        Ok(ReadOnlyEnding::Failed(line.into()))
     }
 }
 
@@ -2251,32 +2351,13 @@ fn job_kept_ports(
     }
 }
 
-/// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
-/// reaches only its model endpoint's port, on loopback for a local model, otherwise on any
-/// host, and a tools-on job follows the project's network choice with the model still
-/// reachable. Inputs: the project's agent policy, whether the job has tools, and the model
-/// endpoint. Output: the sandbox network.
-pub(crate) fn job_network(
-    policy: &crate::sandbox::policy::AgentPolicy,
-    tools: bool,
-    model: SandboxRemote,
-) -> SandboxNetwork {
-    if tools {
-        policy.network.sandbox(Some(model))
-    } else {
-        SandboxNetwork::Only(vec![model])
-    }
-}
-
 /// The sandbox network a research job runs under and the model proxy it reaches its model
-/// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
-/// for its account's hosts and reaches only the proxy's port; any other job gets
-/// [`job_network`]. Inputs: the project's agent policy, whether the job has tools, its
-/// account, its id, which the proxy's refusal lines name, and the owner's model ports the
-/// proxy leaves alone. Output: the network and the proxy, which must live as long as the
-/// job runs, or the refusal of an endpoint no proxy can reach by name or a proxy that could
-/// not start.
+/// through, decided as for a team agent by `AgentNetwork::proxied` and `reach`. Inputs: the OS,
+/// the agent policy, whether the job has tools, its account, its id and the owner's model ports
+/// the proxy leaves alone. Output: the network and the proxy, which must outlive the job, or the
+/// refusal of a model this OS cannot reach, an endpoint no proxy names or a proxy that failed.
 pub(crate) fn job_reach(
+    os: &str,
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,
     account: &ResearchAccount,
@@ -2284,11 +2365,8 @@ pub(crate) fn job_reach(
     kept: &[u16],
 ) -> Result<(SandboxNetwork, Option<ModelProxy>), RunError> {
     let model = model_remote(account)?;
-    let proxied = tools
-        && policy.network == crate::sandbox::policy::AgentNetwork::None
-        && matches!(model, SandboxRemote::AnyHost(_));
-    if !proxied {
-        return Ok((job_network(policy, tools, model), None));
+    if !policy.network.proxied(os, tools, model) {
+        return Ok((policy.network.reach(os, tools, model, None)?, None));
     }
     let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
         hosts
@@ -2311,8 +2389,33 @@ pub(crate) fn job_reach(
         ));
     }
     let proxy = ModelProxy::bind(job, hosts, None, kept)?;
-    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]);
+    let network = policy.network.reach(os, tools, model, Some(proxy.port()))?;
     Ok((network, Some(proxy)))
+}
+
+/// The line a research job fails with when its launch errs, and its attempt count: a context
+/// problem names any secret found in the command text, an unconfirmed warden or a model on
+/// this computer that a Windows agent cannot reach fails at once, and anything else is a
+/// sandbox that could not be prepared. Inputs: the error and the attempt limit. Output: both.
+fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
+    match error {
+        RunError::Context(problem) => (
+            crate::launch_context::secret_in_command_text(problem)
+                .unwrap_or_else(|| "Could not give the agent this project's context".to_owned()),
+            attempts_max,
+        ),
+        RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
+        RunError::Sandbox(refusal) if kernel_sandbox::lines::model_loopback_windows(refusal) => (
+            crate::config::plain_problem(kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+                .unwrap_or(kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE)
+                .to_owned(),
+            1,
+        ),
+        _ => (
+            "Could not prepare the research sandbox".to_owned(),
+            attempts_max,
+        ),
+    }
 }
 
 /// Puts a keyed endpoint account behind an engine key relay for one run (DEC-141 PA-8): the
@@ -3010,7 +3113,7 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         command.process_group(0);
     }
     command
-        .args(GIT_SAFE)
+        .args(git_safe())
         .args(arguments)
         .current_dir(root)
         .env_clear()
@@ -3022,7 +3125,10 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
+    Ok(wait_bounded(
+        kernel_processes::spawn_gate::spawn(&mut command)?,
+        SETUP_TIMEOUT,
+    )? == Ended::Succeeded)
 }
 
 /// The owner's line refusing agents a folder of the owner's that is no git repository.
@@ -3247,7 +3353,7 @@ pub(crate) fn add_teammate_worktree_at(
 /// sees which step failed and how.
 #[cfg(unix)]
 fn setup_step(command: &mut Command, failed: &'static str) -> Result<(), RunError> {
-    match wait_bounded(crate::spawn_gate::spawn(command)?, SETUP_TIMEOUT)? {
+    match wait_bounded(kernel_processes::spawn_gate::spawn(command)?, SETUP_TIMEOUT)? {
         Ended::Succeeded => Ok(()),
         Ended::Failed => Err(RunError::Setup(step_failure(failed, Path::new(TOOLS_ROOT)))),
         Ended::TimedOut => Err(RunError::Setup(SETUP_TIMED_OUT)),
@@ -3348,7 +3454,7 @@ fn step_failure(failed: &'static str, tools: &Path) -> &'static str {
 /// absent or fails so the caller keeps using [`GIT`].
 #[cfg(unix)]
 fn real_git() -> Option<PathBuf> {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/xcrun")
             .args(["--find", "git"])
             .env_clear()
@@ -3366,14 +3472,14 @@ fn real_git() -> Option<PathBuf> {
 }
 
 /// A git command for the engine's own worktree steps under the agent's installed profile:
-/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
+/// no global config, no lazy fetch and the [`git_safe`] settings, with no input or output.
 /// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .envs(GIT_SAFE_ENV)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(setup_debug_stderr());
@@ -3393,8 +3499,8 @@ pub(crate) struct AgentGit {
 
 /// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
 /// K5b): under its installed profile, as the worktree setup steps run, with the
-/// [`GIT_SAFE`] settings and the caller's extra variables, within the setup time limit.
-/// Its output is read while it runs, so a long listing never stalls it. Takes the
+/// [`git_safe`] settings, the editor `:` git never starts (no path lookup) and the caller's
+/// extra variables, within the setup time limit. Output is read while it runs. Takes the
 /// agent's sandbox, its installed profile, the folder, the arguments, the variables and
 /// the most output bytes kept. Returns how it ended, or the spawn failure.
 #[cfg(unix)]
@@ -3408,7 +3514,7 @@ pub(crate) fn agent_git(
 ) -> Result<AgentGit, RunError> {
     let mut command = worktree_git(sandbox, profile);
     command
-        .env("GIT_EDITOR", "true")
+        .env("GIT_EDITOR", ":")
         .envs(variables.iter().copied())
         .arg("-C")
         .arg(folder)
@@ -3431,7 +3537,7 @@ fn git_output(
     limit: usize,
 ) -> Result<(Option<ExitStatus>, Vec<u8>, bool), RunError> {
     command.stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(command)?;
+    let mut child = kernel_processes::spawn_gate::spawn(command)?;
     let stdout = child
         .stdout
         .take()
@@ -3808,7 +3914,7 @@ impl Lifeline {
     pub(crate) fn watch(group: u32) -> io::Result<Self> {
         use std::os::unix::process::CommandExt;
         assert!(group > 1);
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .env_clear()
                 .args(["-c", LIFELINE, "lifeline", &group.to_string()])
@@ -4697,11 +4803,15 @@ mod tests {
                 std::fs::create_dir(&folder).unwrap();
                 folder
             };
+            let proxy = policy
+                .network
+                .proxied("macos", tools, model)
+                .then_some(41_300);
             ProjectSandbox::new(
                 &make("project"),
                 &make("home"),
                 &make("tmp"),
-                job_network(&policy, tools, model),
+                policy.network.reach("macos", tools, model, proxy).unwrap(),
             )
             .unwrap()
             .profile()
@@ -4716,6 +4826,7 @@ mod tests {
         assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
         let none = profile(AgentNetwork::None, true);
         assert!(!none.contains("(remote ip \"*:"), "{none}");
+        assert!(none.contains("(remote ip \"localhost:41300\")"), "{none}");
         assert!(!none.contains("mDNSResponder"), "{none}");
     }
 
@@ -4804,7 +4915,8 @@ mod tests {
             connection: codex_connection(),
             model: None,
         };
-        let (network, proxy) = job_reach(&none, true, &account, 41, &[]).unwrap();
+        let (network, proxy) =
+            job_reach(std::env::consts::OS, &none, true, &account, 41, &[]).unwrap();
         assert!(
             proxy.is_some(),
             "a tools-on job under None gets a model proxy, not {network:?}"
@@ -4819,7 +4931,8 @@ mod tests {
             ("api.openai.com:443", "HTTP/1.1 200 Connection Established"),
             ("example.com:443", "HTTP/1.1 403 Forbidden"),
         ] {
-            let mut client = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
+            let mut client =
+                kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
             client
                 .set_read_timeout(Some(Duration::from_secs(15)))
                 .unwrap();
@@ -4834,7 +4947,8 @@ mod tests {
                 .unwrap();
             assert_eq!(line.trim_end(), status, "{target}");
         }
-        let (off, unproxied) = job_reach(&none, false, &account, 41, &[]).unwrap();
+        let (off, unproxied) =
+            job_reach(std::env::consts::OS, &none, false, &account, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
         let local = ResearchAccount::Endpoint {
@@ -4842,7 +4956,8 @@ mod tests {
             model: "qwen2.5:0.5b".into(),
             key: None,
         };
-        let (direct, unproxied) = job_reach(&none, true, &local, 41, &[]).unwrap();
+        let (direct, unproxied) =
+            job_reach(std::env::consts::OS, &none, true, &local, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(
             direct,
@@ -4854,9 +4969,77 @@ mod tests {
             key: None,
         };
         assert!(matches!(
-            job_reach(&none, true, &unnamed, 41, &[]),
+            job_reach(std::env::consts::OS, &none, true, &unnamed, 41, &[]),
             Err(RunError::Invalid(_))
         ));
+    }
+
+    /// A research job on Windows whose model is on this computer is refused with the loopback
+    /// line under every network choice, tools on or off, as a team agent is (#526 r2 F1): under
+    /// Open it would otherwise start and fail every model call. Linux and macOS still reach it,
+    /// and the job fails once with the plain sentence for `model_loopback_unavailable_windows`.
+    #[test]
+    fn a_research_job_on_windows_with_a_model_on_this_computer_is_refused_under_every_choice() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let local = ResearchAccount::Endpoint {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        };
+        for network in [AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None] {
+            let policy = AgentPolicy {
+                network,
+                ..AgentPolicy::default()
+            };
+            for tools in [true, false] {
+                let refused = job_reach("windows", &policy, tools, &local, 41, &[]);
+                assert!(
+                    matches!(&refused, Err(RunError::Sandbox(error)) if kernel_sandbox::lines::model_loopback_windows(error)),
+                    "{network:?} tools {tools}: {:?}",
+                    refused.as_ref().map(|(reach, _)| reach)
+                );
+                for os in ["linux", "macos"] {
+                    assert!(
+                        job_reach(os, &policy, tools, &local, 41, &[]).is_ok(),
+                        "{os} {network:?} tools {tools}"
+                    );
+                }
+            }
+        }
+        let refusal = RunError::Sandbox(SandboxError::Unavailable(
+            kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+        ));
+        let sentence =
+            crate::config::plain_problem(kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+                .unwrap();
+        assert_eq!(launch_failure(&refusal, 2), (sentence.to_owned(), 1));
+        let other = RunError::Sandbox(SandboxError::Unavailable("another refusal".into()));
+        assert_eq!(
+            launch_failure(&other, 2),
+            ("Could not prepare the research sandbox".to_owned(), 2)
+        );
+    }
+
+    /// A research job with tools under None on Windows starts no model proxy and reaches its
+    /// hosted model's port on any host, as a team agent there does (DESIGN-0256 O2a, leader
+    /// 06:42); on Linux and macOS the proxy row above still holds.
+    #[test]
+    fn a_windows_research_job_with_tools_under_no_network_starts_no_model_proxy() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let none = AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        };
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let (network, proxy) = job_reach("windows", &none, true, &account, 41, &[]).unwrap();
+        assert!(proxy.is_none(), "{network:?}");
+        assert_eq!(
+            network,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+        );
     }
 
     #[test]
@@ -4947,6 +5130,25 @@ mod tests {
             .unwrap();
     }
 
+    /// V243-FIRMLINK-STATE (#448 r2 LOW): a research state named through
+    /// /System/Volumes/Data is refused, since the folder gates compare it with one-spelled
+    /// roots and its sandbox rules would never match, so a folder inside it would see other
+    /// agents' homes and tmp. The short name of the same folder opens.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_state_named_through_the_data_volume_is_refused() {
+        let root = engine_root();
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", root.state.display()));
+        assert!(matches!(
+            ResearchRunner::without_codex(&root.database, &long, ResearchLimits::default()),
+            Err(RunError::Invalid(reason)) if reason == "state directory must be canonical"
+        ));
+        assert!(
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .is_ok()
+        );
+    }
+
     /// A run that waits for its repository's setup lock longer than the stale limit keeps
     /// its claim: the wait is heartbeated, so stale recovery neither takes the job back nor
     /// leaves the run setting up a worktree for a job it lost (finding_40456ca5a72c5454).
@@ -4974,7 +5176,7 @@ mod tests {
         let id = jobs
             .enqueue("alpha", "market_research", "codex", false)
             .unwrap();
-        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let project = ResearchProject {
             id: "alpha",
             root: &folder,
@@ -5037,7 +5239,7 @@ mod tests {
         let id = jobs
             .enqueue("alpha", "market_research", "codex", false)
             .unwrap();
-        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let project = ResearchProject {
             id: "alpha",
             root: &folder,
@@ -5134,26 +5336,38 @@ mod tests {
 
     /// A terminal host that lists the panes it was given and fails every other call, or
     /// fails its listing too, as a tmux server that cannot answer.
-    struct Listed(Result<Vec<AgentId>, crate::terminal::HostError>);
+    struct Listed(Result<Vec<AgentId>, kernel_processes::terminal::HostError>);
 
     impl Host for Listed {
         fn spawn(
             &self,
             _agent: &AgentId,
-            _command: &crate::harnesses::interactive::InteractiveCommand,
-        ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+            _command: &kernel_processes::terminal::PaneCommand,
+        ) -> Result<kernel_processes::terminal::PaneRef, kernel_processes::terminal::HostError>
+        {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
         fn attach(
             &self,
             _agent: &AgentId,
-        ) -> Result<crate::terminal::TerminalStream, crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        ) -> Result<kernel_processes::terminal::TerminalStream, kernel_processes::terminal::HostError>
+        {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
-        fn input(&self, _agent: &AgentId, _bytes: &[u8]) -> Result<(), crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        fn input(
+            &self,
+            _agent: &AgentId,
+            _bytes: &[u8],
+        ) -> Result<(), kernel_processes::terminal::HostError> {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
         fn resize(
@@ -5161,15 +5375,19 @@ mod tests {
             _agent: &AgentId,
             _cols: u16,
             _rows: u16,
-        ) -> Result<(), crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        ) -> Result<(), kernel_processes::terminal::HostError> {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
-        fn kill(&self, _agent: &AgentId) -> Result<(), crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_agent_unknown".into()))
+        fn kill(&self, _agent: &AgentId) -> Result<(), kernel_processes::terminal::HostError> {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_agent_unknown".into(),
+            ))
         }
 
-        fn alive(&self) -> Result<Vec<AgentId>, crate::terminal::HostError> {
+        fn alive(&self) -> Result<Vec<AgentId>, kernel_processes::terminal::HostError> {
             self.0.clone()
         }
     }
@@ -5203,7 +5421,7 @@ mod tests {
             2,
             "each agent's start looks again"
         );
-        let broken: Arc<dyn Host> = Arc::new(Listed(Err(crate::terminal::HostError(
+        let broken: Arc<dyn Host> = Arc::new(Listed(Err(kernel_processes::terminal::HostError(
             "terminal_unavailable".into(),
         ))));
         *found.lock().unwrap() = Some(broken);
@@ -5241,7 +5459,7 @@ mod tests {
         fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         let interpreter =
-            crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+            kernel_processes::finding::resolve("sh", &crate::tools::tools_places(None)).unwrap();
         assert_eq!(
             harness_words(&script).unwrap(),
             vec![
@@ -5279,7 +5497,7 @@ mod tests {
         fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         let line =
-            crate::tools::resolve_entry(&program, &crate::tools::Places::from_environment(None))
+            kernel_processes::finding::resolve_entry(&program, &crate::tools::tools_places(None))
                 .unwrap_err()
                 .line();
         assert!(matches!(harness_words(&program), Err(RunError::Invalid(code)) if code == line));
@@ -5319,8 +5537,8 @@ mod tests {
                 unreached.line().to_owned()
             })
         };
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
-        let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+        let open = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let listening = open.local_addr().unwrap().port();
         let codex = |base_url: String| ResearchAccount::Endpoint {
             base_url,
@@ -5512,7 +5730,7 @@ mod tests {
     /// keeps its place.
     #[test]
     fn the_reach_check_here_names_a_refusing_provider_only_where_confined_runs_exist() {
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
         let account = ResearchAccount::Endpoint {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             model: "local-model".into(),
@@ -5543,7 +5761,7 @@ mod tests {
         repository_git(&folder, &["init", "-q"]);
         repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
         register_project(&root.database, "alpha", &folder);
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
         let runner = ResearchRunner::new(
             &root.database,
             &root.state,
@@ -5671,15 +5889,58 @@ mod tests {
     /// provider it did not start on that port.
     #[test]
     fn a_port_kept_for_a_down_provider_refuses_connects_and_no_plain_bind_takes_it() {
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
         let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-        let taken = crate::spawn_gate::bind_tcp_std_exclusive(address);
+        let taken = kernel_processes::spawn_gate::bind_tcp_std_exclusive(address);
         assert_eq!(
             taken.as_ref().map(drop).map_err(std::io::Error::kind),
             Err(std::io::ErrorKind::AddrInUse),
             "a plain bind took the port the row named for a down provider"
         );
         assert!(ProviderReach::system().refused_everywhere(&[address]));
+    }
+
+    /// V243-FIRMLINK-LAUNCH-ROOT (rv-sec2 19:24): a read-only run's folder named through the
+    /// data volume passes the canonical-folder gate under its short name, and a folder reached
+    /// through a link is still refused there.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_takes_the_long_name_of_its_folder_but_refuses_a_link() {
+        let root = engine_root();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let linked = root.base.join("linked");
+        std::os::unix::fs::symlink(&folder, &linked).unwrap();
+        let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", folder.display()));
+        assert!(long.is_dir());
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let project = ProjectId::new("alpha").unwrap();
+        let gated = |name: &str, folder: &std::path::Path| {
+            let run = ReadOnlyRun {
+                name,
+                agent: "onboarding",
+                kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+                project: Some(&project),
+                folder,
+                prompt: "Map this repository.",
+                account: &account,
+                wall_time: Duration::from_secs(5),
+                output_tokens: None,
+            };
+            matches!(
+                runner.run_read_only(&run, &|| false),
+                Err(RunError::Invalid(ref text)) if text == "read-only folder must be canonical"
+            )
+        };
+        assert!(!gated("onboard-m-alpha-1", &long));
+        assert!(gated("onboard-m-alpha-2", &linked));
     }
 
     #[test]
@@ -6097,7 +6358,7 @@ mod tests {
                 matches!(
                     &ending,
                     Err(RunError::Sandbox(SandboxError::Invalid(reason)))
-                        if reason == crate::sandbox::SECRET_ROOT_REFUSED
+                        if reason == kernel_sandbox::paths::SECRET_ROOT_REFUSED
                 ),
                 "{name}: {ending:?}"
             );
@@ -6509,7 +6770,7 @@ mod tests {
     }
 
     fn group_members(group: u32) -> usize {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/pgrep")
                 .env_clear()
                 .arg("-g")
@@ -6526,7 +6787,7 @@ mod tests {
     fn an_agent_dropped_while_a_panic_unwinds_leaves_no_process_in_its_group() {
         use std::os::unix::process::CommandExt;
         const MID_RUN: &str = "the run fails while its agent and the agent's child are running";
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .env_clear()
                 .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
@@ -6557,7 +6818,7 @@ mod tests {
     fn a_lifeline_kills_its_agent_group_only_when_its_pipe_closes_without_done() {
         use std::os::unix::process::CommandExt;
         let spawn = || {
-            let agent = crate::spawn_gate::spawn(
+            let agent = kernel_processes::spawn_gate::spawn(
                 Command::new("/bin/sh")
                     .env_clear()
                     .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
@@ -6959,7 +7220,7 @@ mod tests {
         std::os::unix::fs::symlink(&report, &link).unwrap();
         assert!(read_bounded(folder.path(), &link, 64).is_err());
         let fifo = folder.path().join("fifo.md");
-        let made = crate::spawn_gate::status(
+        let made = kernel_processes::spawn_gate::status(
             std::process::Command::new("/usr/bin/mkfifo")
                 .arg(&fifo)
                 .stdin(std::process::Stdio::null()),
@@ -7073,7 +7334,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
-        let configured = crate::spawn_gate::status(
+        let configured = kernel_processes::spawn_gate::status(
             Command::new(GIT)
                 .env_clear()
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -7116,7 +7377,7 @@ mod tests {
         }
         ensure_repository(&project, &tmp).unwrap();
         let owner_git = |dir: &Path, args: &[&str]| {
-            crate::spawn_gate::output(
+            kernel_processes::spawn_gate::output(
                 Command::new(GIT)
                     .env_clear()
                     .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -7169,7 +7430,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_git_keeps_the_selected_toolchain_and_sandboxed_git_is_the_command_line_tools_git() {
-        let found = crate::spawn_gate::output(
+        let found = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/xcrun")
                 .args(["--find", "git"])
                 .env_clear()
@@ -7233,7 +7494,7 @@ mod tests {
             ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
-        let printed = crate::spawn_gate::output(
+        let printed = kernel_processes::spawn_gate::output(
             sandbox
                 .command(&profile, sandboxed_git())
                 .args(["version"])
@@ -7412,7 +7673,7 @@ mod tests {
                             .stdin(Stdio::null())
                             .stdout(Stdio::null())
                             .stderr(Stdio::piped());
-                        let output = crate::spawn_gate::output(&mut command).unwrap();
+                        let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
                         if !output.status.success() {
                             refused
                                 .lock()
@@ -7439,7 +7700,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let child = crate::spawn_gate::spawn(&mut command).unwrap();
+            let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
             let group = child.id();
             (wait_bounded(child, limit).unwrap(), group)
         };
@@ -7465,7 +7726,7 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let started = Instant::now();
         assert_eq!(
             wait_bounded(child, Duration::from_millis(200)).unwrap(),
@@ -7582,7 +7843,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     pub(super) fn repository_git(project: &Path, arguments: &[&str]) {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             Command::new(GIT)
                 .env_clear()
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -8215,6 +8476,9 @@ mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_engine_tests.rs"]
 pub(crate) mod live_engine_tests;
+#[cfg(test)]
+#[path = "runner/program_tests.rs"]
+mod program_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/warden_tests.rs"]
 mod warden_tests;

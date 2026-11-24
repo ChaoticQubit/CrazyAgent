@@ -17,7 +17,7 @@ struct Engine {
 
 impl Engine {
     async fn start(root: &Path) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)

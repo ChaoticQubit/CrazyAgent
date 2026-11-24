@@ -5,8 +5,9 @@ use crate::team::agent_messages::{
     RESULT_PREVIEW_BYTES_MAX, ResultsShown, Speaker,
 };
 use crate::team::events::{self, EventKind};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, Host};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::params;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -53,6 +54,8 @@ impl Pane {
         let host: Arc<dyn Host> = Arc::new(Tmux::open(
             Some(tmux.clone()),
             &base.join(crate::terminal::FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
         ));
         let recorded = base.join("typed.txt");
         let target = match typed {
@@ -70,8 +73,11 @@ impl Pane {
             env: Vec::new(),
             transcript: Transcript::Unavailable,
         };
-        host.spawn(&AgentId::team(agent).unwrap(), &command)
-            .unwrap();
+        host.spawn(
+            &AgentId::team(agent).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
         Self {
             folder,
             tmux,
@@ -90,7 +96,7 @@ impl Drop for Pane {
             .unwrap()
             .join(crate::terminal::FOLDER)
             .join(SOCKET);
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(socket)

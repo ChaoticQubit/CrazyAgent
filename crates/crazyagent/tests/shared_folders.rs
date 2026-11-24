@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::sandbox::ProjectSandbox;
 use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope, apply};
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
+use kernel_sandbox::net::SandboxNetwork;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -41,7 +42,7 @@ const SECRETS: &[&str] = &[
 ];
 
 fn git(folder: &Path, arguments: &[&str]) {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -123,7 +124,7 @@ fn run(case: &Case, sandbox: &ProjectSandbox, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 fn quoted(path: &Path) -> String {

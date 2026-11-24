@@ -287,7 +287,7 @@ impl OwnerClient {
     }
 
     async fn overview_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(OVERVIEW_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, OVERVIEW_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { overview: action })
                 .map_err(|_| failure("overview_request_bounds"))?;
@@ -295,10 +295,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| unavailable())?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -514,7 +514,7 @@ fn checked(
 /// authority, the handshake packet, the admission and the request bytes. Output: Ok once
 /// a reply or a refusal was written.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],

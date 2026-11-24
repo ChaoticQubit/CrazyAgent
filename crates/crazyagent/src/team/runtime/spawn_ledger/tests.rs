@@ -2,8 +2,10 @@ use super::*;
 use crate::agent_git::Layout;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::runtime::{TeamLimits, TeamRuntime};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -131,7 +133,12 @@ impl Case {
     fn host(&mut self) -> Arc<dyn Host> {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Arc::new(Tmux::open(Some(tmux), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(tmux),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn pane(&self, host: &Arc<dyn Host>, id: i64) {
@@ -143,14 +150,18 @@ impl Case {
             env: Vec::new(),
             transcript: Transcript::ClaudeSession { file },
         };
-        host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
+        host.spawn(
+            &AgentId::team(id).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
 }
 
 impl Drop for Case {
     fn drop(&mut self) {
         if let Some(tmux) = &self.tmux {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(tmux)
                     .arg("-S")
                     .arg(self.base.join(FOLDER).join(SOCKET))
@@ -167,7 +178,7 @@ impl Drop for Case {
 /// Runs git as the owner would in a test: no global or system config, in `dir`.
 /// Inputs: the folder and the arguments. Output: standard output.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

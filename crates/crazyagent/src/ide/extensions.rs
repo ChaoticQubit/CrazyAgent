@@ -694,7 +694,7 @@ impl Server<'_> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| refused())?;
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| refused())?;
         let stdout = child.stdout.take().ok_or_else(refused)?;
         let reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -873,7 +873,8 @@ fn unavailable<E>(_: E) -> EngineError {
 
 fn read(url: &url::Url, limit: u64) -> Result<Vec<u8>, EngineError> {
     let mut bytes = Vec::new();
-    crate::update::download(url.as_str(), &mut bytes, limit, READ_TIME).map_err(fetch_failure)?;
+    kernel_processes::update::download(url.as_str(), &mut bytes, limit, READ_TIME)
+        .map_err(fetch_failure)?;
     Ok(bytes)
 }
 
@@ -883,7 +884,7 @@ fn download_to(url: &str, path: &Path) -> Result<String, EngineError> {
         file,
         hasher: Sha256::new(),
     };
-    crate::update::download(url, &mut hashing, VSIX_BYTES_MAX, DOWNLOAD_TIME)
+    kernel_processes::update::download(url, &mut hashing, VSIX_BYTES_MAX, DOWNLOAD_TIME)
         .map_err(fetch_failure)?;
     hashing
         .file
@@ -892,7 +893,7 @@ fn download_to(url: &str, path: &Path) -> Result<String, EngineError> {
     Ok(format!("{:x}", hashing.hasher.finalize()))
 }
 
-fn fetch_failure(error: crate::update::UpdateError) -> EngineError {
+fn fetch_failure(error: kernel_processes::update::UpdateError) -> EngineError {
     failure(match error.code {
         "update_url_refused" => "ide_extension_source_refused",
         "update_too_large" => "ide_extension_too_large",
@@ -956,22 +957,15 @@ fn suffix() -> Result<String, EngineError> {
     Ok(super::bridge::hex(&bytes))
 }
 
-#[cfg(unix)]
+/// Opens an extension file to read as itself, never through a link or junction at its name
+/// ([`crate::platform::open_plain`]), and keeps it only when it is a regular file. Input: the
+/// path. Output: the open file, or the I/O error.
 fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)?;
+    let file = crate::platform::open_plain(path)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
     Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
 }
 
 #[cfg(unix)]
@@ -995,3 +989,22 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn an_extension_file_that_is_a_link_is_not_opened() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("secret.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = folder.path().join("package.json");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(open_plain(&target).is_ok());
+        assert!(
+            open_plain(&link).is_err(),
+            "the open followed the link to its target"
+        );
+    }
+}

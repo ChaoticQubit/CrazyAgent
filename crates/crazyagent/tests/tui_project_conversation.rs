@@ -59,7 +59,7 @@ struct Process {
 
 impl Process {
     fn spawn(command: &mut Command) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -146,7 +146,7 @@ impl Process {
             "engine exited unexpectedly"
         );
         assert!(
-            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
                 "-s",
                 "TERM",
                 &self.child.id().to_string()
@@ -166,7 +166,7 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = crazyagent::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new("/bin/kill")
                     .args(["-s", "TERM", &self.child.id().to_string()])
                     .stdout(Stdio::null())

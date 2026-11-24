@@ -1,0 +1,73 @@
+package crazyagent:sdk;
+
+interface sdk-types {
+  record not-granted {
+    capability: string,
+    needs: string,
+  }
+
+  variant refusal {
+    not-granted(not-granted),
+    tier-too-high(string),
+    rejected(string),
+    failed(string),
+  }
+}
+
+interface modes-types {
+  enum mode {
+    read,
+    write,
+  }
+}
+
+interface wire-types {
+  enum mode {
+    read,
+    write,
+  }
+
+  record blob {
+    size: u64,
+    data: list<u8>,
+    parts: list<u64>,
+    tail: option<list<u8>>,
+  }
+
+  record plain {
+    name: string,
+    mode: mode,
+  }
+
+  record blob-stored {
+    at: u64,
+    data: list<u8>,
+    blob: blob,
+  }
+}
+
+interface wire {
+  use sdk-types.{refusal};
+  use wire-types.{blob, mode, plain};
+  use modes-types.{mode as modes-mode};
+
+  store: func(blob: blob, plain: plain, at: u64) -> result<blob, refusal>;
+
+  peek: func(plain: plain) -> result<option<u64>, refusal>;
+
+  blobs: func(plain: plain) -> result<list<blob>, refusal>;
+
+  nested: func(values: list<option<u64>>) -> result<list<option<u64>>, refusal>;
+
+  archive: func(
+    first: blob,
+    second: blob,
+    values: list<option<u64>>,
+  ) -> result<option<blob>, refusal>;
+
+  swap: func(here: mode, there: modes-mode) -> result<modes-mode, refusal>;
+}
+
+world plugin {
+  import wire;
+}

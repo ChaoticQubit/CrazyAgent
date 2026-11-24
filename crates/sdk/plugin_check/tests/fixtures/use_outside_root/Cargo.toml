@@ -1,0 +1,14 @@
+[package]
+name = "crazyagent-plugin-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+crazyagent-sdk = { path = "../../../crates/sdk/rust" }
+
+[build-dependencies]
+crazyagent-plugin-check = { path = "../../../crates/sdk/plugin_check" }

@@ -1,11 +1,15 @@
 #![cfg(target_os = "macos")]
+mod full_access_support;
+use full_access_support::full_access;
 
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Session,
 };
 use crazyagent::harnesses::terminal_session::{Resume, TerminalSession};
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use crazyagent::terminal::FOLDER;
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
@@ -30,7 +34,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -127,10 +131,10 @@ fn answer(mut stream: TcpStream) {
 }
 
 fn model() -> String {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             std::thread::spawn(move || answer(stream));
         }
     });
@@ -156,7 +160,12 @@ fn world(codex_folder: bool) -> Option<World> {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let (home, repo, bin) = (base.join("home"), base.join("repo"), base.join("bin"));
     for path in [&home, &repo, &bin] {
         private(path);
@@ -172,7 +181,7 @@ fn world(codex_folder: bool) -> Option<World> {
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    let done = crazyagent::spawn_gate::output(
+    let done = kernel_processes::spawn_gate::output(
         Command::new(GIT)
             .args(["init", "-q"])
             .current_dir(&repo)
@@ -225,8 +234,7 @@ fn request(world: &World, cwd: &Path, tools: bool) -> LaunchRequest {
         },
         model: Some("stand-in-model".into()),
         tools,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(cwd, &world.base),
         git_identity: None,
         limits: LaunchLimits::default(),
     }
@@ -310,7 +318,7 @@ fn control_runs_the_plant(world: &World, cwd: &Path, marker: &Path) {
         "model_providers.standin={{name=\"standin\",base_url=\"{}\",wire_api=\"responses\"}}",
         world.model
     );
-    let done = crazyagent::spawn_gate::output(
+    let done = kernel_processes::spawn_gate::output(
         Command::new(&world.codex)
             .args([
                 "exec",

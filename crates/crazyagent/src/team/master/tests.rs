@@ -1,8 +1,9 @@
 use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
-use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
 use crate::{landing_log::seeded, terminal::FOLDER};
+use kernel_processes::terminal::tmux::{SESSION, SOCKET, Tmux};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
@@ -101,14 +102,19 @@ impl Fixture {
     fn host(&mut self) -> Arc<dyn Host> {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Arc::new(Tmux::open(Some(tmux), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(tmux),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(tmux) = &self.tmux {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(tmux)
                     .arg("-S")
                     .arg(self.base.join(FOLDER).join(SOCKET))
@@ -123,9 +129,9 @@ impl Drop for Fixture {
 }
 
 /// R10-L1: an input whose typing fails after its checks passed frees the master for the
-/// next one, since its input time is cleared. With the master's pane gone, tmux answers the
-/// bracketed paste question for its current window (IMP-RVDS-PR3), here the other pane, so
-/// the check passes and only the typing fails; the other pane gets nothing.
+/// next one, since its input time is cleared. The master's pane ends after the checks and
+/// the hold, just before the typing, while another pane is tmux's current window: the typing
+/// fails and that other pane gets nothing.
 #[test]
 fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     let mut fixture = Fixture::new();
@@ -147,14 +153,21 @@ fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     let master = AgentId::team(MASTER).unwrap();
     let other = AgentId::team(MASTER + 1).unwrap();
     let other_typed = fixture.base.join("other-typed");
-    host.spawn(&master, &app(&fixture.base.join("typed")))
-        .unwrap();
-    host.spawn(&other, &app(&other_typed)).unwrap();
+    host.spawn(
+        &master,
+        &kernel_processes::terminal::PaneCommand::from(&app(&fixture.base.join("typed"))),
+    )
+    .unwrap();
+    host.spawn(
+        &other,
+        &kernel_processes::terminal::PaneCommand::from(&app(&other_typed)),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &master);
     reads_keys(host.as_ref(), &other);
     fixture.live(Some(MASTER));
     let tmux = fixture.tmux.clone().unwrap();
-    let selected = crate::spawn_gate::status(
+    let selected = kernel_processes::spawn_gate::status(
         Command::new(&tmux)
             .arg("-S")
             .arg(fixture.base.join(FOLDER).join(SOCKET))
@@ -170,19 +183,17 @@ fn a_failed_typing_frees_the_live_master_for_the_next_input() {
         selected.success(),
         "the other pane is tmux's current window"
     );
-    host.kill(&master).unwrap();
-    assert!(
-        host.input_live(&master).unwrap(),
-        "tmux answers for another pane of its server"
-    );
 
-    let gone = master_input_at(
+    let gone = master_input_when(
         &fixture.connection,
         host.as_ref(),
         None,
         &project,
         "hello",
-        NOW,
+        || {
+            host.kill(&master).unwrap();
+            Ok(true)
+        },
     );
     assert!(matches!(gone, Err(InputRefused::Failed(_))), "{gone:?}");
     let input_ms: Option<i64> = fixture
@@ -229,11 +240,15 @@ fn engine_input_asks_the_host_outside_its_write_transaction() {
         transcript: Transcript::Unavailable,
     };
     let pane = AgentId::team(MASTER).unwrap();
-    host.spawn(&pane, &command).unwrap();
+    host.spawn(
+        &pane,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &pane);
     fixture.live(Some(MASTER));
     let tmux = fixture.tmux.clone().unwrap();
-    let shown = crate::spawn_gate::output(
+    let shown = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")
             .arg(fixture.base.join(FOLDER).join(SOCKET))
@@ -246,7 +261,7 @@ fn engine_input_asks_the_host_outside_its_write_transaction() {
     let pid = String::from_utf8(shown.stdout).unwrap().trim().to_owned();
     assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
     let signal = |name: &str| {
-        crate::spawn_gate::status(Command::new("/bin/kill").args([name, pid.as_str()]))
+        kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([name, pid.as_str()]))
             .is_ok_and(|status| status.success())
     };
     let db = fixture.base.join("engine.db");
@@ -316,7 +331,11 @@ fn dropped_turn_on(fixture: &Fixture, host: &dyn Host, screen: &str) -> PathBuf 
         transcript: Transcript::Unavailable,
     };
     let master = AgentId::team(MASTER).unwrap();
-    host.spawn(&master, &command).unwrap();
+    host.spawn(
+        &master,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host, &master);
     fixture.live(Some(MASTER));
     fixture.set("turn_open=1");
@@ -420,8 +439,11 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     let input = |text: &str, now: i64| {
         master_input_at(
@@ -530,7 +552,11 @@ fn engine_input_waits_until_the_live_masters_app_reads_keys() {
         transcript: Transcript::Unavailable,
     };
     let pane = AgentId::team(MASTER).unwrap();
-    host.spawn(&pane, &command).unwrap();
+    host.spawn(
+        &pane,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     fixture.live(Some(MASTER));
     let input = |now: i64| {
         master_input_at(
@@ -593,8 +619,11 @@ fn engine_input_runs_its_step_only_right_before_it_types() {
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     let input = |text: &str, now: i64, answer: Result<bool, EngineError>| {
         let ran = std::cell::Cell::new(false);
@@ -737,8 +766,11 @@ fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() 
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     fixture.live(Some(MASTER));
     let typing = OwnerTyping::new(fixture.base.join("never-written.db"));
@@ -802,8 +834,11 @@ fn a_views_focus_and_mouse_reports_never_hold_an_answer_back() {
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
-        .unwrap();
+    host.spawn(
+        &AgentId::team(MASTER).unwrap(),
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     fixture.live(Some(MASTER));
     let typing = OwnerTyping::new(fixture.base.join("never-written.db"));
@@ -2026,7 +2061,7 @@ fn the_masters_overlapping_start_work_notes_the_sub_agent_unless_overlaps_are_of
     master_row(&fixture);
     known_project(&fixture);
     let folder = fixture.base.join("project");
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("git")
             .args(["init", "-q"])
             .current_dir(&folder)
@@ -3233,7 +3268,7 @@ fn a_waiting_task_s_handle_is_named_as_waiting_even_after_an_earlier_holder_move
 fn git_at(fixture: &Fixture, dir: &Path, args: &[&str]) -> String {
     let home = fixture.base.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -4250,7 +4285,7 @@ const WORKER: i64 = 52;
 /// and a fixed identity. Takes the home, the folder and the arguments. Returns its
 /// trimmed standard output; a failing git fails the test.
 fn git_in(home: &Path, folder: &Path, arguments: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -4325,7 +4360,7 @@ fn codex_sign_in(fixture: &Fixture, generation: i64, phase: &str) {
              VALUES (?1,?2,?3,?4,X'01',X'01')",
             params![
                 format!("operation-{generation}"),
-                crate::memory::hash(CODEX_PROFILE.as_bytes()),
+                kernel_common::hash(CODEX_PROFILE.as_bytes()),
                 generation,
                 phase
             ],
@@ -5388,7 +5423,7 @@ fn merge_from_a_lead_merges_its_finished_worker_and_closes_its_change_set() {
         &clones.project,
         &home,
         &tmp,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap()
     .confine_to_clone(&clones.lead)

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn no_network_grants_a_model_only_on_loopback_and_never_a_host_port() {
-    use crate::sandbox::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
     assert_eq!(
         AgentNetwork::None.sandbox(Some(SandboxRemote::AnyHost(443))),
         SandboxNetwork::Only(vec![])
@@ -302,6 +302,143 @@ fn a_network_choice_is_wider_only_than_the_narrower_ones() {
 }
 
 #[test]
+fn full_access_on_windows_is_refused_with_its_own_reason_and_code() {
+    for access in AgentAccess::ALL {
+        assert_eq!(
+            access.refusal().map(|(reason, _)| reason),
+            access.unavailable()
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(
+            AgentAccess::Full.refusal(),
+            Some((FULL_WINDOWS_UNAVAILABLE, SANDBOX_FULL_UNAVAILABLE_WINDOWS))
+        );
+        for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            assert_eq!(
+                access.refusal(),
+                Some((WINDOWS_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE))
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    for access in [AgentAccess::OwnBranch, AgentAccess::Full] {
+        assert_eq!(
+            access.refusal(),
+            Some((LINUX_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE))
+        );
+    }
+    #[cfg(target_os = "macos")]
+    assert!(
+        AgentAccess::ALL
+            .iter()
+            .all(|access| access.refusal().is_none())
+    );
+}
+
+#[test]
+fn a_windows_model_only_agent_with_tools_starts_no_proxy_and_reaches_the_models_port_on_any_host() {
+    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    let hosted = SandboxRemote::AnyHost(443);
+    let local = SandboxRemote::Loopback(11_434);
+    assert!(!AgentNetwork::None.proxied("windows", true, hosted));
+    assert_eq!(
+        AgentNetwork::None
+            .reach("windows", true, hosted, None)
+            .unwrap(),
+        SandboxNetwork::Only(vec![hosted])
+    );
+    for os in ["macos", "linux"] {
+        assert!(AgentNetwork::None.proxied(os, true, hosted));
+        assert_eq!(
+            AgentNetwork::None
+                .reach(os, true, hosted, Some(41_300))
+                .unwrap(),
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(41_300)])
+        );
+        assert!(!AgentNetwork::None.proxied(os, true, local));
+        assert_eq!(
+            AgentNetwork::None.reach(os, true, local, None).unwrap(),
+            SandboxNetwork::Only(vec![local])
+        );
+    }
+    assert!(!AgentNetwork::None.proxied("windows", true, local));
+    for os in ["windows", "macos", "linux"] {
+        assert!(!AgentNetwork::None.proxied(os, false, hosted));
+        assert_eq!(
+            AgentNetwork::None.reach(os, false, hosted, None).unwrap(),
+            SandboxNetwork::Only(vec![hosted])
+        );
+        for network in [AgentNetwork::Open, AgentNetwork::Https] {
+            assert!(!network.proxied(os, true, hosted));
+            assert_eq!(
+                network.reach(os, true, hosted, None).unwrap(),
+                network.sandbox(Some(hosted))
+            );
+        }
+    }
+}
+
+#[test]
+fn a_loopback_model_on_windows_is_refused_under_every_network_choice() {
+    use kernel_sandbox::net::SandboxRemote;
+    let local = SandboxRemote::Loopback(11_434);
+    for network in AgentNetwork::ALL {
+        for tools in [true, false] {
+            let refusal = network.reach("windows", tools, local, None);
+            assert!(
+                refusal
+                    .as_ref()
+                    .is_err_and(kernel_sandbox::lines::model_loopback_windows),
+                "{network:?} tools={tools}: {refusal:?}"
+            );
+        }
+    }
+    for os in ["macos", "linux"] {
+        assert!(AgentNetwork::Open.reach(os, true, local, None).is_ok());
+    }
+}
+
+#[test]
+fn full_access_on_windows_names_no_level_this_version_refuses_there() {
+    let plain = crate::config::plain_problem(SANDBOX_FULL_UNAVAILABLE_WINDOWS)
+        .expect("the code has a plain sentence");
+    for level in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        assert!(!plain.contains(level.label()), "{plain}");
+    }
+    assert!(!plain.contains("always run"), "{plain}");
+    #[cfg(target_os = "windows")]
+    {
+        assert!(
+            AgentAccess::ALL
+                .iter()
+                .all(|level| level.refusal().is_some())
+        );
+        for level in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            assert!(!FULL_WINDOWS_UNAVAILABLE.contains(level.label()));
+        }
+        assert!(!FULL_WINDOWS_UNAVAILABLE.contains("always run"));
+    }
+}
+
+#[test]
+fn on_windows_a_limited_network_choice_says_it_reaches_the_whole_internet() {
+    for network in [AgentNetwork::Https, AgentNetwork::None] {
+        assert_eq!(
+            windows_network_gap("windows", network),
+            Some(WINDOWS_NETWORK_WIDE_LINE)
+        );
+    }
+    assert_eq!(windows_network_gap("windows", AgentNetwork::Open), None);
+    for os in ["macos", "linux"] {
+        for network in AgentNetwork::ALL {
+            assert_eq!(windows_network_gap(os, network), None);
+        }
+    }
+}
+
+#[test]
 fn each_platform_offers_only_the_levels_it_can_enforce() {
     let offered: Vec<AgentAccess> = AgentAccess::ALL
         .into_iter()
@@ -311,9 +448,13 @@ fn each_platform_offers_only_the_levels_it_can_enforce() {
     {
         assert!(offered.is_empty());
         assert!(
-            AgentAccess::ALL
+            [AgentAccess::Sandboxed, AgentAccess::OwnBranch]
                 .iter()
                 .all(|access| access.unavailable() == Some(WINDOWS_UNAVAILABLE))
+        );
+        assert_eq!(
+            AgentAccess::Full.unavailable(),
+            Some(FULL_WINDOWS_UNAVAILABLE)
         );
     }
     #[cfg(target_os = "linux")]
@@ -615,30 +756,33 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
     };
     assert_eq!(rule(IdeAgentFiles::AllowAll, false), "");
     assert_eq!(rule(IdeAgentFiles::AllowAll, true), "");
-    let root_text = super::super::any_case("/tmp/ca-proj");
+    let root_text = kernel_sandbox::paths::any_case("/tmp/ca-proj");
     let new = format!(
         "^{root_text}{}/{}",
-        super::super::any_case("/.crazyagent"),
-        super::super::any_case("worktrees")
+        kernel_sandbox::paths::any_case("/.crazyagent"),
+        kernel_sandbox::paths::any_case("worktrees")
     );
     let both = format!(
         "^{root_text}({})?/{}",
-        super::super::any_case("/.crazyagent"),
-        super::super::any_case("worktrees")
+        kernel_sandbox::paths::any_case("/.crazyagent"),
+        kernel_sandbox::paths::any_case("worktrees")
     );
-    let state = format!("^{root_text}{}$", super::super::any_case("/.crazyagent"));
+    let state = format!(
+        "^{root_text}{}$",
+        kernel_sandbox::paths::any_case("/.crazyagent")
+    );
     for (older_agents, agents) in [(false, &new), (true, &both)] {
         let keep_root = format!("(deny file-write-unlink\n  (regex #\"{agents}$\"))\n");
         assert_eq!(
             rule(IdeAgentFiles::NoDeleteOrRename, older_agents),
             format!(
-                "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+$\") (regex #\"{agents}/[^/]+/\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
+                "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/|$)\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
             )
         );
         assert_eq!(
             rule(IdeAgentFiles::ReadOnly, older_agents),
             format!(
-                "(deny file-write*\n  (regex #\"{agents}/[^/]+$\") (regex #\"{agents}/[^/]+/\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
+                "(deny file-write*\n  (regex #\"{agents}/[^/]+(/|$)\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
             )
         );
     }
@@ -648,7 +792,9 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
 
 #[test]
 fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
-    use crate::sandbox::{LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets};
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE;
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -704,9 +850,9 @@ fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
 
 #[test]
 fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_https() {
-    use crate::sandbox::{
-        LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
-    };
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -743,9 +889,9 @@ fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_
 
 #[test]
 fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
-    use crate::sandbox::{
-        LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
-    };
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |supervised, routed| {
         Some(LinuxHost {
             nested: true,
@@ -804,8 +950,9 @@ fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
 
 #[test]
 fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
-    use crate::sandbox::{
-        LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost,
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{
+        LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE,
     };
     let host = |nested, scoped| {
         Some(LinuxHost {
@@ -851,10 +998,12 @@ fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
 
 #[test]
 fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hold() {
-    use crate::sandbox::{
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{
         LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_ROOT_LINE,
-        LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE, LinuxHost, LinuxSupervisor,
+        LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
     };
+    use kernel_sandbox::settings::LinuxSupervisor;
     let held = |nested, scoped| LinuxHost {
         nested,
         scoped,
@@ -924,9 +1073,10 @@ fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hol
 /// does not cover, says nothing of AppArmor (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
 #[test]
 fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
-    use crate::sandbox::{
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{
         LINUX_APPARMOR_LINE, LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE,
-        LINUX_ROOT_LINE, LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE, LinuxHost,
+        LINUX_ROOT_LINE, LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
     };
     let host = |scoped, supervised, root| LinuxHost {
         nested: false,
@@ -988,7 +1138,8 @@ fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
 /// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
 #[test]
 fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_takes_it() {
-    use crate::sandbox::{LINUX_KEPT_GIT_LINE, LinuxHost};
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::LINUX_KEPT_GIT_LINE;
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(project.join("vendor/.git")).unwrap();

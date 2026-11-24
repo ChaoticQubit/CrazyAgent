@@ -155,7 +155,7 @@ fn rejected(code: &str) -> Option<IdeReply> {
 }
 
 /// Reads one reply frame, or none once the engine closed the connection.
-async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
+async fn read_reply(stream: &mut Stream) -> Option<IdeReply> {
     let length = stream.read_u32().await.ok()? as usize;
     assert!(length > 0 && length <= FRAME_BYTES_MAX);
     let mut body = vec![0; length];
@@ -164,8 +164,8 @@ async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
 }
 
 /// Connects to the owner socket and sends one handshake and one request frame.
-async fn send(socket: &Path, packet: [u8; 37], body: &[u8]) -> UnixStream {
-    let mut stream = crate::spawn_gate::connect_unix(socket).await.unwrap();
+async fn send(socket: &Path, packet: [u8; 37], body: &[u8]) -> Stream {
+    let mut stream = crate::ipc::owner_connect(socket).await.unwrap();
     stream.write_all(&packet).await.unwrap();
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
     frame.extend(body);
@@ -180,7 +180,7 @@ async fn exchange(socket: &Path, packet: [u8; 37], body: &[u8]) -> Option<IdeRep
 }
 
 /// Opens an event subscription and waits for the engine to confirm it.
-async fn subscribe(socket: &Path, packet: [u8; 37], project: &str) -> UnixStream {
+async fn subscribe(socket: &Path, packet: [u8; 37], project: &str) -> Stream {
     let body = request(project, json!({ "name": "ide.events", "args": {} }));
     let mut stream = send(socket, packet, &body).await;
     assert_eq!(
@@ -1284,12 +1284,12 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
         "the write still waits when its bound passes"
     );
     let held = held_writes(case.root.path());
-    let (client, server) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (client, server) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     for end in [&client, &server] {
         end.set_nonblocking(true).unwrap();
     }
-    let mut client = UnixStream::from_std(client).unwrap();
-    let server = UnixStream::from_std(server).unwrap();
+    let mut client = Stream::from_std(client).unwrap();
+    let server = Stream::from_std(server).unwrap();
     let serving = tokio::spawn(serve_within(
         server,
         ide,
@@ -1568,14 +1568,14 @@ async fn ide_git_calls_past_their_cap_are_refused_while_the_others_run() {
     const REFUSED: Duration = Duration::from_secs(10);
     const { assert!(PROJECT_GIT_CALLS_MAX < GIT_CALLS_MAX) };
     let mut case = Case::start().await;
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let url = format!(
         "git://127.0.0.1:{}/slow.git",
         listener.local_addr().unwrap().port()
     );
     let (accepted, mut held) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             if accepted.send(stream).is_err() {
                 return;
             }
@@ -1645,7 +1645,7 @@ async fn ide_git_calls_past_their_cap_are_refused_while_the_others_run() {
 }
 /// Reads one frame of any kind as JSON, or none once the engine closed the connection.
 #[cfg(target_os = "macos")]
-async fn read_value(stream: &mut UnixStream) -> Option<serde_json::Value> {
+async fn read_value(stream: &mut Stream) -> Option<serde_json::Value> {
     let length = stream.read_u32().await.ok()? as usize;
     assert!(length > 0 && length <= FRAME_BYTES_MAX);
     let mut body = vec![0; length];
@@ -1655,7 +1655,7 @@ async fn read_value(stream: &mut UnixStream) -> Option<serde_json::Value> {
 
 /// Sends one control frame on an open terminal connection.
 #[cfg(target_os = "macos")]
-async fn control(stream: &mut UnixStream, request: &crate::terminal::TerminalRequest) {
+async fn control(stream: &mut Stream, request: &crate::terminal::TerminalRequest) {
     let body = serde_json::to_vec(request).unwrap();
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
     frame.extend(body);
@@ -1665,7 +1665,7 @@ async fn control(stream: &mut UnixStream, request: &crate::terminal::TerminalReq
 /// Reads terminal output until it holds `wanted`, or with no `wanted` until the shell
 /// printed anything that is not blank, within 20 seconds. Returns everything read.
 #[cfg(target_os = "macos")]
-async fn output_until(stream: &mut UnixStream, wanted: Option<&str>) -> String {
+async fn output_until(stream: &mut Stream, wanted: Option<&str>) -> String {
     let mut seen = Vec::new();
     let read = async {
         loop {
@@ -1691,7 +1691,7 @@ async fn output_until(stream: &mut UnixStream, wanted: Option<&str>) -> String {
 
 /// Skips output frames until the terminal's final frame, within 20 seconds.
 #[cfg(target_os = "macos")]
-async fn closing(stream: &mut UnixStream) -> serde_json::Value {
+async fn closing(stream: &mut Stream) -> serde_json::Value {
     let read = async {
         loop {
             let frame = read_value(stream).await.expect("no closing frame");
@@ -1707,7 +1707,7 @@ async fn closing(stream: &mut UnixStream) -> serde_json::Value {
 
 /// Opens a Sandboxed terminal and reads its `ok`. Returns the stream and the pane's name.
 #[cfg(target_os = "macos")]
-async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (UnixStream, AgentId) {
+async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (Stream, AgentId) {
     let mut stream = send(socket, packet, body).await;
     let opened = read_value(&mut stream).await.unwrap();
     assert_eq!(opened["kind"], "ok", "{opened}");
@@ -1729,7 +1729,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let folder = case.root.path().join("projects").join("alpha");
     std::fs::write(folder.join("README.md"), "alpha readme\n").unwrap();
     let database = case.root.path().join("engine.db");
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);
@@ -2037,7 +2037,7 @@ fn revoking_every_capability_keeps_going_past_a_replaced_file() {
 #[test]
 #[ignore]
 fn an_ide_capability_write_cut_short_in_its_own_process() {
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     let written = write_capability(&Path::new(&folder).join("capability"), &[7; 32]);
@@ -2049,7 +2049,7 @@ fn an_ide_capability_write_cut_short_in_its_own_process() {
 #[test]
 fn an_ide_capability_write_cut_short_leaves_no_capability_file() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "ide::bridge::tests::an_ide_capability_write_cut_short_in_its_own_process",
         "trap '' XFSZ; ulimit -f 0",
         folder.path(),
@@ -2066,7 +2066,7 @@ fn an_ide_capability_write_cut_short_leaves_no_capability_file() {
 /// the terminal shows, and any other sandbox failure keeps its own code.
 #[test]
 fn an_ide_terminal_whose_cargo_name_walk_ran_past_its_budget_stops_with_the_walk_code() {
-    use crate::sandbox::SandboxError;
+    use kernel_sandbox::error::SandboxError;
     let refused = |error| terminal::shell_refusal(error).0;
     let walked = std::io::Error::other(crate::team::cleanup::WALK_TOO_LONG);
     let missing = std::io::Error::from(std::io::ErrorKind::NotFound);

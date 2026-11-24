@@ -10,24 +10,32 @@ fn codex(entries: &[HarnessEntry]) -> &HarnessStatus {
         .status
 }
 
-fn install(folder: &Path) {
-    let path = folder.join("codex");
+/// Writes a stand-in codex under the first name a search tries for it
+/// ([`crate::paths::executable_names`]): `codex`, runnable, off Windows and `codex.exe` on
+/// Windows, where the extensionless file is never tried. Input: the folder. Output: the file.
+fn install(folder: &Path) -> PathBuf {
+    let names = crate::paths::executable_names("codex");
+    assert!(!names.is_empty());
+    let path = folder.join(&names[0]);
+    assert!(path.starts_with(folder));
     std::fs::write(&path, "#!/bin/sh\n").unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }
 
 /// A clean-Mac gate build maps Homebrew's folders for every search the tool resolver makes
-/// ([`crate::tools::homebrew_folders`]); the catalog's built-in folders come from there too,
+/// ([`kernel_processes::finding::homebrew_folders`]); the catalog's built-in folders come from there too,
 /// so the catalog and the pin never find this Mac's own Homebrew harness under the gate.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_catalog_looks_in_homebrew_where_the_tool_resolver_does() {
-    let homebrew = crate::tools::homebrew_folders();
+    let homebrew = kernel_processes::finding::homebrew_folders(&crate::tools::HOOKS);
     let directories = Search::from_environment().directories;
     for folder in &homebrew {
         assert!(
-            directories.contains(folder) || crate::service::changeable_by_others(folder).is_some(),
+            directories.contains(folder)
+                || kernel_processes::service::changeable_by_others(folder).is_some(),
             "{}",
             folder.display()
         );
@@ -68,7 +76,7 @@ async fn a_cached_catalog_is_served_while_its_re_probe_runs_and_a_check_probes_n
     assert_eq!(codex(&first), &HarnessStatus::NotInstalled);
     assert!(!cache.probing());
 
-    install(folder.path());
+    let installed = install(folder.path());
     let served = cache.entries(search.clone(), false).await.unwrap();
     assert_eq!(
         codex(&served),
@@ -92,7 +100,7 @@ async fn a_cached_catalog_is_served_while_its_re_probe_runs_and_a_check_probes_n
     }
     assert!(ready, "the background probe replaced the cached catalog");
 
-    std::fs::remove_file(folder.path().join("codex")).unwrap();
+    std::fs::remove_file(&installed).unwrap();
     let checked = cache.entries(search.clone(), true).await.unwrap();
     assert_eq!(
         codex(&checked),
@@ -138,10 +146,10 @@ async fn a_cached_catalog_whose_harness_file_is_gone_is_probed_before_it_answers
         .unwrap();
     let search = Search::new(vec![folder.path().to_path_buf()], None, Vec::new());
     let cache = ProbeCache::new(Duration::from_secs(3600));
-    install(folder.path());
+    let installed = install(folder.path());
     let first = cache.entries(search.clone(), false).await.unwrap();
     assert_eq!(codex(&first), &HarnessStatus::Ready);
-    std::fs::remove_file(folder.path().join("codex")).unwrap();
+    std::fs::remove_file(&installed).unwrap();
     let served = cache.entries(search, false).await.unwrap();
     assert_eq!(
         codex(&served),
@@ -237,7 +245,7 @@ fn a_found_harness_the_resolver_cant_start_is_cant_run_over_ready_and_limited() 
         None,
         Vec::new(),
     ));
-    let places = crate::tools::Places::new(vec![folder.path().to_path_buf()], None);
+    let places = crate::tools::tools_new(vec![folder.path().to_path_buf()], None);
     let line = "codex needs ca-catalog-missing-runtime, which is missing. Install it, or run \
                 setup again from Settings. Then try again.";
     let cant_run = HarnessStatus::CantRun {

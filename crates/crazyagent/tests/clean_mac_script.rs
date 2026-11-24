@@ -47,7 +47,7 @@ fn gate(build: i32, test: i32, shape: Option<&str>) -> Run {
     fs::write(bin.join("cargo"), FAKE_CARGO).unwrap();
     fs::set_permissions(bin.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
     let gate: PathBuf = temp.path().join("gate");
-    let status = crazyagent::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("/bin/bash")
             .arg(&script)
             .env_clear()

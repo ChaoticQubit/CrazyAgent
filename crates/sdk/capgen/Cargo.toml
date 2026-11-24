@@ -1,0 +1,20 @@
+[package]
+name = "crazyagent-capgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "capgen"
+path = "src/main.rs"
+
+[dependencies]
+crazyagent-cap = { path = "../cap" }
+crazyagent-kernel-plugin-host = { path = "../../kernel/plugin_host", default-features = false }
+
+[dev-dependencies]
+wit-parser = "=0.263.0"

@@ -235,10 +235,10 @@ fn ide_commit(shim: &Path, project: &Path, folder: &Path, message: &str) -> Outp
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for (key, value) in ide::git::CONFIG_ENV {
+    for (key, value) in ide::git::config_env() {
         command.env(key, value);
     }
-    let output = crazyagent::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(
         output.status.success(),
         "IDE git commit in {}: {}",

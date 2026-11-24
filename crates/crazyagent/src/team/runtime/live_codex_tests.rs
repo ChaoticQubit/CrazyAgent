@@ -5,8 +5,10 @@ use super::managed_agent::{
 };
 use super::{Report, TurnEnd};
 use crate::team::{AgentRole, BackgroundAtEnd};
-use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::Tmux;
+use kernel_processes::terminal::{AgentId, Host};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
@@ -267,7 +269,12 @@ fn in_a_pane(prefix: &str) -> (tempfile::TempDir, Closing, ManagedAgent) {
         .unwrap();
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let agent = ManagedAgent::in_pane("codex", &real_codex(), host.clone(), AgentRole::Sub);
     (root, Closing::new(host), agent)
 }
@@ -497,7 +504,8 @@ fn planted_server_makes_its_marker(agent: &ManagedAgent, config: &str, marker: &
         .map(|argument| argument.as_str().unwrap())
         .collect::<Vec<_>>();
     let ran =
-        crate::spawn_gate::output(&mut agent.command(Path::new(program), &arguments)).unwrap();
+        kernel_processes::spawn_gate::output(&mut agent.command(Path::new(program), &arguments))
+            .unwrap();
     assert!(
         ran.status.success() && marker.exists(),
         "control: the planted server's own command made no marker inside the agent's sandbox"

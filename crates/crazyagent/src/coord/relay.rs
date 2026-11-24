@@ -755,7 +755,7 @@ fn serve_part(
 pub(crate) fn tag_key(tag: &str) -> Option<String> {
     let number: u128 = if tag == LEAD_TAG {
         0
-    } else if crate::terminal::pane_id_valid(tag) {
+    } else if kernel_processes::terminal::pane_id_valid(tag) {
         tag[1..].parse::<u128>().ok()? + 1
     } else {
         return None;
@@ -874,7 +874,7 @@ fn recipients(
         .map_err(state)?;
     for row in rows {
         let (id, pane) = row.map_err(state)?;
-        if crate::terminal::pane_id_valid(&pane) {
+        if kernel_processes::terminal::pane_id_valid(&pane) {
             team.insert(pane, id);
         }
     }
@@ -898,13 +898,17 @@ fn worktree(
     .map_err(state)
 }
 
-/// Replaces `relay.json`; a part or link an agent planted at the part name is removed
-/// first, and a failure leaves the last roster in place.
+/// Replaces `relay.json` unless it already holds these bytes as a plain file; a part or
+/// link an agent planted at the part name is removed first, and a failure leaves the last
+/// roster in place.
 fn write_roster(folder: &Mailbox, roster: &Roster) {
     let Ok(bytes) = serde_json::to_vec(roster) else {
         return;
     };
     if bytes.len() as u64 > ROSTER_BYTES_MAX {
+        return;
+    }
+    if read_entry(folder, ROSTER_FILE, ROSTER_BYTES_MAX).as_deref() == Some(bytes.as_slice()) {
         return;
     }
     let _ = folder.remove(ROSTER_PART);

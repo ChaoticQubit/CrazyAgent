@@ -1,9 +1,14 @@
 use super::*;
 use rusqlite::OptionalExtension;
 
+/// Opens the ledger in a new engine root whose `engine.db` is in write-ahead logging, as the
+/// engine's own store leaves it (`crate::storage::wal_refused`), so each begin and finish is
+/// one WAL commit and not a rollback journal file made and deleted. Output: the root, kept
+/// alive, and the connection.
 fn store() -> (tempfile::TempDir, Connection) {
     let root = tempfile::tempdir().unwrap();
     let db = open(root.path()).unwrap();
+    assert_eq!(crate::storage::wal_refused(&db).unwrap(), None);
     (root, db)
 }
 

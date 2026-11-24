@@ -1,8 +1,9 @@
 use super::*;
 use crate::master_session::{SESSION_DELETED, SessionDeleted};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::replay;
-use crate::state_log::{Aggregate, Appender, Draft, TOMBSTONE};
+use crate::state_log::replay;
+use kernel_storage::state_log::{Draft, TOMBSTONE};
 use serde_json::json;
 
 const TEAM: &str = "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1";
@@ -81,13 +82,13 @@ fn body_at(rows: &[LogRow], seq: u64) -> Vec<u8> {
 fn plant(case: &Case, events: &[(Aggregate, serde_json::Value)]) -> Vec<u64> {
     let mut db = case.db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, Fence::Engine(case.started.host.clone())).unwrap();
+    let mut log = crate::state_log::own(&tx, Fence::Engine(case.started.host.clone())).unwrap();
     let seqs = events
         .iter()
         .map(|(aggregate, body)| {
             let body = serde_json::to_vec(body).unwrap();
             log.append(&Draft {
-                aggregate: *aggregate,
+                aggregate: (*aggregate).into(),
                 kind: "Noted",
                 schema: 1,
                 at_ms: 1,
@@ -451,16 +452,15 @@ async fn deleting_a_deleted_session_again_logs_a_second_event_and_redacts_the_fi
     case.close().await;
 }
 
+/// The rows of each table [`live_and_rebuilt`] reads, in its order, each row as its column
+/// values.
+type TableRows = Vec<Vec<Vec<rusqlite::types::Value>>>;
+
 /// The master sessions, conversation entries, turns, preparations, waiting Resolves and
 /// profile receipts as they stand, then as a replay of the sessions events rebuilds them,
 /// both read in one write transaction that is rolled back. Input: the case. Output: the
 /// live rows and the rebuilt rows.
-fn live_and_rebuilt(
-    case: &Case,
-) -> (
-    Vec<Vec<Vec<rusqlite::types::Value>>>,
-    Vec<Vec<Vec<rusqlite::types::Value>>>,
-) {
+fn live_and_rebuilt(case: &Case) -> (TableRows, TableRows) {
     let mut db = case.db();
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -474,7 +474,7 @@ fn live_and_rebuilt(
             "master_waiting_resolves",
             "configured_master_profiles",
         ]
-        .map(|table| crate::state_log::replay::rows(tx, table).unwrap())
+        .map(|table| kernel_storage::state_log::replay::rows(tx, table).unwrap())
         .to_vec()
     };
     let live = read(&tx);

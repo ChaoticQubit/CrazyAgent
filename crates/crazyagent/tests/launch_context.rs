@@ -7,7 +7,7 @@ use crazyagent::coord::settings::{CoordSettings, RoleSkills, SkillRole};
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchLimits, LaunchRequest, command, command_with_context,
+    AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, command, command_with_context,
 };
 use crazyagent::launch_context::{self, AgentContext};
 use crazyagent::memory::ReviewDecision;
@@ -164,8 +164,7 @@ fn request(case: &Case, harness: &str, home: &Path, tools: bool) -> LaunchReques
         },
         model: Some("qwen2.5:0.5b".into()),
         tools,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     }

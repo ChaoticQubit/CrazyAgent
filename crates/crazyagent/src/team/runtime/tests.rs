@@ -14,7 +14,9 @@ use crate::team::status;
 
 use crate::terminal::FOLDER;
 
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 
 use std::process::{Command, Stdio};
 
@@ -169,7 +171,12 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(self.tmux.clone()),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn runtime(&self) -> TeamRuntime {
@@ -208,12 +215,38 @@ impl Fixture {
             transcript: Transcript::ClaudeSession { file },
         };
         let since = SystemTime::now();
-        let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
+        let pane = host
+            .spawn(
+                &AgentId::team(id).unwrap(),
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         PaneRecord {
             access: Some(AgentAccess::Sandboxed),
             toolchains: Some(Vec::new()),
             ..PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
         }
+    }
+
+    /// Starts a pane whose process ignores terminate and waits until its shell has set that
+    /// trap, so a terminate sent at once cannot end it before the trap holds (S4B-B1 rows).
+    /// Inputs: the host and the agent. Output: the pane's record.
+    #[cfg(target_os = "macos")]
+    fn pane_ignoring_terminate(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
+        let ready = self.base.join(format!("terminate-ignored-{id}"));
+        let shown = ready.display().to_string();
+        assert!(!shown.contains('\''), "{shown}");
+        let script = format!("trap '' TERM; : > '{shown}'; exec cat");
+        let record = self.pane_running(host, id, &["/bin/sh", "-c", &script]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the pane never set its trap: {shown}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        record
     }
 
     fn keep(&self, id: i64, record: &PaneRecord) {
@@ -268,7 +301,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(self.base.join(FOLDER).join(SOCKET))
@@ -1817,6 +1850,45 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
     }
 }
 
+/// V243-FIRMLINK-STATE (#448 r2 LOW): a team state named through /System/Volumes/Data is
+/// refused, since the launch gates compare it with one-spelled roots and its sandbox rules
+/// would never match, so a project inside it would see other agents' homes and tmp. The
+/// short name of the same folder opens.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_state_named_through_the_data_volume_is_refused() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-state-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let owner = connection.unchecked_transaction().unwrap();
+    crate::conversation::initialize(&owner).unwrap();
+    owner.commit().unwrap();
+    drop(connection);
+    let state = base.join("team");
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", state.display()));
+    let open = |state: &Path| {
+        TeamRuntime::open(
+            &database,
+            state,
+            BTreeMap::new(),
+            Box::new(|| None),
+            TeamLimits::default(),
+        )
+        .map(drop)
+    };
+    assert_eq!(
+        open(&long),
+        Err(EngineError("team_state_not_canonical".into()))
+    );
+    assert_eq!(open(&state), Ok(()));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
@@ -1871,7 +1943,7 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     let second = plan(2);
     let object = project.join(".git").join("objects");
     let head = String::from_utf8(
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .args(["rev-parse", "HEAD"])
                 .current_dir(&project)
@@ -1905,7 +1977,7 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
         fanout = quoted(fanout),
         moved = quoted(&fanout.with_extension("moved")),
     );
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(&first.sandbox_profile)
@@ -2189,7 +2261,7 @@ fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
             credential = quoted(&managed.join("auth.json")),
             mine = quoted(&own.join("note.txt")),
         );
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/sandbox-exec")
                 .arg("-f")
                 .arg(&plan.sandbox_profile)
@@ -2258,6 +2330,136 @@ fn the_master_framing_names_the_harnesses_an_empty_plan_can_use() {
     assert!(!typed.contains("record_answer"));
 }
 
+/// The master diagnoses and plans before it hands out work: its live role text and its
+/// opening frame, with or without team tools, tell it to find out what is wrong itself,
+/// reproduce or probe it, and give each sub-agent its part with an acceptance check, and
+/// no longer leave all hands-on work to sub-agents (V243-MASTER-ANALYZE-FIRST).
+#[test]
+fn the_master_diagnoses_and_plans_before_it_hands_out_work() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    for team_tool in [true, false] {
+        for text in [
+            framing(&setup, team_tool, &[], &[]),
+            live_instructions(&setup, team_tool),
+        ] {
+            assert!(!text.contains("Sub-agents do the hands-on work"), "{text}");
+            for rule in [
+                "## Your own task first",
+                "reproduce the failure or probe it",
+                "never a sub-agent's",
+                "Then plan:",
+                "the acceptance check",
+                "Name a cause you could not confirm as unconfirmed.",
+            ] {
+                assert!(text.contains(rule), "{rule}: {text}");
+            }
+        }
+    }
+}
+
+/// The phrases a master's hand-off text holds on every path without team tools, as the
+/// tools' task fields do: the finding, the agent's part and its acceptance check, a costly
+/// probe asked of the owner once, else an UNCONFIRMED cause with the owner's refusal and a
+/// first step that reproduces it without what was declined (#388 F1, V243-MASTER-*).
+const HAND_OFF_PHRASES: [&str; 7] = [
+    "what you found",
+    "this agent's part of your plan",
+    "its acceptance check",
+    "ask the owner once for a small probe",
+    "UNCONFIRMED",
+    "say what the owner declined",
+    "reproducing it without those resources the agent's first step",
+];
+
+/// A master without team tools hands out work in task blocks, so the block text asks for
+/// the same finding, part of the plan and acceptance check as the tools' task fields, and
+/// for a costly probe asked of the owner once, else an UNCONFIRMED cause (#388 F1).
+#[test]
+fn a_task_block_carries_the_finding_and_the_acceptance_check() {
+    let text = block_text();
+    for part in HAND_OFF_PHRASES {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A master without team tools wakes a finished sub-agent mid-session with the wake block
+/// alone, so that block carries the same hand-off text as a new task
+/// (V243-MASTER-WAKE-TEXT-HANDOFF).
+#[test]
+fn a_tools_off_wake_block_carries_the_finding_and_the_acceptance_check() {
+    let text = wake_text(&["- Ada (@docs), finished".into()], false, false);
+    for part in HAND_OFF_PHRASES {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A fresh frame without team tools that lists a finished sub-agent says what a task holds
+/// once, in its task block, and its wake block points there, while a wake block sent alone
+/// mid-session still carries the whole text (V243-HANDOFF-TEXT-TWICE, #411 rv-code4 F1).
+#[test]
+fn a_fresh_tools_off_frame_with_a_finished_sub_agent_says_what_a_task_holds_once() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let finished = ["- Ada (@docs), finished".to_owned()];
+    let framed = framing(&setup, false, &[], &finished);
+    assert_eq!(framed.matches(tool::HAND_OFF_TASK).count(), 1, "{framed}");
+    assert!(framed.contains(&finished[0]), "{framed}");
+    assert!(
+        framed.contains(
+            "\"task\": \"<the text>\"}\n```\nEach task holds what a task block holds, as above."
+        ),
+        "{framed}"
+    );
+    for part in HAND_OFF_PHRASES {
+        assert!(framed.contains(part), "{part}: {framed}");
+    }
+}
+
 #[test]
 fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
@@ -2299,11 +2501,16 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     };
     let mut wrong = Vec::new();
 
-    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    const NOTE_BYTES_MAX: usize = 128;
+    let normal = "# Panes\n\nPlan the page.\n";
+    std::fs::write(&brief, normal).unwrap();
     let framed = frame();
+    let around_bytes = framed
+        .as_deref()
+        .map_or(0, |text| text.len().saturating_sub(normal.len()));
     if !framed
         .as_deref()
-        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+        .is_some_and(|text| text.contains(&format!("Project brief:\n{normal}")))
     {
         wrong.push(("normal", framed));
     }
@@ -2319,7 +2526,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
 
     std::fs::remove_file(&brief).unwrap();
     assert!(
-        crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&brief))
+        kernel_processes::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&brief))
             .unwrap()
             .success()
     );
@@ -2346,7 +2553,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     if !framed.as_deref().is_some_and(|text| {
         text.contains("Project brief:\n# Panes\n\naaaa")
             && text.contains(&format!("The brief is {huge} bytes"))
-            && text.len() < BRIEF_BYTES_MAX + 2048
+            && text.len() <= around_bytes + BRIEF_BYTES_MAX + NOTE_BYTES_MAX
     }) {
         wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
     }
@@ -3608,7 +3815,7 @@ fn a_team_agent_starts_the_delegation_engine_from_its_app_bundle_but_no_other_bu
             )
             .unwrap();
         for (program, starts) in [(&engine, true), (&other, false)] {
-            let output = crate::spawn_gate::output(
+            let output = kernel_processes::spawn_gate::output(
                 Command::new(crate::sandbox::SANDBOX_EXEC)
                     .arg("-f")
                     .arg(&plan.sandbox_profile)
@@ -3829,7 +4036,7 @@ fn page_writer(fixture: &Fixture) -> (TeamRuntime, i64, Arc<Agents>) {
 /// git succeeded.
 #[cfg(target_os = "macos")]
 fn agent_git(fixture: &Fixture, worktree: &Path, arguments: &[&str]) {
-    let status = crate::spawn_gate::spawn(
+    let status = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -3896,7 +4103,7 @@ fn agent_places(fixture: &Fixture, member: i64) -> (PathBuf, PathBuf) {
 /// and the worktree. Returns the commit id.
 #[cfg(target_os = "macos")]
 fn agent_head(fixture: &Fixture, worktree: &Path) -> String {
-    let output = crate::spawn_gate::spawn(
+    let output = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -4414,7 +4621,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     let project = fixture.base.join("project");
     std::fs::write(project.join("OWNER.md"), "Written by the owner.\n").unwrap();
     for arguments in [&["add", "OWNER.md"][..], &["commit", "-qm", "Owner notes"]] {
-        let status = crate::spawn_gate::spawn(
+        let status = kernel_processes::spawn_gate::spawn(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -4724,6 +4931,65 @@ fn a_live_claude_master_whose_terminal_ends_resumes_its_conversation_and_logs_ea
         terminal_ended_notes(&fixture),
         1,
         "an owner stop adds no restart note"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// V243-MASTER-INPUT-ENDED-PANE (leader 04:56): a live master's interrupted run whose note
+/// comes due just as the master's pane ends, before the next tick sees it gone, waits instead
+/// of failing: the master's input reads the ended pane as not reading keys, so the run stays
+/// interrupted with no reason, never failed with the terminal's own code.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_interrupted_master_run_waits_when_its_live_master_s_pane_has_just_ended() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = claude_runtime(&fixture, &host, RESUMING_CLAUDE);
+    let project = fixture.setup.project_id.clone();
+    set_master(&fixture, "claude-code");
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Claude Code master runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let deadline = Instant::now() + WAIT;
+    while !(team.workers[&master].live && team.workers[&master].briefed) {
+        assert!(
+            Instant::now() < deadline,
+            "the live master is never briefed"
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        super::super::master::quiet(&fixture.connection, None, &project, now_ms()),
+        "the briefed master is idle, so its input reaches the pane check"
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO recovery_runs(agent,project,kind,harness,at_ms,turn,state) VALUES (?1,?2,'master','claude-code',1,1,'interrupted')",
+            params![master, PROJECT],
+        )
+        .unwrap();
+    host.kill(&AgentId::team(master).unwrap()).unwrap();
+
+    team.resume_interrupted(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let run: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT state,reason FROM recovery_runs WHERE agent=?1",
+            [master],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        run,
+        ("interrupted".to_owned(), None),
+        "a run whose master's pane just ended waits, never failed with the terminal's code"
     );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
@@ -5624,14 +5890,18 @@ fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
         transcript: Transcript::Unavailable,
     };
     let (all, per_pane) = (
-        crate::terminal::CONNECTIONS_MAX,
-        crate::terminal::VIEWERS_MAX,
+        kernel_processes::terminal::CONNECTIONS_MAX,
+        kernel_processes::terminal::VIEWERS_MAX,
     );
     let held: Vec<AgentId> = (0..=all.div_ceil(per_pane))
         .map(|at| AgentId::new(&format!("viewers-held-{at}")).unwrap())
         .collect();
     for pane in &held {
-        host.spawn(pane, &command).unwrap();
+        host.spawn(
+            pane,
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
     let (fresh, filled) = held.split_last().unwrap();
     let mut viewers = Vec::new();
@@ -9828,7 +10098,7 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
 /// Takes the folder and git's arguments.
 #[cfg(target_os = "macos")]
 fn git_text(folder: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .args(args)
             .current_dir(folder)
@@ -12404,7 +12674,7 @@ fn alive_by_pid_file(file: &Path) -> bool {
         .parse()
         .unwrap();
     let alive = || {
-        crate::spawn_gate::status(
+        kernel_processes::spawn_gate::status(
             Command::new("/bin/kill")
                 .arg("-0")
                 .arg(pid.to_string())
@@ -12648,8 +12918,7 @@ fn own_turn_outliving(
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -12740,6 +13009,92 @@ fn own_turn_outliving(
         finished,
         alive,
     }
+}
+
+/// DEC-200 (V243-AGENT-ORDERS-RECV): while a kept native lead's own turn runs, a stop order
+/// reaches `next_lead_turn` as it is sent, not after an `ORDER_WAIT` sleep. The order goes a
+/// fixed 15 ms after the worker starts, so a sleep step would hold it about 85 ms.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_order_reaches_a_lead_whose_own_turn_runs_without_the_order_sleep() {
+    let fixture = Fixture::new(1);
+    let base = fixture.base.join("own-order-wait");
+    let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
+    for path in [&home, &work, &bin] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let executable = bin.join("claude");
+    std::fs::write(
+        &executable,
+        OWN_BACKGROUND_CLAUDE.replace("/bin/sleep SECS\n", "/bin/sleep 1\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = base.join("agent.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable,
+        working_dir: work.canonicalize().unwrap(),
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        boundary: LaunchBoundary::Profile(profile),
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let host = fixture.host();
+    let mut session = AgentSession::Terminal(Box::new(
+        TerminalSession::start(
+            host.clone(),
+            AgentId::new("own-order-wait").unwrap(),
+            request,
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(matches!(
+        session.next_event(Duration::from_secs(5)).unwrap(),
+        Some(LaunchEvent::Ready { .. })
+    ));
+    session.follow_own_turns();
+    let (order, orders) = channel();
+    let (reports, _reported) = channel();
+    let (started, start) = channel();
+    let cancel = AtomicBool::new(false);
+    let mut own = OwnTurn {
+        running: true,
+        ..OwnTurn::default()
+    };
+    let mut rules = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let (lead, cancel_flag, own_state, rules) = (&mut session, &cancel, &mut own, &mut rules);
+    let (next, took) = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            started.send(()).unwrap();
+            next_lead_turn(&orders, cancel_flag, lead, &reports, own_state, rules)
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+        let sent = Instant::now();
+        order.send(Order::Stop).unwrap();
+        let next = worker.join().unwrap();
+        (next, sent.elapsed())
+    });
+    assert!(matches!(next, Next::Stop));
+    assert!(
+        took < ORDER_WAIT * 9 / 20,
+        "the stop order waited {took:?}, about the rest of an {ORDER_WAIT:?} sleep"
+    );
+    session.stop().unwrap();
+    host.close(&[]).unwrap();
 }
 
 /// N-E9 (OP-26): under Wait, a turn a kept native lead's app takes by itself that ends while
@@ -14881,7 +15236,7 @@ const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 /// home. Inputs: the folder, the home and the arguments. Output: git's output.
 #[cfg(target_os = "macos")]
 fn level_git(folder: &Path, home: &Path, arguments: &[&str]) -> std::process::Output {
-    crate::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -15534,8 +15889,57 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
     assert!(run.team.shutdown().unwrap().is_empty());
 }
 
+/// The Full access boundary of a hand-made plan (DEC-102): on macOS the project sandbox
+/// over a fresh folder in `scratch`, installed and marked unconfined; elsewhere none, since
+/// only macOS runs Full access. Input: a canonical, existing folder. Output: the boundary.
+fn full_access_boundary(scratch: &Path) -> Option<Arc<InstalledSandbox>> {
+    #[cfg(target_os = "macos")]
+    {
+        let [project, home, tmp] = ["project", "home", "tmp"].map(|name| scratch.join(name));
+        for folder in [&project, &home, &tmp] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let installed = InstalledSandbox::install(
+            sandbox,
+            &scratch.join("full-access.sb"),
+            kernel_sandbox::settings::LinuxSupervisor::On,
+            LinuxStrict::Off,
+        )
+        .unwrap();
+        Some(Arc::new(installed.unconfined()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = scratch;
+        None
+    }
+}
+
+/// Checks a Full access start of a hand-made plan: unconfined in the plan's Full access
+/// boundary where this system has one, refused with the plain macOS-only line elsewhere.
+/// Input: the start's result. Panics on any other answer.
+fn assert_full_access(start: Result<LaunchRequest, String>) {
+    if cfg!(target_os = "macos") {
+        let request = start.unwrap();
+        assert!(request.boundary.is_unconfined());
+        assert_eq!(request.boundary.confined_profile(), None);
+    } else {
+        let refused = start.unwrap_err();
+        assert!(
+            refused.starts_with(crate::sandbox::FULL_ACCESS_NEEDS_MACOS),
+            "{refused}"
+        );
+    }
+}
+
 #[test]
 fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-plan-full-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let full_access = full_access_boundary(&scratch.path().canonicalize().unwrap());
     let plan = |layout: Layout| Plan {
         harness: "codex".into(),
         executable: PathBuf::from("/bin/sh"),
@@ -15544,6 +15948,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         model: None,
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
+        full_access: full_access.clone(),
         access: AgentAccess::Full,
         toolchains: Vec::new(),
         network: crate::sandbox::policy::AgentNetwork::Open,
@@ -15571,27 +15976,23 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         home: PathBuf::from("/tmp/home"),
     };
     for layout in [Layout::Linked, Layout::Clone] {
-        let full = plan(layout).request(account(), AgentAccess::Full).unwrap();
-        assert!(
-            full.unconfined && full.sandbox_profile.is_none(),
-            "{layout:?}"
-        );
+        assert_full_access(plan(layout).request(account(), AgentAccess::Full));
         let own = plan(layout)
             .request(account(), AgentAccess::OwnBranch)
             .unwrap();
         assert!(
-            !own.unconfined,
+            !own.boundary.is_unconfined(),
             "{layout:?}: a plan started at Full is lowered"
         );
         assert_eq!(
-            own.sandbox_profile.as_deref(),
+            own.boundary.confined_profile(),
             Some(Path::new("/tmp/agent-1.sb"))
         );
     }
     let linked = plan(Layout::Linked)
         .request(account(), AgentAccess::Sandboxed)
         .unwrap();
-    assert!(!linked.unconfined && linked.sandbox_profile.is_some());
+    assert!(!linked.boundary.is_unconfined() && linked.boundary.confined_profile().is_some());
     let refused = plan(Layout::Clone)
         .request(account(), AgentAccess::Sandboxed)
         .unwrap_err();
@@ -17100,7 +17501,7 @@ fn a_fifo_or_link_at_an_agent_git_pointer_is_refused_without_waiting() {
 
     for planted in [&pointer, &back] {
         std::fs::remove_file(&planted.0).unwrap();
-        let made = crate::spawn_gate::status(
+        let made = kernel_processes::spawn_gate::status(
             Command::new("/usr/bin/mkfifo")
                 .arg(&planted.0)
                 .stdin(Stdio::null()),
@@ -19710,7 +20111,7 @@ fn only_a_launch_with_no_conversation_to_continue_starts_its_worker_fresh() {
 fn a_stop_that_leaves_a_command_running_says_so_and_the_agent_reads_stopped() {
     use crate::harnesses::leftovers::{LEFT, Lineage};
     let folder = tempfile::tempdir().unwrap();
-    let mut leader = crate::spawn_gate::spawn(
+    let mut leader = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/perl")
             .args([
                 "-mPOSIX",
@@ -20504,7 +20905,7 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
         &repository,
         &home,
         &tmp,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap()
     .confine_to_clone(&clone)
@@ -22814,7 +23215,8 @@ fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller(
     f.connection
         .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
         .unwrap();
-    let socket = crate::terminal::harness_socket(&f.base, &AgentId::team(lead).unwrap()).unwrap();
+    let socket =
+        crate::terminal::tmux::harness_socket(&f.base, &AgentId::team(lead).unwrap()).unwrap();
     assert!(std::fs::symlink_metadata(&socket).is_err());
     let caller = |pane: Option<&str>| {
         team_caller(
@@ -22880,7 +23282,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
             line.push_str(&format!("{byte:02x}"));
         }
         line.push('\n');
-        let mut stream = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+        let mut stream = kernel_processes::spawn_gate::connect_unix_std(&socket).unwrap();
         stream.write_all(line.as_bytes()).unwrap();
         streams.push(stream);
     }
@@ -22983,9 +23385,9 @@ fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead(
     line.push('\n');
     let other = std::process::id();
     assert_ne!(other, native.record.pid);
-    let mut named = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    let mut named = kernel_processes::spawn_gate::connect_unix_std(&socket).unwrap();
     named.write_all(line.as_bytes()).unwrap();
-    let mut asked = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    let mut asked = kernel_processes::spawn_gate::connect_unix_std(&socket).unwrap();
     asked.write_all(b"who\n").unwrap();
     let host_ref = host.as_ref();
     assert_eq!(
@@ -23256,7 +23658,7 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
             .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type())),
         "the socket is bound without the team tool"
     );
-    let mut asked = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    let mut asked = kernel_processes::spawn_gate::connect_unix_std(&socket).unwrap();
     std::io::Write::write_all(&mut asked, b"who\n").unwrap();
     asked
         .set_read_timeout(Some(Duration::from_millis(50)))
@@ -23512,6 +23914,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         model: None,
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
+        full_access: None,
         access: AgentAccess::OwnBranch,
         network: crate::sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
@@ -24737,7 +25140,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
         ),
     ] {
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let record = fixture.pane_ignoring_terminate(&host, id);
         let agent = AgentId::team(id).unwrap();
         let adoption = Adoption {
             host: host.clone(),
@@ -25339,6 +25742,10 @@ fn a_registered_native_teammate_shows_once_in_the_owner_graph_as_its_own_row() {
 
 #[test]
 fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_otherwise() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-native-full-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
     let plan = Plan {
         harness: "claude-code".into(),
         executable: PathBuf::from("/usr/bin/true"),
@@ -25347,6 +25754,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         model: None,
         tools: true,
         sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
+        full_access: full_access_boundary(&scratch.path().canonicalize().unwrap()),
         access: AgentAccess::Sandboxed,
         network: crate::sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
@@ -25380,23 +25788,26 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
     );
     for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
         let request = plan.request(account(), access).unwrap();
-        assert!(!request.unconfined);
-        assert_eq!(request.sandbox_profile, Some(plan.sandbox_profile.clone()));
+        assert!(!request.boundary.is_unconfined());
+        assert_eq!(
+            request.boundary.confined_profile(),
+            Some(plan.sandbox_profile.as_path())
+        );
     }
     let app_spawned = Plan {
         native: false,
         tmux: None,
         ..plan
     };
-    let request = app_spawned.request(account(), AgentAccess::Full).unwrap();
-    assert!(request.unconfined && request.sandbox_profile.is_none());
+    assert_full_access(app_spawned.request(account(), AgentAccess::Full));
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_on_agent_profile_follows_the_project_network_choice() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::policy::AgentNetwork;
-    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    use kernel_sandbox::net::SandboxRemote;
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let make = |name: &str| {
@@ -25507,7 +25918,7 @@ fn prepare_tools_on(
 /// Inputs: the runtime, the agent and its plan, and the port. Output: what nc printed.
 #[cfg(target_os = "macos")]
 fn nc_under_profile(runtime: &TeamRuntime, id: i64, plan: &Plan, port: u16) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -25531,7 +25942,7 @@ fn nc_under_profile(runtime: &TeamRuntime, id: i64, plan: &Plan, port: u16) -> S
 #[cfg(target_os = "macos")]
 fn proxy_status(port: u16, target: &str) -> String {
     use std::io::{BufRead, Write};
-    let mut client = match crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)) {
+    let mut client = match kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)) {
         Ok(client) => client,
         Err(error) => return format!("no proxy on {port}: {error}"),
     };
@@ -25660,7 +26071,7 @@ fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_it
         assert_eq!(proxy_status(port, target), status, "{target}");
     }
     drop(plan);
-    assert!(crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_err());
+    assert!(kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_err());
 }
 
 /// Under the None network a live master with tools reaches the network only through its
@@ -25973,7 +26384,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
             .contains(&AgentId::team(kept).unwrap())
     );
     let deadline = Instant::now() + WAIT;
-    while crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_ok() {
+    while kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_ok() {
         assert!(
             Instant::now() < deadline,
             "the model proxy outlived its worker"
@@ -25983,7 +26394,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
 
     let taken = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
     let held = free();
-    let holder = crate::spawn_gate::bind_tcp_std(("127.0.0.1", held)).unwrap();
+    let holder = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", held)).unwrap();
     let record = PaneRecord {
         proxy: Some(held),
         ..fixture.pane(&host, taken)
@@ -26003,7 +26414,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     drop(holder);
 
     let old = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
-    let outside = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
+    let outside = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
         .unwrap()
         .local_addr()
         .unwrap()
@@ -26020,7 +26431,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         "The terminal of team agent {old} was closed: its model proxy port {outside} is outside the ports CrazyAgent uses now."
     )));
     assert!(
-        crate::spawn_gate::connect_tcp_std(("127.0.0.1", outside)).is_err(),
+        kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", outside)).is_err(),
         "a model proxy listens on {outside}"
     );
     assert!(last.shutdown().unwrap().is_empty());
@@ -27525,7 +27936,7 @@ done
 /// arguments. Returns tmux's standard output; panics unless tmux succeeds.
 #[cfg(target_os = "macos")]
 fn test_tmux(fixture: &Fixture, arguments: &[&str]) -> String {
-    let done = crate::spawn_gate::output(
+    let done = kernel_processes::spawn_gate::output(
         Command::new(&fixture.tmux)
             .arg("-S")
             .arg(fixture.base.join(FOLDER).join(SOCKET))
@@ -27567,7 +27978,7 @@ fn teammate_split_running(fixture: &Fixture, lead_pane: &str, command: &str) -> 
         ],
     );
     test_tmux(fixture, &["select-layout", "-t", lead_pane, "tiled"]);
-    assert!(crate::terminal::pane_id_valid(&pane), "{pane}");
+    assert!(kernel_processes::terminal::pane_id_valid(&pane), "{pane}");
     pane
 }
 
@@ -28187,7 +28598,7 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
         end_reported(
             mate,
             sender,
-            || -> Result<bool, crate::terminal::HostError> { panic!("the end failed") },
+            || -> Result<bool, kernel_processes::terminal::HostError> { panic!("the end failed") },
         );
     })
     .join();
@@ -28208,6 +28619,64 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
         error.as_deref(),
         Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
     );
+    team.shutdown().unwrap();
+}
+
+/// #393 F1 (DEC-200): a native teammate's end that fails with a host error other than an
+/// unknown agent leaves its row to a later tick, so its end thread does not wake the team
+/// loop; a wake there would run the loop back to back for as long as the error lasts. The
+/// host here has no tmux and is set as the terminal as is, since attaching one asks it for
+/// its panes first, so every end the owner's stop pass starts fails the same way.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
+    const PASSES: u64 = 40;
+    let fixture = Fixture::new(1);
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        None,
+        &fixture.base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
+    let mut team = fixture.runtime();
+    team.terminal = Some(host);
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+
+    let before = wakes_seen();
+    for _ in 0..PASSES {
+        assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let woken = wakes_seen().wrapping_sub(before);
+    assert!(
+        woken < PASSES / 2,
+        "{woken} wakes in {PASSES} stop passes over an end that keeps failing"
+    );
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1",
+            [mate],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "working");
     team.shutdown().unwrap();
 }
 
@@ -28293,7 +28762,8 @@ fn an_over_cap_lead_is_noted_once_its_teammates_end_is_marked() {
             )
             .unwrap()
     };
-    let hand = |team: &mut TeamRuntime, outcome: Result<bool, crate::terminal::HostError>| {
+    let hand = |team: &mut TeamRuntime,
+                outcome: Result<bool, kernel_processes::terminal::HostError>| {
         team.unmanaged_ending.insert(
             mate,
             PendingEnd {
@@ -28312,7 +28782,9 @@ fn an_over_cap_lead_is_noted_once_its_teammates_end_is_marked() {
 
     hand(
         &mut team,
-        Err(crate::terminal::HostError("terminal_host_failed".into())),
+        Err(kernel_processes::terminal::HostError(
+            "terminal_host_failed".into(),
+        )),
     );
     assert_eq!(notes(), 0, "a failed end noted the lead");
     let status: String = fixture
@@ -28349,7 +28821,7 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
             params![mate, lead],
         )
         .unwrap();
-    let _record = fixture.pane_running(&host, mate, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    let _record = fixture.pane_ignoring_terminate(&host, mate);
     fixture
         .connection
         .execute(
@@ -28426,14 +28898,16 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
         scratches.push(Scratch(home));
         std::fs::create_dir_all(agent_teammates_socket_name(&state, lead).parent().unwrap())
             .unwrap();
-        let socket =
-            crate::terminal::renew_teammates_socket(&fixture.base, &AgentId::team(lead).unwrap())
-                .unwrap();
+        let socket = crate::terminal::tmux::renew_teammates_socket(
+            &fixture.base,
+            &AgentId::team(lead).unwrap(),
+        )
+        .unwrap();
         match shape {
             "refuses" => {
-                drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+                drop(kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap());
                 assert_eq!(
-                    crate::spawn_gate::connect_unix_std(&socket)
+                    kernel_processes::spawn_gate::connect_unix_std(&socket)
                         .unwrap_err()
                         .kind(),
                     std::io::ErrorKind::ConnectionRefused,
@@ -28441,9 +28915,9 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
                 );
             }
             "accepts" => {
-                live.push(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+                live.push(kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap());
                 assert!(
-                    crate::spawn_gate::connect_unix_std(&socket).is_ok(),
+                    kernel_processes::spawn_gate::connect_unix_std(&socket).is_ok(),
                     "the socket stays and accepts a connect"
                 );
             }
@@ -29805,7 +30279,7 @@ impl Drop for LeadServersDown {
             {
                 continue;
             }
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(&self.tmux)
                     .arg("-S")
                     .arg(&socket)
@@ -29896,7 +30370,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     assert!(plan.native, "the lead starts with native teammates");
     assert_eq!(plan.sandbox_profile, agent_profile(&runtime.state, id));
     let lead = AgentId::team(id).unwrap();
-    let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+    let socket = crate::terminal::tmux::harness_socket(&fixture.base, &lead).unwrap();
     let _down = LeadServersDown {
         host: host.clone(),
         lead: lead.clone(),
@@ -29927,8 +30401,13 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         ],
         transcript: Transcript::ClaudeSession { file: session },
     };
-    let placed = host.spawn_own_server(&lead, &command).unwrap();
-    assert!(crate::terminal::pane_id_valid(&placed.pane));
+    let placed = host
+        .spawn_own_server(
+            &lead,
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
+    assert!(kernel_processes::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");
     let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
@@ -29962,7 +30441,10 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     )
     .unwrap();
     let teammate = lines_written(&split, 1).trim().to_owned();
-    assert!(crate::terminal::pane_id_valid(&teammate), "{teammate:?}");
+    assert!(
+        kernel_processes::terminal::pane_id_valid(&teammate),
+        "{teammate:?}"
+    );
     let attempts = lines_written(&tried, 2);
     let after = work.join("after.txt");
     host.input(
@@ -30603,7 +31085,7 @@ fn ended_native_lead_on<T>(
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
     let lead = AgentId::team(id).unwrap();
-    let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+    let mates_socket = crate::terminal::tmux::teammates_socket(&fixture.base, &lead).unwrap();
     let _down = LeadServersDown {
         host: host.clone(),
         lead: lead.clone(),
@@ -30612,7 +31094,7 @@ fn ended_native_lead_on<T>(
     };
     if earlier {
         use std::os::unix::fs::DirBuilderExt;
-        let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+        let socket = crate::terminal::tmux::harness_socket(&fixture.base, &lead).unwrap();
         let folder = socket.parent().unwrap();
         if !folder.exists() {
             std::fs::DirBuilder::new()
@@ -30621,7 +31103,7 @@ fn ended_native_lead_on<T>(
                 .create(folder)
                 .unwrap();
         }
-        let started = crate::spawn_gate::status(
+        let started = kernel_processes::spawn_gate::status(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(crate::team::runtime::agent_profile(
@@ -30728,7 +31210,7 @@ fn hand_warden_pid(folder: &Path) {
         return;
     };
     assert!(server > 1, "the stand-in named a server process");
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-ax", "-o", "pid=,ppid=,comm="])
             .env_clear()
@@ -30808,14 +31290,15 @@ fn native_lead_past_its_deadline(
         },
         |session, host, lead| {
             let root: &PathBuf = root.get().expect("the host was opened on the engine root");
-            let own = crate::terminal::harness_socket(root, lead).unwrap();
-            let mates = crate::terminal::teammates_socket(root, lead).unwrap();
+            let own = crate::terminal::tmux::harness_socket(root, lead).unwrap();
+            let mates = crate::terminal::tmux::teammates_socket(root, lead).unwrap();
             if !renewed_first {
                 host.renew(SystemTime::now() + Duration::from_secs(4))
                     .unwrap();
             }
             moved(&mates);
-            let ended = |socket: &Path| crate::spawn_gate::connect_unix_std(socket).is_err();
+            let ended =
+                |socket: &Path| kernel_processes::spawn_gate::connect_unix_std(socket).is_err();
             let deadline = Instant::now() + WAIT;
             while !(ended(&own) && ended(&mates)) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(200));
@@ -31238,7 +31721,7 @@ fn a_native_lead_s_teammate_starts_through_the_command_its_lead_s_app_runs() {
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
     let lead = AgentId::team(id).unwrap();
-    let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+    let mates_socket = crate::terminal::tmux::teammates_socket(&fixture.base, &lead).unwrap();
     let _down = LeadServersDown {
         host: host.clone(),
         lead: lead.clone(),
@@ -31276,7 +31759,7 @@ fn a_native_lead_s_teammate_starts_through_the_command_its_lead_s_app_runs() {
         .unwrap_or_default()
         .iter()
         .map(|pane| {
-            let shown = crate::spawn_gate::output(
+            let shown = kernel_processes::spawn_gate::output(
                 Command::new(crate::sandbox::SANDBOX_EXEC)
                     .arg("-f")
                     .arg(&plan.sandbox_profile)
@@ -31405,7 +31888,7 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
         ),
     )
     .unwrap();
-    let mated = crate::spawn_gate::output(
+    let mated = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
@@ -31421,7 +31904,7 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
     )
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -31732,7 +32215,7 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
             assert!(path.is_dir(), "{who}: {name} is made before it runs");
             lines.extend(flag_lines(name, &quoted(path.as_path())));
         }
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&profile)
@@ -31887,7 +32370,7 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
         ),
     )
     .unwrap();
-    let mated = crate::spawn_gate::output(
+    let mated = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
@@ -31903,7 +32386,7 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     )
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -32070,7 +32553,7 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
         ),
     )
     .unwrap();
-    let planted = crate::spawn_gate::output(
+    let planted = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -32107,7 +32590,7 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
         ("/bin/zsh", &["-l", "-c", "true"][..]),
         ("/bin/bash", &["-l", "-c", "true"][..]),
     ] {
-        let ran = crate::spawn_gate::output(
+        let ran = kernel_processes::spawn_gate::output(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&plan.sandbox_profile)
@@ -32177,10 +32660,8 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
             problems.push(format!("{entry} kept by the launch"));
         }
     }
-    for entry in ["projects/note"] {
-        if std::fs::symlink_metadata(home.join(entry)).is_err() {
-            problems.push(format!("{entry} removed by the launch"));
-        }
+    if std::fs::symlink_metadata(home.join("projects/note")).is_err() {
+        problems.push("projects/note removed by the launch".to_owned());
     }
     if marker.exists() {
         problems.push(format!(
@@ -32271,7 +32752,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         ),
     )
     .unwrap();
-    let planted = crate::spawn_gate::output(
+    let planted = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -32287,7 +32768,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
     )
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
-    let unpinned = crate::spawn_gate::output(
+    let unpinned = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/chflags")
             .arg("nouchg")
             .arg(&home)
@@ -32296,7 +32777,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
     );
-    let acl_cleared = crate::spawn_gate::output(
+    let acl_cleared = kernel_processes::spawn_gate::output(
         Command::new("/bin/chmod")
             .arg("-N")
             .arg(home.join(".claude.json"))
@@ -32447,7 +32928,7 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
     );
 
     let staged = own.join("staged.txt");
-    let staging = crate::spawn_gate::output(
+    let staging = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -32500,7 +32981,7 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
         ),
     )
     .unwrap();
-    let mated = crate::spawn_gate::output(
+    let mated = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
@@ -32691,7 +33172,7 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
         ),
     )
     .unwrap();
-    let mated = crate::spawn_gate::output(
+    let mated = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
@@ -32707,7 +33188,7 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
     )
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -32878,7 +33359,7 @@ fn a_native_teammate_cannot_move_or_replace_its_lead_s_home() {
         ),
     )
     .unwrap();
-    let mated = crate::spawn_gate::output(
+    let mated = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(agent_teammates_profile(&runtime.state, id))
@@ -32894,7 +33375,7 @@ fn a_native_teammate_cannot_move_or_replace_its_lead_s_home() {
     )
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
@@ -33061,7 +33542,7 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
         ),
     )
     .unwrap();
-    let mated = crate::spawn_gate::output(
+    let mated = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(agent_teammates_profile(&runtime.state, id))

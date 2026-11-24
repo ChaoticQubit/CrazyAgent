@@ -1,6 +1,6 @@
 use super::*;
+use crate::credentials::Keychain;
 use crate::credentials::test_keychain::TestKeychain;
-use crate::credentials::{Keychain, SecretString, Store, reference};
 use crate::github::test_server::{Answer, Server};
 use crate::github::{
     Endpoints, GitHub, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep, GitHubRuleOutcome,
@@ -8,6 +8,8 @@ use crate::github::{
 };
 use crate::protocol::SessionId;
 use crate::questions::{Answer as Picked, Question, QuestionKind, Settlement};
+use kernel_security::secret::SecretString;
+use kernel_security::store::{Store, reference};
 use rusqlite::TransactionBehavior;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
@@ -802,7 +804,10 @@ fn the_proposer_hears_who_gets_the_outcome() {
 fn a_proposal_whose_question_cannot_be_kept_leaves_no_row_and_no_question() {
     let case = Case::new();
     case.done(REPO);
-    assert_eq!(start_store(&case.db).unwrap(), 0);
+    assert_eq!(
+        start_store(&case.db, crate::storage::opening::Opening::for_test(1)).unwrap(),
+        0
+    );
     case.db
         .execute_batch(
             "CREATE TRIGGER keep_fails BEFORE UPDATE OF question ON github_rule_requests

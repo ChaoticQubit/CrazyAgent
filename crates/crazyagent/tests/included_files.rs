@@ -1,4 +1,4 @@
-use crazyagent::spawn_gate;
+use kernel_processes::spawn_gate;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 

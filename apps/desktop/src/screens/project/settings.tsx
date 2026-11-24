@@ -5,8 +5,7 @@ import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type HiddenRunKind, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntakeJob, IntentReceipt, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
-import { loadIntakeJob } from "../../api-intake";
-import { refusalLine } from "../intake/intake";
+import { intakeCopy } from "../../api-intake";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -242,15 +241,15 @@ export function watchRemoveAsk(projectId: string, onAsk: (choice: RemoveChoice) 
   return () => window.removeEventListener("hashchange", take);
 }
 
-/** Starts the engine's job that deletes a project once its exact name is typed (DEC-177 add.1).
- * Inputs: the project id, the typed name, the start and the job read a busy refusal names the
- * running job from. Output: the started job, or the note the dialog's section shows. */
-export async function deleteStart(id: string, typed: string, start = startDeleteJob,
-  read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<{ kind: "started"; job: IntakeJob } | { kind: "refused"; note: string }> {
+/** Starts the engine's job that deletes a project once its exact name is typed (DEC-177 add.1);
+ * it may wait its turn behind other jobs (DEC-197). Inputs: the project id, the typed name and
+ * the start. Output: the started job, or the note the dialog's section shows. */
+export async function deleteStart(id: string, typed: string, start = startDeleteJob): Promise<{ kind: "started"; job: IntakeJob } | { kind: "refused"; note: string }> {
   const result = await start(id, typed);
   if (result.kind === "ok") return { kind: "started", job: result.value };
   if (result.kind === "not_ready") return { kind: "refused", note: "Not ready yet: deleting a project isn't in this build." };
-  return { kind: "refused", note: await refusalLine(result.code, failureCopy(result), read) };
+  const job = result.code === "job_busy" || result.code === "job_same_folder";
+  return { kind: "refused", note: job ? intakeCopy(result.code) : failureCopy(result) };
 }
 
 /** Settings' Remove project: the section, and its dialog, opened by the button or by a route
@@ -545,11 +544,15 @@ export function seersLine(agents: TeamAgent[]): string {
   return `${agents.map((agent) => agent.label).join(", ")} started before a folder was hidden and can still open it.`;
 }
 
-/** Whether the hidden folders section is offered: until the engine's read says this system
- * has no hidden folders (DEC-194), so it shows while loading. Input: the latest read, or null.
+export const HIDDEN_MACOS_ONLY = "Hidden folders work only on macOS for now.";
+export const HIDDEN_MACOS_CLEAR = "Hidden folders work only on macOS for now, so agents here don't start while this list holds a folder. Remove them and save.";
+
+/** Whether the hidden folders section offers editing: unless the engine's read says this
+ * system's boundary cannot hold hidden folders and nothing is saved (#590), so a list saved
+ * before can still be cleared, and it shows while loading. Input: the latest read, or null.
  * Output: true when offered. */
 export function hiddenOffered(saved: HiddenPaths | null): boolean {
-  return saved?.unavailable !== true;
+  return saved?.unavailable !== true || saved.paths.length > 0;
 }
 
 function HiddenSection({ data }: { data: ProjectData }) {
@@ -637,10 +640,11 @@ function HiddenSection({ data }: { data: ProjectData }) {
     data.reloadTeam();
   }
 
-  if (!hiddenOffered(latest)) return null;
+  if (!hiddenOffered(latest)) return <div className="pj-stack"><h2>Folders agents can't open</h2><p className="pj-secondary">{HIDDEN_MACOS_ONLY}</p></div>;
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
+    {latest?.unavailable && <p className="pj-note warn" role="status">{HIDDEN_MACOS_CLEAR}</p>}
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>
     {fullAccess && <p className="pj-note warn" role="status">Full access runs agents without a sandbox, so hidden folders do not apply.</p>}
     {!fullAccess && <p className="pj-secondary">{HIDDEN_SEERS_COVER}</p>}
@@ -655,7 +659,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
       {paths.map((path) => <li key={path}><span className="pj-mono">{displayText(path)}</span>{" "}
         <button type="button" className="btn" aria-label={`Stop hiding ${path}`} onClick={() => setPaths(paths.filter((item) => item !== path))}>Remove</button></li>)}
     </ul>}
-    {saved !== null && <form className="pj-field" onSubmit={(event) => { event.preventDefault(); add(); }}>
+    {saved !== null && !latest?.unavailable && <form className="pj-field" onSubmit={(event) => { event.preventDefault(); add(); }}>
       <label className="pj-label" htmlFor="ps-hidden-path">Folder path</label>
       <input id="ps-hidden-path" className="pj-input" value={typed} placeholder="/Users/you/project/secrets" onChange={(event) => setTyped(event.target.value)} />
       <div><button type="submit" className="btn" disabled={!typed.trim()}>Hide folder</button></div>

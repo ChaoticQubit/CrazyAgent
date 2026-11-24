@@ -758,6 +758,8 @@ fn the_reset_watch_waits_for_the_engine() {
 
 fn shop(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: crate::protocol::RequestId::new("add-1").unwrap(),
         kind: crate::projects_home::job::JobKind::Add,
         project_id: None,
@@ -776,8 +778,8 @@ fn intake_arrival(query: IntakeQuery, result: Result<IntakeView, String>) -> Arr
     }))))
 }
 
-fn status_arrival(job: Option<JobView>) -> Arrival {
-    intake_arrival(IntakeQuery::JobStatus, Ok(IntakeView::Job(job)))
+fn status_arrival(jobs: Vec<JobView>) -> Arrival {
+    intake_arrival(IntakeQuery::JobStatus, Ok(IntakeView::Jobs(jobs)))
 }
 
 fn intake_asks(shell: &mut Shell) -> Vec<String> {
@@ -803,17 +805,17 @@ fn a_running_intake_job_is_read_again_between_ticks_and_no_other_is() {
     assert!(!shell.read_running_job(), "no job is stored");
     assert!(intake_asks(&mut shell).is_empty());
 
-    shell.arrive(status_arrival(Some(shop(JobState::Copying {
+    shell.arrive(status_arrival(vec![shop(JobState::Copying {
         copied: 3,
         checked: 0,
-    }))));
+    })]));
     drain(&mut shell);
     assert!(shell.read_running_job(), "the stored job runs");
     let asks = intake_asks(&mut shell);
     assert_eq!(asks.len(), 1, "{asks:?}");
     assert!(asks[0].contains("JobStatus"), "{asks:?}");
 
-    shell.arrive(status_arrival(Some(shop(JobState::Done))));
+    shell.arrive(status_arrival(vec![shop(JobState::Done)]));
     drain(&mut shell);
     assert!(!shell.read_running_job(), "the stored job ended");
     assert!(intake_asks(&mut shell).is_empty());
@@ -836,8 +838,8 @@ fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again()
         checked: 0,
     });
     shell.ctx.say(Message::success("Saved.", ""));
-    shell.arrive(status_arrival(Some(running.clone())));
-    assert_eq!(shell.ctx.store.intake.as_ref(), Some(&running));
+    shell.arrive(status_arrival(vec![running.clone()]));
+    assert_eq!(shell.ctx.store.intake, std::slice::from_ref(&running));
     assert_eq!(
         shell.ctx.message().map(|said| said.lead.as_str()),
         Some("Saved.")
@@ -845,7 +847,7 @@ fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again()
     assert!(intake_asks(&mut shell).is_empty());
 
     let done = shop(JobState::Done);
-    shell.arrive(status_arrival(Some(done.clone())));
+    shell.arrive(status_arrival(vec![done.clone()]));
     let said = shell.ctx.message().expect("the end is said");
     assert_eq!(
         (said.tone, said.lead.as_str()),
@@ -859,7 +861,7 @@ fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again()
     assert!(asks[0].contains("Found"), "{asks:?}");
 
     shell.ctx.say(Message::success("Saved.", ""));
-    shell.arrive(status_arrival(Some(done.clone())));
+    shell.arrive(status_arrival(vec![done.clone()]));
     shell.arrive(intake_arrival(
         IntakeQuery::JobStatus,
         Err("owner_timeout".into()),
@@ -869,8 +871,8 @@ fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again()
         Some("Saved.")
     );
     assert_eq!(
-        shell.ctx.store.intake.as_ref(),
-        Some(&done),
+        shell.ctx.store.intake,
+        std::slice::from_ref(&done),
         "a failed read keeps it"
     );
     assert!(intake_asks(&mut shell).is_empty());
@@ -884,8 +886,78 @@ fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again()
     let asks = intake_asks(&mut shell);
     assert_eq!(asks.len(), 1, "{asks:?}");
     assert!(asks[0].contains("JobStatus"), "{asks:?}");
-    shell.arrive(status_arrival(None));
-    assert_eq!(shell.ctx.store.intake, None);
+    shell.arrive(status_arrival(Vec::new()));
+    assert!(shell.ctx.store.intake.is_empty());
+}
+
+/// DEC-197: the store keeps every job the engine reads; a start adds its job beside the
+/// running one, each job's end is said once while the other still runs and is read again,
+/// and the last one's end is said in its turn.
+#[test]
+fn each_of_several_intake_jobs_is_kept_and_its_end_said_once_while_the_others_run() {
+    let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+    drain(&mut shell);
+    let garden = |state| JobView {
+        id: crate::protocol::RequestId::new("add-2").unwrap(),
+        source: "/Users/mira/Desktop/garden".into(),
+        ..shop(state)
+    };
+    let copying = JobState::Copying {
+        copied: 3,
+        checked: 0,
+    };
+    shell.arrive(status_arrival(vec![shop(copying.clone())]));
+    let started = garden(JobState::Waiting {
+        behind: "shop".into(),
+    });
+    shell.arrive(intake_arrival(
+        IntakeQuery::JobStart {
+            id: started.id.clone(),
+            subject: crate::projects_home::job::JobSubject::Add {
+                path: started.source.clone(),
+            },
+            mode: crate::projects_home::AddMode::Move,
+            overrides: Vec::new(),
+        },
+        Ok(IntakeView::Job(Some(started.clone()))),
+    ));
+    assert_eq!(
+        shell.ctx.store.intake,
+        [shop(copying.clone()), started.clone()]
+    );
+
+    shell.ctx.say(Message::success("Saved.", ""));
+    let shop_ended = vec![shop(JobState::Done), garden(copying.clone())];
+    shell.arrive(status_arrival(shop_ended.clone()));
+    assert_eq!(shell.ctx.store.intake, shop_ended);
+    assert_eq!(
+        shell.ctx.message().map(|said| said.lead.as_str()),
+        Some("shop is in your projects folder. Set it up from Home.")
+    );
+    let asks = intake_asks(&mut shell);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(asks[0].contains("Found"), "{asks:?}");
+    assert!(shell.read_running_job(), "garden still runs");
+    let asks = intake_asks(&mut shell);
+    assert!(asks.len() == 1 && asks[0].contains("JobStatus"), "{asks:?}");
+
+    shell.ctx.say(Message::success("Saved.", ""));
+    shell.arrive(status_arrival(shop_ended));
+    assert_eq!(
+        shell.ctx.message().map(|said| said.lead.as_str()),
+        Some("Saved."),
+        "shop's end is said once"
+    );
+
+    shell.arrive(status_arrival(vec![
+        shop(JobState::Done),
+        garden(JobState::Done),
+    ]));
+    assert_eq!(
+        shell.ctx.message().map(|said| said.lead.as_str()),
+        Some("garden is in your projects folder. Set it up from Home.")
+    );
+    assert!(!shell.read_running_job(), "both ended");
 }
 
 /// A job that ends failed, stopped or asking for an answer is said as a warning, and a
@@ -894,9 +966,13 @@ fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again()
 fn an_intake_job_that_did_not_land_is_said_as_a_warning_and_a_stop_reads_it_again() {
     let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
     let running = shop(JobState::Downloading {
-        progress: crate::projects_home::icloud::Progress { total: 3, done: 1 },
+        progress: crate::projects_home::icloud::Progress {
+            total: 3,
+            done: 1,
+            ..Default::default()
+        },
     });
-    shell.arrive(status_arrival(Some(running.clone())));
+    shell.arrive(status_arrival(vec![running.clone()]));
     shell.arrive(intake_arrival(
         IntakeQuery::JobStop {
             id: running.id.clone(),
@@ -917,8 +993,8 @@ fn an_intake_job_that_did_not_land_is_said_as_a_warning_and_a_stop_reads_it_agai
         },
     ];
     for state in ended {
-        shell.arrive(status_arrival(Some(running.clone())));
-        shell.arrive(status_arrival(Some(shop(state.clone()))));
+        shell.arrive(status_arrival(vec![running.clone()]));
+        shell.arrive(status_arrival(vec![shop(state.clone())]));
         let said = shell.ctx.message().expect("the end is said");
         assert_eq!(said.tone, super::super::frame::Tone::Warning, "{state:?}");
     }
@@ -933,25 +1009,34 @@ fn the_header_shows_the_running_intake_job_and_nothing_once_it_ended() {
         progress: crate::projects_home::icloud::Progress {
             total: 3000,
             done: 12,
+            ..Default::default()
         },
     });
-    let shown = |job: Option<&JobView>, status: &str| {
+    let shown = |jobs: &[JobView], status: &str| {
         let status = Line::raw(status.to_owned());
-        crate::tui::text::plain(&with_intake(job, status, &theme, &UNICODE))
+        crate::tui::text::plain(&with_intake(jobs, status, &theme, &UNICODE))
     };
     assert_eq!(
-        shown(Some(&running), "Ready"),
+        shown(std::slice::from_ref(&running), "Ready"),
         "Downloading shop: 12 of 3000  Ready"
     );
-    assert_eq!(shown(Some(&running), ""), "Downloading shop: 12 of 3000");
-    assert_eq!(shown(Some(&shop(JobState::Done)), "Ready"), "Ready");
-    assert_eq!(shown(None, "Ready"), "Ready");
-    assert_eq!(shown(None, ""), "");
+    assert_eq!(
+        shown(std::slice::from_ref(&running), ""),
+        "Downloading shop: 12 of 3000"
+    );
+    assert_eq!(shown(&[shop(JobState::Done)], "Ready"), "Ready");
+    assert_eq!(
+        shown(&[shop(JobState::Done), running.clone()], "Ready"),
+        "Downloading shop: 12 of 3000  Ready",
+        "the first running job of several"
+    );
+    assert_eq!(shown(&[], "Ready"), "Ready");
+    assert_eq!(shown(&[], ""), "");
     let long = JobView {
         source: format!("/Users/mira/{}", "a".repeat(200)),
         ..running.clone()
     };
-    let note = shown(Some(&long), "");
+    let note = shown(std::slice::from_ref(&long), "");
     assert!(
         crate::tui::text::width(&note) <= JOB_NOTE_CELLS_MAX,
         "{note}"
@@ -959,7 +1044,7 @@ fn the_header_shows_the_running_intake_job_and_nothing_once_it_ended() {
     assert!(note.starts_with("Downloading aaa"), "{note}");
     assert!(note.ends_with(": 12 of 3000"), "{note}");
     assert!(note.contains(UNICODE.ellipsis), "{note}");
-    assert!(shown(Some(&long), "Ready").ends_with("  Ready"));
+    assert!(shown(std::slice::from_ref(&long), "Ready").ends_with("  Ready"));
 }
 
 fn tidepool() -> ProjectId {

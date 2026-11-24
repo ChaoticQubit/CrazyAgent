@@ -1,7 +1,15 @@
 use super::*;
+use kernel_storage::state_log::replay;
+use kernel_storage::state_log::{
+    BODY_BYTES_MAX, Chunk, Draft, KIND_BYTES_MAX, SNAPSHOT_CHUNK, SNAPSHOT_DONE,
+    TRANSACTION_EVENTS_MAX, verify_snapshot,
+};
 use rusqlite::{Connection, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use walk::{draft_kinds, has_word, hides_draft, sources};
+
+mod walk;
 
 /// An in-memory engine store holding only the `state` row, as storage.rs creates it.
 /// Output: the connection, at revision 0.
@@ -20,7 +28,7 @@ fn db() -> Connection {
 /// A worktrees event with the given body. Input: the body. Output: the draft.
 fn draft(body: &[u8]) -> Draft<'_> {
     Draft {
-        aggregate: Aggregate::Worktrees,
+        aggregate: Aggregate::Worktrees.into(),
         kind: "WorktreeAllocated",
         schema: 1,
         at_ms: 7,
@@ -29,8 +37,8 @@ fn draft(body: &[u8]) -> Draft<'_> {
 }
 
 /// The refusal code of a result, none when it succeeded. Input: the result. Output: the code.
-fn code<T>(result: Result<T, EngineError>) -> Option<String> {
-    result.err().map(|error| error.0)
+fn code<T, E: Into<EngineError>>(result: Result<T, E>) -> Option<String> {
+    result.err().map(|error| error.into().0)
 }
 
 /// Every logged event's seq, revision, aggregate and kind, in seq order. Input: the
@@ -66,16 +74,39 @@ fn chunks() -> Vec<Chunk> {
         .collect()
 }
 
+/// The writer accepts only the names replay reads, the closed
+/// [`Aggregate`] set, so a well-formed name such as `custom` is refused by an append and by a
+/// snapshot before any row is written, and replay of the log still reads every row.
+#[test]
+fn a_name_replay_cannot_read_is_refused_by_an_append_and_a_snapshot() {
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let custom = AggregateName::new("custom");
+
+    let appended = log.append(&Draft {
+        aggregate: custom,
+        ..draft(b"{}")
+    });
+    let snapshot = log.snapshot(custom, 7, chunks());
+
+    assert_eq!(code(appended), Some("state_log_aggregate_unknown".into()));
+    assert_eq!(code(snapshot), Some("state_log_aggregate_unknown".into()));
+    assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
+    tx.commit().unwrap();
+    assert_eq!(logged(&db).len(), 1);
+}
+
 #[test]
 fn each_own_transaction_moves_the_revision_once_and_numbers_its_events_after_the_last() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 2);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.revision(), 2);
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 3);
     tx.commit().unwrap();
@@ -97,7 +128,7 @@ fn an_owner_append_takes_the_revision_its_request_moved_and_refuses_a_stale_or_l
     let mut db = db();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 0, fence::engine())),
+        code(crate::state_log::owner(&tx, 0, fence::engine())),
         Some("state_log_revision_not_newer".into())
     );
     drop(tx);
@@ -105,22 +136,22 @@ fn an_owner_append_takes_the_revision_its_request_moved_and_refuses_a_stale_or_l
         .unwrap();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 4, fence::engine())),
+        code(crate::state_log::owner(&tx, 4, fence::engine())),
         Some("state_log_revision_stale".into())
     );
-    let mut log = Appender::owner(&tx, 5, fence::engine()).unwrap();
+    let mut log = crate::state_log::owner(&tx, 5, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 5, fence::engine())),
+        code(crate::state_log::owner(&tx, 5, fence::engine())),
         Some("state_log_revision_not_newer".into()),
         "a second appending transaction must move the revision again"
     );
     tx.execute("UPDATE state SET revision=3 WHERE id=1", [])
         .unwrap();
     assert_eq!(
-        code(Appender::owner(&tx, 3, fence::engine())),
+        code(crate::state_log::owner(&tx, 3, fence::engine())),
         Some("state_log_revision_not_newer".into()),
         "a revision lower than the last logged one is refused"
     );
@@ -136,7 +167,7 @@ fn an_own_writer_is_refused_once_the_revision_is_exhausted() {
         .unwrap();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(Appender::own(&tx, fence::engine())),
+        code(crate::state_log::own(&tx, fence::engine())),
         Some("state_log_revision_exhausted".into())
     );
 }
@@ -145,7 +176,7 @@ fn an_own_writer_is_refused_once_the_revision_is_exhausted() {
 fn a_body_at_the_cap_is_kept_and_one_byte_over_is_refused() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let full = vec![b'x'; BODY_BYTES_MAX];
     assert_eq!(log.append(&draft(&full)).unwrap(), 1);
     let over = vec![b'x'; BODY_BYTES_MAX + 1];
@@ -160,7 +191,7 @@ fn a_body_at_the_cap_is_kept_and_one_byte_over_is_refused() {
 fn a_kind_schema_or_time_out_of_bounds_is_refused_and_snapshot_kinds_are_reserved() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let longest = "k".repeat(KIND_BYTES_MAX);
     let too_long = "k".repeat(KIND_BYTES_MAX + 1);
     let base = draft(b"{}");
@@ -203,7 +234,7 @@ fn a_kind_schema_or_time_out_of_bounds_is_refused_and_snapshot_kinds_are_reserve
 fn an_append_past_the_last_possible_seq_is_refused() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     tx.execute(
         "INSERT INTO state_log VALUES (?1,1,'worktrees','Planted',1,0,x'')",
         [i64::MAX],
@@ -219,7 +250,7 @@ fn an_append_past_the_last_possible_seq_is_refused() {
 fn one_transaction_holds_at_most_its_bound_of_events() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let last = TRANSACTION_EVENTS_MAX as u64;
     for seq in 1..last {
         assert_eq!(log.append(&draft(b"")).unwrap(), seq);
@@ -243,11 +274,11 @@ fn one_transaction_holds_at_most_its_bound_of_events() {
 fn the_log_and_the_revision_roll_back_with_their_transaction() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 2);
     drop(tx);
     assert_eq!(revision(&db), 1);
@@ -258,7 +289,7 @@ fn the_log_and_the_revision_roll_back_with_their_transaction() {
 fn a_snapshot_run_verifies_and_a_missing_or_changed_chunk_fails_its_hash() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
     let empty = log.snapshot(Aggregate::Ide, 9, Vec::new()).unwrap();
     tx.commit().unwrap();
@@ -309,7 +340,7 @@ fn a_snapshot_run_verifies_and_a_missing_or_changed_chunk_fails_its_hash() {
 fn a_closing_event_whose_hash_covers_rows_that_are_not_its_chunks_is_refused() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     log.append(&draft(b"a")).unwrap();
     log.append(&draft(b"b")).unwrap();
     let sha256 = format!("{:x}", Sha256::digest(b"ab"));
@@ -331,7 +362,7 @@ fn a_closing_event_whose_hash_covers_rows_that_are_not_its_chunks_is_refused() {
 fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let mut run = chunks();
     run.push(Chunk {
         table: "worktrees".into(),
@@ -344,140 +375,9 @@ fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
     assert_eq!(logged(&tx).len(), 0);
 }
 
-/// Plants one row in the log outside the appender, as a damaged or forged store holds it.
-/// Inputs: the connection, the seq, the kind and the body. Output: none.
-fn plant(db: &Connection, seq: i64, kind: &str, body: &[u8]) {
-    db.execute(
-        "INSERT INTO state_log VALUES (?1,1,'worktrees',?2,1,0,?3)",
-        params![seq, kind, body],
-    )
-    .unwrap();
-}
-
-/// The body of a worktrees closing event counting `chunks` and hashing the given chunk
-/// bodies in order. Inputs: the count and the bodies. Output: the body.
-fn closing(chunks: u32, bodies: &[&[u8]]) -> Vec<u8> {
-    let mut digest = Sha256::new();
-    for body in bodies {
-        digest.update(body);
-    }
-    let sha256 = format!("{:x}", digest.finalize());
-    serde_json::to_vec(&json!({ "aggregate": "worktrees", "chunks": chunks, "sha256": sha256 }))
-        .unwrap()
-}
-
-#[test]
-fn a_closing_event_with_a_bad_body_or_a_count_no_run_can_hold_is_invalid() {
-    let mut db = db();
-    let tx = db.transaction().unwrap();
-    Appender::own(&tx, fence::engine()).unwrap();
-    let impossible = u32::try_from(TRANSACTION_EVENTS_MAX).unwrap();
-    plant(&tx, 1, SNAPSHOT_DONE, b"not json");
-    plant(&tx, 2, SNAPSHOT_DONE, &closing(impossible, &[]));
-    plant(&tx, 3, SNAPSHOT_DONE, &closing(impossible - 1, &[]));
-    for (done, expected) in [
-        (1, "state_log_snapshot_invalid"),
-        (2, "state_log_snapshot_invalid"),
-        (3, "state_log_snapshot_hash"),
-    ] {
-        assert_eq!(
-            code(verify_snapshot(&tx, done)),
-            Some(expected.into()),
-            "closing event {done}"
-        );
-    }
-}
-
-#[test]
-fn a_run_short_of_its_count_or_with_chunks_out_of_order_or_of_another_aggregate_fails() {
-    let mut db = db();
-    let tx = db.transaction().unwrap();
-    Appender::own(&tx, fence::engine()).unwrap();
-    plant(&tx, 1, SNAPSHOT_DONE, &closing(1, &[]));
-    assert_eq!(
-        code(verify_snapshot(&tx, 1)),
-        Some("state_log_snapshot_chunks".into()),
-        "a run counting one chunk with none before it"
-    );
-    let chunk = |aggregate: Aggregate, seq: u32| {
-        serde_json::to_vec(&SnapshotChunk {
-            aggregate,
-            table: "worktrees".into(),
-            seq,
-            rows: Vec::new(),
-        })
-        .unwrap()
-    };
-    let swapped = [
-        chunk(Aggregate::Worktrees, 1),
-        chunk(Aggregate::Worktrees, 0),
-    ];
-    let foreign = [chunk(Aggregate::Worktrees, 0), chunk(Aggregate::Ide, 1)];
-    let mut seq: i64 = 1;
-    for run in [&swapped, &foreign] {
-        for body in run {
-            seq += 1;
-            plant(&tx, seq, SNAPSHOT_CHUNK, body);
-        }
-        seq += 1;
-        plant(
-            &tx,
-            seq,
-            SNAPSHOT_DONE,
-            &closing(2, &[run[0].as_slice(), run[1].as_slice()]),
-        );
-        assert_eq!(
-            code(verify_snapshot(&tx, seq as u64)),
-            Some("state_log_snapshot_chunks".into()),
-            "run closed at {seq}"
-        );
-    }
-}
-
-#[test]
-fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
-    let unchecked = || {
-        let db = db();
-        db.execute_batch(
-            "CREATE TABLE state_log (seq INTEGER PRIMARY KEY, revision INTEGER, aggregate TEXT,
-            kind TEXT, schema INTEGER, at_ms INTEGER, body BLOB)",
-        )
-        .unwrap();
-        db
-    };
-    let padded = |mut body: Vec<u8>| {
-        body.resize(BODY_BYTES_MAX + 1, b' ');
-        body
-    };
-    let db = unchecked();
-    plant(&db, 1, SNAPSHOT_DONE, &padded(closing(0, &[])));
-    assert_eq!(
-        code(verify_snapshot(&db, 1)),
-        Some("state_log_snapshot_invalid".into()),
-        "a closing event over the cap"
-    );
-    let db = unchecked();
-    let chunk = padded(
-        serde_json::to_vec(&SnapshotChunk {
-            aggregate: Aggregate::Worktrees,
-            table: "worktrees".into(),
-            seq: 0,
-            rows: Vec::new(),
-        })
-        .unwrap(),
-    );
-    plant(&db, 1, SNAPSHOT_CHUNK, &chunk);
-    plant(&db, 2, SNAPSHOT_DONE, &closing(1, &[chunk.as_slice()]));
-    assert_eq!(
-        code(verify_snapshot(&db, 2)),
-        Some("state_log_snapshot_invalid".into()),
-        "a chunk over the cap"
-    );
-}
-
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 54] = [
+const KINDS: [&str; 56] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -531,7 +431,9 @@ const KINDS: [&str; 54] = [
     crate::settings_log::KIND_STEPS,
     crate::settings_log::KIND_TIME,
     crate::settings_log::KIND_FRAMES,
+    crate::settings_log::KIND_COMPACTION,
     crate::settings_log::KIND_PROFILE,
+    crate::sdk_slice::KIND_CALL_REFUSED,
 ];
 
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
@@ -542,56 +444,55 @@ const FREE_FORM: [(&str, &str); 2] = [
     (crate::landing_log::OWNER_EDIT_KEPT, "path"),
 ];
 
-/// The source files outside tests that name the log's appender, as paths under `src` in
-/// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
-/// ide/log.rs and landing_log.rs write `change.kind()`, which maps each `Change` variant to
-/// one of their kinds.
-const WRITERS: [(&str, &[&str]); 9] = [
-    ("ide/log.rs", &["change.kind(),"]),
-    ("landing_log.rs", &["change.kind(),"]),
-    ("memory/log.rs", &["KIND,"]),
-    ("project_setup/removed/event.rs", &["KIND,"]),
+/// The source files outside tests that name the log's appender or build one of its drafts,
+/// as paths under `src` in sorted order, each with the kinds its drafts may name: the code
+/// after `kind:` with its spaces removed, the constants of its own kinds. ide/log.rs and
+/// landing_log.rs write `change.kind()`, which maps each `Change` variant to one of theirs.
+const WRITERS: [(&str, &[&str]); 10] = [
+    ("ide/log.rs", &["change.kind()"]),
+    ("landing_log.rs", &["change.kind()"]),
+    ("memory/log.rs", &["KIND"]),
+    ("project_setup/removed/event.rs", &["KIND"]),
+    ("sdk_slice.rs", &["KIND_CALL_REFUSED"]),
     (
         "sessions_log.rs",
         &[
-            "KIND_SESSION,",
-            "KIND_ENTRY,",
-            "KIND_ENTRIES_DROPPED,",
-            "KIND_TEXT,",
-            "KIND_TEXTS_DROPPED,",
-            "KIND_TURN,",
-            "KIND_PREPARATION,",
-            "KIND_RESOLVE,",
-            "KIND_RESOLVES_DROPPED,",
-            "KIND_PROFILE,",
-            "KIND_PROFILES_DROPPED,",
+            "KIND_SESSION",
+            "KIND_ENTRY",
+            "KIND_ENTRIES_DROPPED",
+            "KIND_TEXT",
+            "KIND_TEXTS_DROPPED",
+            "KIND_TURN",
+            "KIND_PREPARATION",
+            "KIND_RESOLVE",
+            "KIND_RESOLVES_DROPPED",
+            "KIND_PROFILE",
+            "KIND_PROFILES_DROPPED",
         ],
     ),
     (
         "settings_log.rs",
         &[
-            "KIND_SANDBOX,",
-            "KIND_CLEANUP,",
-            "KIND_QUIT,",
-            "KIND_RETRY,",
-            "KIND_HARNESS_UPDATE,",
-            "KIND_INSTRUCTION_APP,",
-            "KIND_INSTRUCTION,",
-            "KIND_ROADMAP,",
-            "KIND_STEPS,",
-            "KIND_TIME,",
-            "KIND_FRAMES,",
-            "KIND_PROFILE,",
+            "KIND_SANDBOX",
+            "KIND_CLEANUP",
+            "KIND_QUIT",
+            "KIND_RETRY",
+            "KIND_HARNESS_UPDATE",
+            "KIND_INSTRUCTION_APP",
+            "KIND_INSTRUCTION",
+            "KIND_ROADMAP",
+            "KIND_STEPS",
+            "KIND_TIME",
+            "KIND_FRAMES",
+            "KIND_COMPACTION",
+            "KIND_PROFILE",
         ],
     ),
-    ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
-    (
-        "storage/master_session/delete.rs",
-        &["SESSION_DELETED,", "SESSION_DELETED.into(),"],
-    ),
+    ("state_log.rs", &["SNAPSHOT_CHUNK", "SNAPSHOT_DONE"]),
+    ("storage/master_session/delete.rs", &["SESSION_DELETED"]),
     (
         "worktrees/log.rs",
-        &["KIND_ADMITTED,", "KIND_RESERVED,", "KIND_SAVED,"],
+        &["KIND_ADMITTED", "KIND_RESERVED", "KIND_SAVED"],
     ),
 ];
 
@@ -633,6 +534,7 @@ const SNAPSHOTS: [(&str, &[&str]); 5] = [
             "configured_master_steps",
             "configured_master_time",
             "configured_master_frames",
+            "log_compaction_settings",
             "user_profile",
         ],
     ),
@@ -699,7 +601,7 @@ fn worktrees_runs_carry_only_their_named_tables() {
     let mut db = db();
     crate::worktrees::initialize(&db).unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     crate::worktrees::log::snapshot(&mut log, 9).unwrap();
     drop(log);
     let tables = chunk_tables(&tx);
@@ -721,7 +623,7 @@ fn memory_runs_carry_only_their_named_tables() {
     crate::memory::initialize(&db).unwrap();
     crate::assets::initialize(&db).unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     crate::memory::log::snapshot(&mut log, 9).unwrap();
     drop(log);
     let mut statement = tx
@@ -819,55 +721,32 @@ fn closed_body(
     );
 }
 
-/// The source files outside tests whose text names the log's appender, each as its path
-/// under `src` with `/` between parts, and its text. A file or folder whose name ends in
-/// `tests` or `tests.rs` is left out. Output: the files.
-fn writer_sources() -> Vec<(String, String)> {
-    const ENTRIES_MAX: usize = 100_000;
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut folders = vec![src.clone()];
-    let mut found = Vec::new();
-    let mut seen = 0;
-    while let Some(folder) = folders.pop() {
-        for entry in std::fs::read_dir(&folder).unwrap() {
-            seen += 1;
-            assert!(seen <= ENTRIES_MAX);
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if name.ends_with("tests") || name.ends_with("tests.rs") {
-                continue;
-            }
-            if path.is_dir() {
-                folders.push(path);
-                continue;
-            }
-            if !name.ends_with(".rs") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            if text.contains("Appender") {
-                let parts: Vec<String> = path
-                    .strip_prefix(&src)
-                    .unwrap()
-                    .components()
-                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                found.push((parts.join("/"), text));
-            }
-        }
-    }
-    found
+/// Whether a source appends to the log: it names the kernel `Appender` or opens one through
+/// the engine's fence adapter, `state_log::owner`, `own` or `opening`. Input: the code.
+/// Output: true when it does.
+fn appends(code: &str) -> bool {
+    has_word(code, "Appender")
+        || [
+            "state_log::owner(",
+            "state_log::own(",
+            "state_log::opening(",
+        ]
+        .iter()
+        .any(|call| code.contains(call))
 }
 
 /// Checks the snapshot rule of [`no_event_body_can_carry_a_secret`]: only state_log.rs and
 /// the writers [`SNAPSHOTS`] names take a snapshot, and a worktrees run carries only its
-/// named tables. Input: the writers' paths and sources. Output: none.
-fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
-    assert!(!writers.is_empty(), "the log has writers");
-    for (name, text) in writers {
+/// named tables. Input: every source path and its code. Output: none.
+fn only_named_writers_take_a_snapshot(sources: &[(String, String)]) {
+    assert!(!sources.is_empty(), "the walk reads sources");
+    for (name, code) in sources {
         let named = SNAPSHOTS.iter().any(|(path, _)| *path == name.as_str());
         assert!(
-            name.as_str() == "state_log.rs" || named || !text.contains(".snapshot("),
+            name.as_str() == "state_log.rs"
+                || named
+                || !appends(code)
+                || !code.contains(".snapshot("),
             "{name} takes a snapshot"
         );
     }
@@ -887,7 +766,7 @@ fn sessions_runs_carry_only_their_named_tables() {
     assert_eq!(writer, "sessions_log.rs");
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     crate::sessions_log::snapshot(&mut log, 9).unwrap();
     drop(log);
     let mut statement = tx
@@ -944,7 +823,7 @@ fn sessions_body_is_closed(kind: &str) {
         sessions::decode(&replay::Logged {
             seq: 1,
             revision: 1,
-            aggregate: Aggregate::Sessions,
+            aggregate: Aggregate::Sessions.into(),
             kind: kind.into(),
             schema: 1,
             at_ms: 1,
@@ -1026,7 +905,7 @@ fn landing_runs_carry_only_their_named_tables() {
     assert_eq!(writer, "landing_log.rs");
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     crate::landing_log::snapshot(&mut log, 9).unwrap();
     drop(log);
     assert_eq!(chunk_tables(&tx), named, "one chunk per empty table");
@@ -1056,7 +935,7 @@ fn settings_runs_carry_only_their_named_tables() {
     let mut db = db();
     crate::settings_log::initialize(&db).unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     crate::settings_log::snapshot(&mut log, 9).unwrap();
     drop(log);
     assert_eq!(chunk_tables(&tx), named, "one chunk per table, in order");
@@ -1073,7 +952,7 @@ fn settings_body_is_closed(kind: &str) {
         settings::decode(&replay::Logged {
             seq: 1,
             revision: 1,
-            aggregate: Aggregate::Settings,
+            aggregate: Aggregate::Settings.into(),
             kind: kind.into(),
             schema: 1,
             at_ms: 1,
@@ -1084,7 +963,7 @@ fn settings_body_is_closed(kind: &str) {
     let value = |settings: serde_json::Value| json!({"settings": settings});
     let (sample, keys): (serde_json::Value, &[&str]) = match kind {
         settings::KIND_SANDBOX => (
-            value(json!(crate::sandbox_settings::SandboxSettings::default())),
+            value(json!(kernel_sandbox::settings::SandboxSettings::default())),
             &["settings"],
         ),
         settings::KIND_CLEANUP => (
@@ -1139,6 +1018,10 @@ fn settings_body_is_closed(kind: &str) {
             )),
             &["settings"],
         ),
+        settings::KIND_COMPACTION => (
+            value(json!(crate::log_compaction::LogCompaction::default())),
+            &["settings"],
+        ),
         settings::KIND_PROFILE => (json!({"body": "0".repeat(64)}), &["body"]),
         other => panic!("{other} is not a settings kind"),
     };
@@ -1158,7 +1041,7 @@ fn settings_body_is_closed(kind: &str) {
 fn a_closing_body_is_its_hash() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
     let seq = i64::try_from(done).expect("a log seq fits in i64");
     let body: Vec<u8> = tx
@@ -1270,7 +1153,7 @@ fn landing_body_is_closed(kind: &str) {
         let logged = replay::Logged {
             seq: 1,
             revision: 1,
-            aggregate: Aggregate::Landing,
+            aggregate: Aggregate::Landing.into(),
             kind: kind.to_owned(),
             schema: crate::landing_log::SCHEMA,
             at_ms: 0,
@@ -1341,25 +1224,39 @@ fn no_event_body_can_carry_a_secret() {
             "the landing kind {kind} needs a body rule"
         );
     }
-    let writers = writer_sources();
-    let mut names: Vec<&str> = writers.iter().map(|(name, _)| name.as_str()).collect();
-    names.sort_unstable();
+    let sources = sources();
+    let mut writers: Vec<(&str, Vec<Option<String>>)> = Vec::new();
+    for (name, code) in &sources {
+        let scoped =
+            name == "state_log.rs" || name.starts_with("state_log/") || has_word(code, "state_log");
+        let drafts = if scoped {
+            draft_kinds(code)
+        } else {
+            Vec::new()
+        };
+        assert!(
+            !scoped || name == "state_log.rs" || !hides_draft(code),
+            "{name} renames or re-exports the log's Draft"
+        );
+        if appends(code) || !drafts.is_empty() {
+            writers.push((name, drafts));
+        }
+    }
+    writers.sort_unstable_by_key(|(name, _)| *name);
+    let names: Vec<&str> = writers.iter().map(|(name, _)| *name).collect();
     let listed: Vec<&str> = WRITERS.iter().map(|(name, _)| *name).collect();
     assert_eq!(names, listed, "a new log writer needs its kinds in KINDS");
-    for (name, text) in &writers {
-        let (_, own) = WRITERS
-            .iter()
-            .find(|(path, _)| *path == name.as_str())
-            .unwrap();
-        for line in text.lines().map(str::trim) {
-            if let Some(written) = line.strip_prefix("kind: ") {
-                assert!(own.contains(&written), "{name}: {line}");
-            }
+    for ((name, drafts), (_, own)) in writers.iter().zip(WRITERS) {
+        for kind in drafts {
+            assert!(
+                kind.as_deref().is_some_and(|kind| own.contains(&kind)),
+                "{name}: a draft of kind {kind:?}"
+            );
         }
     }
     for kind in KINDS {
         match kind {
-            SNAPSHOT_CHUNK => only_named_writers_take_a_snapshot(&writers),
+            SNAPSHOT_CHUNK => only_named_writers_take_a_snapshot(&sources),
             SNAPSHOT_DONE => a_closing_body_is_its_hash(),
             replay::PROCESS_EXITED => closed_body(
                 kind,
@@ -1411,7 +1308,115 @@ fn no_event_body_can_carry_a_secret() {
             sessions if crate::sessions_log::KINDS.contains(&sessions) => {
                 sessions_body_is_closed(sessions)
             }
+            crate::sdk_slice::KIND_CALL_REFUSED => closed_body(
+                kind,
+                crate::sdk_slice::call_refused_closed,
+                json!({
+                    "plugin": "agent-quit",
+                    "capability": "settings.save_quit",
+                    "needs": "settings.write"
+                }),
+                &["plugin", "capability", "needs"],
+            ),
             other => panic!("the kind {other} has no body rule"),
         }
     }
+}
+
+/// Every aggregate with the string its 2.4 and 2.5 logs store for it, written out by hand so
+/// the rows below never compare a name with itself. Input: none. Output: the 12 pairs.
+fn stored_names() -> [(Aggregate, &'static str); 12] {
+    let all = [
+        Aggregate::Worktrees,
+        Aggregate::Ide,
+        Aggregate::Memory,
+        Aggregate::Projects,
+        Aggregate::Landing,
+        Aggregate::Settings,
+        Aggregate::Plugins,
+        Aggregate::Sessions,
+        Aggregate::Intake,
+        Aggregate::Engine,
+        Aggregate::Accounts,
+        Aggregate::Team,
+    ];
+    all.map(|aggregate| {
+        let stored = match aggregate {
+            Aggregate::Worktrees => "worktrees",
+            Aggregate::Ide => "ide",
+            Aggregate::Memory => "memory",
+            Aggregate::Projects => "projects",
+            Aggregate::Landing => "landing",
+            Aggregate::Settings => "settings",
+            Aggregate::Plugins => "plugins",
+            Aggregate::Sessions => "sessions",
+            Aggregate::Intake => "intake",
+            Aggregate::Engine => "engine",
+            Aggregate::Accounts => "accounts",
+            Aggregate::Team => "team",
+        };
+        (aggregate, stored)
+    })
+}
+
+#[test]
+fn every_aggregate_maps_to_the_name_its_snapshot_bodies_hold() {
+    for (aggregate, stored) in stored_names() {
+        assert_eq!(
+            serde_json::to_string(&aggregate).unwrap(),
+            format!("\"{stored}\"")
+        );
+        let name = kernel_storage::state_log::AggregateName::from(aggregate);
+        assert_eq!(name.name(), stored);
+        let (bodies, done) = kernel_storage::state_log::snapshot_bodies(
+            aggregate.into(),
+            vec![Chunk {
+                table: "t".into(),
+                rows: vec![json!(1)],
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            bodies,
+            [
+                format!(r#"{{"aggregate":"{stored}","table":"t","seq":0,"rows":[1]}}"#)
+                    .into_bytes()
+            ]
+        );
+        let sha256 = format!("{:x}", Sha256::digest(&bodies[0]));
+        assert_eq!(
+            done,
+            format!(r#"{{"aggregate":"{stored}","chunks":1,"sha256":"{sha256}"}}"#).into_bytes()
+        );
+    }
+}
+
+#[test]
+fn no_two_aggregates_share_a_name() {
+    let names = stored_names()
+        .map(|(aggregate, _)| kernel_storage::state_log::AggregateName::from(aggregate).name());
+    let distinct = names.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(distinct.len(), names.len());
+}
+
+#[test]
+fn every_aggregate_is_read_back_under_its_stored_name() {
+    for aggregate in [
+        Aggregate::Worktrees,
+        Aggregate::Ide,
+        Aggregate::Memory,
+        Aggregate::Projects,
+        Aggregate::Landing,
+        Aggregate::Settings,
+        Aggregate::Plugins,
+        Aggregate::Sessions,
+        Aggregate::Intake,
+        Aggregate::Engine,
+        Aggregate::Accounts,
+        Aggregate::Team,
+    ] {
+        assert_eq!(parse(aggregate.name()), Some(aggregate), "{aggregate:?}");
+    }
+    assert_eq!(parse("Worktrees"), None);
+    assert_eq!(parse(""), None);
 }

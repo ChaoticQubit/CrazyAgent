@@ -1,5 +1,6 @@
-use super::run::run_bounded;
-use super::{Dependency, InstallError, Installer, Pin, Version};
+use super::{Dependency, Installer, Pin};
+use kernel_processes::run::run_bounded;
+use kernel_processes::run::{InstallError, Version};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -68,7 +69,7 @@ pub fn tmux_command(
         return Err(InstallError("setup_pin_invalid"));
     }
     if let Some(brew) = brew.filter(|_| !root) {
-        if crate::service::changeable_past_sticky(brew).is_some() {
+        if kernel_processes::service::changeable_past_sticky(brew).is_some() {
             return Err(InstallError("setup_homebrew_unsafe"));
         }
         let mut command = kept_environment(brew);
@@ -142,14 +143,14 @@ impl Installer for LinuxInstaller {
         self.common.program(name)
     }
 
-    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, kernel_processes::finding::Missing> {
         self.common.lookup_program(name)
     }
 
     fn fix_target(
         &self,
-        missing: &crate::tools::Missing,
-    ) -> Option<crate::tools::permission_fix::Target> {
+        missing: &kernel_processes::finding::Missing,
+    ) -> Option<kernel_processes::finding::permission_fix::Target> {
         self.common.fix_target(missing)
     }
 
@@ -158,7 +159,7 @@ impl Installer for LinuxInstaller {
         dep: Dependency,
         confirmed: &str,
         recursive: bool,
-    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+    ) -> Result<kernel_processes::finding::permission_fix::Report, &'static str> {
         self.common.fix_permissions(dep, confirmed, recursive)
     }
 
@@ -197,7 +198,7 @@ mod tests {
         let installer = LinuxInstaller::new(Box::new(shared));
         assert_eq!(installer.find(Dependency::Uv), Ok(None));
         let uv = root.path().join("setup/bin/uv");
-        crate::setup::process::private_folder(uv.parent().unwrap()).unwrap();
+        kernel_processes::run::private_folder(uv.parent().unwrap()).unwrap();
         std::fs::write(&uv, "#!/bin/sh\necho \"uv 0.13.5 (fixture)\"\n").unwrap();
         std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
@@ -338,15 +339,18 @@ mod tests {
         let home = root.path().join("home");
         let local = home.join(".local/bin");
         std::fs::create_dir_all(&local).unwrap();
-        let places = crate::tools::Places::new(
+        let places = crate::tools::tools_new(
             vec![root.path().join("setup/bin"), local.clone()],
             Some(home),
         );
         let shared = PinnedInstaller::with_places(root.path(), vec![], places.clone());
         let installer = LinuxInstaller::new(Box::new(shared));
         let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
-        assert_eq!(missing, crate::tools::resolve("tmux", &places).unwrap_err());
-        assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+        assert_eq!(
+            missing,
+            kernel_processes::finding::resolve("tmux", &places).unwrap_err()
+        );
+        assert_eq!(missing.line(), kernel_processes::finding::TMUX_MISSING);
         assert_eq!(installer.find(Dependency::Tmux), Ok(None));
         let tmux = local.join("tmux");
         std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
@@ -371,7 +375,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_resolver_looks_in_linuxbrew_and_the_nixos_profiles() {
-        let places = crate::tools::Places::engine(None, None, None, None);
+        let places = crate::tools::tools_engine(None, None, None, None);
         let folders = places.folders();
         let system = folders
             .iter()
@@ -396,7 +400,7 @@ mod tests {
     #[test]
     fn setup_finds_tmux_exactly_when_the_live_start_does() {
         let root = tempfile::tempdir().unwrap();
-        let places = crate::tools::Places::from_environment(Some(root.path()));
+        let places = crate::tools::tools_places(Some(root.path()));
         let shared = PinnedInstaller::with_places(root.path(), vec![], places);
         let installer = LinuxInstaller::new(Box::new(shared));
         let started = crate::terminal::tmux::installed(root.path());
@@ -411,7 +415,7 @@ mod tests {
             Ok(Ok(_)) => assert!(started.is_some()),
             Ok(Err(missing)) => {
                 assert!(started.is_none());
-                assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+                assert_eq!(missing.line(), kernel_processes::finding::TMUX_MISSING);
             }
             Err(code) => assert_eq!(code, InstallError("setup_version_unreadable")),
         }

@@ -122,6 +122,14 @@ jobs:
             lost=$(unresolved)
             [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
           fi
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            for source in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              if [ -f "$source" ] && grep -q 'packages\.microsoft\.com' "$source"; then
+                sudo rm -f "$source"
+                echo "::notice::removed the apt source $source, which names packages.microsoft.com; no package this job installs comes from it"
+              fi
+            done
+          fi
           if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
             if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
               echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
@@ -176,6 +184,8 @@ jobs:
         run: cargo fetch --locked
       - name: Lint workspace
         run: make lint
+      - name: Check the bundled plugins
+        run: cargo test -p crazyagent-plugin-check --locked --offline
       - name: Show the free disk and the Rust target size
         if: always()
         run: |

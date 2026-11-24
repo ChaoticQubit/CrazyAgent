@@ -7,7 +7,8 @@ use crazyagent::team::{
     TeamStatus,
 };
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::SOCKET;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -46,7 +47,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -66,7 +67,7 @@ struct Engine {
 
 impl Engine {
     fn start(runtime: &Path) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(runtime)
@@ -121,7 +122,7 @@ impl Engine {
 
     fn stop(mut self) -> String {
         assert!(
-            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
                 "-s",
                 "TERM",
                 &self.child.id().to_string()
@@ -156,7 +157,7 @@ impl Drop for Engine {
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
 fn require_model() {
     assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
-    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
+    let listed = kernel_processes::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
         stream.set_read_timeout(Some(OLLAMA_TIME))?;
         stream.set_write_timeout(Some(OLLAMA_TIME))?;
         stream.write_all(

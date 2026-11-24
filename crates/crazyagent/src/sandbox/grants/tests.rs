@@ -105,7 +105,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
         .unwrap();
     let typed = tmp.path().join("discord-ipc-0");
     assert!(typed.starts_with("/tmp"));
-    let _listener = crate::spawn_gate::bind_unix_std(&typed).unwrap();
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&typed).unwrap();
     let kept = checked(
         &AccessGrant::Socket {
             path: typed.clone(),
@@ -464,7 +464,7 @@ fn host_escape_and_key_agent_sockets_are_refused_by_class() {
     for (relative, code) in rows {
         let path = base.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let _listener = crate::spawn_gate::bind_unix_std(&path).unwrap();
+        let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
             checked(&AccessGrant::Socket { path }, data),
             Err(code),
@@ -636,7 +636,7 @@ fn editor_and_terminal_control_sockets_are_refused_by_class() {
     for relative in rows {
         let path = base.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let _listener = crate::spawn_gate::bind_unix_std(&path).unwrap();
+        let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
             checked(&AccessGrant::Socket { path }, data),
             Err("grant_socket_agent"),
@@ -665,13 +665,13 @@ fn a_socket_with_a_second_name_is_refused_at_both_names() {
     let base = tmp.path().canonicalize().unwrap();
     let data = Path::new("/nonexistent");
     let lone = base.join("lone.sock");
-    let _lone = crate::spawn_gate::bind_unix_std(&lone).unwrap();
+    let _lone = kernel_processes::spawn_gate::bind_unix_std(&lone).unwrap();
     assert_eq!(
         checked(&AccessGrant::Socket { path: lone.clone() }, data),
         Ok(AccessGrant::Socket { path: lone })
     );
     let first = base.join("first.sock");
-    let _first = crate::spawn_gate::bind_unix_std(&first).unwrap();
+    let _first = kernel_processes::spawn_gate::bind_unix_std(&first).unwrap();
     let second = base.join("second.sock");
     std::fs::hard_link(&first, &second).unwrap();
     for path in [first, second] {
@@ -786,7 +786,7 @@ fn the_floor_also_refuses_kakoune_dtach_abduco_and_ssh_mux_sockets() {
     for relative in rows {
         let path = base.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let _listener = crate::spawn_gate::bind_unix_std(&path).unwrap();
+        let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
             checked(&AccessGrant::Socket { path }, data),
             Err("grant_socket_agent"),
@@ -822,7 +822,7 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
 #[test]
 fn only_on_linux_does_a_port_question_say_the_port_is_open_on_every_host() {
     let port = AccessGrant::Port { port: 5_432 };
-    let line = crate::sandbox::LINUX_PORTS_ANY_HOST_LINE;
+    let line = kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE;
     assert_eq!(asked_meaning(&port, None), meaning(&port));
     assert_eq!(
         asked_meaning(&port, Some(line)),
@@ -890,8 +890,8 @@ fn asked_socket(
     let owner = base.join("owner");
     std::fs::create_dir(&owner).unwrap();
     let other = owner.join("store.sock");
-    let asked_listener = crate::spawn_gate::bind_unix_std(&asked).unwrap();
-    let other_listener = crate::spawn_gate::bind_unix_std(&other).unwrap();
+    let asked_listener = kernel_processes::spawn_gate::bind_unix_std(&asked).unwrap();
+    let other_listener = kernel_processes::spawn_gate::bind_unix_std(&other).unwrap();
     assert_eq!(
         checked(
             &AccessGrant::Socket {
@@ -961,7 +961,7 @@ fn an_allow_after_another_socket_took_the_asked_path_grants_nothing() {
     let (asked, _, asked_listener, _other, question) = asked_socket(&case);
     drop(asked_listener);
     std::fs::remove_file(&asked).unwrap();
-    let _again = crate::spawn_gate::bind_unix_std(&asked).unwrap();
+    let _again = kernel_processes::spawn_gate::bind_unix_std(&asked).unwrap();
     allow_grants_nothing(&case, question);
 }
 
@@ -1035,7 +1035,7 @@ fn a_socket_request_for_a_plain_file_gets_the_one_socket_refusal() {
 fn a_socket_request_for_a_socket_with_a_second_name_gets_the_one_socket_refusal() {
     let case = Case::new();
     let first = project_folder(&case).join("app.sock");
-    let _first = crate::spawn_gate::bind_unix_std(&first).unwrap();
+    let _first = kernel_processes::spawn_gate::bind_unix_std(&first).unwrap();
     std::fs::hard_link(&first, project_folder(&case).join("two.sock")).unwrap();
     refused_alike(&case, &first);
 }
@@ -1047,7 +1047,7 @@ fn a_socket_request_for_a_socket_with_a_second_name_gets_the_one_socket_refusal(
 fn a_socket_request_for_a_key_agent_socket_gets_the_one_socket_refusal() {
     let case = Case::new();
     let keys = project_folder(&case).join("S.gpg-agent");
-    let _keys = crate::spawn_gate::bind_unix_std(&keys).unwrap();
+    let _keys = kernel_processes::spawn_gate::bind_unix_std(&keys).unwrap();
     refused_alike(&case, &keys);
 }
 
@@ -1064,6 +1064,6 @@ fn a_socket_request_in_the_engine_data_folder_gets_the_one_socket_refusal() {
         .unwrap()
         .join("engine")
         .join("app.sock");
-    let _engine = crate::spawn_gate::bind_unix_std(&engine).unwrap();
+    let _engine = kernel_processes::spawn_gate::bind_unix_std(&engine).unwrap();
     refused_alike(&case, &engine);
 }

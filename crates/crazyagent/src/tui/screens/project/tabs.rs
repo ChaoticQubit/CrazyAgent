@@ -489,23 +489,57 @@ impl ProjectScreen {
         }
     }
 
+    /// Takes the folder read for the move ask: the rebuildable folders a move would leave in
+    /// iCloud, empty when there are none or the read failed. Takes the folders.
+    pub fn move_read(&mut self, left: crate::projects_home::icloud::SkippedFolders) {
+        if self.confirm_move {
+            self.move_left = Some(left);
+        }
+    }
+
+    /// Takes a folder read for the move ask that failed: the move then downloads everything, as
+    /// it never leaves folders in iCloud it did not show first (DEC-198, leader 16:30).
+    pub fn move_read_failed(&mut self) {
+        if self.confirm_move {
+            self.move_left = Some(crate::projects_home::icloud::SkippedFolders::default());
+            self.move_unread = true;
+        }
+    }
+
     /// Answers one key in the move ask: m moves the project into the projects home, c copies
-    /// it there, and n or Esc keeps it where it is. Takes the key. Returns the move to send,
-    /// or Handled.
+    /// it there, both only once the folder read landed, Space switches Download everything
+    /// while the read names folders a move leaves in iCloud, and n or Esc keeps it where it is.
+    /// Takes the key. Returns the move to send with the switch, or Handled.
     pub(super) fn move_key(&mut self, key: KeyEvent) -> ProjectReply {
         use crate::projects_home::AddMode;
         assert!(self.confirm_move);
+        let leaves = self.move_left.as_ref().is_some_and(|left| !left.is_empty());
         let mode = match key.code {
-            KeyCode::Char('m') => AddMode::Move,
-            KeyCode::Char('c') => AddMode::Copy,
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.confirm_move = false;
+                self.close_move();
                 return ProjectReply::Handled;
             }
+            _ if self.move_left.is_none() => return ProjectReply::Handled,
+            KeyCode::Char(' ') if leaves => {
+                self.move_everything = !self.move_everything;
+                return ProjectReply::Handled;
+            }
+            KeyCode::Char('m') => AddMode::Move,
+            KeyCode::Char('c') => AddMode::Copy,
             _ => return ProjectReply::Handled,
         };
+        assert!(leaves || !self.move_everything);
+        let everything = self.move_everything || self.move_unread;
+        self.close_move();
+        ProjectReply::MoveHome(mode, everything)
+    }
+
+    /// Closes the move ask and forgets its folder read and switch.
+    fn close_move(&mut self) {
         self.confirm_move = false;
-        ProjectReply::MoveHome(mode)
+        self.move_left = None;
+        self.move_everything = false;
+        self.move_unread = false;
     }
 
     /// Closes the remove ask and forgets its preview, choice and typed name.
@@ -519,12 +553,12 @@ impl ProjectScreen {
     }
 
     /// Shows why the engine refused to start the job that moves this project into the projects
-    /// home or deletes it, as a plain line; a busy refusal names the job that runs, as last read.
-    /// Takes the refusal code and the job read. Returns nothing.
-    pub fn job_refused(&mut self, code: &str, held: Option<&crate::projects_home::job::JobView>) {
+    /// home or deletes it, as a plain line; the job refusals of DEC-197, a full waiting list or
+    /// a folder another job holds, say Home's words. Takes the refusal code. Returns nothing.
+    pub fn job_refused(&mut self, code: &str) {
         assert!(!code.is_empty());
         self.problem = Some(match code {
-            "job_busy" => super::super::intake_job::busy(held),
+            "job_busy" | "job_same_folder" => super::super::intake::copy(code),
             code => plain_problem(code),
         });
         assert!(self.problem.is_some());
@@ -668,8 +702,18 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('M') => {
+                if self.setup.is_none() {
+                    self.problem = Some(match self.setup_missing {
+                        true => plain_problem("project_setup_missing"),
+                        false => "Still loading the project folder. Try again.".into(),
+                    });
+                    return ProjectReply::Handled;
+                }
                 self.confirm_move = true;
-                ProjectReply::Handled
+                self.move_left = None;
+                self.move_everything = false;
+                self.move_unread = false;
+                ProjectReply::MoveRead
             }
             KeyCode::Char('i') => ProjectReply::Process,
             KeyCode::Char('G') => ProjectReply::GitHubRules,
@@ -751,25 +795,25 @@ impl ProjectScreen {
             .map(|entry| entry.strategy)
     }
 
-    /// Whether the Settings tab offers hidden folders: until the engine's read says this
-    /// system has none (DEC-194), so the row shows while it loads. Takes the screen.
+    /// Whether the Settings tab offers to edit hidden folders: unless the engine's read says
+    /// this system's boundary cannot hold them and nothing is saved (#590), so a list saved
+    /// before can still be cleared and the box opens while the read loads. Takes the screen.
     /// Returns the answer.
     pub fn hidden_offered(&self) -> bool {
         !self
             .hidden_paths
             .as_ref()
-            .is_some_and(|saved| saved.unavailable)
+            .is_some_and(|saved| saved.unavailable && saved.paths.is_empty())
     }
 
     /// The running agents the team graph names as able to open a folder hidden after they
     /// started (SA-VID14-A), while the project hides any folder. Takes the screen. Returns
     /// their labels in graph order, none while nothing is hidden or the graph loads.
     pub fn hidden_seers(&self) -> Vec<&str> {
-        let hides = self.hidden_offered()
-            && self
-                .hidden_paths
-                .as_ref()
-                .is_some_and(|saved| !saved.paths.is_empty());
+        let hides = self
+            .hidden_paths
+            .as_ref()
+            .is_some_and(|saved| !saved.paths.is_empty());
         match self.team.ready() {
             Some(graph) if hides => graph
                 .nodes
@@ -1037,6 +1081,17 @@ impl ProjectScreen {
             self.confirm_move,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        assert!(
+            self.confirm_move
+                || (self.move_left.is_none() && !self.move_everything && !self.move_unread)
+        );
+        assert!(
+            !self.move_unread
+                || self
+                    .move_left
+                    .as_ref()
+                    .is_some_and(crate::projects_home::icloud::SkippedFolders::is_empty)
+        );
         if self.remove_choice == RemoveChoice::Everything {
             assert!(self.confirm_remove);
             assert!(

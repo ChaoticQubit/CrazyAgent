@@ -53,7 +53,7 @@ fn written_by_a_process(folder: &Path, text: &str) -> String {
     command
         .args(["-c", "printf '%s' \"$1\" > \"$2\"", "sh", text])
         .arg(&output);
-    let status = crate::spawn_gate::spawn(&mut command)
+    let status = kernel_processes::spawn_gate::spawn(&mut command)
         .unwrap()
         .wait()
         .unwrap();
@@ -709,8 +709,10 @@ fn a_prompt_file_swapped_for_a_fifo_is_opened_without_waiting_and_is_no_regular_
     use std::os::unix::fs::OpenOptionsExt;
     let folder = tempfile::tempdir().unwrap();
     let fifo = folder.path().join("brief.md");
-    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
-        .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&fifo),
+    )
+    .unwrap();
     assert!(made.success());
     let (sent, opened) = std::sync::mpsc::channel();
     let path = fifo.clone();

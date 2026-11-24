@@ -1,6 +1,7 @@
 use super::*;
 use crate::credentials::test_keychain::TestKeychain;
-use crate::credentials::{SecretString, Store, parts, reference};
+use kernel_security::secret::SecretString;
+use kernel_security::store::{SecretRef, Store, parts, reference};
 use std::process::{Command, Stdio};
 
 struct Scratch {
@@ -199,7 +200,7 @@ fn keychain_git_helper_answers_get_from_the_store_with_no_secret_in_its_text() {
     assert!(!helper.contains(&value));
     let home = tempfile::tempdir().unwrap();
     let run = |action: &str| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new("/bin/sh")
                 .arg("-c")
                 .arg(format!("{} {action}", &helper[1..]))
@@ -243,7 +244,7 @@ fn secrets_are_visible_ascii_bounded_and_redacted() {
         Vec::new(),
         b"has space".to_vec(),
         b"line\n".to_vec(),
-        vec![b'a'; crate::credentials::SECRET_BYTES_MAX + 1],
+        vec![b'a'; kernel_security::secret::SECRET_BYTES_MAX + 1],
         "caf\u{e9}".as_bytes().to_vec(),
         vec![0x7f],
     ] {
@@ -252,18 +253,21 @@ fn secrets_are_visible_ascii_bounded_and_redacted() {
             "credential_secret_invalid"
         );
     }
-    let longest = SecretString::new(vec![b'z'; crate::credentials::SECRET_BYTES_MAX]).unwrap();
-    assert_eq!(longest.expose().len(), crate::credentials::SECRET_BYTES_MAX);
+    let longest = SecretString::new(vec![b'z'; kernel_security::secret::SECRET_BYTES_MAX]).unwrap();
+    assert_eq!(
+        longest.expose().len(),
+        kernel_security::secret::SECRET_BYTES_MAX
+    );
     let shown = format!("{:?}", secret("gho_visible"));
     assert!(!shown.contains("gho_visible"));
     assert!(reference("dev.crazyagent.a", "b:c").is_err());
-    assert!(parts(&crate::protocol::CredentialRef::new("no-colon").unwrap()).is_err());
-    assert!(parts(&crate::protocol::CredentialRef::new("a:b:c").unwrap()).is_err());
+    assert!(SecretRef::try_from("no-colon").is_err());
+    assert!(SecretRef::try_from("a:b:c").is_err());
 }
 
 #[test]
 fn a_bearer_token_of_up_to_16_kib_is_held_but_the_keychain_refuses_to_store_it() {
-    let tokens = crate::credentials::TOKEN_BYTES_MAX;
+    let tokens = kernel_security::secret::TOKEN_BYTES_MAX;
     let longest = SecretString::bearer(vec![b'z'; tokens]).unwrap();
     assert_eq!(longest.expose().len(), tokens);
     for bad in [Vec::new(), b"has space".to_vec(), vec![b'a'; tokens + 1]] {
@@ -274,7 +278,8 @@ fn a_bearer_token_of_up_to_16_kib_is_held_but_the_keychain_refuses_to_store_it()
     }
     let scratch = Scratch::new();
     let service = scratch.service("github");
-    let long = SecretString::bearer(vec![b'z'; crate::credentials::SECRET_BYTES_MAX + 1]).unwrap();
+    let long =
+        SecretString::bearer(vec![b'z'; kernel_security::secret::SECRET_BYTES_MAX + 1]).unwrap();
     assert_eq!(
         scratch.store.put(&service, "token", &long).unwrap_err().0,
         "credential_secret_invalid"

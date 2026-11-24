@@ -1,8 +1,8 @@
 use super::CloneReceipt;
 use super::api::Endpoints;
-use crate::credentials::Store;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
+use kernel_security::store::Store;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,9 +10,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(not(windows))]
-const NULL_DEVICE: &str = "/dev/null";
+pub(crate) const NULL_DEVICE: &str = "/dev/null";
 #[cfg(windows)]
-const NULL_DEVICE: &str = "NUL";
+pub(crate) const NULL_DEVICE: &str = "NUL";
 const SESSION_BUS_NAMES: [&str; 2] = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 const CLONE_TIME: Duration = Duration::from_secs(1800);
 pub(super) const GIT_USER: &str = "x-access-token";
@@ -47,7 +47,7 @@ pub(super) fn full_name(value: &str) -> Result<(&str, &str), EngineError> {
 /// Finds the git the engine runs: first in the engine's own PATH, never an agent's, then
 /// in the platform's fixed folder. Input: the engine's PATH value. Output: the executable
 /// with links resolved, or none when neither holds one.
-pub(super) fn git_program(path: Option<&OsStr>) -> Option<PathBuf> {
+pub(crate) fn git_program(path: Option<&OsStr>) -> Option<PathBuf> {
     crate::paths::find_in_path("git", path).or_else(|| {
         let folder = fixed_git_folder()?;
         crate::paths::find_in_path("git", Some(folder.as_os_str()))
@@ -177,7 +177,10 @@ pub(super) fn credential_git(git: &Path, empty_home: &Path, helper: &str, scheme
         .arg(format!("credential.helper={helper}"))
         .args(["-c", "credential.interactive=never"])
         .arg("-c")
-        .arg(format!("core.hooksPath={NULL_DEVICE}"))
+        .arg(format!(
+            "core.hooksPath={}",
+            crate::research::runner::no_program()
+        ))
         .args(["-c", "core.fsmonitor=false"])
         .args(["-c", "core.pager=cat"])
         .args(["-c", "core.askPass="])
@@ -210,7 +213,7 @@ pub(super) fn clone_repo(
     if std::fs::symlink_metadata(&destination).is_ok() {
         return Err(failure("clone_destination_exists"));
     }
-    let helper = store.git_credential_helper(credential, GIT_USER)?;
+    let helper = store.git_credential_helper(&crate::protocol::kernel(credential)?, GIT_USER)?;
     let git = git_program(std::env::var_os("PATH").as_deref())
         .ok_or_else(|| failure("github_git_missing"))?;
     let mut token = [0u8; 8];
@@ -279,7 +282,7 @@ pub(super) fn finish(
     failed: &str,
     timed_out: &str,
 ) -> Result<(), EngineError> {
-    let mut child = crate::spawn_gate::spawn(command).map_err(|_| failure(failed))?;
+    let mut child = kernel_processes::spawn_gate::spawn(command).map_err(|_| failure(failed))?;
     let stderr = child.stderr.take().expect("git stderr is piped");
     let reader = std::thread::spawn(move || {
         let mut sink = Vec::new();
@@ -322,7 +325,7 @@ pub(super) fn verify_config(
     if !metadata.is_file() || metadata.len() > CONFIG_BYTES_MAX {
         return Err(failed());
     }
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         git_command(git, empty_home)
             .args(["config", "--file"])
             .arg(config)
@@ -491,7 +494,8 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert!(argv.contains(&format!("core.hooksPath={NULL_DEVICE}")));
+        let hooks = format!("core.hooksPath={}", crate::research::runner::no_program());
+        assert!(argv.contains(&hooks), "{argv:?}");
         assert!(argv.contains(&"core.askPass=".to_owned()));
         assert!(
             argv.iter()

@@ -17,7 +17,7 @@ use crate::research::runner::{
     RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
     confined_unavailable,
 };
-use crate::sandbox::SandboxError;
+use kernel_sandbox::error::SandboxError;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -1030,7 +1030,9 @@ fn start_cause(error: &RunError) -> String {
         RunError::Jobs(JobError::NotHeld) => "job_not_held".to_owned(),
         RunError::Jobs(JobError::Storage(_)) => "job_storage".to_owned(),
         RunError::Sandbox(SandboxError::Invalid(_)) => "sandbox_refused".to_owned(),
-        RunError::Sandbox(SandboxError::Unavailable(_)) => "sandbox_unavailable".to_owned(),
+        RunError::Sandbox(SandboxError::Unavailable(_) | SandboxError::Unreadable(_)) => {
+            "sandbox_unavailable".to_owned()
+        }
         RunError::Sandbox(SandboxError::Io(error)) => io_cause("sandbox_io", error),
         RunError::Context(_) => "context_refused".to_owned(),
         RunError::Account(_) => "account_unavailable".to_owned(),
@@ -1350,6 +1352,7 @@ pub fn start_for_engine(
 ) -> Result<OnboardingService, String> {
     let runtime = runtime
         .canonicalize()
+        .map(kernel_sandbox::paths::one_spelling)
         .map_err(|error| format!("onboarding runtime: {error}"))?;
     let state = runtime.join("onboarding");
     let projects = runtime.join(crate::project_setup::PROJECTS_DIRECTORY);
@@ -1401,7 +1404,7 @@ pub fn start_for_engine(
 }
 
 /// The graphify an engine's graph step runs, looked up again on each step the way
-/// setup finds it ([`crate::tools::Places::engine`]): the app's folder and the owner's own
+/// setup finds it ([`kernel_processes::finding::Places::engine`]): the app's folder and the owner's own
 /// installs first, then `<engine root>/setup/bin`, where setup installs it, last. Input:
 /// the engine root. Output: the program, or the line the graph step fails with when none
 /// of them has one it can run.
@@ -1416,9 +1419,9 @@ pub(crate) fn engine_graphify(runtime: &Path) -> Result<PathBuf, String> {
 /// over (DEC-162), or where setup shows it when that line is longer than a step keeps,
 /// else that none is installed. Input: why graphify cannot run. Output: the line.
 #[cfg(unix)]
-pub(crate) fn graphify_failure(missing: &crate::tools::Missing) -> String {
+pub(crate) fn graphify_failure(missing: &kernel_processes::finding::Missing) -> String {
     match missing.reason {
-        crate::tools::Reason::Refused => {
+        kernel_processes::finding::Reason::Refused => {
             let line = missing.line();
             if line.len() <= super::REASON_BYTES_MAX {
                 line

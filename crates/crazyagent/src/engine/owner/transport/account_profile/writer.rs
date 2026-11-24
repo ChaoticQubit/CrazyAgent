@@ -185,7 +185,7 @@ fn perform(
         .stderr(Stdio::piped())
         .process_group(0);
     assert_eq!(command.get_current_dir(), Some(home.as_path()));
-    let child = crate::spawn_gate::spawn(&mut command).map_err(|_| unknown())?;
+    let child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| unknown())?;
     let group = Pid::from_raw(i32::try_from(child.id()).expect("OS child PID range"))
         .expect("positive child PID");
     process.group = Some(group);
@@ -202,7 +202,7 @@ fn perform(
     let mut frame = Vec::with_capacity(secret.len() + 4);
     frame.extend_from_slice(&(secret.len() as u32).to_be_bytes());
     frame.extend_from_slice(&secret);
-    crate::credentials::wipe(&mut secret);
+    kernel_security::secret::wipe(&mut secret);
     let deadline = WallInstant::now() + Duration::from_secs(5);
     let mut sent = 0;
     let mut stdout = Vec::new();
@@ -233,7 +233,7 @@ fn perform(
         }
         Ok(false)
     })();
-    crate::credentials::wipe(&mut frame);
+    kernel_security::secret::wipe(&mut frame);
     drop(input);
     let okay = observed?;
     if !okay || stdout.len() < 5 {
@@ -321,7 +321,7 @@ fn drain_errors(
         4096usize.saturating_sub(*count),
     )?;
     *count += bytes.len();
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     Ok(())
 }
 
@@ -347,7 +347,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_exited_unreaped_writer_group_answers_until_the_reap_and_settles_cleanly() {
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
                 .process_group(0),
@@ -382,7 +382,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn exited_unreaped_writer_group_settles_cleanly() {
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
                 .process_group(0),

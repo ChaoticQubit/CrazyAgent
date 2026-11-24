@@ -6,8 +6,10 @@ use crazyagent::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crazyagent::protocol::{Outcome, ProjectId, ProjectSpec, StoredProject};
 use crazyagent::questions::{Answer, Ask, Asker, Settlement};
 use crazyagent::team::TeamAction;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use crazyagent::terminal::FOLDER;
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, OptionalExtension};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -61,7 +63,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -85,7 +87,7 @@ impl Engine {
     /// Starts the engine and waits for its `ready` line. Inputs: the engine root and the
     /// codex executable. Output: the running engine, or a panic with its stderr.
     fn start(runtime: &Path, codex: &Path) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(runtime)
@@ -146,7 +148,7 @@ impl Engine {
 
     /// Stops the engine with SIGTERM as the desktop app does and checks it exits cleanly.
     fn stop(mut self) {
-        let signalled = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let signalled = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),
@@ -358,7 +360,12 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
             version,
         },
     );
-    let host = Tmux::open(Some(tmux.clone()), &root.join(FOLDER));
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &root.join(FOLDER),
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     until("the live master's pane runs", || {
         live_agent(&database).is_some_and(|agent| {
             host.alive()

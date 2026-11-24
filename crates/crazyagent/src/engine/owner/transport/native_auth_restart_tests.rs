@@ -162,6 +162,20 @@ impl Restart {
         if self.installed { 6000 } else { 200 }
     }
 
+    /// The one profile home the case's engine made under its root. Output: the home, or a
+    /// panic when there is none or more than one.
+    #[cfg(target_os = "macos")]
+    fn profile_home(&self) -> PathBuf {
+        let profiles = self.root.path().join("native-profiles");
+        let homes: Vec<PathBuf> = std::fs::read_dir(&profiles)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("home"))
+            .filter(|home| home.is_dir())
+            .collect();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        homes[0].clone()
+    }
+
     async fn start(&self) -> Run {
         let (mut service, handle, stop) = self.ready().await;
         service.register_native_auth_host(&custodian()).unwrap();
@@ -232,16 +246,19 @@ impl Restart {
     ) -> (
         crate::team::runtime::TeamRuntime,
         crate::project_setup::StoredSetup,
-        Arc<dyn crate::terminal::Host>,
+        Arc<dyn kernel_processes::terminal::Host>,
     ) {
         let (team, setup) = self.team();
         let base = self.root.path().canonicalize().unwrap();
         let tmux = crate::terminal::tmux::installed(&base)
             .expect("tmux must be installed on this machine");
-        let host: Arc<dyn crate::terminal::Host> = Arc::new(crate::terminal::tmux::Tmux::open(
-            Some(tmux),
-            &base.join(crate::terminal::FOLDER),
-        ));
+        let host: Arc<dyn kernel_processes::terminal::Host> =
+            Arc::new(kernel_processes::terminal::tmux::Tmux::open(
+                Some(tmux),
+                &base.join(crate::terminal::FOLDER),
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            ));
         let team = team
             .with_reproof(reproving)
             .with_terminal(host.clone())
@@ -624,7 +641,14 @@ impl Run {
         let begun = self
             .handle
             .engine
-            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    admission.clone(),
+                    command,
+                    crate::storage::NativeAuthAsk::Engine,
+                    reply,
+                )
+            })
             .await
             .unwrap();
         assert_eq!(begun.reply.fact.phase, NativeAuthPhase::Starting);
@@ -796,6 +820,14 @@ impl Run {
     }
 
     async fn log_out(&self, restart: &Restart) -> NativeAuthFact {
+        let fact = self.logout_finished(restart).await;
+        assert_eq!(fact.phase, NativeAuthPhase::UnauthenticatedObserved);
+        fact
+    }
+
+    /// Runs one real logout of the account through the owner and follows it until it
+    /// finishes, whatever it observed. Input: the case. Output: the final fact.
+    async fn logout_finished(&self, restart: &Restart) -> NativeAuthFact {
         let scope = self.scope(restart.config().id).await;
         let client = self.client();
         let started = client
@@ -816,7 +848,6 @@ impl Run {
                 .unwrap();
             if !read.fact.phase.unfinished() {
                 assert_eq!(read.fact.action, NativeAuthAction::Logout);
-                assert_eq!(read.fact.phase, NativeAuthPhase::UnauthenticatedObserved);
                 return read.fact;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1447,6 +1478,62 @@ async fn an_idle_team_agent_whose_account_sign_in_is_rejected_stops_and_the_next
     .expect("the idle team agent rejection case exceeded 60 seconds");
 }
 
+/// V243-PROFILE-KEYCHAIN-PROMPT (#646 code F2): only a Claude login sets aside a profile
+/// keychain the empty password cannot open. A check of the existing sign-in and a logout
+/// fail closed with the file in place, and the login after them sets it aside for a new one.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_claude_login_sets_aside_a_keychain_the_empty_password_cannot_open() {
+    use crate::credentials::test_keychain::TestKeychain;
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let run = restart.start().await;
+        run.sign_in(&restart).await;
+        let home = restart.profile_home();
+        let keychain = home.join("Library/Keychains/profile.keychain-db");
+        let aside = home.join("Library/Keychains/profile-locked.keychain-db");
+        drop(TestKeychain::adopt(&home, keychain.clone()));
+        let locked = TestKeychain::adopt(&home, keychain.clone());
+        let text = keychain.to_str().unwrap().to_owned();
+        locked.security(&["create-keychain", "-p", "crazyagent-dummy", &text], None);
+        locked.security(&["lock-keychain", &text], None);
+        let before = std::fs::read(&keychain).unwrap();
+        let existing = run
+            .finished(
+                &restart,
+                connection(),
+                "check-locked",
+                NativeAuthMethod::ClaudeExisting,
+            )
+            .await;
+        let logout = run.logout_finished(&restart).await;
+        let unavailable = Some("native_auth_claude_keychain_unavailable");
+        assert_eq!(
+            (
+                (existing.phase, existing.code.as_deref()),
+                (logout.phase, logout.code.as_deref()),
+                std::fs::read(&keychain).unwrap() == before,
+                std::fs::symlink_metadata(&aside).is_ok(),
+            ),
+            (
+                (NativeAuthPhase::Failed, unavailable),
+                (NativeAuthPhase::Failed, unavailable),
+                true,
+                false,
+            ),
+            "a check or a logout moved the keychain or did not fail closed"
+        );
+        run.sign_in_to(&restart, connection(), "restart-sign-in-locked")
+            .await;
+        let _aside = TestKeychain::adopt(&home, aside.clone());
+        assert_eq!(std::fs::read(&aside).unwrap(), before);
+        assert_ne!(std::fs::read(&keychain).unwrap(), before);
+        run.stop().await;
+    })
+    .await
+    .expect("the locked keychain sign-in case exceeded 90 seconds");
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_existing_claude_sign_in_whose_token_lapsed_and_cannot_be_renewed_is_not_reported_signed_in()
@@ -1474,11 +1561,11 @@ async fn an_existing_claude_sign_in_whose_token_lapsed_and_cannot_be_renewed_is_
         let home = &homes[0];
         let keychain = crate::credentials::test_keychain::TestKeychain::adopt(
             home,
-            home.join("Library/Keychains/login.keychain-db"),
+            home.join("Library/Keychains/profile.keychain-db"),
         );
         let service = format!(
             "Claude Code-credentials-{}",
-            &crate::memory::hash(home.to_str().unwrap().as_bytes())[..8]
+            &kernel_common::hash(home.to_str().unwrap().as_bytes())[..8]
         );
         keychain.add(
             "unknown",
@@ -1869,13 +1956,13 @@ async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
         let home = &homes[0];
         let keychain = crate::credentials::test_keychain::TestKeychain::adopt(
             home,
-            home.join("Library/Keychains/login.keychain-db"),
+            home.join("Library/Keychains/profile.keychain-db"),
         );
         keychain.add(
             "unknown",
             &format!(
                 "Claude Code-credentials-{}",
-                &crate::memory::hash(home.to_str().unwrap().as_bytes())[..8]
+                &kernel_common::hash(home.to_str().unwrap().as_bytes())[..8]
             ),
             &serde_json::json!({
                 "claudeAiOauth": {
@@ -2128,4 +2215,506 @@ async fn rejected_account_not_waited() {
     })
     .await
     .expect("the rejected account case exceeded 60 seconds");
+}
+
+/// A Claude stand-in whose sign-out always fails and whose status still reads signed in, the
+/// harness left signed in by a sign-out that could not finish.
+const CLAUDE_SIGN_OUT_FAILS: &str = r#"#!/bin/sh
+case "$2" in
+login) exit 0 ;;
+logout) exit 1 ;;
+status)
+  printf '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","configDirectory":"%s"}' "$CLAUDE_CONFIG_DIR"
+  exit 0 ;;
+esac
+exit 2
+"#;
+
+impl Restart {
+    /// Whether the stand-in ran a harness sign-out, which leaves its marker file.
+    /// Output: true once the marker exists.
+    fn harness_signed_out(&self) -> bool {
+        self.root.path().join("claude.logged-out").exists()
+    }
+
+    /// Swaps the stand-in for one whose sign-out always fails, before the next engine run.
+    /// Output: none; the next run registers the failing stand-in.
+    fn fail_sign_out(&self) {
+        assert!(!self.installed);
+        std::fs::write(&self.claude, CLAUDE_SIGN_OUT_FAILS).unwrap();
+        std::fs::set_permissions(&self.claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+impl Run {
+    /// Asks for a sign-out while storage holds every job at its claim, so it outlasts its
+    /// bound and is pending, then lets the storage worker die at its next claim, as the
+    /// engine does when it dies with the sign-out pending. Input: the case. Output: none.
+    async fn sign_out_then_die(&self, restart: &Restart) {
+        let scope = self.scope(restart.config().id).await;
+        let client = self.client();
+        let path = std::fs::canonicalize(restart.root.path())
+            .unwrap()
+            .join("engine.db");
+        let hold = crate::storage::hold_claims(&path);
+        let sent = client
+            .logout_native_auth(NativeAuthLogout {
+                request_id: request("restart-logout-pending"),
+                scope,
+            })
+            .await;
+        assert_eq!(
+            sent.map(|reply| reply.fact.action).map_err(|error| error.0),
+            Err("access_change_pending".to_owned()),
+            "the sign-out outlasts its bound and is pending"
+        );
+        crate::storage::die_at_claim(&path);
+        drop(hold);
+        for _ in 0..250 {
+            if !crate::storage::dying(&path) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the storage worker never died at its claim");
+    }
+
+    /// Stops a run whose storage worker died, whatever its stop reports.
+    /// Output: none once the run's task ended.
+    async fn stop_dead(self) {
+        self.stop.send_replace(true);
+        let Run { handle, task, .. } = self;
+        drop(handle);
+        let _ = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("a run whose storage died still stops within 10 seconds");
+    }
+}
+
+/// Waits up to 40 seconds for this run's engine-start re-proof to end, which here runs a
+/// real custodian for a sign-out and a status check. Input: the run. Output: true once it
+/// ended.
+async fn re_proof_ended(run: &Run) -> bool {
+    let flag = run.handle.reproving();
+    for _ in 0..400 {
+        if !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// V243-NARROWING-DURABLE: a sign-out still pending when the engine dies takes effect at the
+/// next start. The profile never launches again on its old sign-in, the engine-start re-proof
+/// runs the harness sign-out, and the account reads Not signed in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_pending_when_the_engine_dies_signs_the_profile_out_at_the_next_start() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        assert_eq!(restart.launch(), Ok(()));
+        first.sign_out_then_die(&restart).await;
+        first.stop_dead().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert!(
+            restart.launch().is_err(),
+            "the leftover sign-out is lost: the profile launches on its old sign-in"
+        );
+        assert!(
+            restart.harness_signed_out(),
+            "the engine-start re-proof runs the harness sign-out"
+        );
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the leftover sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE: a leftover sign-out whose harness sign-out fails at the next start
+/// keeps the profile from launching although the harness still reads signed in, and the
+/// Accounts page says why the sign-out did not finish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leftover_sign_out_the_harness_cannot_finish_keeps_the_profile_blocked_and_says_why() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        first.sign_out_then_die(&restart).await;
+        first.stop_dead().await;
+        restart.fail_sign_out();
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert!(
+            restart.launch().is_err(),
+            "a failed harness sign-out leaves the profile blocked"
+        );
+        let account = second.account().await;
+        assert_eq!(account.status, AccountStatus::NotSignedIn);
+        assert!(
+            account
+                .status_label
+                .strip_prefix("Sign-out not finished: ")
+                .is_some_and(|reason| !reason.is_empty()),
+            "the Accounts page says why the sign-out did not finish: {:?}",
+            account.status_label
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the failed leftover sign-out case exceeded 60 seconds");
+}
+
+impl Restart {
+    /// The engine's intent store, opened beside its database the way storage opens it, so
+    /// a row reads and writes the same files the engine does.
+    /// Output: the store.
+    fn intents(&self) -> crate::storage::narrowing::Intents {
+        crate::storage::narrowing::Intents::open(&std::fs::canonicalize(self.root.path()).unwrap())
+            .unwrap()
+            .expect("the intent store opens on unix")
+    }
+
+    /// How many intents the engine keeps on disk now, every file judged and parsed as at
+    /// open, none refused.
+    /// Output: the count.
+    fn kept(&self) -> usize {
+        let listing = self.intents().list().unwrap();
+        assert_eq!(listing.refused, 0);
+        listing.intents.len()
+    }
+}
+
+impl Run {
+    /// Keeps a sign-out of the account on disk the way the engine keeps one storage has not
+    /// taken yet, for this run's database.
+    /// Inputs: the case and the request name. Output: the sign-out and its intent.
+    async fn keep_sign_out(
+        &self,
+        restart: &Restart,
+        name: &str,
+    ) -> (NativeAuthLogout, crate::storage::narrowing::IntentId) {
+        let logout = NativeAuthLogout {
+            request_id: request(name),
+            scope: self.scope(restart.config().id).await,
+        };
+        let id = self.keep(restart, &logout);
+        (logout, id)
+    }
+
+    /// Keeps this sign-out on disk the way the engine keeps one storage has not taken yet,
+    /// for this run's database, whatever its scope says.
+    /// Inputs: the case and the sign-out. Output: its intent's name.
+    fn keep(
+        &self,
+        restart: &Restart,
+        logout: &NativeAuthLogout,
+    ) -> crate::storage::narrowing::IntentId {
+        restart
+            .intents()
+            .write(&crate::storage::narrowing::Intent {
+                db_instance: self.admission().db_instance,
+                change: crate::storage::narrowing::Change::Logout(logout.clone()),
+            })
+            .unwrap()
+    }
+}
+
+/// V243-NARROWING-DURABLE r2: a sign-out storage refuses by name is a final answer. Its
+/// intent ends with the refusal, so the next start never signs the profile out for a
+/// sign-out the owner was told was refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_storage_refuses_keeps_no_intent_and_the_profile_launches_after_a_restart() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let mut scope = first.scope(restart.config().id).await;
+        scope.expected_source_hash = "0".repeat(64);
+        let refused = first
+            .client()
+            .logout_native_auth(NativeAuthLogout {
+                request_id: request("restart-logout-stale"),
+                scope,
+            })
+            .await;
+        assert_eq!(
+            refused
+                .map(|reply| reply.fact.action)
+                .map_err(|error| error.0),
+            Err("native_profile_source_conflict".to_owned()),
+            "storage refuses a sign-out of settings that changed"
+        );
+        assert_eq!(restart.kept(), 0, "a refused sign-out keeps no intent");
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(
+            restart.launch(),
+            Ok(()),
+            "a refused sign-out never signs the profile out at the next start"
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the refused sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: an owner's new sign-in ends the kept sign-outs of its
+/// profile, so neither the drainer nor the next open signs the newer sign-in out, and the
+/// profile still launches after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owner_sign_in_ends_the_kept_sign_outs_of_its_profile_so_a_restart_keeps_it() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        first.keep_sign_out(&restart, "restart-logout-older").await;
+        assert_eq!(restart.kept(), 1);
+        first
+            .sign_in_to(&restart, connection(), "restart-sign-in-newer")
+            .await;
+        assert_eq!(
+            restart.kept(),
+            0,
+            "the owner's new sign-in ends the kept sign-out of its profile"
+        );
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(
+            restart.launch(),
+            Ok(()),
+            "the next start never signs the newer sign-in out"
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the newer sign-in case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: a drained sign-out whose intent is gone, as after a newer
+/// owner sign-in ended it, is refused by storage before it records anything, so the sign-in
+/// stays and the profile launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_sign_out_whose_intent_is_gone_is_refused_and_the_sign_in_stays() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let (logout, id) = first.keep_sign_out(&restart, "restart-logout-gone").await;
+        restart.intents().remove(&id).unwrap();
+        let admission = first.admission();
+        let drained = first
+            .handle
+            .engine
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    admission,
+                    crate::engine::owner::native_auth::Command::Logout(logout),
+                    crate::storage::NativeAuthAsk::Drained(id),
+                    reply,
+                )
+            })
+            .await;
+        assert_eq!(
+            drained
+                .map(|begun| begun.reply.fact.action)
+                .map_err(|error| error.0),
+            Err("native_auth_sign_out_superseded".to_owned()),
+            "a drained sign-out whose intent is gone is refused"
+        );
+        assert_eq!(
+            restart.latest_phase(),
+            NativeAuthPhase::AuthenticatedObserved
+        );
+        assert_eq!(restart.launch(), Ok(()), "the sign-in stays");
+        first.stop().await;
+    })
+    .await
+    .expect("the drained sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: a drained sign-out storage refuses by name keeps its intent,
+/// since the owner was told it is pending and never hears that refusal, and the next open
+/// replays it: the profile reads Not signed in and no longer launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_sign_out_refused_by_name_keeps_its_intent_and_the_next_open_replays_it() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let mut scope = first.scope(restart.config().id).await;
+        scope.expected_source_hash = "0".repeat(64);
+        let logout = NativeAuthLogout {
+            request_id: request("restart-logout-drained-refused"),
+            scope,
+        };
+        let id = first.keep(&restart, &logout);
+        let admission = first.admission();
+        let drained = first
+            .handle
+            .engine
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    admission,
+                    crate::engine::owner::native_auth::Command::Logout(logout),
+                    crate::storage::NativeAuthAsk::Drained(id),
+                    reply,
+                )
+            })
+            .await;
+        assert_eq!(
+            drained
+                .map(|begun| begun.reply.fact.action)
+                .map_err(|error| error.0),
+            Err("native_profile_source_conflict".to_owned()),
+            "storage refuses the drained sign-out by name"
+        );
+        assert_eq!(
+            restart.kept(),
+            1,
+            "a drained sign-out the owner never hears refused keeps its intent"
+        );
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(restart.kept(), 0, "the next open replays the kept sign-out");
+        assert!(
+            restart.launch().is_err(),
+            "the replayed sign-out keeps the profile from launching"
+        );
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the refused drained sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: a sign-out storage refuses by name only after the owner was
+/// told it is pending keeps its intent, since the owner never hears that refusal, and the
+/// next open replays it: the profile reads Not signed in and no longer launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_refused_after_the_owner_was_told_pending_keeps_its_intent_for_the_next_open() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let mut scope = first.scope(restart.config().id).await;
+        scope.expected_source_hash = "0".repeat(64);
+        let (release, held) = tokio::sync::oneshot::channel();
+        first
+            .handle
+            .engine
+            .storage
+            .sender
+            .try_send(Job::Hold(held))
+            .unwrap();
+        let told = first
+            .client()
+            .logout_native_auth(NativeAuthLogout {
+                request_id: request("restart-logout-late-refused"),
+                scope,
+            })
+            .await;
+        assert_eq!(
+            told.map(|reply| reply.fact.action).map_err(|error| error.0),
+            Err("access_change_pending".to_owned()),
+            "a sign-out storage cannot answer by its due time is pending"
+        );
+        release.send(()).unwrap();
+        let (send, settled) = tokio::sync::oneshot::channel();
+        first
+            .handle
+            .engine
+            .storage
+            .sender
+            .send(Job::Setup(crate::storage::setup::Command::Sweep, send))
+            .await
+            .unwrap();
+        settled.await.unwrap().unwrap();
+        assert_eq!(
+            restart.kept(),
+            1,
+            "a refusal the owner never hears keeps the sign-out's intent"
+        );
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(restart.kept(), 0, "the next open replays the kept sign-out");
+        assert!(
+            restart.launch().is_err(),
+            "the replayed sign-out keeps the profile from launching"
+        );
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the late refused sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: storage never takes a refusal as heard by its own clock. An
+/// owner's sign-out it refuses by name while no one receives the answer keeps its intent,
+/// and the next open replays it: the profile reads Not signed in and no longer launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_refused_while_no_one_receives_the_answer_keeps_its_intent_for_the_next_open() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let mut scope = first.scope(restart.config().id).await;
+        scope.expected_source_hash = "0".repeat(64);
+        let logout = NativeAuthLogout {
+            request_id: request("restart-logout-unreceived"),
+            scope,
+        };
+        first.keep(&restart, &logout);
+        let (reply, unreceived) = tokio::sync::oneshot::channel();
+        drop(unreceived);
+        first
+            .handle
+            .engine
+            .storage
+            .sender
+            .send(Job::NativeAuth(
+                first.admission(),
+                crate::engine::owner::native_auth::Command::Logout(logout),
+                crate::storage::NativeAuthAsk::Owner {
+                    answer_by: tokio::time::Instant::now() + Duration::from_secs(30),
+                },
+                reply,
+            ))
+            .await
+            .unwrap();
+        let (send, settled) = tokio::sync::oneshot::channel();
+        first
+            .handle
+            .engine
+            .storage
+            .sender
+            .send(Job::Setup(crate::storage::setup::Command::Sweep, send))
+            .await
+            .unwrap();
+        settled.await.unwrap().unwrap();
+        assert_eq!(
+            restart.kept(),
+            1,
+            "a refusal no one receives keeps the sign-out's intent, whatever the clock says"
+        );
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(restart.kept(), 0, "the next open replays the kept sign-out");
+        assert!(
+            restart.launch().is_err(),
+            "the replayed sign-out keeps the profile from launching"
+        );
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the unreceived refused sign-out case exceeded 60 seconds");
 }

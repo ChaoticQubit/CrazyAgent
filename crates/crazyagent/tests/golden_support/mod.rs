@@ -9,7 +9,8 @@ use crazyagent::onboarding::{Step, project_id_for};
 use crazyagent::project_setup::{HarnessSlot, ProjectSetup};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::SOCKET;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::ErrorKind;
@@ -232,10 +233,12 @@ pub fn git_text(folder: &Path, args: &[&str]) -> String {
 /// listening and no model is asked. Input: none. Output: the port; its thread stays blocked
 /// on the listener until the test process ends.
 pub fn silent_provider() -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     assert!(port > 0);
-    std::thread::spawn(move || crazyagent::spawn_gate::incoming_tcp_std(&listener).for_each(drop));
+    std::thread::spawn(move || {
+        kernel_processes::spawn_gate::incoming_tcp_std(&listener).for_each(drop)
+    });
     port
 }
 

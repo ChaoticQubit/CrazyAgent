@@ -1,0 +1,1870 @@
+[
+  {
+    "scenario": "harness/catalog-specs",
+    "at": 76,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "      \"subscription\",",
+      "      \"api_key\"",
+      "    ],",
+      "    \"binaries\": [",
+      "      \"cursor-agent\"",
+      "    ],",
+      "    \"headless\": \"cursor-agent --print with --output-format stream-json\",",
+      "    \"id\": \"cursor-agent\",",
+      "    \"launch\": \"installed, but CrazyAgent cannot start it yet\",",
+      "    \"locations\": [",
+      "      \".cursor/bin\"",
+      "    ],",
+      "    \"model_selection\": true,",
+      "    \"name\": \"Cursor CLI\",",
+      "    \"tools_limited\": \"tools are allowed or denied only through Cursor's permission file\"",
+      "  },",
+      "  {",
+      "    \"account_kinds\": ["
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/catalog-specs",
+    "at": 110,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "  },",
+      "  {",
+      "    \"account_kinds\": [",
+      "      \"subscription\"",
+      "    ],",
+      "    \"binaries\": [",
+      "      \"agy\",",
+      "      \"antigravity\"",
+      "    ],",
+      "    \"headless\": \"agy --print: one prompt, plain text reply\",",
+      "    \"id\": \"antigravity\",",
+      "    \"launch\": \"installed, but CrazyAgent cannot start it yet\",",
+      "    \"locations\": [],",
+      "    \"model_selection\": true,",
+      "    \"name\": \"Antigravity\",",
+      "    \"tools_limited\": \"tools cannot be switched off, only approved automatically\""
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/catalog-specs",
+    "at": 178,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "  },",
+      "  {",
+      "    \"account_kinds\": [",
+      "      \"subscription\",",
+      "      \"api_key\"",
+      "    ],",
+      "    \"binaries\": [",
+      "      \"amp\"",
+      "    ],",
+      "    \"headless\": \"amp --execute with --stream-json\",",
+      "    \"id\": \"amp\",",
+      "    \"launch\": \"installed, but CrazyAgent cannot start it yet\",",
+      "    \"locations\": [",
+      "      \".amp/bin\"",
+      "    ],",
+      "    \"model_selection\": false,",
+      "    \"name\": \"Amp\",",
+      "    \"tools_limited\": null"
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/catalog-specs",
+    "at": 290,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "      \"kiro-cli\",",
+      "      \"kiro\"",
+      "    ],",
+      "    \"headless\": \"kiro-cli chat --no-interactive\",",
+      "    \"id\": \"kiro\",",
+      "    \"launch\": \"installed, but CrazyAgent cannot start it yet\",",
+      "    \"locations\": [],",
+      "    \"model_selection\": true,",
+      "    \"name\": \"Kiro CLI\",",
+      "    \"tools_limited\": null",
+      "  },",
+      "  {",
+      "    \"account_kinds\": [",
+      "      \"subscription\"",
+      "    ],",
+      "    \"binaries\": ["
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/catalog-specs",
+    "at": 370,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "      \"subscription\"",
+      "    ],",
+      "    \"binaries\": [",
+      "      \"auggie\"",
+      "    ],",
+      "    \"headless\": \"auggie --print: one prompt, plain text reply\",",
+      "    \"id\": \"auggie\",",
+      "    \"launch\": \"installed, but CrazyAgent cannot start it yet\",",
+      "    \"locations\": [],",
+      "    \"model_selection\": true,",
+      "    \"name\": \"Auggie\",",
+      "    \"tools_limited\": null",
+      "  },",
+      "  {",
+      "    \"account_kinds\": ["
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 228,
+    "commit": "48a6ac9a1",
+    "reason": "2.4.3 denies the engine backups folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/backups",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/backups\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 240,
+    "commit": "89fe5a576",
+    "reason": "2.4.3 denies the engine's plugin-keys folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/plugin-keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/plugin-keys\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 255,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 290,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 294,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 300,
+    "commit": "07b039da3",
+    "reason": "2.4.3 splits each optional (/.*)? inside a fold group into an X$ and an X/ regex pair",
+    "security": true,
+    "change": "same: X(/.*)?$ becomes X$ plus X/, the same paths in a form libsandbox accepts",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO](/.*)?|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO]|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(i|I|ı)[nN][fF][oO]/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 304,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 336,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 379,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-full-access",
+    "at": 391,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 210,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 215,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 245,
+    "commit": "48a6ac9a1",
+    "reason": "2.4.3 denies the engine backups folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/backups",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/backups\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 257,
+    "commit": "89fe5a576",
+    "reason": "2.4.3 denies the engine's plugin-keys folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/plugin-keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/plugin-keys\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 272,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 307,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 311,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-3>/own-branch-clone/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-3>/own-branch-clone/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 318,
+    "commit": "07b039da3",
+    "reason": "2.4.3 splits each optional (/.*)? inside a fold group into an X$ and an X/ regex pair",
+    "security": true,
+    "change": "same: X(/.*)?$ becomes X$ plus X/, the same paths in a form libsandbox accepts",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO](/.*)?|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO]|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(i|I|ı)[nN][fF][oO]/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 322,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 354,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 397,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-own-branch",
+    "at": 409,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 228,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 235,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 267,
+    "commit": "48a6ac9a1",
+    "reason": "2.4.3 denies the engine backups folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/backups",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/backups\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 279,
+    "commit": "89fe5a576",
+    "reason": "2.4.3 denies the engine's plugin-keys folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/plugin-keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/plugin-keys\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 280,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<owner-home>/\\\\.rustup/toolchains/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/bin/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/registry/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.local/share/uv/python/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<owner-home>/\\\\.rustup/toolchains/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/bin/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/registry/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.local/share/uv/python/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 298,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 333,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 337,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/worktrees/agent-1/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-3>/sandboxed-worktree/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\"))))\","
+    ],
+    "capture": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/worktrees/agent-1/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-3>/sandboxed-worktree/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\"))))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 345,
+    "commit": "07b039da3",
+    "reason": "2.4.3 splits each optional (/.*)? inside a fold group into an X$ and an X/ regex pair",
+    "security": true,
+    "change": "same: X(/.*)?$ becomes X$ plus X/, the same paths in a form libsandbox accepts",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO](/.*)?|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO]|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(i|I|ı)[nN][fF][oO]/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 349,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/((i|I|ı)[nN][fF][oO]|[pP][aA][cC](k|K|K))(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/((i|I|ı)[nN][fF][oO]|[pP][aA][cC](k|K|K))(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 385,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 428,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-claude-code-sub-sandboxed",
+    "at": 440,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 94,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [
+      "    \"crazyagent/bin/getconf\""
+    ],
+    "capture": [
+      "    \"crazyagent/bin/getconf\",",
+      "    \"crazyagent/codex-hook-keys.json\""
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 234,
+    "commit": "48a6ac9a1",
+    "reason": "2.4.3 denies the engine backups folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/backups",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/backups\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 246,
+    "commit": "89fe5a576",
+    "reason": "2.4.3 denies the engine's plugin-keys folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/plugin-keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/plugin-keys\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 261,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 296,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 300,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 306,
+    "commit": "07b039da3",
+    "reason": "2.4.3 splits each optional (/.*)? inside a fold group into an X$ and an X/ regex pair",
+    "security": true,
+    "change": "same: X(/.*)?$ becomes X$ plus X/, the same paths in a form libsandbox accepts",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO](/.*)?|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO]|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(i|I|ı)[nN][fF][oO]/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 310,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 348,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 391,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-full-access",
+    "at": 403,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 94,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [
+      "    \"crazyagent/bin/getconf\""
+    ],
+    "capture": [
+      "    \"crazyagent/bin/getconf\",",
+      "    \"crazyagent/codex-hook-keys.json\""
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 216,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 221,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 251,
+    "commit": "48a6ac9a1",
+    "reason": "2.4.3 denies the engine backups folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/backups",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/backups\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 263,
+    "commit": "89fe5a576",
+    "reason": "2.4.3 denies the engine's plugin-keys folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/plugin-keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/plugin-keys\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 278,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 313,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 317,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-1>/own-branch-clone/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-1>/own-branch-clone/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 324,
+    "commit": "07b039da3",
+    "reason": "2.4.3 splits each optional (/.*)? inside a fold group into an X$ and an X/ regex pair",
+    "security": true,
+    "change": "same: X(/.*)?$ becomes X$ plus X/, the same paths in a form libsandbox accepts",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO](/.*)?|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO]|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(i|I|ı)[nN][fF][oO]/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 328,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/\\\\.[gG](i|I|ı)[tT]\\\\.[gG](i|I|ı)[tT](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 366,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 409,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-own-branch",
+    "at": 421,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 94,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [
+      "    \"crazyagent/bin/getconf\""
+    ],
+    "capture": [
+      "    \"crazyagent/bin/getconf\",",
+      "    \"crazyagent/codex-hook-keys.json\""
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 234,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(\\\\.[eE][nN][vV].*|\\\\.[gG](i|I|ı)[tT]-[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)|\\\\.[nN][eE][tT][rR][cC]|\\\\.[nN][pP][mM][rR][cC]|\\\\.[pP][yY][pP](i|I|ı)[rR][cC]|\\\\.[pP][gG][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)|\\\\.[hH][tT][pP][aA]((s|S|ſ)(s|S|ſ)|ß|ẞ)[wW][dD]|\\\\.[dD][oO][cC](k|K|K)[eE][rR][cC][fF][gG]|\\\\.(s|S|ſ)3[cC][fF][gG]|\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL]|[pP](i|I|ı)[pP]\\\\.[cC][oO][nN][fF]|(k|K|K)[uU][bB][eE][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]|\\\\.((s|S|ſ)(s|S|ſ)|ß|ẞ)[hH]|\\\\.[aA][wW](s|S|ſ)|\\\\.[gG][nN][uU][pP][gG]|\\\\.(k|K|K)[uU][bB][eE]|\\\\.[dD][oO][cC](k|K|K)[eE][rR]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[jJ](s|S|ſ)[oO][nN]|\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG][cC][lL][oO][uU][dD]|(i|I|ı)[dD]_([rR](s|S|ſ)[aA]|[dD](s|S|ſ)[aA]|[eE][cC][dD](s|S|ſ)[aA]|[eE][dD]25519).*|[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)(\\\\..*)?|(s|S|ſ)[eE][cC][rR][eE][tT](s|S|ſ)?(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 241,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"    (regex #\\\"^<path-2>/projects/snapshot-team/(.*/)?(.*((s|S|ſ)|ß|ẞ)[eE][rR][vV](i|I|ı)[cC][eE](-|_)?[aA][cC][cC][oO][uU][nN][tT].*\\\\.[jJ](s|S|ſ)[oO][nN]|.*\\\\.([pP][eE][mM]|(k|K|K)[eE][yY]|[pP]12|[pP][fF][xX]|[jJ](k|K|K)(s|S|ſ)|(k|K|K)[eE][yY]((s|S|ſ)[tT]|ﬅ|ﬆ)[oO][rR][eE]|[pP][pP](k|K|K)|(k|K|K)[dD][bB][xX]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]|(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN]-[dD][bB]|[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]|[aA][gG][eE]|[cC][rR][tT]|[cC][eE][rR])|.*\\\\.[tT][fF]((s|S|ſ)[tT]|ﬅ|ﬆ)[aA][tT][eE]\\\\..*|.*\\\\.[tT][fF][vV][aA][rR](s|S|ſ)(\\\\..*)?)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 273,
+    "commit": "48a6ac9a1",
+    "reason": "2.4.3 denies the engine backups folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/backups",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/backups\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 285,
+    "commit": "89fe5a576",
+    "reason": "2.4.3 denies the engine's plugin-keys folder to every agent",
+    "security": true,
+    "change": "narrows: agents can no longer read or write <path-1>/plugin-keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "    \"  (subpath \\\"<path-1>/plugin-keys\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 286,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<owner-home>/\\\\.rustup/toolchains/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/bin/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/registry/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.local/share/uv/python/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<owner-home>/\\\\.rustup/toolchains/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/bin/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.cargo/registry/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<owner-home>/\\\\.local/share/uv/python/(.*/)?(\\\\.npmrc|etc/npmrc|\\\\.pypirc|\\\\.netrc|\\\\.git-credentials|credentials\\\\.toml|\\\\.ssh|\\\\.aws|\\\\.gnupg|\\\\.config/gcloud|\\\\.docker|\\\\.kube|pip\\\\.conf|\\\\.yarnrc\\\\.yml)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 304,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/[cC][oO][nN][tT][eE][xX][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[hH][oO][oO](k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[mM][eE][rR][gG][eE](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][bB][aA](s|S|ſ)[eE]-[aA][pP][pP][lL][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[rR][eE][mM][oO][tT][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[bB][rR][aA][nN][cC][hH][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(s|S|ſ)[eE][qQ][uU][eE][nN][cC][eE][rR](/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 339,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT](/[wW][oO][rR](k|K|K)[tT][rR][eE][eE](s|S|ſ)/[^/]+)?/[mM][oO][dD][uU][lL][eE](s|S|ſ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 343,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/worktrees/agent-1/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-1>/sandboxed-worktree/(.+/)?\\\\.[gG](i|I|ı)[tT](/.*)?$\\\"))))\","
+    ],
+    "capture": [
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.crazyagent/worktrees/agent-1/.+/\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/worktrees/agent-1/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/home/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/team/agents/agent-1/tmp/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-3>/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"      (regex #\\\"^<path-1>/tool-cache/<id-1>/sandboxed-worktree/(.+/)?\\\\.[gG](i|I|ı)[tT](/|$)\\\"))))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 351,
+    "commit": "07b039da3",
+    "reason": "2.4.3 splits each optional (/.*)? inside a fold group into an X$ and an X/ regex pair",
+    "security": true,
+    "change": "same: X(/.*)?$ becomes X$ plus X/, the same paths in a form libsandbox accepts",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO](/.*)?|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?(/.*)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/((i|I|ı)[nN][fF][oO]|(s|S|ſ)[hH][aA][lL][lL][oO][wW])$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/(i|I|ı)[nN][fF][oO]/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.[gG](i|I|ı)[tT]/[oO][bB][jJ][eE][cC][tT](s|S|ſ)/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(i|I|ı)[nN][fF][oO]/([cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?|[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ)|[hH][tT][tT][pP]-[aA][lL][tT][eE][rR][nN][aA][tT][eE](s|S|ſ))$\\\")\",",
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/(i|I|ı)[nN][fF][oO]/[cC][oO][mM][mM](i|I|ı)[tT]-[gG][rR][aA][pP][hH](s|S|ſ)?/\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 355,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/((i|I|ı)[nN][fF][oO]|[pP][aA][cC](k|K|K))(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-2>/projects/snapshot-team/\\\\.git/objects/((i|I|ı)[nN][fF][oO]|[pP][aA][cC](k|K|K))(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 397,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][mM][mM][aA][nN][dD](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[oO][uU][tT][pP][uU][tT]-((s|S|ſ)[tT]|ﬅ|ﬆ)[yY][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[rR][uU][lL][eE](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[aA][gG][eE][nN][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 440,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][aA][rR][gG][oO]/[bB](i|I|ı)[nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]/[gG](i|I|ı)[tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[gG](i|I|ı)[tT][cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[nN][pP][mM][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[yY][aA][rR][nN][rR][cC]\\\\.[yY][mM][lL](/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/engine-codex-sub-sandboxed",
+    "at": 452,
+    "commit": "992947bb6",
+    "reason": "2.4.3 spells an at-or-below rule as one ^X(/|$) regex instead of ^X(/.*)?$",
+    "security": true,
+    "change": "same: the regex tail changes spelling, not the paths it matches",
+    "owner_signed": true,
+    "golden": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/.*)?$\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/.*)?$\\\"))\","
+    ],
+    "capture": [
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]\\\\.[lL][oO][cC](k|K|K)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-[rR][eE][lL][aA][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]-(k|K|K)[eE][yY](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][lL][aA][uU][dD][eE]\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][gG][eE][nN][tT](s|S|ſ)\\\\.[mM][dD](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[cC][oO][nN]([fF](i|I|ı)|ﬁ)[gG]\\\\.[tT][oO][mM][lL](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)(k|K|K)(i|I|ı)[lL][lL](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][rR][eE][dD][eE][nN][tT](i|I|ı)[aA][lL](s|S|ſ)\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[tT][oO][dD][oO](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[pP][lL][aA][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][eE][aA][mM](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/\\\\.[cC][lL][aA][uU][dD][eE]/[tT][aA](s|S|ſ)(k|K|K)(s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[aA][uU][tT][hH]\\\\.[jJ](s|S|ſ)[oO][nN](/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/(s|S|ſ)[eE]((s|S|ſ)(s|S|ſ)|ß|ẞ)(i|I|ı)[oO][nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/(k|K|K)[eE][yY][cC][hH][aA](i|I|ı)[nN](s|S|ſ)(/|$)\\\")\",",
+      "    \"  (regex #\\\"^<path-1>/team/agents/agent-1/home/[lL](i|I|ı)[bB][rR][aA][rR][yY]/[pP][rR][eE][fF][eE][rR][eE][nN][cC][eE](s|S|ſ)/[cC][oO][mM]\\\\.[aA][pP][pP][lL][eE]\\\\.(s|S|ſ)[eE][cC][uU][rR](i|I|ı)[tT][yY]\\\\.[pP][lL](i|I|ı)((s|S|ſ)[tT]|ﬅ|ﬆ)(/|$)\\\"))\","
+    ]
+  },
+  {
+    "scenario": "harness/interactive-support",
+    "at": 23,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "    \"name\": \"cursor-agent\",",
+      "    \"reason\": \"CrazyAgent cannot read its replies yet\",",
+      "    \"support\": \"unavailable\"",
+      "  },",
+      "  {"
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/interactive-support",
+    "at": 29,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "    \"reason\": \"CrazyAgent cannot read its replies yet\",",
+      "    \"support\": \"unavailable\"",
+      "  },",
+      "  {",
+      "    \"name\": \"antigravity\","
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/interactive-support",
+    "at": 51,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "  },",
+      "  {",
+      "    \"name\": \"amp\",",
+      "    \"reason\": \"CrazyAgent cannot read its replies yet\",",
+      "    \"support\": \"unavailable\""
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/interactive-support",
+    "at": 83,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "    \"name\": \"kiro\",",
+      "    \"reason\": \"CrazyAgent cannot read its replies yet\",",
+      "    \"support\": \"unavailable\"",
+      "  },",
+      "  {"
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "harness/interactive-support",
+    "at": 108,
+    "commit": "dd2f885de",
+    "reason": "DEC-180 removes Antigravity, Cursor CLI, Amp, Kiro CLI and Auggie from the catalog",
+    "security": false,
+    "golden": [
+      "    \"name\": \"auggie\",",
+      "    \"reason\": \"CrazyAgent cannot read its replies yet\",",
+      "    \"support\": \"unavailable\"",
+      "  },",
+      "  {"
+    ],
+    "capture": []
+  }
+]

@@ -229,7 +229,12 @@ impl Search {
     /// then the HOME folders ([`home_places`]). Inputs: the PATH value, the system folders and
     /// HOME. Output: the search.
     pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
-        Self::engine_in(path, system, home, &crate::tools::temp_roots())
+        Self::engine_in(
+            path,
+            system,
+            home,
+            &kernel_processes::finding::temp_roots(&crate::tools::HOOKS),
+        )
     }
 
     /// Builds the engine search as [`Search::engine`] does with the temp folders given, so a
@@ -251,10 +256,13 @@ impl Search {
             .map(|path| std::env::split_paths(path).collect::<Vec<PathBuf>>())
             .unwrap_or_default()
             .into_iter()
-            .partition(|folder| crate::tools::in_temp_of(folder, temps) && !kept.contains(folder));
+            .partition(|folder| {
+                kernel_processes::finding::in_temp_of(&crate::tools::HOOKS, folder, temps)
+                    && !kept.contains(folder)
+            });
         for folder in system {
             if !directories.contains(folder)
-                && crate::service::changeable_by_others(folder).is_none()
+                && kernel_processes::service::changeable_by_others(folder).is_none()
             {
                 directories.push(folder.clone());
             }
@@ -290,10 +298,14 @@ impl Search {
         };
         let mut folders = self.set_aside_holding(spec);
         for folder in self.places(spec) {
-            let leads = spec.binaries.iter().any(|binary| {
-                let file = folder.join(binary);
-                executable_file(&file) && self.links_into_temp(&file)
-            });
+            let leads = spec
+                .binaries
+                .iter()
+                .flat_map(|binary| crate::paths::executable_names(binary))
+                .any(|name| {
+                    let file = folder.join(name);
+                    executable_file(&file) && self.links_into_temp(&file)
+                });
             if leads && !folders.contains(&folder) {
                 folders.push(folder);
             }
@@ -318,29 +330,38 @@ impl Search {
             .filter(|folder| {
                 spec.binaries
                     .iter()
-                    .any(|binary| executable_file(&folder.join(binary)))
+                    .flat_map(|binary| crate::paths::executable_names(binary))
+                    .any(|name| executable_file(&folder.join(name)))
             })
             .cloned()
             .collect()
     }
 
     /// Whether a file this search found in a kept folder really lies in a temp folder it
-    /// refuses ([`crate::tools::leads_into_temp`]). Input: the file. Output: the answer.
+    /// refuses ([`kernel_processes::finding::leads_into_temp`]). Input: the file. Output: the answer.
     fn links_into_temp(&self, file: &Path) -> bool {
         !self.temps.is_empty()
-            && std::fs::canonicalize(file)
-                .is_ok_and(|real| crate::tools::leads_into_temp(file, &real, &self.temps))
+            && std::fs::canonicalize(file).is_ok_and(|real| {
+                kernel_processes::finding::leads_into_temp(
+                    &crate::tools::HOOKS,
+                    file,
+                    &real,
+                    &self.temps,
+                )
+            })
     }
 
     /// Builds the engine search from this process's PATH and HOME and the built-in system
     /// folders, with no registered executables; off Linux, Homebrew's folders come first
-    /// from the tool resolver's own list ([`crate::tools::homebrew_folders`]), so the
+    /// from the tool resolver's own list ([`kernel_processes::finding::homebrew_folders`]), so the
     /// clean-Mac gate's remap covers the catalog and its pin. Output: the search
     /// ([`Search::engine`]).
     pub fn from_environment() -> Self {
         let mut system: Vec<PathBuf> = Vec::new();
         #[cfg(not(target_os = "linux"))]
-        system.extend(crate::tools::homebrew_folders());
+        system.extend(kernel_processes::finding::homebrew_folders(
+            &crate::tools::HOOKS,
+        ));
         system.extend(SYSTEM_DIRECTORIES.iter().map(PathBuf::from));
         Self::engine(
             std::env::var_os("PATH").as_deref(),
@@ -445,7 +466,8 @@ impl Search {
     /// Output: the search.
     pub fn with_engine(mut self, engine_root: &Path) -> Self {
         let folder = crate::setup::harness_prefix(engine_root).join("bin");
-        let kept = usable_path(&folder) && crate::service::changeable_by_others(&folder).is_none();
+        let kept = usable_path(&folder)
+            && kernel_processes::service::changeable_by_others(&folder).is_none();
         self.engine = kept.then_some(folder);
         assert!(self.engine.iter().all(|engine| engine.is_absolute()));
         self
@@ -471,18 +493,20 @@ impl Search {
         for binary in spec.binaries {
             assert!(!binary.contains('/'));
             for directory in &directories {
-                let candidate = directory.join(binary);
-                if found.contains(&candidate)
-                    || !executable_file(&candidate)
-                    || self.links_into_temp(&candidate)
-                    || (!shims && is_shim(self.home(), &candidate))
-                {
-                    continue;
-                }
-                assert!(candidate.is_absolute());
-                found.push(candidate);
-                if found.len() == limit {
-                    return found;
+                for name in crate::paths::executable_names(binary) {
+                    let candidate = directory.join(name);
+                    if found.contains(&candidate)
+                        || !executable_file(&candidate)
+                        || self.links_into_temp(&candidate)
+                        || (!shims && is_shim(self.home(), &candidate))
+                    {
+                        continue;
+                    }
+                    assert!(candidate.is_absolute());
+                    found.push(candidate);
+                    if found.len() == limit {
+                        return found;
+                    }
                 }
             }
         }
@@ -613,11 +637,7 @@ fn below(base: &Path, relative: &str) -> PathBuf {
 /// only the owner and the system can change, and none of them in a `.crazyagent` folder
 /// ([`in_crazyagent_folder`]). Input: the harness's real file. Output: the prefix, or none.
 pub fn node_prefix(program: &Path) -> Option<PathBuf> {
-    let prefix = program
-        .ancestors()
-        .take(NODE_PREFIX_DEPTH_MAX)
-        .find(|folder| folder.ends_with("lib/node_modules"))
-        .and_then(|modules| modules.parent()?.parent())?;
+    let prefix = npm_prefix(program)?;
     let bin = prefix.join("bin");
     let node = bin.join("node");
     let usable = bin.is_absolute()
@@ -627,8 +647,21 @@ pub fn node_prefix(program: &Path) -> Option<PathBuf> {
         && node.is_file()
         && !in_crazyagent_folder(program)
         && std::fs::canonicalize(&node).is_ok_and(|real| !in_crazyagent_folder(&real))
-        && crate::service::changeable_by_others(&node).is_none();
+        && kernel_processes::service::changeable_by_others(&node).is_none();
     usable.then(|| prefix.to_path_buf())
+}
+
+/// The npm prefix a program's path names: for a file under `<prefix>/lib/node_modules/`
+/// within [`NODE_PREFIX_DEPTH_MAX`] folders, that prefix, read from the path alone with no
+/// check on what it holds. Input: the program's real file. Output: the prefix, or none.
+pub(crate) fn npm_prefix(program: &Path) -> Option<&Path> {
+    let prefix = program
+        .ancestors()
+        .take(NODE_PREFIX_DEPTH_MAX)
+        .find(|folder| folder.ends_with("lib/node_modules"))
+        .and_then(|modules| modules.parent()?.parent())?;
+    assert!(program.starts_with(prefix));
+    Some(prefix)
 }
 
 /// Whether a path runs through a `.crazyagent` folder, where every project keeps the
@@ -645,8 +678,17 @@ fn usable_path(path: &Path) -> bool {
         && path.as_os_str() != OsStr::new("/")
 }
 
+#[cfg(unix)]
 fn executable_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
+}
+
+/// Whether a file a search finds is one a Windows launch runs: a program, or an npm
+/// cmd-shim whose script is there ([`crate::paths::executable_file`]); any other batch file
+/// is no hit. Input: the file. Output: the answer.
+#[cfg(not(unix))]
+fn executable_file(path: &Path) -> bool {
+    crate::paths::executable_file(path).is_some()
 }
 
 /// Reports whether file metadata grants any execute permission.
@@ -735,7 +777,7 @@ pub(crate) fn entry(harness: &'static registry::Harness, search: &Search) -> Har
 /// rows in the same order.
 pub(crate) fn with_needs(
     entries: Vec<HarnessEntry>,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> Vec<HarnessEntry> {
     let count = entries.len();
     let marked: Vec<HarnessEntry> = entries

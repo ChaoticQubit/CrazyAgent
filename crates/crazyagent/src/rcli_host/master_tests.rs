@@ -3,9 +3,9 @@ use super::master_reply::TurnCapture;
 use super::{RcliMasterBinding, RcliMasterHost, RcliMasterLaunch};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::protocol::{CredentialRef, ProjectId, ProtocolError, RequestId, SessionId};
-use crate::sandbox::{
-    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
-};
+use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -269,8 +269,9 @@ fn real_private_paths_reject_aliases_overlap_and_group_access() {
 #[test]
 fn real_process_exit_never_becomes_ready_or_reply_and_shutdown_reaps_owned_child() {
     let case = Case::new();
-    let first =
-        crate::spawn_gate::first_run(&mut std::process::Command::new(&case.launch.executable));
+    let first = kernel_processes::spawn_gate::first_run(&mut std::process::Command::new(
+        &case.launch.executable,
+    ));
     assert_eq!(
         first.code(),
         Some(1),
@@ -368,8 +369,9 @@ fn waiting_host(
     let mut case = Case::new();
     fs::write(&case.launch.executable, WAITING_HOST).unwrap();
     case.launch.artifact_sha256 = digest(WAITING_HOST.as_bytes());
-    let first =
-        crate::spawn_gate::first_run(&mut std::process::Command::new(&case.launch.executable));
+    let first = kernel_processes::spawn_gate::first_run(&mut std::process::Command::new(
+        &case.launch.executable,
+    ));
     assert_eq!(
         first.code(),
         Some(1),

@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::sandbox::ProjectSandbox;
 use crazyagent::sandbox::hidden_paths;
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
+use kernel_sandbox::net::SandboxNetwork;
 use rusqlite::Connection;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -72,7 +73,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 #[test]
@@ -312,7 +313,7 @@ fn with_the_folder_hidden_under_a_confined_worktree_the_agent_cannot_read_it() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let status = crazyagent::spawn_gate::status(&mut command).unwrap();
+        let status = kernel_processes::spawn_gate::status(&mut command).unwrap();
         assert!(status.success(), "git {args:?}");
     };
     git(&["init", "-q"]);
@@ -432,7 +433,7 @@ fn a_kept_out_files_attribute_values_are_never_read() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let wrote = crazyagent::spawn_gate::output(&mut write).unwrap();
+    let wrote = kernel_processes::spawn_gate::output(&mut write).unwrap();
     assert!(wrote.status.success(), "{wrote:?}");
     let sandbox = sandbox_with_hidden(&case, &[]).keep_out(&kept).unwrap();
     let output = run(

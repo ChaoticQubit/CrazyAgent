@@ -1,9 +1,10 @@
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
-use crate::setup::InstallError;
 use base64::Engine;
+use kernel_processes::run::InstallError;
+use kernel_sandbox::error::SandboxError;
 use os::{
-    NODE, lock, npm_ready, open_plain, private_folder, run_command, run_quiet, runnable,
-    staging_folder,
+    NODE, lock, lock_shared, npm_ready, open_plain, private_folder, run_command, run_quiet,
+    runnable, staging_folder, try_lock,
 };
 use sha2::{Digest, Sha512};
 use std::ffi::OsStr;
@@ -24,8 +25,16 @@ const INSTALL_TIME: Duration = Duration::from_secs(900);
 const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
 const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
+const NODE_CHECK_FAILED: &str = "context_mode_node_check_failed";
+const NODE_FOLDER_UNREADABLE: &str = "context_mode_node_folder_unreadable";
+/// The install code for a drive root of the node probe's paths that keeps every app container
+/// from reading its attributes, so a boxed Node.js script fails to resolve its own path
+/// (V244-WIN-ADMIN-STEP); matched by name where a check reads it.
+pub(crate) const NODE_DRIVE_ROOT_UNREADABLE: &str = "context_mode_node_drive_root_unreadable";
 const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
+const NODE_PROFILE: &str = "node.sb";
+const NODE_CHECK_LOCK: &str = "node-check.lock";
 const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
 
@@ -101,6 +110,10 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextMo
         match after_begin(begin_install(root, bin, version), &folder, &node, version) {
             ForCheck::Run(shared) => return Ok(shared),
             ForCheck::Refused(NODE_TOO_OLD) => ContextModeOff::NodeTooOld,
+            ForCheck::Refused(NODE_FOLDER_UNREADABLE) => ContextModeOff::NodeFolderUnreadable,
+            ForCheck::Refused(NODE_DRIVE_ROOT_UNREADABLE) => {
+                ContextModeOff::NodeDriveRootUnreadable
+            }
             _ if mismatch => ContextModeOff::Mismatch,
             ForCheck::SettingUp | ForCheck::Refused("context_mode_installs_busy") => {
                 ContextModeOff::SettingUp
@@ -230,12 +243,21 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
         .ok_or(InstallError("setup_store_unavailable"))?;
     let prefix = format!("{PACKAGE}@{version}");
     clear(folder)?;
-    remove_staged(parent, &prefix);
+    remove_staged(parent, &prefix, version);
     let staged = staging_folder(parent, &prefix)?;
-    let work = staging_folder(parent, &format!("{prefix}-work"));
+    let work = work_folder(&staged, &prefix);
     let result = work.and_then(|work| {
-        let filled = fill(root, &staged, &work, bin, version, prefix.as_ref())
-            .and_then(|()| checked(&staged, version).map_err(InstallError))
+        let filled = npm_job(&staged, &work)
+            .and_then(|(job, home)| {
+                let filled = fill(root, &staged, &work, bin, version, prefix.as_ref())
+                    .and_then(|()| checked(&staged, version).map_err(InstallError));
+                let released = os::release(&npm_profile(parent, version), &job, &home);
+                filled.and_then(|()| {
+                    released
+                        .then_some(())
+                        .ok_or(InstallError("context_mode_sandbox_unavailable"))
+                })
+            })
             .and_then(|()| {
                 std::fs::rename(&staged, folder)
                     .map_err(|_| InstallError("setup_store_unavailable"))
@@ -345,34 +367,83 @@ fn fixture_program(_: Option<&str>) -> bool {
     false
 }
 
-/// Whether the `node` beside npx runs the shared install: its `--version`, read inside a
-/// boundary in a scratch folder removed after ([`node_command`]), names 22.5 or newer, which
-/// has the built-in SQLite context-mode uses without building a dependency. Inputs: the engine
-/// root and npx's folder. Output: false when it is older, fails or names no version, or
-/// `context_mode_sandbox_unavailable` when no boundary can hold it.
+/// Whether npx's `node` runs the shared install: its `--version`, read in a boundary in a
+/// scratch folder ([`node_command`]) under the shared check lock, names 22.5 or newer; the
+/// folder and its container ([`os::release`]) go after the run. Inputs: the engine root and
+/// npx's folder. Output: false for an older or no version, `context_mode_node_check_failed`
+/// when it did not run to an answer, `context_mode_sandbox_unavailable` with no boundary.
 fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
-    let scratch = staging_folder(&root.join("setup").join("npm"), NODE_CHECK)?;
-    let supported = node_command(root, &scratch, bin).map(|command| {
-        run_command(command, NODE_CHECK_TIME)
-            .is_ok_and(|(ok, output)| ok && supported_node(&output))
+    let parent = root.join("setup").join("npm");
+    private_folder(&parent)?;
+    let checks = parent.join(NODE_CHECK_LOCK);
+    if let Some(_alone) = try_lock(&checks)? {
+        end_left_checks(&parent);
+    }
+    let _probing = lock_shared(&checks)?;
+    let scratch = staging_folder(&parent, NODE_CHECK)?;
+    let Ok(base) = kernel_sandbox::paths::canonical(&scratch) else {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err(InstallError("setup_store_unavailable"));
+    };
+    let supported = node_command(root, &scratch, bin).and_then(|command| {
+        match run_command(command, NODE_CHECK_TIME) {
+            Ok((true, output)) if !output.trim_ascii().is_empty() => Ok(supported_node(&output)),
+            _ => Err(InstallError(NODE_CHECK_FAILED)),
+        }
     });
-    let _ = std::fs::remove_dir_all(&scratch);
+    end_check(&scratch, &base);
     supported
 }
 
-/// The `node --version` command of npx's folder inside the boundary npm installs in, with no
-/// network: the scratch folder's own project, home and temp folders, the engine's secrets
-/// denied, Node's tool folders and npx's folder read, a cleared environment (RV-DS241-150)
-/// and, on Linux, the owner's call supervisor choice. Inputs: the engine root, the scratch
-/// folder and npx's folder. Output: the command, or `context_mode_sandbox_unavailable`.
+/// Ends one node probe: releases the container named from its canonical scratch folder
+/// ([`os::release`]) and removes the scratch folder, after a refused release too, which is
+/// logged. Inputs: the scratch folder and its canonical path. Output: none.
+fn end_check(scratch: &Path, base: &Path) {
+    let profile = scratch.join(NODE_PROFILE);
+    let _ = os::release(&profile, &base.join("project"), &base.join("home"));
+    let _ = std::fs::remove_dir_all(scratch);
+}
+
+/// Ends every node probe scratch folder in `setup/npm`, called only while the caller holds
+/// the check lock exclusive, so no live probe in any process owns one: each was left by a
+/// probe that crashed before its own end. Input: the `setup/npm` folder. Output: none.
+fn end_left_checks(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let left = format!(".{NODE_CHECK}-");
+    for entry in entries.flatten() {
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&left));
+        if !ours || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let scratch = entry.path();
+        match kernel_sandbox::paths::canonical(&scratch) {
+            Ok(base) => end_check(&scratch, &base),
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(&scratch);
+            }
+        }
+    }
+}
+
+/// The `node --version` command of npx's folder in npm's install boundary, no network: the
+/// scratch folder's project, home and temp, engine secrets denied, Node's tools, npx's folder
+/// and on Unix npm's grant ([`ProjectSandbox::allow_node_for`]) read, a cleared environment
+/// (RV-DS241-150), on Linux the owner's call supervisor. Inputs: the engine root, the scratch
+/// folder and npx's folder. Output: the command, or the refusal.
 fn node_command(
     root: &Path,
     scratch: &Path,
     bin: &Path,
 ) -> Result<std::process::Command, InstallError> {
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
-    let canonical = |path: &Path| crate::sandbox::canonical(path).map_err(refused);
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+    use kernel_sandbox::net::SandboxNetwork;
+    let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let mut folders = Vec::with_capacity(3);
     for name in ["project", "home", "tmp"] {
         private_folder(&scratch.join(name))?;
@@ -388,11 +459,17 @@ fn node_command(
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
-    let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
+    let real = canonical(bin)?;
+    let sandbox = sandbox.allow_read(&real).map_err(refused)?;
+    #[cfg(unix)]
+    let sandbox = sandbox
+        .allow_node_for(&canonical(&bin.join("npm"))?)
+        .map_err(refused)?;
     let settings = os::boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
-    let profile = scratch.join("node.sb");
-    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
+    let profile = scratch.join(NODE_PROFILE);
+    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict)
+        .map_err(|error| boundary_refused(&real, error))?;
     let mut node = std::process::Command::new(bin.join(NODE));
     node.arg("--version").current_dir(&folders[0]);
     sandbox.wrap(&node).map_err(refused)
@@ -497,8 +574,9 @@ fn running(folder: &Path) -> bool {
 }
 
 /// Says whether an install of one version can start now, before it is registered, with the
-/// same refusals [`install`] would return at once. Inputs: the engine root, npx's folder and
-/// the version. Output: none, or the refusal.
+/// same refusals [`install`] would return at once, and a drive root of the engine root or
+/// npx's folder no app container may read ([`NODE_DRIVE_ROOT_UNREADABLE`]). Inputs: the
+/// engine root, npx's folder and the version. Output: none, or the refusal.
 fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
     if pin(version).is_none() || program_pin(version).is_none() {
         return Some(Begin::Refused("context_mode_integrity_unpinned"));
@@ -510,6 +588,10 @@ fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
         Ok(true) => {}
         Ok(false) => return Some(Begin::Refused(NODE_TOO_OLD)),
         Err(error) => return Some(Begin::Refused(error.0)),
+    }
+    if let Some(drive) = os::unreadable_drive_root(&[root, bin]) {
+        eprintln!("context_mode_drive_root_refused root={}", drive.display());
+        return Some(Begin::Refused(NODE_DRIVE_ROOT_UNREADABLE));
     }
     backoff_left(&failed_marker(root, version)).map(Begin::Failed)
 }
@@ -559,24 +641,90 @@ fn finish(folder: &Path) {
         .retain(|held| held != folder);
 }
 
-fn remove_staged(parent: &Path, prefix: &str) {
+/// Makes the work folder npm runs in beside its staging folder, named with the staging
+/// folder's random suffix (`.<prefix>-work-<random>`), so a later install can pair a crashed
+/// install's two folders. Inputs: the staging folder and the prefix. Output: the new folder,
+/// never one that exists, or `setup_store_unavailable`.
+fn work_folder(staged: &Path, prefix: &str) -> Result<PathBuf, InstallError> {
+    let unavailable = InstallError("setup_store_unavailable");
+    let random = staged
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.strip_prefix(&format!(".{prefix}-")))
+        .ok_or(unavailable)?;
+    let work = staged.with_file_name(format!(".{prefix}-work-{random}"));
+    if std::fs::symlink_metadata(&work).is_ok() {
+        return Err(unavailable);
+    }
+    private_folder(&work)?;
+    Ok(work)
+}
+
+/// The canonical job folder and home an install's npm container is named from: the staging
+/// folder and the work folder's `home`. Inputs: the staging and work folders. Output: both,
+/// or `setup_store_unavailable`.
+fn npm_job(staged: &Path, work: &Path) -> Result<(PathBuf, PathBuf), InstallError> {
+    kernel_sandbox::paths::canonical(staged)
+        .and_then(|folder| Ok((folder, kernel_sandbox::paths::canonical(work)?.join("home"))))
+        .map_err(|_| InstallError("setup_store_unavailable"))
+}
+
+/// Removes the staging and work folders earlier installs of one version left, called under
+/// that version's install lock, so none is live. A staging folder whose paired work folder is
+/// left too first has its container released with the version's profile, which refuses a
+/// pair it does not name. Inputs: the staging folders' parent, the prefix and the version.
+/// Output: none.
+fn remove_staged(parent: &Path, prefix: &str, version: &str) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
     let staged = format!(".{prefix}-");
-    for entry in entries.flatten() {
-        let ours = entry
+    let left: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&staged))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect();
+    for folder in &left {
+        let paired = folder
             .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(&staged));
-        if ours && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            let _ = std::fs::remove_dir_all(entry.path());
+            .and_then(OsStr::to_str)
+            .and_then(|name| name.strip_prefix(&staged))
+            .filter(|random| !random.starts_with("work-"))
+            .map(|random| parent.join(format!("{staged}work-{random}")))
+            .filter(|work| left.contains(work));
+        if let Some((job, home)) = paired.and_then(|work| npm_job(folder, &work).ok()) {
+            let _ = os::release(&npm_profile(parent, version), &job, &home);
         }
+    }
+    for folder in left {
+        let _ = std::fs::remove_dir_all(folder);
     }
 }
 
 fn refused<E>(_: E) -> InstallError {
     InstallError("context_mode_sandbox_unavailable")
+}
+
+/// The install code for a boundary that did not install: a read root no app container may
+/// read and this user cannot change, which the boundary logs by folder, is
+/// [`NODE_FOLDER_UNREADABLE`] when it is npx's folder; every other refusal is
+/// `context_mode_sandbox_unavailable`. Inputs: npx's canonical folder and the refusal.
+/// Output: the code.
+fn boundary_refused(bin: &Path, error: SandboxError) -> InstallError {
+    let SandboxError::Unreadable(folder) = error else {
+        return refused(error);
+    };
+    if folder == bin {
+        InstallError(NODE_FOLDER_UNREADABLE)
+    } else {
+        refused(folder)
+    }
 }
 
 /// Installs `source` into the staging folder with package scripts off, so no script of the
@@ -614,6 +762,17 @@ fn fill(
     checked(staged, version).map_err(InstallError)
 }
 
+/// The boundary profile npm's install step writes beside its staging folders, one per version.
+/// Inputs: the staging folders' parent and the version. Output: its path.
+fn npm_profile(parent: &Path, version: &str) -> PathBuf {
+    parent.join(format!("{PACKAGE}@{version}.sb"))
+}
+
+/// Builds npm's command under the install profile: it reads npm's folder and, on Unix, the
+/// npm package `bin/npm` links into and the `node` beside it ([`ProjectSandbox::allow_node_for`]),
+/// read only, so an npm laid out as setup-node lays it out starts outside every system root.
+/// Inputs: the engine root, staging and work folders, npm's folder and the version. Output:
+/// the command, or the refusal.
 fn npm_command(
     root: &Path,
     staged: &Path,
@@ -630,7 +789,7 @@ fn npm_command(
     let tmp = work.join("tmp");
     private_folder(&home)?;
     private_folder(&tmp)?;
-    let canonical = |path: &Path| crate::sandbox::canonical(path).map_err(refused);
+    let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let homes = ToolHomes::owner().map_err(refused)?;
     let sandbox = ProjectSandbox::new(
         &canonical(staged)?,
@@ -638,11 +797,16 @@ fn npm_command(
         &canonical(&tmp)?,
         os::npm_network(),
     )
+    .map(ProjectSandbox::as_job_folder)
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
-    let profile = parent.join(format!("{PACKAGE}@{version}.sb"));
+    #[cfg(unix)]
+    let sandbox = sandbox
+        .allow_node_for(&canonical(&bin.join("npm"))?)
+        .map_err(refused)?;
+    let profile = npm_profile(parent, version);
     os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
 }
 

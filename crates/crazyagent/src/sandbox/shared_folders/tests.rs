@@ -23,7 +23,7 @@ fn git(root: &Path, args: &[&str]) {
         .env("GIT_COMMITTER_NAME", "Shared Test")
         .env("GIT_COMMITTER_EMAIL", "shared@example.invalid")
         .current_dir(root);
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(
         status.as_ref().is_ok_and(std::process::ExitStatus::success),
         "git {args:?}: {status:?}"
@@ -573,7 +573,7 @@ fn an_empty_folder_plans_without_git_and_keeps_later_entries_closed() {
 #[test]
 fn a_wider_choice_is_refused_off_macos() {
     let temp = tempfile::tempdir().unwrap();
-    let root = crate::sandbox::canonical(temp.path()).unwrap();
+    let root = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let home = root.join("home");
     let tmp = root.join("tmp");
     let project = root.join("project");
@@ -720,7 +720,7 @@ fn the_picker_offers_top_level_real_folders_without_engine_folders_or_links() {
 #[test]
 fn the_secret_names_hold_every_kind_the_owner_asked_for() {
     for name in SECRET_NAMES {
-        let folded = crate::sandbox::fold_case(name);
+        let folded = kernel_sandbox::paths::fold_case(name);
         assert_eq!(
             folded.matches('[').count(),
             folded.matches(']').count(),

@@ -1,10 +1,9 @@
 use super::*;
 use crate::adapters::FIELD_BYTES_MAX;
+use crate::harnesses::drivers::test_paths::{CWD, HOME};
 use crate::harnesses::launch::PROMPT_BYTES_MAX;
 
 const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-text-turn.yaml");
-const HOME: &str = "/agent/home";
-const CWD: &str = "/work/project";
 
 fn manifest_of(text: &str) -> Manifest {
     manifest::parse(text.as_bytes()).unwrap()

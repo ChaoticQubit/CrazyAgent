@@ -1,5 +1,56 @@
 use super::*;
 
+/// One bridge route as the storage-answer row checks it: the route's name and the function
+/// that turns its engine error into the bridge failure the desktop shows.
+type RouteRow = (&'static str, fn(EngineError) -> BridgeError);
+
+#[test]
+fn every_route_names_each_storage_answer_instead_of_its_unknown_outcome() {
+    let routes: [RouteRow; 17] = [
+        ("accounts", accounts::account_error),
+        ("account_profile", account_profile::profile_error),
+        ("native_auth", native_auth::auth_error),
+        ("plugins", plugins::plugin_failure),
+        ("agents", agents::agent_error),
+        ("changes", changes::changes_error),
+        ("cleanup", cleanup::cleanup_error),
+        ("ide", ide_reveal::ide_error),
+        ("ide_extensions", ide_extensions::extensions_error),
+        ("ide_tab", ide::ide_error),
+        ("overview", overview::overview_error),
+        ("process", process::process_error),
+        ("questions", questions::questions_error),
+        ("notify", notify::notify_error),
+        ("recovery", recovery::recovery_error),
+        ("roadmap", roadmap::roadmap_error),
+        ("usage", usage::usage_error),
+    ];
+    assert_eq!(crazyagent::storage::STORAGE_ANSWERS.len(), 4);
+    for code in crazyagent::storage::STORAGE_ANSWERS {
+        assert_eq!(caused("any_outcome_unknown", code).code, *code);
+        assert_eq!(caused("any_outcome_unknown", code).cause, None);
+        assert_eq!(uncaused("any_outcome_unknown", code).code, *code);
+    }
+    assert_eq!(
+        caused("any_outcome_unknown", "Not A Code").code,
+        "any_outcome_unknown"
+    );
+    assert_eq!(
+        uncaused("any_outcome_unknown", ENGINE_VERSION_MISMATCH).code,
+        ENGINE_VERSION_MISMATCH
+    );
+    for (route, map) in routes {
+        for code in crazyagent::storage::STORAGE_ANSWERS {
+            let mapped = map(EngineError((*code).into()));
+            assert_eq!(
+                (route, mapped.code, mapped.cause),
+                (route, *code, None),
+                "the route names the storage answer"
+            );
+        }
+    }
+}
+
 fn kept(kind: &'static str, project_id: Option<&str>) -> PendingIntent {
     PendingIntent {
         kind,
@@ -179,6 +230,13 @@ fn every_code_the_engine_refuses_an_owner_change_with_reaches_the_window_by_name
             quoted_after(text, mark, &mut codes);
         }
     }
+    let plugin_host = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates/kernel/plugin_host/src");
+    let mut kernel_files = Vec::new();
+    sources(&plugin_host, &mut kernel_files);
+    for text in &kernel_files {
+        quoted_after(text, "Failure::Refused(", &mut codes);
+    }
     let selection = std::fs::read_to_string(engine.join("master_session.rs")).unwrap();
     let start = selection.find("pub(crate) fn validate_selection(").unwrap();
     let end = start + selection[start..].find("\n}\n").unwrap();
@@ -214,7 +272,7 @@ fn random_ids_need_no_dev_urandom_file_as_on_windows() {
     use std::process::{Command, Stdio};
     const NO_URANDOM: &str =
         "(version 1)(allow default)(deny file-read* (literal \"/dev/urandom\"))";
-    let denied = crazyagent::spawn_gate::output(
+    let denied = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", NO_URANDOM, "/usr/bin/head", "-c", "1", "/dev/urandom"])
             .stdin(Stdio::null())
@@ -226,7 +284,7 @@ fn random_ids_need_no_dev_urandom_file_as_on_windows() {
         !denied.status.success(),
         "the sandbox let /dev/urandom be read"
     );
-    let child = crazyagent::spawn_gate::output(
+    let child = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", NO_URANDOM])
             .arg(std::env::current_exe().unwrap())

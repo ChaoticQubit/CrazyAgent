@@ -56,7 +56,7 @@ enum Job {
     Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
     Reconnect {
-        engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
+        engine: Option<Box<(crate::paths::Layout, kernel_processes::service::Service)>>,
         start: bool,
     },
     Conversation(Box<ConversationJob>),
@@ -235,12 +235,13 @@ pub(super) struct Connection {
     receiver: Option<Receiver<Result<WireReply, ClientError>>>,
     owner_receiver: Option<Receiver<OwnerReply>>,
     owner_busy: bool,
+    owner_reconnecting: bool,
     stopped: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     pending: Option<Pending>,
     client_id: ClientId,
     sequence: u64,
-    engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
+    engine: Option<Box<(crate::paths::Layout, kernel_processes::service::Service)>>,
     watch: watch::Watch,
 }
 
@@ -263,7 +264,7 @@ impl Connection {
     /// only reconnects. Output: the connection.
     pub fn connect_starting(
         client: Client,
-        engine: Option<(crate::paths::Layout, crate::service::Service)>,
+        engine: Option<(crate::paths::Layout, kernel_processes::service::Service)>,
     ) -> Result<Self, String> {
         let mut connection = Self::connect_paired(client)?;
         connection.engine = engine.map(Box::new);
@@ -1030,6 +1031,7 @@ impl Connection {
             receiver: Some(receiver),
             owner_receiver: Some(owner_receiver),
             owner_busy: false,
+            owner_reconnecting: false,
             stopped,
             worker: Some(worker),
             pending: None,
@@ -1042,6 +1044,13 @@ impl Connection {
 
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.owner_busy
+    }
+
+    /// Tells whether the owner job in flight is a reconnect, from Ctrl-R or an engine start.
+    /// Input: none. Output: true from the reconnect's send until its finished reply is
+    /// polled, so a later press neither stacks a second reconnect nor waits behind it.
+    pub(super) fn reconnecting(&self) -> bool {
+        self.owner_reconnecting
     }
 
     pub fn uncertain(&self) -> bool {
@@ -1134,6 +1143,7 @@ impl Connection {
         if reply.finished {
             assert!(self.owner_busy);
             self.owner_busy = false;
+            self.owner_reconnecting = false;
         }
         Ok(Some(reply.event))
     }
@@ -1214,12 +1224,14 @@ impl Connection {
         if self.busy() {
             return Err("A native request is still pending".into());
         }
+        let reconnecting = matches!(job, Job::Reconnect { .. });
         self.sender
             .as_ref()
             .ok_or("Client stopped")?
             .try_send(job)
             .map_err(|e| e.to_string())?;
         self.owner_busy = true;
+        self.owner_reconnecting = reconnecting;
         Ok(())
     }
 }
@@ -2419,9 +2431,9 @@ fn report_loss(
 /// Starts the engine, or repairs its login service, as `crazyagent tui` does before it
 /// opens, and gives up once the TUI stops so a quit never waits on it (DS-118). Inputs:
 /// the default layout and service and the stop flag. Output: Ok once the engine answers,
-/// else `engine_backup_failed` when its upgrade backup failed or `engine_start_failed`.
+/// else `git_safe_unavailable` (#598 sec N1), `engine_backup_failed` or `engine_start_failed`.
 async fn start_engine(
-    engine: &(crate::paths::Layout, crate::service::Service),
+    engine: &(crate::paths::Layout, kernel_processes::service::Service),
     stopped: &AtomicBool,
 ) -> Result<(), String> {
     let (layout, service) = engine;
@@ -2431,7 +2443,7 @@ async fn start_engine(
         service,
         &service.executable,
         path.as_deref(),
-        crate::service::READY_TIMEOUT,
+        kernel_processes::service::READY_TIMEOUT,
     );
     let stop = async {
         while !stopped.load(Ordering::Relaxed) {
@@ -2445,10 +2457,7 @@ async fn start_engine(
     if started {
         return Ok(());
     }
-    if crate::service::backup_failure(layout).is_some() {
-        return Err("engine_backup_failed".into());
-    }
-    Err("engine_start_failed".into())
+    Err(crate::service::start_failure(layout).into())
 }
 
 /// The access event a reconnect gives: one that failed while a restore holds the TUI's own
@@ -2457,7 +2466,7 @@ async fn start_engine(
 /// Output: the event to show.
 fn restore_held(
     event: OwnerEvent,
-    engine: Option<&(crate::paths::Layout, crate::service::Service)>,
+    engine: Option<&(crate::paths::Layout, kernel_processes::service::Service)>,
 ) -> OwnerEvent {
     match (event, engine) {
         (
@@ -2733,11 +2742,7 @@ mod creation_recovery_tests {
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
         for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
-            silent.push(
-                crate::spawn_gate::connect_unix(&owner_socket)
-                    .await
-                    .unwrap(),
-            );
+            silent.push(crate::ipc::owner_connect(&owner_socket).await.unwrap());
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         let busy = h
@@ -2799,11 +2804,7 @@ mod creation_recovery_tests {
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
         for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
-            silent.push(
-                crate::spawn_gate::connect_unix(&owner_socket)
-                    .await
-                    .unwrap(),
-            );
+            silent.push(crate::ipc::owner_connect(&owner_socket).await.unwrap());
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         let result = h

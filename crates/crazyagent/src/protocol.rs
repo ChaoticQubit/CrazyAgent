@@ -1,3 +1,5 @@
+use kernel_security::error::StoreError;
+use kernel_security::store::SecretRef;
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -19,57 +21,12 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
-const WINDOWS_DEVICE_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
+pub(crate) use kernel_common::names::single_component;
 
-/// True when the text is exactly one plain path component that names one child, never
-/// itself, its parent or another root: not empty, `.`, `..`, a separator, a root or a
-/// Windows drive like `c:`, no trailing dot or space, which Windows strips, and no Windows
-/// device name. A colon stays allowed, for identities and as a Unix file name; on Windows
-/// `name:x` is a stream of `name`, so a Windows folder name needs none. Input: the text.
-/// Output: whether it names one child.
-pub(crate) fn single_component(text: &str) -> bool {
-    let mut parts = std::path::Path::new(text).components();
-    matches!(
-        (parts.next(), parts.next()),
-        (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(text)
-    ) && !text.ends_with(['.', ' '])
-        && !windows_device(text)
-}
-
-/// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
-/// COM1 to COM9 or LPT1 to LPT9 in any case, alone, before an extension or before one
-/// trailing colon, with or without spaces before the dot. Input: one path component.
-/// Output: whether it is reserved on Windows.
-pub(crate) fn windows_device(name: &str) -> bool {
-    let name = name.strip_suffix(':').unwrap_or(name);
-    let stem = name
-        .split_once('.')
-        .map_or(name, |(stem, _)| stem)
-        .trim_end_matches(' ');
-    WINDOWS_DEVICE_NAMES
-        .iter()
-        .any(|device| stem.eq_ignore_ascii_case(device))
-}
-
+/// Checks one engine identity with the kernel rule ([`kernel_common::names::validate_identity`]).
+/// Input: the text. Output: Ok, or the protocol error naming the rule.
 fn validate_identity(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty()
-        || value.len() > 128
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
-        || value.contains("..")
-        || !single_component(value)
-    {
-        return Err(ProtocolError(
-            "identity must be 1..128 safe ASCII bytes".into(),
-        ));
-    }
-    assert!(!value.is_empty());
-    assert!(value.len() <= 128);
-    Ok(())
+    kernel_common::names::validate_identity(value).map_err(|refused| ProtocolError(refused.into()))
 }
 
 macro_rules! identity {
@@ -109,6 +66,24 @@ identity!(
     ControllerEpoch,
     CredentialRef
 );
+
+/// Turns a kernel store reference into the wire reference the engine saves and sends,
+/// byte-equal. A kernel reference is two checked names joined by one `:` and refused on
+/// the shapes an identity refuses, so the conversion cannot fail. Input: the reference.
+/// Output: the same text as a `CredentialRef`.
+pub fn wire(reference: &SecretRef) -> CredentialRef {
+    let wired = CredentialRef::new(reference.as_str())
+        .expect("a kernel reference is always a valid identity");
+    assert_eq!(wired.as_str(), reference.as_str());
+    wired
+}
+
+/// Turns a saved or received wire reference back into a kernel store reference,
+/// byte-equal. Input: the wire reference. Output: the kernel reference, or
+/// `credential_reference_invalid` when it is not `<service>:<account>` with both names checked.
+pub fn kernel(reference: &CredentialRef) -> Result<SecretRef, StoreError> {
+    SecretRef::try_from(reference.as_str())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -205,7 +180,7 @@ pub enum Command {
     },
     #[serde(skip_deserializing)]
     OwnerSandbox {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     #[serde(skip_deserializing)]
@@ -219,6 +194,10 @@ pub enum Command {
     #[serde(skip_deserializing)]
     OwnerProviderRetry {
         choice: crate::provider_retry::ProviderRetry,
+    },
+    #[serde(skip_deserializing)]
+    OwnerLogCompaction {
+        choice: crate::log_compaction::LogCompaction,
     },
     #[serde(skip_deserializing)]
     OwnerMasterSteps {
@@ -462,6 +441,7 @@ impl Command {
             | Self::OwnerAgentCleanup { .. }
             | Self::OwnerAgentQuit { .. }
             | Self::OwnerProviderRetry { .. }
+            | Self::OwnerLogCompaction { .. }
             | Self::OwnerMasterSteps { .. }
             | Self::OwnerMasterTime { .. }
             | Self::OwnerMasterFrames { .. }
@@ -634,6 +614,7 @@ pub const TEXT_WITHHELD: &str = "engine_text_withheld";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel_common::windows_device;
 
     #[test]
     fn only_plain_codes_reach_an_owner_window() {
@@ -735,11 +716,10 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_drive_prefix_is_not_an_identity() {
-        for text in ["c:", "c:x", "z:"] {
-            assert!(!single_component(text), "{text}");
+        for text in ["c:", "c:x", "z:", "C:x"] {
+            assert_eq!(single_component(text), !cfg!(windows), "{text}");
             assert!(ProjectId::new(text).is_err(), "{text}");
         }
         assert!(ClientId::new("owner:abc").is_ok());
@@ -798,6 +778,68 @@ mod tests {
             "Lab \u{1f469}\u{200d}\u{1f4bb}",
         ] {
             assert!(spec(name).validate().is_ok(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_secret_ref_reads_the_same_bytes_as_the_credential_ref_it_replaces() {
+        let found = kernel_security::store::reference("a.b", "c").unwrap();
+        assert_eq!(wire(&found).as_str(), "a.b:c");
+        assert_eq!(kernel(&wire(&found)).unwrap(), found);
+        let saved = CredentialRef::new("dev.crazyagent.x.github:token".to_string()).unwrap();
+        assert_eq!(kernel(&saved).unwrap().as_str(), saved.as_str());
+        let foreign = CredentialRef::new("ab:c:d".to_string()).unwrap();
+        assert_eq!(
+            kernel(&foreign).unwrap_err(),
+            kernel_security::error::StoreError::code("credential_reference_invalid")
+        );
+        assert!(CredentialRef::new("a:b:c".to_string()).is_err());
+    }
+
+    #[test]
+    fn wire_accepts_the_longest_reference_and_every_byte_class() {
+        let longest = "a".repeat(kernel_security::store::NAME_BYTES_MAX);
+        let widest = kernel_security::store::reference(&longest, &longest).unwrap();
+        assert_eq!(
+            wire(&widest).as_str().len(),
+            kernel_security::store::REFERENCE_BYTES_MAX
+        );
+        let classes = kernel_security::store::reference("az09.-_", "_z-9.a").unwrap();
+        assert_eq!(wire(&classes).as_str(), "az09.-_:_z-9.a");
+    }
+
+    #[test]
+    fn a_kernel_reference_is_accepted_exactly_where_a_credential_ref_is() {
+        let names = [
+            "a",
+            "c",
+            "z",
+            "cd",
+            "a.",
+            "a_.",
+            "svc.",
+            "aux",
+            "aux.",
+            "aux.x",
+            "con.v1",
+            "nul.github",
+            "com1",
+            "com1.a",
+            "lpt9.x",
+            "console",
+            "token",
+            "dev.crazyagent.x.github",
+        ];
+        for service in names {
+            for account in names {
+                let joined = format!("{service}:{account}");
+                let today = CredentialRef::new(joined.clone()).is_ok();
+                let found = kernel_security::store::reference(service, account);
+                assert_eq!(found.is_ok(), today, "{joined:?}");
+                if let Ok(found) = found {
+                    assert_eq!(wire(&found).as_str(), joined);
+                }
+            }
         }
     }
 }

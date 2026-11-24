@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { projectsUsing } from "../../api-projects";
 import { accountLabels, accountRanking, accountSchedule, createPool, deletePool, listAccounts, newPoolId, poolInput, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountSchedule, type AccountView, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
-import { loadExtras, loadUsage, type AccountLimits, type LimitExtras, type SpendView } from "../../api-usage";
+import { loadExtras, loadUsage, type AccountLimits, type LimitExtras, type ResetsSource, type SpendView } from "../../api-usage";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, Icon, LoadError, Notice, NotReady, SearchField, Select, SettingSection, Skeleton,
@@ -16,7 +16,7 @@ import { takePoolDraft } from "./pool-draft";
 import { AppOrder, KeepRowFocus, PoolOrderPicker, RowControls, SchedulePanel, applyHeld, usePoolChanges, type ApplyChange, type MadeChange } from "./pool-controls";
 import { HELD_HEAD, heldLine, holdLine, isNear, orderLine, usageBars, whyLine } from "./pool-order";
 import { SpendReset, spendsInApp } from "./spend-reset";
-import { LimitedPoolsNotice, SpendSettingsSection } from "./spend-settings";
+import { LimitedPoolsNotice, SpendSettingsSection, sourceRereads } from "./spend-settings";
 
 export const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add another.";
 
@@ -655,6 +655,18 @@ export function Pools({ creating }: { creating: boolean }) {
     }, REREAD_MS);
     return () => clearInterval(timer);
   }, []);
+  const source = usage.kind === "ok" ? usage.value.spend?.settings.resets_source : undefined;
+  const seenSource = useRef<ResetsSource | undefined>(undefined);
+  const sourceTimers = useRef<number[]>([]);
+  useEffect(() => {
+    if (source === undefined) return;
+    const waits = sourceRereads(seenSource.current, source);
+    seenSource.current = source;
+    if (waits.length === 0) return;
+    sourceTimers.current.forEach((timer) => window.clearTimeout(timer));
+    sourceTimers.current = waits.map((wait) => window.setTimeout(rereadExtras, wait));
+  }, [source]);
+  useEffect(() => () => sourceTimers.current.forEach((timer) => window.clearTimeout(timer)), []);
   const limits: Loaded<AccountLimits[]> = usage.kind === "ok" ? { kind: "ok", value: usage.value.limits } : usage;
   const spend = usage.kind === "ok" ? usage.value.spend : undefined;
   const known = accounts.kind === "ok" ? accounts.value : [];

@@ -21,10 +21,7 @@ const DROP_ABORT: &str = "DROP TRIGGER publication_abort";
 const DETACH_ATTEMPTS: usize = 40;
 const DETACH_PAUSE: Duration = Duration::from_millis(250);
 
-/// Keeps the tests of this file from attaching and detaching images at the same time, so
-/// a device number one test frees is never the one another test expects to change.
-static VOLUMES: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+mod image_support;
 
 /// A scratch APFS disk image attached without Finder at its own mount point, detached
 /// when dropped, so a test can give its volume another device number as a restart does.
@@ -159,7 +156,7 @@ fn first_disk(attached: &str) -> Option<String> {
 /// Runs hdiutil. Input: its arguments, then the paths it acts on. Output: what it printed
 /// when it succeeded, or why it did not start or what it reported when it failed.
 fn hdiutil(arguments: &[&str], paths: &[&Path]) -> Result<String, String> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/hdiutil")
             .args(arguments)
             .args(paths)
@@ -428,7 +425,7 @@ fn published(rig: &Rig) -> bool {
 #[tokio::test]
 async fn a_publication_interrupted_twice_resumes_on_its_renumbered_volume_and_its_journal_keeps_one_device()
  {
-    let _volumes = VOLUMES.lock().await;
+    let _images = image_support::lock();
     let rig = Rig::new(false);
     let db = rig.database();
     let owner = rig.owner(rig.open().await.unwrap()).await;
@@ -476,7 +473,7 @@ async fn a_publication_interrupted_twice_resumes_on_its_renumbered_volume_and_it
 #[tokio::test]
 async fn a_staged_file_journaled_before_a_restart_resumes_on_a_renumbered_volume_unless_it_was_replaced()
  {
-    let _volumes = VOLUMES.lock().await;
+    let _images = image_support::lock();
     for replaced in [false, true] {
         let rig = Rig::new(false);
         let db = rig.database();
@@ -521,7 +518,7 @@ async fn a_staged_file_journaled_before_a_restart_resumes_on_a_renumbered_volume
 
 #[tokio::test]
 async fn settings_split_across_two_renumbered_volumes_are_not_taken_for_the_journaled_ones() {
-    let _volumes = VOLUMES.lock().await;
+    let _images = image_support::lock();
     let rig = Rig::new(true);
     let db = rig.database();
     let owner = rig.owner(rig.open().await.unwrap()).await;
@@ -544,7 +541,7 @@ async fn settings_split_across_two_renumbered_volumes_are_not_taken_for_the_jour
 
 #[tokio::test]
 async fn an_image_entry_of_hdiutil_info_holds_its_own_disk_and_never_the_next_images() {
-    let _volumes = VOLUMES.lock().await;
+    let _images = image_support::lock();
     let root = tempfile::Builder::new()
         .prefix("ca-renum-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())

@@ -179,7 +179,7 @@ impl TurnSession {
         {
             return Err(failure("launch_key_relay_unsupported"));
         }
-        if request.unconfined {
+        if request.boundary.is_unconfined() {
             return Err(failure("launch_harness_unsupported"));
         }
         let (turns, ready) = begin(&request)?;

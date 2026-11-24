@@ -2,6 +2,7 @@ use crate::cleanup_settings::CleanupSettings;
 use crate::engine::EngineError;
 use crate::harnesses::update::UpdateSettings;
 use crate::instruction_files::{AppSettings, Settings};
+use crate::log_compaction::LogCompaction;
 use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
@@ -10,12 +11,14 @@ use crate::protocol::{Command, Outcome, ProjectId};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::QuitSettings;
 use crate::roadmap_status::Refresh;
-use crate::sandbox_settings::SandboxSettings;
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-#[cfg(any(unix, test))]
 use crate::storage::opening::Opening;
+use kernel_sandbox::settings::SandboxSettings;
+use kernel_storage::state_log::Appender;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value as Column;
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
@@ -24,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The kind of the event an owner sandbox settings save appends (v2.5 L10).
 pub const KIND_SANDBOX: &str = "SandboxSettingsSaved";
@@ -48,10 +51,12 @@ pub const KIND_STEPS: &str = "MasterStepsSaved";
 pub const KIND_TIME: &str = "MasterTimeSaved";
 /// The kind of the event an owner master frame limit save appends.
 pub const KIND_FRAMES: &str = "MasterFramesSaved";
+/// The kind of the event an owner event log compaction switch save appends.
+pub const KIND_COMPACTION: &str = "LogCompactionSaved";
 /// The kind of the event an owner profile save appends, carrying its kept text's digest.
 pub const KIND_PROFILE: &str = "UserProfileSaved";
 /// Every settings kind, in [`TABLES`] order, then the profile's.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     KIND_SANDBOX,
     KIND_CLEANUP,
     KIND_QUIT,
@@ -63,12 +68,13 @@ pub const KINDS: [&str; 12] = [
     KIND_STEPS,
     KIND_TIME,
     KIND_FRAMES,
+    KIND_COMPACTION,
     KIND_PROFILE,
 ];
 /// The schema every settings event is written and read at.
 const SCHEMA: u16 = 1;
 /// Every settings table in snapshot order, each with its columns in key order.
-const TABLES: [(&str, &str); 11] = [
+const TABLES: [(&str, &str); 12] = [
     (
         "sandbox_settings",
         "singleton,linux_sockets,linux_supervisor,linux_strict",
@@ -92,6 +98,7 @@ const TABLES: [(&str, &str); 11] = [
     ("configured_master_steps", "singleton,step_limit"),
     ("configured_master_time", "singleton,time_limit"),
     ("configured_master_frames", "singleton,frame_limit"),
+    ("log_compaction_settings", "singleton,choice"),
 ];
 /// The owner profile table (Q5). Its text stays in owner_texts, so its snapshot rows are
 /// `[1, digest]` and it is kept out of [`TABLES`], whose rows carry their columns.
@@ -150,6 +157,7 @@ pub enum Event {
     Steps(Saved<MasterStepSettings>),
     Time(Saved<MasterTimeSettings>),
     Frames(Saved<MasterFrameSettings>),
+    Compaction(Saved<LogCompaction>),
     Profile(Kept),
 }
 
@@ -168,6 +176,7 @@ impl Event {
             Self::Steps(_) => KIND_STEPS,
             Self::Time(_) => KIND_TIME,
             Self::Frames(_) => KIND_FRAMES,
+            Self::Compaction(_) => KIND_COMPACTION,
             Self::Profile(_) => KIND_PROFILE,
         }
     }
@@ -186,6 +195,7 @@ impl Event {
             Self::Steps(event) => serde_json::to_vec(event),
             Self::Time(event) => serde_json::to_vec(event),
             Self::Frames(event) => serde_json::to_vec(event),
+            Self::Compaction(event) => serde_json::to_vec(event),
             Self::Profile(event) => serde_json::to_vec(event),
         }
         .map_err(error)
@@ -207,84 +217,91 @@ pub fn record(
     let aggregate = Aggregate::Settings;
     let seq = match event {
         Event::Sandbox(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_SANDBOX,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Cleanup(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_CLEANUP,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Quit(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_QUIT,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Retry(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RETRY,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::HarnessUpdate(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_HARNESS_UPDATE,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::InstructionApp(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_INSTRUCTION_APP,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Instruction(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_INSTRUCTION,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Roadmap(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ROADMAP,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Steps(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_STEPS,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Time(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TIME,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Frames(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_FRAMES,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
+        Event::Compaction(_) => appender.append(&Draft {
+            aggregate: aggregate.into(),
+            kind: KIND_COMPACTION,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
         Event::Profile(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PROFILE,
             schema: SCHEMA,
             at_ms,
@@ -296,6 +313,7 @@ pub fn record(
         body.len() <= BODY_BYTES_MAX,
         "the log bounds what it appended"
     );
+    crate::state_log::compact_after(appender, Aggregate::Settings, at_ms, chunks)?;
     Ok(seq)
 }
 
@@ -369,6 +387,10 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
             "INSERT INTO configured_master_frames(singleton,frame_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET frame_limit=excluded.frame_limit",
             [word(row.settings.limit)?],
         ),
+        Event::Compaction(row) => db.execute(
+            "INSERT INTO log_compaction_settings(singleton,choice) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
+            [word(row.settings)?],
+        ),
         Event::Profile(row) => return profile(db, &row.body),
     }
     .map_err(error)?;
@@ -419,6 +441,7 @@ pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
         KIND_STEPS => serde_json::from_slice(body).map(Event::Steps),
         KIND_TIME => serde_json::from_slice(body).map(Event::Time),
         KIND_FRAMES => serde_json::from_slice(body).map(Event::Frames),
+        KIND_COMPACTION => serde_json::from_slice(body).map(Event::Compaction),
         KIND_PROFILE => serde_json::from_slice(body).map(Event::Profile),
         _ => return Err(invalid()),
     }
@@ -438,7 +461,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let mut removals = crate::worktrees::log::removals(tx)?.into_iter().peekable();
     clear(tx)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Settings, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Settings, 0, |logged| {
         while let Some((_, project)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_rows(tx, &project)?;
         }
@@ -467,16 +490,22 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
 /// writer's clock. Output: the `seq` of the run's closing event, or
 /// `settings_log_snapshot_rows`, `settings_log_row_too_large` or the log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = appender.project(|tx| chunks(tx))?;
+    Ok(appender.snapshot(Aggregate::Settings, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of every settings table as it stands, the profile's last,
+/// for [`snapshot`] and for compaction. Input: the transaction. Output: the chunks, or the
+/// first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for (table, columns) in TABLES {
-        let rows = appender.project(|tx| table_rows(tx, table, columns))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table, columns)?)?);
     }
-    let profile = appender.project(|tx| profile_rows(tx))?;
-    chunks.extend(pack(PROFILE, profile)?);
+    chunks.extend(pack(PROFILE, profile_rows(db)?)?);
     assert!(chunks.len() > TABLES.len(), "one chunk or more per table");
     assert_eq!(chunks[0].table, TABLES[0].0);
-    appender.snapshot(Aggregate::Settings, at_ms, chunks)
+    Ok(chunks)
 }
 
 /// The profile's snapshot rows: none with no stored profile, else `[1, digest]`, its body
@@ -506,7 +535,6 @@ fn profile_rows(db: &Connection) -> Result<Vec<Value>, EngineError> {
 /// Makes every settings table that is missing. The engine's open calls it after its schema
 /// steps, so every store holds all of them, and step 14 calls it before its run. Input: the
 /// connection. Output: Ok, or the first table's refusal.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     crate::sandbox_settings::initialize(db)?;
     crate::cleanup_settings::initialize(db)?;
@@ -518,6 +546,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     crate::master_step_limit::initialize(db)?;
     crate::master_time_limit::initialize(db)?;
     crate::master_frame_limit::initialize(db)?;
+    crate::log_compaction::initialize(db)?;
     crate::owner_profile::initialize(db)?;
     Ok(())
 }
@@ -528,7 +557,6 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
 /// engine never made first. A store without the `state` table has no log to write, and one with
 /// no settings row needs no run, so it moves no revision. Inputs: the step's transaction and
 /// the open's proof. Output: whether a run was appended, or the first refusal.
-#[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let stated: bool = tx
         .query_row(
@@ -554,7 +582,7 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
         return Ok(false);
     }
     let at_ms = opening.at_ms();
-    let mut appender = Appender::opening(tx, opening)?;
+    let mut appender = crate::state_log::opening(tx, opening)?;
     let done = snapshot(&mut appender, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     assert!(rows > 0);
@@ -587,14 +615,10 @@ pub(crate) fn owner(
             })
         }
         Command::OwnerAgentQuit { settings } => {
-            if let Some(rejected) = crate::quit_settings::check(settings) {
-                return Ok(rejected);
-            }
-            Event::Quit(Saved {
-                settings: *settings,
-            })
+            return crate::sdk_slice::save_quit(tx, revision, settings);
         }
         Command::OwnerProviderRetry { choice } => Event::Retry(Saved { settings: *choice }),
+        Command::OwnerLogCompaction { choice } => Event::Compaction(Saved { settings: *choice }),
         Command::OwnerMasterSteps { settings } => Event::Steps(Saved {
             settings: *settings,
         }),
@@ -709,12 +733,35 @@ pub(crate) fn harness_update(db: &Connection, settings: UpdateSettings) -> Resul
 /// moved to, or the first refusal, which the caller rolls back.
 pub(crate) fn record_own(tx: &Transaction<'_>, event: &Event) -> Result<u64, EngineError> {
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::own(tx, fence)?;
+    let mut appender = crate::state_log::own(tx, fence)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     let revision = appender.revision();
     assert!(seq > 0, "a recorded event has a seq");
     assert!(revision > 0, "own moved the revision");
     Ok(revision)
+}
+
+/// Saves the owner's agents-on-quit choice in the request: refuses invalid settings, else
+/// logs one `AgentQuitSaved` event at the next revision. The SDK slice's provider calls it.
+/// Inputs: the request transaction, the signed revision and the settings. Output: the
+/// outcome, or the engine error.
+pub(crate) fn save_quit_at(
+    tx: &Transaction<'_>,
+    revision: u64,
+    settings: &QuitSettings,
+) -> Result<Outcome, EngineError> {
+    if let Some(rejected) = crate::quit_settings::check(settings) {
+        return Ok(rejected);
+    }
+    let event = Event::Quit(Saved {
+        settings: *settings,
+    });
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| error("revision_exhausted"))?;
+    record_at(tx, next, &event)?;
+    assert!(!tx.is_autocommit(), "the save is part of the request");
+    Ok(Outcome::Applied)
 }
 
 /// Writes one settings event inside an owner request whose next revision is already signed:
@@ -738,7 +785,7 @@ fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Result<(), Engin
         return Err(stale());
     }
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::owner(tx, next, fence)?;
+    let mut appender = crate::state_log::owner(tx, next, fence)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     assert!(seq > 0, "a recorded event has a seq");
     assert_eq!(appender.revision(), next);
@@ -761,7 +808,7 @@ pub(crate) fn forget_project(
         assert!(seq > 0, "the removal is logged before its redaction");
     }
     let kinds = [KIND_INSTRUCTION, KIND_ROADMAP];
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Settings],
         Some(&kinds),

@@ -97,6 +97,9 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
             .create(folder)
             .unwrap();
     }
+    let store = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&store).unwrap();
+    drop(store);
     let ran = base.join("npx-ran");
     let npx = bin.join("npx");
     std::fs::write(
@@ -116,7 +119,7 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
             &["-y".to_owned(), format!("context-mode@{version}")],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err()
     };
@@ -162,6 +165,9 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
             .create(folder)
             .unwrap();
     }
+    let store = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&store).unwrap();
+    drop(store);
     let ran = base.join("npx-ran");
     let npx = bin.join("npx");
     std::fs::write(
@@ -180,7 +186,7 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
         &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     assert_eq!(refused, "server_node_too_old");
@@ -236,7 +242,7 @@ fn the_context_mode_check_of_an_npx_the_resolver_does_not_find_says_so_and_never
         &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     assert_eq!(refused, "server_npx_not_found");
@@ -288,7 +294,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
     let npx = bin.join("npx");
     std::fs::write(&npx, "#!/bin/sh\nexit 3\n").unwrap();
     std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let copied = crate::spawn_gate::status(
+    let copied = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/cp")
             .arg("-cR")
             .arg(&source)
@@ -317,7 +323,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
         &args,
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     );
     let tools = checked.unwrap_or_else(|problem| {
         panic!("the check runs the shared install agents launch, not npx: {problem}")
@@ -333,7 +339,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
 fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
     const ID: &str = "mcp-0123456789abcdef01234567";
     let directory = tempfile::tempdir().unwrap();
-    let root = crate::sandbox::canonical(directory.path())
+    let root = kernel_sandbox::paths::canonical(directory.path())
         .unwrap()
         .join("engine");
     std::fs::create_dir_all(&root).unwrap();
@@ -345,7 +351,7 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
             &["--list".to_owned()],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err()
     };
@@ -353,6 +359,12 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
         check(&root.join("missing-server.exe")),
         "server_command_not_found"
     );
+    assert_eq!(check(&root.join("npx.cmd")), "server_command_not_found");
+    let shipped = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    std::fs::copy(&shipped, root.join("tool")).unwrap();
+    assert_eq!(check(&root.join("tool")), "server_batch_file");
     let server = std::env::current_exe().unwrap();
     let helper = server.with_file_name(crate::sandbox::windows::HELPER_NAME);
     let checked = check(&server);
@@ -369,6 +381,22 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
     }
 }
 
+/// The access list icacls prints for `folder`, read through the spawn gate with stdout and
+/// stderr collected, with icacls' inherited mark `(I)` dropped: writing a list re-marks an
+/// explicit entry that matches the parent's as inherited, with or without the boundary (farm
+/// 44113725856), so a taken-back grant leaves the same entries, not the same marks. Input: the
+/// folder. Output: the listing; a failed listing, or one not naming the folder, panics.
+#[cfg(target_os = "windows")]
+fn access_list(folder: &Path) -> String {
+    let mut icacls = std::process::Command::new("icacls");
+    let listed = kernel_processes::spawn_gate::collected(icacls.arg(folder)).unwrap();
+    assert!(listed.status.success(), "{listed:?}");
+    let text = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
+    assert!(text.contains(folder.to_str().unwrap()), "{listed:?}");
+    assert!(text.contains("(OI)(CI)"), "{listed:?}");
+    text
+}
+
 /// The read entry a server's check was granted on its program's folder is taken back when the
 /// server is removed, and its container is deleted with the folder Windows gave it, so nothing
 /// of the dead container stays; without the boundary helper beside the engine nothing is
@@ -378,19 +406,14 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
 async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     const ID: &str = "mcp-0123456789abcdef01234568";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     let folder = base.join("server");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&folder).unwrap();
     let server = folder.join("server.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
-    let entries = || {
-        let listed =
-            crate::spawn_gate::output(std::process::Command::new("icacls").arg(&folder)).unwrap();
-        assert!(listed.status.success(), "{listed:?}");
-        String::from_utf8_lossy(&listed.stdout).into_owned()
-    };
+    let entries = || access_list(&folder);
     let before = entries();
     let checked = boundary_check(
         &root,
@@ -399,7 +422,7 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
         &["--list".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     let helper = std::env::current_exe()
@@ -416,9 +439,16 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     assert_ne!(entries(), before);
     let checks = root.join(CHECK_FOLDER);
     let profile = check_profile(&checks, ID);
-    let name = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile)
-        .unwrap()
-        .container;
+    let loaded = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile).unwrap();
+    assert!(
+        loaded
+            .guarded
+            .iter()
+            .all(|item| item.guard != crazyagent_win_sandbox::profile::Guard::ReadOnly),
+        "a check folder is a job folder, with no project guards: {:?}",
+        loaded.guarded
+    );
+    let name = loaded.container;
     let container = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
         .join("Packages")
         .join(name);
@@ -441,15 +471,10 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     const DEAD: &str = "mcp-0123456789abcdef0123456b";
     const LIVE: &str = "mcp-0123456789abcdef0123456c";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     std::fs::create_dir_all(&root).unwrap();
-    let entries = |folder: &std::path::Path| {
-        let listed =
-            crate::spawn_gate::output(std::process::Command::new("icacls").arg(folder)).unwrap();
-        assert!(listed.status.success(), "{listed:?}");
-        String::from_utf8_lossy(&listed.stdout).into_owned()
-    };
+    let entries = access_list;
     let helper = std::env::current_exe()
         .unwrap()
         .with_file_name(crate::sandbox::windows::HELPER_NAME);
@@ -467,7 +492,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
             &["--list".to_owned()],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err();
         if !helper.is_file() {
@@ -498,6 +523,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     assert!(live.is_dir());
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::storage::plugins::initialize(&connection).unwrap();
+    crate::storage::trash::initialize(&connection).unwrap();
     connection
         .execute(
             "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
@@ -550,6 +576,7 @@ fn a_check_profile_that_cannot_be_released_stays_for_the_next_start() {
     std::fs::write(&other, "kept").unwrap();
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::storage::plugins::initialize(&connection).unwrap();
+    crate::storage::trash::initialize(&connection).unwrap();
     connection
         .execute(
             "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
@@ -584,7 +611,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
     const BOUND: &str = "mcp-0123456789abcdef0123456f";
     const FORGED: &str = "mcp-0123456789abcdef01234570";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let checks = base.join("engine").join(CHECK_FOLDER);
     let grants = base.join("grants");
     std::fs::create_dir_all(checks.join(CHECK_PROFILES)).unwrap();
@@ -600,7 +627,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
             &folders[0],
             &folders[1],
             &folders[2],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap();
         let mut profile = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();

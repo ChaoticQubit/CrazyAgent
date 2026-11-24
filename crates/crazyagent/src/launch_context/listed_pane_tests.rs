@@ -22,8 +22,7 @@ fn pane_request(harness: &str, home: &Path, work: &Path, profile: &Path) -> Laun
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile.to_path_buf()),
-        unconfined: false,
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile.to_path_buf()),
         git_identity: None,
         limits: LaunchLimits::default(),
     }
@@ -127,9 +126,9 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
 /// hand-over a key is refused.
 #[test]
 fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
-    use crate::credentials::SecretString;
     use crate::harnesses::launch::Secret;
     use crate::model_gateway::relay::Relay;
+    use kernel_security::secret::SecretString;
     use std::ffi::OsStr;
     let (_folder, home) = harness_home("standin-jsonl-append");
     let scratch = tempfile::tempdir().unwrap();
@@ -177,7 +176,7 @@ fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
     let bridge = &built.argv[at + 1..at + 6];
     let file = key_file.to_str().unwrap();
     assert_eq!(bridge[2..], ["file", file, "OPENAI_API_KEY"]);
-    let shown = crate::spawn_gate::collected(
+    let shown = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .args(bridge)
@@ -239,8 +238,8 @@ fn a_listed_pane_at_full_access_is_refused_its_hand_over() {
     let installed = context.install_listed(&appended, &home, true).unwrap();
     let unused = work.join("project.sb");
     let mut request = pane_request("standin-jsonl-append", &home, &work, &unused);
-    request.sandbox_profile = None;
-    request.unconfined = true;
+    let scratch = work.parent().unwrap().to_path_buf();
+    request.boundary = crate::harnesses::launch::full_access_for_test(&work, &scratch);
 
     let refused = command_with(&request, Some(&installed), &run, Some(&settings));
 
@@ -330,7 +329,7 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     assert_eq!(built.argv[6..10], words);
     assert_eq!(built.argv[10..12], ["/usr/bin/true", "--home"]);
     let bridge = &built.argv[5..10];
-    let shown = crate::spawn_gate::collected(
+    let shown = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .args(bridge)

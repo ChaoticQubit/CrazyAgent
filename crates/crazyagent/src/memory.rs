@@ -1,11 +1,10 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::protocol::*;
-#[cfg(unix)]
+use kernel_common::hash;
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub mod import;
@@ -324,11 +323,6 @@ pub(crate) fn reject(code: &str) -> Result<Outcome, EngineError> {
     Ok(Outcome::Rejected { code: code.into() })
 }
 
-pub(crate) fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch("CREATE TABLE IF NOT EXISTS knowledge_principals
         (id TEXT PRIMARY KEY, body TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);

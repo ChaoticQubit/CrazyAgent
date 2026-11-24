@@ -1,0 +1,123 @@
+package crazyagent:sdk;
+
+interface sdk-types {
+  record not-granted {
+    capability: string,
+    needs: string,
+  }
+
+  variant refusal {
+    not-granted(not-granted),
+    tier-too-high(string),
+    rejected(string),
+    failed(string),
+  }
+}
+
+interface net-types {
+  use secrets-types.{secret};
+
+  enum method {
+    get,
+    post,
+    put,
+    patch,
+    delete,
+  }
+
+  record field {
+    name: string,
+    value: string,
+  }
+
+  record secret-field {
+    name: string,
+    secret: secret,
+  }
+
+  record capture {
+    field: string,
+    keep-as: option<string>,
+  }
+
+  record request {
+    method: method,
+    url: string,
+    headers: list<field>,
+    bearer: option<secret>,
+    form: list<field>,
+    secret-form: list<secret-field>,
+    json: option<list<u8>>,
+    reply-headers: list<string>,
+    capture: list<capture>,
+  }
+
+  record captured {
+    field: string,
+    secret: secret,
+  }
+
+  record reply {
+    status: u16,
+    body: list<u8>,
+    headers: list<field>,
+    captured: list<captured>,
+  }
+}
+
+interface net {
+  use sdk-types.{refusal};
+  use net-types.{reply, request as net-request};
+
+  request: func(request: net-request) -> result<reply, refusal>;
+}
+
+interface secrets-types {
+  type secret = u64;
+}
+
+interface secrets {
+  use sdk-types.{refusal};
+  use secrets-types.{secret};
+
+  put-from-owner: func(name: string) -> result<secret, refusal>;
+
+  find: func(name: string) -> result<option<secret>, refusal>;
+
+  forget: func(secret: secret) -> result<_, refusal>;
+}
+
+interface settings-types {
+  enum on-quit {
+    keep-running,
+    stop,
+  }
+
+  enum left-running {
+    after-hours,
+    never,
+  }
+
+  record quit-settings {
+    on-quit: on-quit,
+    left-running: left-running,
+    hours: u16,
+  }
+
+  record agent-quit-saved {
+    settings: quit-settings,
+  }
+}
+
+interface settings {
+  use sdk-types.{refusal};
+  use settings-types.{quit-settings};
+
+  save-quit: func(settings: quit-settings) -> result<_, refusal>;
+}
+
+world plugin {
+  import net;
+  import secrets;
+  import settings;
+}

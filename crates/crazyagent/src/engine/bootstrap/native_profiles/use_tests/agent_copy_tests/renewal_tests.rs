@@ -1,6 +1,7 @@
 use super::*;
-use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crate::sandbox::ProjectSandbox;
 use crate::team::runtime::managed_agent::{claude, codex};
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 
 const COPY_WAIT: Duration = Duration::from_secs(90);
 
@@ -355,7 +356,7 @@ fn a_renewal_left_by_an_engine_that_exits_keeps_the_renewal_lock_until_it_ends()
         "{}::renewing_engine_process",
         module_path!().split_once("::").unwrap().1
     );
-    let mut engine = crate::spawn_gate::spawn(
+    let mut engine = kernel_processes::spawn_gate::spawn(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &helper, "--ignored", "--test-threads", "1"])
             .env(RENEWING_ROOT, root.path())
@@ -487,7 +488,7 @@ fn codex_sign_in(store: &str) -> String {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
@@ -585,7 +586,7 @@ done
     )
     .unwrap();
     std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let version = crate::spawn_gate::output(
+    let version = kernel_processes::spawn_gate::output(
         std::process::Command::new(&old)
             .arg("--version")
             .stdin(std::process::Stdio::null())

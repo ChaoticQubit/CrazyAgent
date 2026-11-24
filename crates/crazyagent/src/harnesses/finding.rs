@@ -43,7 +43,7 @@ pub(crate) const NAMED_FOLDERS_MAX: usize = AGENT_ROWS_MAX * (PROJECT_REPOSITORI
 const AGENT_FOLDERS_MAX: usize = 2 * (NAMED_FOLDERS_MAX + 1);
 /// The engine tables that name folders agents can write, how each names them and the query
 /// that reads them, bounded by its one parameter: engine start's [`AgentSpace`] and the tool
-/// resolver's places ([`crate::tools::Places`]) read this one list.
+/// resolver's places ([`kernel_processes::finding::Places`]) read this one list.
 pub(crate) const AGENT_TABLES: [(&str, Names, &str); 4] = [
     (
         "project_setups",
@@ -91,7 +91,7 @@ pub(crate) enum Names {
 }
 
 /// The folders agents can write, where no harness file may come from: the engine folder
-/// outside its `setup` folder ([`crate::tools::in_engine_data`]) with every agent home, the
+/// outside its `setup` folder ([`kernel_processes::finding::in_engine_data`]) with every agent home, the
 /// agents' temp folders, the engine's own temp folder, which the agents' temp grant gives
 /// them ([`crate::sandbox::grants::owner_temp_folder`]), any `.crazyagent` folder with its
 /// agent worktrees, and each project folder, declared repository and agent worktree the
@@ -132,8 +132,9 @@ impl AgentSpace {
 
     /// Builds the space from the engine folder, the folders the database names and the
     /// engine's own temp folder. Inputs: the engine folder, the named folders and the temp
-    /// folder as given and real. Output: the space, each absolute folder kept as named and as
-    /// its real path, none that holds the owner's home.
+    /// folder as given and real. Output: the space, the engine folder kept as given, as its
+    /// real path and in one spelling, each named folder as named and as its real path in one
+    /// spelling, none that holds the owner's home.
     fn of(root: &Path, named: Vec<PathBuf>, temp: &[PathBuf]) -> Self {
         let owner = crate::projects_home::owner_home().ok();
         let usable = |folder: &PathBuf| {
@@ -143,13 +144,17 @@ impl AgentSpace {
                     .as_deref()
                     .is_some_and(|owner| owner.starts_with(folder))
         };
-        let engine: Vec<PathBuf> = crate::tools::engine_roots(Some(root))
-            .into_iter()
-            .filter(usable)
-            .collect();
+        let mut engine: Vec<PathBuf> =
+            kernel_processes::finding::engine_roots(&crate::tools::HOOKS, Some(root))
+                .into_iter()
+                .chain(kernel_sandbox::paths::canonical(root).ok())
+                .filter(usable)
+                .collect();
+        engine.sort();
+        engine.dedup();
         let mut folders = Vec::new();
         for folder in named {
-            let real = std::fs::canonicalize(&folder).ok();
+            let real = kernel_sandbox::paths::canonical(&folder).ok();
             folders.extend(std::iter::once(folder).chain(real).filter(usable));
         }
         folders.sort();
@@ -159,7 +164,7 @@ impl AgentSpace {
             .filter(|folder| usable(folder))
             .cloned()
             .collect();
-        assert!(engine.len() <= 2);
+        assert!(engine.len() <= 3);
         assert!(temp.len() <= 2);
         assert!(folders.len() <= AGENT_FOLDERS_MAX);
         Self {
@@ -170,22 +175,23 @@ impl AgentSpace {
     }
 
     /// Whether agents could write a harness file or the link to it: the path as given, the
-    /// link in its real folder, or its real file lies in the space. Input: an absolute path.
-    /// Output: the answer.
+    /// link in its real folder, or its real file lies in the space, the last two in one
+    /// spelling so a macOS path named through the data volume matches its short-named folder.
+    /// Input: an absolute path. Output: the answer.
     pub fn holds(&self, path: &Path) -> bool {
         let placed = path
             .parent()
-            .and_then(|folder| std::fs::canonicalize(folder).ok())
+            .and_then(|folder| kernel_sandbox::paths::canonical(folder).ok())
             .zip(path.file_name())
             .map(|(folder, name)| folder.join(name));
-        let real = std::fs::canonicalize(path).ok();
+        let real = kernel_sandbox::paths::canonical(path).ok();
         [Some(path.to_path_buf()), placed, real]
             .into_iter()
             .flatten()
             .any(|at| {
                 in_crazyagent_folder(&at)
                     || at.to_str().is_some_and(|text| text.starts_with(AGENT_TMP))
-                    || crate::tools::in_engine_data(&self.engine, &at)
+                    || kernel_processes::finding::in_engine_data(&self.engine, &at)
                     || self.temp.iter().any(|folder| at.starts_with(folder))
                     || self.folders.iter().any(|folder| at.starts_with(folder))
             })
@@ -465,7 +471,7 @@ pub(crate) fn out_of_reach(path: &Path, space: &AgentSpace) -> Result<(), Engine
     }
     if std::iter::once(path)
         .chain(hops.iter().map(PathBuf::as_path))
-        .any(|part| crate::service::changeable_by_others(part).is_some())
+        .any(|part| kernel_processes::service::changeable_by_others(part).is_some())
     {
         return Err(failure(PATH_CHANGEABLE));
     }
@@ -620,7 +626,7 @@ pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
     if !cfg!(target_os = "macos") {
         return outside_temp(prefix);
     }
-    let cache = crate::spawn_gate::output(
+    let cache = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/getconf")
             .arg("DARWIN_USER_CACHE_DIR")
             .stdin(std::process::Stdio::null())
@@ -639,7 +645,7 @@ pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
 
 /// The folder a row's own temp folders go in, which no other user can change: on macOS the
 /// temp folder, this user's own; elsewhere, where it is the shared `/tmp` that
-/// [`crate::service::changeable_by_others`] rightly counts, this user's cache folder
+/// [`kernel_processes::service::changeable_by_others`] rightly counts, this user's cache folder
 /// ([`user_caches`]). Output: the folder, real.
 #[cfg(all(test, unix))]
 pub(crate) fn private_root() -> PathBuf {
@@ -649,7 +655,7 @@ pub(crate) fn private_root() -> PathBuf {
         user_caches()
     };
     assert!(folder.is_absolute());
-    let changeable = crate::service::changeable_by_others(&folder);
+    let changeable = kernel_processes::service::changeable_by_others(&folder);
     assert_eq!(changeable, None, "others can change {}", folder.display());
     folder
 }
@@ -688,20 +694,20 @@ pub(crate) fn outside_temp(prefix: &str) -> tempfile::TempDir {
         .unwrap();
     let place = folder.path().canonicalize().unwrap();
     assert_eq!(
-        crate::service::changeable_by_others(&place),
+        kernel_processes::service::changeable_by_others(&place),
         None,
         "others can change the cache folder: {}",
         place.display()
     );
     assert!(
-        !crate::tools::temp_roots()
+        !kernel_processes::finding::temp_roots(&crate::tools::HOOKS)
             .iter()
             .any(|temp| place.starts_with(temp)),
         "HOME lies in a temp folder: {}",
         place.display()
     );
     assert!(
-        !crate::tools::Places::from_environment(None).agent_writable(&place),
+        !crate::tools::tools_places(None).agent_writable(&place),
         "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
         place.display()
     );

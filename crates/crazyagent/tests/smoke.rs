@@ -11,9 +11,11 @@ use crazyagent::protocol::{
 };
 use crazyagent::setup::{Dependency, DependencyState};
 use crazyagent::team::NodeKind;
-use crazyagent::terminal::tmux::{SOCKET, installed};
-use crazyagent::terminal::{AgentId, FOLDER, TerminalFrame};
+use crazyagent::terminal::tmux::installed;
+use crazyagent::terminal::{FOLDER, TerminalFrame};
 use e2e_support::{ENGINE, Engine, Owner, Survivors, TMUX, hex, scratch, stop_tmux};
+use kernel_processes::terminal::AgentId;
+use kernel_processes::terminal::tmux::SOCKET;
 use std::collections::BTreeSet;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -36,7 +38,7 @@ struct Server {
 
 impl Server {
     fn run(&self, args: &[&str]) -> Output {
-        crazyagent::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -71,7 +73,7 @@ impl Drop for Server {
 }
 
 fn processes(root: &Path) -> Vec<String> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("ps")
             .args(["axww", "-o", "pid=,command="])
             .stdin(Stdio::null())
@@ -97,7 +99,7 @@ fn settled(what: &str, check: impl Fn() -> bool) {
 }
 
 fn running(pid: u32) -> bool {
-    crazyagent::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("/bin/kill")
             .args(["-0", &pid.to_string()])
             .stdout(Stdio::null())
@@ -194,7 +196,7 @@ async fn the_engine_starts_answers_a_plain_read_and_stops_with_nothing_left() {
         );
     }
     assert!(generations(&root).is_empty(), "{:?}", generations(&root));
-    assert!(crazyagent::spawn_gate::connect_unix_std(root.join("engine.sock")).is_err());
+    assert!(kernel_processes::spawn_gate::connect_unix_std(root.join("engine.sock")).is_err());
     settled("no process runs from the engine root after stop", || {
         processes(&root).is_empty()
     });
@@ -225,7 +227,12 @@ async fn the_engine_private_tmux_server_runs_a_pane_and_never_touches_the_defaul
     let (host, pane) = {
         let agent = agent.clone();
         tokio::task::spawn_blocking(move || {
-            let pane = host.spawn(&agent, &command).unwrap();
+            let pane = host
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
+                .unwrap();
             (host, pane)
         })
         .await
@@ -251,7 +258,7 @@ async fn the_engine_private_tmux_server_runs_a_pane_and_never_touches_the_defaul
 
     let private = server.checked(&["list-panes", "-a", "-F", "#{pane_start_command}"]);
     assert!(private.contains(&marker), "{private}");
-    let default = crazyagent::spawn_gate::output(
+    let default = kernel_processes::spawn_gate::output(
         Command::new(&server.tmux)
             .args(["list-panes", "-a", "-F", "#{pane_start_command}"])
             .env_remove("TMUX")
@@ -385,7 +392,17 @@ fn command_function(lib: &str, command: &str) -> bool {
 
 #[test]
 fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
-    let build = listed(&desktop_source("build.rs"), ".commands(&[", "]");
+    let build_rs = desktop_source("build.rs");
+    let webview_only = listed(
+        &build_rs,
+        "const WEBVIEW_TERMINAL_COMMANDS: [&str; 4] = [",
+        "]",
+    );
+    assert_eq!(webview_only.len(), 4);
+    let build: Vec<String> = listed(&build_rs, "let mut commands = vec![", "]")
+        .into_iter()
+        .chain(webview_only.iter().cloned())
+        .collect();
     assert!(!build.is_empty());
     assert!(build.iter().all(|command| command.starts_with("desktop_")));
     let unique = build.iter().collect::<BTreeSet<_>>();
@@ -394,6 +411,7 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
     let lib = desktop_source("src/lib.rs");
     let handler = listed(&lib, "native_commands! {", "}")
         .into_iter()
+        .map(|item| item.trim_start_matches(';').trim().to_owned())
         .collect::<BTreeSet<_>>();
     assert_eq!(
         handler,
@@ -412,6 +430,7 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
     };
     let main = granted("main-window.json");
     let wall = granted("terminal-wall.json");
+    let webview = granted("webview-terminal.json");
     for command in &build {
         assert!(
             command_function(&lib, command),
@@ -419,8 +438,10 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         );
         let permission = format!("allow-{}", command.replace('_', "-"));
         assert!(
-            main.contains(&permission) || wall.contains(&permission),
-            "{permission} is in neither main-window.json nor terminal-wall.json"
+            main.contains(&permission)
+                || wall.contains(&permission)
+                || webview.contains(&permission),
+            "{permission} is in none of main-window.json, terminal-wall.json and webview-terminal.json"
         );
     }
 
@@ -440,9 +461,11 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         }
         from = at + 1;
     }
+    let macos = cfg!(target_os = "macos");
     let missing = build
         .iter()
         .filter(|command| !linked.contains(*command))
+        .filter(|command| !(macos && webview_only.contains(*command)))
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),

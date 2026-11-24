@@ -116,7 +116,7 @@ fn running_naming(needle: &str, count: usize) -> Vec<(i32, String)> {
 
 #[test]
 fn a_stopped_read_only_run_leaves_nothing_its_harness_detached_into_its_own_session() {
-    let mut bystander = crate::spawn_gate::spawn(
+    let mut bystander = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("3311")
             .stdin(Stdio::null())
@@ -175,7 +175,7 @@ fn a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached() {
     let module = module_path!().split_once("::").unwrap().1;
     let test =
         format!("{module}::a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached");
-    let mut engine = crate::spawn_gate::spawn(
+    let mut engine = kernel_processes::spawn_gate::spawn(
         Command::new(std::env::current_exe().unwrap())
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(READ_ONLY_ENGINE_BASE, base.path())

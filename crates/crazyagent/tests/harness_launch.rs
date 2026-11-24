@@ -1,10 +1,13 @@
 #![cfg(target_os = "macos")]
+mod full_access_support;
+use full_access_support::full_access;
 
 use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
+    AccountBinding, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
+    command, route,
 };
-use crazyagent::harnesses::leftovers::{UNCHECKED, Unstopped};
+use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, Unstopped};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
 use crazyagent::protocol::CredentialRef;
@@ -48,8 +51,7 @@ fn request(harness: &str, home: &Path, work: &Path, account: AccountBinding) -> 
         account,
         model: Some(LOCAL_MODEL.into()),
         tools: false,
-        sandbox_profile: Some(project_profile(work, home)),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(project_profile(work, home)),
         git_identity: None,
         limits: LaunchLimits {
             run_time: Duration::from_secs(420),
@@ -156,9 +158,9 @@ fn a_full_access_agent_starts_without_seatbelt_but_with_the_same_cleared_environ
         home: home.path().to_path_buf(),
     };
     let confined = command(&request("codex", home.path(), work.path(), subscription())).unwrap();
+    let scratch = private_dir("ca-launch-full-");
     let full = LaunchRequest {
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(work.path(), scratch.path()),
         ..request("codex", home.path(), work.path(), subscription())
     };
     let built = command(&full).unwrap();
@@ -180,17 +182,6 @@ fn a_full_access_agent_starts_without_seatbelt_but_with_the_same_cleared_environ
     );
     assert_eq!(environment(&built), environment(&confined));
     assert_eq!(built.get_current_dir(), Some(work.path()));
-
-    let neither = LaunchRequest {
-        sandbox_profile: None,
-        ..request("codex", home.path(), work.path(), subscription())
-    };
-    assert_eq!(command(&neither).unwrap_err().0, "launch_sandbox_required");
-    let both = LaunchRequest {
-        unconfined: true,
-        ..request("codex", home.path(), work.path(), subscription())
-    };
-    assert_eq!(command(&both).unwrap_err().0, "launch_sandbox_conflict");
 }
 
 #[test]
@@ -261,8 +252,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_fr
         account: keyed(),
         model: None,
         tools: false,
-        sandbox_profile: Some(project_profile(work.path(), home.path())),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(project_profile(work.path(), home.path())),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -399,9 +389,7 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     assert!(!args.contains(&"--bare".to_owned()));
     let mut on = request("claude-code", home.path(), work.path(), subscription());
     on.tools = true;
-    on.sandbox_profile = None;
-    assert_eq!(command(&on).unwrap_err().0, "launch_sandbox_required");
-    on.sandbox_profile = Some(profile.clone());
+    on.boundary = LaunchBoundary::Profile(profile.clone());
     let wrapped = command(&on).unwrap();
     assert_eq!(wrapped.get_program(), "/usr/bin/sandbox-exec");
     let args = arguments(&wrapped);
@@ -429,7 +417,7 @@ fn codex_tools_on_runs_without_its_own_sandbox_inside_the_project_sandbox() {
         url_account(home.path(), OLLAMA_OPENAI),
     );
     on.tools = true;
-    on.sandbox_profile = Some(profile);
+    on.boundary = LaunchBoundary::Profile(profile);
     let built = command(&on).unwrap();
     assert_eq!(built.get_program(), "/usr/bin/sandbox-exec");
     let args = arguments(&built);
@@ -462,18 +450,12 @@ fn no_launch_starts_without_the_project_sandbox_profile() {
             );
             bare.tools = tools;
             assert!(command(&bare).is_ok(), "{harness} {tools}");
-            bare.sandbox_profile = None;
-            assert_eq!(
-                command(&bare).unwrap_err().0,
-                "launch_sandbox_required",
-                "{harness} {tools}"
-            );
             for unusable in [
                 PathBuf::from("project.sb"),
                 work.path().join("missing.sb"),
                 work.path().to_path_buf(),
             ] {
-                bare.sandbox_profile = Some(unusable);
+                bare.boundary = LaunchBoundary::Profile(unusable);
                 assert_eq!(
                     command(&bare).unwrap_err().0,
                     "launch_sandbox_profile_unavailable",
@@ -482,17 +464,6 @@ fn no_launch_starts_without_the_project_sandbox_profile() {
             }
         }
     }
-    let mut session = request(
-        "codex",
-        home.path(),
-        work.path(),
-        url_account(home.path(), OLLAMA_OPENAI),
-    );
-    session.sandbox_profile = None;
-    assert_eq!(
-        Session::start(session).err().unwrap().0,
-        "launch_sandbox_required"
-    );
 }
 
 #[test]
@@ -610,7 +581,8 @@ fn sandboxed_stand_in(
     prefix: &str,
     script: &str,
 ) -> (tempfile::TempDir, PathBuf, PathBuf, Session) {
-    use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+    use crazyagent::sandbox::ProjectSandbox;
+    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 
     let root = private_dir(prefix);
     let project = private_folder(root.path(), "project");
@@ -620,7 +592,7 @@ fn sandboxed_stand_in(
     let harness = bin.join("claude");
     std::fs::write(&harness, script).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -649,8 +621,7 @@ fn sandboxed_stand_in(
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -663,7 +634,7 @@ fn sandboxed_stand_in(
 /// shim itself became the harness. Takes the executable, unique to this test. Returns the
 /// wardens killed, so a caller that expects exactly one can check.
 fn kill_wardens_of(harness: &Path) -> Vec<i32> {
-    let listing = crazyagent::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-A", "-ww", "-o", "pid=,uid=,command="])
             .stdin(std::process::Stdio::null())
@@ -760,7 +731,7 @@ impl Drop for Leftover {
 /// Reads a process's parent id with `ps`. Input: the process. Output: the parent, or none
 /// once it has ended.
 fn parent_of(process: rustix::process::Pid) -> Option<i32> {
-    let listing = crazyagent::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-o", "ppid=", "-p", &process.as_raw_nonzero().to_string()])
             .stdin(std::process::Stdio::null())
@@ -793,7 +764,7 @@ fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_un
     let harness = bin.join("claude");
     std::fs::write(&harness, LEAVING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -810,8 +781,7 @@ fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_un
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -901,7 +871,7 @@ fn stopping_a_full_access_headless_agent_names_what_left_its_session_and_parent(
     let harness = bin.join("claude");
     std::fs::write(&harness, ORPHANING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -918,8 +888,7 @@ fn stopping_a_full_access_headless_agent_names_what_left_its_session_and_parent(
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -978,7 +947,7 @@ fn a_full_access_headless_stop_names_a_setsid_child_whose_seen_parent_exited_at_
     let harness = bin.join("claude");
     std::fs::write(&harness, SEEN_PARENT_ORPHANING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -995,8 +964,7 @@ fn a_full_access_headless_stop_names_a_setsid_child_whose_seen_parent_exited_at_
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -1042,14 +1010,12 @@ exec /bin/sleep 30
 "#;
 
 /// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual the owner accepted
-/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle process
-/// setsids, forks and exits within microseconds, between two tables the follower takes,
-/// leaves a grandchild running a program whose environment macOS hides. No table showed the
-/// middle, so neither the grandchild's parent nor the unique id it was forked from links it to
-/// the agent: the stop reports clean, or unchecked under load, naming nothing, while it keeps
-/// running. Pins today's result; a later fix that catches it turns this row red on purpose.
+/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle setsids, forks
+/// and exits between two tables the follower takes leaves a grandchild whose environment macOS
+/// hides. The stop names it as left (`perl`) when a table caught the middle, or misses it,
+/// clean or unchecked, while it keeps running; no other answer passes.
 #[test]
-fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
+fn a_full_access_headless_stop_names_or_misses_an_orphan_made_between_two_tables() {
     let root = private_dir("crazyagent-fast-orphan-");
     let project = private_folder(root.path(), "project");
     let home = private_folder(root.path(), "home");
@@ -1057,7 +1023,7 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
     let harness = bin.join("claude");
     std::fs::write(&harness, FAST_ORPHANING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -1074,8 +1040,7 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -1097,17 +1062,36 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
     };
     let leftover = Leftover(vec![orphan]);
     assert_ne!(rustix::process::getsid(Some(orphan)), Ok(leader));
-
-    match session.stop() {
-        Ok(_) => {}
-        Err(Unstopped::Left(left)) => assert_eq!(left.code(), UNCHECKED, "{}", left.plain()),
+    let missed = match session.stop() {
+        Ok(_) => true,
+        Err(Unstopped::Left(left)) if left.code() == UNCHECKED => true,
+        Err(Unstopped::Left(left)) => {
+            let report = left.plain();
+            assert_eq!(left.code(), LEFT, "{report}");
+            let named = named_in(&report);
+            assert_eq!(
+                named.keys().copied().collect::<Vec<_>>(),
+                [orphan.as_raw_nonzero().get()],
+                "a table saw the middle, so the stop names only the orphan: {report}"
+            );
+            assert_eq!(
+                named
+                    .get(&orphan.as_raw_nonzero().get())
+                    .map(String::as_str),
+                Some("perl"),
+                "{report}"
+            );
+            false
+        }
         Err(other) => panic!("the stop of a Full access agent was reported {other:?}"),
+    };
+    if missed {
+        assert_eq!(
+            rustix::process::test_kill_process(orphan),
+            Ok(()),
+            "a stop that misses the orphan {orphan:?} leaves it running, the accepted residual"
+        );
     }
-    assert_eq!(
-        rustix::process::test_kill_process(orphan),
-        Ok(()),
-        "the orphan {orphan:?} ended with the stop, so the row no longer shows the residual"
-    );
     drop(leftover);
 }
 
@@ -1279,7 +1263,7 @@ fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_
 /// that refuses, so the row needs no model and no network (rv-sec3 engine-hermetic F1).
 #[test]
 fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_session() {
-    let (_refusing, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
     for (harness, name, base_url) in [
         ("codex", "codex", format!("http://127.0.0.1:{port}/v1")),
@@ -1303,8 +1287,7 @@ fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_sessi
             },
             model: Some(LOCAL_MODEL.into()),
             tools: false,
-            sandbox_profile: Some(project_profile(&work, &home)),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(project_profile(&work, &home)),
             git_identity: None,
             limits: LaunchLimits::default(),
         })
@@ -1353,7 +1336,7 @@ fn live_tools_on_turn_completes_inside_the_project_sandbox() {
             url_account(home.path(), base_url),
         );
         on.tools = true;
-        on.sandbox_profile = Some(project_profile(work.path(), home.path()));
+        on.boundary = LaunchBoundary::Profile(project_profile(work.path(), home.path()));
         let mut session = Session::start(on).unwrap();
         let (_, events) = run_turn(&mut session, "Reply with one short greeting.");
         assert!(
@@ -1376,7 +1359,7 @@ fn the_launch_trust_setting_loads_no_mcp_server_from_the_repository() {
     std::fs::write(code_home.join("config.toml"), "project_doc_max_bytes = 0\n").unwrap();
     let repo = private_dir("ca-trust-repo-");
     let root = std::fs::canonicalize(repo.path()).unwrap();
-    let git = crazyagent::spawn_gate::output(
+    let git = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .args(["init", "-q"])
             .current_dir(&root)
@@ -1399,7 +1382,7 @@ fn the_launch_trust_setting_loads_no_mcp_server_from_the_repository() {
         )
     };
     let list = |args: &[&str]| {
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new(&codex)
                 .args(args)
                 .current_dir(&root)

@@ -1,13 +1,17 @@
 use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
-    AGENT_SERVER_COMMAND, ASK_TOOL, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND,
-    MAILBOX_FOLDER, PROPOSE_RULE_TOOL, QUESTION_TOOLS, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL,
-    REQUEST_ACCESS_TOOL, SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL,
-    answer_call, take, take_calls,
+    AGENT_SERVER_COMMAND, ASK_TOOL, DROP_FILE, LIVE_SERVER_COMMAND, MAILBOX_FOLDER,
+    PROPOSE_RULE_TOOL, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL, REQUEST_ACCESS_TOOL,
+    SERVER_COMMAND, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL, take,
+};
+#[cfg(unix)]
+use crazyagent::team::tool::{
+    CALLS_PER_TICK_MAX, Call, QUESTION_TOOLS, TEAM_TOOLS, answer_call, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[test]
@@ -69,7 +73,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
         ],
         "a conversation master's server leaves propose_github_rule and wake out"
     );
-    let unknown = crazyagent::spawn_gate::output(
+    let unknown = kernel_processes::spawn_gate::output(
         Command::new(engine)
             .args(&remembering)
             .arg("forget")
@@ -84,7 +88,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
             .contains("usage: crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]")
     );
 
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(engine)
             .args(&arguments)
             .env_clear()
@@ -129,7 +133,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
         }]
     );
 
-    let wrong = crazyagent::spawn_gate::output(
+    let wrong = kernel_processes::spawn_gate::output(
         Command::new(engine)
             .arg(SERVER_COMMAND)
             .stdin(Stdio::null())
@@ -141,6 +145,10 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
     assert!(String::from_utf8_lossy(&wrong.stderr).contains("usage: crazyagent team-mcp"));
 }
 
+/// The live team server takes the master's calls through its mailbox and hands back the
+/// engine's answers. Unix only, as its siblings that open the mailbox are: off Unix every
+/// mailbox open is refused (`team_mailbox_unavailable`, team/tool.rs), so no call reaches it.
+#[cfg(unix)]
 #[test]
 fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     let directory = tempfile::tempdir().unwrap();
@@ -164,7 +172,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             .collect::<Vec<_>>(),
     );
 
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(engine)
             .args(&arguments)
             .env_clear()
@@ -255,7 +263,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
         "every call and answer was taken"
     );
 
-    let wrong = crazyagent::spawn_gate::output(
+    let wrong = kernel_processes::spawn_gate::output(
         Command::new(engine)
             .arg(LIVE_SERVER_COMMAND)
             .arg(directory.path().join("missing"))
@@ -276,7 +284,7 @@ struct TmuxServer {
 #[cfg(unix)]
 impl TmuxServer {
     fn run(&self, arguments: &[&str]) -> String {
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -300,7 +308,7 @@ impl TmuxServer {
 #[cfg(unix)]
 impl Drop for TmuxServer {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::output(
+        let _ = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -470,7 +478,7 @@ fn both_live_servers_refuse_an_unknown_tool_to_switch_off_with_their_usage() {
     let mailbox = directory.path().canonicalize().unwrap();
     for command in [LIVE_SERVER_COMMAND, AGENT_SERVER_COMMAND] {
         for off in [&["status"][..], &["stop", "Stop"][..]] {
-            let ran = crazyagent::spawn_gate::output(
+            let ran = kernel_processes::spawn_gate::output(
                 Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                     .arg(command)
                     .arg(&mailbox)
@@ -581,7 +589,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut server = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+        let mut server = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let mut input = server.stdin.take().unwrap();
         let opening = [
             json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}}),

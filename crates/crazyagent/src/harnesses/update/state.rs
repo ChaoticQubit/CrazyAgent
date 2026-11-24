@@ -1,10 +1,11 @@
 use super::run::{run_raw, version_raw};
+use super::turn::{Turns, folders, wait_max};
 use super::{
     BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
     InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
-    START_FAILED, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide,
-    install_command, installed_version, latest, latest_from_pointer, lookup, method, pointer, run,
-    shown, update_command,
+    START_FAILED, UNKNOWN_INSTALL, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME,
+    check_command, guide, install_command, installed_version, latest, latest_from_pointer, lookup,
+    method, pointer, run, shown, update_command,
 };
 use crate::engine::EngineError;
 use crate::harnesses::{self, HarnessEntry};
@@ -101,14 +102,14 @@ impl Roots {
     /// Homebrew prefixes, casks only on macOS and the resolver's places with no engine root.
     /// Output: the roots; an unknown home is an empty home.
     pub fn system() -> Self {
-        Self::on(crate::tools::Places::from_environment(None))
+        Self::on(crate::tools::tools_places(None))
     }
 
     /// The roots of this machine with the given resolver places: the engine's own home
     /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS and no npm yet.
     /// Input: the places. Output: the roots; an unknown home is an empty home that matches
     /// nothing.
-    fn on(places: crate::tools::Places) -> Self {
+    fn on(places: kernel_processes::finding::Places) -> Self {
         let home = home_folder().unwrap_or_default();
         Self {
             home,
@@ -124,7 +125,7 @@ impl Roots {
     /// places, and the engine's own prefix `<engine root>/setup/harnesses`. Nothing is run.
     /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
     pub fn engine(engine_root: &Path) -> Self {
-        let mut roots = Self::on(crate::tools::Places::from_environment(Some(engine_root)));
+        let mut roots = Self::on(crate::tools::tools_places(Some(engine_root)));
         roots.npm = engine_npm(engine_root, &roots.places);
         roots
     }
@@ -134,7 +135,10 @@ impl Roots {
 /// places. Inputs: the engine root and those places. Output: the npm, or none with no
 /// usable Node.
 #[cfg(unix)]
-fn engine_npm(engine_root: &Path, places: &crate::tools::Places) -> Option<super::NpmInstall> {
+fn engine_npm(
+    engine_root: &Path,
+    places: &kernel_processes::finding::Places,
+) -> Option<super::NpmInstall> {
     engine_npm_at(engine_root, places)
 }
 
@@ -145,7 +149,7 @@ fn engine_npm(engine_root: &Path, places: &crate::tools::Places) -> Option<super
 #[cfg(unix)]
 pub(crate) fn engine_npm_at(
     engine_root: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> Option<super::NpmInstall> {
     let found = crate::setup::node::usable(places)?;
     let named = crate::setup::harness_prefix(engine_root);
@@ -162,7 +166,10 @@ pub(crate) fn engine_npm_at(
 /// Finds no npm where setup has no Node. Inputs: the engine root and the places, unused.
 /// Output: none.
 #[cfg(not(unix))]
-fn engine_npm(_engine_root: &Path, _places: &crate::tools::Places) -> Option<super::NpmInstall> {
+fn engine_npm(
+    _engine_root: &Path,
+    _places: &kernel_processes::finding::Places,
+) -> Option<super::NpmInstall> {
     None
 }
 
@@ -211,10 +218,42 @@ fn version_command(executable: &Path) -> Option<Fixed> {
     })
 }
 
-/// Runs a version command, bounded like every other run. Inputs: the command and the home
-/// folder. Output: the version it printed, or none.
-fn version_ran(fixed: &Fixed, home: &Path) -> Option<String> {
+/// Runs a version command, bounded like every other run. Inputs: the command, the home
+/// folder and the resolver's places, unused here. Output: the version it printed, or none.
+#[cfg(unix)]
+fn version_ran(
+    fixed: &Fixed,
+    home: &Path,
+    _places: &kernel_processes::finding::Places,
+) -> Option<String> {
     let raw = version_raw(fixed, home, VERSION_TIME).ok()?;
+    installed_version(&String::from_utf8_lossy(&raw.stdout))
+        .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
+}
+
+/// Runs a version command on Windows, which runs no script by its first line: the checked
+/// real file is resolved once more ([`kernel_processes::finding::resolve_entry`]), refused unless that
+/// gives the same file and every file it runs passes [`owner_only`] (the script and each
+/// interpreter, [`kernel_processes::finding::Resolved::grants`]), and that same value's words start with
+/// the version arguments, bounded like every other run. Inputs: the command, the home
+/// folder and the resolver's places. Output: the version it printed, or none.
+#[cfg(windows)]
+fn version_ran(
+    fixed: &Fixed,
+    home: &Path,
+    places: &kernel_processes::finding::Places,
+) -> Option<String> {
+    assert!(fixed.prefix.is_none());
+    let tool = kernel_processes::finding::resolve_entry(&fixed.program, places).ok()?;
+    if tool.program != fixed.program {
+        return None;
+    }
+    for file in tool.grants() {
+        owner_only(&file)?;
+    }
+    let mut words = tool.argv();
+    words.extend(fixed.args.iter().map(std::ffi::OsString::from));
+    let raw = version_raw(&words, &fixed.search, home, VERSION_TIME).ok()?;
     installed_version(&String::from_utf8_lossy(&raw.stdout))
         .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
 }
@@ -244,12 +283,18 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
 
 /// What an installed harness lacks before it can run, read as a launch reads it: the program
 /// its first line asks for when the tool resolver finds none, or the resolver's refusal of the
-/// file or its interpreter, such as one agents can write, with the resolver's owner line. Any
-/// other read leaves the file to run as it is. Nothing is run. Inputs: the catalog's file
-/// and the resolver's places. Output: the need, or none.
-pub(crate) fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
-    use crate::tools::Reason;
-    let missing = crate::tools::resolve_entry(executable, places).err()?;
+/// file, its interpreter or its own npm prefix's `node` ([`kernel_processes::finding::own_node_refused`]),
+/// with the resolver's owner line. Any other read leaves the file to run as it is. Nothing is
+/// run. Inputs: the catalog's file and the resolver's places. Output: the need, or none.
+pub(crate) fn needs(
+    executable: &Path,
+    places: &kernel_processes::finding::Places,
+) -> Option<HarnessNeeds> {
+    use kernel_processes::finding::Reason;
+    let missing = match kernel_processes::finding::resolve_entry(executable, places) {
+        Ok(tool) => kernel_processes::finding::own_node_refused(&tool, places)?,
+        Err(missing) => missing,
+    };
     matches!(missing.reason, Reason::NeedsInterpreter | Reason::Refused).then(|| HarnessNeeds {
         line: missing.line(),
         program: missing.needs,
@@ -283,6 +328,7 @@ fn missing(id: &str, roots: &Roots, settings: UpdateSettings) -> HarnessVersions
         needs: None,
         sign_in_min: None,
         run_min: None,
+        waiting: None,
     }
 }
 
@@ -319,7 +365,7 @@ fn updated(
     fixed: &Fixed,
     executable: &Path,
     home: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> LastUpdate {
     let from = version_if_runs(executable, home, places);
     let ran = run(fixed, home, UPDATE_TIME);
@@ -329,7 +375,7 @@ fn updated(
 
 /// The engine's own home folder: HOME as given on Unix; on Windows the profile folder
 /// ([`crate::projects_home::owner_home`]) in its plain drive spelling, the one install
-/// paths are matched in ([`crate::sandbox::canonical`]). Output: the absolute folder, none
+/// paths are matched in ([`kernel_sandbox::paths::canonical`]). Output: the absolute folder, none
 /// when it is unset, relative or does not resolve.
 pub(super) fn home_folder() -> Option<PathBuf> {
     #[cfg(unix)]
@@ -337,7 +383,7 @@ pub(super) fn home_folder() -> Option<PathBuf> {
     #[cfg(windows)]
     let home = crate::projects_home::owner_home()
         .ok()
-        .and_then(|home| crate::sandbox::canonical(&home).ok());
+        .and_then(|home| kernel_sandbox::paths::canonical(&home).ok());
     home.filter(|home| home.is_absolute())
 }
 
@@ -345,7 +391,7 @@ pub(super) fn home_folder() -> Option<PathBuf> {
 /// trust to start, as an update's program must be ([`super::trusted`]). Inputs: the harness
 /// file and the resolver's places, unused. Output: Some when it may start.
 #[cfg(unix)]
-fn version_gate(executable: &Path, _places: &crate::tools::Places) -> Option<()> {
+fn version_gate(executable: &Path, _places: &kernel_processes::finding::Places) -> Option<()> {
     super::trusted(executable).ok()
 }
 
@@ -356,7 +402,7 @@ fn version_gate(executable: &Path, _places: &crate::tools::Places) -> Option<()>
 /// update refused. Inputs: the harness file and the resolver's places. Output: Some when it
 /// may start.
 #[cfg(windows)]
-fn version_gate(executable: &Path, places: &crate::tools::Places) -> Option<()> {
+fn version_gate(executable: &Path, places: &kernel_processes::finding::Places) -> Option<()> {
     let launched = crate::harnesses::interactive::launch_tool(executable, places).ok()?;
     owner_only(executable)?;
     owner_only(&launched.program)
@@ -375,10 +421,14 @@ fn owner_only(program: &Path) -> Option<()> {
             BoundaryError::Refused(reason) => {
                 eprintln!("harness_version_owner_refused cause={reason}");
             }
-            BoundaryError::Windows { step, code } => {
+            BoundaryError::Windows { step, code }
+            | BoundaryError::AccessList { step, code, .. } => {
                 eprintln!("harness_version_owner_refused cause={step} code={code}");
             }
             BoundaryError::Profile(_) => eprintln!("harness_version_owner_refused cause=profile"),
+            BoundaryError::Unreached(_) => {
+                eprintln!("harness_version_owner_refused cause=unreached");
+            }
         })
         .ok()
 }
@@ -389,14 +439,14 @@ fn owner_only(program: &Path) -> Option<()> {
 /// missing, is never started for a version. It runs the real file the resolver checked,
 /// once that file passes again by its own path, with the entry's folder kept as the search
 /// an interpreter asked for by name is found in, so no link of the entry's chain is
-/// followed after the check. On Windows that real file must also pass [`owner_only`],
-/// since no link on its way is read.
+/// followed after the check. On Windows the run resolves that real file once more and
+/// checks every file it runs with [`owner_only`], since no link on its way is read.
 /// Inputs: the harness executable, the home folder and the resolver's places. Output: the
 /// version, or none.
 pub(super) fn version_if_runs(
     executable: &Path,
     home: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> Option<String> {
     version_gate(executable, places)?;
     let entry = version_command(executable)?;
@@ -408,14 +458,12 @@ pub(super) fn version_if_runs(
     if super::vetted(&fixed, places).ok()? != fixed.program {
         return None;
     }
-    #[cfg(windows)]
-    owner_only(&fixed.program)?;
     assert!(fixed.program.is_absolute());
     #[cfg(test)]
     if let Some(step) = between_vetted_and_run(executable) {
         step();
     }
-    version_ran(&fixed, home)
+    version_ran(&fixed, home, places)
 }
 
 /// A step a row runs once between the check of a version command and its run.
@@ -445,7 +493,7 @@ fn between_vetted_and_run(entry: &Path) -> Option<Step> {
 fn installed_now(
     fixed: &Fixed,
     home: &Path,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
     after: impl FnOnce() -> Option<PathBuf>,
 ) -> LastUpdate {
     assert!(fixed.args.first() == Some(&"install"));
@@ -475,21 +523,23 @@ type Reader = Box<dyn Fn(&Pointer) -> Result<Vec<u8>, &'static str> + Send + Syn
 
 #[derive(Default)]
 struct State {
-    running: Option<&'static str>,
+    running: Vec<&'static str>,
     queued: Vec<&'static str>,
     last: HashMap<&'static str, LastUpdate>,
     latest: HashMap<&'static str, Latest>,
 }
 
-/// The engine's harness update state: the one update or install that may run at a time, how
-/// the last one of each harness ended, and the last check result of each harness. Keys are
-/// catalog ids only, so each map holds at most one entry per catalog harness.
+/// The engine's harness update state: the harnesses whose update or install runs, one job
+/// each, the folders those jobs hold ([`Turns`]), how the last job of each harness ended,
+/// and the last check result of each harness. Keys are catalog ids only, so each list and
+/// map holds at most one entry per catalog harness.
 pub struct Updates {
     state: Mutex<State>,
+    turns: Turns,
     reader: Reader,
 }
 
-/// The one running job's hold on the job slot; dropping it frees the slot on every path.
+/// A running job's hold on its harness; dropping it frees the harness on every path.
 struct Running {
     updates: Arc<Updates>,
     id: &'static str,
@@ -497,10 +547,10 @@ struct Running {
 
 impl Running {
     /// Stores how the job ended and forgets the harness's last check result, then frees the
-    /// slot. Input: the record. Output: none.
+    /// harness. Input: the record. Output: none.
     fn finish(self, last: LastUpdate) {
         let mut state = self.updates.state();
-        assert!(state.running == Some(self.id));
+        assert!(state.running.contains(&self.id));
         state.last.insert(self.id, last);
         state.latest.remove(self.id);
         assert!(state.last.len() <= harnesses::specs().len());
@@ -510,10 +560,8 @@ impl Running {
 impl Drop for Running {
     fn drop(&mut self) {
         let mut state = self.updates.state();
-        if state.running == Some(self.id) {
-            state.running = None;
-        }
-        assert!(state.running != Some(self.id));
+        state.running.retain(|running| *running != self.id);
+        assert!(!state.running.contains(&self.id));
     }
 }
 
@@ -523,6 +571,7 @@ impl Updates {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::default(),
+            turns: Turns::default(),
             reader: Box::new(lookup),
         })
     }
@@ -533,6 +582,7 @@ impl Updates {
     pub(super) fn with_reader(reader: Reader) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::default(),
+            turns: Turns::default(),
             reader,
         })
     }
@@ -541,39 +591,57 @@ impl Updates {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Reports whether no update or install is running. Output: true when the slot is free.
-    pub fn idle(&self) -> bool {
-        self.state().running.is_none()
+    /// The engine's one line of install jobs, which setup jobs share with harness jobs so
+    /// two jobs never change one folder at once. Output: the line.
+    pub(crate) fn turns(&self) -> &Turns {
+        &self.turns
     }
 
-    /// Takes the one job slot for a harness. Input: its catalog id.
-    /// Output: the hold, or `harness_update_busy` while any update or install runs.
+    /// Reports whether no update or install is running. Output: true when no job runs.
+    pub fn idle(&self) -> bool {
+        self.state().running.is_empty()
+    }
+
+    /// Takes a harness for its one job; jobs of other harnesses may run beside it.
+    /// Input: its catalog id. Output: the hold, or `harness_update_busy` while an update or
+    /// install of the same harness runs.
     fn begin(self: &Arc<Self>, id: &'static str) -> Result<Running, &'static str> {
         let mut state = self.state();
-        if state.running.is_some() {
+        if state.running.contains(&id) {
             return Err(BUSY);
         }
-        state.running = Some(id);
-        assert!(state.running == Some(id));
+        state.running.push(id);
+        assert!(state.running.len() <= harnesses::specs().len());
         Ok(Running {
             updates: self.clone(),
             id,
         })
     }
 
-    /// Starts the job thread: it does the work, stores the record, frees the slot, then
-    /// runs the follow-up with whether the work ended well. Inputs: the hold, the work and
-    /// the follow-up. Output: Ok once the thread runs; a thread that cannot start frees
-    /// the slot.
+    /// Starts the job thread: it waits for its turn on the folders its command changes
+    /// ([`Turns::take`]), does the work, frees the folders, stores the record, frees the
+    /// harness, then runs the follow-up with whether the work ended well. A turn that never
+    /// comes within [`wait_max`] is recorded as `harness_update_start_failed`. Inputs: the
+    /// hold, the folders, the work and the follow-up. Output: Ok once the thread runs; a
+    /// thread that cannot start frees the harness.
     fn spawn(
         running: Running,
+        held: Vec<PathBuf>,
         work: impl FnOnce() -> LastUpdate + Send + 'static,
         then: impl FnOnce(bool) + Send + 'static,
     ) -> Result<(), &'static str> {
         std::thread::Builder::new()
             .name(JOB_THREAD.into())
             .spawn(move || {
-                let last = work();
+                let updates = running.updates.clone();
+                let last = match updates.turns.take(running.id, held, wait_max()) {
+                    Some(turn) => {
+                        let last = work();
+                        drop(turn);
+                        last
+                    }
+                    None => outcome(Err(START_FAILED), START_FAILED, None, None),
+                };
                 let ok = last.ok;
                 assert!(ok == last.code.is_none());
                 running.finish(last);
@@ -649,8 +717,8 @@ impl Updates {
         runs: bool,
     ) -> HarnessVersions {
         let id = spec.id;
-        let real =
-            crate::sandbox::canonical(executable).unwrap_or_else(|_| executable.to_path_buf());
+        let real = kernel_sandbox::paths::canonical(executable)
+            .unwrap_or_else(|_| executable.to_path_buf());
         let method = method(id, &real, roots);
         let command = update_command(id, executable, &real, roots);
         let off = settings.mode == UpdateMode::Off;
@@ -695,6 +763,7 @@ impl Updates {
             needs: None,
             sign_in_min: None,
             run_min: None,
+            waiting: None,
         }
     }
 
@@ -730,17 +799,24 @@ impl Updates {
         assert!(versions.needs.is_none() || versions.installed.is_none());
         assert!(versions.needs.is_none() || entry.executable.is_some());
         let state = self.state();
-        versions.running = state.running == Some(spec.id);
+        versions.running = state.running.contains(&spec.id);
         versions.last = state.last.get(spec.id).cloned();
+        drop(state);
+        versions.waiting = self
+            .turns
+            .behind(spec.id)
+            .map(|id| crate::setup::job_name(id).unwrap_or(id).to_owned());
         versions.sign_in_min = harnesses::sign_in_min(spec.id).map(str::to_owned);
         versions.run_min = harnesses::run_min(spec.id).map(str::to_owned);
         versions
     }
 
-    /// Starts the one update of an installed harness in the background, with the harness's
-    /// own documented updater. Inputs: the engine database, the catalog entry, the roots and
-    /// what to do once the update ended, told whether it ended well. Output: Ok once it
-    /// runs, or the refusal code.
+    /// Starts the update of an installed harness in the background, with the harness's own
+    /// documented updater, beside jobs of other harnesses. Its command is built and checked
+    /// now and again once its turn on the folders it changes comes; a command that changed
+    /// in between is recorded as an unknown install, a refusal by its code. Inputs: the engine
+    /// database, the catalog entry, the roots and what to do once the update ended, told
+    /// whether it ended well. Output: Ok once it runs, or the refusal code.
     pub fn start(
         self: &Arc<Self>,
         db: &Connection,
@@ -755,25 +831,36 @@ impl Updates {
             UpdateMode::CheckAndUpdate => {}
         }
         let executable = entry.executable.clone().ok_or(NOT_INSTALLED)?;
-        if let Err(missing) = crate::tools::resolve_entry(&executable, &roots.places)
-            && missing.reason == crate::tools::Reason::Refused
+        if let Err(missing) = kernel_processes::finding::resolve_entry(&executable, &roots.places)
+            && missing.reason == kernel_processes::finding::Reason::Refused
         {
             return Err(super::TOOL_UNSAFE);
         }
         let running = self.begin(id)?;
-        let real = crate::sandbox::canonical(&executable).unwrap_or_else(|_| executable.clone());
+        let real =
+            kernel_sandbox::paths::canonical(&executable).unwrap_or_else(|_| executable.clone());
         let fixed = update_command(id, &executable, &real, roots)?;
-        let home = roots.home.clone();
-        let places = roots.places.clone();
+        let held = folders(&fixed, roots);
+        let roots = roots.clone();
         Self::spawn(
             running,
-            move || updated(&fixed, &executable, &home, &places),
+            held,
+            move || match update_command(id, &executable, &real, &roots) {
+                Ok(again) if again == fixed => {
+                    updated(&fixed, &executable, &roots.home, &roots.places)
+                }
+                Ok(_) => outcome(Err(UNKNOWN_INSTALL), UPDATE_FAILED, None, None),
+                Err(code) => outcome(Err(code), UPDATE_FAILED, None, None),
+            },
             after,
         )
     }
 
-    /// Starts the one install of a harness that is not installed, in the background, with
-    /// Homebrew or npm and the table's package. Inputs: the engine database, the catalog
+    /// Starts the install of a harness that is not installed, in the background, with
+    /// Homebrew or npm and the table's package, beside jobs of other harnesses. Its command is
+    /// built and checked, and npm's engine prefix made private, now and again once its turn on
+    /// the folders it changes comes; a command that changed in between is recorded as an
+    /// unknown install, a refusal by its code. Inputs: the engine database, the catalog
     /// entry, the roots and the search that finds the harness after the install.
     /// Output: Ok once it runs, or the refusal code.
     pub fn install(
@@ -793,11 +880,24 @@ impl Updates {
         let running = self.begin(id)?;
         let fixed = install_command(id, roots)?;
         ready_prefix(&fixed, roots)?;
-        let home = roots.home.clone();
-        let places = roots.places.clone();
+        let held = folders(&fixed, roots);
+        let roots = roots.clone();
         Self::spawn(
             running,
-            move || installed_now(&fixed, &home, &places, after),
+            held,
+            move || {
+                let again = install_command(id, &roots).and_then(|again| {
+                    if again == fixed {
+                        ready_prefix(&again, &roots)
+                    } else {
+                        Err(UNKNOWN_INSTALL)
+                    }
+                });
+                match again {
+                    Ok(()) => installed_now(&fixed, &roots.home, &roots.places, after),
+                    Err(code) => outcome(Err(code), INSTALL_FAILED, None, None),
+                }
+            },
             |_| {},
         )
     }
@@ -843,10 +943,10 @@ impl Updates {
     }
 
     /// Installs the queued harnesses one after another: each starts only once no update or
-    /// install runs, a refusal or a wait past `wait_max` becomes that harness's last record,
-    /// and the rest still install. It drains only the list queued when it began, so a list
-    /// queued after that belongs to its own drain. Inputs: what starts one install, the pause
-    /// between looks and the longest wait for the job slot. Output: none.
+    /// install of any harness runs, a refusal or a wait past `wait_max` becomes that
+    /// harness's last record, and the rest still install. It drains only the list queued when
+    /// it began, so a list queued after that belongs to its own drain. Inputs: what starts one
+    /// install, the pause between looks and the longest wait for no job to run. Output: none.
     pub fn drain(
         self: &Arc<Self>,
         mut start: impl FnMut(&'static str) -> Result<(), &'static str>,
@@ -922,7 +1022,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -958,14 +1058,14 @@ mod windows_tests {
         let home = home_folder().unwrap();
         assert_eq!(
             home,
-            crate::sandbox::canonical(Path::new(&profile)).unwrap()
+            kernel_sandbox::paths::canonical(Path::new(&profile)).unwrap()
         );
         assert!(!home.to_str().unwrap().starts_with(r"\\?\"), "{home:?}");
         assert_eq!(Roots::system().home, home);
         let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
             .join("curl.exe");
-        let places = crate::tools::Places::from_environment(None);
+        let places = crate::tools::tools_places(None);
         let version = version_if_runs(&curl, &home, &places).unwrap();
         assert!(super::super::plain_version(&version), "{version}");
     }
@@ -977,17 +1077,17 @@ mod windows_tests {
     #[test]
     fn a_windows_program_another_account_can_change_tells_no_version() {
         let home = home_folder().unwrap();
-        let places = crate::tools::Places::from_environment(None);
+        let places = crate::tools::tools_places(None);
         let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
             .join("curl.exe");
         let folder = tempfile::tempdir_in(&home).unwrap();
-        let kept = crate::sandbox::canonical(folder.path()).unwrap();
+        let kept = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let curl = kept.join("curl.exe");
         std::fs::copy(&shipped, &curl).unwrap();
         assert!(version_if_runs(&curl, &home, &places).is_some());
 
-        let granted = crate::spawn_gate::collected(
+        let granted = kernel_processes::spawn_gate::collected(
             std::process::Command::new("icacls")
                 .arg(&kept)
                 .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
@@ -996,5 +1096,49 @@ mod windows_tests {
         assert!(granted.status.success(), "{granted:?}");
         assert_eq!(version_if_runs(&curl, &home, &places), None);
         assert_eq!(super::super::version_under_home(&curl), None);
+    }
+
+    /// V243-WIN-HARNESS-SEARCH: a script's version is read through the `node.exe` the places
+    /// hold only while no other account can change it. A curl copy standing in as node.exe
+    /// tells the version of a script whose first line asks for node; once the node folder
+    /// grants Users Modify after the read's check and before its run, the read asks nothing.
+    #[test]
+    fn a_script_s_node_another_account_can_change_tells_no_version() {
+        let home = home_folder().unwrap();
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        let folder = tempfile::tempdir_in(&home).unwrap();
+        let kept = kernel_sandbox::paths::canonical(folder.path()).unwrap();
+        let node = kept.join("node");
+        let package = kept.join("package").join("bin");
+        std::fs::create_dir_all(&node).unwrap();
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::copy(&shipped, node.join("node.exe")).unwrap();
+        let script = package.join("codex.js");
+        std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        let places = crate::tools::tools_new(vec![node.clone()], None);
+        assert!(version_if_runs(&script, &home, &places).is_some());
+
+        let step: Step = Box::new(move || {
+            let granted = kernel_processes::spawn_gate::collected(
+                std::process::Command::new("icacls")
+                    .arg(&node)
+                    .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
+            )
+            .unwrap();
+            assert!(granted.status.success(), "{granted:?}");
+            assert!(!granted.stdout.is_empty(), "{granted:?}");
+        });
+        BETWEEN_VETTED_AND_RUN
+            .lock()
+            .unwrap()
+            .push((script.clone(), step));
+        assert_eq!(version_if_runs(&script, &home, &places), None);
+        let steps = BETWEEN_VETTED_AND_RUN.lock().unwrap();
+        assert!(
+            steps.iter().all(|(entry, _)| *entry != script),
+            "the read passed its check before the grant"
+        );
     }
 }

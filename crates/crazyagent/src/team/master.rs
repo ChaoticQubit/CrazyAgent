@@ -5,7 +5,7 @@ use crate::engine::EngineError;
 use crate::harnesses::terminal_session::{Resume, paste};
 use crate::project_setup::StoredSetup;
 use crate::protocol::ProjectId;
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -49,19 +49,20 @@ const ANSWER_REFUSED: &str = "Not recorded: the owner's message is blank, longer
 const _: () = assert!(crate::questions::PENDING_PER_PROJECT_MAX == 64);
 const _: () = assert!(crate::questions::PENDING_PER_ASKER_MAX == 8);
 
-/// Why the engine did not type into a project's live master. `NoMaster`: no live master
-/// runs. `Busy`: a turn is open, an earlier engine input has not started its turn yet, or
-/// a dropped turn still holds input (see `input_released`).
-/// `OwnerTyping`: the owner typed within the quiet window or left an unsent draft.
-/// `Unready`: the master's app does not read keys yet (bracketed paste off).
-/// `Invalid`: the text is empty or too long. `Failed`: the pane or state could not be used.
+/// Why the engine did not type into a project's live master.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputRefused {
+    /// No live master runs.
     NoMaster,
+    /// A turn is open, an earlier input has not started its turn, or a dropped turn holds input.
     Busy,
+    /// The master's app reads no keys yet (bracketed paste off), or its terminal ended.
     Unready,
+    /// The owner typed within the quiet window or left an unsent draft.
     OwnerTyping,
+    /// The text is empty or too long.
     Invalid,
+    /// The pane or state could not be used.
     Failed(String),
 }
 
@@ -163,7 +164,7 @@ pub(crate) const PROFILE_IN_USE: &str = "Waiting for the account: another proces
 /// The live master's problem line and one team note when it cannot start because no terminal
 /// program is found, which on macOS and Linux is tmux: the resolver's owner line, naming what
 /// is missing and how to install it, and the views offer Try again. The views show it as is.
-pub(crate) const TERMINAL_MISSING: &str = crate::tools::TMUX_MISSING;
+pub(crate) const TERMINAL_MISSING: &str = kernel_processes::finding::TMUX_MISSING;
 
 /// The live master's problem line and one team note while an owner line has waited longer
 /// than a first screen may take for the master's app to read keys (F2); the line is typed
@@ -573,11 +574,13 @@ fn master_input_at_when(
     let failed = |problem: rusqlite::Error| InputRefused::Failed(state(problem).0);
     let agent = input_open(connection, typing, project, now)?;
     let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
-    if !host
-        .input_live(&pane)
-        .map_err(|problem| InputRefused::Failed(problem.0))?
-    {
-        return Err(InputRefused::Unready);
+    match host.input_live(&pane) {
+        Ok(true) => {}
+        Ok(false) => return Err(InputRefused::Unready),
+        Err(problem) if kernel_processes::terminal::ended_code(&problem.0) => {
+            return Err(InputRefused::Unready);
+        }
+        Err(problem) => return Err(InputRefused::Failed(problem.0)),
     }
     if !input_released(connection, host, agent)
         .map_err(|problem| InputRefused::Failed(problem.0))?
@@ -1647,7 +1650,7 @@ fn signed_in_account(
             super::TeamReach::Endpoint { .. } => return Ok(true),
             super::TeamReach::Managed { profile_ref, .. } => profile_ref,
         };
-        let key = crate::memory::hash(profile.as_str().as_bytes());
+        let key = kernel_common::hash(profile.as_str().as_bytes());
         let phase: Option<String> = connection
             .query_row(
                 "SELECT phase FROM native_auth_operations WHERE profile_key=?1

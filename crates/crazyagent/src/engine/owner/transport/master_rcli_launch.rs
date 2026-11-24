@@ -135,7 +135,7 @@ fn validate_prepared(
         if !path.is_absolute()
             || !metadata.is_dir()
             || !crate::platform::owned_by_effective_user(&metadata)
-            || std::fs::canonicalize(path).map_err(io_error)? != *path
+            || !crate::projects_home::is_canonical(path).map_err(io_error)?
         {
             return Err(failure("master_runtime_binding"));
         }
@@ -217,7 +217,7 @@ fallback_allowed = false
     }
 
     fn git(repository: &Path, home: &Path, arguments: &[&str]) {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")

@@ -225,7 +225,7 @@ async fn a_chooser_does_not_start_while_another_thread_holds_the_spawn_gate() {
     let (held, ready) = std::sync::mpsc::channel();
     let (release, wait) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
-        crazyagent::spawn_gate::guarded(|| {
+        kernel_processes::spawn_gate::guarded(|| {
             held.send(()).unwrap();
             let _ = wait.recv();
         })

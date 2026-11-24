@@ -225,7 +225,7 @@ fn applied(reply: &OwnerReply) {
 }
 
 fn git(repository: &Path, home: &Path, arguments: &[&str]) {
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -1817,8 +1817,30 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     );
     assert_eq!(after.registrations, before.registrations);
     assert_eq!(after.captures, before.captures);
-    assert_eq!(after.revision, before.revision + 2);
-    assert_eq!(after.events.len(), before.events.len() + 2);
+    assert_eq!(after.revision, before.revision + 3);
+    assert_eq!(after.events.len(), before.events.len() + 3);
+    let (store, revision) = (database.clone(), before.revision + 1);
+    let started = tokio::task::spawn_blocking(move || {
+        let db = Connection::open_with_flags(
+            store,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        let revision = i64::try_from(revision)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let mut statement =
+            db.prepare("SELECT aggregate, kind FROM state_log WHERE revision=?1 ORDER BY seq")?;
+        statement
+            .query_map([revision], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+    })
+    .await
+    .expect("the state_log read ends");
+    assert_eq!(
+        started,
+        Ok(vec![("landing".to_owned(), "BaseSet".to_owned())]),
+        "the master start's base write is the drive's only other commit (V250-L9)"
+    );
     assert!(matches!(
         custody.acquire_configured_rcli_use(
             &case.runtime().identity(),
@@ -2459,6 +2481,67 @@ async fn a_master_turn_no_account_can_run_names_each_account_and_why() {
         ]
     );
     assert_eq!(blocked, case.persisted_turn().await);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_sign_out_that_outlasts_its_bound_is_pending_and_runs_while_the_host_stays_frozen() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    let path = fs::canonicalize(case.root.path())
+        .unwrap()
+        .join("engine.db");
+    let hold = crate::storage::hold_claims(&path);
+    let sent = case
+        .owner
+        .logout_native_auth(NativeAuthLogout {
+            request_id: RequestId::new("routing-sign-out-held").unwrap(),
+            scope: case.auth_scope("claude-a"),
+        })
+        .await;
+    assert_eq!(
+        sent.map(|reply| reply.fact.action).map_err(|error| error.0),
+        Err("access_change_pending".to_owned()),
+        "a sign-out that outlasts its bound is pending, never withdrawn or unknown"
+    );
+    let frozen = || {
+        case.runtime()
+            .authority
+            .native_auth_host
+            .lock()
+            .unwrap()
+            .is_frozen()
+    };
+    assert!(
+        frozen(),
+        "the host stays frozen while the sign-out is pending"
+    );
+    drop(hold);
+    let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    db.busy_timeout(Duration::from_secs(1)).unwrap();
+    let deadline = Instant::now() + TEST_BOUND;
+    let phase = loop {
+        let logout = db
+            .prepare("SELECT fact FROM native_auth_operations ORDER BY generation DESC")
+            .unwrap()
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|bytes| crate::engine::owner::native_auth::decode_fact(&bytes.unwrap()).unwrap())
+            .find(|fact| {
+                fact.action == NativeAuthAction::Logout
+                    && fact.binding.connection.id == reference("claude-a")
+            });
+        match &logout {
+            Some(fact) if !fact.phase.unfinished() => break fact.phase,
+            _ if Instant::now() >= deadline => {
+                panic!("the pending sign-out never ran: {logout:?}")
+            }
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    };
+    assert_ne!(phase, NativeAuthPhase::AuthenticatedObserved);
+    assert!(frozen(), "the freeze holds until the sign-out has run");
+    drop(db);
     case.finish().await;
 }
 
@@ -3897,7 +3980,7 @@ async fn a_master_s_second_editing_turn_on_a_pending_set_ends_with_no_changes_no
 async fn a_master_head_pointed_away_from_its_lease_branch_is_refused_and_moves_no_branch() {
     let (case, prepared) = tools_case(true).await;
     let read = |args: &[&str]| -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -4598,7 +4681,7 @@ async fn a_conversation_master_s_questions_are_logged_and_recorded_when_its_turn
 /// Reads the commit a worktree's HEAD names. Inputs: the worktree and the git home. Output:
 /// the commit id.
 fn head_of(worktree: &Path, home: &Path) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

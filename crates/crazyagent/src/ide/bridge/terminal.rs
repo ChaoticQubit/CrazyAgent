@@ -2,16 +2,17 @@ use super::{IdeReply, hex, refusal};
 use crate::engine::EngineError;
 use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::harnesses::interactive::InteractiveCommand;
-use crate::platform::unix_socket::{OwnedWriteHalf, UnixStream};
+use crate::ipc::{OwnedWriteHalf, Stream};
 use crate::protocol::{ProjectId, encode_frame};
-use crate::sandbox::SandboxError;
 use crate::sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
 use crate::sandbox::policy::AgentAccess;
-use crate::terminal::buffer::Chunk;
-use crate::terminal::{
-    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame,
-    TerminalRequest, TerminalStream, attach_again,
+use crate::terminal::{TerminalFrame, TerminalRequest};
+use kernel_processes::terminal::attach_again;
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::{
+    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalStream,
 };
+use kernel_sandbox::error::SandboxError;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -46,7 +47,7 @@ pub(super) struct Terminals {
 /// capability stops working. The pane ends with the connection. Inputs: the stream, the
 /// handshake packet, the owner runtime, the project, the size and the level asked for.
 pub(super) async fn serve(
-    mut stream: UnixStream,
+    mut stream: Stream,
     packet: [u8; 37],
     runtime: OwnerRuntimeHandle,
     project: ProjectId,
@@ -198,7 +199,9 @@ pub(super) fn terminal_level(
 /// (RESET-WALK-CODE code r1 F1), else `ide_terminal_refused`.
 pub(super) fn shell_refusal(error: SandboxError) -> EngineError {
     match error {
-        SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),
+        SandboxError::Unavailable(_) | SandboxError::Unreadable(_) => {
+            failure("ide_terminal_unavailable")
+        }
         SandboxError::Io(error) if crate::team::cleanup::walk_too_long_io(&error) => {
             failure(crate::team::cleanup::WALK_TOO_LONG)
         }
@@ -272,7 +275,10 @@ fn start(
     command: &InteractiveCommand,
     (cols, rows): (u16, u16),
 ) -> Result<TerminalStream, EngineError> {
-    host.spawn(name, command)?;
+    host.spawn(
+        name,
+        &kernel_processes::terminal::PaneCommand::from(command),
+    )?;
     let attached = host
         .resize(name, cols, rows)
         .and_then(|()| host.attach(name));
@@ -328,7 +334,7 @@ async fn redraw(writer: &mut OwnedWriteHalf, viewer: &TerminalStream) -> Result<
 /// the packet, the owner runtime, the project, the host and the viewer. Output: the plain
 /// reason it ended.
 async fn relay(
-    mut reader: crate::platform::unix_socket::OwnedReadHalf,
+    mut reader: crate::ipc::OwnedReadHalf,
     writer: &mut OwnedWriteHalf,
     packet: &[u8; 37],
     runtime: &OwnerRuntimeHandle,
@@ -364,6 +370,8 @@ async fn relay(
                     TerminalRequest::Attach { .. }
                     | TerminalRequest::AttachPane { .. }
                     | TerminalRequest::AttachSized { .. }
+                    | TerminalRequest::AttachInput { .. }
+                    | TerminalRequest::Paste { .. }
                     | TerminalRequest::Prompt { .. },
                 ) => {
                     break "terminal_request_invalid";
@@ -430,6 +438,8 @@ async fn act(
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
         | TerminalRequest::AttachSized { .. }
+        | TerminalRequest::AttachInput { .. }
+        | TerminalRequest::Paste { .. }
         | TerminalRequest::Prompt { .. }
         | TerminalRequest::Detach => Ok(()),
     })

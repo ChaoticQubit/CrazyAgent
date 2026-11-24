@@ -12,19 +12,14 @@ pub mod node;
 pub mod pack;
 #[cfg(unix)]
 pub mod pinned;
-#[cfg(unix)]
-pub(crate) mod process;
 pub mod progress;
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
-pub(crate) mod run;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows;
 
+use kernel_processes::run::{InstallError, Version};
 use serde::{Deserialize, Serialize};
 
 pub use pack::{PackGroup, PackKind};
-
-const VERSION_BYTES_MAX: usize = 32;
 
 /// The uv release setup installs on every system.
 pub const UV_VERSION: &str = "0.13.5";
@@ -103,6 +98,24 @@ pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64
     "unknown"
 };
 
+/// The job name a setup run's steps go by in the engine's line of install jobs
+/// ([`crate::harnesses::update::Turns`]); a lone install or fix of one tool goes by its
+/// program name ([`Dependency::program`]).
+pub const SETUP_JOB: &str = "setup";
+
+/// The name a setup job in the engine's line goes by on a screen: the setup run's, or the
+/// tool's label for a lone install or fix. Input: the job's id. Output: the name, none for
+/// a harness job, which screens name from the catalog.
+pub fn job_name(id: &str) -> Option<&'static str> {
+    if id == SETUP_JOB {
+        return Some(SETUP_JOB);
+    }
+    Dependency::ALL
+        .iter()
+        .find(|dep| dep.program() == id)
+        .map(|dep| dep.label())
+}
+
 /// A system tool the app needs: tmux runs agent terminals, uv installs Graphify,
 /// Graphify builds each project's code graph and Node runs the harnesses npm installs.
 /// Setup finds each one or installs it.
@@ -131,7 +144,7 @@ impl Dependency {
 
     /// Why this dependency cannot run when no answer names another reason: it is found
     /// nowhere the tool resolver looks. Output: the missing tool, with its owner line.
-    pub fn not_found(self) -> crate::tools::Missing {
+    pub fn not_found(self) -> kernel_processes::finding::Missing {
         program_not_found(self.program())
     }
 
@@ -144,64 +157,6 @@ impl Dependency {
             Self::Graphify => "Graphify command",
             Self::Node => "Node.js",
         }
-    }
-}
-
-/// A plain reason setup could not find or install something, as a stable code such as
-/// `setup_checksum_mismatch`. `plain_reason` turns the code into the sentence setup shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InstallError(pub &'static str);
-
-impl std::fmt::Display for InstallError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-
-impl std::error::Error for InstallError {}
-
-/// A tool version as the tool prints it, such as `3.5a` or `0.9.9`: 1 to 32 characters
-/// of letters, digits, `.`, `-` and `+`, starting with a letter or digit.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Version(String);
-
-impl Version {
-    /// Checks one version text. Input: the text. Output: the version, or
-    /// `setup_version_unreadable` when it is empty, too long or has other characters.
-    pub fn parse(text: &str) -> Result<Self, InstallError> {
-        let valid = !text.is_empty()
-            && text.len() <= VERSION_BYTES_MAX
-            && text
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_alphanumeric())
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+');
-        if !valid {
-            return Err(InstallError("setup_version_unreadable"));
-        }
-        Ok(Self(text.to_owned()))
-    }
-
-    /// Returns the version text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for Version {
-    type Error = InstallError;
-
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        Self::parse(&text)
-    }
-}
-
-impl From<Version> for String {
-    fn from(version: Version) -> Self {
-        version.0
     }
 }
 
@@ -242,7 +197,7 @@ pub enum Pin {
 /// Where one dependency stands on the setup screen. `Checking` means its version check
 /// is still running in the background; the screen reads the status again to see it.
 /// `Missing` carries the tool resolver's owner line for why the tool cannot run
-/// ([`crate::tools::Missing::line`]), the same words a launch that needs it says.
+/// ([`kernel_processes::finding::Missing::line`]), the same words a launch that needs it says.
 /// `Refused` is a tool the resolver found and passed over (DEC-162): its line, the file, the
 /// part another user or group can change, the permission fix when one can help, and why the
 /// owner's last fix did not, never counted as missing.
@@ -309,8 +264,8 @@ pub struct ToolFix {
     pub command: String,
 }
 
-impl From<&crate::tools::permission_fix::Target> for ToolFix {
-    fn from(target: &crate::tools::permission_fix::Target) -> Self {
+impl From<&kernel_processes::finding::permission_fix::Target> for ToolFix {
+    fn from(target: &kernel_processes::finding::permission_fix::Target) -> Self {
         Self {
             tree: target.path.to_string_lossy().into_owned(),
             recursive: target.recursive,
@@ -330,13 +285,19 @@ pub enum RefusedTool {
     CommandOnly,
 }
 
-/// One dependency as the setup screen lists it: which tool, its plain name and its state.
+/// One dependency as the setup screen lists it: which tool, its plain name and its state,
+/// whether an install or fix of it runs now (`busy`), and the job that one waits behind,
+/// by name, since the two would change the same folder (`waiting`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyStatus {
     pub name: Dependency,
     pub label: String,
     pub state: DependencyState,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 /// Where one default-pack entry stands: not installed yet, being installed, installed
@@ -467,24 +428,24 @@ pub fn locked_tool_args(
 /// the app data folder; `program` finds a program setup installed or the system has.
 /// Implementations never use sudo and never change global configuration.
 /// What looking for one dependency found: its version, why it cannot run
-/// ([`crate::tools::Missing`]), or the check's code.
-pub type Lookup = Result<Result<Located, crate::tools::Missing>, InstallError>;
+/// ([`kernel_processes::finding::Missing`]), or the check's code.
+pub type Lookup = Result<Result<Located, kernel_processes::finding::Missing>, InstallError>;
 
 /// A dependency setup found: the version it reports, whether it is the copy the app ships
 /// beside the engine (DEC-157), which setup shows as bundled and never installs, and why
-/// another tmux runs in place of that copy, if one does ([`crate::tools::BundleNote`]).
+/// another tmux runs in place of that copy, if one does ([`kernel_processes::finding::BundleNote`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Located {
     pub version: Version,
     pub bundled: bool,
-    pub note: Option<crate::tools::BundleNote>,
+    pub note: Option<kernel_processes::finding::BundleNote>,
 }
 
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
 
     /// Finds a dependency as [`Installer::find`] does, naming why it cannot run when it is
-    /// missing ([`crate::tools::Missing`]), the answer the setup screen shows. Input: the
+    /// missing ([`kernel_processes::finding::Missing`]), the answer the setup screen shows. Input: the
     /// dependency. Output: its version, why it cannot run, or the check's code.
     fn lookup(&self, dep: Dependency) -> Lookup {
         Ok(self
@@ -511,7 +472,10 @@ pub trait Installer: Send + Sync {
     /// Finds one program as [`Installer::program`] does, naming why it cannot run when it
     /// is found and passed over (DEC-162), the line the onboarding graph step shows. Input:
     /// the program name. Output: the program, or why it cannot run.
-    fn lookup_program(&self, name: &str) -> Result<std::path::PathBuf, crate::tools::Missing> {
+    fn lookup_program(
+        &self,
+        name: &str,
+    ) -> Result<std::path::PathBuf, kernel_processes::finding::Missing> {
         self.program(name).ok_or_else(|| program_not_found(name))
     }
 
@@ -519,8 +483,8 @@ pub trait Installer: Send + Sync {
     /// places (DEC-162). Input: why the tool cannot run. Output: the target, or none.
     fn fix_target(
         &self,
-        missing: &crate::tools::Missing,
-    ) -> Option<crate::tools::permission_fix::Target> {
+        missing: &kernel_processes::finding::Missing,
+    ) -> Option<kernel_processes::finding::permission_fix::Target> {
         let _ = missing;
         None
     }
@@ -534,18 +498,18 @@ pub trait Installer: Send + Sync {
         dep: Dependency,
         confirmed: &str,
         recursive: bool,
-    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+    ) -> Result<kernel_processes::finding::permission_fix::Report, &'static str> {
         let _ = (dep, confirmed, recursive);
-        Err(crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE)
+        Err(kernel_processes::finding::permission_fix::TOOL_FIX_UNAVAILABLE)
     }
 }
 
 /// Why a program cannot run when it is found nowhere the tool resolver looks. Input: the
 /// program name. Output: the missing tool, with its owner line.
-pub(crate) fn program_not_found(name: &str) -> crate::tools::Missing {
-    crate::tools::Missing {
+pub(crate) fn program_not_found(name: &str) -> kernel_processes::finding::Missing {
+    kernel_processes::finding::Missing {
         tool: name.to_owned(),
-        reason: crate::tools::Reason::NotFound,
+        reason: kernel_processes::finding::Reason::NotFound,
         needs: None,
         found: None,
         looked: Vec::new(),
@@ -663,31 +627,31 @@ const REASONS: [(&str, &str); 36] = [
         "Windows did not say where your local app data folder is, so setup can't install here.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_OFF,
+        kernel_processes::finding::permission_fix::TOOL_FIX_OFF,
         "Fixing permissions from CrazyAgent is turned off in Settings. Run the command shown instead.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_NOT_NEEDED,
         "This tool can run now, so nothing needed fixing.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE,
+        kernel_processes::finding::permission_fix::TOOL_FIX_UNAVAILABLE,
         "Changing permissions can't fix why this tool is not used. Follow the line shown.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_CHANGED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_CHANGED,
         "What blocks this tool changed since you looked, so nothing was changed. Check the row again.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_REFUSED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_REFUSED,
         "CrazyAgent only fixes folders you own inside your home folder, never system, Homebrew, project or app data folders. Run the command yourself if you are sure.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_TOO_LARGE,
+        kernel_processes::finding::permission_fix::TOOL_FIX_TOO_LARGE,
         "That folder is too large to fix from CrazyAgent. Run the command shown instead.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_FAILED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_FAILED,
         "The permissions could not be changed. Run the command shown instead.",
     ),
 ];
@@ -747,7 +711,7 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
                 .map(std::path::PathBuf::from)
                 .collect(),
         ),
-        crate::tools::Places::from_environment(Some(engine_root)),
+        crate::tools::tools_places(Some(engine_root)),
     );
     Box::new(linux::LinuxInstaller::new(Box::new(shared)))
 }
@@ -762,7 +726,7 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
     match windows::WindowsInstaller::new(
         &engine_root.join("setup"),
         local_app_data.as_deref(),
-        crate::tools::Places::from_environment(Some(engine_root)),
+        crate::tools::tools_places(Some(engine_root)),
     ) {
         Ok(installer) => Box::new(installer),
         Err(code) => Box::new(RefusingInstaller(code)),
@@ -804,7 +768,7 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
             if let Some((_, sha256)) = UV_RELEASES.iter().find(|(known, _)| *known == target) {
                 let name = format!("uv-{target}");
                 return Some(Pin::Release {
-                    version: Version(UV_VERSION.to_owned()),
+                    version: Version::parse(UV_VERSION).unwrap(),
                     url: format!(
                         "https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{name}.tar.gz"
                     ),
@@ -814,12 +778,12 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
             }
             WINGET_TARGETS.contains(&target).then(|| Pin::Winget {
                 id: UV_WINGET_ID.to_owned(),
-                version: Version(UV_VERSION.to_owned()),
+                version: Version::parse(UV_VERSION).unwrap(),
             })
         }
         Dependency::Graphify => Some(Pin::UvTool {
             package: GRAPHIFY_PACKAGE.to_owned(),
-            version: Version(GRAPHIFY_VERSION.to_owned()),
+            version: Version::parse(GRAPHIFY_VERSION).unwrap(),
             python: GRAPHIFY_PYTHON.to_owned(),
         }),
         Dependency::Tmux => Some(Pin::Homebrew {
@@ -835,7 +799,7 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
 fn node_pin(target: &str) -> Option<Pin> {
     let pinned = node::pin(target)?;
     Some(Pin::Archive {
-        version: Version(node::NODE_VERSION.to_owned()),
+        version: Version::parse(node::NODE_VERSION).unwrap(),
         url: pinned.url,
         sha256: pinned.sha256,
         top: pinned.top,
@@ -927,7 +891,7 @@ impl SetupAction {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use process::is_sha256;
+    use kernel_processes::run::is_sha256;
 
     const LINUX: [&str; 2] = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"];
 

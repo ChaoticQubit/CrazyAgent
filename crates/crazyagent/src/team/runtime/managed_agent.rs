@@ -14,7 +14,7 @@ use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, OsStr, OsString};
@@ -593,7 +593,7 @@ impl ManagedAgent {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = root.path().canonicalize().unwrap();
         let database = base.join("engine.db");
-        let connection = Connection::open(&database).unwrap();
+        let connection = crate::landing_log::seeded(Connection::open(&database).unwrap());
         crate::storage::initialize_authority_schemas(&connection).unwrap();
         crate::team::initialize(&connection).unwrap();
         crate::project_setup::initialize(&connection).unwrap();
@@ -1245,7 +1245,10 @@ impl ManagedAgent {
     /// Runs one `/bin/sh` script as the agent. Input: the script.
     /// Output: the finished process with its captured output.
     pub(crate) fn shell(&self, script: &str) -> Output {
-        crate::spawn_gate::output(&mut self.command(Path::new("/bin/sh"), &["-c", script])).unwrap()
+        kernel_processes::spawn_gate::output(
+            &mut self.command(Path::new("/bin/sh"), &["-c", script]),
+        )
+        .unwrap()
     }
 }
 

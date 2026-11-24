@@ -817,8 +817,10 @@ fn the_received_view_refuses_links_and_entries_the_launch_did_not_write() {
     assert_eq!(refused(&claude), "agent_instructions_unsafe");
     fs::remove_dir(&file).unwrap();
 
-    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&file))
-        .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&file),
+    )
+    .unwrap();
     assert!(made.success());
     let (sender, outcome) = std::sync::mpsc::channel();
     let home = claude.clone();
@@ -921,8 +923,10 @@ fn a_fifo_swapped_in_for_the_instruction_file_never_blocks_the_read() {
     let fifo = root.join("fifo.md");
     let swapped = state.join("swapped.md");
     fs::write(&plain, "Use TDD.\n").unwrap();
-    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
-        .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&fifo),
+    )
+    .unwrap();
     assert!(made.success());
     fs::hard_link(&plain, &path).unwrap();
 
@@ -2062,7 +2066,8 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     fs::write(&claude, "{}\n").unwrap();
     let chmod = |arguments: &[&str]| {
         let done =
-            crate::spawn_gate::collected(Command::new("/bin/chmod").args(arguments)).unwrap();
+            kernel_processes::spawn_gate::collected(Command::new("/bin/chmod").args(arguments))
+                .unwrap();
         assert!(done.status.success(), "{arguments:?}: {done:?}");
     };
     let path = |path: &Path| path.to_str().unwrap().to_owned();
@@ -2074,13 +2079,16 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     let listed =
-        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&claude)).unwrap();
+        kernel_processes::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&claude))
+            .unwrap();
     let kept_acl = String::from_utf8_lossy(&listed.stdout).into_owned();
     let left: Vec<&Path> = [note.as_path(), stuck.as_path()]
         .into_iter()
         .filter(|path| fs::symlink_metadata(path).is_ok())
         .collect();
-    let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").args(["-R", "-N"]).arg(&home));
+    let _ = kernel_processes::spawn_gate::collected(
+        Command::new("/bin/chmod").args(["-R", "-N"]).arg(&home),
+    );
     assert_eq!(prepared, Ok(()));
     assert!(left.is_empty(), "an ACL kept {left:?} from the launch");
     assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
@@ -2094,7 +2102,7 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
 /// the entry and the path.
 #[cfg(target_os = "macos")]
 fn acl(entry: &str, path: &Path) {
-    let done = crate::spawn_gate::collected(
+    let done = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/chmod")
             .args(["+a", entry])
             .arg(path),
@@ -2107,9 +2115,10 @@ fn acl(entry: &str, path: &Path) {
 /// path. Output: the answer.
 #[cfg(target_os = "macos")]
 fn denies(path: &Path) -> bool {
-    let listed =
-        crate::spawn_gate::collected(std::process::Command::new("/bin/ls").arg("-led").arg(path))
-            .unwrap();
+    let listed = kernel_processes::spawn_gate::collected(
+        std::process::Command::new("/bin/ls").arg("-led").arg(path),
+    )
+    .unwrap();
     listed.status.success() && String::from_utf8_lossy(&listed.stdout).contains("deny")
 }
 
@@ -2122,7 +2131,7 @@ struct Released(PathBuf);
 impl Drop for Released {
     fn drop(&mut self) {
         let _ = nix::unistd::chflags(self.0.as_path(), nix::sys::stat::FileFlag::empty());
-        let _ = crate::spawn_gate::collected(
+        let _ = kernel_processes::spawn_gate::collected(
             std::process::Command::new("/bin/chmod")
                 .arg("-N")
                 .arg(&self.0),
@@ -2785,7 +2794,7 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
         format!("[core]\n\tfsmonitor = {}\n", fsmonitor.display()),
     )
     .unwrap();
-    let site = crate::spawn_gate::collected(
+    let site = kernel_processes::spawn_gate::collected(
         Command::new("/usr/bin/python3")
             .args(["-c", "import site; print(site.getusersitepackages())"])
             .env_clear()
@@ -2809,7 +2818,7 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
     fs::create_dir(&repo).unwrap();
     fs::write(repo.join("a.txt"), "a\n").unwrap();
     for arguments in [&["init", "-q"][..], &["add", "a.txt"][..]] {
-        let setup = crate::spawn_gate::collected(
+        let setup = kernel_processes::spawn_gate::collected(
             Command::new("/usr/bin/git")
                 .args(arguments)
                 .current_dir(&repo)
@@ -2896,7 +2905,7 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
             &package,
         ),
     ] {
-        let output = crate::spawn_gate::collected(
+        let output = kernel_processes::spawn_gate::collected(
             Command::new(&program)
                 .args(arguments)
                 .current_dir(folder)
@@ -2935,7 +2944,7 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
             "npmrc".to_owned(),
         ),
     ] {
-        let output = crate::spawn_gate::collected(
+        let output = kernel_processes::spawn_gate::collected(
             Command::new(&program)
                 .args(arguments)
                 .current_dir(folder)
@@ -3093,4 +3102,19 @@ fn a_walk_budget_of_exactly_what_a_pass_lists_clears_a_home_pass_and_a_memory_pa
     assert_eq!(cleared, Ok(()));
     assert_eq!(memories_left(&projects), 0);
     assert!(projects.join("p1").is_dir() && projects.join("p2").is_dir());
+}
+
+#[cfg(windows)]
+#[test]
+fn an_instruction_file_that_is_a_link_is_refused_and_never_read_through() {
+    let (_directory, root) = folder();
+    let target = root.join("secret.md");
+    fs::write(&target, "owner text").unwrap();
+    let link = root.join("CLAUDE.md");
+    std::os::windows::fs::symlink_file(&target, &link).unwrap();
+    assert_eq!(read_home_file(&target, 64).unwrap(), "owner text");
+    assert_eq!(
+        read_home_file(&link, 64).unwrap_err().0,
+        "agent_instructions_unsafe"
+    );
 }

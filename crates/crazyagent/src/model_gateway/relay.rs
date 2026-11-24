@@ -1,6 +1,7 @@
-use crate::credentials::Piece::{Escaped, Plain};
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use kernel_processes::fd_wait::{self, Wake};
+use kernel_security::secret::Piece::{Escaped, Plain};
+use kernel_security::secret::SecretString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 
 pub mod chatgpt;
@@ -32,6 +33,7 @@ const CLIENT_TIME: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_SECS: &str = "15";
 const UPSTREAM_TIME_SECS: &str = "1800";
 const POLL: Duration = Duration::from_millis(50);
+const WAIT_MAX: Duration = Duration::from_millis(250);
 const REQUEST_DROPPED: [&str; 15] = [
     "host",
     "connection",
@@ -98,30 +100,20 @@ pub(crate) struct Upstream {
     scheme: &'static str,
 }
 
-/// Checks a provider base URL a relay may forward to: https anywhere, or plain http only
-/// to a loopback server, with no user, password, query or fragment.
-/// Input: the base URL. Output: the upstream, or `model_relay_upstream_invalid`.
+/// Checks a provider base URL a relay may forward to with the kernel's shared target rule
+/// (https anywhere, plain http only to loopback, no user, password, query or fragment),
+/// then confines the base path. Input: the base URL. Output: the upstream, or
+/// `model_relay_upstream_invalid`.
 pub(crate) fn upstream(base_url: &str) -> Result<Upstream, EngineError> {
     let invalid = || failure("model_relay_upstream_invalid");
-    let url = url::Url::parse(base_url).map_err(|_| invalid())?;
-    let loopback = match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-        None => return Err(invalid()),
-    };
+    let url = kernel_security::net::target(base_url, kernel_security::net::Query::Refused)
+        .map_err(|_| invalid())?
+        .url;
     let scheme = match url.scheme() {
         "https" => "https",
-        "http" if loopback => "http",
-        _ => return Err(invalid()),
+        "http" => "http",
+        _ => unreachable!("the target rule allows only https and http"),
     };
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(invalid());
-    }
     let path = url.path().trim_end_matches('/').to_owned();
     if path.len() > TARGET_BYTES_MAX / 2 || !path.bytes().all(target_byte) {
         return Err(invalid());
@@ -158,6 +150,8 @@ struct Shared {
     open: Mutex<Vec<Open>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     stop: AtomicBool,
+    #[cfg(test)]
+    accept_passes: AtomicUsize,
 }
 
 /// One harness connection the relay is serving: its accept number, a handle to shut it
@@ -259,7 +253,11 @@ fn relay_listener() -> std::io::Result<TcpListener> {
     let start = NEXT_RELAY_PORT
         .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(usize::try_from(std::process::id()).unwrap_or(0));
-    let listener = first_bound(&ports, start, crate::spawn_gate::bind_tcp_std_exclusive)?;
+    let listener = first_bound(
+        &ports,
+        start,
+        kernel_processes::spawn_gate::bind_tcp_std_exclusive,
+    )?;
     assert!(block.contains(&listener.local_addr()?.port()));
     Ok(listener)
 }
@@ -306,6 +304,7 @@ pub struct Relay {
     port: u16,
     shared: Arc<Shared>,
     accept: Option<JoinHandle<()>>,
+    wake: Wake,
 }
 
 impl Relay {
@@ -336,17 +335,21 @@ impl Relay {
             open: Mutex::new(Vec::new()),
             workers: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
+            #[cfg(test)]
+            accept_passes: AtomicUsize::new(0),
         });
         let accepting = Arc::clone(&shared);
+        let (wake, woken) = fd_wait::wake_pair().map_err(|_| failure("model_relay_unavailable"))?;
         let accept = std::thread::Builder::new()
             .name("model-relay".into())
-            .spawn(move || accept_loop(&listener, &accepting))
+            .spawn(move || accept_loop(&listener, &accepting, &woken))
             .map_err(|_| failure("model_relay_unavailable"))?;
         assert_ne!(port, 0);
         Ok(Self {
             port,
             shared,
             accept: Some(accept),
+            wake,
         })
     }
 
@@ -408,6 +411,7 @@ impl Relay {
 impl Drop for Relay {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
+        self.wake.rouse();
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
@@ -439,11 +443,23 @@ impl Drop for Slot<'_> {
     }
 }
 
-fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
+/// Accepts the harness's connections until the relay stops and hands each to a request
+/// thread. While none is waiting it waits for one or the wake, for at most `WAIT_MAX`; after
+/// a failed accept it sleeps `POLL`, since a listener whose client cannot be accepted stays
+/// ready. Inputs: the non-blocking listener, what the relay's threads share and the wake end.
+/// Output: none.
+fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, woken: &Wake) {
     let mut numbered: u64 = 0;
     while !shared.stop.load(Ordering::Acquire) {
-        let (stream, peer) = match crate::spawn_gate::accept_tcp_std(listener) {
+        #[cfg(test)]
+        shared.accept_passes.fetch_add(1, Ordering::SeqCst);
+        let (stream, peer) = match kernel_processes::spawn_gate::accept_tcp_std(listener) {
             Ok(accepted) => accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let until = Instant::now() + WAIT_MAX;
+                fd_wait::wait_for_clients(&[listener], woken, until, POLL);
+                continue;
+            }
             Err(_) => {
                 std::thread::sleep(POLL);
                 continue;
@@ -561,12 +577,12 @@ fn exchange(
     let input = child.stdin.take();
     let output = child.stdout.take();
     if let Err(mut child) = shared.attach(id, child) {
-        crate::credentials::wipe(&mut config);
+        kernel_security::secret::wipe(&mut config);
         stop(&mut child);
         return Err(502);
     }
     let written = input.map(|mut input| input.write_all(&config));
-    crate::credentials::wipe(&mut config);
+    kernel_security::secret::wipe(&mut config);
     let sent = match (written, body) {
         (Some(Ok(())), Some(mut body)) => body.write_all(&incoming.body).is_ok(),
         (Some(Ok(())), None) => true,
@@ -623,7 +639,7 @@ fn upstream_child(
     let pipe = if incoming.body.is_empty() {
         None
     } else {
-        Some(crate::spawn_gate::guarded(std::io::pipe).map_err(|_| 500_u16)?)
+        Some(kernel_processes::spawn_gate::guarded(std::io::pipe).map_err(|_| 500_u16)?)
     };
     let handed = pipe.as_ref().map(|(reader, _)| handed_path(reader));
     let mut config = match credential {
@@ -642,12 +658,12 @@ fn upstream_child(
     let mut command = upstream_command(&shared.upstream);
     let (spawned, body) = match pipe {
         Some((reader, writer)) => (spawn_holding(&mut command, reader), Some(writer)),
-        None => (crate::spawn_gate::spawn(&mut command), None),
+        None => (kernel_processes::spawn_gate::spawn(&mut command), None),
     };
     match spawned {
         Ok(child) => Ok((child, config, body)),
         Err(_) => {
-            crate::credentials::wipe(&mut config);
+            kernel_security::secret::wipe(&mut config);
             Err(502)
         }
     }
@@ -672,7 +688,7 @@ fn handed_path(_reader: &std::io::PipeReader) -> PathBuf {
 /// no other child ever holds it. Inputs: the curl command and the read end. Output: curl.
 #[cfg(unix)]
 fn spawn_holding(command: &mut Command, reader: std::io::PipeReader) -> std::io::Result<Child> {
-    crate::spawn_gate::spawn_handing(command, reader.into())
+    kernel_processes::spawn_gate::spawn_handing(command, reader.into())
 }
 
 /// Never reached: [`Relay::start`] refuses where curl cannot inherit the body pipe.
@@ -954,18 +970,18 @@ pub(crate) fn upstream_config(
         Plain("\"\n"),
     ]);
     body_line(&mut pieces, body)?;
-    crate::credentials::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
+    kernel_security::secret::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
 }
 
 /// The start of every curl config: the provider URL, the method, and the harness's headers
 /// minus hop-by-hop, encoding and key headers and those `dropped` names, as pieces for
-/// [`crate::credentials::sized`]. Inputs: the upstream, the request and the extra drop
+/// [`kernel_security::secret::sized`]. Inputs: the upstream, the request and the extra drop
 /// test on lowercase header names. Output: the pieces.
 fn forwarded<'a>(
     upstream: &'a Upstream,
     incoming: &'a Incoming,
     dropped: impl Fn(&str) -> bool,
-) -> Vec<crate::credentials::Piece<'a>> {
+) -> Vec<kernel_security::secret::Piece<'a>> {
     let mut pieces = vec![
         Plain("url = \""),
         Escaped(&upstream.origin),
@@ -992,7 +1008,7 @@ fn forwarded<'a>(
 /// Ends a curl config with the body file, when the request has a body.
 /// Inputs: the pieces and the body path. Output: Ok, or `model_relay_request_invalid`.
 fn body_line<'a>(
-    pieces: &mut Vec<crate::credentials::Piece<'a>>,
+    pieces: &mut Vec<kernel_security::secret::Piece<'a>>,
     body: Option<&'a Path>,
 ) -> Result<(), EngineError> {
     if let Some(body) = body {
@@ -1035,7 +1051,7 @@ pub(crate) fn chatgpt_config(
         ]);
     }
     body_line(&mut pieces, body)?;
-    crate::credentials::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
+    kernel_security::secret::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
 }
 
 /// Builds the curl command for the provider without running it: no `.curlrc`, no

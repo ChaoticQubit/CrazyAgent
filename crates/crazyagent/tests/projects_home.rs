@@ -73,7 +73,7 @@ fn sample(folder: &Path) {
 }
 
 fn git(folder: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("git")
             .arg("-C")
             .arg(folder)
@@ -370,7 +370,7 @@ fn special_files_are_refused_and_nothing_is_left_behind() {
     let case = case();
     let source = case.sources.join("socketed");
     sample(&source);
-    let _listener = crazyagent::spawn_gate::bind_unix_std(source.join("agent.sock")).unwrap();
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(source.join("agent.sock")).unwrap();
     let before = names(&source);
 
     let refused = plan_add(
@@ -502,6 +502,68 @@ fn unsafe_homes_and_sources_are_refused_before_anything_changes() {
     )
     .unwrap();
     assert!(source.is_dir());
+}
+
+/// V243-FIRMLINK-HOME-REFUSAL (rv-sec2 15:20 N1/N2): macOS names every folder under a
+/// firmlink, such as /Users and /private, a second way under /System/Volumes/Data. A folder
+/// picked in that spelling is the same folder and meets the same refusals, the data volume
+/// and the folders above it hold the owner's home, and a plan names the folder one way.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_picked_through_the_data_volume_meets_the_same_refusals() {
+    let case = case();
+    let owner = owner_home().unwrap();
+    let data = |path: &Path| format!("/System/Volumes/Data{}", text(path));
+    fs::create_dir(case.home.join("inner")).unwrap();
+    fs::create_dir(case.engine.join("inside")).unwrap();
+    let source = case.sources.join("project");
+    fs::create_dir(&source).unwrap();
+    for (picked, code) in [
+        (data(&owner), "home_source_unsafe"),
+        (data(owner.parent().unwrap()), "home_source_unsafe"),
+        ("/System/Volumes/Data".to_owned(), "home_source_unsafe"),
+        ("/System".to_owned(), "home_source_unsafe"),
+        (data(&case.engine.join("inside")), "home_source_unsafe"),
+        (data(&case.home), "home_source_in_home"),
+        (data(&case.home.join("inner")), "home_source_in_home"),
+    ] {
+        for mode in [AddMode::Move, AddMode::Copy] {
+            assert_eq!(
+                plan_add(&case.home, &case.engine, &picked, mode, &[], &[])
+                    .unwrap_err()
+                    .0,
+                code,
+                "{picked}"
+            );
+        }
+    }
+    for picked in [
+        data(&owner),
+        "/System/Volumes/Data".to_owned(),
+        data(&case.engine),
+    ] {
+        assert_eq!(
+            check_home(Path::new(&picked), &case.engine).unwrap_err().0,
+            "projects_home_unsafe",
+            "{picked}"
+        );
+        assert_eq!(
+            icloud::folder(&picked).map_err(|refusal| refusal.0).err(),
+            (picked != data(&case.engine)).then_some("icloud_folder_unsafe".to_owned()),
+            "{picked}"
+        );
+    }
+    let plan = plan_add(
+        &case.home,
+        &case.engine,
+        &data(&source),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(plan.source(), source.as_path());
+    assert!(source.is_dir() && owner.is_dir());
 }
 
 #[test]
@@ -815,9 +877,16 @@ fn a_home_move_covers_every_folder_or_refuses_before_anything_moves() {
 }
 
 #[cfg(target_os = "macos")]
+mod image_support;
+
+/// A scratch disk image mounted for one test, holding the shared disk image lock from
+/// before its attach until after its detach, so no other test process renumbers a volume
+/// meanwhile. One test makes at most one at a time.
+#[cfg(target_os = "macos")]
 struct Volume {
     mount: PathBuf,
     _image: tempfile::TempDir,
+    _images: std::fs::File,
 }
 
 #[cfg(target_os = "macos")]
@@ -830,6 +899,7 @@ impl Volume {
     /// detached when dropped. Input: the `hdiutil create -fs` name. Output: the volume.
     fn attach_as(format: &str) -> Self {
         use std::os::unix::fs::MetadataExt;
+        let images = image_support::lock();
         let image = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         let disk = image.path().join("second.dmg");
         let mount = image.path().join("mount");
@@ -856,13 +926,14 @@ impl Volume {
             ],
         ] {
             let status =
-                crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
+                kernel_processes::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
                     .unwrap();
             assert!(status.success(), "{args:?}");
         }
         let volume = Self {
             mount: mount.canonicalize().unwrap(),
             _image: image,
+            _images: images,
         };
         assert_ne!(
             fs::metadata(&volume.mount).unwrap().dev(),
@@ -875,7 +946,7 @@ impl Volume {
 #[cfg(target_os = "macos")]
 impl Drop for Volume {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
             "detach",
             "-quiet",
             "-force",
@@ -887,7 +958,7 @@ impl Drop for Volume {
 #[cfg(target_os = "macos")]
 fn tool(program: &str, args: &[&str], path: &Path) {
     let status =
-        crazyagent::spawn_gate::status(Command::new(program).args(args).arg(path)).unwrap();
+        kernel_processes::spawn_gate::status(Command::new(program).args(args).arg(path)).unwrap();
     assert!(status.success(), "{program} {args:?}");
 }
 
@@ -1398,7 +1469,7 @@ fn deep(folder: &Path, levels: usize) -> PathBuf {
 }
 
 fn git_fails(folder: &Path, args: &[&str]) -> bool {
-    !crazyagent::spawn_gate::status(
+    !kernel_processes::spawn_gate::status(
         Command::new("git")
             .arg("-C")
             .arg(folder)
@@ -1607,7 +1678,8 @@ fn hard_stops_stay_whatever_the_owner_overrides() {
     }
     let socketed = case.sources.join("socketed");
     sample(&socketed);
-    let _listener = crazyagent::spawn_gate::bind_unix_std(socketed.join("agent.sock")).unwrap();
+    let _listener =
+        kernel_processes::spawn_gate::bind_unix_std(socketed.join("agent.sock")).unwrap();
     let refused = plan_add(
         &case.home,
         &case.engine,
@@ -1901,4 +1973,47 @@ fn each_git_link_a_move_breaks_is_told_apart() {
         assert_eq!(got, want, "{}", folder.display());
         assert_eq!(links, want != GitLink::None, "{}", folder.display());
     }
+}
+
+/// #408 F1: a projects home saved before the data-volume fix keeps its long spelling in the
+/// store, while every folder picked now resolves short. A folder inside that home or holding
+/// it is still refused, an add lands under the saved spelling, a folder in it can still be
+/// trashed and deleted, and the home cannot move into a folder of its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_saved_through_the_data_volume_keeps_its_refusals() {
+    let case = case();
+    let outer = case.root.join("outer");
+    let home = outer.join("home");
+    let inner = home.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    let saved = PathBuf::from(format!("/System/Volumes/Data{}", text(&home)));
+    assert!(saved.is_dir());
+    let source = case.sources.join("project");
+    fs::create_dir(&source).unwrap();
+    for mode in [AddMode::Move, AddMode::Copy] {
+        for (picked, code) in [
+            (&inner, "home_source_in_home"),
+            (&outer, "home_source_unsafe"),
+        ] {
+            assert_eq!(
+                plan_add(&saved, &case.engine, text(picked), mode, &[], &[])
+                    .unwrap_err()
+                    .0,
+                code,
+                "{picked:?} {mode:?}"
+            );
+        }
+    }
+    let plan = plan_add(&saved, &case.engine, text(&source), AddMode::Copy, &[], &[]).unwrap();
+    assert_eq!(plan.destination(), saved.join("project"));
+    assert_eq!(plan_trash(&saved, text(&inner), &[]).unwrap(), inner);
+    assert_eq!(
+        plan_delete(&saved, &[saved.join("inner")]).unwrap(),
+        std::slice::from_ref(&inner)
+    );
+    assert_eq!(
+        plan_move(&saved, &inner, &case.engine).unwrap_err().0,
+        "home_move_nested"
+    );
 }

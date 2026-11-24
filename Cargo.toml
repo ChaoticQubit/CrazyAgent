@@ -4,13 +4,27 @@ members = [
     "crates/crazyagent-linux-supervisor",
     "crates/crazyagent-macos-fs",
     "crates/crazyagent-win-sandbox",
+    "crates/sdk/cap",
+    "crates/sdk/capgen",
+    "crates/sdk/rust",
+    "crates/sdk/host",
+    "crates/kernel/bus_gateway",
+    "crates/kernel/storage",
+    "crates/kernel/processes",
+    "crates/kernel/common",
+    "crates/kernel/security",
+    "crates/kernel/sandbox",
+    "crates/kernel/plugin_host",
+    "crates/sdk/plugin_check",
+    "plugins/t2/agent-quit",
     "apps/desktop/src-tauri",
 ]
 default-members = ["crates/crazyagent"]
+exclude = ["crates/sdk/plugin_check/tests/fixtures"]
 resolver = "3"
 
 [workspace.package]
-version = "2.4.2"
+version = "2.4.4"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -25,4 +39,22 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.crazyagent]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-storage]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-storage]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-processes]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-processes]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-common]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-common]
 opt-level = 3

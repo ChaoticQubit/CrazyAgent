@@ -2,7 +2,8 @@ use super::*;
 use crate::harnesses::launch::AccountBinding;
 use crate::harnesses::manifest;
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
@@ -25,7 +26,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -74,7 +75,12 @@ fn standin(kind: &'static str, first_screen: bool) -> Standin {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
     for path in [&home, &work, &bin, &home.join("standin")] {
         private(path);
@@ -124,8 +130,7 @@ impl Standin {
             },
             model: None,
             tools: true,
-            sandbox_profile: Some(self.profile.clone()),
-            unconfined: false,
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(self.profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };

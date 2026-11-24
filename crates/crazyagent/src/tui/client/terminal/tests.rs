@@ -1,10 +1,12 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
-use crate::terminal::{FOLDER, Host};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
 use crate::tui::terminal_pane::TerminalPane;
 use crate::tui::theme::Depth;
+use kernel_processes::terminal::Host;
+use kernel_processes::terminal::tmux::{SESSION, SOCKET, Tmux};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::os::unix::fs::PermissionsExt;
@@ -21,7 +23,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Process::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -120,7 +122,7 @@ fn a_long_paste_is_split_into_host_inputs_without_cutting_its_end_marker() {
     for over in 0..=PASTE_CLOSE.len() {
         let body = INPUT_BYTES_MAX + over - PASTE_OPEN.len() - PASTE_CLOSE.len();
         let bytes = [PASTE_OPEN, &vec![b'x'; body][..], PASTE_CLOSE].concat();
-        let parts = inputs(&bytes);
+        let parts = input_runs(&bytes, INPUT_BYTES_MAX);
         assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
         assert!(
             parts.last().is_some_and(|part| part.ends_with(PASTE_CLOSE)),
@@ -130,7 +132,11 @@ fn a_long_paste_is_split_into_host_inputs_without_cutting_its_end_marker() {
         assert_eq!(parts.concat(), bytes);
     }
     let typed = vec![b'x'; 3 * INPUT_BYTES_MAX + 1];
-    assert_eq!(inputs(&typed).len(), 4, "plain bytes are cut at the limit");
+    assert_eq!(
+        input_runs(&typed, INPUT_BYTES_MAX).len(),
+        4,
+        "plain bytes are cut at the limit"
+    );
 }
 
 #[test]
@@ -197,8 +203,18 @@ fn spawn_shell(tmux: PathBuf, folder: &Path, root: &Path, agent: &AgentId) -> Tm
         env: vec![("PS1".into(), "ready$ ".into())],
         transcript: Transcript::Unavailable,
     };
-    let launcher = Tmux::open(Some(tmux), folder);
-    launcher.spawn(agent, &command).unwrap();
+    let launcher = Tmux::open(
+        Some(tmux),
+        folder,
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    );
+    launcher
+        .spawn(
+            agent,
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     launcher
 }
 
@@ -362,7 +378,7 @@ fn the_tui_types_into_resizes_and_detaches_from_a_live_agent_terminal() {
 }
 
 fn tmux_text(tmux: &Path, socket: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Process::new(tmux)
             .arg("-S")
             .arg(socket)

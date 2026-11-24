@@ -6,10 +6,11 @@ mod keychain_support;
 
 use crazyagent::paths::Layout;
 use crazyagent::restore::{ENGINE_RESTORED, RestoreState};
-use crazyagent::service::{LAUNCHD_LABEL, answering};
+use crazyagent::service::answering;
 use crazyagent::terminal::tmux::installed;
 use e2e_support::{TMUX, scratch, stop_tmux};
 use golden_support::{Record, wait_until};
+use kernel_processes::service::LAUNCHD_LABEL;
 use keychain_support::TemporaryKeychain;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeMap;
@@ -258,7 +259,7 @@ fn settled(screen: &str) -> bool {
 /// Input: the command.
 /// Output: its output.
 fn run(command: &mut Command) -> std::io::Result<Output> {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -352,19 +353,27 @@ fn scratch_label(places: &Places) -> String {
     label
 }
 
-/// Opens a database to read only.
-/// Input: its path.
-/// Output: the connection.
-fn read_only(db: &Path) -> Connection {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    Connection::open_with_flags(db, flags).unwrap()
+/// Opens a private copy of a stopped database, with its WAL when there is one, so a read
+/// never writes beside the engine's files and needs no read-only WAL open, which the macOS
+/// 27.2.1 system SQLite 3.54.0 refuses without a -shm file (CANTOPEN 14).
+/// Input: the database. Output: the copy's connection, then the folder that holds it.
+fn read_copy(db: &Path) -> (Connection, tempfile::TempDir) {
+    let folder = scratch("ca-golden-read-");
+    let copy = folder.path().join("engine.db");
+    fs::copy(db, &copy).unwrap();
+    let wal = db.with_extension("db-wal");
+    if wal.is_file() {
+        fs::copy(&wal, copy.with_extension("db-wal")).unwrap();
+    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    (Connection::open_with_flags(&copy, flags).unwrap(), folder)
 }
 
 /// Each table's row count, by name.
 /// Input: the database.
 /// Output: the counts.
 fn counts(db: &Path) -> BTreeMap<String, i64> {
-    let connection = read_only(db);
+    let (connection, _folder) = read_copy(db);
     let names: Vec<String> = connection
         .prepare(TABLES)
         .unwrap()
@@ -388,7 +397,8 @@ fn counts(db: &Path) -> BTreeMap<String, i64> {
 /// Input: the database.
 /// Output: `PRAGMA user_version`.
 fn version(db: &Path) -> i64 {
-    read_only(db)
+    let (connection, _folder) = read_copy(db);
+    connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap()
 }

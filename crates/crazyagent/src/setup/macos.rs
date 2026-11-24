@@ -1,6 +1,7 @@
 use super::pinned::{PinnedInstaller, runnable, system_folders};
-use super::process::{private_folder, run};
-use super::{Dependency, InstallError, Installer, Pin, Version};
+use super::{Dependency, Installer, Pin};
+use kernel_processes::run::{InstallError, Version};
+use kernel_processes::run::{private_folder, run};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -29,13 +30,13 @@ pub struct MacInstaller {
 
 impl MacInstaller {
     /// Uses the engine root's `setup` folder and finds programs wherever the tool resolver
-    /// looks for this engine ([`crate::tools::Places::from_environment`]), the answer every
+    /// looks for this engine ([`kernel_processes::finding::Places::from_environment`]), the answer every
     /// launch uses. Homebrew's folders and its `brew` come from the resolver's own list
-    /// ([`crate::tools::homebrew_folders`]), so the clean-Mac gate's remap covers them; the
+    /// ([`kernel_processes::finding::homebrew_folders`]), so the clean-Mac gate's remap covers them; the
     /// programs setup starts search `setup/bin`, `~/.local/bin`, the engine's `PATH`,
     /// Homebrew and the system folders. Input: the engine root. Output: the installer.
     pub fn new(engine_root: &Path) -> Self {
-        let homebrew = crate::tools::homebrew_folders();
+        let homebrew = kernel_processes::finding::homebrew_folders(&crate::tools::HOOKS);
         let brew: Vec<PathBuf> = homebrew.iter().map(|folder| folder.join("brew")).collect();
         let mut fixed = homebrew;
         fixed.extend(SYSTEM_PATH.iter().map(PathBuf::from));
@@ -43,7 +44,7 @@ impl MacInstaller {
             pinned: PinnedInstaller::with_places(
                 engine_root,
                 system_folders(fixed),
-                crate::tools::Places::from_environment(Some(engine_root)),
+                crate::tools::tools_places(Some(engine_root)),
             ),
             brew: brew.into_iter().filter(|path| path.is_absolute()).collect(),
         }
@@ -91,7 +92,7 @@ impl MacInstaller {
             return Err(InstallError("setup_homebrew_missing"));
         }
         let brew = found
-            .find(|path| crate::service::changeable_past_sticky(path).is_none())
+            .find(|path| kernel_processes::service::changeable_past_sticky(path).is_none())
             .ok_or(InstallError("setup_homebrew_unsafe"))?;
         let mut env = self.pinned.env();
         env.extend([
@@ -131,14 +132,14 @@ impl Installer for MacInstaller {
         self.pinned.program(name)
     }
 
-    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, kernel_processes::finding::Missing> {
         self.pinned.lookup_program(name)
     }
 
     fn fix_target(
         &self,
-        missing: &crate::tools::Missing,
-    ) -> Option<crate::tools::permission_fix::Target> {
+        missing: &kernel_processes::finding::Missing,
+    ) -> Option<kernel_processes::finding::permission_fix::Target> {
         self.pinned.fix_target(missing)
     }
 
@@ -147,7 +148,7 @@ impl Installer for MacInstaller {
         dep: Dependency,
         confirmed: &str,
         recursive: bool,
-    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+    ) -> Result<kernel_processes::finding::permission_fix::Report, &'static str> {
         self.pinned.fix_permissions(dep, confirmed, recursive)
     }
 

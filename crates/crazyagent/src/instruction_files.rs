@@ -1,6 +1,7 @@
 pub use crate::agent_home::Repeated;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use kernel_sandbox::paths::ASCII_FOLDS;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,35 +48,6 @@ const NAMES: [&str; 6] = [
 
 const CODEX_OVERRIDE: &str = "AGENTS.override.md";
 const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
-/// The code points a case-insensitive HFS+ volume ignores in names (git's
-/// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
-/// compare that must match such a volume leaves out (RV-DS241-148).
-pub(crate) const HFS_IGNORED: [char; 16] = [
-    '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
-    '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
-];
-
-/// The code points outside ASCII that a case-insensitive volume folds onto ASCII, with the
-/// ASCII they fold onto: on APFS the full case fold of their canonical decomposition, each
-/// checked on the volume (probe 2026-10-28), and U+0131 DOTLESS I, which the NTFS upcase
-/// table maps to `I`. The one list the landing checks, the name compares and the Seatbelt
-/// name spellings share (SA vid 202, DS-148 F1).
-pub(crate) const ASCII_FOLDS: [(char, &str); 14] = [
-    ('\u{DF}', "ss"),
-    ('\u{131}', "i"),
-    ('\u{17F}', "s"),
-    ('\u{37E}', ";"),
-    ('\u{1E9E}', "ss"),
-    ('\u{1FEF}', "`"),
-    ('\u{212A}', "k"),
-    ('\u{FB00}', "ff"),
-    ('\u{FB01}', "fi"),
-    ('\u{FB02}', "fl"),
-    ('\u{FB03}', "ffi"),
-    ('\u{FB04}', "ffl"),
-    ('\u{FB05}', "st"),
-    ('\u{FB06}', "st"),
-];
 
 /// The project's own instruction files an import copies into the project instructions and
 /// then moves aside, by their path inside the project folder.
@@ -628,7 +600,10 @@ pub(crate) fn names_one_of(name: &str, names: &[&str]) -> bool {
 /// folded text.
 fn folded(name: &str) -> String {
     let mut text = String::with_capacity(name.len());
-    for point in name.chars().filter(|point| !HFS_IGNORED.contains(point)) {
+    for point in name
+        .chars()
+        .filter(|point| !kernel_sandbox::paths::HFS_IGNORED.contains(point))
+    {
         match ASCII_FOLDS.iter().find(|(from, _)| *from == point) {
             Some((_, ascii)) => text.push_str(ascii),
             None => text.push(point.to_ascii_lowercase()),
@@ -640,7 +615,6 @@ fn folded(name: &str) -> String {
 /// Tells whether a path part opens a `.git` entry on a case-insensitive volume, compared as
 /// [`folded`] compares names, so `.GIT`, `.g\u{200c}it` on HFS+ and `.g\u{131}t` on NTFS all
 /// count (RV-DS241-148). Input: the part. Output: true for one.
-#[cfg(unix)]
 pub(crate) fn names_git(part: &str) -> bool {
     folded(part) == ".git"
 }
@@ -1556,7 +1530,7 @@ fn owned_text(target: &Path) -> Result<String, &'static str> {
 /// the text, or a plain code.
 fn text_of(file: fs::File) -> Result<String, &'static str> {
     let held = file.metadata().map_err(|_| "process_import_unreadable")?;
-    if !held.is_file() || !owned(&held) {
+    if !held.is_file() || !owned(&file, &held) {
         return Err("process_import_unsafe");
     }
     if held.len() > crate::agent_home::TEXT_BYTES_MAX as u64 {
@@ -1577,14 +1551,25 @@ fn text_of(file: fs::File) -> Result<String, &'static str> {
     Ok(text)
 }
 
+/// Tells whether the engine's user owns an open file, read from its metadata. Inputs: the
+/// open file, unused here, and its metadata. Output: true only then.
 #[cfg(unix)]
-fn owned(metadata: &fs::Metadata) -> bool {
+fn owned(_file: &fs::File, metadata: &fs::Metadata) -> bool {
     metadata.uid() == rustix::process::geteuid().as_raw()
 }
 
-#[cfg(not(unix))]
-fn owned(_metadata: &fs::Metadata) -> bool {
-    true
+/// Tells whether an open file on Windows has an owner W1's judge trusts, read from the
+/// handle: the engine's user, SYSTEM, the administrators or TrustedInstaller, as an elevated
+/// user's new files are owned by the administrators (DESIGN-0256 C6). Inputs: the open file
+/// and its metadata, unused here. Output: true only then; a handle whose owner cannot be
+/// read is false.
+#[cfg(windows)]
+fn owned(file: &fs::File, _metadata: &fs::Metadata) -> bool {
+    use crazyagent_win_sandbox::{dacl, private};
+    match (private::facts(file), private::user_sid()) {
+        (Ok(facts), Ok(user)) => dacl::trusted_owner(&facts.owner, &user),
+        _ => false,
+    }
 }
 
 /// Moves one project instruction file, or the link at its path, or arrived project
@@ -1641,3 +1626,29 @@ pub mod sources;
 #[cfg(all(test, unix))]
 #[path = "instruction_files/tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    /// C6 (DESIGN-0256): owner text on Windows is a file whose owner W1's judge trusts, read
+    /// from the open file; a file whose owner is the Users group is unsafe, as a file of
+    /// another uid is on Unix. Setting that owner needs the elevated runner (P0).
+    #[test]
+    fn owner_text_is_a_file_with_a_trusted_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("AGENTS.md");
+        std::fs::write(&file, "# rules").unwrap();
+        assert_eq!(super::owned_text(&file).unwrap(), "# rules");
+        let status =
+            kernel_processes::spawn_gate::status(std::process::Command::new("icacls").args([
+                file.to_str().unwrap(),
+                "/setowner",
+                "*S-1-5-32-545",
+            ]))
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            super::owned_text(&file).unwrap_err(),
+            "process_import_unsafe"
+        );
+    }
+}

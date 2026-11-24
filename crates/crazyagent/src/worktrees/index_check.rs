@@ -4,7 +4,6 @@ use super::*;
 /// lock, its index exists, and no tracked file differs from that index; staged changes are
 /// its agent's or a turn end's. Read only: `status` honours `--no-optional-locks`, unlike
 /// `diff`, which refreshes the index. Input: the record. Output: success, or the refusal.
-#[cfg(unix)]
 pub(super) fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
     let metadata = worktree_metadata(record)?;
     match std::fs::symlink_metadata(metadata.join("index.lock")) {

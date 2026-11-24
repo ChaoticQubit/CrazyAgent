@@ -632,7 +632,8 @@ fn under_overlaps_block_a_review_ready_claim_denies_the_edit_until_its_work_land
 #[test]
 fn under_overlaps_block_the_edit_hook_still_denies_from_an_engine_in_an_app_bundle_under_the_profile()
  {
-    use crazyagent::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork};
+    use crazyagent::sandbox::{ProjectSandbox, SANDBOX_EXEC};
+    use kernel_sandbox::net::SandboxNetwork;
     let team = Team::new();
     let claimed = Claimed::new(&team);
     let folder = team
@@ -735,7 +736,7 @@ fn a_teammate_claiming_the_leads_letter_never_marks_it_delivered_unseen() {
     .unwrap();
     serve();
 
-    let forged = crazyagent::spawn_gate::output(
+    let forged = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/touch")
             .arg(team.entry(&format!("{to_lead:032x}.shown")))
             .env_clear()

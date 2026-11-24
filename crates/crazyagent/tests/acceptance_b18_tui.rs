@@ -69,7 +69,7 @@ impl Pty {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -424,9 +424,10 @@ fn b18_a_waiting_agent_change_set_shows_in_changes_and_accept_lands_it() {
 }
 
 /// Build 18 items 10 and 11 (access levels, toolchains): in Settings the owner raises the
-/// project's agent access to Own branch with the Rust toolchain allowed, then to Full access,
-/// which waits for an explicit y after its warning; n keeps the saved level. The engine stores
-/// each saved choice, which is what the team runtime launches agents with.
+/// project's agent access to Own branch and turns off the Rust toolchain, which a new project
+/// starts with allowed once it is installed (F26), then raises it to Full access, which waits
+/// for an explicit y after its warning; n keeps the saved level. The engine stores each saved
+/// choice, which is what the team runtime launches agents with.
 #[cfg(target_os = "macos")]
 #[test]
 fn b18_the_owner_changes_agent_access_and_toolchains_in_settings() {
@@ -441,7 +442,16 @@ fn b18_the_owner_changes_agent_access_and_toolchains_in_settings() {
         .iter()
         .position(|row| row.toolchain == Toolchain::Rust)
         .expect("the Rust toolchain folder in the owner's home is listed");
-    assert!(start.toolchains[rust].installed && !start.toolchains[rust].allowed);
+    assert!(
+        start.toolchains[rust].installed,
+        "the Rust folder in the owner's home reads as installed: {:?}",
+        start.toolchains
+    );
+    assert!(
+        start.toolchains[rust].allowed,
+        "a new project starts with the installed Rust allowed (F26): {:?}",
+        start.toolchains
+    );
 
     let pty = Pty::launch(tmux, &engine.socket());
     open_tab(&pty, "Settings");
@@ -454,7 +464,7 @@ fn b18_the_owner_changes_agent_access_and_toolchains_in_settings() {
             && screen.contains("Toolchains agents may use")
             && screen.contains("[> Save ]")
     });
-    assert!(screen.contains("[ ] Rust"), "{screen}");
+    assert!(screen.contains("[x] Rust"), "{screen}");
     assert!(screen.contains("[> Save ]"), "{screen}");
     pty.bytes(&RIGHT);
     pty.until("Right picks Own branch", |screen| {
@@ -464,18 +474,18 @@ fn b18_the_owner_changes_agent_access_and_toolchains_in_settings() {
         pty.bytes(&DOWN);
     }
     pty.keys(&["Space"]);
-    pty.until("Space allows Rust", |screen| screen.contains("[x] Rust"));
+    pty.until("Space turns Rust off", |screen| screen.contains("[ ] Rust"));
     pty.keys(&["Enter"]);
     pty.until("the saved level shows in Settings", |screen| {
         !screen.contains("Toolchains agents may use") && screen.contains("Own branch")
     });
     let saved = policy(&engine, &project);
     assert_eq!(saved.access, AgentAccess::OwnBranch);
-    assert!(saved.toolchains[rust].allowed, "{saved:?}");
+    assert!(!saved.toolchains[rust].allowed, "{saved:?}");
 
     pty.keys(&["c"]);
     pty.until("c opens the box at the saved level", |screen| {
-        screen.contains("< Own branch >") && screen.contains("[x] Rust")
+        screen.contains("< Own branch >") && screen.contains("[ ] Rust")
     });
     pty.bytes(&RIGHT);
     pty.until("Right picks Full access", |screen| {
@@ -501,7 +511,7 @@ fn b18_the_owner_changes_agent_access_and_toolchains_in_settings() {
     });
     let full = policy(&engine, &project);
     assert_eq!(full.access, AgentAccess::Full);
-    assert!(full.toolchains[rust].allowed, "{full:?}");
+    assert!(!full.toolchains[rust].allowed, "{full:?}");
     drop(pty);
     engine.stop();
 }

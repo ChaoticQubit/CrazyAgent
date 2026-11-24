@@ -31,7 +31,7 @@ pub(super) struct PrivateBytes(Vec<u8>);
 
 impl Drop for PrivateBytes {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.0);
+        kernel_security::secret::wipe(&mut self.0);
     }
 }
 
@@ -399,7 +399,7 @@ struct InputReply {
     accepted: bool,
 }
 
-async fn read_secret(stream: &mut UnixStream) -> Result<PrivateBytes, EngineError> {
+async fn read_secret(stream: &mut Stream) -> Result<PrivateBytes, EngineError> {
     let mut size = [0; 4];
     stream
         .read_exact(&mut size)
@@ -446,10 +446,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -461,7 +461,7 @@ impl OwnerClient {
             };
             packet[5..].copy_from_slice(&self.token);
             stream.write_all(&packet).await.map_err(io_error)?;
-            crate::credentials::wipe(&mut packet);
+            kernel_security::secret::wipe(&mut packet);
             stream
                 .write_all(
                     &encode_frame(&InputEnvelope {
@@ -493,7 +493,7 @@ impl OwnerClient {
     }
 }
 
-async fn read_input_reply(stream: &mut UnixStream) -> Result<InputReply, EngineError> {
+async fn read_input_reply(stream: &mut Stream) -> Result<InputReply, EngineError> {
     let frame = read_frame(stream).await?;
     serde_json::from_slice(&frame[4..]).map_err(|_| failure("native_auth_claude_input_invalid"))
 }
@@ -511,7 +511,7 @@ fn validate_input_reply(reply: &InputReply, request: &ClaudeAuthInput) -> Result
 }
 
 pub(in crate::engine::owner::transport) async fn serve_input(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -537,7 +537,11 @@ pub(in crate::engine::owner::transport) async fn serve_input(
         }
     }
     let fact = host
-        .native_auth_command(admission.clone(), read.clone())
+        .native_auth_command(
+            admission.clone(),
+            read.clone(),
+            crate::storage::NativeAuthAsk::Engine,
+        )
         .await?
         .fact;
     {
@@ -571,7 +575,11 @@ pub(in crate::engine::owner::transport) async fn serve_input(
         return Err(failure("native_auth_claude_input_invalid"));
     }
     let fact = host
-        .native_auth_command(admission.clone(), read)
+        .native_auth_command(
+            admission.clone(),
+            read,
+            crate::storage::NativeAuthAsk::Engine,
+        )
         .await?
         .fact;
     {

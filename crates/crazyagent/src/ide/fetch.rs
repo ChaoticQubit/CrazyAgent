@@ -175,7 +175,7 @@ pub fn ensure(runtime: &Path) -> bool {
     if !qualified() {
         return false;
     }
-    match crate::update::target()
+    match kernel_processes::update::target()
         .ok_or_else(|| failure("ide_build_unsupported_platform"))
         .and_then(manifest::current)
     {
@@ -193,7 +193,7 @@ pub fn ensure(runtime: &Path) -> bool {
 /// Input: the engine root. Output: true when a fetch started.
 pub fn on_engine_start(runtime: &Path) -> bool {
     let default = std::env::var_os("CRAZYAGENT_HOME").is_none()
-        && crate::update::data_root().is_some_and(|root| {
+        && kernel_processes::update::data_root().is_some_and(|root| {
             match (std::fs::canonicalize(root), std::fs::canonicalize(runtime)) {
                 (Ok(home), Ok(given)) => home == given,
                 _ => false,
@@ -342,20 +342,19 @@ fn download(runtime: &Path, build: &Build, archive: &Path) -> Result<String, Eng
         written: 0,
         reported: 0,
     };
-    crate::update::download(&build.url, &mut progress, build.size_max, DOWNLOAD_TIMEOUT).map_err(
-        |error| {
+    kernel_processes::update::download(&build.url, &mut progress, build.size_max, DOWNLOAD_TIMEOUT)
+        .map_err(|error| {
             failure(match error.code {
                 "update_too_large" => "ide_build_too_large",
                 _ => "ide_build_download_failed",
             })
-        },
-    )?;
+        })?;
     progress.file.sync_all().map_err(storage)?;
     Ok(format!("{:x}", progress.hasher.finalize()))
 }
 
 fn tar(mode: &str, archive: &Path) -> Command {
-    let mut command = Command::new(crate::update::system_tool("tar"));
+    let mut command = Command::new(kernel_processes::update::system_tool("tar"));
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -379,7 +378,8 @@ fn name_inside(name: &str) -> bool {
 /// land outside the target. Input: the verified archive. Output: Ok, or
 /// `ide_build_archive_invalid`.
 fn check_names(archive: &Path) -> Result<(), EngineError> {
-    let output = crate::spawn_gate::output(tar("-t", archive).arg("-P")).map_err(invalid)?;
+    let output =
+        kernel_processes::spawn_gate::output(tar("-t", archive).arg("-P")).map_err(invalid)?;
     if !output.status.success() {
         return Err(failure("ide_build_archive_invalid"));
     }
@@ -399,8 +399,8 @@ fn check_names(archive: &Path) -> Result<(), EngineError> {
 
 fn extract(archive: &Path, staging: &Path) -> Result<(), EngineError> {
     std::fs::create_dir(staging).map_err(storage)?;
-    let output =
-        crate::spawn_gate::output(tar("-x", archive).arg("-C").arg(staging)).map_err(invalid)?;
+    let output = kernel_processes::spawn_gate::output(tar("-x", archive).arg("-C").arg(staging))
+        .map_err(invalid)?;
     if !output.status.success() {
         return Err(failure("ide_build_archive_invalid"));
     }

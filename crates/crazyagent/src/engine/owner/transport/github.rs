@@ -1,11 +1,11 @@
 use super::*;
-use crate::credentials::{SECRET_BYTES_MAX, SecretString};
 use crate::engine::owner::AccountSecret;
 use crate::github::{
     CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
     GitHubPublishPlan, GitHubRepoPage, GitHubRepoRules, GitHubRule, GitHubStatus,
 };
 use crate::protocol::{ProjectId, encode_frame};
+use kernel_security::secret::{SECRET_BYTES_MAX, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -89,6 +89,13 @@ impl Action {
             Self::Rules { .. } | Self::RuleSet { .. } => RULES_TIME,
             _ => ACTION_TIME,
         }
+    }
+
+    /// The longest a client waits for this request: the bound the engine serves the action
+    /// under plus the client's own timeout, which covers the admission and the reply's write.
+    /// Input: the client's timeout. Output: the wait.
+    pub(super) fn wait(&self, client: Duration) -> Duration {
+        self.time() + client
     }
 }
 
@@ -380,7 +387,7 @@ impl OwnerClient {
         action: Action,
         token: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        let time = self.timeout.max(action.time());
+        let time = action.wait(self.timeout);
         tokio::time::timeout(time, async {
             let read = read_kind(&action);
             let envelope = Envelope {
@@ -392,10 +399,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("github_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -415,9 +422,9 @@ impl OwnerClient {
                 let mut bytes = token.into_bytes();
                 let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
                 framed.extend_from_slice(&bytes);
-                crate::credentials::wipe(&mut bytes);
+                kernel_security::secret::wipe(&mut bytes);
                 let sent = stream.write_all(&framed).await;
-                crate::credentials::wipe(&mut framed);
+                kernel_security::secret::wipe(&mut framed);
                 sent.map_err(|_| failure("github_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
@@ -440,11 +447,11 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// Serves one GitHub owner request after the owner exchange deadline: the action runs
-/// under its own budget ([`Action::time`]) and the reply write under the owner wait.
-/// Inputs: the stream, engine, authority, owner packet, admission and request bytes.
-/// Output: the reply written, a rejection code included.
+/// under its own budget ([`Action::time`]), each storage job in it decided just before that
+/// budget cuts it, and the reply write under the owner wait. Inputs: the stream, engine,
+/// authority, owner packet, admission and request bytes. Output: the reply written.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -467,7 +474,8 @@ pub(super) async fn serve(
             Err(error) => Err(error),
         }
     };
-    let outcome = tokio::time::timeout(time, work)
+    let cut = tokio::time::Instant::now() + time;
+    let outcome = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work))
         .await
         .unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
@@ -569,6 +577,7 @@ async fn handle(
                             pool: None,
                             prompt,
                             agent: DRAFT_AGENT,
+                            holds_seat: false,
                         })
                     }),
                 }
@@ -700,7 +709,7 @@ async fn authenticate(
     Ok(())
 }
 
-async fn receive_token(stream: &mut UnixStream) -> Result<SecretString, EngineError> {
+async fn receive_token(stream: &mut Stream) -> Result<SecretString, EngineError> {
     tokio::time::timeout(TOKEN_FRAME_TIME, async {
         let invalid = || failure("github_token_frame_invalid");
         let size = stream.read_u32().await.map_err(|_| invalid())? as usize;
@@ -709,7 +718,7 @@ async fn receive_token(stream: &mut UnixStream) -> Result<SecretString, EngineEr
         }
         let mut bytes = vec![0; size];
         if stream.read_exact(&mut bytes).await.is_err() {
-            crate::credentials::wipe(&mut bytes);
+            kernel_security::secret::wipe(&mut bytes);
             return Err(invalid());
         }
         SecretString::new(bytes).map_err(|_| failure("github_token_invalid"))

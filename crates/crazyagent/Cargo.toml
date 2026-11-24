@@ -14,6 +14,17 @@ clean-mac-gate = []
 owner-trace = []
 
 [dependencies]
+crazyagent-bus-gateway = { path = "../kernel/bus_gateway" }
+crazyagent-kernel-security = { path = "../kernel/security" }
+crazyagent-kernel-storage = { path = "../kernel/storage" }
+crazyagent-kernel-processes = { path = "../kernel/processes" }
+crazyagent-kernel-common = { path = "../kernel/common" }
+crazyagent-kernel-plugin-host = { path = "../kernel/plugin_host" }
+crazyagent-kernel-sandbox = { path = "../kernel/sandbox" }
+crazyagent-plugin-agent-quit = { path = "../../plugins/t2/agent-quit" }
+crazyagent-sdk = { path = "../sdk/rust" }
+crazyagent-sdk-host = { path = "../sdk/host" }
+crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["raw_value"] }
 url = "=2.5.8"
@@ -36,8 +47,8 @@ zeroize = "=1.9.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
-rustix = { version = "=1.1.5", features = ["fs", "process", "thread"] }
-nix = { version = "=0.28.0", default-features = false, features = ["fs", "net", "signal", "socket", "uio", "user"] }
+rustix = { version = "=1.1.5", features = ["event", "fs", "process", "thread"] }
+nix = { version = "=0.28.0", default-features = false, features = ["fs", "mount", "net", "sched", "signal", "socket", "uio", "user"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 keyring-core = "=1.0.1"
@@ -49,8 +60,6 @@ seccompiler = { version = "=0.5.0", default-features = false }
 zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }
-portable-pty = "=0.9.0"
 windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -59,6 +68,18 @@ crazyagent-macos-fs = { path = "../crazyagent-macos-fs" }
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 sha2 = { version = "=0.10.9", features = ["asm"] }
 
+[build-dependencies]
+crazyagent-plugin-check = { path = "../sdk/plugin_check" }
+
 [dev-dependencies]
+crazyagent-bus-gateway = { path = "../kernel/bus_gateway", features = ["test-support"] }
+crazyagent-kernel-storage = { path = "../kernel/storage", features = ["test-support"] }
+crazyagent-kernel-processes = { path = "../kernel/processes", features = ["test-support"] }
+crazyagent-kernel-sandbox = { path = "../kernel/sandbox", features = ["test-support"] }
+crazyagent-cap = { path = "../sdk/cap" }
+crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 tempfile = "=3.27.0"
 minisign = "=0.10.0"
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox", features = ["test-principals"] }

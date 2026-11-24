@@ -1174,7 +1174,7 @@ fn lead_tree_orders_workers_under_their_leads() {
 
 #[cfg(unix)]
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -1459,7 +1459,7 @@ fn naming_more_kept_screens_than_a_host_keeps_is_refused() {
     let mut status = tree();
     status.show_finished = true;
     status.agents.extend(
-        (0..=crate::terminal::KEPT_MAX as i64).map(|offset| TeamAgent {
+        (0..=kernel_processes::terminal::kept::KEPT_MAX as i64).map(|offset| TeamAgent {
             parent: Some(3),
             finished: true,
             ..agent(100 + offset, AgentRole::Sub, "codex", AgentStatus::Failed)
@@ -1472,7 +1472,7 @@ fn naming_more_kept_screens_than_a_host_keeps_is_refused() {
             .iter()
             .filter(|node| node.status == Some(AgentStatus::Failed) && node.kind == NodeKind::Sub)
             .count()
-            > crate::terminal::KEPT_MAX
+            > kernel_processes::terminal::kept::KEPT_MAX
     );
     name_kept(&mut shown, |_| true);
 }

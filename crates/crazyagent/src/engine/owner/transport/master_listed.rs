@@ -7,7 +7,6 @@ use super::master_runtime::{Capture, POLICY_CHECK_EVERY, timed_out};
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::agents::Hold;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
-use crate::credentials::SecretString;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::claude_host::MasterTools;
 use crate::harnesses::accounts::Handover;
@@ -28,6 +27,7 @@ use crate::protocol::{CredentialRef, RequestId};
 use crate::sandbox::hidden_paths::HiddenRun;
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
 use crate::usage::capture::Tokens;
+use kernel_security::secret::SecretString;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
@@ -466,7 +466,7 @@ fn listed_stop_settled<K: Send + 'static>(
 /// lowercase hex characters, or [`NOT_INSTALLED`] for a file that cannot be read.
 #[cfg(unix)]
 fn program_digest(program: &std::path::Path) -> Result<String, EngineError> {
-    crate::setup::process::file_sha256(program).map_err(|_| failure(NOT_INSTALLED))
+    kernel_processes::run::file_sha256(program).map_err(|_| failure(NOT_INSTALLED))
 }
 
 /// Refuses the digest of a listed master's program where no listed master runs, as a
@@ -805,8 +805,9 @@ impl OwnerRuntimeHandle {
             },
             model: Some(handover.model().to_owned()),
             tools: false,
-            sandbox_profile: Some(sandbox.profile().to_path_buf()),
-            unconfined: false,
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(
+                sandbox.profile().to_path_buf(),
+            ),
             git_identity: None,
             limits: turn_limits(prepared.time, prepared.provider_retry),
         };

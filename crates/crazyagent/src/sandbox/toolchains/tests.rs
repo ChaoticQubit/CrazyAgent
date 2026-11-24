@@ -169,7 +169,7 @@ fn a_launch_getconf_written_again_is_kept_and_one_that_changed_is_refused() {
 /// test's own home. Inputs: the program, the repository, the home and the arguments.
 /// Output: the program's output.
 fn git_run(program: &Path, repo: &Path, home: &Path, args: &[&str]) -> std::process::Output {
-    crate::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         std::process::Command::new(program)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -796,7 +796,7 @@ fn launches_that_prepare_one_cargo_home_at_once_all_get_it() {
 #[test]
 #[ignore]
 fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     let home = tempfile::tempdir().unwrap();
@@ -825,7 +825,7 @@ fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
 #[test]
 fn a_launch_getconf_written_under_a_narrow_umask_is_a_private_program() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "sandbox::toolchains::tests::a_launch_getconf_written_under_a_narrow_umask_in_its_own_process",
         ":",
         folder.path(),
@@ -838,4 +838,63 @@ fn a_launch_getconf_written_under_a_narrow_umask_is_a_private_program() {
         fs::read_to_string(folder.path().join("outcome")).unwrap(),
         "ok 700 700"
     );
+}
+
+/// Leaves in an agent's short temp folder what an agent may: a folder it shut with mode 000
+/// and a file it made immutable in a folder of its own. Input: the temp folder. Output: none.
+#[cfg(target_os = "macos")]
+fn shut_and_pin(tmp: &Path) {
+    let shut = tmp.join("shut");
+    fs::create_dir_all(&shut).unwrap();
+    fs::write(shut.join("inner"), b"left by an agent\n").unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let pinned = tmp.join("deep").join("pinned");
+    fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+    fs::write(&pinned, b"left by an agent\n").unwrap();
+    assert!(
+        kernel_processes::spawn_gate::status(
+            std::process::Command::new("/usr/bin/chflags")
+                .arg("uchg")
+                .arg(&pinned)
+        )
+        .unwrap()
+        .success()
+    );
+}
+
+/// #571 sec N1: removing an agent's short temp folder removes a folder the agent shut with
+/// mode 000 and a file it made immutable, as Clean up removes an agent's tree, so neither
+/// keeps the folder in the system temp folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = make_tmp(home.path()).unwrap();
+    shut_and_pin(&tmp);
+    let removed = remove_tmp(home.path());
+    let left = fs::symlink_metadata(&tmp).is_ok();
+    let _ = crate::team::cleanup::remove_agent_tree(&tmp);
+    assert!(removed.is_ok(), "{removed:?}");
+    assert!(!left, "the temp folder stayed");
+}
+
+/// #571 sec N1: removing all an agent's short temp folder holds but its kept socket removes
+/// a folder the agent shut with mode 000 and a file it made immutable, and keeps the socket.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = make_tmp(home.path()).unwrap();
+    let socket = tmp.join("kept.sock");
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    shut_and_pin(&tmp);
+    let removed = remove_tmp_keeping(home.path(), "kept.sock");
+    let names: Vec<_> = fs::read_dir(&tmp)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect();
+    let _ = crate::team::cleanup::remove_agent_tree(&tmp);
+    assert!(removed.is_ok(), "{removed:?}");
+    assert_eq!(names, [std::ffi::OsString::from("kept.sock")]);
 }

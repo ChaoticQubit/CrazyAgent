@@ -27,7 +27,7 @@ impl Process {
     }
 
     fn launch_output(root: &Path, socket: &str, output: Stdio) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)
@@ -63,7 +63,14 @@ impl Process {
         let err_reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
             err.take(65536).read_to_end(&mut bytes).unwrap();
-            appended(&captured, &bytes);
+            let untraced: Vec<u8> = bytes
+                .split_inclusive(|byte| *byte == b'\n')
+                .filter(|line| !line.starts_with(b"owner_trace "))
+                .flatten()
+                .copied()
+                .collect();
+            assert!(untraced.len() <= bytes.len());
+            appended(&captured, &untraced);
         });
         Self {
             child,
@@ -113,7 +120,7 @@ impl Process {
 
     fn stop(&mut self, signal: &str) {
         assert!(
-            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
                 "-s",
                 signal,
                 &self.child.id().to_string()
@@ -431,7 +438,7 @@ fn cli_preserves_unsafe_locator_objects() {
             }
             "fifo" => {
                 assert!(
-                    crazyagent::spawn_gate::status(
+                    kernel_processes::spawn_gate::status(
                         Command::new("/usr/bin/mkfifo")
                             .arg("-m")
                             .arg("600")
@@ -622,11 +629,11 @@ async fn cli_shutdown_stops_both_before_database_unlock() {
         process.ready();
         let state = locator(root.path());
         let generation = root.path().join(state["generation"].as_str().unwrap());
-        let mut stalled = crazyagent::spawn_gate::connect_unix(generation.join("owner.sock"))
+        let mut stalled = kernel_processes::spawn_gate::connect_unix(generation.join("owner.sock"))
             .await
             .unwrap();
         stalled.write_all(b"CA").await.unwrap();
-        let mut ordinary = crazyagent::spawn_gate::connect_unix(root.path().join("e.sock"))
+        let mut ordinary = kernel_processes::spawn_gate::connect_unix(root.path().join("e.sock"))
             .await
             .unwrap();
         ordinary.write_all(&[0]).await.unwrap();
@@ -645,12 +652,12 @@ async fn cli_shutdown_stops_both_before_database_unlock() {
         assert!(!root.path().join("e.sock").exists());
         assert!(!generation.exists());
         assert!(
-            crazyagent::spawn_gate::connect_unix(root.path().join("e.sock"))
+            kernel_processes::spawn_gate::connect_unix(root.path().join("e.sock"))
                 .await
                 .is_err()
         );
         assert!(
-            crazyagent::spawn_gate::connect_unix(generation.join("owner.sock"))
+            kernel_processes::spawn_gate::connect_unix(generation.join("owner.sock"))
                 .await
                 .is_err()
         );
@@ -777,7 +784,7 @@ fn cli_preserves_unrecorded_socket() {
     let root = tempfile::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.path().join("engine.sock");
-    let listener = crazyagent::spawn_gate::bind_unix_std(&path).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut process = Process::launch(root.path(), "engine.sock");
     process.refused("socket_path_already_exists");
@@ -808,7 +815,7 @@ async fn pending_cancellation_creates_no_runtime_state() {
 async fn cli_output_failure_cleans_runtime_before_unlock() {
     use std::os::fd::OwnedFd;
     let root = private_root();
-    let (output, peer) = crazyagent::spawn_gate::unix_pair_std().unwrap();
+    let (output, peer) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     drop(peer);
     let fd: OwnedFd = output.into();
     let mut process = Process::launch_output(root.path(), "e.sock", Stdio::from(fd));
@@ -854,7 +861,7 @@ async fn cli_shutdown_preserves_observed_replacements() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let identity = std::fs::symlink_metadata(&path).unwrap().ino();
         assert!(
-            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
                 "-s",
                 "TERM",
                 &process.child.id().to_string()
@@ -896,7 +903,9 @@ async fn cli_owner_transport_rejects_wrong_authentication() {
         .path()
         .join(state["generation"].as_str().unwrap())
         .join("owner.sock");
-    let mut stream = crazyagent::spawn_gate::connect_unix(path).await.unwrap();
+    let mut stream = kernel_processes::spawn_gate::connect_unix(path)
+        .await
+        .unwrap();
     let mut packet = [0; 37];
     packet[..4].copy_from_slice(b"CAO1");
     stream.write_all(&packet).await.unwrap();

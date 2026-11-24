@@ -38,6 +38,9 @@ const MEMORY_BYTES_MAX: usize = 4096;
 pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
 pub(in crate::tui) const REVIEW_ROWS: usize = 12;
 const MESSAGE_BYTES_MAX: usize = 8192;
+/// What `a` says when the owner's text and the drafted message pass one message's bound.
+const REINSTALL_TOO_LONG: &str = "Your message and the drafted one don't fit in one message. Send or \
+                                  shorten yours, then press a again.";
 const NAME_BYTES_MAX: usize = 256;
 const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
@@ -662,10 +665,12 @@ pub(in crate::tui) enum ProjectReply {
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
     RefreshOverview,
-    MoveHome(crate::projects_home::AddMode),
+    MoveRead,
+    MoveHome(crate::projects_home::AddMode, bool),
     DeleteEverything(String),
     GitHubRules,
     TeamChange(Box<crate::team::TeamAction>),
+    ReinstallDismiss,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -711,6 +716,9 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
     pub confirm_move: bool,
+    pub move_left: Option<crate::projects_home::icloud::SkippedFolders>,
+    pub move_everything: bool,
+    pub move_unread: bool,
     pub removal: Option<crate::team::cleanup::RemovalPreview>,
     pub remove_choice: RemoveChoice,
     remove_everything: bool,
@@ -734,6 +742,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub recovery: ProjectRecovery,
     pub roadmap: StatusLine,
     pub github_notice: bool,
+    pub reinstall: Option<crate::projects_home::reinstall::Offer>,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -761,7 +770,7 @@ pub(in crate::tui) struct ProjectScreen {
 pub(in crate::tui) fn memory_source(memory: &KnowledgeEntry) -> Option<ResearchKind> {
     let digest = memory.id.as_str().strip_prefix("research-")?;
     ResearchKind::ALL.into_iter().find(|kind| {
-        let expected = crate::memory::hash(
+        let expected = kernel_common::hash(
             format!(
                 "{}\n{}\n{}",
                 memory.project_id.as_str(),
@@ -887,6 +896,12 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "git tracks a file in that folder. Only folders git does not track can be hidden."
         }
         "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
+        "hidden_path_name_unchecked" => {
+            "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another."
+        }
+        "hidden_paths_need_macos" => {
+            "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
+        }
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {
@@ -954,6 +969,13 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             || code == "projects_removed_full" =>
         {
             return crate::projects_home::plain_problem(code).map_or_else(
+                || coded("That didn't work. Try again.", code),
+                str::to_owned,
+            );
+        }
+        code @ (crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS
+        | kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS) => {
+            return crate::config::plain_problem(code).map_or_else(
                 || coded("That didn't work. Try again.", code),
                 str::to_owned,
             );

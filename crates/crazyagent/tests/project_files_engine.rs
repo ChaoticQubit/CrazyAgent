@@ -43,7 +43,7 @@ async fn engine() -> (
 /// Runs git as a test owner would, with an empty home and no system config.
 /// Inputs: the home, the folder and the arguments.
 fn git(home: &Path, dir: &Path, args: &[&str]) {
-    let status = crazyagent::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/git")
             .args(args)
             .current_dir(dir)

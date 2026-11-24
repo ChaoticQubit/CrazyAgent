@@ -31,6 +31,10 @@ pub mod instruction_check;
 /// model reply, the pool rule and the one confined model run.
 pub mod instruction_cleanup;
 pub mod instruction_files;
+/// The owner-class endpoints, named by path: the engine and owner listeners, their clients
+/// and the check of the peer at each end: a Unix socket guarded by its parent folder, or on
+/// Windows a named pipe whose pipes file in that folder pins the serving engine.
+pub(crate) mod ipc;
 #[cfg(unix)]
 pub mod isolation;
 pub mod landing;
@@ -39,6 +43,7 @@ pub mod landing_turns;
 pub mod launch_context;
 pub mod learning;
 pub mod ledger;
+pub mod log_compaction;
 pub mod master_frame_limit;
 pub mod master_session;
 pub mod master_sessions;
@@ -46,6 +51,9 @@ pub mod master_step_limit;
 pub mod master_time_limit;
 pub mod memory;
 pub mod model_gateway;
+/// `net.request` egress through the system curl and today's GitHub exchange, with the
+/// static host and capture tables of the bundled plugins.
+pub mod net_egress;
 pub mod onboarding;
 pub mod owner_profile;
 pub mod owner_texts;
@@ -61,7 +69,6 @@ pub mod projects_home;
 pub mod protocol;
 pub mod provider_reach;
 pub mod provider_retry;
-pub mod qualification;
 pub mod questions;
 pub mod quit_settings;
 pub mod rcli_host;
@@ -73,18 +80,17 @@ pub mod routing;
 pub mod sandbox;
 pub mod sandbox_settings;
 pub mod scheduling;
+/// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
+/// gateway's grant check and the bundled agent-quit plugin.
+mod sdk_slice;
+/// The SDK providers the kernel security crate backs: the secrets capabilities over the
+/// OS store, and `Absent`, which fails every call without opening anything.
+pub mod security_caps;
 pub mod service;
 pub mod sessions_log;
 pub mod settings_log;
 pub mod setup;
 pub mod skills;
-/// The short address a Unix socket is bound and reached at when its own path is too long
-/// for a socket address.
-#[cfg(unix)]
-pub mod socket_address;
-/// The one place this crate starts child processes and creates sockets, so no child
-/// inherits a pipe or socket another thread has not marked close-on-exec yet.
-pub mod spawn_gate;
 /// The engine's ordered event log in engine.db (v2.5 L1): one `seq` per event, the
 /// transaction's revision, a closed aggregate, and snapshot runs in chunks.
 pub mod state_log;
@@ -97,7 +103,6 @@ pub mod tui;
 pub mod update;
 pub mod usage;
 pub mod verification;
-pub mod version;
 /// A client's side of the engine watch (v2.5 S3b, S3d): where it resumes, which topics go
 /// out at once and how often a reload for changes of unknown subject may follow.
 pub mod watch_feed;
@@ -107,3 +112,6 @@ pub mod worktrees;
 #[cfg(all(test, unix))]
 #[path = "../tests/poll_support/mod.rs"]
 mod poll_support;
+
+#[cfg(all(test, unix))]
+mod budget_processes_tests;

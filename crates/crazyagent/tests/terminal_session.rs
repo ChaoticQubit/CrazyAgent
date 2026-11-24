@@ -1,14 +1,18 @@
 #![cfg(target_os = "macos")]
+mod full_access_support;
+use full_access_support::full_access;
 
 use crazyagent::harnesses::interactive::KEY_FILE;
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
+    AccountBinding, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
 };
 use crazyagent::harnesses::leftovers::Unstopped;
 use crazyagent::harnesses::terminal_session::TerminalSession;
 use crazyagent::research::runner::{ResearchLimits, ResearchRunner};
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use crazyagent::terminal::FOLDER;
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use rustix::process::{
     Pid, Signal, getpgid, kill_process, test_kill_process, test_kill_process_group,
 };
@@ -36,7 +40,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -84,7 +88,12 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let home = root_path.join("home");
     let work = root_path.join("work");
     let bin = root_path.join("bin");
@@ -107,8 +116,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -175,7 +183,12 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let home = root_path.join("home");
     let work = root_path.join("work");
     let bin = root_path.join("bin");
@@ -198,8 +211,7 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -272,7 +284,12 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
     let host: Arc<dyn Host> = if keeps {
         crazyagent::terminal::tmux_host(&root_path, Some(tmux))
     } else {
-        Arc::new(Tmux::open(Some(tmux), &folder))
+        Arc::new(Tmux::open(
+            Some(tmux),
+            &folder,
+            crazyagent::sandbox::confinement(),
+            crazyagent::terminal::tmux::tmux_hooks(),
+        ))
     };
     let home = root_path.join("home");
     let work = root_path.join("work");
@@ -288,6 +305,10 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
         std::fs::write(&profile, text).unwrap();
         profile
     });
+    let boundary = match profile {
+        Some(profile) => LaunchBoundary::Profile(profile),
+        None => full_access(&work, &root_path),
+    };
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable,
@@ -299,8 +320,7 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
         },
         model: None,
         tools: true,
-        unconfined: profile.is_none(),
-        sandbox_profile: profile,
+        boundary,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -555,7 +575,7 @@ fn pid_in(folder: &Path, name: &str) -> Option<rustix::process::Pid> {
 /// Reads a process's parent id with `ps`. Input: the process. Output: the parent, or none
 /// once it has ended.
 fn parent_of(process: rustix::process::Pid) -> Option<i32> {
-    let listing = crazyagent::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-o", "ppid=", "-p", &process.as_raw_nonzero().to_string()])
             .stdin(Stdio::null())
@@ -598,7 +618,12 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let home = root_path.join("home");
     let work = root_path.join("work");
     let bin = root_path.join("bin");
@@ -608,6 +633,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
     let executable = bin.join("claude");
     std::fs::write(&executable, LEAVING_STAND_IN).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let boundary = full_access(&work, &root_path);
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable,
@@ -615,8 +641,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         account: AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -687,7 +712,7 @@ const PARENT_STAND_IN: &str = "#!/bin/sh\nif kill -0 \"$PPID\" 2>/dev/null; then
 
 /// The command line `ps` shows for one process. Input: the pid. Output: the line.
 fn command_of(pid: Pid) -> String {
-    let listed = crazyagent::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-o", "command=", "-p"])
             .arg(pid.as_raw_nonzero().get().to_string())

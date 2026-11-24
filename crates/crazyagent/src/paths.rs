@@ -1,3 +1,4 @@
+use kernel_common::Platform;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -24,24 +25,6 @@ impl std::error::Error for PathsError {}
 
 fn problem(path: &Path, what: impl std::fmt::Display) -> PathsError {
     PathsError(format!("{}: {what}", path.display()))
-}
-
-/// The three desktop platforms the data root and services are defined for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Platform {
-    MacOs,
-    Linux,
-    Windows,
-}
-
-impl Platform {
-    pub const CURRENT: Self = if cfg!(target_os = "macos") {
-        Self::MacOs
-    } else if cfg!(windows) {
-        Self::Windows
-    } else {
-        Self::Linux
-    };
 }
 
 /// The environment values that choose the data root, read once so the choice is testable
@@ -160,7 +143,13 @@ impl Layout {
     /// default `global.toml` and `project.toml` (0600) when they are missing; existing
     /// files are kept. Output: an error naming the path for an unsafe or unusable entry.
     pub fn prepare(&self) -> Result<(), PathsError> {
+        #[cfg(unix)]
         private_folder(&self.root)?;
+        #[cfg(windows)]
+        private_folder_as(
+            &self.root,
+            Some(crazyagent_win_sandbox::private::Store::Database),
+        )?;
         private_folder(&self.logs())?;
         private_settings(&self.global_settings(), GLOBAL_DEFAULTS)?;
         private_settings(&self.project_settings(), PROJECT_DEFAULTS)?;
@@ -171,6 +160,7 @@ impl Layout {
 /// Creates a folder and any missing parents private to this user (0700), then refuses
 /// it unless it is a real folder this user owns with exactly mode 0700. Input: the
 /// folder. Output: Ok, or an error naming the path and the fix.
+#[cfg(unix)]
 pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -186,14 +176,77 @@ pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     private(path, &metadata, 0o700, "700")
 }
 
-/// Whether a folder already is one [`private_folder`] leaves: a real folder, not a link,
-/// owned by this user with mode 700 where Unix modes exist. Nothing is created. Input: the
-/// folder. Output: the answer, false for a missing folder.
-pub(crate) fn is_private_folder(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.is_dir() && private(path, &metadata, 0o700, "700").is_ok())
+/// Creates a folder's missing parents, then the folder itself as a W1 private folder (owned
+/// by this user, protected list for the user, SYSTEM and the administrators), or checks the
+/// one already there (DESIGN-0256 D1). Input: the folder. Output: Ok, or an error naming the
+/// path and why it is not private.
+#[cfg(windows)]
+pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
+    private_folder_as(path, None)
 }
 
+/// [`private_folder`] for a store folder too: a new one is made with the store's full
+/// label (#524 r3), as the data root is for the database. Inputs: the folder and the store,
+/// if any. Output: Ok, or an error naming the path and why it is not private.
+#[cfg(windows)]
+fn private_folder_as(
+    path: &Path,
+    store: Option<crazyagent_win_sandbox::private::Store>,
+) -> Result<(), PathsError> {
+    use crazyagent_win_sandbox::private;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| problem(path, format!("could not create the folder ({error})")))?;
+    }
+    match store {
+        Some(store) => private::store_dir(path, store),
+        None => private::dir(path),
+    }
+    .map(drop)
+    .map_err(|error| refused(path, &error))
+}
+
+/// Says why W1's private check refused an entry, or that it could not be opened. Inputs: the
+/// path and the error. Output: the problem naming the path.
+#[cfg(windows)]
+fn refused(path: &Path, error: &std::io::Error) -> PathsError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        problem(path, format!("must be private to you ({error})"))
+    } else {
+        problem(path, error)
+    }
+}
+
+/// Whether a folder already is one [`private_folder`] leaves: a real folder, not a link,
+/// owned by this user with mode 700 where Unix modes exist, private by W1's check on Windows.
+/// Nothing is created. Input: the folder. Output: the answer, false for a missing folder.
+pub(crate) fn is_private_folder(path: &Path) -> bool {
+    #[cfg(unix)]
+    return std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && private(path, &metadata, 0o700, "700").is_ok());
+    #[cfg(windows)]
+    return std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        && crazyagent_win_sandbox::private::dir(path).is_ok();
+}
+
+/// Writes a default settings file private to this user when it is missing, or checks the one
+/// already there, on Windows through W1's private file (DESIGN-0256 D1). Inputs: the path
+/// and the default text. Output: Ok, or an error naming the path.
+#[cfg(windows)]
+fn private_settings(path: &Path, defaults: &str) -> Result<(), PathsError> {
+    use crazyagent_win_sandbox::private;
+    match private::file(path, true) {
+        Ok(mut file) => std::io::Write::write_all(&mut file, defaults.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|error| problem(path, format!("could not write settings ({error})"))),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => private::read_only(path)
+            .map(drop)
+            .map_err(|error| refused(path, &error)),
+        Err(error) => Err(refused(path, &error)),
+    }
+}
+
+#[cfg(unix)]
 fn private_settings(path: &Path, defaults: &str) -> Result<(), PathsError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -241,28 +294,30 @@ fn private(
     Ok(())
 }
 
-/// Accepts every entry where Unix owner and mode bits do not exist. Inputs unused.
-/// Output: Ok; the engine itself still refuses roots it cannot check on Windows.
-#[cfg(not(unix))]
-fn private(
-    _path: &Path,
-    _metadata: &std::fs::Metadata,
-    _mode: u32,
-    _shown: &str,
-) -> Result<(), PathsError> {
-    Ok(())
-}
-
-fn executable_names(name: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![format!("{name}.exe"), name.to_owned()]
-    } else {
+/// The file names a search tries for a program name in each folder, in order: the name
+/// alone off Windows; on Windows `<name>.exe`, then `<name>.cmd` (an npm cmd-shim the
+/// resolver maps to its script, never run through cmd.exe), and a name that already has an
+/// extension alone. The extensionless file npm writes beside its shims is an sh script
+/// Windows cannot start, so it is never tried. Input: the name. Output: the names.
+pub(crate) fn executable_names(name: &str) -> Vec<String> {
+    if !cfg!(windows) || Path::new(name).extension().is_some() {
         vec![name.to_owned()]
+    } else {
+        vec![format!("{name}.exe"), format!("{name}.cmd")]
     }
 }
 
-fn executable_file(path: &Path) -> Option<PathBuf> {
+/// The real file a launch of an entry runs, while it is a runnable file: on Windows an npm
+/// cmd-shim gives the script it names ([`kernel_processes::batch::cmd_shim_real`]), the pin, and any
+/// other batch file gives none. Input: the entry. Output: the real file, or none.
+pub(crate) fn executable_file(path: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(path).ok()?;
+    #[cfg(windows)]
+    let real = if kernel_processes::batch::batch_file(&real) {
+        kernel_processes::batch::cmd_shim_real(&real)?
+    } else {
+        real
+    };
     let metadata = std::fs::metadata(&real).ok()?;
     #[cfg(unix)]
     let runnable = std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0;
@@ -272,12 +327,14 @@ fn executable_file(path: &Path) -> Option<PathBuf> {
 }
 
 /// Finds the PATH entry a shell would run for a name, skipping relative PATH folders, folders
-/// in the temp folders given and entries leading into one ([`crate::tools::leads_into_temp`]).
+/// in the temp folders given and entries leading into one ([`kernel_processes::finding::leads_into_temp`]).
 /// Inputs: the name, a PATH value and the temp folders, none to refuse nothing. Output: the
 /// absolute entry with its links kept, or none when no entry leads to a runnable file.
 fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<PathBuf> {
     for folder in std::env::split_paths(path?) {
-        if !folder.is_absolute() || crate::tools::in_temp_of(&folder, temps) {
+        if !folder.is_absolute()
+            || kernel_processes::finding::in_temp_of(&crate::tools::HOOKS, &folder, temps)
+        {
             continue;
         }
         for file in executable_names(name) {
@@ -285,7 +342,12 @@ fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<Pat
             let Some(real) = executable_file(&entry) else {
                 continue;
             };
-            if crate::tools::leads_into_temp(&entry, &real, temps) {
+            if kernel_processes::finding::leads_into_temp(
+                &crate::tools::HOOKS,
+                &entry,
+                &real,
+                temps,
+            ) {
                 continue;
             }
             assert!(entry.is_absolute());
@@ -315,7 +377,7 @@ pub struct Harnesses {
 /// and the folder holding the running executable. Output: each given path, else the `codex`
 /// and `claude` entries the search finds as the catalog does (PATH, system, then HOME
 /// folders), and the RCLI host next to the executable, then in the engine's places with that
-/// PATH ([`crate::tools::Places::engine`]), which set aside a temp folder, links kept.
+/// PATH ([`kernel_processes::finding::Places::engine`]), which set aside a temp folder, links kept.
 pub fn resolve_harnesses(
     given: Harnesses,
     search: &crate::harnesses::Search,
@@ -329,19 +391,19 @@ pub fn resolve_harnesses(
             .or_else(|| harness_entry("claude-code", search, path)),
         rcli: rcli_entry(
             given.rcli,
-            &crate::tools::Places::engine(None, None, None, path),
+            &crate::tools::tools_engine(None, None, None, path),
             executable_folder,
         ),
     }
 }
 
 /// Resolves the RCLI host for one engine start: the given path, else the host next to the
-/// running executable, then wherever the tool resolver looks ([`crate::tools::resolve`]),
+/// running executable, then wherever the tool resolver looks ([`kernel_processes::finding::resolve`]),
 /// links kept. Inputs: the given path, the places and the folder holding the running
 /// executable. Output: the entry, or none.
 pub fn rcli_entry(
     given: Option<PathBuf>,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
     executable_folder: Option<&Path>,
 ) -> Option<PathBuf> {
     let beside = || {
@@ -354,7 +416,7 @@ pub fn rcli_entry(
     let resolved = || {
         executable_names(RCLI_EXECUTABLE)
             .iter()
-            .find_map(|name| crate::tools::resolve(name, places).ok())
+            .find_map(|name| kernel_processes::finding::resolve(name, places).ok())
             .map(|found| found.entry)
     };
     given.or_else(|| {
@@ -429,7 +491,11 @@ pub fn harness_candidates(
 /// match for its name, never one in a temp folder or leading into one for an entry outside
 /// every temp folder; else NotFound, which a launch reports as not installed.
 pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
-    launch_executable_in(entry, path, &crate::tools::temp_roots())
+    launch_executable_in(
+        entry,
+        path,
+        &kernel_processes::finding::temp_roots(&crate::tools::HOOKS),
+    )
 }
 
 /// Resolves a harness entry as [`launch_executable`] does with the temp folders given, so a
@@ -454,7 +520,11 @@ fn launch_executable_in(
 /// under the rules of [`launch_executable`]; else NotFound. Inputs: the absolute entry and
 /// the PATH value. Output: the entry used.
 pub fn launch_entry(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
-    launch_entry_in(entry, path, &crate::tools::temp_roots())
+    launch_entry_in(
+        entry,
+        path,
+        &kernel_processes::finding::temp_roots(&crate::tools::HOOKS),
+    )
 }
 
 /// Finds the entry a launch goes through as [`launch_entry`] does with the temp folders
@@ -471,11 +541,12 @@ fn launch_entry_in(
     let on_path = || {
         let folder = entry.parent()?;
         let name = entry.file_name()?.to_str()?;
-        let refused: &[PathBuf] = if crate::tools::in_temp_of(folder, temps) {
-            &[]
-        } else {
-            temps
-        };
+        let refused: &[PathBuf] =
+            if kernel_processes::finding::in_temp_of(&crate::tools::HOOKS, folder, temps) {
+                &[]
+            } else {
+                temps
+            };
         std::env::split_paths(path?)
             .any(|listed| listed == folder)
             .then(|| path_entry(name, path, refused))
@@ -663,7 +734,11 @@ mod tests {
                 root.join("o00000000").join("owner.sock"),
                 root.join(SOCKET_NAME),
             ] {
-                assert!(crate::socket_address::fits(&socket), "{}", socket.display());
+                assert!(
+                    kernel_processes::socket_address::fits(&socket),
+                    "{}",
+                    socket.display()
+                );
             }
         }
     }
@@ -813,7 +888,7 @@ mod tests {
         let app = root.join("app");
         let bin = root.join("bin");
         program(&bin.join(RCLI_EXECUTABLE), 0o755);
-        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        let places = crate::tools::tools_new(vec![bin.clone()], None);
         assert_eq!(
             rcli_entry(None, &places, Some(&app)),
             Some(bin.join(RCLI_EXECUTABLE))
@@ -849,8 +924,11 @@ mod tests {
     /// Keeps only the folders of `places` inside `root`, in their order, so a row sees the
     /// engine's search order without this machine's Homebrew and system folders. Inputs:
     /// the places and the scratch root. Output: the places.
-    fn scratch_only(places: crate::tools::Places, root: &Path) -> crate::tools::Places {
-        crate::tools::Places::new(
+    fn scratch_only(
+        places: kernel_processes::finding::Places,
+        root: &Path,
+    ) -> kernel_processes::finding::Places {
+        crate::tools::tools_new(
             places
                 .folders()
                 .iter()
@@ -879,7 +957,7 @@ mod tests {
         let hidden = root.join("project/.crazyagent/bin");
         std::fs::create_dir_all(&home).unwrap();
         let path = std::env::join_paths([planted.clone(), installed.clone()]).unwrap();
-        let looked = crate::tools::Places::engine(
+        let looked = crate::tools::tools_engine(
             Some(&engine),
             None,
             Some(home.clone()),
@@ -888,7 +966,7 @@ mod tests {
         assert!(looked.folders().contains(&installed));
         assert!(!looked.folders().contains(&planted));
         let scratch = scratch_only(looked, &root);
-        let places = crate::tools::Places::new(
+        let places = crate::tools::tools_new(
             [scratch.folders(), &[hidden.clone(), elsewhere.clone()]].concat(),
             Some(home.clone()),
         );
@@ -927,7 +1005,7 @@ mod tests {
         program(&real, 0o755);
         std::fs::create_dir_all(&linked).unwrap();
         std::os::unix::fs::symlink(&real, linked.join(RCLI_EXECUTABLE)).unwrap();
-        let only_link = crate::tools::Places::new(vec![linked.clone()], Some(home));
+        let only_link = crate::tools::tools_new(vec![linked.clone()], Some(home));
         assert_eq!(
             rcli_entry(None, &only_link, None),
             Some(linked.join(RCLI_EXECUTABLE)),

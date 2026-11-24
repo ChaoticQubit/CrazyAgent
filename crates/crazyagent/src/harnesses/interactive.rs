@@ -118,6 +118,19 @@ pub struct InteractiveCommand {
     pub transcript: Transcript,
 }
 
+impl From<&InteractiveCommand> for kernel_processes::terminal::PaneCommand {
+    /// The fields the terminal host reads, byte-equal: the argument vector, the working
+    /// folder and the environment; the session record stays with the harness. Input: the
+    /// command. Output: the pane command.
+    fn from(command: &InteractiveCommand) -> Self {
+        Self {
+            argv: command.argv.clone(),
+            cwd: command.cwd.clone(),
+            env: command.env.clone(),
+        }
+    }
+}
+
 /// Where a harness writes its own session record, which the engine reads for status,
 /// replies and task blocks instead of reading the screen: a Codex rollout, a Claude Code
 /// transcript, or the record a manifest harness's terminal settings name.
@@ -355,7 +368,7 @@ pub fn command_with(
 ) -> Result<InteractiveCommand, LaunchError> {
     validate(request)?;
     let handover = installed.and_then(Installed::handover);
-    if handover.is_some() && request.sandbox_profile.is_none() {
+    if handover.is_some() && request.boundary.confined_profile().is_none() {
         return Err(failure("launch_environment_refused"));
     }
     if request.account.key().is_some() != run.key_file.is_some() {
@@ -367,7 +380,7 @@ pub fn command_with(
         .working_dir
         .canonicalize()
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
-    let mut argv = match request.sandbox_profile.as_deref() {
+    let mut argv = match request.boundary.confined_profile() {
         Some(profile) => vec![SANDBOX_EXEC.to_owned(), "-f".to_owned(), text(profile)?],
         None => Vec::new(),
     };
@@ -420,7 +433,7 @@ pub fn command_with(
             if !request.tools {
                 return Err(failure("launch_tools_off_unsupported"));
             }
-            if request.unconfined {
+            if request.boundary.is_unconfined() {
                 return Err(failure("launch_harness_unsupported"));
             }
             let harness = request.harness.as_str();
@@ -572,7 +585,10 @@ pub fn command_with(
     if let Some(key) = request.account.key() {
         assert!(!exposes(&built, key));
     }
-    assert_eq!(built.argv[0] == SANDBOX_EXEC, !request.unconfined);
+    assert_eq!(
+        built.argv[0] == SANDBOX_EXEC,
+        !request.boundary.is_unconfined()
+    );
     Ok(built)
 }
 
@@ -638,7 +654,7 @@ fn agent_env(
         .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
         .map(|(name, _)| name.as_str())
         .collect();
-    let refused = |_: crate::sandbox::SandboxError| failure("launch_environment_refused");
+    let refused = |_: kernel_sandbox::error::SandboxError| failure("launch_environment_refused");
     let built = match handover {
         Some(handover) => {
             let handed = crate::sandbox::Handed::new(&names, handover.token()).map_err(refused)?;
@@ -694,12 +710,12 @@ fn moved(to: &Path, rest: &Path) -> Result<String, LaunchError> {
 }
 
 /// The words that start a harness with no search path, as the tool resolver reads its file
-/// ([`crate::tools::Resolved::argv`]): the file itself, or for a script that asks `env` for
+/// ([`kernel_processes::finding::Resolved::argv`]): the file itself, or for a script that asks `env` for
 /// its interpreter, such as an npm-built Codex asking for `node`, that interpreter's
 /// absolute file, its words and then the script. Input: the harness file. Output: the
 /// words, or the resolver's owner line when it cannot run ([`launch_tool`]).
 pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError> {
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let resolved = launch_tool(executable, &places)?;
     let words = start_words(&resolved)
         .iter()
@@ -711,12 +727,14 @@ pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError
 
 /// The words that start a resolved harness with no search path: the entry itself for a
 /// program or a script the system runs, else its interpreter's words, the first line's words
-/// and the script's real file ([`crate::tools::Resolved::argv`]). Input: the tool. Output:
+/// and the script's real file ([`kernel_processes::finding::Resolved::argv`]). Input: the tool. Output:
 /// the words, at least one.
-pub(crate) fn start_words(resolved: &crate::tools::Resolved) -> Vec<std::ffi::OsString> {
+pub(crate) fn start_words(
+    resolved: &kernel_processes::finding::Resolved,
+) -> Vec<std::ffi::OsString> {
     let entry = || vec![resolved.entry.clone().into_os_string()];
     let words = match resolved.kind {
-        crate::tools::Kind::Native => entry(),
+        kernel_processes::finding::Kind::Native => entry(),
         _ => {
             let argv = resolved.argv();
             if argv.len() > 1 { argv } else { entry() }
@@ -726,44 +744,56 @@ pub(crate) fn start_words(resolved: &crate::tools::Resolved) -> Vec<std::ffi::Os
     words
 }
 
-/// The harness the engine starts for a pinned file, only after the tool resolver's entry
-/// checks ([`crate::tools::resolve_entry`]). A version-manager shim starts the real install
-/// its name resolves to, else the shim itself while the resolver would run its file, every
-/// link on its way included ([`crate::tools::check_place`]), and no other user can change it.
-/// Inputs: the harness file and the places. Output: the tool, or the resolver's owner line
-/// for why it cannot run.
+/// The harness the engine starts for a pinned file ([`found_tool`]), refused when it would
+/// start under a `node` other than its own npm prefix's because the resolver passes that
+/// one over ([`kernel_processes::finding::own_node_refused`]). Inputs: the harness file and the places.
+/// Output: the tool, or the resolver's owner line for why it cannot run.
 pub(crate) fn launch_tool(
     executable: &Path,
-    places: &crate::tools::Places,
-) -> Result<crate::tools::Resolved, LaunchError> {
-    let refused = |missing: crate::tools::Missing| LaunchError(missing.line(), None);
+    places: &kernel_processes::finding::Places,
+) -> Result<kernel_processes::finding::Resolved, LaunchError> {
+    let refused = |missing: kernel_processes::finding::Missing| LaunchError(missing.line(), None);
+    let tool = found_tool(executable, places).map_err(refused)?;
+    match kernel_processes::finding::own_node_refused(&tool, places) {
+        Some(missing) => Err(refused(missing)),
+        None => Ok(tool),
+    }
+}
+
+/// The harness found for a pinned file, after the resolver's entry checks
+/// ([`kernel_processes::finding::resolve_entry`]); a version-manager shim gives the real install its name
+/// resolves to, else itself when the resolver would run it ([`kernel_processes::finding::check_place`]).
+/// Inputs: the harness file and the places. Output: the tool, or why it cannot run.
+fn found_tool(
+    executable: &Path,
+    places: &kernel_processes::finding::Places,
+) -> Result<kernel_processes::finding::Resolved, kernel_processes::finding::Missing> {
     if !super::is_shim(places.home(), executable) {
-        return crate::tools::resolve_entry(executable, places).map_err(refused);
+        return kernel_processes::finding::resolve_entry(executable, places);
     }
     let name = executable
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or_default();
-    match crate::tools::resolve(name, places) {
+    match kernel_processes::finding::resolve(name, places) {
         Ok(found) => Ok(found),
         Err(_)
             if executable.is_absolute()
-                && crate::tools::check_place(places, executable) == Some(Ok(()))
-                && crate::service::changeable_by_others(executable).is_none() =>
+                && kernel_processes::finding::check_place(places, executable) == Some(Ok(())) =>
         {
             Ok(as_given(executable))
         }
-        Err(missing) => Err(refused(missing)),
+        Err(missing) => Err(missing),
     }
 }
 
 /// A harness file taken as it is, a native program that is its own entry and real file.
 /// Input: the file. Output: the tool.
-fn as_given(executable: &Path) -> crate::tools::Resolved {
-    crate::tools::Resolved {
+fn as_given(executable: &Path) -> kernel_processes::finding::Resolved {
+    kernel_processes::finding::Resolved {
         entry: executable.to_path_buf(),
         program: executable.to_path_buf(),
-        kind: crate::tools::Kind::Native,
+        kind: kernel_processes::finding::Kind::Native,
     }
 }
 

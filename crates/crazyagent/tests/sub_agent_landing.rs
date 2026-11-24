@@ -18,7 +18,7 @@ const PROJECT: &str = "project-1";
 /// Runs git as the owner would, with no system or global config, an isolated home and a
 /// fixed identity. Takes the folder, the home and the arguments. Returns how it ended.
 fn git_output(folder: &Path, home: &Path, arguments: &[&str]) -> Output {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -323,7 +323,7 @@ impl Team {
             &self.project,
             &home,
             &tmp,
-            crazyagent::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap()
         .confine_to_clone(&self.lead.worktree)

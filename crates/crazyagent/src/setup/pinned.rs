@@ -1,9 +1,11 @@
-use super::process::{file_sha256, is_sha256, private_folder, run, staging_folder, version_from};
 use super::{
     Dependency, GRAPHIFY_PYTHON, InstallError, Installer, LOCK_FILE, Pin, ToolLock, Version,
     keep_only,
 };
-use crate::tools::permission_fix;
+use kernel_processes::finding::permission_fix;
+use kernel_processes::run::{
+    file_sha256, is_sha256, private_folder, run, staging_folder, version_from,
+};
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -21,7 +23,11 @@ const NAME_BYTES_MAX: usize = 64;
 
 /// A dependency setup found: its entry, its version and why the bundled tmux is not the one
 /// used, if it is not.
-type Chosen = (PathBuf, Version, Option<crate::tools::BundleNote>);
+type Chosen = (
+    PathBuf,
+    Version,
+    Option<kernel_processes::finding::BundleNote>,
+);
 
 /// The folders searched after `setup/bin` on a Unix system: the owner's `~/.local/bin`,
 /// the engine's own absolute `PATH` folders, then the platform's fixed folders.
@@ -46,7 +52,7 @@ pub fn system_folders(fixed: Vec<PathBuf>) -> Vec<PathBuf> {
 pub struct PinnedInstaller {
     setup: PathBuf,
     search: Vec<PathBuf>,
-    places: crate::tools::Places,
+    places: kernel_processes::finding::Places,
 }
 
 impl PinnedInstaller {
@@ -63,7 +69,7 @@ impl PinnedInstaller {
         }
         assert!(!search.is_empty());
         let places =
-            crate::tools::Places::new(search.clone(), std::env::var_os("HOME").map(PathBuf::from));
+            crate::tools::tools_new(search.clone(), std::env::var_os("HOME").map(PathBuf::from));
         Self {
             setup,
             search,
@@ -72,13 +78,13 @@ impl PinnedInstaller {
     }
 
     /// Same as [`PinnedInstaller::with_paths`], finding programs wherever the tool resolver
-    /// looks in `places` ([`crate::tools::resolve`]), so setup finds a tool exactly where a
+    /// looks in `places` ([`kernel_processes::finding::resolve`]), so setup finds a tool exactly where a
     /// launch that needs it does. Inputs: the engine root, the folders the programs setup
     /// starts search after `setup/bin`, and the places. Output: the installer.
     pub fn with_places(
         engine_root: &Path,
         system: Vec<PathBuf>,
-        places: crate::tools::Places,
+        places: kernel_processes::finding::Places,
     ) -> Self {
         Self {
             places,
@@ -108,23 +114,24 @@ impl PinnedInstaller {
             .map(|(entry, version, _)| (entry, version))
     }
 
-    /// Finds a dependency wherever the tool resolver looks ([`crate::tools::resolve`]), the
+    /// Finds a dependency wherever the tool resolver looks ([`kernel_processes::finding::resolve`]), the
     /// file a launch that needs it runs, and reads its version through the same words; tmux
-    /// is the one the terminal uses ([`crate::tools::resolve_tmux`]), with why the bundled
+    /// is the one the terminal uses ([`kernel_processes::finding::resolve_tmux`]), with why the bundled
     /// copy is not, if it is not, and too old when agent terminals do not support its version.
     /// Input: the dependency. Output: its entry, version and note, why it cannot run, or the
     /// version check's code.
     fn resolved(
         &self,
         dep: Dependency,
-    ) -> Result<Result<Chosen, crate::tools::Missing>, InstallError> {
+    ) -> Result<Result<Chosen, kernel_processes::finding::Missing>, InstallError> {
         let found = match dep {
-            Dependency::Tmux => crate::tools::resolve_tmux(
+            Dependency::Tmux => kernel_processes::finding::resolve_tmux(
                 &self.places,
-                crate::tools::SHIPS_BUNDLED_TMUX,
-                crate::terminal::tmux::runs,
+                kernel_processes::finding::SHIPS_BUNDLED_TMUX,
+                kernel_processes::terminal::tmux::runs,
             ),
-            _ => crate::tools::resolve(dep.program(), &self.places).map(|found| (found, None)),
+            _ => kernel_processes::finding::resolve(dep.program(), &self.places)
+                .map(|found| (found, None)),
         };
         let (found, note) = match found {
             Ok(found) => found,
@@ -133,12 +140,12 @@ impl PinnedInstaller {
         let version = self.version(dep, &found.argv())?;
         assert!(found.entry.is_absolute());
         if dep == Dependency::Tmux
-            && crate::terminal::tmux::supported(version.as_str()) != Some(true)
+            && kernel_processes::terminal::tmux::supported(version.as_str()) != Some(true)
         {
-            return Ok(Err(crate::tools::Missing {
+            return Ok(Err(kernel_processes::finding::Missing {
                 tool: dep.program().to_owned(),
-                reason: crate::tools::Reason::WrongVersion,
-                needs: Some(crate::terminal::tmux::version_needed()),
+                reason: kernel_processes::finding::Reason::WrongVersion,
+                needs: Some(kernel_processes::terminal::tmux::version_needed()),
                 found: Some(version.as_str().to_owned()),
                 looked: found
                     .entry
@@ -154,7 +161,7 @@ impl PinnedInstaller {
 
     /// Returns the `PATH` value that puts `setup/bin` first, for programs the engine runs,
     /// with every other folder a lookup on the installer's places would refuse left out
-    /// ([`crate::tools::Places::kept_for_children`]), so a program setup starts never finds an
+    /// ([`kernel_processes::finding::Places::kept_for_children`]), so a program setup starts never finds an
     /// interpreter agents or other users planted. Output: the value.
     pub fn search_path(&self) -> OsString {
         let own = self.setup.join("bin");
@@ -228,7 +235,9 @@ impl PinnedInstaller {
         }
         let bin = self.setup.join("bin");
         private_folder(&bin)?;
-        let staging = staging_folder(&self.setup, "download")?;
+        let id = crate::engine::owner::random_id()
+            .map_err(|_| InstallError("setup_store_unavailable"))?;
+        let staging = staging_folder(&self.setup, "download", &id)?;
         let result = (|| {
             let archive = staging.join("archive.tar.gz");
             self.download(url, sha256, &archive, &staging)?;
@@ -357,7 +366,9 @@ impl PinnedInstaller {
             ("UV_NO_CONFIG", "1".into()),
             ("UV_NO_PROGRESS", "1".into()),
         ]);
-        let staged = staging_folder(&home, "env")?;
+        let id = crate::engine::owner::random_id()
+            .map_err(|_| InstallError("setup_store_unavailable"))?;
+        let staged = staging_folder(&home, "env", &id)?;
         let result = (|| {
             let requirements = staged.join(LOCK_FILE);
             std::fs::OpenOptions::new()
@@ -388,7 +399,7 @@ impl PinnedInstaller {
                 return Err(InstallError("setup_install_failed"));
             }
             for tree in [&pythons, &staged] {
-                crate::tools::permission_fix::tighten_setup(&self.setup, tree)
+                kernel_processes::finding::permission_fix::tighten_setup(&self.setup, tree)
                     .map_err(|_| InstallError("setup_install_failed"))?;
             }
             for (program, name) in programs.iter().zip(lock.programs) {
@@ -544,15 +555,18 @@ impl Installer for PinnedInstaller {
         self.lookup_program(name).ok()
     }
 
-    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, kernel_processes::finding::Missing> {
         if name.is_empty() || name.contains('/') || name.starts_with('.') {
             return Err(super::program_not_found(name));
         }
-        crate::tools::resolve(name, &self.places).map(|found| found.entry)
+        kernel_processes::finding::resolve(name, &self.places).map(|found| found.entry)
     }
 
-    fn fix_target(&self, missing: &crate::tools::Missing) -> Option<permission_fix::Target> {
-        if missing.reason != crate::tools::Reason::Refused {
+    fn fix_target(
+        &self,
+        missing: &kernel_processes::finding::Missing,
+    ) -> Option<permission_fix::Target> {
+        if missing.reason != kernel_processes::finding::Reason::Refused {
             return None;
         }
         permission_fix::target(missing.refused.as_deref()?, &self.places)
@@ -564,7 +578,7 @@ impl Installer for PinnedInstaller {
         confirmed: &str,
         recursive: bool,
     ) -> Result<permission_fix::Report, &'static str> {
-        let missing = match crate::tools::resolve(dep.program(), &self.places) {
+        let missing = match kernel_processes::finding::resolve(dep.program(), &self.places) {
             Ok(_) => return Err(permission_fix::TOOL_FIX_NOT_NEEDED),
             Err(missing) => missing,
         };

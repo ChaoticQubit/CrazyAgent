@@ -2,11 +2,13 @@ use crate::engine::EngineError;
 use crate::engine::owner::HostStamp;
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{ProjectId, TaskId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-#[cfg(any(unix, test))]
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::Appender;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -219,21 +221,21 @@ pub fn record(
     let aggregate = Aggregate::Worktrees;
     let seq = match event {
         Event::Admitted(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ADMITTED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Reserved(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RESERVED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Saved(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_SAVED,
             schema: SCHEMA,
             at_ms,
@@ -245,6 +247,7 @@ pub fn record(
         body.len() <= BODY_BYTES_MAX,
         "the log bounds what it appended"
     );
+    crate::state_log::compact_after(appender, Aggregate::Worktrees, at_ms, chunks)?;
     Ok(seq)
 }
 
@@ -329,7 +332,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let mut removals = removals(tx)?.into_iter().peekable();
     clear(tx)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Worktrees, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Worktrees, 0, |logged| {
         while let Some((_, project)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_admissions(tx, &project)?;
         }
@@ -358,14 +361,20 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
 /// closing event, or `worktrees_log_snapshot_rows`, `worktrees_log_row_too_large` or the
 /// log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = appender.project(|tx| chunks(tx))?;
+    Ok(appender.snapshot(Aggregate::Worktrees, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of both worktree tables as they stand, for [`snapshot`]
+/// and for compaction. Input: the transaction. Output: the chunks, or the first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for (table, columns) in [ADMISSIONS, LEASES] {
-        let rows = appender.project(|tx| table_rows(tx, table, columns))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table, columns)?)?);
     }
     assert!(chunks.len() >= 2, "one chunk or more per table");
     assert_eq!(chunks[0].table, ADMISSIONS.0);
-    appender.snapshot(Aggregate::Worktrees, at_ms, chunks)
+    Ok(chunks)
 }
 
 /// The open-time sweep of both worktree tables in one transaction: every lease is settled
@@ -375,7 +384,6 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
 /// nothing changed no appender is built, so a plain start moves no revision. Inputs: the
 /// connection, outside any transaction, and the open's proof. Output: whether a run was
 /// appended, or the first refusal, which rolls the whole sweep back.
-#[cfg(unix)]
 pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineError> {
     assert!(db.is_autocommit(), "the sweep owns its transaction");
     let tx =
@@ -386,7 +394,7 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
     let changed = live(&tx)? != before;
     if changed {
         let at_ms = opening.at_ms();
-        let mut appender = Appender::opening(&tx, opening)?;
+        let mut appender = crate::state_log::opening(&tx, opening)?;
         snapshot(&mut appender, at_ms)?;
     }
     tx.commit().map_err(error)?;
@@ -400,7 +408,6 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
 /// write, and one with no worktree row needs no run, so it moves no revision. Inputs: the
 /// step's transaction and the open's proof. Output: whether a run was appended, or the
 /// log's refusal.
-#[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let present: i64 = tx
         .query_row(
@@ -425,7 +432,7 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
         return Ok(false);
     }
     let at_ms = opening.at_ms();
-    let mut appender = Appender::opening(tx, opening)?;
+    let mut appender = crate::state_log::opening(tx, opening)?;
     let done = snapshot(&mut appender, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     assert_eq!(present, 3);
@@ -434,7 +441,6 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
 
 /// Both worktree tables as they stand, each ordered by all its columns. Input: the
 /// connection. Output: the admissions and the leases.
-#[cfg(unix)]
 fn live(db: &Connection) -> Result<[Vec<Vec<rusqlite::types::Value>>; 2], EngineError> {
     Ok([replay::rows(db, ADMISSIONS.0)?, replay::rows(db, LEASES.0)?])
 }
@@ -561,7 +567,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// `worktrees_log_event_invalid` for a removal body that is not one.
 pub(crate) fn removals(db: &Connection) -> Result<Vec<(u64, String)>, EngineError> {
     let mut found = Vec::new();
-    replay::replay(db, Aggregate::Projects, 0, |logged| {
+    crate::state_log::replay(db, Aggregate::Projects, 0, |logged| {
         if logged.kind != removed::KIND {
             return Ok(());
         }
@@ -630,7 +636,7 @@ pub(crate) fn store_fence(tx: &Transaction<'_>) -> Result<Fence, EngineError> {
 /// writer's checks passed. Inputs: the transaction and the event. Output: the revision it
 /// moved to, or the first refusal, which the caller rolls back.
 pub(crate) fn record_own(tx: &Transaction<'_>, event: &Event) -> Result<u64, EngineError> {
-    let mut appender = Appender::own(tx, store_fence(tx)?)?;
+    let mut appender = crate::state_log::own(tx, store_fence(tx)?)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     let revision = appender.revision();
     assert!(seq > 0, "a recorded event has a seq");
@@ -658,7 +664,7 @@ pub(crate) fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Resul
     if moved != 1 {
         return Err(stale());
     }
-    let mut appender = Appender::owner(tx, next, store_fence(tx)?)?;
+    let mut appender = crate::state_log::owner(tx, next, store_fence(tx)?)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     assert!(seq > 0, "a recorded event has a seq");
     assert_eq!(appender.revision(), next);
@@ -680,7 +686,7 @@ pub(crate) fn forget_project(
         assert!(seq > 0, "the removal is logged before its redaction");
     }
     let kinds = [KIND_ADMITTED];
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Worktrees],
         Some(&kinds),

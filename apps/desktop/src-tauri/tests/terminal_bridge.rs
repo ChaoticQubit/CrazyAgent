@@ -6,14 +6,13 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::project_setup::{HarnessSlot, ProjectSetup, TeamPlan};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::team::{EdgeState, NodeKind, TaskSource};
-use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
-};
+use crazyagent::terminal::{TerminalFrame, TerminalRequest};
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, VIEWERS_MAX, ViewKey, agent, channel_message, graph_shows, input_request, pane,
-    plain_code, request_valid,
+    Session, Terminals, VIEWERS_MAX, ViewKey, agent, channel_message, graph_shows, input_request,
+    pane, plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
+use kernel_processes::terminal::{AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN};
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -34,7 +33,11 @@ const COMMANDS: [&str; 6] = [
 fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     let build = include_str!("../build.rs");
     let bindings = include_str!("../src/lib.rs");
-    let capability = include_str!("../capabilities/main-window.json");
+    let capability = [
+        include_str!("../capabilities/main-window.json"),
+        include_str!("../capabilities/webview-terminal.json"),
+    ]
+    .concat();
     let client = include_str!("../../src/api.ts");
     for command in COMMANDS {
         assert_eq!(
@@ -68,10 +71,22 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
-const WALL_COMMANDS: [&str; 12] = [
+const WALL_COMMANDS: [&str; 24] = [
     "desktop_terminal_attach",
     "desktop_terminal_input",
     "desktop_terminal_prompt",
+    "desktop_native_terminal_enabled",
+    "desktop_native_terminal_open",
+    "desktop_native_terminal_place",
+    "desktop_native_terminal_cover",
+    "desktop_native_terminal_focus",
+    "desktop_native_terminal_style",
+    "desktop_native_terminal_copy",
+    "desktop_native_terminal_paste",
+    "desktop_native_terminal_jump",
+    "desktop_native_terminal_keys",
+    "desktop_native_terminal_close",
+    "desktop_native_terminal_probe",
     "desktop_terminal_resize",
     "desktop_terminal_detach",
     "desktop_team_graph",
@@ -128,10 +143,16 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     assert_eq!(wall["windows"], json!(["terminals-*"]));
     assert_eq!(wall["webviews"], json!(["terminals-*"]));
     assert_eq!(wall["local"], json!(true));
+    let webview = read(include_str!("../capabilities/webview-terminal.json"));
+    assert!(webview.get("windows").is_none());
+    assert_eq!(webview["webviews"], json!(["main", "terminals-*"]));
+    assert_eq!(webview["platforms"], json!(["linux", "windows"]));
+    assert_eq!(webview["local"], json!(true));
     let granted: BTreeSet<String> = wall["permissions"]
         .as_array()
         .unwrap()
         .iter()
+        .chain(webview["permissions"].as_array().unwrap())
         .map(|permission| permission.as_str().unwrap().to_owned())
         .collect();
     let allowed: BTreeSet<String> = WALL_COMMANDS
@@ -148,7 +169,7 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     let conf = read(include_str!("../tauri.conf.json"));
     assert_eq!(
         conf["app"]["security"]["capabilities"],
-        json!(["main-window", "terminal-wall"])
+        json!(["main-window", "terminal-wall", "webview-terminal"])
     );
     let commands = command_bodies();
     assert!(commands.len() > 100, "{}", commands.len());
@@ -181,15 +202,25 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
         .unwrap()
         .1;
     assert!(attach.contains("id: Option<String>"), "{attach}");
-    assert!(attach.contains(PROJECT_WALL_GUARD), "{attach}");
+    assert!(attach.contains("attach_place("), "{attach}");
     assert!(
-        attach.contains("bridge::terminal::graph_shows(&graph, &key.agent)"),
+        attach
+            .contains(".open_terminal(key.agent, key.pane, None, bridge::terminal::Session::Full)"),
         "{attach}"
     );
-    assert!(
-        attach.contains(".open_terminal(key.agent, key.pane)"),
-        "{attach}"
-    );
+    let gate = include_str!("../src/lib.rs")
+        .split_once("async fn attach_place(")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .unwrap()
+        .0;
+    for step in [
+        "terminal_window(webview)?;",
+        "bridge::terminal::place_project(webview.label(), id)?",
+        "bridge::terminal::graph_shows(&graph, &key.agent)",
+        ".checked_room(webview.label(), &key, shows)",
+    ] {
+        assert!(gate.contains(step), "attach_place lacks {step}: {gate}");
+    }
 }
 
 /// A wall window opens at an address naming its project, page and project name, and moves
@@ -570,7 +601,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(edge.reply, None);
 
     let unknown = bridge
-        .open_terminal(AgentId::team(99)?, None)
+        .open_terminal(AgentId::team(99)?, None, None, Session::Full)
         .await
         .err()
         .map(|e| e.code);

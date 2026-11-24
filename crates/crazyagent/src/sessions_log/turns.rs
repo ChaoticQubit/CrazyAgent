@@ -48,8 +48,9 @@ const SHAPES: [(&str, &str, &str, &str); 4] = [
 /// else its id (#462 F1).
 const LEGACY_PROFILES: &str = "SELECT c.id,c.session,c.profile,c.body,s.project,c.id FROM (SELECT id,session,COALESCE(CASE WHEN json_valid(body) THEN json_extract(body,'$.proof.profile_ref') END,id) AS profile,body FROM configured_master_profiles) c JOIN master_sessions s ON s.id=c.session";
 
-const _: () =
-    assert!(NAMES_MAX * 131 + super::CHUNK_ENVELOPE_BYTES <= crate::state_log::BODY_BYTES_MAX);
+const _: () = assert!(
+    NAMES_MAX * 131 + super::CHUNK_ENVELOPE_BYTES <= kernel_storage::state_log::BODY_BYTES_MAX
+);
 
 /// One master turn row: its session's project and the turn's keys, its phase and the digest
 /// its body is kept under (`owner_texts`), so no turn text rides in the log.
@@ -396,7 +397,6 @@ pub(super) fn replace(db: &Connection, table: &str, row: Value) -> Result<(), En
 
 /// Gives `sessions_touched` the seven-table check when an older shape of it exists, every
 /// mark kept. Input: the upgrade transaction. Output: Ok, or the store's refusal.
-#[cfg(any(unix, test))]
 pub(super) fn widen_touched(db: &Connection) -> Result<(), EngineError> {
     use rusqlite::OptionalExtension;
     let found: Option<String> = db
@@ -431,9 +431,9 @@ pub(super) fn widen_touched(db: &Connection) -> Result<(), EngineError> {
 
 /// Whether the log holds an event or a snapshot chunk of the four tables. Input: the
 /// transaction. Output: the answer, or the store's refusal.
-#[cfg(any(unix, test))]
 pub(super) fn on_the_log(db: &Connection) -> Result<bool, EngineError> {
-    use crate::state_log::{Aggregate, SNAPSHOT_CHUNK};
+    use crate::state_log::Aggregate;
+    use kernel_storage::state_log::SNAPSHOT_CHUNK;
     if !exists(db, "state_log")? {
         return Ok(false);
     }

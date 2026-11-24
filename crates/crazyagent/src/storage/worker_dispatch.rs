@@ -88,7 +88,6 @@ struct StoredLease {
     metadata: Option<LeaseIdentity>,
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS worker_runner_registrations
         (id TEXT PRIMARY KEY, attempt TEXT NOT NULL UNIQUE, body BLOB NOT NULL CHECK(length(body)<=2048), active INTEGER NOT NULL CHECK(active IN (0,1)));
@@ -494,10 +493,10 @@ fn prepare(
                         DispatchState::RunnerUnavailable
                     },
                     delivery_generation: 1,
-                    binding_digest: crate::memory::hash(
+                    binding_digest: kernel_common::hash(
                         &serde_json::to_vec(&actual.binding).map_err(error)?,
                     ),
-                    lease_digest: crate::memory::hash(&seal_bytes),
+                    lease_digest: kernel_common::hash(&seal_bytes),
                     offer_digest: None,
                     cancellation: DispatchCancellation::None,
                     receipt: None,
@@ -1055,7 +1054,6 @@ pub(crate) fn execute(
     Ok(result)
 }
 
-#[cfg(unix)]
 pub(crate) fn restart(db: &mut Connection, config: &EffectiveConfig) -> Result<(), EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

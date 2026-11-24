@@ -8,7 +8,8 @@ use crazyagent::project_setup::{ProjectSetup, TeamPlan};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::setup::{Dependency, DependencyState, SetupStatus};
 use crazyagent::team::{AgentRole, TeamAction, TeamStatus};
-use crazyagent::terminal::{AgentId, TerminalFrame};
+use crazyagent::terminal::TerminalFrame;
+use kernel_processes::terminal::AgentId;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
@@ -160,7 +161,7 @@ fn host_tmux() -> PathBuf {
 /// the `clean-mac-gate` feature holds the remap's variable name. Output: the answer; panics
 /// when the binary can't be read.
 fn engine_has_remap() -> bool {
-    let status = crazyagent::spawn_gate::status(Command::new("/usr/bin/grep").args([
+    let status = kernel_processes::spawn_gate::status(Command::new("/usr/bin/grep").args([
         "-q",
         "-F",
         "--",
@@ -243,7 +244,7 @@ impl Mac {
             .unwrap();
         let run = temp.path().canonicalize().unwrap();
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
-        if let Some(entry) = crazyagent::service::changeable_by_others(&run) {
+        if let Some(entry) = kernel_processes::service::changeable_by_others(&run) {
             panic!(
                 "{REFUSED}: other users can change {}, so the engine passes over every stand-in in {}; set TMPDIR to a folder only you can change",
                 entry.display(),
@@ -378,7 +379,7 @@ impl Mac {
     /// mapped into the system root, and the user basics launchd adds. Nothing else is
     /// inherited. Output: the variables.
     fn environment(&self) -> Vec<(OsString, OsString)> {
-        let path = crazyagent::service::service_path(
+        let path = kernel_processes::service::service_path(
             Some(OsStr::new(FINDER_PATH)),
             Some(&self.home),
             None,
@@ -416,7 +417,7 @@ impl Mac {
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr);
-        self.engine = Some(crazyagent::spawn_gate::spawn(&mut command).unwrap());
+        self.engine = Some(kernel_processes::spawn_gate::spawn(&mut command).unwrap());
         let start = Instant::now();
         while fs::read(self.kept.join("engine-stdout.log")).unwrap() != READY_LINE {
             if let Some(status) = self.engine.as_mut().unwrap().try_wait().unwrap() {
@@ -442,7 +443,7 @@ impl Mac {
         let Some(mut child) = self.engine.take() else {
             return;
         };
-        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &child.id().to_string(),
@@ -469,8 +470,8 @@ impl Drop for Mac {
         let socket = self
             .root
             .join(crazyagent::terminal::FOLDER)
-            .join(crazyagent::terminal::tmux::SOCKET);
-        let _ = crazyagent::spawn_gate::status(
+            .join(kernel_processes::terminal::tmux::SOCKET);
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&socket)
@@ -810,7 +811,7 @@ fn typed_reason(line: &str, tools: &[&str]) -> bool {
         .strip_prefix(LIVE_OFF_START)
         .and_then(|rest| rest.strip_suffix(LIVE_OFF_END))
         .unwrap_or(line);
-    let tmux = tools.contains(&"tmux") && reason == crazyagent::tools::TMUX_MISSING;
+    let tmux = tools.contains(&"tmux") && reason == kernel_processes::finding::TMUX_MISSING;
     let named = tools
         .iter()
         .filter(|tool| **tool != "tmux")
@@ -1014,8 +1015,8 @@ fn the_gate_starts_the_engine_with_the_login_service_arguments_and_environment()
     let root = tempfile::tempdir().unwrap();
     let root = root.path().canonicalize().unwrap();
     let layout = crazyagent::paths::Layout::new(root.clone()).unwrap();
-    let service = crazyagent::service::Service::current_user(
-        crazyagent::paths::Platform::MacOs,
+    let service = crazyagent::service::current_user(
+        kernel_common::Platform::MacOs,
         PathBuf::from(ENGINE),
         &layout,
     )

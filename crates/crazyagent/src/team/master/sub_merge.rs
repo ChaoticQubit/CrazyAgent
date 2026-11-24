@@ -1,9 +1,10 @@
 use super::{Answering, is_worker, land_on_lead, state};
 use crate::engine::EngineError;
 use crate::landing::{LeadGit, MergeOutcome};
-use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+use crate::sandbox::ProjectSandbox;
 use crate::team::bound_text;
 use crate::team::tool::{FINISH_WORK_TOOL, INSPECT_WORK_TOOL};
+use kernel_sandbox::net::SandboxNetwork;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -155,6 +156,7 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
         .project_folder()
         .canonicalize()
         .ok()
+        .map(kernel_sandbox::paths::one_spelling)
         .and_then(|root| {
             ProjectSandbox::new(&root, &home, &tmp, SandboxNetwork::Only(Vec::new())).ok()
         });

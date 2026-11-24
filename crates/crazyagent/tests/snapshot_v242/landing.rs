@@ -436,7 +436,7 @@ fn owner_git(folder: &Path, args: &[&str], date: Option<&str>) -> Result<(), Str
             .env("GIT_AUTHOR_DATE", date)
             .env("GIT_COMMITTER_DATE", date);
     }
-    let output = crazyagent::spawn_gate::output(&mut command).map_err(text)?;
+    let output = kernel_processes::spawn_gate::output(&mut command).map_err(text)?;
     match output.status.success() {
         true => Ok(()),
         false => Err(format!("git {} gave {}", args[0], output.status)),
@@ -482,11 +482,20 @@ fn a_merge_whose_parents_share_a_second_lists_the_agent_commit_before_the_base()
     assert_eq!(subjects, ["Merge agent", "Agent: tide fix", "first"]);
 }
 
-/// Records one agent change set on the stopped engine's store, closing the store before the
-/// engine starts again. Inputs: the seeded project and the owner checkout. Output: the set.
+/// Records one agent change set with the engine stopped, the way the engine records an agent
+/// turn: under an owner runtime started in this process on the same store, since v2.5 L9 a
+/// store write needs this process to run its engine host. The owner and the store close
+/// before Accept starts the engine again. Inputs: the seeded project and the owner checkout.
+/// Output: the change set.
 fn recorded_change(seeded: &Seeded, checkout: &Path) -> Result<ChangeSetId, String> {
-    let db = landing::open(seeded.engine.path()).map_err(debug)?;
-    agent_change(&db, &seeded.project, checkout)
+    let private = seeded.disk.path().join("owner-config");
+    fs::create_dir_all(&private).map_err(text)?;
+    let owner = crate::owner_support::owner_on(&private, seeded.engine.path());
+    let recorded = landing::open(seeded.engine.path())
+        .map_err(debug)
+        .and_then(|db| agent_change(&db, &seeded.project, checkout));
+    drop(owner);
+    recorded
 }
 
 /// Names the decision an Accept came to, as the owner sees it.

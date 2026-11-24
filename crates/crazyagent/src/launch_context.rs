@@ -112,8 +112,13 @@ const CONTEXT_MODE_TOOLS: [&str; 5] = [
     "ctx_search",
 ];
 /// The most bytes of the section that tells a tools-on launch when to use context-mode,
-/// graphify and its skills.
-pub const TOOL_USE_BYTES_MAX: usize = 2 * 1024;
+/// graphify and its skills, and which MCP servers it left out.
+pub const TOOL_USE_BYTES_MAX: usize = 3 * 1024;
+/// The most server names each tools-section line about servers left out, as no Windows
+/// program or as not found, shows before it says how many more there are.
+const BATCH_NAMES_SHOWN_MAX: usize = 4;
+/// The most bytes of each such line: its words, the names shown and the count of the rest.
+const BATCH_LINE_BYTES_MAX: usize = 640;
 /// The most bytes of the Task-start reminder the first turn of a task carries (T3-15).
 pub const TASK_START_BYTES_MAX: usize = 1024;
 const TEAMMATE_COMMAND: &str = "teammate";
@@ -1098,10 +1103,7 @@ impl AgentContext {
             server
                 .secrets
                 .iter()
-                .find(|secret| {
-                    let value = secret.value.expose();
-                    !value.is_empty() && text.windows(value.len()).any(|window| window == value)
-                })
+                .find(|secret| kernel_security::exposure::holds(secret.value.expose(), text))
                 .map(|secret| SecretInCommand {
                     server: server.name.clone(),
                     secret: secret.name.clone(),
@@ -1136,8 +1138,11 @@ impl AgentContext {
     /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`, and Codex
     /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
     /// the files hold the agent's own `getconf`
-    /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
-    /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
+    /// ([`crate::sandbox::toolchains::write_getconf`]). On Windows it is refused with
+    /// `launch_context_unavailable` once H1's check passes, before it takes the lock or
+    /// changes the home, until S9b writes its files handle-relative (CodeRabbit CR-1140).
+    /// Output: the guard holding the files and the harness arguments, or `launch_home_busy`
+    /// while another launch uses the home.
     pub fn install(
         &self,
         harness: &str,
@@ -1162,6 +1167,9 @@ impl AgentContext {
             return Err(failure("launch_account_handover_mismatch"));
         }
         crate::harnesses::launch::validate_home(home)?;
+        if cfg!(windows) {
+            return Err(failure("launch_context_unavailable"));
+        }
         let lock = lock(home)?;
         let state = home.join(STATE);
         let mut installed = Installed {
@@ -1232,6 +1240,8 @@ impl AgentContext {
                     false,
                     servers,
                     self.plugins.context_mode_off,
+                    &self.plugins.batch_files,
+                    &self.plugins.commands_not_found,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1310,6 +1320,8 @@ impl AgentContext {
                     true,
                     servers,
                     self.plugins.context_mode_off,
+                    &self.plugins.batch_files,
+                    &self.plugins.commands_not_found,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1670,10 +1682,20 @@ impl Installed {
     /// private agent home, or `launch_home_busy` while another launch uses it.
     pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
         let lock = if files.listed {
+            #[cfg(windows)]
+            crate::harnesses::launch::validate_home(&files.home)?;
             lock_listed(&files.home, None)?
         } else {
+            #[cfg(windows)]
+            let held = crate::harnesses::launch::hold_home(&files.home)?;
+            #[cfg(windows)]
+            crate::harnesses::launch::validate_held_home(&files.home, &held)?;
+            #[cfg(unix)]
             crate::harnesses::launch::validate_home(&files.home)?;
-            lock(&files.home)?
+            let lock = lock(&files.home)?;
+            #[cfg(windows)]
+            locked_in(&lock, &held)?;
+            lock
         };
         Ok(Self {
             arguments: Vec::new(),
@@ -1737,6 +1759,8 @@ impl Drop for Installed {
         }
         #[cfg(unix)]
         let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
+        #[cfg(windows)]
+        let _ = crazyagent_win_sandbox::private::unlock(&self._lock);
     }
 }
 
@@ -1978,24 +2002,75 @@ fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
         ContextModeOff::NodeTooOld => {
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n"
         }
+        ContextModeOff::NodeFolderUnreadable => {
+            "- context-mode is off for this launch: Windows does not let sandboxed programs read the Node.js folder it runs from, and this Windows user cannot change that, so CrazyAgent did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n"
+        }
+        ContextModeOff::NodeDriveRootUnreadable => {
+            "- context-mode is off for this launch: Windows does not let sandboxed programs read the root of a drive it uses, so CrazyAgent did not start it. Use the shell instead, and tell the owner in your report to run the CrazyAgent installer again and approve the administrator step.\n"
+        }
         ContextModeOff::NpxNotFound => {
             "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n"
         }
     }
 }
 
+/// The tools-section line naming the MCP servers a launch left out because each one's
+/// command is not a Windows program ([`crate::plugins::without_cmd_exe`]) and what to tell the
+/// owner. Input: the names. Output: one line ending in a newline, none without names.
+fn batch_files_line(names: &[String]) -> Option<String> {
+    let list = left_out_list(names)?;
+    let line = format!(
+        "- MCP servers off for this launch: {list}. Each one's command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent did not start it. Tell the owner in your report to set its command to the tool's .exe, or to node.exe with the tool's script as the first argument.\n"
+    );
+    assert!(line.len() <= BATCH_LINE_BYTES_MAX);
+    Some(line)
+}
+
+/// The tools-section line naming the MCP servers a launch left out because each one's command
+/// was not found, a missing npx.cmd included, or the tool checks refused its npx.cmd, and what
+/// to tell the owner (V243-MCP-NPX-LAUNCH-LINE). Input: the names. Output: one line ending in
+/// a newline, none without names.
+fn not_found_line(names: &[String]) -> Option<String> {
+    let list = left_out_list(names)?;
+    let line = format!(
+        "- MCP servers off for this launch: {list}. Each one's command was not found on this computer, or CrazyAgent's tool checks refused it, so CrazyAgent did not start it. Tell the owner in your report to check these servers in Settings.\n"
+    );
+    assert!(line.len() <= BATCH_LINE_BYTES_MAX);
+    Some(line)
+}
+
+/// The names a left-out line shows: at most [`BATCH_NAMES_SHOWN_MAX`], each clipped to a
+/// server name's bound and in backticks, then how many more. Input: the names. Output: the
+/// list, none without names.
+fn left_out_list(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = names
+        .iter()
+        .take(BATCH_NAMES_SHOWN_MAX)
+        .map(|name| format!("`{}`", clip(name, crate::plugins::SERVER_NAME_BYTES_MAX)))
+        .collect();
+    Some(match names.len() - shown.len() {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    })
+}
+
 /// Tells a tools-on launch the rules for the tools it has (18.15.1), as firm rules for every
 /// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
 /// all output that is not short and fixed, a graphify query before any source read and a
-/// check of the approved skills by the names the skills index uses. A launch that left the
-/// context-mode server out is told why. Inputs: whether the harness is Claude Code, the
-/// launch's servers, why context-mode was left out if it was, the tools switched off and the
-/// first approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX`
-/// bytes.
+/// check of the approved skills by the names the skills index uses. A launch that left out
+/// context-mode, or servers as no Windows program or as not found, is told why, one line per
+/// cause. Inputs: the harness, the launch's servers, why context-mode was left out, the servers
+/// left out per cause, the tools switched off and the first approved skill's name, none without
+/// skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
 fn tool_use_section(
     claude: bool,
     servers: &[LaunchServer],
     context_mode_off: Option<crate::plugins::ContextModeOff>,
+    batch_files: &[String],
+    commands_not_found: &[String],
     off_tools: &[(String, Vec<String>)],
     skill: Option<&str>,
 ) -> String {
@@ -2024,6 +2099,12 @@ fn tool_use_section(
     }
     if let Some(off) = context_mode_off.filter(|_| !context_mode) {
         section.push_str(context_mode_off_line(off));
+    }
+    if let Some(line) = batch_files_line(batch_files) {
+        section.push_str(&line);
+    }
+    if let Some(line) = not_found_line(commands_not_found) {
+        section.push_str(&line);
     }
     section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
     if let Some(name) = skill {
@@ -2655,23 +2736,64 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     let mut text = Vec::with_capacity(counted.0);
     let capacity = text.capacity();
     if serde_json::to_writer(&mut text, value).is_err() {
-        crate::credentials::wipe(&mut text);
+        kernel_security::secret::wipe(&mut text);
         return Err(failure("launch_context_unavailable"));
     }
     assert_eq!(text.len(), counted.0);
     assert_eq!(text.capacity(), capacity);
     String::from_utf8(text).map_err(|error| {
         let mut bytes = error.into_bytes();
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         failure("launch_context_unavailable")
     })
 }
 
-/// Refuses launch context files where owner-only no-follow creation does not exist.
-/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
-#[cfg(not(unix))]
-fn lock(_home: &Path) -> Result<File, LaunchError> {
-    Err(failure("launch_context_unavailable"))
+/// Confirms on Windows that a launch lock is the lock name directly in the held home
+/// (CodeRabbit CR-1252): both real places are read from their handles, so a lock the home's
+/// path reached in another folder, as after a junction above the home was pointed elsewhere
+/// between the hold and the lock, is refused. Inputs: the lock and the held home. Output:
+/// Ok, or `launch_context_unsafe`.
+#[cfg(windows)]
+fn locked_in(lock: &File, held: &File) -> Result<(), LaunchError> {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let unsafe_lock = |_: std::io::Error| failure("launch_context_unsafe");
+    let mut wanted = crazyagent_win_sandbox::final_name(held).map_err(unsafe_lock)?;
+    if wanted.last() != Some(&SEPARATOR) {
+        wanted.push(SEPARATOR);
+    }
+    wanted.extend(LOCK.encode_utf16());
+    let found = crazyagent_win_sandbox::final_name(lock).map_err(unsafe_lock)?;
+    if found != wanted {
+        return Err(failure("launch_context_unsafe"));
+    }
+    Ok(())
+}
+
+/// Opens and locks the agent home's launch lock through W1 (V244-WIN-MASTER S9a): made a
+/// private file when it is missing, else opened, never through a link, a second name or a
+/// list that is not private, then locked without waiting. A name a launched agent left as a
+/// link, a folder or an open file stays refused until S9b clears it handle-relative; no
+/// Windows launch reuses a home before then (D6, D8). Input: the home H1's check passed.
+/// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
+#[cfg(windows)]
+fn lock(home: &Path) -> Result<File, LaunchError> {
+    use crazyagent_win_sandbox::private;
+    const LOCK_VIOLATION: i32 = 33;
+    let path = home.join(LOCK);
+    let file = match private::file(&path, true) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            private::file(&path, false)
+        }
+        made => made,
+    }
+    .map_err(|_| failure("launch_context_unsafe"))?;
+    match private::lock(&file) {
+        Ok(()) => Ok(file),
+        Err(error) if error.raw_os_error() == Some(LOCK_VIOLATION) => {
+            Err(failure("launch_home_busy"))
+        }
+        Err(_) => Err(failure("launch_context_unsafe")),
+    }
 }
 
 /// Opens and locks the agent home's launch lock, made owner-only and never through a link.
@@ -2886,8 +3008,9 @@ pub(crate) fn lock_kept(found: &rustix::fs::Stat) -> bool {
         && (cfg!(not(target_os = "macos")) || found.st_nlink == 1)
 }
 
-/// Keeps a home's launch lock where it is a plain file, on systems with no owner-only lock,
-/// whose launches [`lock`] refuses. Input: its metadata. Output: the answer.
+/// Keeps a home's launch lock where it is a plain file read without following a link; on
+/// Windows whether it is private is W1's judge at the next [`lock`], which refuses one that
+/// is not. Input: its metadata. Output: the answer.
 #[cfg(not(unix))]
 pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
@@ -2926,11 +3049,21 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         let manifest = listed.manifest();
         let asked = crate::harnesses::home::read(manifest)
             .map_err(|_| failure("launch_manifest_invalid"))?;
+        #[cfg(windows)]
+        crate::harnesses::launch::validate_home(home)?;
         let lock = lock_listed(home, Some(manifest.id.as_str()))?;
         (lock, asked.environment(home))
     } else {
+        #[cfg(windows)]
+        let held = crate::harnesses::launch::hold_home(home)?;
+        #[cfg(windows)]
+        crate::harnesses::launch::validate_held_home(home, &held)?;
+        #[cfg(unix)]
         crate::harnesses::launch::validate_home(home)?;
-        (lock(home)?, Vec::new())
+        let lock = lock(home)?;
+        #[cfg(windows)]
+        locked_in(&lock, &held)?;
+        (lock, Vec::new())
     };
     if drivers::piped(harness) == Ok(Piped::Codex) {
         remove_copies(home)?;
@@ -3075,7 +3208,7 @@ fn release_skills(parent: &std::os::fd::OwnedFd) {
     let Ok(input) = entry.try_clone() else {
         return;
     };
-    let _ = crate::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .args(["-N", "/dev/stdin"])
             .stdin(std::process::Stdio::from(input))
@@ -3118,11 +3251,12 @@ fn park(home: &Path) -> Option<(PathBuf, std::os::fd::OwnedFd)> {
     None
 }
 
-/// Leaves skill copies in place where descriptor-relative removal does not exist; no
-/// launch reaches this, because the home lock is refused first. Input: unused. Output: Ok.
+/// Refuses a Codex launch's skill removal where it is not yet handle-relative, so a Codex
+/// home is never launched with skills an earlier run left; S9b removes them through the
+/// held-folder layer (D8). Input: unused. Output: `launch_context_unavailable`.
 #[cfg(not(unix))]
 fn remove_copies(_home: &Path) -> Result<(), LaunchError> {
-    Ok(())
+    Err(failure("launch_context_unavailable"))
 }
 
 /// Whether `name` is still in `folder`, read without following a link. A read that fails
@@ -3279,7 +3413,7 @@ fn release(path: &Path, tree: bool) {
         vec![flags, acl, mode]
     };
     for mut command in commands {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -3373,7 +3507,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
 fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let mut bytes = text.into_bytes();
     let written = write_private(path, &bytes);
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     written
 }
 
@@ -3489,6 +3623,10 @@ fn copy_file(source: &Path, target: &Path, budget: &mut Budget) -> Result<(), La
 #[cfg(all(test, unix))]
 #[path = "launch_context/tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "launch_context/windows_tests.rs"]
+mod windows_tests;
 
 #[cfg(all(test, unix))]
 #[path = "launch_context/listed_tests.rs"]

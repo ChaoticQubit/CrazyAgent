@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use crazyagent::update::{self, UpdateError};
+use kernel_processes::update::{self, UpdateError};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -49,7 +49,7 @@ fn a_signed_release_archive_is_verified_unpacked_and_swapped_in_with_the_real_bi
     executable(&release.path().join("crazyagent-runner"), &runner);
     executable(&release.path().join("README-not-installed"), b"ignored");
     let archive = release.path().join("crazyagent.tar.gz");
-    let packed = crazyagent::spawn_gate::status(
+    let packed = kernel_processes::spawn_gate::status(
         Command::new("tar")
             .arg("-czf")
             .arg(&archive)
@@ -95,7 +95,7 @@ fn a_signed_release_archive_is_verified_unpacked_and_swapped_in_with_the_real_bi
     );
     assert!(!install.path().join("README-not-installed").exists());
     assert!(leftovers(install.path()).is_empty());
-    let answered = crazyagent::spawn_gate::output(
+    let answered = kernel_processes::spawn_gate::output(
         Command::new(install.path().join("crazyagent"))
             .arg("--version")
             .stdin(Stdio::null())
@@ -177,7 +177,7 @@ fn an_archive_without_crazyagent_is_refused_before_anything_changes() {
     executable(&release.path().join("something-else"), b"x");
     let archive = release.path().join("bad.tar.gz");
     assert!(
-        crazyagent::spawn_gate::status(
+        kernel_processes::spawn_gate::status(
             Command::new("tar")
                 .arg("-czf")
                 .arg(&archive)

@@ -1,7 +1,10 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::sandbox::ProjectSandbox;
 use crazyagent::sandbox::toolchains::{self, ToolHomes, Toolchains};
-use crazyagent::sandbox::{ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError, SandboxNetwork};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::paths::SECRET_ROOT_REFUSED;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -90,6 +93,13 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
 
 fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) -> Output {
     sandbox.install(profile).unwrap();
+    run_installed(sandbox, profile, shell, script)
+}
+
+/// Runs a script under the profile an earlier install wrote, without installing again, so
+/// the home stays as the row left it after that install. Inputs: the sandbox, the profile,
+/// the shell and the script. Output: the run's output.
+fn run_installed(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) -> Output {
     let mut command = sandbox.command(profile, shell);
     command
         .arg("-c")
@@ -97,7 +107,7 @@ fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 fn path_of(command: &std::process::Command) -> String {
@@ -433,7 +443,7 @@ fn an_agent_cannot_open_remove_or_replace_its_temp_folder() {
         "{metadata:?}"
     );
     assert_eq!(metadata.unwrap().permissions().mode() & 0o777, 0o700);
-    let listed = crazyagent::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ls")
             .arg("-lde")
             .arg(&tmp)
@@ -788,7 +798,7 @@ impl AgentGit {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        crazyagent::spawn_gate::output(&mut command).unwrap()
+        kernel_processes::spawn_gate::output(&mut command).unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -1099,7 +1109,7 @@ fn a_node_script_harness_runs_with_the_node_beside_it_inside_the_sandbox() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut wrapped).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1170,7 +1180,7 @@ fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_pack
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut wrapped).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1215,7 +1225,7 @@ fn a_node_harness_in_the_engine_prefix_runs_with_the_node_it_was_installed_with(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut wrapped).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -1318,7 +1328,7 @@ fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() 
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let made = crazyagent::spawn_gate::output(&mut owner).unwrap();
+        let made = kernel_processes::spawn_gate::output(&mut owner).unwrap();
         assert!(made.status.success(), "{made:?}");
     }
     let mut harness = std::process::Command::new("/bin/sh");
@@ -1332,7 +1342,7 @@ fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut wrapped).unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(!stderr.contains("xcrun"), "{stderr}");
@@ -1387,7 +1397,7 @@ fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let made = crazyagent::spawn_gate::output(&mut owner).unwrap();
+            let made = kernel_processes::spawn_gate::output(&mut owner).unwrap();
             assert!(made.status.success(), "{made:?}");
         }
     }
@@ -1404,7 +1414,7 @@ fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut wrapped).unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "upstream\n");
@@ -1439,7 +1449,7 @@ fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 /// The app ships tmux as `CrazyAgent.app/Contents/MacOS/crazyagent-tmux`, beside the engine
@@ -1613,7 +1623,7 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
         );
     }
 
-    let listener = crazyagent::spawn_gate::bind_unix_std(&team.callers).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&team.callers).unwrap();
     listener.set_nonblocking(true).unwrap();
     let node = |path: &Path| {
         fs::symlink_metadata(path).ok().map(|meta| {
@@ -1631,7 +1641,7 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut answered = 0;
         while answered < roles.len() && std::time::Instant::now() < deadline {
-            match crazyagent::spawn_gate::accept_unix_std(&listener) {
+            match kernel_processes::spawn_gate::accept_unix_std(&listener) {
                 Ok(mut stream) => {
                     stream.set_nonblocking(false).unwrap();
                     let mut line = String::new();
@@ -1878,7 +1888,7 @@ fn neither_a_native_lead_nor_its_teammates_touch_the_caller_socket_s_binding_nam
         );
     }
 
-    let listener = crazyagent::spawn_gate::bind_unix_std(&binding).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&binding).unwrap();
     let node = || {
         fs::symlink_metadata(&binding)
             .ok()
@@ -2556,9 +2566,10 @@ fn native_team_agents_still_send_a_call_and_remove_the_answer_they_read() {
 /// executes or what trips the next launch (RV-DS241-137 code r1 F4, sec r1 F1, F2,
 /// DEC-173, RV-DS241-186, -187): no cargo or git config, `.gitconfig` included, cargo
 /// subcommand, npm or yarn config, in any letter case, no `.config` built elsewhere and
-/// moved in nor moved away, no flag or ACL on what the next launch keeps, no move, removal
-/// or link in place of a folder a launch walks or of the link to the owner's crates, and no
-/// link at a cargo cache name, while it still writes its own cache and its own folder in
+/// moved in, whether the launch made one first or not, judged by what landed and not by the
+/// move's exit, nor moved away, no flag or ACL on what the next launch keeps, no move,
+/// removal or link in place of a folder a launch walks or of the link to the owner's crates,
+/// and no link at a cargo cache name, while it still writes its own cache and its own folder in
 /// `.config`, sets flags and ACLs on its own copies elsewhere in its home and in its cache,
 /// and makes the cargo git cache the owner lacks. A later `cargo x` and `npm run` outside
 /// the sandbox then run nothing it planted. Needs npm and node on `PATH`.
@@ -2578,6 +2589,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     );
     write(&case.home.join(".npm/_cacache/index"), "cache\n");
     write(&case.home.join("f"), "plain\n");
+    write(&case.home.join("g"), "plain\n");
     write(&case.home.join(".claude.json"), "{}\n");
     let marker = case.profiles.join("ran.txt");
     let required = case.profiles.join("npmrc.js");
@@ -2618,7 +2630,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         (
             "config_parent",
             format!(
-                "rm -rf {config} 2>/dev/null; mkdir -p {built} && printf '[core]\\n' > {built}/config && mv {} {config}",
+                "rm -rf {config} 2>/dev/null; mkdir -p {built} && printf '[core]\\n' > {built}/config && mv {} {config} && test -e {config}/git/config",
                 home("built"),
                 config = home(".config"),
                 built = home("built/git")
@@ -2714,7 +2726,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         ("flag_new", format!("/usr/bin/chflags uchg {}", home("f"))),
         (
             "acl_new",
-            format!("/bin/chmod +a 'everyone deny delete' {}", home("f")),
+            format!("/bin/chmod +a 'everyone deny delete' {}", home("g")),
         ),
         (
             "flag_cache",
@@ -2730,6 +2742,29 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         ),
     ];
     let mut problems = Vec::new();
+    sandbox.install(&profile).unwrap();
+    fs::remove_dir(case.home.join(".config")).unwrap();
+    let staged = case.home.join("built");
+    run_installed(
+        &sandbox,
+        &profile,
+        Path::new("/bin/sh"),
+        &format!(
+            "mkdir -p {built} && printf '[core]\\n' > {built}/config && mv {} {}",
+            home("built"),
+            home(".config"),
+            built = home("built/git")
+        ),
+    );
+    if fs::symlink_metadata(case.home.join(".config")).is_ok() {
+        problems.push("config_parent with no .config made first: .config planted".to_owned());
+    }
+    if !staged.join("git/config").is_file() {
+        problems.push("config_parent with no .config made first: built moved".to_owned());
+    }
+    if staged.is_dir() {
+        fs::remove_dir_all(&staged).unwrap();
+    }
     for (name, script) in denied {
         let output = run(&sandbox, &profile, &script);
         if output.status.success() {
@@ -2745,7 +2780,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
             ));
         }
     }
-    let listed = crazyagent::spawn_gate::collected(
+    let listed = kernel_processes::spawn_gate::collected(
         Command::new("/bin/ls")
             .arg("-led")
             .arg(case.home.join(".claude.json")),
@@ -2754,12 +2789,12 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     let flags = fs::symlink_metadata(case.home.join(".claude.json"))
         .map(|metadata| FileFlag::from_bits_retain(metadata.st_flags()))
         .unwrap();
-    let _ = crazyagent::spawn_gate::collected(
+    let _ = kernel_processes::spawn_gate::collected(
         Command::new("/usr/bin/chflags")
             .args(["-R", "nouchg"])
             .arg(&case.home),
     );
-    let _ = crazyagent::spawn_gate::collected(
+    let _ = kernel_processes::spawn_gate::collected(
         Command::new("/bin/chmod")
             .args(["-R", "-N"])
             .arg(&case.home),
@@ -2804,14 +2839,14 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         &package.join("package.json"),
         "{\"name\":\"p\",\"version\":\"0.0.0\",\"scripts\":{\"x\":\"node -e 0\"}}\n",
     );
-    let cargo = crazyagent::spawn_gate::collected(
+    let cargo = kernel_processes::spawn_gate::collected(
         Command::new(env!("CARGO"))
             .arg("x")
             .current_dir(&case.tmp)
             .env("CARGO_HOME", case.home.join(".cargo")),
     )
     .unwrap();
-    let npm = crazyagent::spawn_gate::collected(
+    let npm = kernel_processes::spawn_gate::collected(
         Command::new(npm)
             .args(["--no-update-notifier", "run", "x"])
             .current_dir(&package)

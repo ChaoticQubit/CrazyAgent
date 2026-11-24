@@ -67,6 +67,18 @@ fn keychain_unavailable() -> EngineError {
     failure("native_profile_agent_keychain_unavailable")
 }
 
+/// Whether an agent home lies in the account profiles folder below the engine folder, or the
+/// profiles folder cannot be read, so no agent keychain is made there. Both are compared in
+/// their [`kernel_sandbox::paths::canonical`] spelling, so neither passes the other through the
+/// macOS data volume's name; a home that does not resolve is compared as given. Inputs: the
+/// engine folder and the agent home. Output: the answer.
+#[cfg(target_os = "macos")]
+fn inside_profiles(engine: &Path, home: &Path) -> bool {
+    let home = kernel_sandbox::paths::canonical(home).unwrap_or_else(|_| home.to_path_buf());
+    kernel_sandbox::paths::canonical(&engine.join(super::ROOT))
+        .map_or(true, |profiles| home.starts_with(profiles))
+}
+
 /// The Claude OAuth scope prefix an agent's copy may never carry. A Console sign-in holds
 /// `org:create_api_key`, which turns a copy into a durable API key, and the `org:` family
 /// grants organisation-wide access; a subscription sign-in holds only `user:` scopes
@@ -115,7 +127,7 @@ pub(super) struct Record {
 
 impl Drop for Record {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.copy);
+        kernel_security::secret::wipe(&mut self.copy);
     }
 }
 
@@ -170,9 +182,7 @@ impl AgentKeychain {
             .to_str()
             .filter(|text| text.is_ascii())
             .ok_or_else(keychain_unavailable)?;
-        if std::fs::canonicalize(engine.join(super::ROOT))
-            .map_or(true, |profiles| home.starts_with(profiles))
-        {
+        if inside_profiles(engine, home) {
             return Err(keychain_unavailable());
         }
         let mates = crate::launch_context::mates_home(home);
@@ -291,7 +301,7 @@ pub(super) fn account_record(
         Harness::Codex => codex_copy(&bytes),
         Harness::Claude => claude_copy(&bytes),
     };
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     record
 }
 
@@ -552,7 +562,7 @@ fn read_record(folder: &File, name: &str) -> Result<Vec<u8>, EngineError> {
     let mut bytes = Vec::with_capacity(RECORD_BYTES_MAX as usize + 1);
     let read = file.take(RECORD_BYTES_MAX + 1).read_to_end(&mut bytes);
     if read.is_err() || bytes.len() as u64 > RECORD_BYTES_MAX {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(unavailable());
     }
     Ok(bytes)
@@ -606,7 +616,7 @@ impl RecordText<'_> {
 impl Drop for RecordText<'_> {
     fn drop(&mut self) {
         if let Cow::Owned(text) = &mut self.0 {
-            crate::credentials::wipe(&mut std::mem::take(text).into_bytes());
+            kernel_security::secret::wipe(&mut std::mem::take(text).into_bytes());
         }
     }
 }
@@ -693,7 +703,7 @@ fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
     let identity = claims_only(filled(tokens.id_token.as_ref()).ok_or_else(codex_unreadable)?)?;
     let expires = Duration::from_secs(token_expiry(access)?);
     let null = Value::Null;
-    let copy = crate::credentials::sized_json(&CodexCopy {
+    let copy = kernel_security::secret::sized_json(&CodexCopy {
         api_key: (),
         last_refresh: record.last_refresh.as_ref().unwrap_or(&null),
         tokens: CodexCopyTokens {
@@ -799,7 +809,7 @@ fn polled(
     plan: Option<&Value>,
 ) -> Result<crate::usage::poll::PollCredential, EngineError> {
     Ok(crate::usage::poll::PollCredential {
-        token: crate::credentials::SecretString::bearer(token.as_bytes().to_vec())
+        token: kernel_security::secret::SecretString::bearer(token.as_bytes().to_vec())
             .map_err(|_| unavailable())?,
         account_id: account_id.and_then(Value::as_str).map(str::to_owned),
         plan: plan.and_then(Value::as_str).map(str::to_owned),
@@ -842,7 +852,7 @@ pub(crate) fn chatgpt_tokens(
     let (_, tokens) = codex_record(record)?;
     let access = filled(tokens.access_token.as_ref()).ok_or_else(codex_unreadable)?;
     let expires = Duration::from_secs(token_expiry(access)?);
-    let access = crate::credentials::SecretString::bearer(access.as_bytes().to_vec())
+    let access = kernel_security::secret::SecretString::bearer(access.as_bytes().to_vec())
         .map_err(|_| codex_unreadable())?;
     let account_id = tokens
         .account_id
@@ -976,7 +986,7 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
         .as_ref()
         .and_then(Value::as_u64)
         .ok_or_else(unavailable)?;
-    let copy = crate::credentials::sized_json(&ClaudeCopy {
+    let copy = kernel_security::secret::sized_json(&ClaudeCopy {
         oauth: ClaudeCopyOauth {
             access_token: access,
             expires_at: expires_ms,
@@ -993,10 +1003,11 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
     })
 }
 
-/// Reads the account's Claude Code credential from the managed home's own keychain, where
-/// the sign-in custodian's Claude Code stored it under the item name Claude Code derives
-/// from that home. The secret comes back only through a bounded pipe, never an argument.
-/// Inputs: the managed home's descriptor and path. Output: the record, or unavailable.
+/// Reads the account's Claude Code credential from the managed home's own keychain, filed
+/// under the item name Claude Code derives from that home, once the keychain is open, so a
+/// locked one never makes macOS ask the owner for its password. The secret comes back only
+/// through a bounded pipe, never an argument. Inputs: the managed home's descriptor and
+/// path. Output: the record, or unavailable.
 #[cfg(target_os = "macos")]
 fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
     use std::process::{Command, Stdio};
@@ -1006,7 +1017,10 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
         .ok_or_else(unavailable)?;
     let library = open_folder(home, "Library")?;
     let keychains = open_folder(&library, "Keychains")?;
-    let stat = rustix::fs::statat(&keychains, "login.keychain-db", AtFlags::SYMLINK_NOFOLLOW)
+    let keychain =
+        crate::engine::keychain::open_profile_keychain(path).map_err(|_| unavailable())?;
+    let name = keychain.file_name().ok_or_else(unavailable)?;
+    let stat = rustix::fs::statat(&keychains, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|_| unavailable())?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
         || stat.st_nlink != 1
@@ -1015,8 +1029,7 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
         return Err(unavailable());
     }
     let service = claude_service(text);
-    let keychain = path.join("Library/Keychains/login.keychain-db");
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(SECURITY)
             .args(["find-generic-password", "-s", service.as_str(), "-w"])
             .arg(&keychain)
@@ -1049,7 +1062,7 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
         None => Ok(0),
     };
     if read.is_err() || !status.success() || bytes.len() as u64 > RECORD_BYTES_MAX {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(unavailable());
     }
     while bytes.last() == Some(&b'\n') {
@@ -1076,4 +1089,37 @@ fn open_folder(parent: &File, name: &str) -> Result<File, EngineError> {
         return Err(unavailable());
     }
     Ok(folder)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod profile_home_tests {
+    use super::inside_profiles;
+    use std::path::{Path, PathBuf};
+
+    /// V243-FIRMLINK-SWEEP D4: an agent home in the account profiles folder counts as inside
+    /// it whichever of the two macOS names the engine folder and the home use, so no agent
+    /// keychain is made there; a home beside the profiles folder is not inside.
+    #[test]
+    fn a_profile_home_named_through_the_data_volume_is_inside_the_profiles() {
+        let base = tempfile::tempdir().unwrap();
+        let engine = base.path().canonicalize().unwrap();
+        let profile = engine.join(super::super::ROOT).join("account");
+        let agent = engine.join("agents").join("one");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+        assert!(long(&profile).is_dir());
+        for (engine, home) in [
+            (engine.clone(), profile.clone()),
+            (engine.clone(), long(&profile)),
+            (long(&engine), profile.clone()),
+        ] {
+            assert!(
+                inside_profiles(&engine, &home),
+                "engine {engine:?}, home {home:?}"
+            );
+        }
+        assert!(!inside_profiles(&engine, &agent));
+        assert!(!inside_profiles(&long(&engine), &agent));
+    }
 }

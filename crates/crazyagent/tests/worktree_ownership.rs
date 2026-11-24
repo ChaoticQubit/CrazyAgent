@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 fn git(root: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Process::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -55,17 +55,22 @@ fn request(id: &str, revision: u64, command: Command) -> WireRequest {
 }
 
 /// Sends one request the way the engine's contract asks a client to: while it answers
-/// outcome_unknown_retry_same_identity (its wait ended and the write may still commit),
-/// the same request goes again, and storage replays a recorded mutation's reply. Gives up
-/// after 30 s. Inputs: the engine and the request. Output: the reply.
+/// outcome_unknown_retry_same_identity (its wait ended and the write may still commit) or
+/// a not-submitted code (nothing ran), the same request goes again, and storage replays a
+/// recorded mutation's reply. Gives up after 30 s. Inputs: the engine and the request.
+/// Output: the reply.
 async fn send(engine: &Engine, request: WireRequest) -> WireReply {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match engine.apply(request.clone()).await {
             Ok(reply) => return reply,
             Err(error)
-                if error.0 == "outcome_unknown_retry_same_identity"
-                    && std::time::Instant::now() < until => {}
+                if matches!(
+                    error.0.as_str(),
+                    "outcome_unknown_retry_same_identity"
+                        | "storage_starting_not_submitted"
+                        | "storage_busy_not_submitted"
+                ) && std::time::Instant::now() < until => {}
             Err(error) => panic!("engine apply failed: {error:?}"),
         }
     }
@@ -1010,7 +1015,7 @@ fn logged(database: &Path) -> Vec<(i64, String)> {
 /// Asserts that replay of the closed store's log rebuilds both worktree tables as they
 /// stand, inside a transaction that is rolled back. Input: the store's path. Output: none.
 fn replays_to_live(database: &Path) {
-    use crazyagent::state_log::replay::rows;
+    use kernel_storage::state_log::replay::rows;
     let mut db = rusqlite::Connection::open(database).unwrap();
     let tables = |db: &rusqlite::Connection| {
         (

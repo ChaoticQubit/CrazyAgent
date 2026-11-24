@@ -341,11 +341,18 @@ impl ProjectPage {
     /// with the exact name typed (DEC-177 add.1); Home follows it and the reply says it started
     /// or why not. Takes the subject, the way and the context. Returns nothing; the reply
     /// arrives later.
-    fn start_job(&mut self, subject: JobSubject, mode: AddMode, ctx: &mut Ctx) {
+    fn start_job(
+        &mut self,
+        subject: JobSubject,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+        ctx: &mut Ctx,
+    ) {
+        assert!(overrides.len() <= crate::projects_home::ADD_OVERRIDES_MAX);
         let id = match start_id() {
             Ok(id) => id,
             Err(code) => {
-                self.screen.job_refused(&code, ctx.store.intake.as_ref());
+                self.screen.job_refused(&code);
                 return;
             }
         };
@@ -353,11 +360,24 @@ impl ProjectPage {
             id,
             subject,
             mode,
-            overrides: Vec::new(),
+            overrides,
         };
         self.job_sent = Some(query.clone());
         super::super::intake::ask(ctx, query);
         assert!(self.job_sent.is_some());
+    }
+
+    /// Reads the reinstall offer the engine keeps for this project's folder, unless a read or
+    /// a dismiss of it is already on its way. Takes the context. Returns nothing.
+    pub(super) fn read_reinstall(&mut self, ctx: &mut Ctx) {
+        if self.reinstall_sent.is_some() {
+            return;
+        }
+        let query = IntakeQuery::ReinstallOffer {
+            project: self.screen.project.clone(),
+        };
+        self.reinstall_sent = Some(query.clone());
+        super::super::intake::ask(ctx, query);
     }
 
     /// Takes the reply to this page's move or delete start, then follows the started move in
@@ -394,6 +414,28 @@ impl ProjectPage {
             }
             return true;
         }
+        if self.reinstall_sent.as_ref() == Some(&event.query) {
+            self.reinstall_sent = None;
+            match (&event.query, &event.result) {
+                (_, Ok(IntakeView::Reinstall(offer))) => self.screen.reinstall = offer.clone(),
+                (_, Ok(IntakeView::ReinstallDismissed(_))) => self.screen.reinstall = None,
+                (IntakeQuery::ReinstallDismiss { .. }, _) => {
+                    self.screen.problem = Some(REINSTALL_NOT_DISMISSED.into());
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if self.move_read_sent.as_ref() == Some(&event.query) {
+            self.move_read_sent = None;
+            match &event.result {
+                Ok(IntakeView::FolderSize(measured)) => {
+                    self.screen.move_read(measured.skipped.clone())
+                }
+                _ => self.screen.move_read_failed(),
+            }
+            return true;
+        }
         if self
             .ask_pane
             .as_ref()
@@ -424,17 +466,15 @@ impl ProjectPage {
                         "Follow it on Home; you can keep working.",
                     ));
                 }
-                Ok(_) => self
-                    .screen
-                    .job_refused("intake_change_outcome_unknown", ctx.store.intake.as_ref()),
-                Err(code) => self.screen.job_refused(code, ctx.store.intake.as_ref()),
+                Ok(_) => self.screen.job_refused("intake_change_outcome_unknown"),
+                Err(code) => self.screen.job_refused(code),
             }
         }
         let ended = self.moving.as_ref().is_some_and(|id| {
-            ctx.store
+            !ctx.store
                 .intake
-                .as_ref()
-                .is_none_or(|job| &job.id != id || !intake_job::running(job))
+                .iter()
+                .any(|job| &job.id == id && intake_job::running(job))
         });
         if ended {
             self.moving = None;
@@ -897,6 +937,14 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::ReinstallDismiss => {
+                let query = IntakeQuery::ReinstallDismiss {
+                    project: self.screen.project.clone(),
+                };
+                self.reinstall_sent = Some(query.clone());
+                super::super::intake::ask(ctx, query);
+                Flow::Handled
+            }
             ProjectReply::GitHubRules => Flow::Open(Place::ProjectGitHub {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
@@ -917,15 +965,33 @@ impl ProjectPage {
                 self.set_order(strategy, ctx);
                 Flow::Handled
             }
-            ProjectReply::MoveHome(mode) => {
+            ProjectReply::MoveRead => {
+                let folder = self
+                    .screen
+                    .setup
+                    .as_ref()
+                    .expect("the move ask opens only once the project folder is known")
+                    .project_folder();
+                let query = IntakeQuery::FolderSize {
+                    path: folder.to_string_lossy().into_owned(),
+                };
+                self.move_read_sent = Some(query.clone());
+                super::super::intake::ask(ctx, query);
+                Flow::Handled
+            }
+            ProjectReply::MoveHome(mode, everything) => {
                 let project_id = self.screen.project.clone();
-                self.start_job(JobSubject::MoveProject { project_id }, mode, ctx);
+                let overrides = match everything {
+                    true => vec![AddOverride::DownloadEverything],
+                    false => Vec::new(),
+                };
+                self.start_job(JobSubject::MoveProject { project_id }, mode, overrides, ctx);
                 Flow::Handled
             }
             ProjectReply::DeleteEverything(name) => {
                 let project_id = self.screen.project.clone();
                 let subject = JobSubject::Delete { project_id, name };
-                self.start_job(subject, AddMode::Move, ctx);
+                self.start_job(subject, AddMode::Move, Vec::new(), ctx);
                 Flow::Handled
             }
         };

@@ -33,6 +33,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "instructions_cleanup_busy",
     "instructions_cleanup_empty",
     "instructions_cleanup_failed",
+    "instructions_cleanup_full",
     "instructions_cleanup_master_harness",
     "instructions_cleanup_no_account",
     "instructions_cleanup_no_network",
@@ -796,7 +797,7 @@ impl OwnerClient {
         pool: Option<CredentialRef>,
     ) -> Result<Proposal, EngineError> {
         cleanup::cleanup_pool(project.as_ref(), pool.as_ref()).map_err(failure)?;
-        let limit = self.timeout.max(PROPOSE_TIMEOUT);
+        let limit = deferred_wait(self.timeout, PROPOSE_TIMEOUT);
         match self
             .process_exchange_within(Action::Propose { project, pool }, None, limit)
             .await?
@@ -897,7 +898,7 @@ impl OwnerClient {
         text: Option<String>,
         limit: Duration,
     ) -> Result<(Reply, Option<String>), EngineError> {
-        assert!(limit >= self.timeout && limit <= self.timeout.max(PROPOSE_TIMEOUT));
+        assert!(limit >= self.timeout && limit <= deferred_wait(self.timeout, PROPOSE_TIMEOUT));
         tokio::time::timeout(limit, async {
             let read = read_kind(&action);
             let envelope = Envelope {
@@ -910,10 +911,10 @@ impl OwnerClient {
                 return Err(failure("owner_socket_replaced"));
             }
             let unavailable = |_| failure("process_owner_unavailable");
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(unavailable)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -1072,7 +1073,7 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -1192,7 +1193,7 @@ pub(super) async fn serve(
 }
 
 fn public_code(error: EngineError) -> String {
-    if PROCESS_CODES.contains(&error.0.as_str()) {
+    if PROCESS_CODES.contains(&error.0.as_str()) || crate::storage::storage_answer(&error.0) {
         error.0
     } else {
         "process_outcome_unknown".into()
@@ -1200,7 +1201,7 @@ fn public_code(error: EngineError) -> String {
 }
 
 async fn handle(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -1268,6 +1269,7 @@ async fn handle(
                     pool: pool.as_ref(),
                     prompt,
                     agent: "instructions-cleanup",
+                    holds_seat: true,
                 })
             })
             .map(Answer::Proposed)
@@ -1351,7 +1353,7 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
             }
             let home =
                 crate::skills::import::home().ok_or_else(|| failure("process_import_missing"))?;
-            let places = crate::tools::Places::from_environment(Some(root));
+            let places = crate::tools::tools_places(Some(root));
             Answer::Text(crate::instruction_files::sources::read(
                 &home, registry, &places, &harness,
             )?)
@@ -2055,13 +2057,14 @@ fn checks(root: &Path, project: Option<&ProjectId>, text: &str, app: Option<&str
         findings.push(Finding::new(FindingKind::OverBudget, Vec::new(), &note));
     }
     let (folder, skills, servers) = inventory(root, project);
-    let places = crate::tools::Places::from_environment(Some(root));
-    let pending = crate::tools::probe::mark().first_run_pending;
+    let places = crate::tools::tools_places(Some(root));
+    let pending =
+        kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending;
     let program = |name: &str| {
         if pending {
             return None;
         }
-        match crate::tools::resolve(name, &places) {
+        match kernel_processes::finding::resolve(name, &places) {
             Ok(_) => Some(true),
             Err(missing) => missing.refused.is_none().then_some(false),
         }

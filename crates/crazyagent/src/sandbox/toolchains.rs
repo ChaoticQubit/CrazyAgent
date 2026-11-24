@@ -1,4 +1,5 @@
-use super::{SandboxError, canonical, owner_home};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::paths::{canonical, owner_home};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -1063,9 +1064,10 @@ fn seal_new_folder(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Removes the agent's short temp folder with everything in it. Input: the agent home.
-/// Output: done when it is gone or never existed, or a refusal when the path is not this
-/// user's folder.
+/// Removes the agent's short temp folder with everything in it, as Clean up removes an
+/// agent's tree ([`agent_tree_gone`]), so a folder it shut or a file it made immutable does
+/// not keep it. Input: the agent home. Output: done when it is gone or never existed, or a
+/// refusal when the path is not this user's folder.
 #[cfg(unix)]
 pub fn remove_tmp(home: &Path) -> io::Result<()> {
     let path = tmp_path(home);
@@ -1080,7 +1082,16 @@ pub fn remove_tmp(home: &Path) -> io::Result<()> {
         }
         Ok(_) => {}
     }
-    fs::remove_dir_all(&path)
+    agent_tree_gone(&path)
+}
+
+/// Removes a folder an agent wrote, with all it holds, through
+/// [`crate::team::cleanup::remove_agent_tree`], which opens up what the agent shut and clears
+/// its immutable flags without following a link. Input: the folder. Output: done once nothing
+/// has its name, or the error naming why it stays.
+#[cfg(unix)]
+fn agent_tree_gone(folder: &Path) -> io::Result<()> {
+    crate::team::cleanup::remove_agent_tree(folder).map_err(|error| io::Error::other(error.0))
 }
 
 /// Removes everything in the agent's short temp folder but the socket named `kept`, which
@@ -1104,7 +1115,7 @@ pub fn remove_tmp_keeping(home: &Path, kept: &str) -> io::Result<()> {
             continue;
         }
         if entry.file_type()?.is_dir() {
-            fs::remove_dir_all(entry.path())?;
+            agent_tree_gone(&entry.path())?;
         } else {
             fs::remove_file(entry.path())?;
         }

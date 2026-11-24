@@ -156,7 +156,7 @@ fn hide(ctx: &mut Ctx) -> u64 {
 
 /// One row of the project list: the New project draft kept after leaving the
 /// wizard, a projects folder entry that is not a ready project, or a project.
-/// Input: the engine's intake job, the kept draft, the found folders and the store. Output:
+/// Input: the engine's intake jobs, the kept draft, the found folders and the store. Output:
 /// drawn as a four-row card; Enter does the job's first action, continues the draft, sets up
 /// the folder or opens the project.
 enum Entry {
@@ -319,7 +319,7 @@ pub struct Home {
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
     sent: Option<IntakeQuery>,
-    job_shown: bool,
+    jobs_shown: Vec<crate::protocol::RequestId>,
 }
 
 impl Default for Home {
@@ -389,14 +389,16 @@ pub(in crate::tui) mod tests {
     use crate::pools::{MemberKind, MemberStatus, PoolMember};
     use crate::protocol::CredentialRef;
     use crate::protocol::ProjectId;
-    use crate::setup::{Dependency, DependencyStatus, Version};
-    use crate::terminal::{AgentId, TerminalFrame};
+    use crate::setup::{Dependency, DependencyStatus};
+    use crate::terminal::TerminalFrame;
     use crate::tui::client::OwnerEvent;
     use crate::tui::client::app_setup::AppSetupEvent;
     use crate::tui::client::learning::{LearningEvent, LearningReply};
     use crate::tui::client::settings::SettingsEvent;
     use crate::tui::screens::settings_accounts::tests::{ctx, render};
     use crate::tui::shell::Shell;
+    use kernel_processes::run::Version;
+    use kernel_processes::terminal::AgentId;
 
     fn pool(name: &str, statuses: &[MemberStatus]) -> PoolSummary {
         PoolSummary {
@@ -437,6 +439,8 @@ pub(in crate::tui) mod tests {
                             version: Version::parse("1.0.0").unwrap(),
                         }
                     },
+                    busy: false,
+                    waiting: None,
                 })
                 .collect(),
             pack: Vec::new(),
@@ -648,7 +652,9 @@ pub(in crate::tui) mod tests {
         let mut status = tools(&[]);
         status.dependencies[0].state = DependencyState::System {
             version: Version::parse("3.5a").unwrap(),
-            note: crate::tools::BundleNote::Missing.line().to_owned(),
+            note: kernel_processes::finding::BundleNote::Missing
+                .line()
+                .to_owned(),
         };
         assert_eq!(missing_tools(&status), Vec::<String>::new());
     }

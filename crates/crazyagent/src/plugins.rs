@@ -66,10 +66,10 @@ pub(crate) fn absolute_command(command: &str) -> bool {
 
 /// Whether a server command is a full path on this system: on Windows a plain drive path
 /// such as `C:\Program Files\nodejs\npx.cmd`, never a `/`, UNC, verbatim, device or stream
-/// path ([`crate::sandbox::windows_clean_text`]). Input: the command. Output: the answer.
+/// path ([`kernel_sandbox::paths::windows_clean_text`]). Input: the command. Output: the answer.
 #[cfg(not(unix))]
 pub(crate) fn absolute_command(command: &str) -> bool {
-    crate::sandbox::windows_clean_text(command)
+    kernel_sandbox::paths::windows_clean_text(command)
 }
 
 impl ServerSpec {
@@ -383,7 +383,7 @@ impl SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.0);
+        kernel_security::secret::wipe(&mut self.0);
     }
 }
 
@@ -411,16 +411,18 @@ pub struct LaunchServer {
 }
 
 /// Why a launch left the default pack's context-mode server out rather than run its npx
-/// spec: the engine's shared install is still being set up, setting it up failed or cannot
-/// run, the installed files did not match the pinned hashes, the Node.js beside npx is older
-/// than context-mode needs, or the npx a spec only shaped like that launch names is not one
-/// the engine's tool resolver finds.
+/// spec: the shared install is still being set up, setting it up failed or cannot run, the
+/// installed files did not match the pinned hashes, the Node.js beside npx is too old, sits in
+/// a folder Windows sandboxes cannot read and this user cannot change, or meets a drive root
+/// they cannot read, or the tool resolver does not find that npx.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModeOff {
     SettingUp,
     Failed,
     Mismatch,
     NodeTooOld,
+    NodeFolderUnreadable,
+    NodeDriveRootUnreadable,
     NpxNotFound,
 }
 
@@ -460,8 +462,9 @@ pub(crate) fn found_context_mode<'a>(
     if pinned_context_mode(spec).is_none() {
         return Ok(None);
     }
-    let pending = crate::tools::probe::mark().first_run_pending;
-    let places = crate::tools::Places::from_environment(Some(root));
+    let pending =
+        kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending;
+    let places = crate::tools::tools_places(Some(root));
     context_mode_on(spec, &places, pending)
 }
 
@@ -472,7 +475,7 @@ pub(crate) fn found_context_mode<'a>(
 /// whether that probe was still going. Output: npx's folder and version, none, or why not.
 pub(crate) fn context_mode_on<'a>(
     spec: &'a ServerSpec,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
     pending: bool,
 ) -> Result<Option<(&'a Path, &'a str)>, ContextModeOff> {
     let (ServerSpec::Stdio { command, .. }, Some((bin, version))) =
@@ -481,14 +484,93 @@ pub(crate) fn context_mode_on<'a>(
         return Ok(None);
     };
     let listed = places.folders().iter().any(|folder| folder == bin);
-    if listed && crate::tools::resolve_entry(Path::new(command), places).is_ok() {
+    if listed && kernel_processes::finding::resolve_entry(Path::new(command), places).is_ok() {
         return Ok(Some((bin, version)));
     }
     if pending {
         return Err(ContextModeOff::SettingUp);
     }
-    crate::tools::probe::missed();
+    kernel_processes::finding::probe::missed(crate::tools::finding_seed);
     Err(ContextModeOff::NpxNotFound)
+}
+
+/// The spec a harness or a server check runs for one approved server, never through cmd.exe
+/// (V243-WIN-MCP-NPX, #341 sec F1): on Windows a stdio command runs only as a program, as
+/// written and as its real file ([`kernel_processes::batch::program_file`]), or as npm's own `npx.cmd`
+/// mapped by its layout ([`npx_spec`]); a batch name that is not there is not found. Inputs:
+/// the engine root and the spec. Output: the spec to run, or the code that leaves it out.
+pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpec, &'static str> {
+    #[cfg(windows)]
+    if let ServerSpec::Stdio { command, args } = &spec {
+        let command = Path::new(command);
+        let found = command.canonicalize();
+        let missing = found
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let real = found.ok();
+        let batch = kernel_processes::batch::batch_file(command)
+            || real
+                .as_deref()
+                .is_some_and(kernel_processes::batch::batch_file);
+        if batch && missing {
+            return Err("server_command_not_found");
+        }
+        if batch {
+            let places = crate::tools::tools_places(Some(root));
+            return npx_spec(command, args, &places);
+        }
+        let program = kernel_processes::batch::program_file(command)
+            && real
+                .as_deref()
+                .is_none_or(kernel_processes::batch::program_file);
+        if !program {
+            return Err("server_batch_file");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = root;
+    Ok(spec)
+}
+
+/// npm's `npx.cmd` as the tool resolver runs it ([`kernel_processes::finding::resolve_entry`]), kept only
+/// when the resolver mapped it by npx's layout ([`kernel_processes::batch::npx_real`]): `node.exe` with
+/// `npx-cli.js` before the approved arguments, both in plain drive spelling. Inputs: the
+/// command, its arguments and the places. Output: the spec, `server_command_not_found` for
+/// an npx.cmd the resolver refuses, its cause logged (#341 code F1), or `server_batch_file`.
+#[cfg(windows)]
+fn npx_spec(
+    command: &Path,
+    args: &[String],
+    places: &kernel_processes::finding::Places,
+) -> Result<ServerSpec, &'static str> {
+    let other = "server_batch_file";
+    let (node, cli) = kernel_processes::batch::npx_real(command).ok_or(other)?;
+    let tool = kernel_processes::finding::resolve_entry(command, places).map_err(|missing| {
+        let why = missing.refused.as_ref().map(|refused| &refused.why);
+        eprintln!(
+            "plugin_server_npx_refused reason={:?} refused={why:?}",
+            missing.reason
+        );
+        "server_command_not_found"
+    })?;
+    if tool.program != cli || tool.interpreter().map(|found| &found.program) != Some(&node) {
+        return Err(other);
+    }
+    let plain = |file: &Path| {
+        kernel_sandbox::paths::canonical(file)
+            .ok()?
+            .into_os_string()
+            .into_string()
+            .ok()
+    };
+    let mut words = Vec::with_capacity(args.len() + 1);
+    words.push(plain(&cli).ok_or(other)?);
+    words.extend_from_slice(args);
+    assert!(words.len() <= ARGS_MAX + 1);
+    Ok(ServerSpec::Stdio {
+        command: plain(&node).ok_or(other)?,
+        args: words,
+    })
 }
 
 #[cfg(unix)]
@@ -525,15 +607,18 @@ pub(crate) fn exact_version(version: &str) -> bool {
         })
 }
 
-/// The effective set with each server's secret values already read, ready for a harness
-/// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_off` says why
-/// the default pack's context-mode server was left out, none when it was not, and
-/// `left_out` names each server so left out, whose hooks the launch leaves out too.
+/// The effective set with secret values read, ready for a harness launch; skills as in
+/// `EffectivePlugins`. `context_mode_off` says why context-mode was left out, `batch_files`
+/// names each server left out as no Windows program ([`without_cmd_exe`]), `commands_not_found`
+/// each one whose command was not found or whose npx.cmd was refused, and `left_out` every
+/// server left out, whose hooks the launch leaves out too.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
     pub skills: Vec<EffectiveSkill>,
     pub servers: Vec<LaunchServer>,
     pub context_mode_off: Option<ContextModeOff>,
+    pub batch_files: Vec<String>,
+    pub commands_not_found: Vec<String>,
     pub left_out: Vec<String>,
 }
 
@@ -617,9 +702,15 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_limit", "You can add up to 50 MCP servers here."),
     ("server_not_found", "This MCP server was removed."),
+    #[cfg(unix)]
     (
         "server_command_invalid",
         "Enter the full path to the command, starting with /.",
+    ),
+    #[cfg(not(unix))]
+    (
+        "server_command_invalid",
+        "Enter the full path to the command, such as C:\\Program Files\\nodejs\\npx.cmd.",
     ),
     (
         "server_args_invalid",
@@ -666,6 +757,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_cant_start", "The server can't start."),
     (
+        "server_batch_file",
+        "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
+    ),
+    (
         "server_stored_spec_invalid",
         "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.",
     ),
@@ -686,6 +781,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The server's processes could not be listed after its check. CrazyAgent keeps looking for them and ends them.",
     ),
     ("server_exited", "The server stopped before answering."),
+    (
+        "server_check_timeout_powershell",
+        "The server did not answer within 10 seconds. It runs on PowerShell, so the likely cause is PowerShell reading every module installed on this computer before its first command, which takes longer when many modules are installed.",
+    ),
     (
         "server_check_timeout",
         "The server did not answer within 10 seconds.",
@@ -717,6 +816,14 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "server_npx_not_found",
         "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
+    ),
+    (
+        "server_node_folder_unreadable",
+        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it.",
+    ),
+    (
+        "server_node_drive_root_unreadable",
+        "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step.",
     ),
     (
         "server_output_too_large",
@@ -801,7 +908,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
 pub const CHECK_REFUSED: &str = "server_check_refused:";
 
 /// The longest boundary reason a recorded check problem carries.
-const CHECK_REASON_BYTES_MAX: usize = 1024;
+pub const CHECK_REASON_BYTES_MAX: usize = 1024;
 
 /// Records a boundary refusal of a server check with the boundary's reason. Input: the plain
 /// reason, never empty. Output: the problem to record, which [`check_problem`] shows.
@@ -811,6 +918,25 @@ pub fn check_refused(reason: &str) -> String {
     let problem = format!("{CHECK_REFUSED}{reason}");
     assert!(check_problem(&problem).contains(reason.trim_end_matches('.')));
     problem
+}
+
+/// Why a server check is not run on Windows under a network that names hosts or ports: the
+/// AppContainer holds no such limit, so the check would reach the whole internet, which the
+/// owner accepted for agents only (#519 F1).
+const WINDOWS_CHECK_LIMIT: &str = "limiting a Windows agent's network to a few ports needs a firewall rule for its AppContainer, which this build does not have, so the agent does not start rather than reach more";
+
+/// The refusal of a server check whose network names hosts or ports on Windows (#519 F1).
+/// Inputs: the OS and the check's network. Output: the problem to record, or None when the
+/// check may run.
+pub fn check_network_refused(
+    os: &str,
+    network: &kernel_sandbox::net::SandboxNetwork,
+) -> Option<String> {
+    let limited = matches!(
+        network,
+        kernel_sandbox::net::SandboxNetwork::Only(remotes) if !remotes.is_empty()
+    );
+    (os == "windows" && limited).then(|| check_refused(WINDOWS_CHECK_LIMIT))
 }
 
 /// The start of a recorded check problem for a failed context-mode shared install, followed
@@ -870,6 +996,28 @@ pub fn known_code(code: &str) -> Option<&'static str> {
         .iter()
         .find(|(known, _)| *known == code)
         .map(|(known, _)| *known)
+}
+
+/// The problem a server check records when it ends with `code`: a timed-out check of a
+/// PowerShell server (`powershell` or `pwsh`, any case or extension) records
+/// `server_check_timeout_powershell`, whose sentence names module reading as the likely cause.
+/// Inputs: the check's code and the server's program. Output: the code to record.
+pub fn timed_out_problem(code: &'static str, program: &Path) -> &'static str {
+    assert!(!code.is_empty());
+    assert!(!program.as_os_str().is_empty());
+    let text = program.to_string_lossy();
+    let name = text.rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+    let powershell = ["powershell", "pwsh"]
+        .iter()
+        .any(|known| stem.eq_ignore_ascii_case(known));
+    let named = "server_check_timeout_powershell";
+    if code == "server_check_timeout" && powershell {
+        assert!(known_code(named).is_some());
+        named
+    } else {
+        code
+    }
 }
 
 #[cfg(test)]
@@ -1007,6 +1155,42 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_check_under_a_host_or_port_limit_is_refused_with_the_firewall_reason() {
+        use crate::sandbox::policy::AgentNetwork;
+        use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+        let https = AgentNetwork::Https.sandbox(None);
+        assert_eq!(
+            https,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+        );
+        let refused = check_network_refused("windows", &https).expect("refused on Windows");
+        assert_eq!(refused, check_refused(WINDOWS_CHECK_LIMIT));
+        assert_eq!(
+            check_problem(&refused),
+            format!("CrazyAgent did not run the check: {WINDOWS_CHECK_LIMIT}.")
+        );
+        let loopback = SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)]);
+        assert!(check_network_refused("windows", &loopback).is_some());
+        for open in [
+            AgentNetwork::Open.sandbox(None),
+            AgentNetwork::None.sandbox(None),
+        ] {
+            assert!(
+                check_network_refused("windows", &open).is_none(),
+                "{open:?}"
+            );
+        }
+        for os in ["macos", "linux"] {
+            for network in [&https, &loopback] {
+                assert!(
+                    check_network_refused(os, network).is_none(),
+                    "{os} {network:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_check_the_boundary_refused_shows_the_boundary_reason() {
         let reason = "port 40000 is kept free for the owner's apps, a local model or a model \
              proxy, and this Linux hands out ports 32768 to 60999 by itself";
@@ -1029,6 +1213,55 @@ mod tests {
         for other in ["server_cant_start", "no_such_code", CHECK_REFUSED, ""] {
             assert_eq!(check_problem(other), "The server can't start.", "{other:?}");
         }
+    }
+
+    /// V243-WIN-PWSH-CONFINED-CHECK: a check of a PowerShell server that ran out of time says
+    /// the server did not answer in time and names PowerShell reading its installed modules as
+    /// the likely cause; any other program, and any other code, keeps its own words.
+    #[test]
+    fn a_powershell_server_that_timed_out_names_its_module_reading_as_the_likely_cause() {
+        let timed_out = "server_check_timeout";
+        let named = "server_check_timeout_powershell";
+        for program in [
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Program Files\PowerShell\7\PWSH.EXE",
+            "/usr/local/bin/pwsh",
+            "/opt/microsoft/powershell/7/pwsh",
+        ] {
+            let program = Path::new(program);
+            assert_eq!(timed_out_problem(timed_out, program), named, "{program:?}");
+            assert_eq!(timed_out_problem("server_exited", program), "server_exited");
+        }
+        for program in [
+            r"C:\Program Files\nodejs\node.exe",
+            "/usr/local/bin/powershell-helper",
+            "/opt/pwsh/bin/uvx",
+        ] {
+            let program = Path::new(program);
+            assert_eq!(
+                timed_out_problem(timed_out, program),
+                timed_out,
+                "{program:?}"
+            );
+        }
+        assert_eq!(
+            check_problem(timed_out),
+            "The server did not answer within 10 seconds."
+        );
+        assert_eq!(
+            check_problem(named),
+            "The server did not answer within 10 seconds. It runs on PowerShell, so the likely cause is PowerShell reading every module installed on this computer before its first command, which takes longer when many modules are installed."
+        );
+        assert_eq!(known_code(named), Some(named));
+    }
+
+    /// V243-WIN-MCP-NPX: a check of a Windows command that is no program, npm's npx.cmd
+    /// aside, says what to point the command at instead, and the code is known to every client.
+    #[test]
+    fn a_check_of_a_batch_command_says_what_to_point_it_at() {
+        let words = "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.";
+        assert_eq!(check_problem("server_batch_file"), words);
+        assert_eq!(known_code("server_batch_file"), Some("server_batch_file"));
     }
 
     #[test]
@@ -1100,6 +1333,46 @@ mod tests {
         );
     }
 
+    /// V244-WIN-NPM: a check whose context-mode install met a Node.js folder no Windows
+    /// sandbox may read, and this Windows user cannot open, reads one sentence of its own,
+    /// a code the desktop knows; a boundary reason that names a folder shows that folder.
+    #[test]
+    fn a_check_on_a_node_folder_windows_sandboxes_cannot_read_says_so_in_one_sentence() {
+        let words = "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it.";
+        assert_eq!(check_problem("server_node_folder_unreadable"), words);
+        assert_eq!(plain_problem("server_node_folder_unreadable"), Some(words));
+        assert_eq!(
+            known_code("server_node_folder_unreadable"),
+            Some("server_node_folder_unreadable")
+        );
+        let folder = std::path::Path::new(r"C:\Program Files\nodejs");
+        let reason = kernel_sandbox::error::unreadable_reason(folder);
+        assert!(reason.contains(r"C:\Program Files\nodejs"), "{reason}");
+        assert!(check_problem(&check_refused(&reason)).contains(&reason));
+    }
+
+    /// V244-WIN-ADMIN-STEP: a check whose context-mode install met a drive root no Windows
+    /// sandbox may read reads its own sentence, apart from the Node.js folder one, naming the
+    /// installer's administrator step that adds the entry; a code the desktop knows.
+    #[test]
+    fn a_check_on_a_drive_root_windows_sandboxes_cannot_read_names_the_administrator_step() {
+        let words = "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step.";
+        assert_eq!(check_problem("server_node_drive_root_unreadable"), words);
+        assert_eq!(
+            plain_problem("server_node_drive_root_unreadable"),
+            Some(words)
+        );
+        assert_eq!(
+            known_code("server_node_drive_root_unreadable"),
+            Some("server_node_drive_root_unreadable")
+        );
+        assert_ne!(
+            plain_problem("server_node_folder_unreadable"),
+            Some(words),
+            "one sentence per cause"
+        );
+    }
+
     /// RV-DS241-153: the pinned context-mode launch is read from the full npx path that
     /// `validate` accepts on this system, a drive path on Windows since WIN-PACK-SEED, so it is
     /// the pinned launch there too and is never run through npx as approved.
@@ -1120,7 +1393,7 @@ mod windows_tests {
 
     /// WIN-PACK-SEED: on Windows a server command is a plain drive path, such as the `npx.cmd`
     /// setup finds, never a `/` path, a bare name, or a UNC, verbatim, device, drive-relative,
-    /// forward-slash or stream path ([`crate::sandbox::windows_clean_text`]).
+    /// forward-slash or stream path ([`kernel_sandbox::paths::windows_clean_text`]).
     #[test]
     fn a_windows_server_command_is_a_plain_drive_path() {
         let stdio = |command: &str| ServerSpec::Stdio {
@@ -1128,6 +1401,10 @@ mod windows_tests {
             args: vec!["-y".into()],
         };
         assert!(stdio(r"C:\Program Files\nodejs\npx.cmd").validate().is_ok());
+        assert_eq!(
+            plain_problem("server_command_invalid"),
+            Some(r"Enter the full path to the command, such as C:\Program Files\nodejs\npx.cmd.")
+        );
         for command in [
             "/usr/local/bin/npx",
             "npx.cmd",
@@ -1142,5 +1419,84 @@ mod windows_tests {
             let refused = stdio(command).validate().unwrap_err();
             assert_eq!(refused.0, "server_command_invalid", "{command}");
         }
+    }
+
+    /// V243-WIN-MCP-NPX and #341: npm's `npx.cmd`, found by its layout, runs as the `node.exe`
+    /// beside it with `npx-cli.js` before the approved arguments, in plain drive spelling; one
+    /// the resolver refuses, and a `.cmd` that is not there, npx.cmd included, is not found; any
+    /// other `.cmd` or `.bat`, and a name with no extension or a dotted one with a `.cmd` beside
+    /// it, there or not, is a batch file; a `.exe` spec is unchanged.
+    #[test]
+    fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
+        let folder = tempfile::tempdir().unwrap();
+        let real = kernel_sandbox::paths::canonical(folder.path()).unwrap();
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("where.exe");
+        std::fs::copy(&shipped, real.join("node.exe")).unwrap();
+        let bin = real.join("node_modules").join("npm").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
+        for name in ["npx.cmd", "other.cmd", "run.bat", "tool.cmd", "tool.v2.cmd"] {
+            std::fs::write(real.join(name), "@ECHO off\r\n").unwrap();
+        }
+        let places = crate::tools::tools_new(vec![real.clone()], None);
+        let args = vec!["-y".to_owned(), "@scope/server".to_owned()];
+        let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+        let spec = |name: &str| ServerSpec::Stdio {
+            command: text(real.join(name)),
+            args: args.clone(),
+        };
+        let mapped = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(
+            mapped,
+            Ok(ServerSpec::Stdio {
+                command: text(real.join("node.exe")),
+                args: vec![
+                    text(bin.join("npx-cli.js")),
+                    "-y".into(),
+                    "@scope/server".into()
+                ],
+            })
+        );
+        assert!(mapped.unwrap().validate().is_ok());
+        for name in ["other.cmd", "run.bat"] {
+            let refused = npx_spec(&real.join(name), &args, &places);
+            assert_eq!(refused, Err("server_batch_file"), "{name}");
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        for name in ["tool", "tool.v2", "gone", "gone.v2"] {
+            assert!(spec(name).validate().is_ok(), "{name}");
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        std::fs::copy(&shipped, real.join("tool")).unwrap();
+        std::fs::copy(&shipped, real.join("tool.v2")).unwrap();
+        for name in ["tool", "tool.v2"] {
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        assert_eq!(
+            without_cmd_exe(&real, spec("gone.exe")),
+            Ok(spec("gone.exe"))
+        );
+        std::fs::write(bin.join("npx-cli.js"), "#!/usr/bin/env deno\n").unwrap();
+        let refused = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(refused, Err("server_command_not_found"));
+        std::fs::remove_file(real.join("node.exe")).unwrap();
+        let lone = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(lone, Err("server_batch_file"));
+        assert_eq!(
+            without_cmd_exe(&real, spec("gone.cmd")),
+            Err("server_command_not_found")
+        );
+        std::fs::remove_file(real.join("npx.cmd")).unwrap();
+        assert_eq!(
+            without_cmd_exe(&real, spec("npx.cmd")),
+            Err("server_command_not_found")
+        );
+        let program = ServerSpec::Stdio {
+            command: text(shipped),
+            args: args.clone(),
+        };
+        assert_eq!(without_cmd_exe(&real, program.clone()), Ok(program));
     }
 }

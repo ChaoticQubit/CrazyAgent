@@ -10,7 +10,7 @@ use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::protocol::ProjectId;
 use crate::setup::SetupStatus;
-use crate::terminal::INPUT_BYTES_MAX;
+use kernel_processes::terminal::INPUT_BYTES_MAX;
 use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
 
@@ -71,7 +71,7 @@ pub struct Store {
         Option<crate::protocol::ProjectId>,
         crate::landing::WaitingChanges,
     )>,
-    pub intake: Option<crate::projects_home::job::JobView>,
+    pub intake: Vec<crate::projects_home::job::JobView>,
 }
 
 impl Store {
@@ -99,7 +99,7 @@ impl Default for Store {
             projects_seen: None,
             questions: Load::Idle,
             waiting: None,
-            intake: None,
+            intake: Vec::new(),
         }
     }
 }
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn terminal_requests_jump_the_engine_queue_in_their_own_order() {
         let mut ctx = ctx();
-        let agent = crate::terminal::AgentId::team(1).unwrap();
+        let agent = kernel_processes::terminal::AgentId::team(1).unwrap();
         ctx.request(Request::Projects);
         ctx.request(Request::TerminalInput {
             agent: agent.clone(),
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn refused_keystrokes_leave_room_for_the_replies_screens_wait_on() {
         let mut ctx = full();
-        let agent = crate::terminal::AgentId::team(1).unwrap();
+        let agent = kernel_processes::terminal::AgentId::team(1).unwrap();
         for _ in 0..40 {
             ctx.request(Request::TerminalInput {
                 agent: agent.clone(),

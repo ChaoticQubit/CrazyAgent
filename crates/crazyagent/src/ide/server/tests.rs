@@ -1,9 +1,10 @@
 use super::*;
 use crate::ide::workspace::{IdePolicy, ide_policy};
+use crate::sandbox::ProjectSandbox;
 use crate::sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
 };
-use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+use kernel_sandbox::net::SandboxNetwork;
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -81,7 +82,7 @@ pub(crate) async fn gone(group: i32) {
 }
 
 async fn request(port: u16, head: &str) -> String {
-    let mut stream = crate::spawn_gate::connect_tcp(("127.0.0.1", port))
+    let mut stream = kernel_processes::spawn_gate::connect_tcp(("127.0.0.1", port))
         .await
         .unwrap();
     stream.write_all(head.as_bytes()).await.unwrap();
@@ -117,7 +118,7 @@ fn status(reply: &str) -> &str {
 
 /// Every TCP address a process group listens on, read with real `lsof` across the machine.
 fn group_listeners(group: i32) -> Vec<String> {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/sbin/lsof")
             .env_clear()
             .env("LC_ALL", "C")
@@ -150,7 +151,7 @@ fn group_listeners(group: i32) -> Vec<String> {
 /// passes.
 #[tokio::test]
 async fn a_listener_outside_the_servers_group_refuses_the_open() {
-    let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let held = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = held.local_addr().unwrap().port();
     let ours = rustix::process::getpgid(None).unwrap();
     let other = Pid::from_raw(1).unwrap();
@@ -196,7 +197,7 @@ fn only_a_listener_outside_the_group_on_127_0_0_1_refuses_the_open() {
 /// would refuse every later open of the project.
 #[test]
 fn a_port_a_wildcard_listener_of_this_user_holds_is_not_free() {
-    let held = crate::spawn_gate::bind_tcp_std(("0.0.0.0", 0)).unwrap();
+    let held = kernel_processes::spawn_gate::bind_tcp_std(("0.0.0.0", 0)).unwrap();
     let port = held.local_addr().unwrap().port();
     assert!(!ports::free(port), "a wildcard listener holds {port}");
     drop(held);
@@ -435,7 +436,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let read = crate::spawn_gate::output(&mut cat).unwrap();
+    let read = kernel_processes::spawn_gate::output(&mut cat).unwrap();
     assert!(!read.status.success());
     assert!(!String::from_utf8_lossy(&read.stdout).contains(&new));
     servers.stop_all().await;
@@ -506,7 +507,7 @@ fn server_env_holds_only_allowlisted_names() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success());
     let printed = String::from_utf8(output.stdout).unwrap();
     let mut seen: Vec<(&str, &str)> = printed
@@ -529,7 +530,7 @@ fn server_env_holds_only_allowlisted_names() {
         crate::ide::git::CEILING_VARIABLE,
         "/private/tmp/project/.crazyagent/worktrees",
     ));
-    expected.extend(crate::ide::git::CONFIG_ENV);
+    expected.extend(crate::ide::git::config_env());
     expected.push(("GIT_CONFIG_GLOBAL", "/private/tmp/ide/project/gitconfig"));
     expected.push(("GIT_CONFIG_NOSYSTEM", "1"));
     expected.sort();
@@ -544,7 +545,7 @@ fn server_env_holds_only_allowlisted_names() {
             || *name == crate::ide::git::CEILING_VARIABLE
             || *name == "GIT_CONFIG_GLOBAL"
             || *name == "GIT_CONFIG_NOSYSTEM"
-            || crate::ide::git::CONFIG_ENV
+            || crate::ide::git::config_env()
                 .iter()
                 .any(|(fixed, _)| name == fixed)
     }));
@@ -587,7 +588,8 @@ async fn port_is_stable_for_a_project_across_restarts() {
     assert!(servers.stop(&project).await);
     drop(servers);
 
-    let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
+    let held =
+        kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
     let restarted = servers_in(data.path(), IDLE_LIMIT);
     let moved = restarted
         .open(&project, checkout.path(), &build)
@@ -1194,7 +1196,7 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     };
     let refused = request(info.port, &upgrade("")).await;
     assert!(status(&refused).contains(" 403 "), "{refused}");
-    let mut stream = crate::spawn_gate::connect_tcp(("127.0.0.1", info.port))
+    let mut stream = kernel_processes::spawn_gate::connect_tcp(("127.0.0.1", info.port))
         .await
         .unwrap();
     stream
@@ -1250,7 +1252,7 @@ fn server_command(
         capability_path: folder.join(CAPABILITY),
         workspace: folder.join(WORKSPACE),
     };
-    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let (_reader, writer) = kernel_processes::spawn_gate::guarded(std::io::pipe).unwrap();
     command(
         Launch {
             project,
@@ -1444,6 +1446,90 @@ fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
     assert!(
         !profile.contains(first.to_str().unwrap()),
         "the next start's profile names the earlier start's temp folder"
+    );
+}
+
+/// Leaves in a temp folder what a session may: a folder it shut with mode 000 and a file it
+/// made immutable. Input: the temp folder. Output: none.
+fn shut_and_pin(tmp: &Path) {
+    let shut = tmp.join("shut");
+    fs::create_dir_all(&shut).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let pinned = tmp.join("pinned");
+    fs::write(&pinned, b"left by a session\n").unwrap();
+    assert!(
+        kernel_processes::spawn_gate::status(
+            Command::new("/usr/bin/chflags").arg("uchg").arg(&pinned)
+        )
+        .unwrap()
+        .success()
+    );
+}
+
+/// The folders in the system temp folder that [`retire`] made from `tmp`, its name followed
+/// by [`TMP_GONE`]. Input: the temp folder. Output: the folders found.
+fn moved_aside(tmp: &Path) -> Vec<PathBuf> {
+    let mut prefix = tmp.file_name().unwrap().to_os_string();
+    prefix.push(TMP_GONE);
+    let prefix = prefix.into_string().unwrap();
+    fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// V243-OWNER-BOOTSTRAP-IDE-TMP-LINE: the temp folder of an earlier confined start whose
+/// session shut a folder with mode 000 and made a file immutable in it is moved aside and
+/// removed by the next start, never left in the system temp folder, where every later
+/// engine start's sweep would report it as `ide_server_tmp_left`.
+#[test]
+fn the_next_confined_start_removes_an_earlier_temp_folder_its_session_shut_and_pinned() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("shut-its-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let first = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    shut_and_pin(&first);
+    let next = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (first.exists() || !moved_aside(&first).is_empty()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let (kept, left) = (first.exists(), moved_aside(&first));
+    for made in left.iter().chain([&first, &next]) {
+        let _ = crate::team::cleanup::remove_agent_tree(made);
+    }
+    assert_ne!(next, first);
+    assert!(!kept, "the earlier start's temp folder is still there");
+    assert!(left.is_empty(), "left in the system temp folder: {left:?}");
+}
+
+/// V243-OWNER-BOOTSTRAP-IDE-TMP-LINE: a temp folder an earlier engine moved aside and left
+/// behind, holding a folder shut with mode 000 and an immutable file, is removed by the
+/// engine-start sweep, so no later start reports it again.
+#[test]
+fn the_engine_start_sweep_removes_a_left_temp_folder_that_was_shut_and_pinned() {
+    let home = scratch();
+    let tmp = crate::sandbox::toolchains::make_tmp(&home.path().join("left")).unwrap();
+    shut_and_pin(&tmp);
+    let gone = retire(&tmp).expect("the temp folder moves aside");
+    assert!(retired(&gone), "{}", gone.display());
+    let entries = fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+        .unwrap()
+        .count();
+    let removed = sweep_retired(entries + GONE_SCAN_MAX)
+        .expect("the sweep starts")
+        .join()
+        .unwrap();
+    let left = gone.exists();
+    let _ = crate::team::cleanup::remove_agent_tree(&gone);
+    assert!(
+        !left,
+        "the sweep left {} ({removed} removed)",
+        gone.display()
     );
 }
 
@@ -1713,7 +1799,7 @@ fn owner_repository(root: &Path) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     assert!(
-        crate::spawn_gate::output(&mut init)
+        kernel_processes::spawn_gate::output(&mut init)
             .unwrap()
             .status
             .success()
@@ -1804,7 +1890,7 @@ fn the_server_cannot_change_the_git_config_the_engine_wrote_for_it() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let write = crate::spawn_gate::output(&mut shell).unwrap();
+    let write = kernel_processes::spawn_gate::output(&mut shell).unwrap();
     let said = String::from_utf8_lossy(&write.stderr).into_owned();
     assert!(!write.status.success(), "{said}");
     assert!(said.contains("Operation not permitted"), "{said}");
@@ -1850,7 +1936,7 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
         capability_path: folder.join(CAPABILITY),
         workspace: folder.join(WORKSPACE),
     };
-    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let (_reader, writer) = kernel_processes::spawn_gate::guarded(std::io::pipe).unwrap();
     let command = command(
         Launch {
             project,
@@ -2039,7 +2125,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         capability_path: folder.join(CAPABILITY),
         workspace: folder.join(WORKSPACE),
     };
-    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let (_reader, writer) = kernel_processes::spawn_gate::guarded(std::io::pipe).unwrap();
     let socket = data.path().join("engine").join("owner.sock");
     let command = command(
         Launch {
@@ -2098,7 +2184,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         "the server starts in a folder its profile lets it read, so getcwd works under Seatbelt"
     );
     let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = command.get_envs().collect();
-    for (name, value) in crate::ide::git::CONFIG_ENV {
+    for (name, value) in crate::ide::git::config_env() {
         assert!(
             envs.contains(&(
                 std::ffi::OsStr::new(name),
@@ -2566,7 +2652,7 @@ fn full_access_git(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::spawn_gate::output(&mut git).unwrap()
+    kernel_processes::spawn_gate::output(&mut git).unwrap()
 }
 
 #[test]
@@ -2797,7 +2883,10 @@ fn a_project_without_a_crazyagent_folder_holds_agents_started_after_its_ide_open
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        crate::spawn_gate::output(&mut rm).unwrap().status.success()
+        kernel_processes::spawn_gate::output(&mut rm)
+            .unwrap()
+            .status
+            .success()
     };
     assert!(!removes(&file));
     assert_eq!(fs::read_to_string(&file).unwrap(), "agent\n");
@@ -2821,7 +2910,7 @@ fn a_full_access_launch_runs_the_launcher_with_no_seatbelt() {
 #[test]
 fn a_launch_builds_its_profile_at_the_projects_level() {
     let (checkout, data) = (scratch(), scratch());
-    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let root = fs::canonicalize(checkout.path()).unwrap();
@@ -2836,7 +2925,7 @@ fn a_launch_builds_its_profile_at_the_projects_level() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        crate::spawn_gate::output(&mut probe)
+        kernel_processes::spawn_gate::output(&mut probe)
             .unwrap()
             .status
             .success()
@@ -3177,9 +3266,9 @@ async fn a_full_access_stop_names_a_process_that_left_its_group() {
 }
 
 /// RV-DS241-189: removing a recorded temp folder only moves it aside, one rename however
-/// much it holds, so no stop, shutdown or next start waits on what a session left there;
-/// the folder is removed on a thread of its own, and one no remove can finish no longer
-/// stays at its path.
+/// much it holds or however it is shut, so no stop, shutdown or next start waits on what a
+/// session left there; the folder is removed on a thread of its own, so a moved folder is one
+/// the start sweep removes or already gone (#571 code F1).
 #[test]
 fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path() {
     let (data, keys) = (scratch(), scratch());
@@ -3204,7 +3293,9 @@ fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path()
                 .is_some_and(|name| name.starts_with(&prefix))
         })
         .collect();
-    let named = aside.iter().all(|path| retired(path));
+    let named = aside
+        .iter()
+        .all(|path| retired(path) || fs::symlink_metadata(path).is_err());
     for path in aside.iter().chain(stayed.then_some(&left)) {
         let _ = fs::set_permissions(path.join(&shut), fs::Permissions::from_mode(0o700));
         let _ = fs::remove_dir_all(path);
@@ -3268,7 +3359,7 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
 #[test]
 #[ignore]
 fn an_ide_token_write_cut_short_in_its_own_process() {
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     assert!(token::issue(Path::new(&folder)).is_err());
@@ -3279,7 +3370,7 @@ fn an_ide_token_write_cut_short_in_its_own_process() {
 #[test]
 fn an_ide_token_write_cut_short_leaves_no_token_file() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "ide::server::tests::an_ide_token_write_cut_short_in_its_own_process",
         "trap '' XFSZ; ulimit -f 0",
         folder.path(),

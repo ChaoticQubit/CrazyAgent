@@ -721,7 +721,7 @@ fn stale_save_shows_the_conflict_choices() {
                 outside: false,
             },
             writer: crate::storage::versioned::LastWriter::Agent(
-                crate::terminal::AgentId::team(3).unwrap(),
+                kernel_processes::terminal::AgentId::team(3).unwrap(),
             ),
         }))
     };
@@ -1841,6 +1841,7 @@ fn every_edit_with_ai_refusal_has_its_own_plain_sentence() {
         cleanup::NO_ACCOUNT,
         cleanup::PAUSED,
         cleanup::BUSY,
+        cleanup::FULL,
         cleanup::EMPTY,
         cleanup::FAILED,
         cleanup::TIMED_OUT,

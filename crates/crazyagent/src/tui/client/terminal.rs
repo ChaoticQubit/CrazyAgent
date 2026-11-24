@@ -1,9 +1,12 @@
 use super::bounded_problem;
 use crate::engine::Client;
 use crate::engine::owner::{OwnerClientKind, TerminalOutput, TerminalSession};
-use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
+use crate::terminal::TerminalFrame;
 use crate::tui::seam::Request;
 use crate::tui::terminal_pane::{PASTE_CLOSE, PASTE_OPEN};
+use kernel_processes::terminal::{
+    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, input_runs, input_runs_max,
+};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
@@ -23,7 +26,7 @@ const DRAIN_TIME: Duration = Duration::from_secs(5);
 /// `PASTE_CHARS_MAX` characters of up to four bytes each inside its bracketed paste markers.
 const TYPED_BYTES_MAX: usize =
     4 * crate::tui::run::PASTE_CHARS_MAX + PASTE_OPEN.len() + PASTE_CLOSE.len();
-const _: () = assert!(TYPED_BYTES_MAX.div_ceil(INPUT_BYTES_MAX) <= COMMANDS_QUEUED);
+const _: () = assert!(input_runs_max(TYPED_BYTES_MAX, INPUT_BYTES_MAX) <= COMMANDS_QUEUED);
 
 struct Session {
     agent: AgentId,
@@ -77,7 +80,7 @@ impl Terminals {
         match request {
             Request::TerminalAttach { agent } => self.want(agent, None),
             Request::TerminalAttachPane { agent, pane } => {
-                assert!(crate::terminal::pane_id_valid(&pane));
+                assert!(kernel_processes::terminal::pane_id_valid(&pane));
                 self.want(agent, Some(pane));
             }
             Request::TerminalInput { agent, bytes } => {
@@ -217,7 +220,7 @@ impl Terminals {
         else {
             return;
         };
-        let parts = inputs(bytes);
+        let parts = input_runs(bytes, INPUT_BYTES_MAX);
         let reason = match session.commands.try_reserve_many(parts.len()) {
             Ok(permits) => {
                 for (permit, part) in permits.zip(parts) {
@@ -302,32 +305,6 @@ fn stream(
         let _ = control.detach().await;
         let _ = tokio::time::timeout(DRAIN_TIME, reader).await;
     });
-}
-
-/// Splits one key event's bytes into host inputs of at most `INPUT_BYTES_MAX` bytes, never
-/// inside the closing bracketed paste marker, so a program that reads paste markers per read
-/// sees it whole. Input: the bytes, at least one. Output: the inputs in order.
-fn inputs(bytes: &[u8]) -> Vec<&[u8]> {
-    assert!(!bytes.is_empty());
-    let marker = if bytes.ends_with(PASTE_CLOSE) {
-        bytes.len() - PASTE_CLOSE.len()
-    } else {
-        bytes.len()
-    };
-    let mut parts = Vec::new();
-    let mut start = 0;
-    while start < bytes.len() {
-        let mut end = (start + INPUT_BYTES_MAX).min(bytes.len());
-        if marker < end && end < bytes.len() {
-            end = marker;
-        }
-        assert!(end > start);
-        parts.push(&bytes[start..end]);
-        start = end;
-    }
-    assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
-    assert_eq!(parts.concat(), bytes);
-    parts
 }
 
 /// Opens an owner connection and attaches to the agent's terminal, or to one

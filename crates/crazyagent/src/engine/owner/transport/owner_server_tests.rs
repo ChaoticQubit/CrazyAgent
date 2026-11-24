@@ -65,13 +65,13 @@ impl Fixture {
     }
 }
 
-async fn connected(client: &OwnerClient) -> UnixStream {
-    crate::spawn_gate::connect_unix(client.root.path.join(SOCKET))
+async fn connected(client: &OwnerClient) -> Stream {
+    crate::ipc::owner_connect(client.root.path.join(SOCKET))
         .await
         .unwrap()
 }
 
-async fn admitted(client: &OwnerClient) -> UnixStream {
+async fn admitted(client: &OwnerClient) -> Stream {
     let mut stream = connected(client).await;
     let mut packet = [0; 37];
     packet[..4].copy_from_slice(b"CAO1");
@@ -147,7 +147,7 @@ async fn an_owner_client_past_the_client_slots_is_refused_plainly_while_the_othe
 /// Sends a GitHub token request that says a token follows and never sends it, so the
 /// engine serves it past the owner exchange while it waits for the token frame.
 /// Input: the owner client. Output: the open connection.
-async fn awaiting_a_token(client: &OwnerClient) -> UnixStream {
+async fn awaiting_a_token(client: &OwnerClient) -> Stream {
     let mut stream = admitted(client).await;
     let frame =
         encode_frame(&json!({"github": {"kind": "token"}, "secret_present": true})).unwrap();
@@ -158,7 +158,7 @@ async fn awaiting_a_token(client: &OwnerClient) -> UnixStream {
 /// Opens a terminal view that sends its owner packet and no attach request, so the engine
 /// holds it as a view while it waits for the request. Input: the owner client. Output: the
 /// open connection.
-async fn terminal_waiting(client: &OwnerClient) -> UnixStream {
+async fn terminal_waiting(client: &OwnerClient) -> Stream {
     let mut stream = connected(client).await;
     let mut packet = [0; 37];
     packet[..4].copy_from_slice(terminal::MAGIC);
@@ -169,11 +169,11 @@ async fn terminal_waiting(client: &OwnerClient) -> UnixStream {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_views_up_to_the_connection_bound_are_held_and_the_next_is_refused_by_name() {
-    assert_eq!(crate::terminal::CONNECTIONS_MAX, 40);
+    assert_eq!(kernel_processes::terminal::CONNECTIONS_MAX, 40);
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let mut held = Vec::new();
-    for _ in 0..crate::terminal::CONNECTIONS_MAX {
+    for _ in 0..kernel_processes::terminal::CONNECTIONS_MAX {
         held.push(terminal_waiting(&client).await);
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -190,13 +190,13 @@ async fn terminal_views_up_to_the_connection_bound_are_held_and_the_next_is_refu
     }
     assert_eq!(
         open,
-        crate::terminal::CONNECTIONS_MAX,
+        kernel_processes::terminal::CONNECTIONS_MAX,
         "views 9 to 40 are held like the first 8"
     );
 
     let mut past = terminal_waiting(&client).await;
     let attach = crate::terminal::TerminalRequest::Attach {
-        agent_id: crate::terminal::AgentId::team(1).unwrap(),
+        agent_id: kernel_processes::terminal::AgentId::team(1).unwrap(),
     };
     past.write_all(&encode_frame(&attach).unwrap())
         .await
@@ -332,7 +332,7 @@ auth = { method = "native_managed", profile_ref = "claude-profile" }
 async fn a_page_filled_by_config_only_accounts_still_leads_to_the_added_ones() {
     let fixture = Fixture::start_with(CONFIG_ONLY_ACCOUNT).await;
     let client = fixture.client().await;
-    let closed = crate::spawn_gate::bind_tcp("127.0.0.1:0")
+    let closed = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap()
         .local_addr()
@@ -380,7 +380,7 @@ async fn a_page_filled_by_config_only_accounts_still_leads_to_the_added_ones() {
 /// Runs git in a test checkout with an isolated home and no system config. Inputs: the
 /// home, the folder and the arguments. Output: standard output.
 fn checkout_git(home: &Path, dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

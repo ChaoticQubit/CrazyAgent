@@ -1397,7 +1397,7 @@ async fn research_text_with_hidden_characters_stored_before_the_check_is_never_k
         let written_before_the_check = |id: RequestId, status: KnowledgeStatus| KnowledgeEntry {
             id,
             version: 1,
-            content_hash: crate::memory::hash(hidden.as_bytes()),
+            content_hash: kernel_common::hash(hidden.as_bytes()),
             text: hidden.clone(),
             human_reviewed: status == KnowledgeStatus::Confirmed,
             status,

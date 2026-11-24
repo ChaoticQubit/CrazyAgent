@@ -21,11 +21,12 @@ export function wallOnlyCommands() {
 
 /**
  * Asserts each command has the grant of the window that may call it. A wall-only command must be
- * in the wall capability and absent from main-window.json, any other must be in main-window.json.
+ * in the wall capability and absent from main-window.json, any other must be in main-window.json
+ * or, for the webview terminal's Windows and Linux commands, in webview-terminal.json.
  * Input: the commands the window files call. Output: none, stops with an assertion on a wrong grant.
  */
 export function assertWindowGrants(commands) {
-  const main = permissions("main-window");
+  const main = [...permissions("main-window"), ...permissions("webview-terminal")];
   const wall = permissions("terminal-wall");
   const wallOnly = wallOnlyCommands();
   for (const command of wallOnly) {
@@ -33,6 +34,6 @@ export function assertWindowGrants(commands) {
     assert.ok(!main.includes(grant(command)), `${command} is wall-only but in main-window.json`);
   }
   for (const command of commands) {
-    if (!wallOnly.includes(command)) assert.ok(main.includes(grant(command)), `${command} missing from main-window.json`);
+    if (!wallOnly.includes(command)) assert.ok(main.includes(grant(command)), `${command} missing from main-window.json and webview-terminal.json`);
   }
 }

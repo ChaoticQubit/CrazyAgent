@@ -14,10 +14,13 @@ const LOCK_HELD: Duration = Duration::from_millis(1000);
 const SKILL: &str = "---\nname: release-notes\ndescription: Writes release notes from merged changes.\n---\n\n# Release notes\n";
 
 /// The codes of an engine start whose own check of its new sockets missed the owner
-/// deadline, which bounds that check as well: such a start has already stopped itself.
-const START_MISSED: [&str; 2] = [
+/// deadline, which bounds that check as well, including a check storage did not take in
+/// time: such a start has already stopped itself.
+const START_MISSED: [&str; 4] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "ordinary_readiness_timeout",
+    "storage_starting_not_submitted",
+    "storage_busy_not_submitted",
 ];
 
 /// The most engine starts one row tries before a start that misses the deadline fails it.
@@ -118,7 +121,7 @@ fn outlasted_the_owner_deadline(started: std::time::Instant) {
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
 /// Inputs: the owner home, the folder and the arguments. Output: none; a failure panics.
 fn git(home: &Path, dir: &Path, args: &[&str]) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -340,6 +343,63 @@ async fn a_skill_import_slower_than_the_owner_deadline_answers_with_the_skill() 
         .expect("an import past the owner deadline must still answer");
     outlasted_the_owner_deadline(started);
     assert_eq!(imported.skill.name, "release-notes");
+    owner.stop().await;
+}
+
+/// A skill import that first waits 2 s behind a held owner barrier, then finds storage never
+/// takes it within `IMPORT_TIMEOUT`, is refused storage_busy_not_submitted before its own
+/// serve bound cuts it: the wait puts its storage bound past that cut, so the owner hears the
+/// refusal rather than no reply, and nothing is imported (V243-STORAGE-BUSY-ROWS).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_skill_import_storage_never_takes_is_refused_before_its_serve_bound_cuts_it() {
+    let owner = Owner::start().await;
+    let source = owner.root.path().join("work/release-notes");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("SKILL.md"), SKILL).unwrap();
+    let engine = &owner.service.owner_runtime().unwrap().engine;
+    let (release, held) = oneshot::channel();
+    engine
+        .storage
+        .sender
+        .try_send(crate::storage::Job::Hold(held))
+        .unwrap();
+    let barrier = engine.owner_egress.write().await;
+
+    let started = std::time::Instant::now();
+    let mut imported = Box::pin(
+        owner
+            .client
+            .import_skill(source.to_str().unwrap().to_owned(), None),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut imported)
+            .await
+            .is_err(),
+        "the import waits behind the held owner barrier"
+    );
+    drop(barrier);
+    let imported = imported.await;
+    let waited = started.elapsed();
+    drop(release);
+    assert_eq!(
+        imported
+            .map(|imported| imported.skill.name)
+            .map_err(|error| error.0),
+        Err("storage_busy_not_submitted".to_owned()),
+        "the import answered its refusal itself before its serve bound cut it"
+    );
+    assert!(
+        waited < plugins::IMPORT_TIMEOUT + Duration::from_secs(5),
+        "the refusal came at the import's own bound, not the client's"
+    );
+    let listed = owner.client.plugin_skills(None, 0).await.unwrap();
+    assert!(
+        listed
+            .skills
+            .iter()
+            .all(|skill| skill.name != "release-notes"),
+        "the refused import never landed"
+    );
     owner.stop().await;
 }
 

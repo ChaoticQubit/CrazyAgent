@@ -183,8 +183,7 @@ fn request(roots: &Roots, harness: &str, kind: &str, tools: bool) -> LaunchReque
         account: account(roots, kind),
         model: Some(MODEL.into()),
         tools,
-        sandbox_profile: Some(project_profile(roots)),
-        unconfined: false,
+        boundary: crazyagent::harnesses::launch::LaunchBoundary::Profile(project_profile(roots)),
         git_identity: None,
         limits: LaunchLimits {
             run_time: Duration::from_secs(420),

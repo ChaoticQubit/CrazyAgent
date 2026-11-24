@@ -2,8 +2,7 @@ use super::codex_folder::{self, Screen};
 use super::interactive::settings::{STEPS_MAX, Step, TerminalSettings};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
-    Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
-    validate,
+    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route, validate,
 };
 use super::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::records::{self, Reader};
@@ -11,8 +10,9 @@ use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
-use crate::terminal::buffer::Chunk;
-use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
+use kernel_processes::group::Ending;
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -489,11 +489,11 @@ impl TerminalSession {
             .as_ref()
             .is_some_and(|installed| installed.native().is_some());
         #[cfg(target_os = "macos")]
-        let kept_freeze = !request.unconfined && !native && freeze_record.is_some();
+        let kept_freeze = !request.boundary.is_unconfined() && !native && freeze_record.is_some();
         #[cfg(not(target_os = "macos"))]
         let kept_freeze = false;
         #[cfg(target_os = "macos")]
-        let command = if request.unconfined {
+        let command = if request.boundary.is_unconfined() {
             assert_ne!(command.argv[0], crate::sandbox::SANDBOX_EXEC);
             command
         } else {
@@ -536,7 +536,12 @@ impl TerminalSession {
             None => TranscriptReader::new(command.transcript.clone(), &command.cwd, since),
         };
         let resumed = resume.map(|resume| (resume.record.clone(), reader.start()));
-        let pane = host.spawn(&agent, &command).map_err(host_failure)?;
+        let pane = host
+            .spawn(
+                &agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .map_err(host_failure)?;
         assert_eq!(pane.agent, agent);
         let unkept = host.unkept(&agent);
         let ready = LaunchEvent::Ready {
@@ -575,10 +580,15 @@ impl TerminalSession {
             group_ended: false,
             uncertain: false,
             #[cfg(target_os = "macos")]
-            unconfined: request.unconfined,
+            unconfined: request.boundary.is_unconfined(),
             #[cfg(target_os = "macos")]
             unkept,
-            lineage: follower_of(pane.pid, unkept, request.unconfined, Some(token.clone())),
+            lineage: follower_of(
+                pane.pid,
+                unkept,
+                request.boundary.is_unconfined(),
+                Some(token.clone()),
+            ),
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -691,10 +701,11 @@ impl TerminalSession {
         assert!(!self.held && !self.own_held);
     }
 
-    /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
-    /// waits, at most `READY_WAIT`, until the app has drawn its screen, gone quiet and
-    /// reads keys itself (see [`Host::input_live`]), so its Enter is not lost.
-    /// Input: prompt text. Output: Ok, `launch_busy` while a turn runs, or a refusal code.
+    /// Types one prompt into the app's own pane as a bracketed paste, then Enter, never into a
+    /// teammate split off its window. The first prompt waits, at most `READY_WAIT`, until the
+    /// app has drawn its screen, gone quiet and reads keys itself (see [`Host::input_live`]),
+    /// so its Enter is not lost. Input: prompt text. Output: Ok, `launch_busy` while a turn
+    /// runs, or a refusal code.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {
         self.send_or_cancel(prompt, &AtomicBool::new(false))
     }
@@ -714,11 +725,19 @@ impl TerminalSession {
         if !self.ready {
             self.wait_ready(cancel)?;
         }
+        let host = self.host.as_ref();
+        let pin =
+            kernel_processes::terminal::request_pin(host, &self.agent).map_err(host_failure)?;
+        let typed = |bytes: &[u8]| {
+            let stale = kernel_processes::terminal::APP_PANE_UNKNOWN;
+            kernel_processes::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes, stale)
+                .map_err(host_failure)
+        };
         for part in paste(prompt) {
-            self.type_bytes(part.as_bytes())?;
+            typed(part.as_bytes())?;
         }
         std::thread::sleep(PASTE_SETTLE);
-        self.type_bytes(self.submit_key)?;
+        typed(self.submit_key)?;
         self.turn = true;
         Ok(())
     }

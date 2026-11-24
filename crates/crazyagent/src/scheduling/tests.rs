@@ -1619,7 +1619,7 @@ fn sign_in_under(
              VALUES (?1,?2,1,?3,?4,?5)",
             params![
                 operation,
-                crate::memory::hash(profile_ref.as_str().as_bytes()),
+                kernel_common::hash(profile_ref.as_str().as_bytes()),
                 column,
                 request,
                 fact
@@ -1662,7 +1662,7 @@ fn provider_rejected(connection: &Connection, id: &str) {
              VALUES (?1,?2,1,?3)",
             params![
                 observation.id.as_str(),
-                crate::memory::hash(&serde_json::to_vec(&model).unwrap()),
+                kernel_common::hash(&serde_json::to_vec(&model).unwrap()),
                 serde_json::to_string(&observation).unwrap()
             ],
         )
@@ -1795,7 +1795,7 @@ fn fenced(connection: &Connection, id: &str) {
             "INSERT INTO native_auth_fences(profile_key,operation_id,generation,db_instance,
              engine_epoch,custody_id,owner_id,owner_epoch) VALUES (?1,'operation-a',1,?2,?2,?2,?2,1)",
             params![
-                crate::memory::hash(profile_ref.as_str().as_bytes()),
+                kernel_common::hash(profile_ref.as_str().as_bytes()),
                 "a".repeat(64)
             ],
         )

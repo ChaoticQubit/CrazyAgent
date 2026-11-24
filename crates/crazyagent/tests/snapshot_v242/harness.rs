@@ -2,7 +2,8 @@ use super::Scenario;
 use crazyagent::engine::owner::{OwnerResponse, OwnerResult};
 use crazyagent::harnesses::interactive::{self, InteractiveCommand, Run, Support, Transcript};
 use crazyagent::harnesses::launch::{
-    AccountBinding, GitIdentity, LaunchError, LaunchLimits, LaunchRequest, Secret, command, route,
+    AccountBinding, GitIdentity, LaunchBoundary, LaunchError, LaunchLimits, LaunchRequest, Secret,
+    command, route,
 };
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::protocol::ProjectId;
@@ -219,8 +220,15 @@ fn request(harness: &str, folders: &Folders, shape: Shape) -> Result<LaunchReque
         account,
         model: Some(MODEL.to_owned()),
         tools: shape.tools,
-        sandbox_profile: (!shape.full_access).then(|| folders.profile.clone()),
-        unconfined: shape.full_access,
+        boundary: if shape.full_access {
+            let scratch = folders
+                .work
+                .parent()
+                .ok_or("the working folder has no parent")?;
+            super::full_access_support::full_access(&folders.work, scratch)
+        } else {
+            LaunchBoundary::Profile(folders.profile.clone())
+        },
         git_identity,
         limits: LaunchLimits::default(),
     })
@@ -439,12 +447,6 @@ fn headless_refusals(scratch: &Path) -> Result<Value, String> {
         "harness-without-headless-adapter",
         outcome(command(&request("gemini-cli", &folders, CONFINED)?)),
     );
-    let mut bare = request("codex", &folders, CONFINED)?;
-    bare.sandbox_profile = None;
-    note("confined-without-profile", outcome(command(&bare)));
-    let mut both = request("codex", &folders, CONFINED)?;
-    both.unconfined = true;
-    note("profile-and-unconfined", outcome(command(&both)));
     let keyed = Shape {
         account: Account::RoutedKey,
         ..CONFINED

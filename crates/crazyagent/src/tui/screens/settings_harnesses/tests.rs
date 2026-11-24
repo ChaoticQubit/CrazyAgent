@@ -1,12 +1,13 @@
 use super::*;
 use crate::harnesses::update::{CheckWhen, HarnessNeeds, LastUpdate};
 use crate::harnesses::{Search, catalog};
-use crate::setup::{Dependency, DependencyState, DependencyStatus, SetupStatus, Version};
+use crate::setup::{Dependency, DependencyState, DependencyStatus, SetupStatus};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::screens::settings_accounts::tests::{dataset, fixture, list_ctx, render};
 use crate::tui::seam::Request;
 use crate::tui::shell::Shell;
+use kernel_processes::run::Version;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -277,6 +278,7 @@ fn versions_of(installed: &str, latest: Latest) -> HarnessVersions {
         needs: None,
         sign_in_min: None,
         run_min: None,
+        waiting: None,
     }
 }
 
@@ -703,8 +705,12 @@ fn version_replies_for_a_page_with_no_catalog_yet_are_dropped() {
     assert!(frame(&mut shell).contains("Version 2.1.309. Version 2.1.322 is available."));
 }
 
+/// V243-HARNESS-UPDATE-PARALLEL (owner 12:1x, leader 12:21): a job on another harness starts
+/// while one runs; while the engine holds it behind the first, its row says which harness it
+/// waits for, with no error; both rows are read until their jobs end, and the harness whose
+/// job runs is still held from a second one.
 #[test]
-fn a_second_job_waits_for_the_one_that_runs_and_the_first_row_still_ends() {
+fn a_job_on_another_harness_starts_while_one_runs_and_its_row_says_what_it_waits_for() {
     let found = found();
     let mut shell = on_claude(&found);
     press(&mut shell, 'u', newer());
@@ -723,38 +729,81 @@ fn a_second_job_waits_for_the_one_that_runs_and_the_first_row_still_ends() {
     sent(&mut shell.ctx);
 
     select(&mut shell, &found, "aider");
-    shell.key(Key::Char('i'));
-    let message = shell.ctx.message().unwrap();
-    assert_eq!(
-        (message.lead.as_str(), message.rest.as_str()),
-        (
-            "Can't install Aider.",
-            "Claude Code is being updated or installed. Wait until that ends."
-        )
+    press(
+        &mut shell,
+        'i',
+        missing("aider", Some(AIDER_LINE), AIDER_GUIDE),
     );
     shell.key(Key::Char('y'));
-    select(&mut shell, &found, "codex");
-    shell.key(Key::Char('u'));
-    shell.key(Key::Char('y'));
-    assert!(
-        sent(&mut shell.ctx).is_empty(),
-        "no read and no second job while one runs"
-    );
-
-    shell.refresh();
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Versions("claude-code".into(), false)],
-        "the running update is still read"
+        vec![
+            Sent::Versions("aider".into(), false),
+            Sent::Install("aider".into())
+        ],
+        "Aider installs while Claude Code updates"
     );
-    deliver(&mut shell, ended(Some("2.1.309"), Some("2.1.322")));
+    shell.arrive(arrival(SettingsEvent::HarnessInstalled(
+        "aider".into(),
+        Ok(()),
+    )));
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
+            ..newer()
+        },
+    );
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
+            waiting: Some("claude-code".into()),
+            ..missing("aider", Some(AIDER_LINE), AIDER_GUIDE)
+        },
+    );
+    let shown = frame(&mut shell);
+    assert!(
+        shown.contains("Waiting for Claude Code to finish..."),
+        "{shown}"
+    );
+    assert!(!shown.contains("Installing..."), "{shown}");
+    assert!(shell.ctx.message().is_none(), "waiting is not an error");
+
     select(&mut shell, &found, "claude-code");
+    shell.key(Key::Char('u'));
+    assert_eq!(
+        shell.ctx.message().unwrap().rest,
+        "Claude Code is being updated or installed. Wait until that ends."
+    );
+    sent(&mut shell.ctx);
+
+    shell.refresh();
+    let reads = sent(&mut shell.ctx);
+    for id in ["claude-code", "aider"] {
+        assert!(
+            reads.contains(&Sent::Versions(id.into(), false)),
+            "{id} is read until its job ends: {reads:?}"
+        );
+    }
+    deliver(&mut shell, ended(Some("2.1.309"), Some("2.1.322")));
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
+            ..missing("aider", Some(AIDER_LINE), AIDER_GUIDE)
+        },
+    );
     let shown = frame(&mut shell);
     assert!(!shown.contains("Updating..."), "{shown}");
     assert!(
         shown.contains("Updated from 2.1.309 to 2.1.322."),
         "{shown}"
     );
+    select(&mut shell, &found, "aider");
+    let shown = frame(&mut shell);
+    assert!(shown.contains("Installing..."), "{shown}");
+    assert!(!shown.contains("Waiting for"), "{shown}");
 }
 
 #[test]
@@ -1093,7 +1142,7 @@ fn a_refused_update_says_the_engine_reason() {
     )));
     assert_eq!(
         shell.ctx.message().unwrap().rest,
-        "Another harness update or install is running."
+        "This harness is already updating or installing."
     );
     shell.refresh();
     assert!(sent(&mut shell.ctx).is_empty());
@@ -1121,6 +1170,7 @@ fn missing(id: &str, install: Option<&str>, guide: &str) -> HarnessVersions {
         needs: None,
         sign_in_min: None,
         run_min: None,
+        waiting: None,
     }
 }
 
@@ -1510,6 +1560,8 @@ fn setup_node(state: DependencyState) -> Arrival {
                 name: Dependency::Node,
                 label: "Node.js".into(),
                 state,
+                busy: false,
+                waiting: None,
             }],
             pack: Vec::new(),
             running: false,
@@ -1832,7 +1884,7 @@ fn a_listed_research_harness_says_which_research_it_runs_and_which_harnesses_run
         ..codex.clone()
     };
     let text = |entry: &HarnessEntry| {
-        Harnesses::detail(entry, None, None, false, 116, &ctx)
+        Harnesses::detail(entry, None, None, false, None, 116, &ctx)
             .iter()
             .map(|line| {
                 line.spans

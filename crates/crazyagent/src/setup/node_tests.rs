@@ -1,5 +1,5 @@
 use super::*;
-use crate::setup::process::{file_sha256, is_sha256};
+use kernel_processes::run::{file_sha256, is_sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
@@ -19,7 +19,10 @@ fn owned_root() -> tempfile::TempDir {
     let beside = std::env::current_exe().unwrap();
     let root = tempfile::tempdir_in(beside.parent().unwrap()).unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(crate::service::changeable_by_others(root.path()), None);
+    assert_eq!(
+        kernel_processes::service::changeable_by_others(root.path()),
+        None
+    );
     root
 }
 
@@ -60,7 +63,11 @@ fn pack(work: &Path, source: &Path) -> (PathBuf, String) {
     for entry in std::fs::read_dir(source).unwrap() {
         tar.arg(entry.unwrap().file_name());
     }
-    assert!(crate::spawn_gate::status(&mut tar).unwrap().success());
+    assert!(
+        kernel_processes::spawn_gate::status(&mut tar)
+            .unwrap()
+            .success()
+    );
     let sha256 = file_sha256(&archive).unwrap();
     (archive, sha256)
 }
@@ -216,8 +223,10 @@ fn an_unpacked_tree_is_kept_only_with_plain_files_folders_and_links_that_stay_in
     assert_eq!(check_tree(&climbing, limits), unsafe_tree);
 
     let special = tree(&work.path().join("special"), TOP, "v26.13.1");
-    let fifo = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(special.join("pipe")))
-        .unwrap();
+    let fifo = kernel_processes::spawn_gate::status(
+        Command::new("/usr/bin/mkfifo").arg(special.join("pipe")),
+    )
+    .unwrap();
     assert!(fifo.success());
     assert_eq!(check_tree(&special, limits), unsafe_tree);
 
@@ -332,8 +341,8 @@ fn a_link_that_climbs_out_through_another_link_is_refused_though_its_words_stay_
     );
 }
 
-fn places(folders: Vec<PathBuf>) -> crate::tools::Places {
-    crate::tools::Places::new(folders, None)
+fn places(folders: Vec<PathBuf>) -> kernel_processes::finding::Places {
+    crate::tools::tools_new(folders, None)
 }
 
 fn npm_launcher(folder: &Path) {
@@ -384,7 +393,7 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
     let empty = work.path().join("no-system-node");
     std::fs::create_dir_all(&empty).unwrap();
     let only_engine = places(vec![empty, setup_bin.clone()]);
-    let node = crate::tools::resolve("node", &only_engine).unwrap();
+    let node = kernel_processes::finding::resolve("node", &only_engine).unwrap();
     assert_eq!(node.entry, setup_bin.join("node"));
     assert_eq!(
         node.program,
@@ -397,7 +406,7 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
             npm: setup_bin.join("npm"),
         })
     );
-    let engine = crate::tools::Places::engine(Some(root.path()), None, None, None);
+    let engine = crate::tools::tools_engine(Some(root.path()), None, None, None);
     let folders = engine.folders();
     assert_eq!(
         folders[folders.len() - 2..],
@@ -420,7 +429,7 @@ fn an_owner_node_and_the_app_node_both_present_picks_the_owners() {
     let owner = home.join(".local/bin");
     script(&owner.join("node"), "v22.11.0");
     npm_launcher(&owner);
-    let engine = crate::tools::Places::engine(Some(root.path()), None, Some(home), None);
+    let engine = crate::tools::tools_engine(Some(root.path()), None, Some(home), None);
     let setup_bin = root.path().join("setup/bin");
     let prefix_bin = crate::setup::harness_prefix(root.path()).join("bin");
     let both: Vec<PathBuf> = engine
@@ -437,7 +446,8 @@ fn an_owner_node_and_the_app_node_both_present_picks_the_owners() {
 
 #[test]
 fn an_owner_node_or_npm_alone_never_pairs_with_the_app_install_and_the_app_pair_is_used_whole() {
-    use crate::setup::{Dependency, Installer, Version};
+    use crate::setup::{Dependency, Installer};
+    use kernel_processes::run::Version;
     let root = root();
     let work = tempfile::tempdir().unwrap();
     let source = work.path().join("source");
@@ -537,7 +547,8 @@ fn the_engine_npm_prefix_is_made_private_even_with_no_engine_node() {
 
 #[test]
 fn setup_finds_a_usable_node_through_the_resolver_and_installs_the_pinned_archive_only_as_node() {
-    use crate::setup::{Dependency, Installer, Pin, Version};
+    use crate::setup::{Dependency, Installer, Pin};
+    use kernel_processes::run::Version;
     let root = root();
     let work = tempfile::tempdir().unwrap();
     let system = work.path().join("system");
@@ -633,7 +644,7 @@ fn the_node_install_runs_its_programs_with_gzip_on_their_path() {
             .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
     };
     assert!(folders.iter().any(gzip), "{path:?}");
-    let system: Vec<PathBuf> = crate::tools::SYSTEM_FOLDERS
+    let system: Vec<PathBuf> = kernel_processes::finding::SYSTEM_FOLDERS
         .iter()
         .map(PathBuf::from)
         .collect();

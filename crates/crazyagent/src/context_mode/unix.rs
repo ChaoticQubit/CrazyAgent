@@ -1,8 +1,9 @@
 use super::refused;
 use crate::file_lock::HeldLock;
-use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
-use crate::sandbox_settings::SandboxSettings;
-use crate::setup::InstallError;
+use crate::sandbox::ProjectSandbox;
+use kernel_processes::run::InstallError;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::settings::SandboxSettings;
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
@@ -10,7 +11,19 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-pub(super) use crate::setup::process::{private_folder, run_command, staging_folder};
+pub(super) use kernel_processes::run::{private_folder, run_command};
+
+/// Makes a fresh private staging folder inside a parent with a random suffix, mirroring
+/// the Windows `staging_folder` in `context_mode/windows.rs`. Inputs: the parent folder and
+/// a name prefix. Output: the new folder path, or `setup_store_unavailable`.
+pub(super) fn staging_folder(
+    parent: &Path,
+    prefix: &str,
+) -> Result<std::path::PathBuf, InstallError> {
+    let id =
+        crate::engine::owner::random_id().map_err(|_| InstallError("setup_store_unavailable"))?;
+    kernel_processes::run::staging_folder(parent, prefix, &id)
+}
 
 /// The name of the `node` program beside npx.
 pub(super) const NODE: &str = "node";
@@ -37,6 +50,13 @@ pub(super) fn npm_ready(bin: &Path) -> bool {
     runnable(&bin.join("npm"))
 }
 
+/// The first drive root among `paths` that keeps every app container out: none, as only
+/// Windows boxes read drive roots through access lists. Input: the paths, unread. Output:
+/// none.
+pub(super) fn unreadable_drive_root(_paths: &[&Path]) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// The network the install's npm may reach: HTTPS on any host, nothing else.
 pub(super) fn npm_network() -> SandboxNetwork {
     SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
@@ -56,6 +76,14 @@ pub(super) fn open_plain(path: &Path) -> Option<File> {
 /// waiting while another installer holds it. Input: the lock file. Output: the held lock, or
 /// `setup_store_unavailable`.
 pub(super) fn lock(path: &Path) -> Result<Lock, InstallError> {
+    HeldLock::take(open_lock(path)?, FlockOperation::LockExclusive)
+        .map_err(|_| InstallError("setup_store_unavailable"))
+}
+
+/// Opens a lock file, created 0600 when missing, with no link followed, and keeps it only
+/// when it is a regular file. Input: the lock file. Output: the file, or
+/// `setup_store_unavailable`.
+fn open_lock(path: &Path) -> Result<File, InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
     let file = File::from(
         rustix::fs::open(
@@ -68,7 +96,25 @@ pub(super) fn lock(path: &Path) -> Result<Lock, InstallError> {
     if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
         return Err(unavailable);
     }
-    HeldLock::take(file, FlockOperation::LockExclusive).map_err(|_| unavailable)
+    Ok(file)
+}
+
+/// Takes a shared lock on a lock file, waiting only while an exclusive holder has it. Input:
+/// the lock file. Output: the held lock, or `setup_store_unavailable`.
+pub(super) fn lock_shared(path: &Path) -> Result<Lock, InstallError> {
+    HeldLock::take(open_lock(path)?, FlockOperation::LockShared)
+        .map_err(|_| InstallError("setup_store_unavailable"))
+}
+
+/// Takes the exclusive lock on a lock file only when no other open file holds it, never
+/// waiting. Input: the lock file. Output: the held lock, none while another holds it, or
+/// `setup_store_unavailable`.
+pub(super) fn try_lock(path: &Path) -> Result<Option<Lock>, InstallError> {
+    match HeldLock::take(open_lock(path)?, FlockOperation::NonBlockingLockExclusive) {
+        Ok(held) => Ok(Some(held)),
+        Err(error) if error == rustix::io::Errno::WOULDBLOCK => Ok(None),
+        Err(_) => Err(InstallError("setup_store_unavailable")),
+    }
 }
 
 /// The owner's sandbox settings a context-mode step's boundary takes on Linux (DEC-185): the
@@ -129,4 +175,10 @@ pub(super) fn npm_wrap(
         .env("PATH", search)
         .env("npm_config_update_notifier", "false");
     Ok(command)
+}
+
+/// Reports nothing to release: Seatbelt and Landlock leave no access entry or container behind
+/// a finished job. Inputs: the job's profile, folder and home, unused. Output: true.
+pub(super) fn release(_profile: &Path, _folder: &Path, _home: &Path) -> bool {
+    true
 }

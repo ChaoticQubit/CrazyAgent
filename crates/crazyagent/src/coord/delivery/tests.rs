@@ -1,7 +1,8 @@
 use super::*;
 use crate::coord::{NewMessage, QuestionFor, Severity, Waiting};
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -48,7 +49,12 @@ impl Fixture {
     pub(super) fn host(&mut self) -> Tmux {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Tmux::open(Some(tmux), &self.base.join(crate::terminal::FOLDER))
+        Tmux::open(
+            Some(tmux),
+            &self.base.join(crate::terminal::FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        )
     }
 
     pub(super) fn agent(
@@ -125,8 +131,8 @@ impl Fixture {
         let file = self.base.join(format!("script-{agent}.sh"));
         std::fs::write(&file, script).unwrap();
         host.spawn(
-            &crate::terminal::AgentId::team(agent).unwrap(),
-            &InteractiveCommand {
+            &kernel_processes::terminal::AgentId::team(agent).unwrap(),
+            &kernel_processes::terminal::PaneCommand::from(&InteractiveCommand {
                 argv: vec![
                     "/bin/sh".into(),
                     file.to_str().unwrap().into(),
@@ -135,7 +141,7 @@ impl Fixture {
                 cwd: self.base.clone(),
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
-            },
+            }),
         )
         .unwrap();
     }
@@ -144,7 +150,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(tmux) = &self.tmux {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(tmux)
                     .arg("-S")
                     .arg(self.base.join(crate::terminal::FOLDER).join(SOCKET))
@@ -433,6 +439,76 @@ fn recipients_are_live_agents_waiting_longest_first_and_capped_per_tick() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// How many old messages the idle-cost row puts in front of the tick's waiting reads.
+const HISTORY_MESSAGES: i64 = 600;
+/// The most SQLite steps the waiting reads may add over that history: far below one step
+/// per old message, so any read that walks the history fails.
+const HISTORY_STEPS_SLACK: i32 = 32;
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): each tick reads which messages wait, for every stepped
+/// project. Over a history of read messages and of messages left Sent to a stopped agent,
+/// both reads take as many SQLite steps as over none, so an idle tick does not grow with it.
+#[test]
+fn waiting_message_reads_do_not_grow_with_message_history() {
+    let fixture = Fixture::new();
+    let live = fixture.agent("sub", "codex", "idle", None);
+    let stopped = fixture.agent("sub", "codex", "stopped", None);
+    let before = waiting_read_steps(&fixture.db);
+    for n in 0..HISTORY_MESSAGES {
+        let (to, receipt) = match n % 3 {
+            0 => (stopped, "sent"),
+            1 => (stopped, "read"),
+            _ => (live, "read"),
+        };
+        fixture
+            .db
+            .execute(
+                "INSERT INTO coord_messages(project,from_kind,to_kind,to_agent,kind,body,receipt,created,receipt_at)
+                 VALUES (?1,'owner','agent',?2,'prompt','Old',?3,1,1)",
+                params![PROJECT, to, receipt],
+            )
+            .unwrap();
+    }
+    let after = waiting_read_steps(&fixture.db);
+    assert!(
+        after.0 <= before.0 + HISTORY_STEPS_SLACK,
+        "requeue steps grew from {} to {}",
+        before.0,
+        after.0
+    );
+    assert!(
+        after.1 <= before.1 + HISTORY_STEPS_SLACK,
+        "recipients steps grew from {} to {}",
+        before.1,
+        after.1
+    );
+    assert!(recipients(&fixture.db, &project()).unwrap().is_empty());
+}
+
+/// Counts the SQLite steps of the tick's two waiting reads, each run to its end.
+/// Input: the database. Output: the steps of the requeue read and of the recipients read.
+fn waiting_read_steps(db: &Connection) -> (i32, i32) {
+    let limit = i64::try_from(RECIPIENTS_PER_TICK_MAX).unwrap();
+    let requeue = statement_steps(db, REQUEUE_SQL, params![PROJECT, limit]);
+    let recipients = statement_steps(
+        db,
+        &recipients_sql(),
+        params![PROJECT, RESULTS_KEY, EVENTS_KEY, limit],
+    );
+    assert!(requeue > 0 && recipients > 0);
+    (requeue, recipients)
+}
+
+/// Runs one read to its end and counts its SQLite virtual machine steps.
+/// Inputs: the database, the SQL and its parameters. Output: the step count.
+fn statement_steps(db: &Connection, sql: &str, args: impl rusqlite::Params) -> i32 {
+    let mut statement = db.prepare(sql).unwrap();
+    let mut rows = statement.query(args).unwrap();
+    while rows.next().unwrap().is_some() {}
+    drop(rows);
+    statement.get_status(rusqlite::StatementStatus::VmStep)
 }
 
 /// K2b: Native only leaves a Claude Code or Rcli agent's messages Sent with no retry, for
@@ -846,7 +922,7 @@ fn tmux_quiet_grows_while_a_pane_is_silent_and_resets_on_output() {
     let agent = fixture.agent("sub", "codex", "idle", None);
     let out = fixture.base.join("out.txt");
     fixture.pane(&host, agent, READ_ONE_LINE, &out);
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("three quiet seconds", || {
         host.quiet(&pane).unwrap().unwrap() >= Duration::from_secs(3)
     });
@@ -867,7 +943,7 @@ fn the_bridge_is_given_the_agents_own_pane_from_the_host() {
     let paneless = fixture.agent("sub", "codex", "idle", None);
     fixture.pane(&host, agent, READ_ONE_LINE, &fixture.base.join("out.txt"));
     let shown = host
-        .pane_pid(&crate::terminal::AgentId::team(agent).unwrap())
+        .pane_pid(&kernel_processes::terminal::AgentId::team(agent).unwrap())
         .unwrap();
     assert!(shown.is_some());
     let asleep = BTreeSet::new();
@@ -888,7 +964,7 @@ fn typing_waits_while_a_dropped_turn_holds_input_on_an_unknown_screen() {
     let agent = fixture.agent("master", "codex", "idle", None);
     let out = fixture.base.join("typed.txt");
     fixture.pane(&host, agent, READ_ONE_LINE, &out);
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -950,7 +1026,7 @@ fn typing_waits_for_an_idle_quiet_pane_the_owner_left_alone() {
     );
     crate::coord::set_waiting(&fixture.db, agent, None, now).unwrap();
 
-    let asker_pane = crate::terminal::AgentId::team(asker).unwrap();
+    let asker_pane = kernel_processes::terminal::AgentId::team(asker).unwrap();
     until("the question on screen", || {
         crate::team::events::question(&host.screen(&asker_pane).unwrap()).is_some()
     });
@@ -959,7 +1035,7 @@ fn typing_waits_for_an_idle_quiet_pane_the_owner_left_alone() {
         Typing::Held("coord_agent_waiting")
     );
 
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     if host.quiet(&pane).unwrap().unwrap() < typing::APP_QUIET {
         assert_eq!(
             try_type(agent, Some(&owner), now),
@@ -1014,7 +1090,7 @@ fn auto_types_only_claude_code_messages_past_the_grace_into_an_idle_pane() {
         "New work",
         now - 1_000,
     );
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1081,7 +1157,7 @@ fn an_owner_notice_alone_is_not_typed_into_an_idle_lead_until_a_waking_message()
     let notice = waiting[0].id;
     assert!(waiting[0].body.contains(crate::team::events::OWNER_WOKE));
     assert!(!waking(&fixture.db, lead).unwrap());
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1153,7 +1229,7 @@ fn a_teammate_note_alone_is_still_typed_into_an_idle_awake_agent() {
         1,
     );
     assert!(!waking(&fixture.db, lead).unwrap());
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1223,7 +1299,7 @@ fn a_full_window_of_owner_notices_never_holds_a_later_prompt() {
             .len(),
         PENDING_MAX
     );
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     let awake = BTreeSet::new();
     let reached = reach(
         Some(&host as &dyn Host),
@@ -1337,7 +1413,7 @@ fn a_cut_never_types_an_owner_notice_alone_ahead_of_a_long_prompt() {
     let waiting = crate::coord::pending(&fixture.db, lead, PENDING_MAX).unwrap();
     let (_, whole) = lines(&fixture.db, &waiting, PROMPT_BYTES_MAX).unwrap();
     assert_eq!(whole, [notice], "the prompt does not fit behind the notice");
-    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(lead).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });
@@ -1574,7 +1650,7 @@ fn a_listed_agents_message_is_typed_into_its_stand_in_pane_under_auto_and_typing
             "Check the gate",
             now,
         );
-        let pane = crate::terminal::AgentId::team(agent).unwrap();
+        let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
         until("a quiet pane", || {
             host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
         });
@@ -1634,7 +1710,7 @@ fn native_only_keeps_a_tools_off_codex_agents_messages_sent_until_auto_types_the
         "Check the gate",
         now,
     );
-    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    let pane = kernel_processes::terminal::AgentId::team(agent).unwrap();
     until("a quiet pane", || {
         host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
     });

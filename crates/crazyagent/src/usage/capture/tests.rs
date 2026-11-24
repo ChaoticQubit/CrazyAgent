@@ -793,8 +793,10 @@ fn reported_turn_usage_adds_up_under_its_agent_and_a_bad_session_name_is_refused
 
 fn mkfifo(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let made =
-        crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(path),
+    )
+    .unwrap();
     assert!(made.success());
 }
 

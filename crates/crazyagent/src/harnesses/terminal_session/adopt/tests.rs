@@ -4,7 +4,8 @@ use crate::harnesses::interactive::InteractiveCommand;
 #[cfg(target_os = "macos")]
 use crate::terminal::FOLDER;
 #[cfg(target_os = "macos")]
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -40,6 +41,8 @@ impl Fixture {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
             &self.root.path().join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
         ))
     }
 
@@ -76,7 +79,12 @@ impl Fixture {
             },
         };
         let since = SystemTime::now();
-        let pane = host.spawn(agent, &command).unwrap();
+        let pane = host
+            .spawn(
+                agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
     }
 }
@@ -84,7 +92,7 @@ impl Fixture {
 #[cfg(target_os = "macos")]
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(self.root.path().join(FOLDER).join(SOCKET))
@@ -652,7 +660,7 @@ fn an_adopted_pane_past_the_old_event_and_byte_caps_is_taken_over_and_reads_on()
 
 /// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.
 fn fifo(path: &std::path::Path) {
-    let made = crate::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(path)
             .env_clear()
@@ -894,7 +902,8 @@ fn a_cut_adoption_replay_on_a_pane_without_its_input_prompt_stops_the_turn_befor
 /// prompt. A cut read on such a pane does not take it over idle: a pane with a stopped
 /// process is not waiting, so it gets Escape like a pane with an open turn, its turn settles,
 /// and only then is it taken over. The stand-in shows the prompt, stops a process it started
-/// and records every Escape.
+/// and records every Escape; the row adopts only once that process is stopped and the pane
+/// quiet for `APP_QUIET`, so a slow stand-in never passes for an idle pane.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_cut_adoption_replay_on_a_pane_that_shows_its_prompt_over_a_stopped_process_stops_the_turn_first()
@@ -907,7 +916,17 @@ fn a_cut_adoption_replay_on_a_pane_that_shows_its_prompt_over_a_stopped_process_
     assert!(length > 4 * READ_BYTES_MAX as u64);
     let harness = format!("{IDLE_PROMPT}sleep 600 & kill -STOP $!; {ESCAPE_HARNESS}");
     let record = fixture.spawn(&host, &agent, &harness, &file);
-    std::thread::sleep(Duration::from_secs(5));
+    let quiet = crate::coord::delivery::typing::APP_QUIET;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !crate::team::caller::stopped_under(record.pid)
+        || !matches!(host.quiet(&agent), Ok(Some(drawn)) if drawn >= quiet)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in never stopped its process under a quiet prompt"
+        );
+        std::thread::sleep(POLL);
+    }
     let launched = PaneRecord {
         since_ms: record.since_ms - 60_000,
         ..record
@@ -1003,7 +1022,7 @@ fn a_pane_whose_process_is_not_the_recorded_one_is_not_adopted_and_its_group_is_
     let agent = AgentId::team(7).unwrap();
     let file = fixture.transcript(&[TURN_OPEN, TURN_DONE]);
     let record = fixture.spawn(&host, &agent, "exec cat", &file);
-    let mut other = crate::spawn_gate::spawn(
+    let mut other = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
             .process_group(0)

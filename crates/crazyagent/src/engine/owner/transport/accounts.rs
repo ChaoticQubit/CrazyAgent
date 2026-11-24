@@ -13,6 +13,7 @@ use std::os::fd::OwnedFd;
 #[cfg(unix)]
 const KEYS: &str = crate::storage::accounts::ACCOUNT_KEYS;
 const SECRET_MAX: usize = 8192;
+const _: () = assert!(SECRET_MAX as u64 == crate::storage::accounts::KEY_BYTES_MAX);
 const LIST_PROBE: Duration = Duration::from_millis(400);
 const CHECK_PROBE: Duration = Duration::from_secs(4);
 
@@ -197,7 +198,7 @@ impl OwnerClient {
         action: Action,
         key: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        let time = action.time(self.timeout) + self.timeout;
+        let time = action.time(self.engine_timeout) + self.timeout;
         tokio::time::timeout(time, async {
             let read = read_kind(&action);
             let envelope = Envelope {
@@ -209,10 +210,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("accounts_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -232,9 +233,9 @@ impl OwnerClient {
                 let mut bytes = key.into_bytes();
                 let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
                 framed.extend_from_slice(&bytes);
-                crate::credentials::wipe(&mut bytes);
+                kernel_security::secret::wipe(&mut bytes);
                 let sent = stream.write_all(&framed).await;
-                crate::credentials::wipe(&mut framed);
+                kernel_security::secret::wipe(&mut framed);
                 sent.map_err(|_| failure("accounts_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
@@ -257,11 +258,11 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// Serves one accounts owner request after the owner exchange deadline: the action runs
-/// under its own budget, which covers its network probes, and the reply write under the
-/// owner wait. Inputs: the stream, engine, authority, owner packet, admission and request
-/// bytes. Output: the reply written, a rejection code included.
+/// under its own budget, which covers its network probes and decides each storage job just
+/// before that budget cuts it, and the reply write under the owner wait. Inputs: the stream,
+/// engine, authority, owner packet, admission and request bytes. Output: the reply written.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -276,12 +277,11 @@ pub(super) async fn serve(
         None
     };
     let time = envelope.accounts.time(engine.timeout);
-    let outcome = tokio::time::timeout(
-        time,
-        handle(engine, authority, packet, admission, envelope.accounts, key),
-    )
-    .await
-    .unwrap_or_else(|_| Err(unknown()));
+    let cut = tokio::time::Instant::now() + time;
+    let work = handle(engine, authority, packet, admission, envelope.accounts, key);
+    let outcome = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work))
+        .await
+        .unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
@@ -399,12 +399,12 @@ async fn handle(
             let listed = match actor(engine, admission, Command::Get(id.clone())).await {
                 Ok(ResultValue::Account(listed)) => listed,
                 refused => {
-                    crate::credentials::wipe(&mut key.into_bytes());
+                    kernel_security::secret::wipe(&mut key.into_bytes());
                     return Err(refused.err().unwrap_or_else(unknown));
                 }
             };
             let ModelAuthentication::ApiKey { credential_ref } = &listed.connection.auth else {
-                crate::credentials::wipe(&mut key.into_bytes());
+                kernel_security::secret::wipe(&mut key.into_bytes());
                 return Err(failure("account_key_not_allowed"));
             };
             replace_key(root, credential_ref, key)?;
@@ -474,7 +474,7 @@ async fn authenticate(
     Ok(())
 }
 
-async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {
+async fn receive_key(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("accounts_key_frame_invalid");
         let size = stream.read_u32().await.map_err(|_| invalid())? as usize;
@@ -483,7 +483,7 @@ async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret, EngineErr
         }
         let mut bytes = vec![0; size];
         if stream.read_exact(&mut bytes).await.is_err() {
-            crate::credentials::wipe(&mut bytes);
+            kernel_security::secret::wipe(&mut bytes);
             return Err(invalid());
         }
         AccountSecret::new(bytes).map_err(|_| failure("account_key_invalid"))
@@ -595,7 +595,7 @@ fn write_key(directory: &File, name: &str, key: AccountSecret) -> Result<(), Eng
     let mut file = File::from(fd);
     let mut bytes = key.into_bytes();
     let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| file.sync_all());
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     if written.is_err() {
         let _ = rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty());
         return Err(failure("account_key_store_unavailable"));
@@ -628,18 +628,21 @@ pub(super) fn replace_key(
     Ok(())
 }
 
-/// Refuses to save an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, unused, and the key, which is zeroed before it drops.
-/// Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
+/// Saves an account key on Windows as a new W1 secret file in the engine root's key folder,
+/// through the one key-folder guard in storage. Inputs: owner root, credential reference and
+/// the key, which is zeroed after the write. Output: the folder synced, or the refusal.
+#[cfg(windows)]
 fn store_key(
-    _root: &Root,
-    _credential: &CredentialRef,
+    root: &Root,
+    credential: &CredentialRef,
     key: AccountSecret,
 ) -> Result<(), EngineError> {
     let mut bytes = key.into_bytes();
-    crate::credentials::wipe(&mut bytes);
-    Err(failure("account_key_store_unavailable"))
+    let stored = root
+        .engine_root()
+        .and_then(|engine| crate::storage::accounts::store_key_file(engine, credential, &bytes));
+    kernel_security::secret::wipe(&mut bytes);
+    stored
 }
 
 #[cfg(unix)]
@@ -671,24 +674,30 @@ fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, Eng
     Ok(Some(file))
 }
 
-/// Refuses to replace an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, unused, and the key, which is zeroed before it drops.
-/// Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
+/// Swaps the saved key of one credential for a new one on Windows: storage writes a staged
+/// W1 secret file and renames it over the old one. Inputs: owner root, credential reference
+/// and the new key, which is zeroed after the write. Output: Ok, or the refusal; on a
+/// refusal the old key stays.
+#[cfg(windows)]
 pub(super) fn replace_key(
-    _root: &Root,
-    _credential: &CredentialRef,
+    root: &Root,
+    credential: &CredentialRef,
     key: AccountSecret,
 ) -> Result<(), EngineError> {
-    crate::credentials::wipe(&mut key.into_bytes());
-    Err(failure("account_key_store_unavailable"))
+    let mut bytes = key.into_bytes();
+    let replaced = root
+        .engine_root()
+        .and_then(|engine| crate::storage::accounts::replace_key_file(engine, credential, &bytes));
+    kernel_security::secret::wipe(&mut bytes);
+    replaced
 }
 
-/// Refuses to open an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, both unused. Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
-fn open_key(_root: &Root, _credential: &CredentialRef) -> Result<Option<File>, EngineError> {
-    Err(failure("account_key_store_unavailable"))
+/// Opens the saved key of one credential on Windows as a W1 private file read without delete
+/// sharing. Inputs: owner root and credential reference. Output: the file, none when no key
+/// was saved, or the storage refusal.
+#[cfg(windows)]
+fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, EngineError> {
+    crate::storage::accounts::open_key_file(root.engine_root()?, credential)
 }
 
 fn read_key(root: &Root, credential: &CredentialRef) -> Result<Option<Vec<u8>>, EngineError> {
@@ -702,7 +711,7 @@ fn read_key(root: &Root, credential: &CredentialRef) -> Result<Option<Vec<u8>>, 
         .is_err()
         || bytes.len() > SECRET_MAX
     {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(failure("account_key_store_unavailable"));
     }
     Ok(Some(bytes))
@@ -738,11 +747,12 @@ fn remove_key(root: &Root, credential: &CredentialRef) -> Result<(), EngineError
     }
 }
 
-/// Refuses to remove an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, both unused. Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
-fn remove_key(_root: &Root, _credential: &CredentialRef) -> Result<(), EngineError> {
-    Err(failure("account_key_store_unavailable"))
+/// Removes the saved key of one credential on Windows while its key folder is held.
+/// Inputs: owner root and credential reference. Output: Ok when the key is gone, including
+/// when it was never saved, or the storage refusal.
+#[cfg(windows)]
+fn remove_key(root: &Root, credential: &CredentialRef) -> Result<(), EngineError> {
+    crate::storage::accounts::remove_key_file(root.engine_root()?, credential.as_str())
 }
 
 fn http_url(connection: &ModelConnection) -> Option<url::Url> {
@@ -830,16 +840,32 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
         },
         model: (!native).then(|| listed.connection.model.id.clone()),
         status,
-        status_label: if status == AccountStatus::NotSignedIn && listed.rejected {
-            "Sign-in rejected"
-        } else if status == AccountStatus::SigningIn
-            && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
-        {
-            "Checking sign-in"
-        } else {
-            status.label()
-        }
-        .into(),
+        status_label: match &listed.sign_out_unfinished {
+            Some(code) if status == AccountStatus::NotSignedIn => {
+                format!("Sign-out not finished: {}", sign_out_reason(code))
+            }
+            _ if status == AccountStatus::NotSignedIn && listed.rejected => {
+                "Sign-in rejected".into()
+            }
+            _ if status == AccountStatus::SigningIn
+                && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved) =>
+            {
+                "Checking sign-in".into()
+            }
+            _ => status.label().into(),
+        },
+    }
+}
+
+/// Says in plain words why a sign-out did not finish in the harness, for the Accounts page:
+/// the profile is signed out here, but the harness may still hold its credentials.
+/// Input: the stored code. Output: the reason, a fixed sentence for any code it does not
+/// name, so no harness output ever reaches the page.
+fn sign_out_reason(code: &str) -> &'static str {
+    match code {
+        crate::storage::SIGN_OUT_NOT_RUN => "the engine stopped before the harness signed out",
+        "native_auth_host_unavailable" => "the sign-in helper could not run the harness",
+        _ => "the harness sign-out failed",
     }
 }
 
@@ -922,7 +948,7 @@ async fn check(
     let checked = probe::check(&url, key.as_deref(), CHECK_PROBE).await;
     let mut key = key;
     if let Some(bytes) = key.as_mut() {
-        crate::credentials::wipe(bytes);
+        kernel_security::secret::wipe(bytes);
     }
     Ok(match checked {
         Err(_) => (view(&listed, AccountStatus::Unreachable), Vec::new()),

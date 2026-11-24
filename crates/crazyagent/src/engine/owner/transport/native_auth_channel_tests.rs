@@ -243,7 +243,14 @@ impl ChannelCase {
     async fn begin(&self, command: Command) -> NativeAuthBegin {
         self.host
             .engine
-            .native_auth_job(|reply| Job::NativeAuth(self.admission(), command, reply))
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    self.admission(),
+                    command,
+                    crate::storage::NativeAuthAsk::Engine,
+                    reply,
+                )
+            })
             .await
             .unwrap()
     }
@@ -350,16 +357,15 @@ impl ChannelCase {
             .unwrap()
     }
 
-    async fn raw(&self, packet: &[u8; 37]) -> UnixStream {
-        let mut stream =
-            crate::spawn_gate::connect_unix(self.host.authority.root.path.join(SOCKET))
-                .await
-                .unwrap();
+    async fn raw(&self, packet: &[u8; 37]) -> Stream {
+        let mut stream = crate::ipc::owner_connect(self.host.authority.root.path.join(SOCKET))
+            .await
+            .unwrap();
         stream.write_all(packet).await.unwrap();
         stream
     }
 
-    async fn attached(&self) -> UnixStream {
+    async fn attached(&self) -> Stream {
         let mut stream = self.raw(&self.packet()).await;
         stream
             .write_all(&encode_frame(&json!({"protocol_version": 1, "kind": "attach"})).unwrap())
@@ -385,7 +391,7 @@ impl ChannelCase {
     }
 }
 
-async fn rejected(mut stream: UnixStream) {
+async fn rejected(mut stream: Stream) {
     let mut byte = [0; 1];
     let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
         .await
@@ -530,7 +536,7 @@ async fn native_auth_channel_bootstrap_writes_exact_token_length_and_closes_chil
     channel_case(|case| async move {
         let (_, launch) = case.launch("bootstrap-token-pipe").await;
         let before = case.snapshot();
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/usr/bin/wc")
                 .arg("-c")
                 .env_clear()
@@ -1170,7 +1176,7 @@ async fn native_auth_channel_any_real_child_effect_forbids_no_effect_retirement(
         let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
         assert!(channel.revalidate(&guard).await.is_ok());
         let mut session = CustodySession::new(guard);
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/usr/bin/true")
                 .env_clear()
                 .stdin(Stdio::null())

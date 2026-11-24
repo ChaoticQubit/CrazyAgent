@@ -74,7 +74,7 @@ fn a_claude_mcp_config_frees_no_copy_of_a_secret() {
         .windows(SECRET.len())
         .filter(|window| *window == SECRET)
         .count();
-    crazyagent::credentials::wipe(&mut text);
+    kernel_security::secret::wipe(&mut text);
     assert_eq!(held, 2);
     assert_eq!(FREED_WITH_SECRET.load(Ordering::SeqCst), 0);
 }

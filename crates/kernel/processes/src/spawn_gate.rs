@@ -1,0 +1,654 @@
+use std::cell::Cell;
+use std::io;
+use std::process::{Child, Command, ExitStatus, Output};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+static GATE: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    static HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SPAWNED: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static ACCEPT_WAITS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Test helper: how many times this thread's blocking accepts have waited for a client, so a
+/// row can bound the wakeups one accept takes. Output: the count.
+#[cfg(all(test, unix))]
+pub(crate) fn accept_waits() -> usize {
+    ACCEPT_WAITS.get()
+}
+
+/// Test helper: how many children this thread has started through the gate, so a row can
+/// bound the processes one call starts. Output: the count.
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+pub fn spawned() -> usize {
+    SPAWNED.get()
+}
+
+/// Test helper: names the folder a row run by [`row_alone`] works and reports in.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub const ROW_FOLDER: &str = "CRAZYAGENT_TEST_ROW_FOLDER";
+
+/// Test helper: runs one ignored row of this test binary in its own process, so a
+/// per-process setting, such as a umask or a file size limit, reaches no other row.
+/// Inputs: the row's full name, a shell line run before it (`:` for none) and the folder
+/// named to it in [`ROW_FOLDER`]. Output: the row's exit status.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn row_alone(row: &str, prelude: &str, folder: &std::path::Path) -> ExitStatus {
+    status(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "{prelude}; exec \"$0\" --exact {row} --ignored --test-threads 1"
+            ))
+            .arg(std::env::current_exe().unwrap())
+            .env(ROW_FOLDER, folder)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap()
+}
+
+struct Entered(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        HELD.set(false);
+    }
+}
+
+fn enter() -> Entered {
+    assert!(
+        !HELD.get(),
+        "spawn_gate entered again on a thread that already holds it"
+    );
+    let guard = GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    HELD.set(true);
+    Entered(guard)
+}
+
+/// Runs a call that creates file descriptors while no other thread of this
+/// process starts a child, for sockets and anything else the platform cannot
+/// create close-on-exec in one step. Input: the call, which must not enter the
+/// gate again. Output: what the call returned.
+pub fn guarded<T>(create: impl FnOnce() -> T) -> T {
+    let _gate = enter();
+    create()
+}
+
+/// Starts a child process while no other thread of this process starts one or creates a
+/// socket, so the child inherits only its own pipes. On Windows a `.cmd` or `.bat` program
+/// ([`crate::batch::batch_file`]) and a program neither absolute nor a bare file name
+/// ([`crate::batch::fixed_program`]) are refused. Input: the configured command. Output: the
+/// child, or the error that kept it from starting.
+#[allow(clippy::disallowed_methods)]
+pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    #[cfg(windows)]
+    if crate::batch::batch_file(std::path::Path::new(command.get_program())) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "spawn_batch_file_refused",
+        ));
+    }
+    #[cfg(windows)]
+    if !crate::batch::fixed_program(std::path::Path::new(command.get_program())) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "spawn_relative_program_refused",
+        ));
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    SPAWNED.set(SPAWNED.get() + 1);
+    guarded(|| command.spawn())
+}
+
+/// Starts a child that also inherits one more open descriptor, at its own number, while no
+/// other thread of this process starts a child, then closes this process's copy, so no other
+/// child ever holds it. Input: the configured command and the descriptor to hand over.
+/// Output: the child, or the error that kept it from starting.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io::Result<Child> {
+    #[cfg(any(test, feature = "test-support"))]
+    SPAWNED.set(SPAWNED.get() + 1);
+    guarded(move || {
+        rustix::io::fcntl_setfd(&handed, rustix::io::FdFlags::empty())?;
+        let child = command.spawn();
+        drop(handed);
+        child
+    })
+}
+
+/// The custody of a child started by [`kept`]: the thread that forked it waits until this
+/// drops. Linux sends a child's parent-death signal, which bubblewrap's `--die-with-parent`
+/// sets, when the thread that forked it exits, so the child ends with this keeper or with
+/// the process, never with the thread that asked for it.
+#[must_use = "dropping the keeper ends the thread that forked the child"]
+pub struct Keeper {
+    _release: std::sync::mpsc::SyncSender<()>,
+}
+
+/// Runs `start`, which forks a child, on a thread of its own that waits until the returned
+/// keeper drops, so the child outlives the calling thread and still ends with the engine
+/// (V243 P6). Input: the start, which may enter the gate. Output: what the start returned
+/// and its keeper, or the error that kept the thread or the child from starting.
+pub fn kept<T: Send + 'static>(
+    start: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<(T, Keeper)> {
+    assert!(
+        !HELD.get(),
+        "a kept start waits on a thread that already holds the spawn gate"
+    );
+    let (started_sender, started) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+    std::thread::Builder::new()
+        .name("spawn-keeper".to_owned())
+        .spawn(move || {
+            let result = start();
+            let holds = result.is_ok();
+            if started_sender.send(result).is_ok() && holds {
+                let _released = released.recv();
+            }
+        })?;
+    let result = started
+        .recv()
+        .map_err(|_| io::Error::other("spawn_keeper_lost"))??;
+    Ok((result, Keeper { _release: release }))
+}
+
+/// Starts a child through the gate and waits for it outside the gate.
+/// Input: the configured command; its stdio is inherited unless set, as with
+/// `Command::status`. Output: the exit status.
+pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
+    spawn(command)?.wait()
+}
+
+/// Starts a child through the gate and collects its output outside the gate.
+/// Input: the configured command with stdin, stdout and stderr set; unlike
+/// `Command::output` nothing is defaulted. Output: status, stdout and stderr.
+pub fn output(command: &mut Command) -> io::Result<Output> {
+    spawn(command)?.wait_with_output()
+}
+
+/// Test helper: starts a child through the gate with the stdio `Command::output` defaults,
+/// no input and stdout and stderr collected, replacing whatever the command had set. A
+/// caller that needs its own stdio uses [`output`] with that stdio set. Input: the
+/// configured command. Output: status, stdout and stderr.
+pub fn collected(command: &mut Command) -> io::Result<Output> {
+    use std::process::Stdio;
+    output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+}
+
+/// Accepts one connection on a Tokio Unix listener, taking the gate only for
+/// each accept attempt, never while waiting. A failure a later accept outlives,
+/// such as an aborted peer or a full descriptor table, is logged and retried
+/// after a pause that doubles up to a second, so it never ends a server.
+/// Input: the listener. Output: the stream and its peer address, or a lasting error.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub async fn accept_unix(
+    listener: &tokio::net::UnixListener,
+) -> io::Result<(tokio::net::UnixStream, tokio::net::unix::SocketAddr)> {
+    let mut pause = ACCEPT_PAUSE_MIN;
+    loop {
+        match std::future::poll_fn(|context| guarded(|| listener.poll_accept(context))).await {
+            Err(error) if passing(&error) => {
+                eprintln!("accept_retried: {error}");
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(ACCEPT_PAUSE_MAX);
+            }
+            accepted => return accepted,
+        }
+    }
+}
+
+#[cfg(unix)]
+const ACCEPT_PAUSE_MIN: std::time::Duration = std::time::Duration::from_millis(10);
+#[cfg(unix)]
+const ACCEPT_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Tells whether an accept failure belongs to one connection or to a resource
+/// that frees up, so a later accept can succeed on the same listener.
+/// Input: the accept error. Output: true to retry, false for a lasting failure.
+#[cfg(unix)]
+fn passing(error: &io::Error) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+    ) || matches!(
+        Errno::from_io_error(error),
+        Some(Errno::MFILE | Errno::NFILE | Errno::NOBUFS | Errno::NOMEM | Errno::PROTO)
+    )
+}
+
+/// Accepts one connection on a Tokio TCP listener, taking the gate only for
+/// each accept attempt, never while waiting.
+/// Input: the listener. Output: the stream and its peer address.
+#[allow(clippy::disallowed_methods)]
+pub async fn accept_tcp(
+    listener: &tokio::net::TcpListener,
+) -> io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    std::future::poll_fn(|context| guarded(|| listener.poll_accept(context))).await
+}
+
+/// Connects a Tokio Unix stream; only the socket is created inside the gate. A path too
+/// long for a socket address is reached through its short address.
+/// Input: the socket path. Output: the connected stream.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub async fn connect_unix(path: impl AsRef<std::path::Path>) -> io::Result<tokio::net::UnixStream> {
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(tokio::net::UnixSocket::new_stream)?
+        .connect(address)
+        .await
+}
+
+/// Connects a Tokio TCP stream to the first address of `host:port` that
+/// accepts; only each socket is created inside the gate.
+/// Input: the address text. Output: the connected stream or the last error.
+#[allow(clippy::disallowed_methods)]
+pub async fn connect_tcp(
+    address: impl tokio::net::ToSocketAddrs,
+) -> io::Result<tokio::net::TcpStream> {
+    let mut last = io::Error::new(io::ErrorKind::InvalidInput, "no address to connect to");
+    for target in tokio::net::lookup_host(address).await? {
+        let socket = guarded(|| match target {
+            std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        })?;
+        match socket.connect(target).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
+}
+
+/// Binds a Tokio TCP listener to the first address of `address` that binds;
+/// each socket is created inside the gate. Must run inside a Tokio runtime.
+/// Input: the address. Output: the listener or the last bind error.
+#[allow(clippy::disallowed_methods)]
+pub async fn bind_tcp(
+    address: impl tokio::net::ToSocketAddrs,
+) -> io::Result<tokio::net::TcpListener> {
+    let mut last = io::Error::new(io::ErrorKind::InvalidInput, "no address to bind");
+    for target in tokio::net::lookup_host(address).await? {
+        match guarded(|| std::net::TcpListener::bind(target)) {
+            Ok(listener) => {
+                listener.set_nonblocking(true)?;
+                return tokio::net::TcpListener::from_std(listener);
+            }
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
+}
+
+/// Binds a Tokio Unix listener at `path` inside the gate, through its short address when
+/// the path is too long for a socket address. Must run inside a Tokio runtime.
+/// Input: the socket path. Output: the listener.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn bind_unix(path: impl AsRef<std::path::Path>) -> io::Result<tokio::net::UnixListener> {
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| tokio::net::UnixListener::bind(&address))
+}
+
+/// Connects a blocking Unix stream inside the gate, through the short address of a path
+/// too long for a socket address; a Unix connect never waits on the network.
+/// Input: the socket path. Output: the stream.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn connect_unix_std(
+    path: impl AsRef<std::path::Path>,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| std::os::unix::net::UnixStream::connect(&address))
+}
+
+/// Accepts one waiting connection on a non-blocking Unix listener inside the gate, never
+/// waiting for one. Input: the listener. Output: the stream, or `WouldBlock` when none
+/// waits, or the accept failure.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn accept_unix_std(
+    listener: &std::os::unix::net::UnixListener,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    guarded(|| listener.accept()).map(|(stream, _)| stream)
+}
+
+/// Binds a blocking Unix listener inside the gate, through the short address of a path
+/// too long for a socket address. Input: the socket path. Output: the listener.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn bind_unix_std(
+    path: impl AsRef<std::path::Path>,
+) -> io::Result<std::os::unix::net::UnixListener> {
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| std::os::unix::net::UnixListener::bind(&address))
+}
+
+/// Binds a Unix datagram socket inside the gate, through the short address of a path too
+/// long for a socket address. Input: the socket path. Output: the socket.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn bind_unix_datagram_std(
+    path: impl AsRef<std::path::Path>,
+) -> io::Result<std::os::unix::net::UnixDatagram> {
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| std::os::unix::net::UnixDatagram::bind(&address))
+}
+
+/// Creates a connected pair of blocking Unix streams inside the gate.
+/// Input: none. Output: both ends.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn unix_pair_std() -> io::Result<(
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+)> {
+    guarded(std::os::unix::net::UnixStream::pair)
+}
+
+/// Binds a blocking TCP listener inside the gate.
+/// Input: the address. Output: the listener.
+#[allow(clippy::disallowed_methods)]
+pub fn bind_tcp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::TcpListener> {
+    guarded(|| std::net::TcpListener::bind(address))
+}
+
+/// Binds a blocking TCP listener like [`bind_tcp_std`] but without `SO_REUSEADDR`, so the
+/// bind fails with `AddrInUse` while any socket holds the port, including a wildcard
+/// listener of this user that `std`'s bind would sit beside, and a closed connection
+/// still in TIME_WAIT. It queues up to the system's `SOMAXCONN` connections, the largest
+/// queue nix takes (128 on macOS). Input: the address. Output: the close-on-exec listener.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, SockaddrIn6, bind, listen, socket,
+    };
+    use std::os::fd::AsRawFd;
+    let family = match address {
+        std::net::SocketAddr::V4(_) => AddressFamily::Inet,
+        std::net::SocketAddr::V6(_) => AddressFamily::Inet6,
+    };
+    let socket = guarded(|| -> io::Result<std::os::fd::OwnedFd> {
+        let socket = socket(family, SockType::Stream, SockFlag::empty(), None)?;
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+        Ok(socket)
+    })?;
+    match address {
+        std::net::SocketAddr::V4(v4) => bind(socket.as_raw_fd(), &SockaddrIn::from(v4))?,
+        std::net::SocketAddr::V6(v6) => bind(socket.as_raw_fd(), &SockaddrIn6::from(v6))?,
+    }
+    listen(&socket, Backlog::MAXCONN)?;
+    Ok(std::net::TcpListener::from(socket))
+}
+
+/// The [`bind_tcp_std_exclusive`] of Windows, whose `std` bind sets no `SO_REUSEADDR` yet
+/// sits beside a listener on another address of the port: it binds, then reads the system's
+/// listener table and fails with `AddrInUse` when such a listener holds the port. A listener
+/// bound after that read is not seen. Input: the address. Output: the listener.
+#[cfg(not(unix))]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    let listener = bind_tcp_std(address)?;
+    if crazyagent_win_sandbox::listener_beside(listener.local_addr()?)? {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "a listener on another address holds the port",
+        ));
+    }
+    Ok(listener)
+}
+
+/// Holds a free loopback TCP port from the low block that refuses every connect, as a model
+/// provider that is down, where an owner's model port would be: a listener takes one connection
+/// from this process and is closed, so nothing listens and a unix bind without `SO_REUSEADDR`
+/// fails. Input: none. Output: the connection's two ends, which free the port when dropped,
+/// and the port.
+pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
+    let listener = low_tcp_listener()?;
+    let address = listener.local_addr()?;
+    assert!(LOW_PORTS.contains(&address.port()));
+    let near = connect_tcp_std(address)?;
+    let (far, _) = accept_tcp_std(&listener)?;
+    drop(listener);
+    assert_eq!(far.local_addr()?, address, "the kept end holds the port");
+    Ok(([near, far], address.port()))
+}
+
+/// The loopback block [`free_low_tcp_port`] picks from: below the ports every system hands
+/// out by itself, below the 30000 up that Linux node services use, and below both systems'
+/// model proxy blocks. The engine checks at compile time that its owner ports and proxy
+/// blocks stay clear of it. Output: the inclusive port range.
+pub const LOW_PORTS: std::ops::RangeInclusive<u16> = 20_000..=28_999;
+
+/// Picks a loopback TCP port nothing holds now from the low block, 20000 to 28999, so no
+/// port-0 bind or outbound connect takes it before the caller's own listener, such as a
+/// sandboxed child's, binds it. Each call in this process starts past the port the last call
+/// gave. Input: none. Output: the port, which nothing holds when this returns.
+pub fn free_low_tcp_port() -> io::Result<u16> {
+    let port = low_tcp_listener()?.local_addr()?.port();
+    assert!(LOW_PORTS.contains(&port));
+    Ok(port)
+}
+
+/// Binds a loopback listener on a low block port nothing holds now. The bind itself takes
+/// the port, so another process racing for it fails its own bind and moves on; each call in
+/// this process starts past the port the last call took. Input: none. Output: the
+/// listener, or `AddrInUse` when every low port is taken.
+fn low_tcp_listener() -> io::Result<std::net::TcpListener> {
+    static NEXT: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+    let span = u32::from(LOW_PORTS.end() - LOW_PORTS.start()) + 1;
+    let mut next = NEXT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let seed = std::process::id().wrapping_mul(2_654_435_761) % span;
+    let first = next.unwrap_or(seed);
+    for step in 0..span {
+        let offset = (first + step) % span;
+        let port = LOW_PORTS.start() + u16::try_from(offset).map_err(io::Error::other)?;
+        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        if let Ok(listener) = bind_tcp_std_exclusive(address) {
+            assert!(LOW_PORTS.contains(&port));
+            *next = Some((offset + 1) % span);
+            return Ok(listener);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrInUse,
+        "every low loopback port is taken",
+    ))
+}
+
+/// Binds a blocking UDP socket inside the gate.
+/// Input: the address. Output: the socket.
+#[allow(clippy::disallowed_methods)]
+pub fn bind_udp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::UdpSocket> {
+    guarded(|| std::net::UdpSocket::bind(address))
+}
+
+/// Connects a blocking TCP stream inside the gate, so the gate is held for the
+/// whole connect; use it for loopback peers only.
+/// Input: the address. Output: the stream.
+#[allow(clippy::disallowed_methods)]
+pub fn connect_tcp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::TcpStream> {
+    guarded(|| std::net::TcpStream::connect(address))
+}
+
+/// Connects a blocking TCP stream within `timeout` inside the gate, holding it
+/// for at most that long; use it for loopback peers only.
+/// Input: the address and timeout. Output: the stream.
+#[allow(clippy::disallowed_methods)]
+pub fn connect_tcp_std_timeout(
+    address: &std::net::SocketAddr,
+    timeout: std::time::Duration,
+) -> io::Result<std::net::TcpStream> {
+    guarded(|| std::net::TcpStream::connect_timeout(address, timeout))
+}
+
+/// Accepts one connection on a blocking or non-blocking TCP listener. A blocking listener
+/// waits for a client in poll(2) without the gate, then accepts under it, and keeps its mode;
+/// the accepted stream is blocking. Input: the listener. Output: the stream and peer.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn accept_tcp_std(
+    listener: &std::net::TcpListener,
+) -> io::Result<(std::net::TcpStream, std::net::SocketAddr)> {
+    let waits = !nonblocking(listener)?;
+    if waits {
+        listener.set_nonblocking(true)?;
+    }
+    let accepted = loop {
+        match guarded(|| listener.accept()) {
+            Err(error) if waits && error.kind() == io::ErrorKind::WouldBlock => {
+                #[cfg(test)]
+                ACCEPT_WAITS.set(ACCEPT_WAITS.get() + 1);
+                let mut fds = [rustix::event::PollFd::new(
+                    listener,
+                    rustix::event::PollFlags::IN,
+                )];
+                if crate::fd_wait::ready(&mut fds, None).is_err() {
+                    std::thread::sleep(ACCEPT_POLL);
+                }
+            }
+            other => break other,
+        }
+    };
+    if waits {
+        listener.set_nonblocking(false)?;
+    }
+    let (stream, peer) = accepted?;
+    stream.set_nonblocking(false)?;
+    Ok((stream, peer))
+}
+
+/// Accepts one connection where child processes inherit no socket by default. Winsock
+/// gives the accepted socket the listener's non-blocking mode, so the stream is set
+/// blocking, as on Unix, and its read timeouts hold. Input: the listener. Output: the
+/// blocking stream and peer.
+#[cfg(not(unix))]
+#[allow(clippy::disallowed_methods)]
+pub fn accept_tcp_std(
+    listener: &std::net::TcpListener,
+) -> io::Result<(std::net::TcpStream, std::net::SocketAddr)> {
+    let (stream, peer) = listener.accept()?;
+    stream.set_nonblocking(false)?;
+    Ok((stream, peer))
+}
+
+/// Accepts connections forever, as `TcpListener::incoming` does, through
+/// [`accept_tcp_std`]. Input: the listener. Output: an endless iterator of streams.
+pub fn incoming_tcp_std(
+    listener: &std::net::TcpListener,
+) -> impl Iterator<Item = io::Result<std::net::TcpStream>> + '_ {
+    std::iter::repeat_with(move || accept_tcp_std(listener).map(|(stream, _)| stream))
+}
+
+/// Creates an unconnected Unix stream socket inside the gate, for checks that
+/// need a socket with no peer. Input: none. Output: the socket as a stream.
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+#[allow(clippy::disallowed_methods)]
+pub fn unconnected_unix_stream() -> io::Result<std::os::unix::net::UnixStream> {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
+    guarded(|| {
+        socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+    })
+    .map(std::os::unix::net::UnixStream::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+const ACCEPT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+#[cfg(unix)]
+fn nonblocking(listener: &std::net::TcpListener) -> io::Result<bool> {
+    let flags = rustix::fs::fcntl_getfl(listener)?;
+    Ok(flags.contains(rustix::fs::OFlags::NONBLOCK))
+}
+
+/// Starts short real children through the gate on another thread until the returned flag
+/// is set, the way the engine keeps starting agents while other work runs.
+/// Input: none. Output: the stop flag and the thread, which returns how many it started.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn start_children_until_stopped() -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<u64>,
+) {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let starter = std::thread::spawn(move || {
+        let mut started = 0_u64;
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let exit = status(
+                Command::new("/usr/bin/true")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .unwrap();
+            assert!(exit.success());
+            started += 1;
+        }
+        started
+    });
+    (stop, starter)
+}
+
+/// How long a test waits for a freshly written executable's first run. macOS assesses each
+/// new executable once on its first exec, after spawn returns and one at a time across the
+/// machine, so this start bound stays apart from the short bounds a test then measures.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub const FIRST_EXEC_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs a freshly written executable once to completion through the gate, so macOS has
+/// assessed it before a test times it. Input: the command with its program and arguments.
+/// Output: its exit status; panics past [`FIRST_EXEC_TIME`] after stopping it.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn first_run(command: &mut Command) -> ExitStatus {
+    let mut child = spawn(
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + FIRST_EXEC_TIME;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("a fresh executable did not finish its first run within {FIRST_EXEC_TIME:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -37,7 +37,7 @@ fn program(file: &Path) {
 /// setup installs it. Output: the case, removed when dropped.
 fn case() -> Case {
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let links = base
         .join("local")
         .join("Microsoft")
@@ -57,7 +57,7 @@ fn installer(case: &Case) -> WindowsInstaller {
     WindowsInstaller::new(
         &case.base.join("app"),
         Some(&case.base.join("local")),
-        crate::tools::Places::new(Vec::new(), None),
+        crate::tools::tools_new(Vec::new(), None),
     )
     .unwrap()
 }
@@ -153,8 +153,15 @@ fn context_mode_is_set_up_on_windows_as_the_pinned_launch_the_engine_runs() {
     let root = case.base.join("engine");
     let bin = root.join("setup").join("bin");
     program(&bin.join("npx.cmd"));
+    program(&bin.join("node.exe"));
+    program(
+        &bin.join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npx-cli.js"),
+    );
     let places =
-        crate::tools::Places::engine(Some(&root), None, None, Some(std::ffi::OsStr::new("")));
+        crate::tools::tools_engine(Some(&root), None, None, Some(std::ffi::OsStr::new("")));
     let installer = WindowsInstaller::new(
         &root.join("setup"),
         Some(&case.base.join("local")),

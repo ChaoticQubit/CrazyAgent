@@ -197,20 +197,22 @@ export function summary() {
   return browser.execute(() => document.querySelector(".tg-summary")?.textContent ?? "");
 }
 
-/** Reads one agent's terminal view as the owner sees it: the state line, the rows xterm
- * draws as text and one by one, the scroll offset, whether it is live, whether Jump to latest
- * shows and whether the agent reads the mouse. Input: the agent's label. Output: the view,
- * or null while none is shown. */
+/** Reads one agent's terminal view as the owner sees it: the state line, the screen's lines
+ * read from the terminal's buffer (the view's readScreen, so they read the same under every
+ * Terminal renderer) as one text and one by one, the scroll offset, whether it is live,
+ * whether Jump to latest shows and whether the agent reads the mouse. Input: the agent's
+ * label. Output: the view, or null while none is shown. */
 export function terminalView(label) {
   return browser.execute((label) => {
     const section = [...document.querySelectorAll("section.tg-terminal")]
       .find((node) => node.getAttribute("aria-label") === `${label} terminal` && node.getClientRects().length);
     if (!section) return null;
     const jump = [...section.querySelectorAll("button")].some((button) => button.textContent.trim() === "Jump to latest");
+    const lines = section.querySelector(".tg-terminal-host")?.readScreen?.() ?? [];
     return {
       state: section.querySelector(".tg-terminal-state")?.innerText ?? "",
-      rows: section.querySelector(".xterm-rows")?.innerText ?? "",
-      lines: [...section.querySelectorAll(".xterm-rows > div")].map((row) => row.innerText),
+      rows: lines.join("\n"),
+      lines,
       top: section.querySelector(".xterm-viewport")?.scrollTop ?? 0,
       mouse: Boolean(section.querySelector(".xterm.enable-mouse-events")),
       live: Boolean(section.querySelector(".tg-terminal-note")),
@@ -304,34 +306,37 @@ export function finishedList() {
   });
 }
 
-/** Reads the text of each row an agent's terminal draws, top first. Input: the agent's
- * label. Output: the row texts, empty while no terminal is drawn. */
+/** Reads the text of each row an agent's terminal shows, top first, from its buffer.
+ * Input: the agent's label. Output: the row texts, empty while no terminal is shown. */
 export function rowTexts(label) {
   return browser.execute((label) => {
     const section = [...document.querySelectorAll("section.tg-terminal")]
       .find((node) => node.getAttribute("aria-label") === `${label} terminal` && node.getClientRects().length);
-    return [...(section?.querySelectorAll(".xterm-rows > div") ?? [])].map((row) => row.innerText);
+    return section?.querySelector(".tg-terminal-host")?.readScreen?.() ?? [];
   }, label);
 }
 
 /** Selects one row of an agent's terminal as the owner does on a Mac: an Option triple-click
  * on it, which selects the line even while the agent reads the mouse, then opens the
- * terminal's right-click menu on that row. Inputs: the agent's label and the row's index.
- * Output: { row, rows }, the row's text and every row's text then, or null when the
- * terminal or the row is not drawn. */
+ * terminal's right-click menu on that row. The row's place is its share of the screen's
+ * height, so it holds whichever renderer draws it. Inputs: the agent's label and the row's
+ * index. Output: { row, rows }, the row's text and every row's text then, both from the
+ * buffer, or null when the terminal or the row is not shown. */
 export function selectRow(label, index) {
   return browser.execute((label, index) => {
     const section = [...document.querySelectorAll("section.tg-terminal")]
       .find((node) => node.getAttribute("aria-label") === `${label} terminal` && node.getClientRects().length);
-    const row = section?.querySelectorAll(".xterm-rows > div")[index];
+    const lines = section?.querySelector(".tg-terminal-host")?.readScreen?.() ?? [];
     const screen = section?.querySelector(".xterm-screen");
-    if (!row || !screen) return null;
-    const box = row.getBoundingClientRect();
-    const at = { clientX: box.left + 4, clientY: box.top + box.height / 2, bubbles: true, cancelable: true, view: window };
+    if (!screen || index < 0 || index >= lines.length) return null;
+    const box = screen.getBoundingClientRect();
+    const height = box.height / lines.length;
+    const at = { clientX: box.left + 4, clientY: box.top + height * index + height / 2, bubbles: true, cancelable: true, view: window };
     screen.dispatchEvent(new MouseEvent("mousedown", { ...at, button: 0, buttons: 1, detail: 3, altKey: true }));
     document.dispatchEvent(new MouseEvent("mouseup", { ...at, button: 0, buttons: 0, detail: 3, altKey: true }));
     screen.dispatchEvent(new MouseEvent("contextmenu", { ...at, button: 2, buttons: 2 }));
-    return { row: row.innerText, rows: [...section.querySelectorAll(".xterm-rows > div")].map((line) => line.innerText) };
+    const rows = section.querySelector(".tg-terminal-host").readScreen?.() ?? [];
+    return { row: rows[index], rows };
   }, label, index);
 }
 

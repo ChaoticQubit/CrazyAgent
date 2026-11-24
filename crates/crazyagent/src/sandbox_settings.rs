@@ -1,49 +1,19 @@
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::Outcome;
-use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use crate::storage::versioned;
+use kernel_sandbox::settings::SandboxSettings;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS sandbox_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports')),
     linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off')),
     linux_strict TEXT NOT NULL DEFAULT 'off' CHECK(linux_strict IN ('off', 'on'))
 )";
-#[cfg(any(unix, test))]
 const SUPERVISOR_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))";
-#[cfg(any(unix, test))]
 const STRICT_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_strict TEXT NOT NULL DEFAULT 'off' CHECK(linux_strict IN ('off', 'on'))";
-
-/// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held
-/// on Linux ("Linux limited-network sockets"), whether Linux agents run under the call
-/// supervisor ("Linux call supervisor") and whether a Linux launch without the full sandbox
-/// is refused (DEC-185). Before the first save every value is its default; a client that
-/// sends no supervisor or strict choice gets the default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxSettings {
-    pub linux_sockets: LinuxSockets,
-    #[serde(default)]
-    pub linux_supervisor: LinuxSupervisor,
-    #[serde(default)]
-    pub linux_strict: LinuxStrict,
-}
-
-/// The owner's sandbox settings with the version of the read that showed them. A save
-/// names that version, so a save from a window that read older settings is refused
-/// `stale_revision` instead of turning a newer choice back (rv-sec2 F1). Fields: the
-/// settings and the version, 0 before the first save.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoredSandboxSettings {
-    pub settings: SandboxSettings,
-    pub version: u64,
-}
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
@@ -60,7 +30,6 @@ fn value<T: DeserializeOwned>(word: String) -> Result<T, EngineError> {
 /// columns to a table made before them, holding `on` and `off` for a row already saved, so
 /// the owner's other choices stay. Input: the engine database. Output: Ok, or the database
 /// error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)?;
     for (name, column) in [
@@ -182,6 +151,7 @@ pub(crate) fn read(connection: &Connection) -> Result<OwnerData, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 
     fn shown(connection: &Connection) -> Option<(SandboxSettings, u64)> {
         match read(connection) {

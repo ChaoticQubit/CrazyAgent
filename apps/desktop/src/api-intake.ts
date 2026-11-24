@@ -5,13 +5,13 @@ import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
 import type { GitHubPromptAnswer } from "./engine-client";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
+  githubUseCli, intakeDismiss, intakeStart, intakeStatus, intakeStop, reinstallDismiss, reinstallOffer, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
   fixToolPermissions as startFix, setRefusedTool as saveRefusedTool,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob,
-  IntentReceipt, OnboardingView,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IntakeJob,
+  IntentReceipt, OnboardingView, ReinstallOffer,
   DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
 import { githubRuleDefaults, githubRuleDefaultsSet, githubRules, githubRuleSet } from "./engine-client";
@@ -68,13 +68,14 @@ const COPY: Record<string, string> = {
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_add_cancelled: "Adding the folder stopped. Nothing was moved or copied.",
   home_add_in_progress: "A folder is being added to your projects folder. Try again when it finishes.",
-  job_busy: "Another job is running. Wait for it to finish on Home.",
+  job_busy: "Several folders are already waiting. Wait for one to finish on Home.",
+  job_same_folder: "This folder is already being moved or added. See it on Home.",
   intake_failed: "Adding the folder failed. Check your projects folder before trying again.",
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
   home_icloud_not_downloaded: "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.",
   home_permission_denied: "macOS didn't let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed.",
-  icloud_download_busy: "Another iCloud download is running. Wait for it to finish.",
+  icloud_download_busy: "Too many iCloud downloads are running at once. Wait for one to finish.",
   icloud_folder_missing: "That folder isn't there anymore. Choose it again.",
   icloud_folder_unsafe: "That folder can't be downloaded.",
   icloud_folder_unreadable: "Some files in that folder can't be read.",
@@ -141,7 +142,8 @@ const COPY: Record<string, string> = {
   github_publish_hooks_set: "The project's git runs hooks, so CrazyAgent won't commit or push it. Remove the hooks, then try again.",
   github_publish_ignore_invalid: "These lines can't go into .gitignore. Keep one pattern per line, without control characters.",
   github_publish_in_progress: "This project already has a publish. Finish or discard it first.",
-  github_publish_not_plain_repo: "The project's .git is a link or a file, not a plain folder, so CrazyAgent won't publish it.",
+  github_publish_nested_repository: "A folder in the project holds a git repository of its own, such as a submodule, so CrazyAgent won't publish this project. Move that repository out of the project, then try again.",
+  github_publish_not_plain_repo: "The project's .git is a link or a file, or points git at another place, so CrazyAgent won't publish it.",
   github_publish_not_started: "This project has no publish to go on with. Start it again.",
   github_publish_on_github: "This project is already on GitHub.",
   github_publish_other_host: "This project's git already points at another host, so CrazyAgent won't publish it on GitHub.",
@@ -152,6 +154,7 @@ const COPY: Record<string, string> = {
   github_publish_secret_in_history: "The secret is already in the project's git history, so leaving the file out doesn't remove it. Remove it from the history, then check again.",
   github_publish_step_invalid: "The publish moved on since this was shown. Look at it again.",
   github_publish_too_large: "This project is too large to publish from CrazyAgent: over 20,000 files or 200 MB.",
+  github_publish_tree_too_large: "The project folder holds over 2,000,000 files and folders, ignored ones too, more than CrazyAgent checks before it publishes.",
   github_publish_workflow_scope: "The GitHub sign-in can't push workflow files. Sign in to GitHub again, then try again.",
   github_repo_name_taken: "That repository name is taken on this GitHub account. Pick another name.",
   github_repo_create_refused: "GitHub refused to make the repository. Check that this account may create repositories.",
@@ -257,6 +260,7 @@ const MOVE_COPY: Record<string, string> = {
   move_project_copy_worktrees: "An agent works in a git worktree of this project, which a copy would leave behind. Move the project instead.",
   move_project_folder_link: "This project's folder is reached through a link, so it can't be moved from here.",
   move_project_in_progress: "A project is being moved. Try again when it is done.",
+  move_project_two_spellings: "Some of this project's saved records name its folder in two ways, and a move would overwrite one with the other. Nothing was moved.",
   move_project_unavailable: "CrazyAgent couldn't check the team, so nothing was moved. Try again.",
   move_project_interrupted: "The move stopped part way. Check the project folder before trying again.",
   move_project_record_invalid: "CrazyAgent couldn't read the move it recorded. Check the project folder before trying again.",
@@ -346,36 +350,20 @@ export function loadFolderSize(path: string): Promise<Result<FolderSize>> {
   return wrap(() => folderSize(path));
 }
 
-/** Downloads every file of a folder that is only in iCloud, so it can then be moved or copied.
- * Input: the absolute folder. Output: how many files it downloaded, or home_icloud_not_downloaded
- * after a stop, a stall or the time limit. */
-export function downloadFromIcloud(path: string): Promise<Result<number>> {
-  return wrap(() => icloudDownload(path));
-}
-
-/** Reads how far the running iCloud download has come. Output: the counts, or null when none runs. */
-export function loadIcloudProgress(): Promise<Result<IcloudProgress | null>> {
-  return wrap(icloudProgress);
-}
-
-/** Stops the running iCloud download; its download call then ends with home_icloud_not_downloaded.
- * Output: whether one was running. */
-export function cancelIcloudDownload(): Promise<Result<boolean>> {
-  return wrap(icloudCancel);
-}
-
 /** Starts the engine's intake job, which downloads what is only in iCloud and then moves or
  * copies the folder into the projects folder apart from the window, or attaches to the job
  * adding that folder already. The native bridge checks the path by the host's own rule, so a
  * Windows drive or network share folder goes through (RV-DS241-1). Inputs: the absolute folder,
- * move or copy and the overrides. Output: the job, home_source_invalid for a path that is not
- * absolute there, or job_busy while another job runs. */
+ * move or copy and the overrides. Output: the job, which may wait its turn, home_source_invalid
+ * for a path that is not absolute there, job_same_folder while a job holds this folder or one
+ * inside or around it, or job_busy once the waiting list is full (DEC-197). */
 export function startIntake(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
   return wrap(() => intakeStart(path, mode, overrides));
 }
 
-/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
-export function loadIntakeJob(): Promise<Result<IntakeJob | null>> {
+/** Reads every job the engine holds, running, waiting or ended since the last start (DEC-197).
+ * Output: the jobs in start order. */
+export function loadIntakeJobs(): Promise<Result<IntakeJob[]>> {
   return wrap(intakeStatus);
 }
 
@@ -388,6 +376,16 @@ export function stopIntake(id: string): Promise<Result<boolean>> {
  * was forgotten. */
 export function dismissIntake(id: string): Promise<Result<boolean>> {
   return wrap(() => intakeDismiss(id));
+}
+
+/** Reads a project's reinstall offer. Input: the project id. Output: the offer, or null. */
+export function loadReinstallOffer(projectId: string): Promise<Result<ReinstallOffer | null>> {
+  return wrap(() => reinstallOffer(projectId));
+}
+
+/** Dismisses a project's reinstall offer. Input: the project id. Output: whether one was. */
+export function dismissReinstallOffer(projectId: string): Promise<Result<boolean>> {
+  return wrap(() => reinstallDismiss(projectId));
 }
 
 /** Moves or copies a folder into the projects folder, where it then shows as found.

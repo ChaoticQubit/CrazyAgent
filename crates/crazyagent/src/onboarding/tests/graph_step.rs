@@ -38,8 +38,10 @@ fn a_graph_mark_is_written_only_into_a_regular_file_of_its_own_and_never_waits_o
     let planted = folder.path().join("planted");
     std::fs::create_dir(&planted).unwrap();
     let fifo = planted.join(graph::KEPT_OUT_MARK);
-    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
-        .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&fifo),
+    )
+    .unwrap();
     assert!(made.success());
     let (sent, wrote) = std::sync::mpsc::channel();
     let target = planted.clone();
@@ -87,15 +89,15 @@ fn a_graph_mark_longer_than_what_is_read_back_is_never_written() {
 
 #[test]
 fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
-    let refused = crate::tools::Missing {
+    let refused = kernel_processes::finding::Missing {
         tool: "graphify".into(),
-        reason: crate::tools::Reason::Refused,
+        reason: kernel_processes::finding::Reason::Refused,
         needs: None,
         found: None,
         looked: Vec::new(),
-        refused: Some(Box::new(crate::tools::Refused {
+        refused: Some(Box::new(kernel_processes::finding::Refused {
             file: std::path::PathBuf::from("/h/tool/bin/python3"),
-            why: crate::tools::Refusal::OthersCanChange(std::path::PathBuf::from(
+            why: kernel_processes::finding::Refusal::OthersCanChange(std::path::PathBuf::from(
                 "/h/py/bin/python3.13",
             )),
         })),
@@ -104,10 +106,10 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
     assert_ne!(refused.line(), graph::GRAPHIFY_MISSING);
     assert_eq!(service::graphify_failure(&refused), refused.line());
     let deep = std::path::PathBuf::from(format!("/h/{}/python3", "deep/".repeat(40)));
-    let long = crate::tools::Missing {
-        refused: Some(Box::new(crate::tools::Refused {
+    let long = kernel_processes::finding::Missing {
+        refused: Some(Box::new(kernel_processes::finding::Refused {
             file: deep.clone(),
-            why: crate::tools::Refusal::OthersCanChange(deep),
+            why: kernel_processes::finding::Refusal::OthersCanChange(deep),
         })),
         ..refused
     };

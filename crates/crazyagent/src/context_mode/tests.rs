@@ -70,6 +70,15 @@ impl Case {
         install(&self.root, &self.bin, VERSION)
     }
 
+    /// Writes the engine database every real engine root holds, with the default sandbox
+    /// settings, so a step's Linux boundary reads the owner's choices instead of refusing a
+    /// root with no store. Input: none. Output: none.
+    fn store(&self) {
+        let connection = rusqlite::Connection::open(self.root.join("engine.db")).unwrap();
+        crate::sandbox_settings::initialize(&connection).unwrap();
+        assert!(self.root.join("engine.db").is_file());
+    }
+
     /// Lists the hidden staging and work folders installs left in `setup/npm`.
     fn staged(&self) -> Vec<String> {
         fs::read_dir(self.npm())
@@ -209,6 +218,59 @@ fn a_stale_staging_folder_is_removed_under_the_lock() {
     assert!(case.staged().is_empty());
 }
 
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: a node probe that crashed before its release left its
+/// scratch folder; the next probe, with no other probe running, ends it whatever the probe
+/// itself answers.
+#[test]
+fn a_node_probe_removes_the_scratch_a_crashed_probe_left() {
+    let case = case("/usr/bin/false");
+    let left = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+    fs::write(left.join(NODE_PROFILE), "from a crashed probe").unwrap();
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(!left.exists(), "the crashed probe's scratch is ended");
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: while another probe holds the check lock, a probe
+/// leaves every scratch folder alone, since it may be that probe's live one; once the lock
+/// is free the next probe ends it.
+#[test]
+fn a_node_probe_leaves_a_scratch_alone_while_another_probe_holds_the_check_lock() {
+    let case = case("/usr/bin/false");
+    let left = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(case.npm().join("node-check.lock"))
+        .unwrap();
+    held.lock_shared().unwrap();
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(left.is_dir(), "a live probe's scratch is never touched");
+    held.unlock().unwrap();
+    drop(held);
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(!left.exists(), "with the lock free the scratch is ended");
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: an install's work folder carries its staging folder's
+/// random suffix, so a later install can pair the two, and is never one that exists.
+#[test]
+fn an_install_work_folder_is_paired_with_its_staging_folder_by_name() {
+    let case = case("/usr/bin/false");
+    let prefix = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
+    assert_eq!(random.len(), 24);
+    let work = work_folder(&staged, &prefix).unwrap();
+    assert_eq!(work, case.npm().join(format!(".{prefix}-work-{random}")));
+    assert!(work.is_dir());
+    assert_eq!(
+        work_folder(&staged, &prefix),
+        Err(InstallError("setup_store_unavailable"))
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failed_npm_run_leaves_no_staging_folder_and_records_when_it_failed() {
@@ -287,7 +349,6 @@ fn whatever_is_left_incomplete_at_the_install_path_is_removed_under_the_lock() {
 
 /// Finds the folder holding the real `npm` and `node` on PATH. Output: the folder; a run
 /// without npm on PATH is reported unavailable.
-#[cfg(target_os = "macos")]
 fn system_bin() -> PathBuf {
     let Some(npm) = std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
@@ -297,6 +358,39 @@ fn system_bin() -> PathBuf {
         panic!("UNAVAILABLE: npm and node on PATH");
     };
     npm.parent().unwrap().to_path_buf()
+}
+
+/// Copies the real `node` into a prefix's `bin`, as setup lays out the engine's own Node. A
+/// node linked to its own `libnode`, as Homebrew's is through `@rpath`, gets each `.dylib` of
+/// its `lib` folder beside it, where `@loader_path` finds it. Inputs: the real node and the
+/// `bin` folder. Output: none; a node that still cannot start from the copy is reported
+/// unavailable with what it printed.
+fn copy_node(node: &Path, bin: &Path) {
+    let own = bin.join("node");
+    fs::copy(node, &own).unwrap();
+    let start = || {
+        kernel_processes::spawn_gate::collected(std::process::Command::new(&own).arg("--version"))
+            .unwrap()
+    };
+    if start().status.success() {
+        return;
+    }
+    let libs = node.parent().and_then(Path::parent).unwrap().join("lib");
+    for entry in fs::read_dir(&libs).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| name.ends_with(".dylib")) && entry.path().is_file() {
+            fs::copy(entry.path(), bin.join(&name)).unwrap();
+        }
+    }
+    let started = start();
+    if !started.status.success() {
+        panic!(
+            "UNAVAILABLE: a node that starts from a copy, not {node:?} with the libraries of \
+             {libs:?} beside it: {:?} {}",
+            started.status,
+            String::from_utf8_lossy(&started.stderr)
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -321,6 +415,185 @@ fn npm_starts_under_the_install_sandbox_profile() {
     );
     let profile = fs::read_to_string(case.npm().join(PROFILE)).unwrap();
     assert!(profile.contains("(remote ip \"*:443\")"));
+}
+
+/// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm in a setup-node layout (`bin/npm` a link into
+/// `../lib/node_modules/npm`, `bin/node` a [`copy_node`]) in a prefix under no granted root
+/// starts under the install profile, the grant following `bin/npm` to npm's package, read only.
+/// The prefix is in the build folder; the root holds Linux's settings store. Input: none.
+/// Output: none; panics with npm's standard error on a failed start.
+#[test]
+fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_install_profile() {
+    let real = system_bin();
+    let cli = kernel_sandbox::paths::canonical(&real.join("npm")).unwrap();
+    let package = cli.parent().and_then(Path::parent).unwrap().to_path_buf();
+    assert!(package.ends_with("lib/node_modules/npm"), "{cli:?}");
+    let build = std::env::current_exe().unwrap();
+    let outside = tempfile::Builder::new()
+        .prefix("ca-npm-prefix-")
+        .tempdir_in(build.parent().unwrap())
+        .unwrap();
+    let prefix = outside.path().canonicalize().unwrap();
+    if let Some(open) = kernel_processes::service::changeable_by_others(&prefix) {
+        panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
+    }
+    let bin = prefix.join("bin");
+    let modules = prefix.join("lib").join("node_modules");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&modules).unwrap();
+    let copied = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/bin/cp")
+            .arg("-R")
+            .arg(&package)
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(copied.success(), "{package:?}");
+    let writable = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("-R")
+            .arg("u+w")
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(writable.success(), "{modules:?}");
+    let node = kernel_sandbox::paths::canonical(&real.join("node")).unwrap();
+    copy_node(&node, &bin);
+    std::os::unix::fs::symlink("../lib/node_modules/npm/bin/npm-cli.js", bin.join("npm")).unwrap();
+    let program = kernel_sandbox::paths::canonical(&bin.join("npm")).unwrap();
+    assert_eq!(
+        crate::harnesses::node_prefix(&program).as_deref(),
+        Some(prefix.as_path()),
+        "the grant takes this prefix as npm's; changeable: {:?}",
+        kernel_processes::service::changeable_by_others(&bin.join("node"))
+    );
+    let case = case("/usr/bin/false");
+    case.store();
+    let name = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&case.npm(), &name).unwrap();
+    let work = staging_folder(&case.npm(), &format!("{name}-work")).unwrap();
+    let npm = || {
+        let mut command = npm_command(&case.root, &staged, &work, &bin, VERSION).unwrap();
+        command.arg("--version");
+        command
+    };
+    let (ok, output) = run_command(npm(), Duration::from_secs(60)).unwrap();
+    let version = String::from_utf8(output).unwrap();
+    if !ok {
+        let failed = kernel_processes::spawn_gate::collected(&mut npm()).unwrap();
+        panic!(
+            "npm linked into its package did not start under the install profile: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+    }
+    let numbers: Vec<&str> = version.trim().split('.').collect();
+    assert_eq!(numbers.len(), 3, "{version}");
+    assert!(
+        numbers
+            .iter()
+            .all(|number| number.bytes().all(|b| b.is_ascii_digit()))
+    );
+}
+
+/// V243-CONTEXT-MODE-ENGINE-NODE: context-mode on the engine's own Node, laid out as setup
+/// lays it out (`setup/bin/{node,npm,npx}` links into `setup/node/bin`, a copy of the real
+/// Node tree, [`copy_node`]), in an engine root no other user can change: the Node check
+/// reads a supported version and npm starts under the install profile. A failed start shows
+/// its standard error.
+#[test]
+fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_profile() {
+    let real = system_bin();
+    let cli = kernel_sandbox::paths::canonical(&real.join("npm")).unwrap();
+    let package = cli.parent().and_then(Path::parent).unwrap().to_path_buf();
+    assert!(package.ends_with("lib/node_modules/npm"), "{cli:?}");
+    let build = std::env::current_exe().unwrap();
+    let outside = tempfile::Builder::new()
+        .prefix("ca-engine-node-")
+        .tempdir_in(build.parent().unwrap())
+        .unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    if let Some(open) = kernel_processes::service::changeable_by_others(&base) {
+        panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
+    }
+    let root = base.join("engine");
+    let tree = crate::setup::node::folder(&root);
+    let bin = root.join("setup").join("bin");
+    let npm = root.join("setup").join("npm");
+    let modules = tree.join("lib").join("node_modules");
+    for folder in [&npm, &bin, &tree.join("bin"), &modules] {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .unwrap();
+    }
+    let copied = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/bin/cp")
+            .arg("-R")
+            .arg(&package)
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(copied.success(), "{package:?}");
+    let writable = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("-R")
+            .arg("u+w")
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(writable.success(), "{modules:?}");
+    let node = kernel_sandbox::paths::canonical(&real.join("node")).unwrap();
+    copy_node(&node, &tree.join("bin"));
+    for (name, script) in [("npm", "npm-cli.js"), ("npx", "npx-cli.js")] {
+        let target = format!("../lib/node_modules/npm/bin/{script}");
+        std::os::unix::fs::symlink(target, tree.join("bin").join(name)).unwrap();
+    }
+    for name in ["node", "npm", "npx"] {
+        std::os::unix::fs::symlink(tree.join("bin").join(name), bin.join(name)).unwrap();
+    }
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&connection).unwrap();
+    drop(connection);
+    let checked = node_supported(&root, &bin) == Ok(true);
+    let check_error = if checked {
+        String::new()
+    } else {
+        let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
+        let canonical = kernel_sandbox::paths::canonical(&scratch).unwrap();
+        let mut command = node_command(&root, &scratch, &bin).unwrap();
+        let failed = kernel_processes::spawn_gate::collected(&mut command).unwrap();
+        end_check(&scratch, &canonical);
+        format!(
+            "{:?} {}{}",
+            failed.status,
+            String::from_utf8_lossy(&failed.stdout),
+            String::from_utf8_lossy(&failed.stderr)
+        )
+    };
+    let name = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&npm, &name).unwrap();
+    let work = staging_folder(&npm, &format!("{name}-work")).unwrap();
+    let npm_version = || {
+        let mut command = npm_command(&root, &staged, &work, &bin, VERSION).unwrap();
+        command.arg("--version");
+        command
+    };
+    let (started, output) = run_command(npm_version(), Duration::from_secs(60)).unwrap();
+    let npm_error = if started {
+        String::new()
+    } else {
+        let failed = kernel_processes::spawn_gate::collected(&mut npm_version()).unwrap();
+        String::from_utf8_lossy(&failed.stderr).into_owned()
+    };
+    assert!(
+        checked && started,
+        "the engine's own Node: node check passed {checked}: {check_error}\nnpm started \
+         {started}: {npm_error}"
+    );
+    let version = String::from_utf8(output).unwrap();
+    let numbers: Vec<&str> = version.trim().split('.').collect();
+    assert_eq!(numbers.len(), 3, "{version}");
 }
 
 /// The shared install's npm starts through the launcher its Node check starts through, so
@@ -397,7 +670,7 @@ fn forging_tarball(folder: &Path) -> PathBuf {
     )
     .unwrap();
     let tarball = folder.join(format!("context-mode-{VERSION}.tgz"));
-    let packed = crate::spawn_gate::status(
+    let packed = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/tar")
             .env("COPYFILE_DISABLE", "1")
             .arg("-czf")
@@ -460,6 +733,7 @@ fn registered(folder: &Path) -> bool {
 #[test]
 fn a_check_inside_the_backoff_after_a_failed_install_gets_the_time_left_and_never_npx() {
     let case = case("/usr/bin/false");
+    case.store();
     fs::write(case.npm().join(FAILED), (now() - 60).to_string()).unwrap();
     match for_check(&case.root, npx_in(&case, VERSION)) {
         ForCheck::Failed(left) => assert!(
@@ -585,7 +859,7 @@ fn a_pinned_shaped_npx_the_resolver_does_not_find_is_left_out_and_nothing_of_its
     };
     assert!(pinned(&spec).is_some(), "shaped like the pinned launch");
     assert!(
-        !crate::tools::probe::mark().first_run_pending,
+        !kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending,
         "unit tests never start a real folder run, so the probes count as ended"
     );
     assert_eq!(
@@ -616,7 +890,7 @@ fn a_pinned_shaped_npx_not_found_while_the_first_folder_probe_runs_is_being_set_
         command: tools.join("npx").to_str().unwrap().to_owned(),
         args: vec!["-y".into(), format!("context-mode@{VERSION}")],
     };
-    let places = crate::tools::Places::from_environment(Some(&case.root));
+    let places = crate::tools::tools_places(Some(&case.root));
     let on = |spec: &ServerSpec, pending| {
         crate::plugins::context_mode_on(spec, &places, pending).map(|found| found.is_some())
     };
@@ -752,6 +1026,7 @@ fn only_node_22_5_or_newer_runs_the_shared_install() {
 #[test]
 fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_server() {
     let case = case("/usr/bin/false");
+    case.store();
     node_reports(&case.bin, "v22.4.1");
     assert_eq!(case.install().unwrap_err().0, "context_mode_node_too_old");
     assert_eq!(
@@ -767,13 +1042,71 @@ fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_ser
     assert!(!case.npm().join(FAILED).exists(), "no failure is recorded");
     assert!(!case.npm().join(PROFILE).exists(), "npm never started");
     assert!(case.staged().is_empty());
-    fs::remove_file(case.bin.join("node")).unwrap();
-    std::os::unix::fs::symlink("/usr/bin/true", case.bin.join("node")).unwrap();
+    node_reports(&case.bin, "node-unknown");
     assert_eq!(
         for_launch(&case.root, npx_in(&case, VERSION)),
         Err(ContextModeOff::NodeTooOld),
-        "a node that names no version counts as too old"
+        "a node that ran and names no version counts as too old"
     );
+}
+
+/// V243-CONTEXT-MODE-ENGINE-NODE: a node check that did not run to an answer answers its own
+/// code, not too old; no install starts and no failure is recorded. The cases: a `node` script
+/// that exits 1, one that exits 0 printing nothing, and a node in an app bundle outside every
+/// granted root, which both boundaries refuse though run alone it names a supported version.
+/// Input: none. Output: none; panics on another answer.
+#[test]
+fn a_node_check_that_did_not_run_answers_its_own_code_not_too_old() {
+    for why in ["a failed exit", "no output", "a refused start"] {
+        let case = case("/usr/bin/false");
+        case.store();
+        let node = case.bin.join("node");
+        fs::remove_file(&node).unwrap();
+        if why == "a refused start" {
+            let bundle = case
+                .root
+                .parent()
+                .unwrap()
+                .join("Refused.app/Contents/MacOS");
+            fs::create_dir_all(&bundle).unwrap();
+            node_reports(&bundle, "v24.0.0");
+            let alone = kernel_processes::spawn_gate::collected(
+                std::process::Command::new(bundle.join("node")).arg("--version"),
+            )
+            .unwrap();
+            assert_eq!(alone.stdout, b"v24.0.0\n", "run alone it answers");
+            std::os::unix::fs::symlink(bundle.join("node"), &node).unwrap();
+        } else {
+            let code = if why == "a failed exit" { 1 } else { 0 };
+            fs::write(&node, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+            fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            case.install().unwrap_err().0,
+            "context_mode_node_check_failed",
+            "{why}"
+        );
+        assert_eq!(
+            for_check(&case.root, npx_in(&case, VERSION)),
+            ForCheck::Refused("context_mode_node_check_failed"),
+            "{why}"
+        );
+        assert_eq!(
+            for_launch(&case.root, npx_in(&case, VERSION)),
+            Err(ContextModeOff::Failed),
+            "{why}"
+        );
+        assert!(!registered(&case.folder()), "{why}");
+        assert!(
+            !case.npm().join(FAILED).exists(),
+            "{why}: no failure is recorded"
+        );
+        assert!(
+            !case.npm().join(PROFILE).exists(),
+            "{why}: npm never started"
+        );
+        assert!(case.staged().is_empty(), "{why}");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -897,8 +1230,8 @@ fn an_agent_launch_runs_the_checked_shared_install_or_no_context_mode_never_npx(
 /// Linux; off Linux they take the defaults, strict off, which those boundaries ignore.
 #[test]
 fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     #[cfg(target_os = "linux")]
     assert_eq!(
@@ -930,8 +1263,8 @@ fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
 /// Off Linux strict changes nothing.
 #[test]
 fn the_node_check_and_npm_refuse_under_stored_strict_when_linux_cannot_hold_fully() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
     crate::sandbox_settings::initialize(&connection).unwrap();

@@ -221,7 +221,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         tool_home: None,
     };
     let installed = context.install("codex", &home, false).unwrap();
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(installed._lock.try_clone().unwrap())
@@ -315,7 +315,7 @@ fn a_launch_replaces_a_lock_name_that_is_no_plain_file_and_locks_the_home() {
             }
             "link" => std::os::unix::fs::symlink(&outside, &lock).unwrap(),
             _ => {
-                let made = crate::spawn_gate::collected(
+                let made = kernel_processes::spawn_gate::collected(
                     std::process::Command::new("/usr/bin/mkfifo").arg(&lock),
                 )
                 .unwrap();
@@ -408,7 +408,7 @@ fn a_launch_locks_a_home_whose_acl_denies_listing_and_searching_it() {
     let root = directory.path().canonicalize().unwrap();
     let home = root.join("claude");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
-    let added = crate::spawn_gate::collected(
+    let added = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/chmod")
             .args(["+a", "everyone deny list,search"])
             .arg(&home),
@@ -420,7 +420,7 @@ fn a_launch_locks_a_home_whose_acl_denies_listing_and_searching_it() {
         .map(|_| ())
         .map_err(|error| error.0);
 
-    let _ = crate::spawn_gate::collected(
+    let _ = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/chmod")
             .arg("-N")
             .arg(&home),
@@ -495,7 +495,9 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
 #[cfg(unix)]
 #[test]
 fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Secret, Session,
+    };
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let home = base.join("codex");
@@ -534,8 +536,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -551,7 +552,9 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
 #[cfg(unix)]
 #[test]
 fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Secret, Session,
+    };
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let home = base.join("codex");
@@ -592,8 +595,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -828,7 +830,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
 /// agent would. Inputs: the flag name and the path. Output: whether `chflags` succeeded.
 #[cfg(target_os = "macos")]
 fn chflags(flag: &str, path: &Path) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/chflags")
             .arg(flag)
             .arg(path)
@@ -1037,7 +1039,7 @@ fn a_context_less_codex_hold_removes_planted_system_skills() {
 /// path and the path. Output: whether `chmod` succeeded.
 #[cfg(target_os = "macos")]
 fn chmod(arguments: &[&str], path: &Path) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .args(arguments)
             .arg(path)
@@ -1056,7 +1058,7 @@ struct Unpinned(PathBuf);
 #[cfg(target_os = "macos")]
 impl Drop for Unpinned {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             std::process::Command::new("/usr/bin/chflags")
                 .args(["-R", "-P", "nouchg,nouappnd"])
                 .arg(&self.0)
@@ -1171,7 +1173,7 @@ fn listed(folders: &[&Path]) -> String {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap()
 }
@@ -1551,11 +1553,11 @@ fn a_released_skills_folder_leaves_an_owner_s_linked_file_and_a_link_s_target_as
     drop(held);
 }
 
-/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write, which cannot move to a
-/// new parent, gains the owner's write through the descriptor its release opened, never its
-/// name: a process an earlier run left that moves the folder aside and links an owner's read
-/// only file with an ACL entry at `skills` meanwhile leaves the owner's file with its mode and
-/// ACL entry, the moved folder opened up, and the launch with an empty `skills` folder.
+/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write gains the owner's write
+/// through the descriptor its release opened, never its name: a process an earlier run left
+/// that moves it aside (with write given and taken off again) and links an owner's read only
+/// file with an ACL entry at `skills` leaves that file's mode and ACL entry, the moved folder
+/// opened up, and the launch with an empty `skills` folder.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_name() {
@@ -1584,7 +1586,9 @@ fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_n
     let (swapped, aside, linked) = (skills.clone(), moved.clone(), owner.clone());
     AFTER_SKILLS_OPEN.with(|step| {
         *step.borrow_mut() = Some(Box::new(move || {
+            fs::set_permissions(&swapped, fs::Permissions::from_mode(0o700)).unwrap();
             fs::rename(&swapped, &aside).unwrap();
+            fs::set_permissions(&aside, fs::Permissions::from_mode(0o500)).unwrap();
             fs::hard_link(&linked, &swapped).unwrap();
         }));
     });
@@ -2313,6 +2317,8 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
                 }],
             }],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -2336,10 +2342,9 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile.clone()),
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile.clone()),
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
-        unconfined: false,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
     let named = LaunchError(
@@ -2372,12 +2377,16 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
     );
     let tmux =
         crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
-    let host: std::sync::Arc<dyn crate::terminal::Host> = std::sync::Arc::new(
-        crate::terminal::tmux::Tmux::open(Some(tmux), &root.join(crate::terminal::FOLDER)),
-    );
+    let host: std::sync::Arc<dyn kernel_processes::terminal::Host> =
+        std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
+            Some(tmux),
+            &root.join(crate::terminal::FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ));
     let pane = crate::harnesses::terminal_session::TerminalSession::start(
         host,
-        crate::terminal::AgentId::team(1).unwrap(),
+        kernel_processes::terminal::AgentId::team(1).unwrap(),
         request(),
         Some(context()),
     );
@@ -2399,8 +2408,8 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
 struct LeftPane {
     _directory: tempfile::TempDir,
     config: PathBuf,
-    host: std::sync::Arc<dyn crate::terminal::Host>,
-    agent: crate::terminal::AgentId,
+    host: std::sync::Arc<dyn kernel_processes::terminal::Host>,
+    agent: kernel_processes::terminal::AgentId,
     record: crate::harnesses::terminal_session::PaneRecord,
     tmux: PathBuf,
     socket: PathBuf,
@@ -2443,6 +2452,8 @@ impl LeftPane {
                     }],
                 }],
                 context_mode_off: None,
+                batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             instructions: "# Project context from CrazyAgent\n".into(),
@@ -2466,22 +2477,23 @@ impl LeftPane {
             account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools: true,
-            sandbox_profile: Some(profile),
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: crate::harnesses::launch::LaunchLimits::default(),
-            unconfined: false,
         };
         let tmux = crate::terminal::tmux::installed(&root)
             .expect("tmux must be installed on this machine");
         let socket = root
             .join(crate::terminal::FOLDER)
-            .join(crate::terminal::tmux::SOCKET);
-        let host: std::sync::Arc<dyn crate::terminal::Host> =
-            std::sync::Arc::new(crate::terminal::tmux::Tmux::open(
+            .join(kernel_processes::terminal::tmux::SOCKET);
+        let host: std::sync::Arc<dyn kernel_processes::terminal::Host> =
+            std::sync::Arc::new(kernel_processes::terminal::tmux::Tmux::open(
                 Some(tmux.clone()),
                 &root.join(crate::terminal::FOLDER),
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
             ));
-        let agent = crate::terminal::AgentId::team(team).unwrap();
+        let agent = kernel_processes::terminal::AgentId::team(team).unwrap();
         let config = home.join("config.toml");
         let session = crate::harnesses::terminal_session::TerminalSession::start(
             host.clone(),
@@ -2510,7 +2522,7 @@ impl LeftPane {
 
     /// Ends the tmux server that holds the pane.
     fn kill_server(&self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             std::process::Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -2846,6 +2858,8 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
 
@@ -2881,6 +2895,8 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3173,6 +3189,8 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                 }],
                 servers: vec![command_server("context-mode")],
                 context_mode_off: None,
+                batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             Vec::new(),
@@ -3253,6 +3271,8 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
             false => vec![command_server("graph")],
         },
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = |tools: &[&str]| {
@@ -3378,6 +3398,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         },
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3497,6 +3519,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             skills: Vec::new(),
             servers: vec![command_server("graph")],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         Vec::new(),
@@ -3675,7 +3699,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
     assert!(start.get("matcher").is_none());
     let command = start["hooks"][0]["command"].as_str().unwrap();
     assert!(!command.contains(stored.to_str().unwrap()), "{command}");
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(command)
@@ -3745,7 +3769,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
     let command = start["hooks"].as_array().unwrap()[0]["command"]
         .as_str()
         .unwrap();
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(command)
@@ -3988,7 +4012,7 @@ fn mcp_handshake(
         .stdout(Stdio::piped())
         .stderr(errors.reopen().unwrap());
     let started = std::time::Instant::now();
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (lines, replies) = std::sync::mpsc::channel();
@@ -4351,7 +4375,7 @@ fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, Path
     let root = private_folder(&base.join("engine"));
     let npm = private_folder(&root.join("setup").join("npm"));
     let install = npm.join(format!("context-mode@{CONTEXT_MODE_VERSION}"));
-    let copied = crate::spawn_gate::status(
+    let copied = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/cp")
             .arg("-cR")
             .arg(&source)
@@ -4367,8 +4391,9 @@ fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, Path
 #[cfg(target_os = "macos")]
 #[test]
 fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use kernel_sandbox::net::SandboxNetwork;
     const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
@@ -4421,8 +4446,9 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use kernel_sandbox::net::SandboxNetwork;
     const MARKER: &str = "ctx-execute-4471";
     const CALL_LIMIT: Duration = Duration::from_secs(60);
     let directory = tempfile::tempdir().unwrap();
@@ -4494,8 +4520,9 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_cannot_change_its_launch_getconf() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::toolchains;
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use kernel_sandbox::net::SandboxNetwork;
     const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
 printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
 mkdir "$1/planted" 2>/dev/null && echo planted
@@ -4526,7 +4553,7 @@ exit 0"#;
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let changed = crate::spawn_gate::output(&mut change).unwrap();
+    let changed = kernel_processes::spawn_gate::output(&mut change).unwrap();
     assert!(changed.status.success(), "{changed:?}");
     assert_eq!(
         String::from_utf8_lossy(&changed.stdout),
@@ -4570,7 +4597,7 @@ fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        crate::spawn_gate::output(command).unwrap()
+        kernel_processes::spawn_gate::output(command).unwrap()
     };
     let answer = |home: &Path, user: &Path, name: &str| {
         let getconf = home.join(STATE).join("bin").join("getconf");
@@ -4638,12 +4665,12 @@ fn secret_names_ride_only_on_a_secret_in_command_refusal() {
 fn request_capture() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use std::io::{BufRead, BufReader, Read, Write};
     const BODY_BYTES_MAX: usize = 8 * 1024 * 1024;
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = bodies.clone();
     std::thread::spawn(move || {
-        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             let sink = sink.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -4692,9 +4719,10 @@ fn tools_on_profile(
     port: u16,
     installs: &[&Path],
 ) -> PathBuf {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::policy::AgentPolicy;
     use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    use kernel_sandbox::net::SandboxRemote;
     let policy = AgentPolicy::default();
     let homes = ToolHomes::owner().unwrap();
     let tmp = private_folder(&base.join("tmp"));
@@ -4740,7 +4768,9 @@ fn log_tail(path: &Path, bytes: usize) -> String {
 #[test]
 #[ignore = "live: needs Claude Code and CRAZYAGENT_CONTEXT_MODE_INSTALL"]
 fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Session,
+    };
     use std::os::unix::fs::PermissionsExt;
     const TASK: &str = "Name the tools you have for check 4471.";
     const SERVER: &str = "plugin_context-mode_context-mode";
@@ -4754,7 +4784,7 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
     let (context, _connection, _install) = shared_context_mode(&base);
     let home = private_folder(&base.join("home"));
     let work = private_folder(&base.join("work"));
-    let initialized = crate::spawn_gate::status(
+    let initialized = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/git")
             .args(["init", "-q"])
             .arg(&work),
@@ -4798,8 +4828,7 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
             },
             model: Some("qwen2.5:0.5b".into()),
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(180),
@@ -4952,12 +4981,12 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
     fs::create_dir_all(&work).unwrap();
     let home = root.join("codex");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = bodies.clone();
     std::thread::spawn(move || {
-        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             answer_as_responses(stream, &sink);
         }
     });
@@ -5017,7 +5046,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = crate::spawn_gate::output(&mut command).unwrap();
+        let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
         let shown = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -5067,6 +5096,8 @@ fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_
         skills: Vec::new(),
         servers: vec![command_server("graph")],
         context_mode_off: dropped.then_some(crate::plugins::ContextModeOff::NodeTooOld),
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let claude = private_home(&root, "claude");
@@ -5183,7 +5214,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
 #[ignore]
 fn a_context_file_written_under_a_narrow_umask_in_its_own_process() {
     use std::os::unix::fs::PermissionsExt;
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     let folder = PathBuf::from(folder);
@@ -5207,7 +5238,7 @@ fn a_context_file_written_under_a_narrow_umask_in_its_own_process() {
 #[test]
 fn a_context_file_written_under_a_narrow_umask_is_private() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "launch_context::tests::a_context_file_written_under_a_narrow_umask_in_its_own_process",
         ":",
         folder.path(),
@@ -5263,6 +5294,8 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
                 },
             ],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -5285,6 +5318,9 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
         .keep();
     assert!(Path::new(&home).join("config.toml").is_file());
 }
+
+#[path = "batch_files_tests.rs"]
+mod batch_files_tests;
 
 /// The Codex hook pin rows: a Codex launch pins only its own hooks from its own key list,
 /// never bypasses hook trust, and tells a missing key list apart from a linked, oversized,

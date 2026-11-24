@@ -353,6 +353,12 @@ mod launch {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let base = folder.path().canonicalize().unwrap();
+        let private = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
+        assert!(
+            private.is_ok(),
+            "the turn base takes 0700: {:?}",
+            private.err()
+        );
         let (bin, work) = (base.join("bin"), base.join("work"));
         for place in [&bin, &work] {
             std::fs::create_dir(place).unwrap();
@@ -377,8 +383,7 @@ mod launch {
             },
             model: Some("m-1".into()),
             tools,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -678,8 +683,9 @@ mod launch {
         assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
         let (handover, _) = handed.unwrap();
         let mut open = turn(false);
-        open.request.sandbox_profile = None;
-        open.request.unconfined = true;
+        let work = open.request.working_dir.clone();
+        let scratch = work.parent().unwrap().to_path_buf();
+        open.request.boundary = crate::harnesses::launch::full_access_for_test(&work, &scratch);
         let refused = launched(harness, &open, &handover).err();
         let code = refused.map(|error| error.0);
         assert_eq!(code.as_deref(), Some("launch_environment_refused"));
@@ -792,7 +798,7 @@ exec /bin/sleep 60
         let (done, watching) = std::sync::mpsc::channel();
         let group = session.process_group();
         watchdog(group, Duration::from_secs(10), watching);
-        let prompt = "\u{1}".repeat(20_000);
+        let prompt = "\u{1}".repeat(24_000);
         let framed = serde_json::to_string(&prompt).unwrap();
         assert!(framed.len() > 2 * 65_536, "{}", framed.len());
         let began = Instant::now();
@@ -933,7 +939,7 @@ fn a_listed_master_stop_that_left_processes_holds_them() {
         Err(failure(STOP_UNCERTAIN))
     );
     assert!(held_in(project).is_empty());
-    let mut sleeper = crate::spawn_gate::spawn(
+    let mut sleeper = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/perl")
             .args([
                 "-mPOSIX",

@@ -1,5 +1,14 @@
+/// The commands only the webview terminal calls. A macOS build draws every terminal natively
+/// (DEC-203), so it neither builds nor grants them; Windows and Linux keep that terminal.
+const WEBVIEW_TERMINAL_COMMANDS: [&str; 4] = [
+    "desktop_terminal_attach",
+    "desktop_terminal_input",
+    "desktop_terminal_resize",
+    "desktop_terminal_detach",
+];
+
 fn main() {
-    let manifest = tauri_build::AppManifest::new().commands(&[
+    let mut commands = vec![
         "desktop_connect",
         "desktop_status",
         "desktop_watch",
@@ -93,11 +102,19 @@ fn main() {
         "desktop_coord_questions",
         "desktop_coord_answer",
         "desktop_team_attention",
-        "desktop_terminal_attach",
-        "desktop_terminal_input",
         "desktop_terminal_prompt",
-        "desktop_terminal_resize",
-        "desktop_terminal_detach",
+        "desktop_native_terminal_enabled",
+        "desktop_native_terminal_open",
+        "desktop_native_terminal_place",
+        "desktop_native_terminal_cover",
+        "desktop_native_terminal_focus",
+        "desktop_native_terminal_style",
+        "desktop_native_terminal_copy",
+        "desktop_native_terminal_paste",
+        "desktop_native_terminal_jump",
+        "desktop_native_terminal_keys",
+        "desktop_native_terminal_close",
+        "desktop_native_terminal_probe",
         "desktop_team_terminals_per_window",
         "desktop_terminals_per_window",
         "desktop_open_terminal_windows",
@@ -147,13 +164,12 @@ fn main() {
         "desktop_github_rules",
         "desktop_github_rule_set",
         "desktop_clone_repo",
-        "desktop_icloud_download",
-        "desktop_icloud_progress",
-        "desktop_icloud_cancel",
         "desktop_intake_start",
         "desktop_intake_status",
         "desktop_intake_stop",
         "desktop_intake_dismiss",
+        "desktop_reinstall_offer",
+        "desktop_reinstall_dismiss",
         "desktop_setup_status",
         "desktop_run_setup",
         "desktop_install_dependency",
@@ -226,6 +242,8 @@ fn main() {
         "desktop_set_quit_settings",
         "desktop_provider_retry",
         "desktop_set_provider_retry",
+        "desktop_log_compaction",
+        "desktop_set_log_compaction",
         "desktop_learning_progress",
         "desktop_set_learning_mark",
         "desktop_master_step_settings",
@@ -366,7 +384,12 @@ fn main() {
         "desktop_overview_reject",
         "desktop_overview_set_refresh",
         "desktop_overview_set_apply",
-    ]);
+    ];
+    let os = std::env::var("CARGO_CFG_TARGET_OS").expect("cargo sets CARGO_CFG_TARGET_OS");
+    if os != "macos" {
+        commands.extend(WEBVIEW_TERMINAL_COMMANDS);
+    }
+    let manifest = tauri_build::AppManifest::new().commands(commands.leak());
     let windows = tauri_build::WindowsAttributes::new_without_app_manifest();
     tauri_build::try_build(
         tauri_build::Attributes::new()

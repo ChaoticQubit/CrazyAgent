@@ -10,7 +10,7 @@ fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .current_dir(dir.path());
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(status.is_ok_and(|status| status.success()), "git init");
     for (path, text) in files {
         let path = dir.path().join(path);
@@ -368,7 +368,7 @@ fn fixture_git(repo: &Path, args: &[&str]) {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .current_dir(repo);
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(status.is_ok_and(|status| status.success()), "git {args:?}");
 }
 
@@ -424,4 +424,41 @@ fn the_project_git_never_fetches_a_missing_object_and_allows_no_transport() {
 
     assert!(set.contains(&("GIT_NO_LAZY_FETCH".into(), Some("1".into()))));
     assert!(set.contains(&("GIT_ALLOW_PROTOCOL".into(), Some(String::new()))));
+}
+
+/// V243-FIRMLINK-SWEEP D6: a line naming a hidden folder by its absolute path is left out
+/// whichever of the two macOS names the project folder was given by and the line uses, so a
+/// /System/Volumes/Data path never carries a hidden folder's name into the prompt.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_hidden_folder_named_through_the_data_volume_never_reaches_the_prompt() {
+    let repo = repo_with(&[("README.md", "# App\n")]);
+    let short = repo.path().canonicalize().unwrap();
+    let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", short.display()));
+    assert!(long.is_dir());
+    for (given, named) in [
+        (&short, &short),
+        (&short, &long),
+        (&long, &short),
+        (&long, &long),
+    ] {
+        let mark = format!("Phase 2: publish {}/client-x/contract.md", named.display());
+        let mut evidence = Evidence {
+            documents: vec![Document {
+                path: "docs/plan.md".into(),
+                size: 1,
+                text: "# Plan\n".into(),
+                cut: false,
+                kind: FoundKind::Roadmap,
+                marks: vec!["M1 Identity".into(), mark.clone()],
+            }],
+            ..Evidence::default()
+        };
+        screen(given, &mut evidence, &["client-x".to_owned()]);
+        assert_eq!(
+            evidence.documents[0].marks,
+            ["M1 Identity"],
+            "folder {given:?}, line {mark}"
+        );
+    }
 }

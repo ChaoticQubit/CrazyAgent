@@ -7,7 +7,7 @@ use crazyagent::coord::delivery::codex;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchLimits, LaunchRequest, command_with_context,
+    AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, command_with_context,
 };
 use crazyagent::launch_context;
 use crazyagent::plugins::Scope;
@@ -40,7 +40,7 @@ fn installed_codex() -> PathBuf {
         .find(|candidate| candidate.is_file())
         .map(|candidate| fs::canonicalize(candidate).unwrap())
         .expect("UNAVAILABLE: no codex executable on PATH");
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(&executable)
             .arg("--version")
             .env_clear()
@@ -173,7 +173,7 @@ async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agen
     let context = launch_context::for_project(&connection, &project, Layout::Linked).unwrap();
     drop(connection);
 
-    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let profile = base.join("agent.sb");
     fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let work = private_directory(&base.join("work"));
@@ -190,8 +190,7 @@ async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agen
             },
             model: Some("qwen2.5:0.5b".into()),
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits::default(),
         },
@@ -206,7 +205,7 @@ async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agen
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let mut input = child.stdin.take().unwrap();
     let output = child.stdout.take().unwrap();
     let (sender, lines) = mpsc::channel();

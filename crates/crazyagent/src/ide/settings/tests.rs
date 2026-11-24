@@ -564,7 +564,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         &case.folder,
         &grants,
         45_733,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         &[],
         crate::sandbox::policy::AgentFilesRule::default(),
     )
@@ -577,7 +577,9 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let ran = crate::spawn_gate::status(&mut shell).unwrap().success();
+    let ran = kernel_processes::spawn_gate::status(&mut shell)
+        .unwrap()
+        .success();
     crate::sandbox::toolchains::remove_tmp(&case.server_data).unwrap();
     ran
 }
@@ -672,7 +674,7 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
 /// `env` and git's own PATH. Inputs: the shim, the variables and the arguments. Output:
 /// what it printed and its status.
 fn shim_run(shim: &Path, env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
-    crate::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         std::process::Command::new(shim)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

@@ -38,6 +38,21 @@ fn a_publish_start_outlasts_its_own_git_before_its_outcome_is_unknown() {
     assert!(start.time() < crate::instruction_cleanup::WALL_TIME);
 }
 
+/// A GitHub request's client wait covers the bound the engine serves the action under plus
+/// the client's own timeout for admission and the reply, so an answer the engine gives at
+/// its own cut still reaches the client (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE). The
+/// larger of the two alone ends the wait with the engine's bound.
+#[test]
+fn a_github_wait_covers_the_action_bound_plus_the_client_timeout() {
+    let client = Duration::from_secs(1);
+    let status = crate::engine::owner::transport::github::Action::Status;
+    assert_eq!(status.wait(client), status.time() + client);
+    let clone = crate::engine::owner::transport::github::Action::Clone {
+        full_name: "octo-cat/tool".into(),
+    };
+    assert_eq!(clone.wait(client), clone.time() + client);
+}
+
 #[tokio::test]
 async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
     run_case(false, |context| async move {
@@ -138,13 +153,14 @@ async fn the_publish_prompt_answers_over_the_owner_socket_and_keeps_not_now() {
 mod slow_remote {
     use super::*;
     use crate::client_controller::OwnerController;
+    use crate::credentials::platform_store;
     use crate::credentials::test_keychain::TestKeychain;
-    use crate::credentials::{SecretString, Store, platform_store, reference};
     use crate::engine::owner::{OwnerResponse, OwnerResult};
     use crate::github::test_server::{Answer, Server, base64};
     use crate::github::{Endpoints, GitHub, namespace, use_loopback};
     use crate::projects_home::FoundState;
-    use crate::protocol::CredentialRef;
+    use kernel_security::secret::SecretString;
+    use kernel_security::store::{SecretRef, Store, reference};
     use std::process::Command;
     use std::sync::Mutex as StdMutex;
     use std::sync::mpsc;
@@ -155,7 +171,7 @@ mod slow_remote {
     struct Forget {
         root: PathBuf,
         store: Arc<dyn Store>,
-        item: CredentialRef,
+        item: SecretRef,
     }
 
     impl Drop for Forget {
@@ -166,7 +182,7 @@ mod slow_remote {
     }
 
     fn git(args: &[&str], directory: &Path) {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             Command::new("/usr/bin/git")
                 .args(args)
                 .current_dir(directory)

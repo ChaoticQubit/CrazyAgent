@@ -60,7 +60,7 @@ const FORGED_BRIEF: &str = "# Forged brief\n\nWritten by a project agent.\n";
 #[cfg(target_os = "macos")]
 fn require_model() {
     assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
-    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
+    let listed = kernel_processes::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
         stream.set_read_timeout(Some(OLLAMA_TIME))?;
         stream.set_write_timeout(Some(OLLAMA_TIME))?;
         stream.write_all(
@@ -84,7 +84,7 @@ fn require_model() {
 
 /// Runs git in `repo` with no global or system configuration.
 fn git(repo: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .current_dir(repo)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -170,7 +170,7 @@ struct EngineProcess {
 impl EngineProcess {
     /// Starts the binary and waits up to 20 s for its `ready` line.
     fn start(root: &Path, global: &Path, project_settings: &Path) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)
@@ -207,7 +207,7 @@ impl EngineProcess {
         if let Some(status) = self.child.try_wait().ok().flatten() {
             return status.success();
         }
-        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),
@@ -700,10 +700,10 @@ async fn stop_service(service: OnboardingService) {
 /// once. Returns the port; the serving thread ends with the test process.
 #[cfg(target_os = "macos")]
 fn rejecting_endpoint() -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(64) {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).take(64) {
             let Ok(stream) = stream else { break };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut reader = BufReader::new(stream);
@@ -1377,6 +1377,29 @@ async fn a_nested_crazyagent_folder_never_stands_in_for_the_onboarded_context() 
     bench.stop().await;
 }
 
+/// V243-FIRMLINK-HOME-REFUSAL r2: macOS names every folder under /Users or /private a
+/// second way under /System/Volumes/Data. That spelling is not the folder's canonical one,
+/// so it is refused before the folder checks it would slip past, the engine's own folder
+/// and an ordinary repository alike.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_typed_through_the_data_volume_is_refused() {
+    let mut bench = Bench::start(|_| {}).await;
+    let inside = bench.root.join("inside");
+    fs::create_dir(&inside).unwrap();
+    for folder in [inside, bench.repo.clone()] {
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", folder.display()));
+        assert!(long.is_dir());
+        let response = bench.start_onboarding_at(&long).await;
+        assert_eq!(
+            rejection(&response).as_deref(),
+            Some("onboarding_path_not_canonical"),
+            "{long:?}"
+        );
+    }
+    bench.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
     let mut bench = Bench::start(|_| {}).await;
@@ -1404,10 +1427,15 @@ async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
     bench.stop().await;
 }
 
-/// The installed graphify, or a BLOCKED panic naming the missing tool.
+/// The graphify the graph rows run, found as the library rows find it: the file
+/// `CRAZYAGENT_GRAPHIFY` names, as CI installs it pinned in its own state, else the one this
+/// machine has. Output: the canonical file, or a BLOCKED panic naming what is missing.
 #[cfg(target_os = "macos")]
 fn graphify() -> PathBuf {
-    installed_graphify().expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)")
+    std::env::var_os("CRAZYAGENT_GRAPHIFY")
+        .map(|named| std::fs::canonicalize(named).expect("CRAZYAGENT_GRAPHIFY names a file"))
+        .or_else(installed_graphify)
+        .expect("BLOCKED: graphify not installed (CRAZYAGENT_GRAPHIFY, ~/.local/bin or Homebrew)")
 }
 
 /// Panics BLOCKED unless the engine at `root` finds a graphify the way its graph step
@@ -1943,7 +1971,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
 async fn a_mapping_step_whose_provider_refuses_connections_stops_at_once_with_the_reach_line() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "e2e-model".into(),
@@ -2047,7 +2075,7 @@ async fn a_mapping_step_runs_on_the_next_pool_member_when_the_first_ones_provide
  {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let (_held, down) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, down) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let up = rejecting_endpoint();
     let resolver = loopback_resolver(&bench, &[(down, "first-model"), (up, "second-model")]);
     let (service, agents) = reachable_mapping(&bench, resolver);
@@ -2073,8 +2101,8 @@ async fn a_mapping_step_whose_members_all_refuse_connections_stops_at_once_with_
  {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let (_first, first) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
-    let (_second, second) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_first, first) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+    let (_second, second) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let resolver = loopback_resolver(&bench, &[(first, "first-model"), (second, "second-model")]);
     let started = Instant::now();
     let (service, agents) = reachable_mapping(&bench, resolver);
@@ -2172,7 +2200,7 @@ fn onboarding_created_ms(root: &Path) -> i64 {
 async fn a_step_that_cannot_start_records_its_cause_code() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let provider = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!(
             "http://127.0.0.1:{}/v1",

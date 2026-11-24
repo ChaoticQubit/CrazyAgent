@@ -31,6 +31,7 @@ pub(in crate::tui) struct Spend {
     view: Option<SpendView>,
     asking: Option<Ask>,
     read_ms: Option<i64>,
+    source_changed: bool,
 }
 
 struct Ask {
@@ -233,7 +234,24 @@ impl Spend {
             view: None,
             asking: None,
             read_ms: None,
+            source_changed: false,
         }
+    }
+
+    /// Keeps a usage read's spend view. Input: the view. Output: whether it names another
+    /// Claude free resets source than the view before it, false for the first one.
+    pub(in crate::tui) fn take_view(&mut self, view: SpendView) -> bool {
+        let before = self.view.as_ref().map(|seen| seen.settings.resets_source);
+        let changed = before.is_some_and(|source| source != view.settings.resets_source);
+        self.view = Some(view);
+        changed
+    }
+
+    /// Whether a usage read named another Claude free resets source since the last ask, which
+    /// Pools follows with quick free resets reads (V243-RESETS-SETTING-REFRESH). Output: the
+    /// answer, cleared by the ask.
+    pub(in crate::tui) fn take_source_change(&mut self) -> bool {
+        std::mem::take(&mut self.source_changed)
     }
 
     /// Reads the spend view with the usage report when it is due, and the account names
@@ -421,7 +439,9 @@ impl Spend {
     /// Inputs: the arrival and the context. Output: none.
     pub(in crate::tui) fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) {
         match settings_event(arrival) {
-            Some(SettingsEvent::Usage(Ok(report))) => self.view = Some(report.spend.clone()),
+            Some(SettingsEvent::Usage(Ok(report))) => {
+                self.source_changed |= self.take_view(report.spend.clone());
+            }
             Some(SettingsEvent::SpendSet(Ok(()))) => self.reload(ctx, crate::tui::clock::now_ms()),
             Some(SettingsEvent::SpendSet(Err(code))) => ctx.say(Message::error(
                 "Could not change the setting.",

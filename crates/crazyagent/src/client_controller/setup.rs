@@ -64,9 +64,10 @@ impl OwnerController {
         self.send_pending().await
     }
 
-    /// Installs one missing tool alone, such as Node when a picked harness needs it.
-    /// Takes the tool and the client generation. Returns the actual owner response; a
-    /// rejection carries a plain code, `setup_busy` while a setup run goes on.
+    /// Installs one missing tool alone, such as Node when a picked harness needs it; during
+    /// a setup run it waits its turn on that tool. Takes the tool and the client generation.
+    /// Returns the actual owner response; a rejection carries a plain code, `setup_busy`
+    /// while a lone install or fix of the same tool goes on.
     pub async fn install_dependency(
         &mut self,
         name: crate::setup::Dependency,

@@ -174,7 +174,7 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
     let base = directory.path().canonicalize().unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = base.join("p");
-    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = accepted(&listener);
         let mut request = [0u8; 4096];
@@ -211,7 +211,7 @@ fn ping_of(
     let base = directory.path().canonicalize().unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = base.join("p");
-    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = accepted(&listener);
         let mut request = [0u8; 4096];
@@ -280,7 +280,7 @@ fn a_bridge_that_closes_right_after_its_answer_is_always_named_closed() {
         let base = directory.path().canonicalize().unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket = base.join("p");
-        let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+        let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let mut stream = accepted(&listener);
             let mut request = [0u8; 4096];
@@ -339,7 +339,7 @@ fn an_agent_with_no_pane_to_compare_is_not_reached_through_its_bridge() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_bridge_is_used_only_when_its_listener_runs_in_the_agents_pane() {
-    use crate::terminal::Host;
+    use kernel_processes::terminal::Host;
     let mut fixture = super::super::tests::Fixture::new();
     let host = fixture.host();
     let owner = fixture.agent("sub", "codex", "idle", None);
@@ -355,7 +355,7 @@ fn a_bridge_is_used_only_when_its_listener_runs_in_the_agents_pane() {
     );
     super::super::tests::until("the stand-in listening", || got.exists());
     let pane_of = |agent| {
-        host.pane_pid(&crate::terminal::AgentId::team(agent).unwrap())
+        host.pane_pid(&kernel_processes::terminal::AgentId::team(agent).unwrap())
             .unwrap()
             .unwrap()
     };
@@ -387,7 +387,7 @@ fn accepted(listener: &std::os::unix::net::UnixListener) -> std::os::unix::net::
     listener.set_nonblocking(true).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        match crate::spawn_gate::accept_unix_std(listener) {
+        match kernel_processes::spawn_gate::accept_unix_std(listener) {
             Ok(stream) => {
                 stream.set_nonblocking(false).unwrap();
                 return stream;

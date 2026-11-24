@@ -2,8 +2,10 @@ use super::managed_agent::{Closing, ManagedAgent, SignedIn, claude, real_claude}
 use super::{BACKGROUND_STOPPED, Report, TurnEnd};
 use crate::harnesses::terminal_session::Resume;
 use crate::team::{AgentRole, BackgroundAtEnd};
-use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{FOLDER, Host};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::Host;
+use kernel_processes::terminal::tmux::Tmux;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,7 +119,12 @@ fn a_resumed_claude_agent_keeps_its_conversation_and_sees_an_edit_only_as_the_en
         .unwrap();
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let mut signed_in = SignedIn::claude();
     let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host, AgentRole::Sub);
     let started = format!("## Codeword\n\nThe codeword is {FIRST_CODEWORD}.\n");
@@ -190,7 +197,7 @@ fn a_resumed_claude_agent_keeps_its_conversation_and_sees_an_edit_only_as_the_en
 /// The running processes whose command line holds `needle`, as `ps` lists them.
 /// Input: the text. Output: each process's pid and command line.
 pub(super) fn processes_with(needle: &str) -> Vec<String> {
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-axww", "-o", "pid=,command="])
             .stdout(std::process::Stdio::piped()),
@@ -218,7 +225,12 @@ fn under_stop_a_real_claude_agent_s_background_command_ends_with_its_task() {
         .unwrap();
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
     agent.background = BackgroundAtEnd::Stop;
     let mut signed_in = SignedIn::claude();
@@ -314,7 +326,12 @@ fn a_real_claude_agent_whose_background_command_ends_mid_turn_ends_its_task_with
         .unwrap();
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
     agent.background = BackgroundAtEnd::Wait;
     let mut signed_in = SignedIn::claude();
@@ -398,7 +415,12 @@ fn a_real_claude_agent_s_bash_runs_lsof_on_its_own_process_and_port_inside_the_a
         .unwrap();
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let mut agent =
         ManagedAgent::in_pane("claude-code", &real_claude(), host.clone(), AgentRole::Sub);
     let host = Closing::new(host);

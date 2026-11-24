@@ -19,6 +19,12 @@ if [ -n "$lost" ]; then
   lost=$(unresolved)
   [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
 fi
+for source in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+  if [ -f "$source" ] && grep -q 'packages\.microsoft\.com' "$source"; then
+    sudo rm -f "$source"
+    echo "::notice::removed the apt source $source, which names packages.microsoft.com; no package this job installs comes from it"
+  fi
+done
 if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
   echo "::warning::the runner Ubuntu mirror list failed; trying archive.ubuntu.com and security.ubuntu.com directly"
   printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null

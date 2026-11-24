@@ -23,9 +23,12 @@ const PROFILE_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(target_os = "macos")]
 const REPORT_BYTES_MAX: usize = 8;
 #[cfg(target_os = "macos")]
-const HEAR_INTERVAL: Duration = Duration::from_millis(1);
-#[cfg(target_os = "macos")]
 const CONFINED_SIGNALS: &str = "(allow signal (target same-sandbox))";
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static HEARD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// The engine's end of one run's warden: a process the session shim forks inside the run's
 /// Seatbelt sandbox before it starts the harness. Once this end is shut, or closed, as the
@@ -58,12 +61,12 @@ pub fn spawn(command: &mut Command) -> io::Result<(Child, Option<Warden>)> {
     use std::os::fd::{AsRawFd, OwnedFd};
 
     if !wardable(command)? {
-        return crate::spawn_gate::spawn(command).map(|child| (child, None));
+        return kernel_processes::spawn_gate::spawn(command).map(|child| (child, None));
     }
-    let (engine, warden) = crate::spawn_gate::unix_pair_std()?;
+    let (engine, warden) = kernel_processes::spawn_gate::unix_pair_std()?;
     let handed = OwnedFd::from(warden);
     command.env(WARDEN_FD, handed.as_raw_fd().to_string());
-    let child = crate::spawn_gate::spawn_handing(command, handed)?;
+    let child = kernel_processes::spawn_gate::spawn_handing(command, handed)?;
     Ok((child, Some(Warden::reported(engine, ARM_TIME))))
 }
 
@@ -71,7 +74,7 @@ pub fn spawn(command: &mut Command) -> io::Result<(Child, Option<Warden>)> {
 /// and no warden.
 #[cfg(not(target_os = "macos"))]
 pub fn spawn(command: &mut Command) -> io::Result<(Child, Option<Warden>)> {
-    crate::spawn_gate::spawn(command).map(|child| (child, None))
+    kernel_processes::spawn_gate::spawn(command).map(|child| (child, None))
 }
 
 /// Tells whether a command starts the session shim under `sandbox-exec -f <profile>` whose
@@ -125,21 +128,24 @@ enum Heard {
     Silent,
 }
 
-/// Waits until `deadline` for the warden to write or to close its end, polling the
-/// nonblocking end every [`HEAR_INTERVAL`], since macOS refuses a read timeout on a socket
-/// whose peer has closed. Inputs: the nonblocking engine end, the buffer and the deadline.
-/// Output: how many bytes came, that the warden closed its end, or silence until the
-/// deadline or a read error.
+/// Waits until `deadline` for the warden to write or to close its end, reading the
+/// nonblocking end each time poll(2) finds it ready, since macOS refuses a read timeout on a
+/// socket whose peer has closed. Inputs: the nonblocking engine end, the buffer and the
+/// deadline. Output: how many bytes came, that the warden closed its end, or silence until
+/// the deadline or a read or poll error.
 #[cfg(target_os = "macos")]
 fn hear(
     mut engine: &std::os::unix::net::UnixStream,
     buffer: &mut [u8],
     deadline: Instant,
 ) -> Heard {
+    use rustix::event::{PollFd, PollFlags};
     use std::io::Read;
 
     assert!(!buffer.is_empty());
     loop {
+        #[cfg(test)]
+        HEARD.set(HEARD.get() + 1);
         match engine.read(buffer) {
             Ok(0) => return Heard::Closed,
             Ok(count) => return Heard::Bytes(count),
@@ -147,7 +153,10 @@ fn hear(
             Err(error)
                 if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
             {
-                std::thread::sleep(HEAR_INTERVAL);
+                let mut fds = [PollFd::new(engine, PollFlags::IN)];
+                if kernel_processes::fd_wait::ready(&mut fds, Some(deadline)).is_err() {
+                    return Heard::Silent;
+                }
             }
             Err(_) => return Heard::Silent,
         }

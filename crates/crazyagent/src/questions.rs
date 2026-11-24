@@ -5,7 +5,7 @@ use crate::protocol::{ProjectId, SessionId};
 use crate::storage::versioned::{self, Item, Writer};
 use crate::team::events::{self, NotificationKind};
 use crate::team::{MessageAuthor, MessageState, append_message, bound_text, now_ms};
-use crate::terminal::AgentId;
+use kernel_processes::terminal::AgentId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;

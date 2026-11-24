@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
+mod bounds_tests;
+#[cfg(test)]
 mod tests;
 
 /// The most bytes one kept text may hold.

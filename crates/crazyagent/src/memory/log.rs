@@ -2,10 +2,12 @@ use crate::engine::EngineError;
 use crate::owner_texts::{self, TextDigest};
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{Command, Outcome, ProjectId, RequestId};
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-#[cfg(unix)]
+use crate::state_log::Aggregate;
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::Appender;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -432,7 +434,7 @@ pub(crate) fn close(
     )
     .map_err(error)?;
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::owner(tx, next, fence)?;
+    let mut appender = crate::state_log::owner(tx, next, fence)?;
     let changes = drain(tx, action)?;
     append(&mut appender, &changes, Clock::System.now_ms())?;
     assert_eq!(appender.revision(), next);
@@ -460,7 +462,7 @@ pub(crate) fn close_request(
 /// writes its `events` row. Inputs: the transaction and the action. Output: the revision it
 /// moved to, or the fence's or the log's refusal.
 pub(crate) fn record_own(tx: &Transaction<'_>, action: Action) -> Result<u64, EngineError> {
-    let mut appender = Appender::own(tx, crate::worktrees::log::store_fence(tx)?)?;
+    let mut appender = crate::state_log::own(tx, crate::worktrees::log::store_fence(tx)?)?;
     let changes = drain(tx, action)?;
     assert!(!changes.is_empty(), "an own write logs its change");
     append(&mut appender, &changes, Clock::System.now_ms())?;
@@ -702,13 +704,14 @@ fn append(
         let body = serde_json::to_vec(change).map_err(error)?;
         assert!(body.len() <= BODY_BYTES_MAX, "a change body fits one event");
         last = appender.append(&Draft {
-            aggregate: Aggregate::Memory,
+            aggregate: Aggregate::Memory.into(),
             kind: KIND,
             schema: SCHEMA,
             at_ms,
             body: &body,
         })?;
     }
+    crate::state_log::compact_after(appender, Aggregate::Memory, at_ms, chunks)?;
     Ok(last)
 }
 
@@ -827,7 +830,7 @@ fn clear(db: &Connection) -> Result<(), EngineError> {
 /// `memory_log_event_invalid` for a removal body that is not one.
 fn removals(db: &Connection) -> Result<Vec<(u64, removed::ProjectRemoved)>, EngineError> {
     let mut found = Vec::new();
-    replay::replay(db, Aggregate::Projects, 0, |logged| {
+    crate::state_log::replay(db, Aggregate::Projects, 0, |logged| {
         if logged.kind != removed::KIND {
             return Ok(());
         }
@@ -854,7 +857,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<Rebuilt, EngineError> {
     clear(tx)?;
     let mut missing = Vec::new();
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Memory, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Memory, 0, |logged| {
         while let Some((_, removal)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_removed(tx, &removal.project, removal.kept)?;
         }
@@ -952,13 +955,20 @@ fn pack(table: Table, rows: Vec<serde_json::Value>) -> Result<Vec<Chunk>, Engine
 /// and the writer's clock. Output: the `seq` of the run's closing event, or the log's
 /// refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = appender.project(|tx| chunks(tx))?;
+    Ok(appender.snapshot(Aggregate::Memory, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of the 14 tables as they stand, every text kept for its
+/// holder, for [`snapshot`] and for compaction. Input: the transaction. Output: the chunks,
+/// or the first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for table in TABLES {
-        let rows = appender.project(|tx| table_rows(tx, table))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table)?)?);
     }
     assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
-    appender.snapshot(Aggregate::Memory, at_ms, chunks)
+    Ok(chunks)
 }
 
 /// The open-time sweep, run once every memory table exists: makes the touched-key triggers
@@ -968,7 +978,6 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
 /// a plain start moves no revision. Inputs: the connection, outside any transaction, and the
 /// open's proof. Output: whether a change was logged, or the first refusal, which rolls the
 /// whole sweep back.
-#[cfg(unix)]
 pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineError> {
     assert!(db.is_autocommit(), "the sweep owns its transaction");
     initialize(db)?;
@@ -978,7 +987,7 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
     let changed = pending(&tx)?;
     if changed {
         let at_ms = opening.at_ms();
-        let mut appender = Appender::opening(&tx, opening)?;
+        let mut appender = crate::state_log::opening(&tx, opening)?;
         let changes = drain(&tx, Action::Swept)?;
         append(&mut appender, &changes, at_ms)?;
     }
@@ -992,7 +1001,6 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
 
 /// Whether the log already holds a memory event, so the store's memory reached it as it
 /// was written. Input: the transaction. Output: the answer, or the store's refusal.
-#[cfg(unix)]
 fn on_the_log(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     let log: bool = tx
         .query_row(
@@ -1021,7 +1029,6 @@ fn on_the_log(tx: &Transaction<'_>) -> Result<bool, EngineError> {
 /// again, as when an upgrade from a reset version runs the step over it; none of them moves
 /// a revision. Inputs: the step's transaction and the open's proof. Output: whether a run
 /// was appended, or the log's refusal.
-#[cfg(unix)]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let stated: bool = tx
         .query_row(
@@ -1048,7 +1055,7 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
         return Ok(false);
     }
     let at_ms = opening.at_ms();
-    let mut appender = Appender::opening(tx, opening)?;
+    let mut appender = crate::state_log::opening(tx, opening)?;
     snapshot(&mut appender, at_ms)?;
     let touched: bool = tx
         .query_row(

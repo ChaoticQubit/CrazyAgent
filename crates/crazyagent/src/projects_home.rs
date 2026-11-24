@@ -1,3 +1,5 @@
+#[cfg(all(test, windows))]
+mod compare_windows_tests;
 pub(crate) mod delete_mark;
 pub mod icloud;
 mod intake;
@@ -7,7 +9,10 @@ mod move_project;
 #[cfg(all(test, unix))]
 mod move_tests;
 mod platform;
+pub mod reinstall;
 pub(crate) mod setup_mark;
+#[cfg(test)]
+mod spelling_tests;
 mod watch;
 
 pub use intake::{
@@ -21,13 +26,16 @@ pub use layout::{
 pub(crate) use move_project::holds as project_move_holds;
 pub(crate) use move_project::lands as project_move_lands;
 pub(crate) use move_project::{
-    Asked, Finished, Pending, check as project_move_check, finish, forget, pending, plan,
+    Asked, Finished, MoveCheck, Pending, check as project_move_check, finish, forget, pending, plan,
 };
 pub use move_project::{MOVE_STOP_WAIT, Moved, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use kernel_sandbox::paths::one_spelling;
+#[cfg(target_os = "macos")]
+use kernel_sandbox::paths::{DATA_VOLUME, same_entry};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -36,7 +44,6 @@ pub const NAME_BYTES_MAX: usize = 255;
 pub const SLUG_BYTES_MAX: usize = 64;
 pub const LINKED_WORKTREES_MAX: usize = 4096;
 
-#[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     path TEXT NOT NULL CHECK(length(CAST(path AS BLOB)) BETWEEN 1 AND 1024)
@@ -132,17 +139,19 @@ pub enum AddMode {
 
 /// A soft refusal of one add that the owner was shown and chose to go past for
 /// that add only: a Move that breaks linked git worktrees, a Copy of a folder
-/// that is itself a linked checkout, or a copy past the usual entry and level
-/// bounds. Every other refusal stays; an add without one keeps its refusal.
+/// that is itself a linked checkout, a copy past the usual entry and level
+/// bounds, or downloading the rebuildable folders an iCloud add leaves out
+/// (DEC-198). Every other refusal stays; an add without one keeps its refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddOverride {
     Worktrees,
     LinkedCheckout,
     TooLarge,
+    DownloadEverything,
 }
 
-pub const ADD_OVERRIDES_MAX: usize = 3;
+pub const ADD_OVERRIDES_MAX: usize = 4;
 
 /// Checks the overrides of one add: at most one of each, `worktrees` only with a Move
 /// and `linked_checkout` only with a Copy. Inputs: the mode and the overrides.
@@ -155,7 +164,7 @@ fn check_overrides(mode: AddMode, overrides: &[AddOverride]) -> Result<(), Engin
     let wrong_mode = overrides.iter().any(|item| match item {
         AddOverride::Worktrees => mode != AddMode::Move,
         AddOverride::LinkedCheckout => mode != AddMode::Copy,
-        AddOverride::TooLarge => false,
+        AddOverride::TooLarge | AddOverride::DownloadEverything => false,
     });
     if overrides.len() > ADD_OVERRIDES_MAX || repeated || wrong_mode {
         return Err(refused("home_override_invalid"));
@@ -268,8 +277,24 @@ pub fn owner_home() -> Result<PathBuf, EngineError> {
     let home = std::env::var_os(platform::OWNER_HOME_VARIABLE)
         .ok_or_else(|| refused("owner_home_unknown"))?;
     let home = std::fs::canonicalize(home).map_err(|_| refused("owner_home_unknown"))?;
+    let home = one_spelling(home);
     assert!(home.is_absolute());
     Ok(home)
+}
+
+/// The data volume's name for a path in its one spelling, when that names the same entry,
+/// so a folder above the firmlink, such as the data volume itself, is seen to hold it.
+/// Input: the path. Output: the other name, none for a path with no other.
+#[cfg(target_os = "macos")]
+pub(crate) fn data_twin(path: &Path) -> Option<PathBuf> {
+    let twin = Path::new(DATA_VOLUME).join(path.strip_prefix("/").ok()?);
+    same_entry(path, &twin).then_some(twin)
+}
+
+/// Off macOS a path has one name. Input: the path. Output: none.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn data_twin(_path: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// Resolves an owner-picked folder that must be a real directory, not a link.
@@ -284,33 +309,88 @@ fn real_folder(path: &Path, missing: &str, not_folder: &str) -> Result<PathBuf, 
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(refused(not_folder));
     }
-    let real = std::fs::canonicalize(path).map_err(|_| refused(missing))?;
+    let real = one_spelling(std::fs::canonicalize(path).map_err(|_| refused(missing))?);
     assert!(real.is_absolute());
     Ok(real)
 }
 
-/// True when `path` is `/`, the owner's home folder or a folder holding it.
-fn holds_owner_home(path: &Path, owner: &Path) -> bool {
-    path.parent().is_none() || owner.starts_with(path)
+/// True when `path` is `/`, the owner's home folder or a folder holding it, under either of
+/// the home's names on macOS. Inputs: a path in its one spelling and the owner's home.
+pub(crate) fn holds_owner_home(path: &Path, owner: &Path) -> bool {
+    path.parent().is_none()
+        || inside(owner, path)
+        || data_twin(owner).is_some_and(|twin| inside(&twin, path))
 }
 
 /// True when one of the two folders is inside the other or they are the same.
 fn overlaps(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+    inside(left, right) || inside(right, left)
+}
+
+/// A path resolved, then on Windows given the spelling [`one_spelling`] stores folders in;
+/// on macOS and Linux the resolved path as it is, so a check that compares it keeps its
+/// meaning there (W3-4c, leader 13:20 Q1). Input: the path. Output: the resolved path, or
+/// the I/O error.
+pub(crate) fn resolved(path: &Path) -> std::io::Result<PathBuf> {
+    let real = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    let real = one_spelling(real);
+    Ok(real)
+}
+
+/// Whether `path` names itself as [`resolved`] names it: no link on its way and, on
+/// Windows, the stored spelling. Input: the path. Output: the answer, or the I/O error of
+/// resolving it.
+pub(crate) fn is_canonical(path: &Path) -> std::io::Result<bool> {
+    Ok(resolved(path)? == path)
+}
+
+/// True when `path` is `folder` or lies below it, each compared by its [`compare_key`], so
+/// a refusal that asks whether one folder holds another never misses because one side kept
+/// a verbatim spelling (rv-sec2 #736 L1). Inputs: the path and the folder. Output: the answer.
+pub(crate) fn inside(path: &Path, folder: &Path) -> bool {
+    compare_key(path).starts_with(compare_key(folder))
+}
+
+/// The spelling a containment compare reads a path in. On Windows a verbatim drive path
+/// `\\?\C:\...` reads as `C:\...` even when [`one_spelling`] keeps it verbatim for a name
+/// the sandbox refuses; the stored spelling stays [`one_spelling`]'s. Elsewhere the path
+/// itself. Input: the path. Output: the key, borrowed from the path.
+fn compare_key(path: &Path) -> &Path {
+    #[cfg(windows)]
+    if let Some(plain) = path.to_str().and_then(windows_drive_plain) {
+        return Path::new(plain);
+    }
+    path
+}
+
+/// The drive path a verbatim drive path names, whatever names it holds: `\\?\C:\work` gives
+/// `C:\work`. Text in any other form, a UNC, device or plain path included, gives none.
+/// Input: the text. Output: the plain drive text, or none.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_drive_plain(text: &str) -> Option<&str> {
+    let plain = text.strip_prefix(r"\\?\")?;
+    let bytes = plain.as_bytes();
+    let drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    drive.then_some(plain)
 }
 
 /// True when a real folder overlaps a folder the project uses: its own folder
 /// or a repository it declares, each compared as recorded and, when it
-/// resolves, at its canonical path, so one declared through a link counts.
-/// Input: a canonical folder and the project. Output: whether it is in use.
+/// resolves, at its canonical path in one spelling, so one declared through a link or
+/// recorded under the other macOS name counts. Input: a canonical folder in either
+/// spelling and the project. Output: whether it is in use.
 pub(crate) fn in_use(real: &Path, project: &Registered) -> bool {
     assert!(real.is_absolute());
+    let short = one_spelling(real.to_path_buf());
     std::iter::once(&project.folder)
         .chain(&project.repositories)
         .filter(|used| used.is_absolute())
         .any(|used| {
             overlaps(real, used)
-                || std::fs::canonicalize(used).is_ok_and(|canonical| overlaps(real, &canonical))
+                || std::fs::canonicalize(used)
+                    .is_ok_and(|canonical| overlaps(&short, &one_spelling(canonical)))
         })
 }
 
@@ -539,11 +619,12 @@ pub fn check_add(
         "home_source_missing",
         "home_source_not_folder",
     )?;
-    if real.starts_with(home) {
+    let saved = one_spelling(home.to_path_buf());
+    if inside(&real, &saved) {
         return Err(refused("home_source_in_home"));
     }
     let owner = owner_home()?;
-    if holds_owner_home(&real, &owner) || home.starts_with(&real) || overlaps(&real, engine_root) {
+    if holds_owner_home(&real, &owner) || inside(&saved, &real) || overlaps(&real, engine_root) {
         return Err(refused("home_source_unsafe"));
     }
     let name = real
@@ -579,13 +660,18 @@ fn copy_linked(folder: &Path, mode: AddMode, overrides: &[AddOverride]) -> bool 
 }
 
 /// The bounds an add's download listing and copy work within: [`FORCED_COPY_BOUNDS`] once
-/// the owner went past `too_large`, else [`COPY_BOUNDS`]. Input: the add's overrides.
-/// Output: the bounds.
+/// the owner went past `too_large`, else [`COPY_BOUNDS`], leaving out rebuildable folders
+/// still in iCloud unless the owner chose `download_everything`. Input: the add's
+/// overrides. Output: the bounds.
 pub fn add_bounds(overrides: &[AddOverride]) -> CopyBounds {
-    let bounds = if overrides.contains(&AddOverride::TooLarge) {
+    let limits = if overrides.contains(&AddOverride::TooLarge) {
         FORCED_COPY_BOUNDS
     } else {
         COPY_BOUNDS
+    };
+    let bounds = CopyBounds {
+        skip_rebuildable: !overrides.contains(&AddOverride::DownloadEverything),
+        ..limits
     };
     assert!(bounds.entries >= COPY_BOUNDS.entries);
     assert!(bounds.depth >= COPY_BOUNDS.depth);
@@ -606,7 +692,7 @@ pub fn folder_name(name: &str) -> Result<(), EngineError> {
         || name.chars().any(|c| {
             c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         })
-        || crate::protocol::windows_device(name)
+        || kernel_common::windows_device(name)
     {
         return Err(refused("home_folder_name_invalid"));
     }
@@ -637,12 +723,20 @@ pub fn slug(name: &str) -> Option<String> {
         }
         slug.push(c.to_ascii_lowercase());
     }
-    if slug.is_empty() || crate::protocol::windows_device(&slug) {
+    if slug.is_empty() || kernel_common::windows_device(&slug) {
         return None;
     }
     assert!(slug.len() <= SLUG_BYTES_MAX && !slug.ends_with('-'));
     assert!(folder_name(&slug).is_ok());
     Some(slug)
+}
+
+/// Whether two folders brought into the home at once land under names the volume tells
+/// apart: both ASCII and different ignoring case. A name with any other character may fold
+/// into another on the volume (case, Unicode form), so it never counts as apart (DEC-197).
+/// Inputs: the two destination names. Output: the answer.
+pub fn names_apart(a: &str, b: &str) -> bool {
+    a.is_ascii() && b.is_ascii() && !a.eq_ignore_ascii_case(b)
 }
 
 /// Gives the path a folder named `name` takes in the home when it is free.
@@ -686,7 +780,8 @@ pub fn plan_trash(
         "home_trash_missing",
         "home_trash_not_folder",
     )?;
-    if real.parent() != Some(home) {
+    let home = one_spelling(home.to_path_buf());
+    if real.parent() != Some(home.as_path()) {
         return Err(refused("home_trash_outside"));
     }
     let name = real
@@ -697,7 +792,7 @@ pub fn plan_trash(
     if registered.iter().any(|project| in_use(&real, project)) {
         return Err(refused("home_trash_still_set_up"));
     }
-    assert!(real.starts_with(home) && real != home);
+    assert!(real.starts_with(&home) && real != home);
     Ok(real)
 }
 
@@ -719,6 +814,7 @@ pub fn trash(folder: &Path) -> Result<(), EngineError> {
 /// strictly below the home.
 pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, EngineError> {
     assert!(home.is_absolute());
+    let home = one_spelling(home.to_path_buf());
     let mut real = Vec::with_capacity(folders.len());
     for folder in folders {
         let climbs = folder
@@ -728,7 +824,7 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
             return Err(refused("delete_outside_home"));
         }
         match real_folder(folder, "delete_folder_missing", "delete_outside_home") {
-            Ok(path) if path.starts_with(home) && path != home => real.push(path),
+            Ok(path) if path.starts_with(&home) && path != home => real.push(path),
             Ok(_) => return Err(refused("delete_outside_home")),
             Err(missing) if missing.0 == "delete_folder_missing" => {}
             Err(refusal) => return Err(refusal),
@@ -746,7 +842,7 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
     assert!(
         moved
             .iter()
-            .all(|path| path.starts_with(home) && path != home)
+            .all(|path| path.starts_with(&home) && *path != home)
     );
     Ok(moved)
 }
@@ -951,7 +1047,6 @@ pub(crate) const RECORDED_NAME_BYTES_MAX: usize = 96;
 /// The statement that makes the record of the engine files a Delete everything moved when
 /// it is missing, its names checked to hold [`RECORDED_NAME_BYTES_MAX`] bytes. Output: the
 /// statement.
-#[cfg(unix)]
 fn delete_files_table() -> String {
     format!(
         "CREATE TABLE IF NOT EXISTS projects_delete_files (
@@ -1065,14 +1160,11 @@ fn folder_inode(folder: &Path) -> Option<i64> {
     i64::try_from(number).ok()
 }
 
-/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
-/// and teammates' records, a research run's folder, a roadmap status run's folder and
-/// Seatbelt profile, or a project's tool caches, which an agent may have closed or pinned
-/// inside and are cleared of that first. Only the
-/// folder the record was written for goes: under any other identity it stays, logged as
-/// `project_files_kept`, and the record is finished. A name that is no engine file removes
-/// nothing. A file left behind is logged as `project_files_left` and keeps its record.
-/// Inputs: the engine database path and the records. Output: the names that are finished.
+/// Removes the engine files a delete recorded, each folder as an agent's tree: an agent's
+/// state folder, sandbox profiles and teammates' records, a research or roadmap status run's
+/// folder and Seatbelt profile, or a project's tool caches. A non-engine name, or a folder now
+/// under another identity (`project_files_kept`), is finished; a file left keeps its record
+/// (`project_files_left`). Inputs: the database path and the records. Output: finished names.
 pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
     let Some(root) = database.parent() else {
         return Vec::new();
@@ -1088,13 +1180,11 @@ pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<Strin
                     Ok(())
                 } else if let EngineFile::Agent(id) = file {
                     crate::team::cleanup::remove_agent_files(&root.join("team"), id)
-                } else if matches!(file, EngineFile::ToolCache) {
-                    crate::team::cleanup::remove_agent_tree(&folder)
                 } else if matches!(file, EngineFile::StatusRun) {
-                    crate::team::cleanup::remove_tree(&folder)
+                    crate::team::cleanup::remove_agent_tree(&folder)
                         .and_then(|()| remove_run_profile(root, name))
                 } else {
-                    crate::team::cleanup::remove_tree(&folder)
+                    crate::team::cleanup::remove_agent_tree(&folder)
                 }
             }
         };
@@ -1126,10 +1216,11 @@ pub fn plan_move(
     engine_root: &Path,
 ) -> Result<MovePlan, EngineError> {
     let next = check_home(picked, engine_root)?;
-    if next == current {
+    let saved = one_spelling(current.to_path_buf());
+    if next == saved {
         return Err(refused("home_move_same"));
     }
-    if overlaps(&next, current) {
+    if overlaps(&next, &saved) {
         return Err(refused("home_move_nested"));
     }
     let folders = watch::scan_all(current)?.ok_or_else(|| refused("home_move_too_many"))?;
@@ -1222,7 +1313,6 @@ pub fn found(
 /// the table that holds each Delete everything planned and not yet settled, when the
 /// engine database opens; a database from before gains the tables it lacks.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(TABLE)
@@ -1295,9 +1385,9 @@ pub(crate) fn move_holds(
         )
         .optional()?;
     Ok(origin.is_some_and(|origin| {
-        let origin = Path::new(&origin);
-        folder.starts_with(origin)
-            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(origin))
+        let origin = one_spelling(PathBuf::from(origin));
+        inside(folder, &origin)
+            || std::fs::canonicalize(folder).is_ok_and(|real| inside(&one_spelling(real), &origin))
     }))
 }
 
@@ -1412,7 +1502,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_permission_denied" => {
             "macOS did not let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed."
         }
-        "icloud_download_busy" => "Another iCloud download is running. Wait for it to finish.",
+        "icloud_download_busy" => {
+            "Too many iCloud downloads are running at once. Wait for one to finish."
+        }
         "icloud_folder_missing" => "That folder isn't there anymore.",
         "icloud_folder_unsafe" => "That folder can't be downloaded.",
         "icloud_folder_unreadable" => "Some files in this folder can't be read.",
@@ -1461,6 +1553,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "move_project_in_progress" => {
             "A project is still being moved into your projects folder. Try again when it finishes."
+        }
+        "move_project_two_spellings" => {
+            "Some of this project's saved records name its folder in two ways, and a move would overwrite one with the other. Nothing was moved."
         }
         "home_add_in_progress" => {
             "A folder is being added to your projects folder. Try again when it finishes."

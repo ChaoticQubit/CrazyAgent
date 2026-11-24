@@ -179,7 +179,7 @@ pub(crate) fn survivors(processes: [Pid; 3], wait: Duration) -> Vec<Pid> {
 /// This user's processes whose command line contains `needle`, read with `ps`. Input: the
 /// text. Output: their ids and command lines.
 pub(crate) fn processes_naming(needle: &str) -> Vec<(i32, String)> {
-    let listing = crate::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-A", "-ww", "-o", "pid=,uid=,command="])
             .stdin(std::process::Stdio::null())
@@ -247,7 +247,7 @@ pub(crate) fn detached_survivors(
 /// before it is killed, so an id that ended and was reused by another process is never hit.
 /// Inputs: the id and the texts. Output: true when it still names one.
 fn still_naming(pid: i32, needles: &[&str]) -> bool {
-    let listing = crate::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-ww", "-o", "pid=,uid=,command=", "-p", &pid.to_string()])
             .stdin(Stdio::null())
@@ -270,7 +270,7 @@ fn still_naming(pid: i32, needles: &[&str]) -> bool {
 /// after the shim itself became the harness, as an agent that killed its own warden leaves
 /// the run. Input: the harness path, unique to the test. Output: the wardens killed.
 pub(crate) fn kill_wardens_of(harness: &str) -> Vec<i32> {
-    let listing = crate::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-ww", "-o", "pid=,uid=,command="])
             .stdin(Stdio::null())

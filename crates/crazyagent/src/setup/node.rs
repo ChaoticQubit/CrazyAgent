@@ -1,6 +1,6 @@
-use super::InstallError;
 use super::pinned::{PinnedInstaller, link, runnable};
-use super::process::{is_sha256, private_folder, run, staging_folder};
+use kernel_processes::run::InstallError;
+use kernel_processes::run::{is_sha256, private_folder, run, staging_folder};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -152,14 +152,14 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
 /// `node` and `npm` (npm with its interpreter), so npm never pairs with another install's
 /// node; the engine's own is found through its `setup/bin` links. Nothing is run.
 /// Input: the places. Output: the Node, or none when no folder holds both.
-pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
+pub fn usable(places: &kernel_processes::finding::Places) -> Option<Usable> {
     let found = places.folders().iter().find_map(|folder| {
-        let node = crate::tools::resolve_entry(&folder.join("node"), places).ok()?;
-        let npm = crate::tools::resolve_entry(&folder.join("npm"), places).ok()?;
+        let node = kernel_processes::finding::resolve_entry(&folder.join("node"), places).ok()?;
+        let npm = kernel_processes::finding::resolve_entry(&folder.join("npm"), places).ok()?;
         Some((node, npm))
     });
     let Some((node, npm)) = found else {
-        crate::tools::probe::missed();
+        kernel_processes::finding::probe::missed(crate::tools::finding_seed);
         return None;
     };
     assert_eq!(node.entry.parent(), npm.entry.parent());
@@ -222,7 +222,9 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
     let installer = installer(engine_root);
     let setup = installer.setup_folder().to_path_buf();
     private_folder(&setup)?;
-    let staging = staging_folder(&setup, "node")?;
+    let id =
+        crate::engine::owner::random_id().map_err(|_| InstallError("setup_store_unavailable"))?;
+    let staging = staging_folder(&setup, "node", &id)?;
     let result = (|| {
         let archive = staging.join("node.tar.gz");
         installer.download(&pin.url, &pin.sha256, &archive, &staging)?;
@@ -267,7 +269,7 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
 /// for `-z`, and no folder of the engine's own `PATH` or home. Input: the engine root.
 /// Output: the installer.
 fn installer(engine_root: &Path) -> PinnedInstaller {
-    let system: Vec<PathBuf> = crate::tools::SYSTEM_FOLDERS
+    let system: Vec<PathBuf> = kernel_processes::finding::SYSTEM_FOLDERS
         .iter()
         .map(PathBuf::from)
         .collect();

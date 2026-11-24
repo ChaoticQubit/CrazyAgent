@@ -602,7 +602,7 @@ pub(in crate::engine) async fn dispatch(
             .as_ref()
             .map(|(harness, words)| (kind.as_str(), harness.as_ref(), words.as_slice())),
     )?;
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(io_error)?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(io_error)?;
     let cause = child.stderr.take().map(CustodianCause::new).transpose();
     let streams = match (child.stdin.take(), cause) {
         (Some(input), Ok(cause)) => Ok((input, cause)),

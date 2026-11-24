@@ -1,5 +1,5 @@
 use super::*;
-use crate::harnesses::launch::{CLAUDE_NATIVE_TEAM_TOOLS, LaunchLimits};
+use crate::harnesses::launch::{CLAUDE_NATIVE_TEAM_TOOLS, LaunchBoundary, LaunchLimits};
 use std::os::unix::fs::PermissionsExt;
 
 const SESSION: &str = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
@@ -66,8 +66,7 @@ impl Case {
             account,
             model: None,
             tools,
-            sandbox_profile: Some(self.profile()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(self.profile()),
             git_identity: None,
             limits: LaunchLimits::default(),
         }
@@ -508,7 +507,7 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
         key_file.display()
     );
     assert!(built.argv.contains(&provider), "{:?}", built.argv);
-    let helper = crate::spawn_gate::output(
+    let helper = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/cat")
             .arg(&key_file)
             .stdin(std::process::Stdio::null())
@@ -520,7 +519,7 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
 
     #[cfg(target_os = "macos")]
     {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new(&built.argv[0])
                 .args(&built.argv[1..])
                 .env_clear()
@@ -572,7 +571,7 @@ fn the_codex_bridge_attaches_the_app_to_its_app_server_and_stops_the_server_afte
         )
     };
     let bridge = |codex: &Path, resume: &str| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             std::process::Command::new("/bin/sh")
                 .args(["-c", CODEX_BRIDGE_SCRIPT, "codex-bridge"])
                 .arg(codex)
@@ -609,7 +608,7 @@ fn the_codex_bridge_attaches_the_app_to_its_app_server_and_stops_the_server_afte
     );
     let pid = std::fs::read_to_string(&server).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while crate::spawn_gate::output(
+    while kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/kill")
             .args(["-0", pid.trim()])
             .stdin(std::process::Stdio::null())
@@ -773,7 +772,7 @@ fn a_keyed_claude_gets_its_key_through_its_key_helper_and_a_local_one_a_placehol
             .iter()
             .any(|(name, _)| name == "ANTHROPIC_API_KEY")
     );
-    let helper = crate::spawn_gate::output(
+    let helper = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/sh")
             .args(["-c", settings["apiKeyHelper"].as_str().unwrap()])
             .stdin(std::process::Stdio::null())
@@ -815,10 +814,10 @@ fn a_keyed_claude_gets_its_key_through_its_key_helper_and_a_local_one_a_placehol
 fn every_launch_needs_its_sandbox_profile_and_a_safe_home() {
     let case = Case::new();
     let mut bare = case.request("codex", case.subscription(), true);
-    bare.sandbox_profile = None;
+    bare.boundary = LaunchBoundary::Profile(PathBuf::from("agent.sb"));
     assert_eq!(
         command(&bare, None, &run(None)).unwrap_err().0,
-        "launch_sandbox_required"
+        "launch_sandbox_profile_unavailable"
     );
     std::fs::set_permissions(case.home(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let open = case.request("claude-code", case.subscription(), true);
@@ -882,7 +881,7 @@ fn a_key_written_under_a_narrow_umask_in_its_own_process() {
 #[test]
 fn a_key_written_under_a_narrow_umask_is_still_a_private_file() {
     let case = Case::new();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -934,7 +933,7 @@ fn a_key_write_cut_short_in_its_own_process() {
 #[test]
 fn a_key_write_cut_short_leaves_no_key_file() {
     let case = Case::new();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/sh")
             .args([
                 "-c",
@@ -1128,9 +1127,11 @@ fn a_claude_config_that_is_a_fifo_or_link_is_refused_without_blocking() {
     let project = case.path().join("work");
     let config = case.home().join(".claude.json");
     assert!(
-        crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&config))
-            .unwrap()
-            .success()
+        kernel_processes::spawn_gate::status(
+            std::process::Command::new("/usr/bin/mkfifo").arg(&config)
+        )
+        .unwrap()
+        .success()
     );
     assert_eq!(
         prepare_claude_home(&case.home(), &project).unwrap_err().0,
@@ -1491,7 +1492,7 @@ fn the_installed_codex_reads_a_native_lead_with_its_own_sub_agents_on() {
             .current_dir(case.path().join("work"))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = crate::spawn_gate::output(&mut features).unwrap();
+        let output = kernel_processes::spawn_gate::output(&mut features).unwrap();
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(
             output.status.success(),
@@ -2104,8 +2105,8 @@ fn a_harness_entry_inside_a_project_never_launches() {
     std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
     let entry = project.join("bin").join("codex");
     stand_in(&entry);
-    let places = crate::tools::Places::from_environment(None);
-    let line = crate::tools::resolve_entry(&entry, &places)
+    let places = crate::tools::tools_places(None);
+    let line = kernel_processes::finding::resolve_entry(&entry, &places)
         .unwrap_err()
         .line();
     assert_eq!(launch_words(&entry), Err(LaunchError(line.clone(), None)));
@@ -2128,18 +2129,44 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
     stand_in(&shim);
     let real = base.join("real");
     stand_in(&real.join(name));
-    let found = crate::tools::Places::new(vec![real.clone()], Some(home.clone()));
+    let found = crate::tools::tools_new(vec![real.clone()], Some(home.clone()));
     assert!(crate::harnesses::is_shim(found.home(), &shim));
     assert_eq!(launch_tool(&shim, &found).unwrap().entry, real.join(name));
-    let none = crate::tools::Places::new(Vec::new(), Some(home));
+    let none = crate::tools::tools_new(Vec::new(), Some(home));
     assert_eq!(launch_tool(&shim, &none).unwrap().entry, shim);
     let project = base.join("project");
     std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
     let inside_home = project.join("home");
     let inside = inside_home.join(".volta/bin").join(name);
     stand_in(&inside);
-    let places = crate::tools::Places::new(Vec::new(), Some(inside_home));
+    let places = crate::tools::tools_new(Vec::new(), Some(inside_home));
     assert!(launch_tool(&inside, &places).is_err());
+}
+
+/// G1: a shim with no real install found is judged by the resolver's own rule alone, so a
+/// HOME in this user's folder under a sticky shared folder, as under /tmp on Linux, starts
+/// it as given, while a shim in a folder every user can write never starts.
+#[test]
+fn a_shim_under_a_sticky_shared_folder_starts_as_given_by_the_resolver_rule() {
+    let scratch = tempfile::tempdir().unwrap();
+    let shared = scratch.path().canonicalize().unwrap().join("shared");
+    let mine = shared.join("mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let name = "crazyagent-shim-sticky-row";
+    let home = mine.join("home");
+    let shim = home.join(".volta/bin").join(name);
+    stand_in(&shim);
+    let places = crate::tools::tools_new(Vec::new(), Some(home));
+    assert!(crate::harnesses::is_shim(places.home(), &shim));
+    assert_eq!(launch_tool(&shim, &places).unwrap().entry, shim);
+    std::fs::set_permissions(
+        shim.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    assert!(launch_tool(&shim, &places).is_err());
 }
 
 /// rv-sa241 B1 L1: a shim that finds no real install starts as given only when the resolver
@@ -2161,7 +2188,7 @@ fn a_shim_reached_through_a_link_agents_can_move_never_starts_as_given() {
     let shim = home.join(".volta/bin").join(name);
     std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&hop, &shim).unwrap();
-    let places = crate::tools::Places::new(Vec::new(), Some(home));
+    let places = crate::tools::tools_new(Vec::new(), Some(home));
     assert!(crate::harnesses::is_shim(places.home(), &shim));
     assert!(
         !places.agent_writable(&shim),
@@ -2182,12 +2209,12 @@ fn a_pinned_harness_inside_a_project_is_refused_by_name_not_reported_missing() {
     std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
     let entry = project.join("bin").join("codex");
     stand_in(&entry);
-    let places = crate::tools::Places::from_environment(None);
-    let missing = crate::tools::resolve_entry(&entry, &places).unwrap_err();
-    assert_eq!(missing.reason, crate::tools::Reason::Refused);
+    let places = crate::tools::tools_places(None);
+    let missing = kernel_processes::finding::resolve_entry(&entry, &places).unwrap_err();
+    assert_eq!(missing.reason, kernel_processes::finding::Reason::Refused);
     assert_eq!(
         missing.refused.map(|refused| refused.why),
-        Some(crate::tools::Refusal::AgentsCanWrite)
+        Some(kernel_processes::finding::Refusal::AgentsCanWrite)
     );
     let LaunchError(line, _) = launch_tool(&entry, &places).unwrap_err();
     assert!(line.contains(&entry.display().to_string()), "{line}");
@@ -2300,8 +2327,8 @@ fn a_manifest_command_refuses_a_keyed_account_tools_off_and_full_access() {
     let refused = command_with(&off, None, &run(None), Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_tools_off_unsupported")));
     let mut full = case.request("standin-jsonl-append", keyless(&case), true);
-    full.sandbox_profile = None;
-    full.unconfined = true;
+    let scratch = full.working_dir.parent().unwrap().to_path_buf();
+    full.boundary = crate::harnesses::launch::full_access_for_test(&full.working_dir, &scratch);
     let refused = command_with(&full, None, &run(None), Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_harness_unsupported")));
 }
@@ -2394,7 +2421,7 @@ fn the_claude_sign_in_floor_never_falls_below_the_first_claude_with_the_snapshot
 #[test]
 #[ignore]
 fn a_teammate_command_written_under_a_narrow_umask_in_its_own_process() {
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     let case = Case::new();
@@ -2427,7 +2454,7 @@ fn a_teammate_command_written_under_a_narrow_umask_in_its_own_process() {
 #[test]
 fn a_teammate_command_written_under_a_narrow_umask_is_a_private_program() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "harnesses::interactive::tests::a_teammate_command_written_under_a_narrow_umask_in_its_own_process",
         ":",
         folder.path(),
@@ -2440,4 +2467,30 @@ fn a_teammate_command_written_under_a_narrow_umask_is_a_private_program() {
         std::fs::read_to_string(folder.path().join("outcome")).unwrap(),
         "ok 700"
     );
+}
+
+/// The pane command a terminal host runs keeps the interactive command's argument
+/// vector, working folder and environment byte-equal; only the session record stays behind.
+#[test]
+fn pane_command_from_an_interactive_command_keeps_every_field() {
+    let command = InteractiveCommand {
+        argv: vec![
+            "/usr/bin/sandbox-exec".into(),
+            "-f".into(),
+            "/tmp/profile with space.sb".into(),
+            "codex".into(),
+            "--flag=ü".into(),
+        ],
+        cwd: PathBuf::from("/work/project one"),
+        env: vec![
+            ("HOME".into(), "/home/agent".into()),
+            ("CODEX_HOME".into(), String::new()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ],
+        transcript: Transcript::Unavailable,
+    };
+    let pane = kernel_processes::terminal::PaneCommand::from(&command);
+    assert_eq!(pane.argv, command.argv);
+    assert_eq!(pane.cwd, command.cwd);
+    assert_eq!(pane.env, command.env);
 }

@@ -4,7 +4,9 @@ use crazyagent::agent_git::Layout;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
-use crazyagent::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+use crazyagent::harnesses::launch::{
+    AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Session,
+};
 use crazyagent::launch_context;
 use crazyagent::plugins::{Scope, ServerSpec};
 use crazyagent::project_setup::ProjectSetup;
@@ -77,12 +79,12 @@ fn record(stream: TcpStream, bodies: Bodies) {
 }
 
 fn capture() -> (u16, Bodies) {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bodies: Bodies = Arc::new(Mutex::new(Vec::new()));
     let sink = bodies.clone();
     std::thread::spawn(move || {
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             let sink = sink.clone();
             std::thread::spawn(move || record(stream, sink));
         }
@@ -207,7 +209,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
     fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let work = private_directory(&base.join("work"));
     assert!(
-        crazyagent::spawn_gate::status(
+        kernel_processes::spawn_gate::status(
             std::process::Command::new("/usr/bin/git")
                 .args(["init", "-q"])
                 .arg(&work)
@@ -237,8 +239,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
                 },
                 model: Some("qwen2.5:0.5b".into()),
                 tools: true,
-                sandbox_profile: Some(profile.clone()),
-                unconfined: false,
+                boundary: LaunchBoundary::Profile(profile.clone()),
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: Duration::from_secs(180),

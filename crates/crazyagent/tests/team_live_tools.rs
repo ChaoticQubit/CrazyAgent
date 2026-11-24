@@ -11,8 +11,10 @@ use crazyagent::team::names;
 use crazyagent::team::tool::{
     INSPECT_WORK_TOOL, LIVE_SERVER_COMMAND, MAILBOX_FOLDER, SPAWN_TOOL, UPDATE_WORK_TOOL,
 };
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use crazyagent::terminal::FOLDER;
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -33,7 +35,7 @@ struct Terminals {
 
 impl Drop for Terminals {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(self.base.join(FOLDER).join(SOCKET))
@@ -152,11 +154,16 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         tmux: installed(&base).expect("tmux must be installed on this machine"),
         base: base.clone(),
     };
-    let host = Tmux::open(Some(terminals.tmux.clone()), &base.join(FOLDER));
+    let host = Tmux::open(
+        Some(terminals.tmux.clone()),
+        &base.join(FOLDER),
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     let typed = base.join("typed.txt");
     host.spawn(
         &AgentId::team(writer).unwrap(),
-        &InteractiveCommand {
+        &kernel_processes::terminal::PaneCommand::from(&InteractiveCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -165,14 +172,14 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
             cwd: base.clone(),
             env: Vec::new(),
             transcript: Transcript::Unavailable,
-        },
+        }),
     )
     .unwrap();
 
     let mailbox = base.join(MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .arg(LIVE_SERVER_COMMAND)
             .arg(&mailbox)
@@ -405,7 +412,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
 /// output; panics when git fails.
 #[cfg(target_os = "macos")]
 fn git(folder: &std::path::Path, home: &std::path::Path, arguments: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -560,7 +567,7 @@ fn a_live_master_s_merge_lands_on_the_land_on_branch_through_the_engine_binary()
     let mailbox = base.join(MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .arg(LIVE_SERVER_COMMAND)
             .arg(&mailbox)
