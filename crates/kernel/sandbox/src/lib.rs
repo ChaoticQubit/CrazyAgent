@@ -8,6 +8,9 @@ pub mod access;
 mod confinement;
 #[cfg(unix)]
 pub use confinement::confinement;
+/// Egress through the system curl: one request exchange with its bounds, and the per-plugin
+/// host allowlist and send the kernel's `net.request` calls through.
+pub mod egress;
 /// The ELF reader: whether a Linux program is loaded by glibc, and so resolves names over
 /// TCP when the sandbox asks it to, judged from its program headers alone.
 pub mod elf;

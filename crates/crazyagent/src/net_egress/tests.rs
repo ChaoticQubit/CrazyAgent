@@ -338,3 +338,22 @@ fn a_reply_header_other_than_the_scopes_is_refused_before_curl() {
         Err(StoreError::code("net_reply_header_unsupported"))
     );
 }
+
+#[test]
+fn github_requests_go_through_the_kernel_exchange() {
+    let mut folders = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/github")];
+    let mut read = 0;
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                read += 1;
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(!text.contains("fn exchange("), "{}", path.display());
+            }
+        }
+    }
+    assert!(read > 10);
+}
