@@ -517,6 +517,33 @@ fn a_removal_deletes_its_folder_only_after_the_commit() {
     assert!(case.plugin_entries().is_empty());
 }
 
+/// A removal whose commit fails at the end of `logged`, here held off by a reader, puts the
+/// folder back under its name and keeps the plugin's rows.
+#[test]
+fn a_removal_whose_commit_fails_puts_the_folder_back() {
+    let case = case(true);
+    case.add("near", NEAR, false).unwrap();
+    let tables = case.tables();
+    case.db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let reader = Connection::open(case.root.join("engine.db")).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let held: i64 = reader
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+        .unwrap();
+    assert!(held > 0, "the reader holds the database");
+    let remove = Command::Remove {
+        name: "near".into(),
+    };
+    assert_eq!(case.run(remove), Err("app_plugins_unavailable".to_owned()));
+    assert!(
+        case.db.is_autocommit(),
+        "the failed commit ended its transaction"
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    assert_eq!(case.plugin_entries(), ["near"]);
+    assert_eq!(case.tables(), tables);
+}
+
 /// A replace whose capture rolls back keeps the old folder under the plugin name with the
 /// old trust row, and leaves no staged or retired folder.
 #[test]
