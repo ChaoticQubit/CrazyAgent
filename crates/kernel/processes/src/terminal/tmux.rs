@@ -249,17 +249,17 @@ static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 /// terminal supports (3.7 or later, the first with the bracketed-paste flag the attach
 /// reads). A read that runs out of time counts as running, since a new file can wait behind
 /// the system's first-run checks; the version read setup does next reports it. Takes the
-/// tmux. Returns the answer.
-pub fn runs(tmux: &crate::finding::Resolved) -> bool {
+/// tmux. Returns Ok when it runs, else its version when that is a release too old, else none.
+pub fn runs(tmux: &crate::finding::Resolved) -> Result<(), Option<String>> {
     runs_within(tmux, VERSION_READ_TIME)
 }
 
 /// Answers [`runs`] with the version read bounded by the given time, so a test can let a
 /// read run out of time quickly. Takes the tmux and the bound. Returns the answer.
-fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
+fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> Result<(), Option<String>> {
     assert!(!time.is_zero() && time <= VERSION_READ_TIME);
     let Ok(metadata) = std::fs::metadata(&tmux.program) else {
-        return false;
+        return Err(None);
     };
     let file: RanFile = (
         tmux.program.clone(),
@@ -274,11 +274,11 @@ fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
     if last().contains(&file) {
-        return true;
+        return Ok(());
     }
     let words = tmux.argv();
     let Some((program, rest)) = words.split_first() else {
-        return false;
+        return Err(None);
     };
     let mut arguments = rest.to_vec();
     arguments.push("-V".into());
@@ -290,12 +290,18 @@ fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
         time,
     );
     let running = match version {
-        Err(crate::run::InstallError(code)) => code == "setup_timeout",
-        Ok((false, _)) => false,
-        Ok((true, output)) => crate::run::version_from(&output)
-            .is_ok_and(|found| supported(found.as_str()) == Some(true)),
+        Err(crate::run::InstallError(code)) if code == "setup_timeout" => Ok(()),
+        Err(_) | Ok((false, _)) => Err(None),
+        Ok((true, output)) => match crate::run::version_from(&output) {
+            Ok(found) => match supported(found.as_str()) {
+                Some(true) => Ok(()),
+                Some(false) => Err(Some(found.as_str().to_owned())),
+                None => Err(None),
+            },
+            Err(_) => Err(None),
+        },
     };
-    if running {
+    if running.is_ok() {
         let mut kept = last();
         kept.retain(|(path, ..)| *path != file.0);
         if kept.len() == RAN_MAX {

@@ -416,7 +416,7 @@ mod tests {
 
     /// Setup's tmux row and the live master's start ask the same resolver on this machine and
     /// give the user the same answer: a tmux setup finds is the program the start runs; a tmux
-    /// setup calls too old is a version the terminal refuses, and both lines say too old; a
+    /// setup calls too old is one the start does not find, and both lines say too old; a
     /// missing tmux gives the resolver's tmux line and no program to start.
     #[test]
     fn setup_and_the_live_start_agree_on_this_machines_tmux()
@@ -444,6 +444,10 @@ mod tests {
             Ok(Err(missing))
                 if missing.reason == kernel_processes::finding::Reason::WrongVersion =>
             {
+                assert!(
+                    started.is_none(),
+                    "setup calls tmux too old, the start found it"
+                );
                 let version = missing
                     .found
                     .as_deref()

@@ -520,8 +520,9 @@ fn a_missing_bundled_tmux_falls_back_to_the_usual_search_order() {
     }
 }
 
-/// Leader 20:08: a bundled tmux whose version read fails is passed over for the usual order,
-/// which says the bundled one can't run; only the bundled copy is ever asked whether it runs.
+/// A bundled tmux whose version read fails is passed over for the usual order, which says
+/// the bundled one can't run; the usual order's tmux is asked next, and one that cannot run
+/// either is still the one found.
 #[test]
 fn a_bundled_tmux_that_cannot_run_falls_back_to_the_usual_order_and_says_so() {
     let (_folder, home) = scratch();
@@ -529,12 +530,12 @@ fn a_bundled_tmux_that_cannot_run_falls_back_to_the_usual_order_and_says_so() {
     let asked = std::cell::RefCell::new(Vec::new());
     let (found, note) = resolve_tmux(&places, true, |tmux| {
         asked.borrow_mut().push(tmux.entry.clone());
-        false
+        Err(None)
     })
     .unwrap();
     assert_eq!(found.entry, brew);
     assert_eq!(note, Some(BundleNote::CannotRun));
-    assert_eq!(asked.into_inner(), vec![sidecar]);
+    assert_eq!(asked.into_inner(), vec![sidecar, brew]);
 }
 
 /// A bundled tmux that runs is the one used, with no note, whether or not the build is
@@ -544,7 +545,7 @@ fn a_bundled_tmux_that_runs_is_used_with_no_note() {
     let (_folder, home) = scratch();
     let (places, sidecar, _brew) = bundled_layout(&home);
     for ships in [true, false] {
-        let (found, note) = resolve_tmux(&places, ships, |_| true).unwrap();
+        let (found, note) = resolve_tmux(&places, ships, |_| Ok(())).unwrap();
         assert_eq!(found.entry, sidecar);
         assert_eq!(note, None);
     }
@@ -557,12 +558,12 @@ fn a_lost_bundled_tmux_says_it_is_missing_only_in_a_build_that_ships_one() {
     let (_folder, home) = scratch();
     let (places, sidecar, brew) = bundled_layout(&home);
     or_named(std::fs::remove_file(&sidecar), &sidecar);
-    let never = |_: &Resolved| -> bool { panic!("nothing to run") };
+    let runs = |_: &Resolved| Ok(());
     assert_eq!(
-        resolve_tmux(&places, true, never).unwrap(),
+        resolve_tmux(&places, true, runs).unwrap(),
         (resolve("tmux", &places).unwrap(), Some(BundleNote::Missing))
     );
-    let (found, note) = resolve_tmux(&places, false, never).unwrap();
+    let (found, note) = resolve_tmux(&places, false, runs).unwrap();
     assert_eq!((found.entry, note), (brew, None));
 }
 
