@@ -701,6 +701,13 @@ impl ResearchJobs {
         crate::sandbox::access_store::read::load(&self.connection, project.as_str())
     }
 
+    /// The queue database's open connection, for a read the queue keeps no method for.
+    /// Takes nothing. Returns the connection.
+    #[cfg(unix)]
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     /// Reads the folders the owner keeps a project's agents out of, see
     /// [`crate::sandbox::access_store::hidden::load`]. Takes the project. Returns the folders.
     pub fn hidden_paths(
