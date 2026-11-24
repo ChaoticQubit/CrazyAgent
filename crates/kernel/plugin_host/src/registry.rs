@@ -201,6 +201,17 @@ pub(crate) fn found(engine: &Engine<'_>, name: &str) -> Result<Found, Refused> {
     find(engine, name)?.ok_or_else(|| refused("app_plugin_not_found"))
 }
 
+/// Refuses a write that touches files while the caller holds an open transaction, before
+/// anything is written, so a rollback can never part the rows from the files on disk.
+/// Input: the connection. Output: Ok, or `app_plugins_unavailable`.
+pub(crate) fn outside_transaction(db: &Connection) -> Result<(), Refused> {
+    if db.is_autocommit() {
+        Ok(())
+    } else {
+        Err(refused("app_plugins_unavailable"))
+    }
+}
+
 /// Drops what an older plugin of the owner's left under a name a bundled plugin or a
 /// bundled code plugin now has: its secret bindings with the keys entered for it, its switch
 /// and its trust record. Neither kind ever gets a trust record, so one is the mark of such a
@@ -422,7 +433,8 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
 /// or `app_plugin_changed`, `_refused`, `_name_taken`, `_past_cap` (the listing would not
 /// show it, or would drop a listed plugin for it), `_port_handed_out` (its loopback port
-/// is in the range the engine reads now), or the folder's refusal.
+/// is in the range the engine reads now), or the folder's refusal; inside a caller's open
+/// transaction, `app_plugins_unavailable` before anything is written.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -431,6 +443,7 @@ pub fn add(
     replace: bool,
     now_ms: i64,
 ) -> Result<(), Refused> {
+    outside_transaction(db)?;
     prepare(db, engine)?;
     let bytes = folder::read_source(source).map_err(|_| refused("app_plugin_refused"))?;
     if kernel_common::hash(&bytes) != sha256 {
@@ -557,9 +570,11 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
 /// once those rows are gone, the keys entered for it and its folder (or the .yaml file an
 /// older version left). A failed row write or commit changes nothing. Account keys stay. Under a
 /// bundled plugin's name it removes only what the owner's folder still holds, which the
-/// bundled plugin shadows. Inputs: database, engine facts and name. Output: Ok, or
+/// bundled plugin shadows. Inside a caller's open transaction it is refused before anything
+/// is written. Inputs: database, engine facts and name. Output: Ok, or
 /// `app_plugin_bundled`, `app_plugin_not_found`, the database's or the folder's refusal.
 pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Refused> {
+    outside_transaction(db)?;
     prepare(db, engine)?;
     if is_bundled(name) {
         return if folder::remove(engine.root, name, engine.keys.new_ref)? {
@@ -586,7 +601,7 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     }
     let retired = folder::retire(engine.root, name, engine.keys.new_ref)?;
     let bindings = binding_rows(db, name)?;
-    let outermost = db.is_autocommit();
+    assert!(db.is_autocommit());
     db.execute_batch("SAVEPOINT app_plugin_remove")
         .map_err(sqlite)?;
     let written = [
@@ -598,12 +613,7 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     .try_for_each(|sql| db.execute(sql, [name]).map(|_| ()))
     .and_then(|()| db.execute_batch("RELEASE app_plugin_remove"));
     if let Err(error) = written {
-        let undo = if outermost {
-            "ROLLBACK"
-        } else {
-            "ROLLBACK TO app_plugin_remove; RELEASE app_plugin_remove"
-        };
-        let _ = db.execute_batch(undo);
+        let _ = db.execute_batch("ROLLBACK");
         return Err(sqlite(error));
     }
     for (_, source, reference) in &bindings {
