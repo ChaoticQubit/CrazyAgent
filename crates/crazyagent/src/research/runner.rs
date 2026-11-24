@@ -1871,10 +1871,8 @@ impl ResearchRunner {
         if !(1..=ATTEMPTS_MAX).contains(&job.attempts) {
             return Err(RunError::Invalid("research attempt out of range".into()));
         }
-        for launch in 0..RUNS_PER_ATTEMPT_MAX {
-            let suffix = (launch > 0)
-                .then(|| format!("-{launch}"))
-                .unwrap_or_default();
+        let launches = (1..RUNS_PER_ATTEMPT_MAX).map(|launch| format!("-{launch}"));
+        for suffix in std::iter::once(String::new()).chain(launches) {
             let name = format!("job-{}-{}{suffix}", job.id, job.attempts);
             let worktree = crate::projects_home::state_folder(root)
                 .join("worktrees")

@@ -83,9 +83,11 @@ pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineEr
 fn latest_run(agents: &Directory, job: i64) -> Result<Option<String>, EngineError> {
     for attempt in (1..=crate::research::jobs::ATTEMPTS_MAX).rev() {
         for launch in (0..crate::research::runner::RUNS_PER_ATTEMPT_MAX).rev() {
-            let suffix = (launch > 0)
-                .then(|| format!("-{launch}"))
-                .unwrap_or_default();
+            let suffix = if launch == 0 {
+                String::new()
+            } else {
+                format!("-{launch}")
+            };
             let name = format!("job-{job}-{attempt}{suffix}");
             match rustix::fs::statat(agents, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(_) => return Ok(Some(name)),
