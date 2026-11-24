@@ -72,8 +72,9 @@ fn v6_allowed(ip: Ipv6Addr) -> bool {
 /// Checks the addresses a request may connect to: an IP literal host directly, a host name
 /// through one lookup, every resolved address checked before any is handed on and one refused
 /// address refusing all. Inputs: the parsed URL, its port, the lookup and the refusal.
-/// Output: the `resolve` value `host:port:a,b,...` naming every address in the lookup's order
-/// (IPv6 in brackets) for a host name, none for a literal, the refusal, or the lookup's failure.
+/// Output: the `resolve` value `host:port:a,b,...` naming the first [`ADDRESSES_MAX`]
+/// distinct addresses in the lookup's order (IPv6 in brackets) for a host name, none for a
+/// literal, the refusal, or the lookup's failure.
 pub fn pinned<E>(
     parsed: &url::Url,
     port: u16,
@@ -98,7 +99,17 @@ pub fn pinned<E>(
     if resolved.is_empty() || !resolved.iter().all(|address| address_allowed(*address)) {
         return Err(refused());
     }
-    let addresses: Vec<String> = resolved
+    let mut kept: Vec<IpAddr> = Vec::with_capacity(ADDRESSES_MAX);
+    for address in resolved {
+        if kept.len() == ADDRESSES_MAX {
+            break;
+        }
+        if !kept.contains(&address) {
+            kept.push(address);
+        }
+    }
+    assert!(!kept.is_empty() && kept.len() <= ADDRESSES_MAX);
+    let addresses: Vec<String> = kept
         .iter()
         .map(|address| match address {
             IpAddr::V4(address) => address.to_string(),

@@ -3,6 +3,7 @@ use kernel_security::net::{Egress, RawReply, Sealed};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// The most body bytes one exchange reads, and the size curl may download.
@@ -14,8 +15,12 @@ const REQUEST_TIME: Duration = Duration::from_secs(30);
 /// The longest one host lookup may take before its request is refused.
 pub const LOOKUP_TIME: Duration = Duration::from_secs(5);
 
-/// The most lookups still running past [`LOOKUP_TIME`] before a new lookup is refused.
-pub const LOOKUPS_MAX: usize = 4;
+/// The most lookup threads alive at once, answered or not; one more is refused, so stalled
+/// lookups never pile up threads.
+pub const LOOKUPS_MAX: usize = 8;
+
+/// The lookup threads alive now, counted from before the spawn until each thread ends.
+static LOOKUPS: AtomicUsize = AtomicUsize::new(0);
 
 /// curl's `--max-time`, 25 s: what is left of the 30 s request time after the lookup's 5 s
 /// bound, so the lookup and curl together never pass 30 s.
@@ -229,24 +234,42 @@ fn resolve_with(
 
 /// Runs one host lookup on a thread of its own and waits at most [`LOOKUP_TIME`] for it,
 /// so a stalled resolver never holds a request. A lookup still running then keeps its
-/// thread until the resolver returns, and its answer is dropped. Inputs: the host, port
-/// and lookup. Output: the lookup's answer, or a `TimedOut` failure past the bound.
+/// thread, counted, until the resolver returns; with [`LOOKUPS_MAX`] threads alive a new
+/// lookup is refused at once, with no spawn. Inputs: the host, port and lookup. Output: the
+/// answer, or a `TimedOut` failure past the bound or at the cap.
 pub fn lookup_within(
     host: &str,
     port: u16,
     lookup: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>> + Send + 'static,
 ) -> io::Result<Vec<IpAddr>> {
     assert!(!host.is_empty());
+    if LOOKUPS.fetch_add(1, Ordering::SeqCst) >= LOOKUPS_MAX {
+        LOOKUPS.fetch_sub(1, Ordering::SeqCst);
+        return Err(io::Error::from(io::ErrorKind::TimedOut));
+    }
+    let alive = Alive;
     let host = host.to_owned();
     let (answer, answered) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("host-lookup".to_owned())
         .spawn(move || {
+            let _alive = alive;
             let _ = answer.send(lookup(&host, port));
         })?;
     answered
         .recv_timeout(LOOKUP_TIME)
         .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)))
+}
+
+/// One counted lookup thread: dropping it, when the thread ends, unwinds, or never spawns,
+/// takes it off [`LOOKUPS`].
+struct Alive;
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        let before = LOOKUPS.fetch_sub(1, Ordering::SeqCst);
+        assert!(before > 0 && before <= LOOKUPS_MAX);
+    }
 }
 
 /// Looks a host name up once through the system resolver, with no bound of its own; callers
