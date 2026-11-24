@@ -442,3 +442,87 @@ fn a_port_grant_refuses_the_model_relay_ports() {
         );
     }
 }
+
+/// A folder for one socket row, under `/tmp` so the socket path stays short, with
+/// `parts` below it made in order at the given modes. Input: the parts and their modes.
+/// Output: the guard and the deepest folder.
+#[cfg(unix)]
+fn socket_folders(parts: &[(&str, u32)]) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-gs-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut folder = tmp.path().to_path_buf();
+    for (name, mode) in parts {
+        folder.push(name);
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(*mode)).unwrap();
+    }
+    (tmp, folder)
+}
+
+/// Checks a grant of a socket bound in a folder. Input: the folder. Output: the check.
+#[cfg(unix)]
+fn socket_grant_in(folder: &Path) -> Result<AccessGrant, &'static str> {
+    let path = folder.join("app.sock");
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
+    checked(
+        &HOOKS,
+        &AccessGrant::Socket { path },
+        Path::new("/nonexistent"),
+    )
+}
+
+/// A socket in the user's closed folder is refused when a folder above it is one another
+/// user can write, since that user can move the closed folder away and put their own in
+/// its place.
+#[cfg(unix)]
+#[test]
+fn a_socket_below_a_folder_others_can_write_is_refused() {
+    let (_tmp, folder) = socket_folders(&[("open", 0o777), ("mine", 0o700)]);
+    assert_eq!(socket_grant_in(&folder), Err("grant_socket_owner"));
+}
+
+/// A socket in the user's `0700` folder is refused when an access list on that folder lets
+/// every user add or delete its entries, which the mode bits alone do not show.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_in_a_folder_an_access_list_opens_is_refused() {
+    let (_tmp, folder) = socket_folders(&[("mine", 0o700)]);
+    let added = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow add_file,delete_child"])
+            .arg(&folder),
+    )
+    .unwrap();
+    assert!(added.success());
+    assert_eq!(socket_grant_in(&folder), Err("grant_socket_owner"));
+}
+
+/// A socket in the user's closed folder, or in a sticky folder of the user, with no folder
+/// above it that another user can change, is held as before.
+#[cfg(unix)]
+#[test]
+fn a_socket_in_a_closed_or_sticky_folder_of_the_user_is_held() {
+    for (name, mode) in [("mine", 0o700), ("sticky", 0o1777)] {
+        let (_tmp, folder) = socket_folders(&[(name, mode)]);
+        let real = folder.canonicalize().unwrap().join("app.sock");
+        assert_eq!(
+            socket_grant_in(&folder),
+            Ok(AccessGrant::Socket { path: real }),
+            "{name}"
+        );
+    }
+}
+
+/// A sticky folder holds a socket only when the socket itself is the user's: another user's
+/// socket in root's sticky folder, as `/tmp` is, is refused.
+#[cfg(unix)]
+#[test]
+fn another_user_s_socket_in_root_s_sticky_folder_is_refused() {
+    let me = 501;
+    assert_eq!(
+        ownership(Some((true, me + 1)), (0, 0o041_777), me),
+        Err("grant_socket_owner")
+    );
+}
