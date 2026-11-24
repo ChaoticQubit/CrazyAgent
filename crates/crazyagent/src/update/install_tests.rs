@@ -5,26 +5,27 @@ use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 
 use super::install_release;
-use kernel_processes::update::test_support::{TestResult, joined, response, serve};
+use kernel_processes::update::test_support::{TestResult, at, joined, response, serve};
 use kernel_processes::update::{Asset, Manifest, target};
 
 /// The names in a folder with each regular file's bytes, sorted. Input: the folder.
-/// Output: the names and bytes, none for a folder.
-fn listing(folder: &Path) -> Vec<(String, Option<Vec<u8>>)> {
-    let mut names: Vec<(String, Option<Vec<u8>>)> = std::fs::read_dir(folder)
-        .unwrap()
+/// Output: the names and bytes, none for a folder, or the listing step that failed, naming
+/// its path.
+fn listing(folder: &Path) -> TestResult<Vec<(String, Option<Vec<u8>>)>> {
+    let mut names = at(folder, std::fs::read_dir(folder))?
         .map(|entry| {
-            let entry = entry.unwrap();
-            let bytes = entry
-                .file_type()
-                .unwrap()
-                .is_file()
-                .then(|| std::fs::read(entry.path()).unwrap());
-            (entry.file_name().to_string_lossy().into_owned(), bytes)
+            let entry = at(folder, entry)?;
+            let path = entry.path();
+            let bytes = if at(&path, entry.file_type())?.is_file() {
+                Some(at(&path, std::fs::read(&path))?)
+            } else {
+                None
+            };
+            Ok((entry.file_name().to_string_lossy().into_owned(), bytes))
         })
-        .collect();
+        .collect::<TestResult<Vec<(String, Option<Vec<u8>>)>>>()?;
     names.sort();
-    names
+    Ok(names)
 }
 
 /// A release whose archive matches its checksum but whose signature another key made is
@@ -32,10 +33,12 @@ fn listing(folder: &Path) -> Vec<(String, Option<Vec<u8>>)> {
 /// no staging folder is left, only the lock file a run always leaves.
 #[test]
 fn a_release_signed_by_another_key_installs_nothing() -> TestResult {
-    let install = tempfile::tempdir().unwrap();
-    std::fs::write(install.path().join("crazyagent"), "old engine").unwrap();
-    std::fs::write(install.path().join("crazyagent-runner"), "old runner").unwrap();
-    let before = listing(install.path());
+    let install = tempfile::tempdir()?;
+    let engine = install.path().join("crazyagent");
+    at(&engine, std::fs::write(&engine, "old engine"))?;
+    let runner = install.path().join("crazyagent-runner");
+    at(&runner, std::fs::write(&runner, "old runner"))?;
+    let before = listing(install.path())?;
     let bytes = b"release archive bytes".to_vec();
     let sha: String = Sha256::digest(&bytes)
         .iter()
@@ -77,7 +80,7 @@ fn a_release_signed_by_another_key_installs_nothing() -> TestResult {
         "{}",
         refused.message
     );
-    let mut after = listing(install.path());
+    let mut after = listing(install.path())?;
     after.retain(|(name, _)| name != super::UPDATE_LOCK);
     assert_eq!(after, before);
     Ok(())
