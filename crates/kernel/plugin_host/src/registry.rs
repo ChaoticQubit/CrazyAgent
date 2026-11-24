@@ -584,6 +584,7 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     if !present && !known {
         return Err(refused("app_plugin_not_found"));
     }
+    let retired = folder::retire(engine.root, name, engine.keys.new_ref)?;
     let bindings = binding_rows(db, name)?;
     let outermost = db.is_autocommit();
     db.execute_batch("SAVEPOINT app_plugin_remove")
@@ -608,6 +609,7 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     for (_, source, reference) in &bindings {
         forget_key_file(db, engine, source, reference);
     }
+    retired.finish()?;
     folder::remove(engine.root, name, engine.keys.new_ref)?;
     Ok(())
 }
