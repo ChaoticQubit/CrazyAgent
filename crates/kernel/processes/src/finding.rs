@@ -153,28 +153,27 @@ const INSTALL_ROOTS: [&str; 8] = [
 /// only [`HOMEBREW_FILLED`] counts as installed, whichever install root the path lies under,
 /// since the owner can write a prefix and may keep repositories there.
 const HOMEBREW_PREFIXES: [&str; 3] = ["/usr/local", "/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
-/// The folders Homebrew fills in its prefix: links, kegs and their frameworks, casks, npm's
-/// global packages under `lib`, and Homebrew's own code. `var`, which holds service data, and
-/// every other folder are left out, so a tool there counts as agents' while the set-up
-/// projects cannot be read.
-const HOMEBREW_FILLED: [&str; 12] = [
+/// The folders in a Homebrew prefix that hold the tools it installs: links, kegs and their
+/// frameworks, casks and Homebrew's own code, plus npm's global packages ([`HOMEBREW_NPM`]).
+/// `share`, `etc`, `include`, `var`, the rest of `lib` and every other folder are left out,
+/// so a tool there counts as agents' while the set-up projects cannot be read.
+const HOMEBREW_FILLED: [&str; 8] = [
     "bin",
     "sbin",
-    "lib",
     "Cellar",
     "opt",
     "Caskroom",
     "Homebrew",
     "Library",
     "Frameworks",
-    "share",
-    "include",
-    "etc",
 ];
+/// npm's global packages in a Homebrew prefix, the one installed folder below its `lib`.
+const HOMEBREW_NPM: [&str; 2] = ["lib", "node_modules"];
 
 /// Whether a path below a Homebrew prefix, in the form given or the prefix's macOS data
-/// volume name ([`FindingHooks::data_twin`]), lies in a folder Homebrew fills; a path below
-/// no prefix passes. Inputs: the hooks and the path. Output: the answer.
+/// volume name ([`FindingHooks::data_twin`]), lies in a folder that holds Homebrew's tools
+/// ([`HOMEBREW_FILLED`] or [`HOMEBREW_NPM`]); a path below no prefix passes. Inputs: the
+/// hooks and the path. Output: the answer.
 fn homebrew_filled(hooks: &FindingHooks, path: &Path) -> bool {
     for prefix in HOMEBREW_PREFIXES.iter().map(Path::new) {
         let twin = (hooks.data_twin)(prefix);
@@ -182,12 +181,15 @@ fn homebrew_filled(hooks: &FindingHooks, path: &Path) -> bool {
             .chain(twin.as_deref())
             .find_map(|form| path.strip_prefix(form).ok());
         if let Some(rest) = below {
-            return match rest.components().next() {
-                Some(std::path::Component::Normal(name)) => {
-                    HOMEBREW_FILLED.iter().any(|filled| name == *filled)
-                }
-                _ => false,
-            };
+            let mut names = rest.components().map(|part| match part {
+                std::path::Component::Normal(name) => Some(name),
+                _ => None,
+            });
+            let first = names.next().flatten();
+            if first.is_some_and(|name| name == HOMEBREW_NPM[0]) {
+                return names.next().flatten() == Some(std::ffi::OsStr::new(HOMEBREW_NPM[1]));
+            }
+            return first.is_some_and(|name| HOMEBREW_FILLED.iter().any(|filled| name == *filled));
         }
     }
     true
