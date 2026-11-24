@@ -749,7 +749,7 @@ fn an_archive_unpacks_with_neither_its_owners_nor_its_modes() {
     std::fs::write(source.join("top/tool"), "#!/bin/sh\nexit 0\n").unwrap();
     let archive = root.path().join("tool.tar.gz");
     let status = kernel_processes::spawn_gate::status(
-        Command::new(TAR)
+        Command::new(kernel_processes::install::TAR)
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
@@ -760,7 +760,13 @@ fn an_archive_unpacks_with_neither_its_owners_nor_its_modes() {
     assert!(status.success());
     let out = root.path().join("out");
     private_folder(&out).unwrap();
-    let words = unpack_args(&archive, &out);
+    let recipe = kernel_processes::install::InstallRecipe::NodeArchive {
+        version: crate::setup::node::NODE_VERSION.to_owned(),
+        target: crate::setup::TARGET.to_owned(),
+        sha256: "0".repeat(64),
+    };
+    let [_, unpack] = fetch_steps(&recipe, "file:///unused", None, &archive, &out).unwrap();
+    let words = unpack.args;
     for flag in ["--no-same-owner", "--no-same-permissions"] {
         assert!(
             words.iter().any(|word| word == flag),
@@ -768,7 +774,7 @@ fn an_archive_unpacks_with_neither_its_owners_nor_its_modes() {
         );
     }
     let (unpacked, _) = run(
-        Path::new(TAR),
+        Path::new(kernel_processes::install::TAR),
         &words,
         &[("PATH", OsString::from("/usr/bin:/bin"))],
         root.path(),
