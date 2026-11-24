@@ -182,15 +182,23 @@ fn pinned(value: &toml::Value) -> bool {
     }
 }
 
-/// The `cargo tree` listing of one package of the workspace at `root`, on the host target,
+/// The `cargo tree` listing of one package of the workspace at `root`, on every target,
 /// one crate per line with no prefix, read offline from the lockfile as it stands. Inputs:
 /// the workspace folder and the package name. Output: the listing, or the error naming why
 /// cargo gave none.
 fn path_tree(root: &Path, package: &str) -> std::io::Result<String> {
     let mut tree = Command::new(env!("CARGO"));
-    tree.args(["tree", "-p", package, "-e", "normal,build"])
-        .args(["--prefix", "none", "--offline", "--locked"])
-        .current_dir(root);
+    tree.args([
+        "tree",
+        "-p",
+        package,
+        "-e",
+        "normal,build",
+        "--target",
+        "all",
+    ])
+    .args(["--prefix", "none", "--offline", "--locked"])
+    .current_dir(root);
     let output = kernel_processes::spawn_gate::collected(&mut tree)?;
     if !output.status.success() {
         return Err(std::io::Error::other(
@@ -220,7 +228,7 @@ fn outside(listed: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `cargo tree` for kernel/sandbox on the host target, which the batch runs on each farm
+/// `cargo tree` for kernel/sandbox on every target, which the batch runs on each farm
 /// runner, names only the allowlisted path crates (kernel common, processes, security and
 /// storage and the platform crates), never the engine, the SDK or the bus gateway; and its
 /// own manifest pins every third-party crate exactly.
