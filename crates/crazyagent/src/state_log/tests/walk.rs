@@ -1,31 +1,38 @@
 /// Every source file outside tests, as its path under `src` with `/` between parts and its
 /// code ([`code_only`]). A file or folder whose name ends in `tests` or `tests.rs` is left
-/// out. Output: the files.
-pub(super) fn sources() -> Vec<(String, String)> {
+/// out, and a link to a folder is not walked. Input: the source folder. Output: the files;
+/// a folder, entry or file it cannot read panics naming its path.
+pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
     const ENTRIES_MAX: usize = 100_000;
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut folders = vec![src.clone()];
+    let mut folders = vec![src.to_path_buf()];
     let mut found = Vec::new();
     let mut seen = 0;
     while let Some(folder) = folders.pop() {
-        for entry in std::fs::read_dir(&folder).unwrap() {
+        let entries =
+            std::fs::read_dir(&folder).unwrap_or_else(|error| panic!("read {folder:?}: {error}"));
+        for entry in entries {
             seen += 1;
             assert!(seen <= ENTRIES_MAX);
-            let path = entry.unwrap().path();
+            let entry = entry.unwrap_or_else(|error| panic!("entry in {folder:?}: {error}"));
+            let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             if name.ends_with("tests") || name.ends_with("tests.rs") {
                 continue;
             }
-            if path.is_dir() {
+            let kind = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
+            if kind.is_dir() {
                 folders.push(path);
                 continue;
             }
             if !name.ends_with(".rs") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).unwrap();
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {path:?}: {error}"));
             let parts: Vec<String> = path
-                .strip_prefix(&src)
+                .strip_prefix(src)
                 .unwrap()
                 .components()
                 .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -181,9 +188,9 @@ pub(super) fn draft_kinds(code: &str) -> Vec<Option<String>> {
     kinds
 }
 
-/// The kind one draft literal names: the code after its `kind:` field with the spaces
-/// removed, or None for a `kind` shorthand or no kind field. Input: the code right after the
-/// literal's `{`. Output: the kind.
+/// The kind one draft literal names: the code after its own `kind:` field with the spaces
+/// removed, or None for a `kind` shorthand or no kind field. Fields split only at commas
+/// outside nested values. Input: the code right after the literal's `{`. Output: the kind.
 fn literal_kind(body: &str) -> Option<String> {
     let mut depth = 0_usize;
     let mut field = String::new();
@@ -191,7 +198,7 @@ fn literal_kind(body: &str) -> Option<String> {
         match c {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' if depth > 0 => depth -= 1,
-            ',' | '}' => {
+            ',' | '}' if depth == 0 => {
                 let value = field
                     .trim()
                     .strip_prefix("kind")
@@ -214,20 +221,27 @@ fn literal_kind(body: &str) -> Option<String> {
     None
 }
 
-/// Whether `code` renames the log's draft (`Draft as`) or re-exports it with a `pub use`,
-/// which would let another file build drafts under a name [`draft_kinds`] does not read.
-/// Input: code ([`code_only`]). Output: the answer.
+/// Whether `code` renames the log's draft (`Draft as`), re-exports it or the whole log
+/// module with a `pub use`, or names it in a type alias, any of which would let a file build
+/// drafts under a name [`draft_kinds`] does not read. Input: code ([`code_only`]). Output:
+/// the answer.
 pub(super) fn hides_draft(code: &str) -> bool {
-    word_starts(code, "use").any(|at| {
-        let statement = code[at..].split(';').next().unwrap_or_default();
-        let flat = statement.split_whitespace().collect::<Vec<_>>().join(" ");
-        let before = code[..at].trim_end();
-        let before = before
-            .strip_suffix(')')
-            .and_then(|rest| rest.rsplit_once('('))
-            .map_or(before, |(head, _)| head.trim_end());
-        has_word(statement, "Draft") && (flat.contains("Draft as ") || before.ends_with("pub"))
-    })
+    let aliased = word_starts(code, "type")
+        .any(|at| has_word(code[at..].split(';').next().unwrap_or_default(), "Draft"));
+    aliased
+        || word_starts(code, "use").any(|at| {
+            let statement = code[at..].split(';').next().unwrap_or_default();
+            let flat = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+            let before = code[..at].trim_end();
+            let before = before
+                .strip_suffix(')')
+                .and_then(|rest| rest.rsplit_once('('))
+                .map_or(before, |(head, _)| head.trim_end());
+            let public = before.ends_with("pub");
+            let glob = flat.ends_with('*') && has_word(statement, "state_log");
+            (has_word(statement, "Draft") && (flat.contains("Draft as ") || public))
+                || (glob && public)
+        })
 }
 
 /// V250-L1-N1-WALK-SHAPES: the draft scan reads a kind on the line after its field, refuses
@@ -269,4 +283,52 @@ fn the_draft_scan_reads_every_literal_shape() {
     assert!(!hides_draft(&code_only(
         "use crate::state_log::{Aggregate as Kind, Appender, Draft};"
     )));
+}
+
+/// A file that re-exports the whole log module, or names the log's draft through a type
+/// alias, hides its drafts from the scan just as a renamed import does; a private glob import
+/// and a type that does not name the draft hide nothing.
+#[test]
+fn a_glob_re_export_or_a_type_alias_hides_the_draft() {
+    assert!(hides_draft(&code_only("pub use crate::state_log::*;")));
+    assert!(hides_draft(&code_only(
+        "pub(crate) use crate::state_log::*;"
+    )));
+    assert!(hides_draft(&code_only("type D = Draft;")));
+    assert!(hides_draft(&code_only(
+        "type Entry<'a> = state_log::Draft<'a>;"
+    )));
+    assert!(!hides_draft(&code_only("use crate::state_log::*;")));
+    assert!(!hides_draft(&code_only("type Kind = &'static str;")));
+}
+
+/// A comma inside a value nested in the draft literal does not end the field, so the
+/// draft's own kind is read and a `kind` field of a nested literal is not.
+#[test]
+fn a_comma_inside_a_nested_value_does_not_end_the_kind() {
+    let code = code_only(concat!(
+        "log.append(&Draft { body: &to_vec(&Note { id: 1, kind: INNER, n: 2 })?, ",
+        "kind: OUTER, schema: 1 });\n",
+        "log.append(&Draft { kind: pick(A, B), schema: 1 });\n",
+    ));
+    assert_eq!(
+        draft_kinds(&code),
+        [Some("OUTER".to_owned()), Some("pick(A,B)".to_owned())]
+    );
+}
+
+/// A link to a folder under the source folder is not walked, so no file is read twice under
+/// two names.
+#[cfg(unix)]
+#[test]
+fn a_folder_link_under_the_sources_is_not_walked() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("real")).unwrap();
+    std::fs::write(src.join("real/a.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink(src.join("real"), src.join("linked")).unwrap();
+
+    let names: Vec<String> = sources(&src).into_iter().map(|(name, _)| name).collect();
+
+    assert_eq!(names, ["real/a.rs"]);
 }
