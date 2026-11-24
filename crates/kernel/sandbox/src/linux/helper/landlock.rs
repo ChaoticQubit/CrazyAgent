@@ -1,5 +1,5 @@
 use super::*;
-use crate::linux::places::{fixed_place, granted_place};
+use crate::linux::places::{fixed_place, granted_place, held_roots};
 use ::landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, RestrictionStatus, Ruleset,
     RulesetAttr, RulesetCreatedAttr, RulesetError, Scope, make_bitflags,
@@ -447,17 +447,24 @@ pub(super) fn refused_sockets(tcp_only: bool, plain_tcp: bool) -> Result<Vec<Sec
 /// Starts a harness bubblewrap launched, after a private mount tree if it hides folders ([`cut`]),
 /// behind the socket filter a Landlock agent with a network limit gets ([`refuse_sockets`] with
 /// `tcp_only`): no Unix-domain socket, no io_uring ring, no family but TCP and routing netlink, so
-/// no AF_VSOCK leaves the closed network. Inputs: the harness and the covers. Output: 3 when the
-/// cut or the filter fails, 126 when the harness cannot start.
+/// no AF_VSOCK leaves the closed network. Each bound grant root is checked first to be the place
+/// the engine opened at wrap ([`held_roots`]). Inputs: the harness, the covers and the bound
+/// roots. Output: 3 when the cut, the check or the filter fails, 126 when the harness cannot
+/// start.
 pub(super) fn filtered(
     program: &Path,
     args: Vec<OsString>,
     covers: Option<&[PathBuf]>,
+    bound: &[Bound],
 ) -> ExitCode {
     if let Some(covers) = covers
         && let Err(reason) = cut(covers)
     {
         eprintln!("crazyagent-landlock: {HIDDEN_MOUNTS_NOT_PRIVATE}: {reason}");
+        return ExitCode::from(3);
+    }
+    if let Err(reason) = held_roots(bound) {
+        eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
     if let Err(reason) = refuse_sockets(true, false) {

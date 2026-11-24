@@ -76,11 +76,62 @@ fn the_socket_filter_request_takes_no_policy_and_names_the_harness() {
             program: PathBuf::from("/bin/true"),
             args: vec![OsString::from("-x")],
             cut: None,
+            bound: Vec::new(),
         })
     );
     assert!(parse(&[FILTER_SOCKETS, READ, "/usr", "--", "/bin/true"]).is_err());
     assert!(parse(&[FILTER_SOCKETS, "--", "bin/true"]).is_err());
     assert!(parse(&[PROBE, FILTER_SOCKETS]).is_err());
+}
+
+#[test]
+fn the_socket_filter_request_carries_each_bound_root_and_no_other_request_does() {
+    let parse = |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+    assert_eq!(
+        parse(&[
+            FILTER_SOCKETS,
+            BOUND,
+            "/w/home",
+            "7",
+            "9",
+            "--",
+            "/bin/true"
+        ]),
+        Ok(HelperRequest::Filter {
+            program: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            cut: None,
+            bound: vec![crate::linux::places::Bound {
+                root: PathBuf::from("/w/home"),
+                dev: 7,
+                ino: 9,
+            }],
+        })
+    );
+    for refused in [
+        &[
+            BOUND,
+            "/w/home",
+            "7",
+            "9",
+            FILTER_SOCKETS,
+            "--",
+            "/bin/true",
+        ][..],
+        &[FILTER_SOCKETS, BOUND, "w/home", "7", "9", "--", "/bin/true"],
+        &[FILTER_SOCKETS, BOUND, "/w/home", "7", "--", "/bin/true"],
+        &[READ, "/usr", BOUND, "/w/home", "7", "9", "--", "/bin/true"],
+        &[PROBE, BOUND, "/w/home", "7", "9"],
+    ] {
+        assert!(parse(refused).is_err(), "{refused:?}");
+    }
+    let mut many = vec![FILTER_SOCKETS.to_string()];
+    for _ in 0..=HELPER_PATHS_MAX {
+        many.extend([BOUND.into(), "/w".into(), "1".into(), "2".into()]);
+    }
+    many.extend(["--".into(), "/bin/true".into()]);
+    let refused = HelperRequest::parse(many.iter().map(OsString::from).collect()).unwrap_err();
+    assert!(refused.contains("bound roots"), "{refused}");
 }
 
 #[test]
@@ -412,6 +463,7 @@ fn a_private_tree_comes_with_a_nested_run_a_probe_or_the_filter_and_absolute_cov
             program: PathBuf::from("/bin/true"),
             args: Vec::new(),
             cut: covers,
+            bound: Vec::new(),
         })
     );
     for refused in [

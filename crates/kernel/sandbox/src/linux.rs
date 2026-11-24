@@ -6,4 +6,4 @@ pub mod helper;
 pub mod launch;
 /// How the engine and the helper open a granted folder part by part without following a
 /// link, and which fixed system places keep following theirs.
-pub(crate) mod places;
+pub mod places;

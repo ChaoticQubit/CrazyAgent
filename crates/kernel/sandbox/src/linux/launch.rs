@@ -1,5 +1,6 @@
 use crate::error::{SandboxError, invalid};
 use crate::hidden_paths::HIDDEN_MAX;
+use crate::linux::places::{Bound, bound_args, bound_roots};
 use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::clean_absolute;
 use crate::ports::BRIDGE_PORT_MIN;
@@ -646,7 +647,9 @@ impl LinuxSandbox {
                 )
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
-                bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
+                let bound = bound_roots(grants.read.iter().chain(&grants.write))
+                    .map_err(SandboxError::Unavailable)?;
+                bwrap_command(bwrap, helper, &grants, &bound, cwd, self.sandbox.network())
             }
         };
         let mut base = vec![
@@ -1176,12 +1179,15 @@ pub(crate) fn nest_command(
 /// The bubblewrap command for a closed agent up to its harness: its own namespaces, the system
 /// folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, an empty read-only
 /// folder over each existing hidden folder, then the helper read-only for the socket filter
-/// ([`FILTER_SOCKETS`]), with a private mount tree first when it hides folders ([`cut`]). Inputs:
-/// bwrap, the helper, the grants, the working folder and the network. Output: the command.
+/// ([`FILTER_SOCKETS`]) and the check of each bound grant root
+/// ([`crate::linux::places::held_roots`]), with a private mount tree first when it hides folders
+/// ([`cut`]). Inputs: bwrap, the helper, the grants, the identity of each read then write grant
+/// root, the working folder and the network. Output: the command.
 fn bwrap_command(
     bwrap: &Path,
     helper: &Path,
     grants: &Grants,
+    bound: &[Bound],
     cwd: &Path,
     network: &SandboxNetwork,
 ) -> Command {
@@ -1232,6 +1238,13 @@ fn bwrap_command(
     command.arg("--ro-bind").arg(helper).arg(helper);
     command.arg("--chdir").arg(cwd);
     command.arg("--").arg(helper).arg(FILTER_SOCKETS);
+    assert!(
+        bound
+            .iter()
+            .map(|one| &one.root)
+            .eq(grants.read.iter().chain(&grants.write))
+    );
+    command.args(bound_args(bound));
     command.args(cut_args(private_tree(&grants.hidden)));
     command
 }
