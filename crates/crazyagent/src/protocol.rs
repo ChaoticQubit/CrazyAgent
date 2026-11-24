@@ -54,7 +54,7 @@ pub(crate) fn windows_device(name: &str) -> bool {
         .any(|device| stem.eq_ignore_ascii_case(device))
 }
 
-fn validate_identity(value: &str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_identity(value: &str) -> Result<(), ProtocolError> {
     if value.is_empty()
         || value.len() > 128
         || !value

@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod perf_kit;
+#[cfg(test)]
+mod perf_tests;
 pub mod accounts;
 pub mod activity;
 pub mod adapters;
