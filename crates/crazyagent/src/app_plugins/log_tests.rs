@@ -544,6 +544,26 @@ fn a_removal_whose_commit_fails_puts_the_folder_back() {
     assert_eq!(case.tables(), tables);
 }
 
+/// A capture whose work panics after a removal kept its folder step puts the folder back
+/// as the step is dropped, and the rows roll back with the transaction.
+#[test]
+fn a_folder_step_dropped_by_a_panicking_capture_puts_the_folder_back() {
+    let case = case(true);
+    case.add("near", NEAR, false).unwrap();
+    let tables = case.tables();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        logged(&case.db, &case.root, |db| -> Result<(), EngineError> {
+            kernel_plugin_host::registry::remove(db, &engine(&case.root), "near")
+                .map_err(|refused| EngineError(refused.code.into()))?;
+            panic!("the work stops after the removal");
+        })
+    }));
+    assert!(panicked.is_err());
+    assert!(case.db.is_autocommit());
+    assert_eq!(case.plugin_entries(), ["near"]);
+    assert_eq!(case.tables(), tables);
+}
+
 /// A replace whose capture rolls back keeps the old folder under the plugin name with the
 /// old trust row, and leaves no staged or retired folder.
 #[test]
