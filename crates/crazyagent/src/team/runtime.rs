@@ -13828,15 +13828,7 @@ fn turn(
             }
             Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
             Ok(Some(LaunchEvent::TurnFinished { success })) => {
-                break if success {
-                    TurnEnd::Success
-                } else if interrupted {
-                    TurnEnd::Interrupted
-                } else if limited {
-                    TurnEnd::RateLimited
-                } else {
-                    TurnEnd::Failed
-                };
+                break turn_end::launched_end(limited, interrupted, success);
             }
             Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
             Err(problem) => {
@@ -14700,6 +14692,9 @@ mod narrowing;
 mod spawn_ledger;
 
 mod task_prompt_lines;
+#[path = "runtime/turn_end.rs"]
+mod turn_end;
+
 mod teammates;
 
 /// Who a test's agent is to a leftover hold: no project, so a hold it leaves ends its

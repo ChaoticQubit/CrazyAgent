@@ -51,7 +51,7 @@ mod stop_race_tests;
 
 pub(super) const PROJECT: &str = "team-panes";
 
-const ENDPOINT: &str = "local-a";
+pub(super) const ENDPOINT: &str = "local-a";
 
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Plan the page"}}"#;
 
@@ -8560,7 +8560,7 @@ done
 /// under `limits`. Inputs: the fixture, its terminal host, the script and the limits.
 /// Output: the runtime.
 #[cfg(target_os = "macos")]
-fn limited_runtime(
+pub(super) fn limited_runtime(
     fixture: &Fixture,
     host: &Arc<dyn Host>,
     script: &str,
