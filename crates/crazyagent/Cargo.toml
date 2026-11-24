@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [features]
 clean-mac-gate = []
 owner-trace = []
+test-support = []
 
 [dependencies]
 crazyagent-bus-gateway = { path = "../kernel/bus_gateway" }

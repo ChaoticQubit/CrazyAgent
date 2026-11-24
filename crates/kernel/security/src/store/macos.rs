@@ -261,13 +261,8 @@ fn run(
         }
     }
     let stdout = child.stdout.take().ok_or_else(unavailable)?;
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout
-            .take(OUTPUT_BYTES_MAX as u64 + 1)
-            .read_to_end(&mut bytes);
-        (read, bytes)
-    });
+    let reader =
+        std::thread::spawn(move || crate::read_limited::read_limited(stdout, OUTPUT_BYTES_MAX));
     let deadline = Instant::now() + STEP_TIME;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|_| unavailable())? {
