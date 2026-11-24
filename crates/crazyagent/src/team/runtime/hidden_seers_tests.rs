@@ -212,3 +212,68 @@ fn a_pane_taken_over_after_a_folder_was_hidden_is_listed_by_what_its_record_hid(
         host.close(&[]).unwrap();
     }
 }
+
+/// A project whose only agent is a seer the engine stopped and whose process ended is not
+/// stepped on its own; the owner's Restart them makes it stepped until the ask is served,
+/// and once served the project rests again.
+#[test]
+fn the_owner_restart_steps_a_project_whose_only_seer_ended() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let keys = fixture.setup.project_folder().join("secrets").join("keys");
+    let before = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let (mut worker, _orders) = held_worker(&project, AgentRole::Sub);
+    worker.hidden = Some(Vec::new());
+    team.workers.insert(before, worker);
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    team.workers.clear();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(
+        !team.active_projects().unwrap().contains(&project),
+        "an ended seer alone does not wake the project"
+    );
+
+    assert_eq!(restart_them(&fixture), crate::protocol::Outcome::Applied);
+    assert!(
+        team.active_projects().unwrap().contains(&project),
+        "the owner's Restart them wakes the project"
+    );
+    team.restart_seers(&fixture.setup).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert_eq!(
+        team.restarts.remove(&before),
+        Some((project.clone(), Restart::Hidden))
+    );
+    assert!(
+        !team.active_projects().unwrap().contains(&project),
+        "a served ask no longer wakes the project"
+    );
+}
+
+/// A restart ask for an agent the engine holds nothing of, as after the engine restarted,
+/// wakes the project once, and the hidden check of that one step drops it, so the project
+/// rests again.
+#[test]
+fn a_stale_restart_ask_leaves_the_project_resting_after_one_step() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let ghost = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    crate::sandbox::access_store::hidden::set_seers(
+        &fixture.connection,
+        PROJECT,
+        &BTreeSet::from([ghost]),
+    )
+    .unwrap();
+    assert_eq!(restart_them(&fixture), crate::protocol::Outcome::Applied);
+    assert!(team.active_projects().unwrap().contains(&project));
+    team.restart_seers(&fixture.setup).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(team.restarts.is_empty());
+    assert!(
+        !team.active_projects().unwrap().contains(&project),
+        "a stale ask is dropped by the step it woke"
+    );
+}
