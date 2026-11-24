@@ -3,7 +3,7 @@ import { bridgeCall, errorMessage, STORAGE_COPY, withCode } from "./engine-clien
 import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, HarnessSubAgents, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 import type { AccountCheck, AccountDraft, AccountView, ProviderEntry } from "./api-account-types";
-import { CHANGE } from "./api-change-copy";
+import { CHANGE, MODEL_ACCESS_CHANGE } from "./api-change-copy";
 
 export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
@@ -378,18 +378,6 @@ export function dropUnconfirmed(): Promise<Result<ConnectionStatus>> {
 
 /** Pauses before each automatic check of an unconfirmed change, in milliseconds. */
 export const UNCONFIRMED_CHECKS_MS: readonly number[] = [2000, 4000, 8000, 16000, 30000];
-
-const MODEL_ACCESS_CHANGE: Record<ModelAccessEdit["kind"], string> = {
-  add_account: "adding an account",
-  remove_account: "deleting an account",
-  create_connection: "adding a connection",
-  replace_connection: "changing a connection",
-  remove_connection: "removing a connection",
-  create_pool: "creating a pool",
-  replace_pool: "changing a pool",
-  remove_pool: "deleting a pool",
-  assign_project_pool: "changing a project's pool",
-};
 
 /** Names a kept change in plain words. Input: the change. Output: a lower-case phrase, the
  * broader phrase for an access edit the window has no name for, and "your change" for a kind

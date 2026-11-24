@@ -9,7 +9,7 @@
   "apps/desktop/src-tauri/tests/native_auth.rs": 1564,
   "apps/desktop/src/api-process.ts": 644,
   "apps/desktop/src/api-projects.ts": 1024,
-  "apps/desktop/src/api.ts": 1691,
+  "apps/desktop/src/api.ts": 1680,
   "apps/desktop/src/engine-client.ts": 2991,
   "apps/desktop/src/screens/intake/intake.ts": 1231,
   "apps/desktop/src/screens/metrics/view.tsx": 670,
