@@ -415,7 +415,7 @@ impl ProjectPage {
                     home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
-                    network: crate::sandbox::policy::AgentNetwork::default(),
+                    network: kernel_sandbox::policy::AgentNetwork::default(),
                     apply_changes: Default::default(),
                     grants: Vec::new(),
                 },

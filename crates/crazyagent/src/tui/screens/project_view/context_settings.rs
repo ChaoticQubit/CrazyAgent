@@ -496,8 +496,8 @@ fn runs_lines(screen: &ProjectScreen, width: usize, look: &Look) -> Vec<Row> {
 
 /// The words the hidden folders list names one kind of engine run by (SA-VID14-R2-N2).
 /// Takes the kind. Returns the words.
-fn run_words(kind: crate::sandbox::hidden_paths::RunKind) -> &'static str {
-    use crate::sandbox::hidden_paths::RunKind;
+fn run_words(kind: kernel_sandbox::hidden_paths::RunKind) -> &'static str {
+    use kernel_sandbox::hidden_paths::RunKind;
     match kind {
         RunKind::Master => "master turn",
         RunKind::Research => "research job",

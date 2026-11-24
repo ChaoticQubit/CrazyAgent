@@ -1347,7 +1347,7 @@ fn an_open_network_agent_listens_on_no_owner_model_or_proxy_port() {
     ) {
         Err(SandboxError::Unavailable(reason)) => assert_eq!(
             reason,
-            crazyagent::sandbox::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK
+            kernel_sandbox::profile::consts::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK
         ),
         other => panic!("bubblewrap must refuse an open network: {other:?}"),
     }
@@ -4781,7 +4781,7 @@ fn a_full_access_launch_on_linux_is_refused_and_builds_nothing() {
     assert!(matches!(
         full.wrap(&Command::new("/usr/bin/true")),
         Err(SandboxError::Unavailable(reason))
-            if reason == crazyagent::sandbox::FULL_ACCESS_NEEDS_MACOS
+            if reason == kernel_sandbox::profile::consts::FULL_ACCESS_NEEDS_MACOS
     ));
     let request = linux_launch(&case, LaunchBoundary::Installed(Arc::new(full)), &case.home);
     assert!(request.boundary.is_unconfined());

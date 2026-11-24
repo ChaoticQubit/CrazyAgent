@@ -2,7 +2,7 @@ use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use crate::research::jobs::RUN_AGAIN;
-use crate::sandbox::policy::LevelView;
+use kernel_sandbox::policy::LevelView;
 use retry::retry_research;
 pub use retry::{RESEARCH_UNAVAILABLE_HERE, retryable};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -444,14 +444,14 @@ pub struct ReadPaths {
 /// The folders a project's agents are kept out of in saved order, with the version the
 /// owner's screen sends back when it changes them, and the kinds of engine runs still
 /// running that started before one of them was hidden (SA-VID14-R2-N2), and whether this
-/// system's boundary cannot hold hidden folders at all ([`crate::sandbox::HIDDEN_UNHELD`]).
+/// system's boundary cannot hold hidden folders at all ([`kernel_sandbox::profile::consts::HIDDEN_UNHELD`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiddenPaths {
     pub paths: Vec<String>,
     pub version: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runs: Vec<crate::sandbox::hidden_paths::RunKind>,
+    pub runs: Vec<kernel_sandbox::hidden_paths::RunKind>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unavailable: bool,
 }
@@ -816,7 +816,7 @@ pub enum SetupView {
     Context(ProjectContext),
     ReadPaths(ReadPaths),
     HiddenPaths(HiddenPaths),
-    AgentPolicy(crate::sandbox::policy::PolicyView),
+    AgentPolicy(kernel_sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -903,7 +903,7 @@ pub enum SetupAction {
     SetAgentPolicy {
         project_id: ProjectId,
         version: u64,
-        policy: crate::sandbox::policy::AgentPolicy,
+        policy: kernel_sandbox::policy::AgentPolicy,
     },
 }
 
@@ -948,7 +948,7 @@ impl SetupAction {
                 Ok(())
             }
             Self::SetReadPaths { paths, .. } => {
-                if paths.len() > crate::sandbox::extra_paths::EXTRA_PATHS_MAX
+                if paths.len() > kernel_sandbox::extra_paths::EXTRA_PATHS_MAX
                     || paths
                         .iter()
                         .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
@@ -958,7 +958,7 @@ impl SetupAction {
                 Ok(())
             }
             Self::SetHiddenPaths { paths, .. } => {
-                if paths.len() > crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+                if paths.len() > kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX
                     || paths
                         .iter()
                         .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
@@ -1129,7 +1129,7 @@ pub fn catalog(
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
-        agent_access: LevelView::all(calls),
+        agent_access: LevelView::all(&crate::sandbox::POLICY_HOOKS, calls),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)
@@ -2659,7 +2659,7 @@ pub(crate) fn forget_removed(db: &Connection, tables: &[&str]) -> Result<usize, 
 }
 
 /// Saves a project's extra read-only folders once each passes
-/// [`crate::sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
+/// [`kernel_sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
 /// Takes the transaction, project, the version the screen showed and the typed paths.
 /// Returns Applied, or a plain rejection for an unknown project, a refused path or
 /// `stale_revision` when the folders changed since.
@@ -2682,7 +2682,11 @@ fn set_read_paths(
     let Some(data_root) = tx.path().map(Path::new).and_then(Path::parent) else {
         return Ok(rejected("read_path_refused"));
     };
-    let checked = match crate::sandbox::extra_paths::checked_all(paths, data_root) {
+    let checked = match kernel_sandbox::extra_paths::checked_all(
+        &crate::sandbox::ACCESS_HOOKS,
+        paths,
+        data_root,
+    ) {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
@@ -2690,14 +2694,14 @@ fn set_read_paths(
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    crate::sandbox::access_store::read::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
 
-/// Saves a project's hidden folders once each passes [`crate::sandbox::hidden_paths::checked`]
+/// Saves a project's hidden folders once each passes [`kernel_sandbox::hidden_paths::checked`]
 /// against the project's folder and the screen showed the current ones. Takes the transaction,
 /// project, the version shown and the typed paths. Returns Applied, or a plain rejection for an
-/// unknown project, a refused path, any folder where [`crate::sandbox::HIDDEN_UNHELD`], or
+/// unknown project, a refused path, any folder where [`kernel_sandbox::profile::consts::HIDDEN_UNHELD`], or
 /// `stale_revision` when the folders changed since, so a stale screen never un-hides a folder.
 fn set_hidden_paths(
     tx: &Transaction<'_>,
@@ -2708,22 +2712,24 @@ fn set_hidden_paths(
     let Some(setup) = load_setup(tx, project_id)? else {
         return Ok(rejected("invalid_project"));
     };
-    if crate::sandbox::HIDDEN_UNHELD && !paths.is_empty() {
+    if kernel_sandbox::profile::consts::HIDDEN_UNHELD && !paths.is_empty() {
         return Ok(rejected("hidden_paths_need_macos"));
     }
     let folder = setup.project_folder();
-    let checked = match crate::sandbox::hidden_paths::checked_all(paths, &folder) {
+    let checked = match kernel_sandbox::hidden_paths::checked_all(paths, &folder) {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
-    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
+    if let Err(code) =
+        kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, &folder, &checked)
+    {
         return Ok(rejected(code));
     }
     let item = crate::storage::versioned::hidden_paths_item(project_id);
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    crate::sandbox::access_store::hidden::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
 
@@ -2737,7 +2743,7 @@ fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     version: u64,
-    policy: &crate::sandbox::policy::AgentPolicy,
+    policy: &kernel_sandbox::policy::AgentPolicy,
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
         .query_row(
@@ -2755,22 +2761,22 @@ fn set_agent_policy(
     if let Some((_, code)) = policy.access.refusal() {
         return Ok(rejected(code));
     }
-    let before = crate::sandbox::policy::load(tx, project_id.as_str())
+    let before = crate::sandbox::policy_store::load(tx, project_id.as_str())
         .map(|saved| saved.grants)
         .unwrap_or_default();
-    let data = crate::sandbox::grants::data_root(tx).unwrap_or_default();
+    let data = crate::sandbox::grants_store::data_root(tx).unwrap_or_default();
     let mut kept = Vec::with_capacity(policy.grants.len());
     for grant in &policy.grants {
         if before.contains(grant) {
             kept.push(grant.clone());
             continue;
         }
-        match crate::sandbox::grants::checked(grant, &data) {
+        match kernel_sandbox::grants::checked(&crate::sandbox::GRANT_HOOKS, grant, &data) {
             Ok(grant) => kept.push(grant),
             Err(code) => return Ok(rejected(code)),
         }
     }
-    let policy = crate::sandbox::policy::AgentPolicy {
+    let policy = kernel_sandbox::policy::AgentPolicy {
         grants: kept,
         ..policy.clone()
     };
@@ -2781,8 +2787,8 @@ fn set_agent_policy(
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
-    crate::sandbox::grants::log_changes(
+    crate::sandbox::policy_store::save(tx, project_id.as_str(), &policy).map_err(error)?;
+    crate::sandbox::grants_store::log_changes(
         tx,
         project_id.as_str(),
         &before,
@@ -2842,7 +2848,7 @@ fn remove(
         )
         .map_err(error)?;
     }
-    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::sandbox::access_store::read::save(tx, project_id.as_str(), &[]).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),
@@ -3179,16 +3185,16 @@ pub(crate) fn record_new(
     if outcome == Outcome::Applied {
         crate::storage::reinstall::forget(tx, &staged.folder)?;
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
-        if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
-            let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
-            let policy = crate::sandbox::policy::AgentPolicy {
-                toolchains: crate::sandbox::policy::recorded_toolchains(
+        if !crate::sandbox::policy_store::saved(tx, project_id.as_str()).map_err(error)? {
+            let homes = kernel_sandbox::toolchains::ToolHomes::owner().ok();
+            let policy = kernel_sandbox::policy::AgentPolicy {
+                toolchains: kernel_sandbox::policy::recorded_toolchains(
                     &staged.staging,
                     homes.as_ref(),
                 ),
                 ..Default::default()
             };
-            crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+            crate::sandbox::policy_store::save(tx, project_id.as_str(), &policy).map_err(error)?;
         }
         let state = crate::projects_home::state_folder(&staged.staging);
         assert_ne!(state, staged.staging);

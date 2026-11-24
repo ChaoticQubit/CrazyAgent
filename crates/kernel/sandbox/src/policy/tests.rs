@@ -1,8 +1,15 @@
 use super::*;
 
+const HOOKS: PolicyHooks = PolicyHooks {
+    linux_host: || None,
+    linux_host_kept: || None,
+    linux_other_git: |_| false,
+    local_folders: |_| Vec::new(),
+};
+
 #[test]
 fn no_network_grants_a_model_only_on_loopback_and_never_a_host_port() {
-    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    use crate::net::{SandboxNetwork, SandboxRemote};
     assert_eq!(
         AgentNetwork::None.sandbox(Some(SandboxRemote::AnyHost(443))),
         SandboxNetwork::Only(vec![])
@@ -44,7 +51,14 @@ fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_
     );
     let saved = serde_json::to_string(&own).unwrap();
     assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
-    let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
+    let view = own.view(
+        &HOOKS,
+        folder.path(),
+        &ToolHomes::at(folder.path()),
+        1,
+        None,
+        true,
+    );
     assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
     let listed: Vec<(&str, &str)> = view
         .tool_caches
@@ -57,54 +71,6 @@ fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_
             ("shared", "Shared by agents with the same access"),
             ("per_agent", "One per agent")
         ]
-    );
-}
-
-/// DEC-173 add.1: a policy saved before the agent home caches setting reads Clear when
-/// access is raised, each choice survives a save, a load and a pin, and the view lists
-/// every choice with the words the owner reads.
-#[test]
-fn a_policy_saved_before_the_home_caches_setting_clears_when_access_is_raised() {
-    let old: AgentPolicy =
-        serde_json::from_str(r#"{"access":"sandboxed","toolchains":[]}"#).unwrap();
-    assert_eq!(old.home_caches, HomeCaches::ClearWhenRaised);
-    let connection = Connection::open_in_memory().unwrap();
-    let folder = tempfile::tempdir().unwrap();
-    for choice in HomeCaches::ALL {
-        let policy = AgentPolicy {
-            home_caches: choice,
-            ..AgentPolicy::default()
-        };
-        let body = serde_json::to_string(&policy).unwrap();
-        assert!(
-            body.contains(&format!(r#""home_caches":"{}""#, choice.id())),
-            "{body}"
-        );
-        save(&connection, "p", &policy).unwrap();
-        let read = load(&connection, "p").unwrap();
-        assert_eq!(read.home_caches, choice);
-        assert_eq!(read.pinned(folder.path()).home_caches, choice);
-        let view = read.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
-        assert_eq!(view.home_caches, choice);
-        let listed: Vec<(&str, &str)> = view
-            .home_cache_choices
-            .iter()
-            .map(|row| (row.choice.id(), row.label.as_str()))
-            .collect();
-        assert_eq!(
-            listed,
-            [
-                ("keep", "Keep"),
-                ("clear_when_raised", "Clear when access is raised"),
-                ("clear_every_launch", "Clear every launch")
-            ]
-        );
-    }
-    assert!(
-        serde_json::from_str::<AgentPolicy>(
-            r#"{"access":"sandboxed","toolchains":[],"home_caches":"clear_sometimes"}"#
-        )
-        .is_err()
     );
 }
 
@@ -132,7 +98,14 @@ fn a_policy_saved_before_the_access_change_settings_reads_when_idle_and_no_grant
     assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
     assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
     assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
-    let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
+    let view = own.view(
+        &HOOKS,
+        folder.path(),
+        &ToolHomes::at(folder.path()),
+        1,
+        None,
+        true,
+    );
     let listed: Vec<(&str, &str)> = view
         .apply_choices
         .iter()
@@ -339,7 +312,7 @@ fn full_access_on_windows_is_refused_with_its_own_reason_and_code() {
 
 #[test]
 fn a_windows_model_only_agent_with_tools_starts_no_proxy_and_reaches_the_models_port_on_any_host() {
-    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    use crate::net::{SandboxNetwork, SandboxRemote};
     let hosted = SandboxRemote::AnyHost(443);
     let local = SandboxRemote::Loopback(11_434);
     assert!(!AgentNetwork::None.proxied("windows", true, hosted));
@@ -382,7 +355,7 @@ fn a_windows_model_only_agent_with_tools_starts_no_proxy_and_reaches_the_models_
 
 #[test]
 fn a_loopback_model_on_windows_is_refused_under_every_network_choice() {
-    use kernel_sandbox::net::SandboxRemote;
+    use crate::net::SandboxRemote;
     let local = SandboxRemote::Loopback(11_434);
     for network in AgentNetwork::ALL {
         for tools in [true, false] {
@@ -390,35 +363,13 @@ fn a_loopback_model_on_windows_is_refused_under_every_network_choice() {
             assert!(
                 refusal
                     .as_ref()
-                    .is_err_and(kernel_sandbox::lines::model_loopback_windows),
+                    .is_err_and(crate::lines::model_loopback_windows),
                 "{network:?} tools={tools}: {refusal:?}"
             );
         }
     }
     for os in ["macos", "linux"] {
         assert!(AgentNetwork::Open.reach(os, true, local, None).is_ok());
-    }
-}
-
-#[test]
-fn full_access_on_windows_names_no_level_this_version_refuses_there() {
-    let plain = crate::config::plain_problem(SANDBOX_FULL_UNAVAILABLE_WINDOWS)
-        .expect("the code has a plain sentence");
-    for level in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
-        assert!(!plain.contains(level.label()), "{plain}");
-    }
-    assert!(!plain.contains("always run"), "{plain}");
-    #[cfg(target_os = "windows")]
-    {
-        assert!(
-            AgentAccess::ALL
-                .iter()
-                .all(|level| level.refusal().is_some())
-        );
-        for level in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
-            assert!(!FULL_WINDOWS_UNAVAILABLE.contains(level.label()));
-        }
-        assert!(!FULL_WINDOWS_UNAVAILABLE.contains("always run"));
     }
 }
 
@@ -594,151 +545,6 @@ fn a_running_process_is_narrowed_only_by_what_the_saved_policy_no_longer_allows(
     assert_eq!(narrowing(Some(&pinned), None, None, None, &rust), None);
 }
 
-#[test]
-fn a_saved_policy_round_trips_and_a_missing_or_tampered_one_is_never_wider() {
-    let connection = Connection::open_in_memory().unwrap();
-    assert_eq!(load(&connection, "p").unwrap(), AgentPolicy::default());
-    let policy = AgentPolicy {
-        access: AgentAccess::Full,
-        network: AgentNetwork::default(),
-        toolchains: vec![ToolchainChoice {
-            toolchain: Toolchain::Python,
-            allowed: false,
-        }],
-        ide_git_hooks: true,
-        tool_cache: Default::default(),
-        home_caches: Default::default(),
-        ide_agent_files: Default::default(),
-        shared_folders: Default::default(),
-        ..Default::default()
-    };
-    save(&connection, "p", &policy).unwrap();
-    assert_eq!(load(&connection, "p").unwrap(), policy);
-    let view = policy.view(
-        Path::new("/nonexistent"),
-        &ToolHomes::at(Path::new("/nonexistent")),
-        0,
-        Default::default(),
-        true,
-    );
-    assert!(view.ide_git_hooks);
-    connection
-        .execute(
-            "UPDATE project_agent_policy SET body=?1 WHERE project='p'",
-            [r#"{"access":"full","toolchains":[]}"#],
-        )
-        .unwrap();
-    let old = load(&connection, "p").unwrap();
-    assert_eq!(old.access, AgentAccess::Full);
-    assert!(!old.ide_git_hooks);
-    assert!(!AgentPolicy::default().ide_git_hooks);
-    assert_eq!(load(&connection, "other").unwrap(), AgentPolicy::default());
-    for body in [
-            r#"{"access":"root","toolchains":[]}"#.to_owned(),
-            r#"{"access":"full","toolchains":[],"extra":1}"#.to_owned(),
-            r#"{"access":"full","toolchains":[],"ide_git_hooks":"yes"}"#.to_owned(),
-            r#"{"access":"full","toolchains":[{"toolchain":"node","allowed":true},{"toolchain":"node","allowed":false}]}"#.to_owned(),
-            format!(r#"{{"access":"full","toolchains":[],"pad":"{}"}}"#, "x".repeat(BODY_BYTES_MAX)),
-        ] {
-            connection
-                .execute(
-                    "UPDATE project_agent_policy SET body=?1 WHERE project='p'",
-                    [&body],
-                )
-                .unwrap();
-            assert!(load(&connection, "p").is_err(), "{body}");
-        }
-    remove(&connection, "p").unwrap();
-    assert_eq!(load(&connection, "p").unwrap(), AgentPolicy::default());
-}
-
-#[test]
-fn a_saved_network_choice_reads_back_and_defaults_to_open() {
-    let connection = Connection::open_in_memory().unwrap();
-    assert_eq!(AgentNetwork::default(), AgentNetwork::Open);
-    assert_eq!(load(&connection, "p").unwrap().network, AgentNetwork::Open);
-    let mut policy = AgentPolicy::default();
-    for choice in AgentNetwork::ALL {
-        policy.network = choice;
-        save(&connection, "p", &policy).unwrap();
-        assert_eq!(load(&connection, "p").unwrap().network, choice);
-    }
-    connection.execute(TABLE, []).unwrap();
-    connection
-        .execute(
-            "INSERT INTO project_agent_policy (project, body) VALUES ('old', ?1)
-                 ON CONFLICT(project) DO UPDATE SET body=excluded.body",
-            [r#"{"access":"own_branch","toolchains":[]}"#],
-        )
-        .unwrap();
-    let old = load(&connection, "old").unwrap();
-    assert_eq!(old.access, AgentAccess::OwnBranch);
-    assert_eq!(old.network, AgentNetwork::Open);
-}
-/// DEC-124: the agent folders choice reads back as saved, through the view and a pinned
-/// policy; a policy saved before the setting existed reads Allow all changes, and an
-/// unknown choice makes the policy unreadable, so it never reads as a wider one.
-#[test]
-fn a_saved_agent_folders_choice_reads_back_and_an_older_policy_reads_allow_all() {
-    let connection = Connection::open_in_memory().unwrap();
-    let nowhere = Path::new("/nonexistent");
-    assert_eq!(
-        load(&connection, "p").unwrap().ide_agent_files,
-        IdeAgentFiles::AllowAll
-    );
-    assert_eq!(
-        IdeAgentFiles::ALL.map(IdeAgentFiles::label),
-        ["Allow all changes", "No delete or rename", "Read only"]
-    );
-    let mut policy = AgentPolicy::default();
-    for choice in IdeAgentFiles::ALL {
-        policy.ide_agent_files = choice;
-        save(&connection, "p", &policy).unwrap();
-        let read = load(&connection, "p").unwrap();
-        assert_eq!(read.ide_agent_files, choice);
-        assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
-        assert_eq!(
-            read.view(nowhere, &ToolHomes::at(nowhere), 0, None, true)
-                .ide_agent_files,
-            choice
-        );
-    }
-    for (body, choice) in [
-        (
-            r#"{"access":"own_branch","toolchains":[]}"#,
-            IdeAgentFiles::AllowAll,
-        ),
-        (
-            r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":"no_delete_or_rename"}"#,
-            IdeAgentFiles::NoDeleteOrRename,
-        ),
-        (
-            r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":"read_only"}"#,
-            IdeAgentFiles::ReadOnly,
-        ),
-    ] {
-        connection
-            .execute(
-                "UPDATE project_agent_policy SET body=?1 WHERE project='p'",
-                [body],
-            )
-            .unwrap();
-        assert_eq!(load(&connection, "p").unwrap().ide_agent_files, choice);
-    }
-    for body in [
-        r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":"delete_all"}"#,
-        r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":true}"#,
-    ] {
-        connection
-            .execute(
-                "UPDATE project_agent_policy SET body=?1 WHERE project='p'",
-                [body],
-            )
-            .unwrap();
-        assert!(load(&connection, "p").is_err(), "{body}");
-    }
-}
-
 /// DEC-124: Allow all changes adds no rule. No delete or rename denies every unlink and
 /// Read only every write at and below each agent folder, in any letter case, and both
 /// keep the agents root from being removed or moved aside. The older root is named only
@@ -756,21 +562,18 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
     };
     assert_eq!(rule(IdeAgentFiles::AllowAll, false), "");
     assert_eq!(rule(IdeAgentFiles::AllowAll, true), "");
-    let root_text = kernel_sandbox::paths::any_case("/tmp/ca-proj");
+    let root_text = crate::paths::any_case("/tmp/ca-proj");
     let new = format!(
         "^{root_text}{}/{}",
-        kernel_sandbox::paths::any_case("/.crazyagent"),
-        kernel_sandbox::paths::any_case("worktrees")
+        crate::paths::any_case("/.crazyagent"),
+        crate::paths::any_case("worktrees")
     );
     let both = format!(
         "^{root_text}({})?/{}",
-        kernel_sandbox::paths::any_case("/.crazyagent"),
-        kernel_sandbox::paths::any_case("worktrees")
+        crate::paths::any_case("/.crazyagent"),
+        crate::paths::any_case("worktrees")
     );
-    let state = format!(
-        "^{root_text}{}$",
-        kernel_sandbox::paths::any_case("/.crazyagent")
-    );
+    let state = format!("^{root_text}{}$", crate::paths::any_case("/.crazyagent"));
     for (older_agents, agents) in [(false, &new), (true, &both)] {
         let keep_root = format!("(deny file-write-unlink\n  (regex #\"{agents}$\"))\n");
         assert_eq!(
@@ -792,9 +595,9 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
 
 #[test]
 fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
-    use crate::sandbox::LinuxHost;
-    use kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE;
-    use kernel_sandbox::settings::LinuxSockets;
+    use crate::host::LinuxHost;
+    use crate::lines::LINUX_PORTS_ANY_HOST_LINE;
+    use crate::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -836,7 +639,7 @@ fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
         assert_eq!(none(true, sockets, &[]), line, "{sockets:?}");
     }
     let named = none(true, tcp, &[port(8080), port(443), port(80)]).unwrap();
-    assert_eq!(named, crate::sandbox::linux_unbridged_line(80));
+    assert_eq!(named, crate::lines::linux_unbridged_line(80));
     assert!(named.contains("port 80 is below 1024"), "{named}");
     assert_eq!(
         none(false, tcp, &[port(80)]),
@@ -850,9 +653,9 @@ fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
 
 #[test]
 fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_https() {
-    use crate::sandbox::LinuxHost;
-    use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
-    use kernel_sandbox::settings::LinuxSockets;
+    use crate::host::LinuxHost;
+    use crate::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
+    use crate::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -889,9 +692,9 @@ fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_
 
 #[test]
 fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
-    use crate::sandbox::LinuxHost;
-    use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
-    use kernel_sandbox::settings::LinuxSockets;
+    use crate::host::LinuxHost;
+    use crate::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
+    use crate::settings::LinuxSockets;
     let host = |supervised, routed| {
         Some(LinuxHost {
             nested: true,
@@ -950,10 +753,8 @@ fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
 
 #[test]
 fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
-    use crate::sandbox::LinuxHost;
-    use kernel_sandbox::lines::{
-        LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE,
-    };
+    use crate::host::LinuxHost;
+    use crate::lines::{LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE};
     let host = |nested, scoped| {
         Some(LinuxHost {
             nested,
@@ -996,76 +797,6 @@ fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
     assert!(old.gaps.is_empty(), "a view an older engine stored");
 }
 
-#[test]
-fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hold() {
-    use crate::sandbox::LinuxHost;
-    use kernel_sandbox::lines::{
-        LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_ROOT_LINE,
-        LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
-    };
-    use kernel_sandbox::settings::LinuxSupervisor;
-    let held = |nested, scoped| LinuxHost {
-        nested,
-        scoped,
-        supervised: true,
-        root: false,
-        armored: false,
-        routed: false,
-    };
-    let root = LinuxHost {
-        nested: false,
-        scoped: false,
-        supervised: false,
-        root: true,
-        armored: false,
-        routed: false,
-    };
-    let sandboxed = |host, found| linux_gaps(AgentAccess::Sandboxed, Some(host), found);
-    let (kept, said) = (LINUX_KEPT_GIT_LINE, LINUX_SUPERVISED_LINE);
-    assert_eq!(sandboxed(held(true, false), false), [said]);
-    assert_eq!(sandboxed(held(true, true), true), [kept, said]);
-    for scoped in [false, true] {
-        let listed = [kept, said, LINUX_PROCESS_LIST_LINE];
-        assert_eq!(
-            sandboxed(held(false, scoped), true),
-            listed,
-            "scoped {scoped}"
-        );
-    }
-    let open = [LINUX_ROOT_LINE, LINUX_NESTED_GIT_LINE, LINUX_SIGNALS_LINE];
-    assert_eq!(sandboxed(root, true), open);
-    assert_eq!(sandboxed(root, false), open);
-    for host in [held(false, false), root] {
-        assert!(linux_gaps(AgentAccess::Full, Some(host), true).is_empty());
-    }
-    let (on, off) = (Some(LinuxSupervisor::On), Some(LinuxSupervisor::Off));
-    assert_eq!(held(true, false).under(on), held(true, false));
-    assert!(!held(true, false).under(off).supervised);
-    assert!(
-        !held(true, false).under(None).supervised,
-        "unreadable shows every line"
-    );
-    assert_eq!(root.under(on), root);
-    assert_eq!(root.under(None), root);
-    assert!(
-        !root.under(off).root,
-        "with the supervisor Off, root changes nothing"
-    );
-    let catalog = LevelView::on(Some(held(true, false)), true);
-    assert_eq!(catalog[0].access, AgentAccess::Sandboxed);
-    let told: Vec<&str> = catalog[0].gaps.iter().map(String::as_str).collect();
-    assert_eq!(
-        told,
-        [kept, said],
-        "the catalog has no project to rule one out"
-    );
-    let unread = LevelView::other_git(Some(held(true, false)), Path::new("/nonexistent"));
-    assert!(unread, "a folder that cannot be read rules out none");
-    let quiet = LevelView::on(Some(held(true, false)), false);
-    let told: Vec<&str> = quiet[0].gaps.iter().map(String::as_str).collect();
-    assert_eq!(told, [said], "a project with no other repository");
-}
-
 /// A Linux where AppArmor keeps unprivileged programs out of user namespaces and agents
 /// get no process space of their own says AppArmor is why, just before the process or
 /// signals line it explains, at every limited level and never under Full; a Linux
@@ -1073,8 +804,8 @@ fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hol
 /// does not cover, says nothing of AppArmor (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
 #[test]
 fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
-    use crate::sandbox::LinuxHost;
-    use kernel_sandbox::lines::{
+    use crate::host::LinuxHost;
+    use crate::lines::{
         LINUX_APPARMOR_LINE, LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE,
         LINUX_ROOT_LINE, LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
     };
@@ -1131,34 +862,4 @@ fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
         armor.contains("sudo dpkg-reconfigure crazy-agent"),
         "{armor}"
     );
-}
-
-/// The Agent access page reads the project folder for another git repository before its
-/// database transaction, and only where the call supervisor runs; the view takes that
-/// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
-#[test]
-fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_takes_it() {
-    use crate::sandbox::LinuxHost;
-    use kernel_sandbox::lines::LINUX_KEPT_GIT_LINE;
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(project.join("vendor/.git")).unwrap();
-    let missing = temp.path().join("missing");
-    let host = |supervised| LinuxHost {
-        nested: true,
-        scoped: true,
-        supervised,
-        root: false,
-        armored: false,
-        routed: false,
-    };
-    assert!(LevelView::other_git(Some(host(true)), &project));
-    assert!(LevelView::other_git(Some(host(true)), &missing));
-    for unread in [Some(host(false)), None] {
-        assert!(!LevelView::other_git(unread, &project), "{unread:?}");
-        assert!(!LevelView::other_git(unread, &missing), "{unread:?}");
-    }
-    let lines = |other_git| LevelView::on(Some(host(true)), other_git).remove(0).gaps;
-    assert!(lines(true).contains(&LINUX_KEPT_GIT_LINE.to_owned()));
-    assert!(!lines(false).contains(&LINUX_KEPT_GIT_LINE.to_owned()));
 }

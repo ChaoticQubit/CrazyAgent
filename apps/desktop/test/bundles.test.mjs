@@ -84,7 +84,7 @@ test("postinst installs and loads the profile only on configure where AppArmor r
 });
 
 test("the engine's AppArmor line names the deb's own package for dpkg-reconfigure (DEC-179 SBX-3)", () => {
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/lines.rs", import.meta.url), "utf8");
   const line = /pub const LINUX_APPARMOR_LINE: &str = "([^"]+)";/.exec(engine)?.[1] ?? "";
   const kebab = config("tauri.conf.json").productName.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
   assert.equal(kebab, "crazy-agent", "Tauri names the deb package in kebab case");

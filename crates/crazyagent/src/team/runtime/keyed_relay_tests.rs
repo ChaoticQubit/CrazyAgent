@@ -145,7 +145,7 @@ fn claude_runtime(fixture: &Fixture) -> TeamRuntime {
 /// then deletes it. Inputs: the fixture, the account reach and whether to save its key
 /// first. Output: none.
 fn assert_full_access_claude_keychain(fixture: &Fixture, reach: TeamReach, keyed: bool) {
-    save_access(fixture, crate::sandbox::policy::AgentAccess::Full);
+    save_access(fixture, kernel_sandbox::policy::AgentAccess::Full);
     let runtime = claude_runtime(fixture);
     if keyed {
         save_key(&fixture.base);
@@ -185,7 +185,7 @@ fn assert_full_access_claude_keychain(fixture: &Fixture, reach: TeamReach, keyed
     assert!(keychain.setting("default-keychain").contains(text));
     assert!(keychain.setting("list-keychains").contains(text));
     drop(keychain);
-    let _ = crate::sandbox::toolchains::remove_tmp(&home);
+    let _ = kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home);
 }
 
 /// A Full access Claude Code agent on a URL account runs unsandboxed under its engine-made
@@ -280,7 +280,7 @@ fn a_keyed_live_master_is_stopped_at_quit_so_nothing_dials_its_ended_relay_port(
         .and_then(|rest| rest.split('/').next())
         .and_then(|port| port.parse().ok())
         .expect("the master runs on its key relay");
-    assert!(crate::sandbox::model_proxy::RELAY_PORTS.contains(&port));
+    assert!(kernel_sandbox::ports::RELAY_PORTS.contains(&port));
 
     let left = team.shutdown().unwrap();
     let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", port)).unwrap();

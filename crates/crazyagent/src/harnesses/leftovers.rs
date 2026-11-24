@@ -3072,7 +3072,7 @@ pub(crate) mod tests {
     /// takes at most 256 runs, for the engine's life.
     #[test]
     fn a_kept_or_asked_hold_frees_its_hidden_folders_listing_once_its_processes_end() {
-        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
         let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
         for (project, mode) in [
             ("keep-slots-kept", LeftoverMode::Keep),
@@ -3115,7 +3115,7 @@ pub(crate) mod tests {
     /// the owner's Keep leaves it, and frees its place once they end.
     #[test]
     fn signing_out_keeps_a_listed_hold_named_until_its_processes_end() {
-        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
         let project = "keep-slots-signed-out";
         let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
         let mut leftover = session_sleeper(false);
@@ -3165,7 +3165,7 @@ pub(crate) mod tests {
     /// before anything is held, and the run leaves the list as its listing drops.
     #[test]
     fn a_listed_hold_without_a_project_refuses() {
-        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
         let project = "keep-slots-no-project";
         let mut leftover = session_sleeper(false);
         let listed = starting(RunKind::Research, project).expect("the list has room");
@@ -3196,7 +3196,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_kept_run_whose_process_handed_off_to_an_orphan_stays_on_the_hidden_folders_list() {
-        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
         let project = "keep-slots-handed-off";
         let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
         let ids = |names: &str| -> Vec<String> {
@@ -3261,7 +3261,7 @@ pub(crate) mod tests {
     /// checked end, and an unchecked end under End, free its place.
     #[test]
     fn an_unchecked_end_keeps_a_kept_or_asked_run_on_the_hidden_folders_list() {
-        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        use kernel_sandbox::hidden_paths::{RunKind, runs_seeing, starting};
         let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
         let mut after = Vec::new();
         for (project, state, checked) in [

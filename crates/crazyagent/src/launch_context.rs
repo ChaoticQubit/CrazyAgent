@@ -139,7 +139,7 @@ const _: () = assert!(
         + BRIEF_BYTES_MAX
         + INDEX_BYTES_MAX
         + MEMORY_SECTION_BYTES_MAX
-        + crate::sandbox::shared_folders::SECTION_BYTES_MAX
+        + kernel_sandbox::shared_folders::SECTION_BYTES_MAX
         + 3 * SECTION_SLACK
         <= INSTRUCTIONS_BYTES_MAX
 );
@@ -325,7 +325,7 @@ fn for_project_skills(
     let catch_up_main = crate::team::catch_up_main(&tx, project)
         .map_err(|problem| LaunchError(problem.0, None))?
         == crate::team::CatchUpMain::On;
-    let home_caches = crate::sandbox::policy::load(&tx, project.as_str())
+    let home_caches = crate::sandbox::policy_store::load(&tx, project.as_str())
         .map_err(unavailable)?
         .home_caches;
     drop(tx);
@@ -649,10 +649,10 @@ fn project_instructions(
     let memories = crate::memory::library::approved_for_project(tx, project)
         .map_err(unavailable)?
         .render();
-    let policy = crate::sandbox::policy::load(tx, project.as_str()).unwrap_or_default();
+    let policy = crate::sandbox::policy_store::load(tx, project.as_str()).unwrap_or_default();
     let folder = setup.as_ref().map(StoredSetup::project_folder);
     let instructions = render(project, setup.as_ref(), &memories, layout)
-        + &crate::sandbox::shared_folders::context_section(
+        + &kernel_sandbox::shared_folders::context_section(
             folder.as_deref(),
             policy.access,
             &policy.shared_folders,
@@ -847,7 +847,7 @@ impl AgentContext {
     /// Names the access level this launch runs at, which decides whether the launch keeps
     /// the download caches an earlier run left in its home (DEC-173 add.1). A launch that
     /// never names one is treated as unknown. Input: the level. Output: the context.
-    pub fn at_access(mut self, level: crate::sandbox::policy::AgentAccess) -> Self {
+    pub fn at_access(mut self, level: kernel_sandbox::policy::AgentAccess) -> Self {
         if let Some(process) = self.process.as_mut() {
             process.caches.level = Some(level);
         }
@@ -1138,7 +1138,7 @@ impl AgentContext {
     /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`, and Codex
     /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
     /// the files hold the agent's own `getconf`
-    /// ([`crate::sandbox::toolchains::write_getconf`]). On Windows it is refused with
+    /// ([`kernel_sandbox::toolchains::write_getconf`]). On Windows it is refused with
     /// `launch_context_unavailable` once H1's check passes, before it takes the lock or
     /// changes the home, until S9b writes its files handle-relative (CodeRabbit CR-1140).
     /// Output: the guard holding the files and the harness arguments, or `launch_home_busy`
@@ -1383,8 +1383,12 @@ impl AgentContext {
             ]);
         }
         #[cfg(target_os = "macos")]
-        crate::sandbox::toolchains::write_getconf(home, installed.native.is_some())
-            .map_err(|_| failure("launch_context_unwritable"))?;
+        kernel_sandbox::toolchains::write_getconf(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            home,
+            installed.native.is_some(),
+        )
+        .map_err(|_| failure("launch_context_unwritable"))?;
         assert!(installed.files.as_ref().is_some_and(|files| {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
@@ -1504,8 +1508,12 @@ impl AgentContext {
         #[cfg(target_os = "macos")]
         if let Some(tools) = &self.tool_home {
             directory(&tools.join(STATE), false)?;
-            crate::sandbox::toolchains::write_getconf(tools, false)
-                .map_err(|_| failure("launch_context_unwritable"))?;
+            kernel_sandbox::toolchains::write_getconf(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
+                tools,
+                false,
+            )
+            .map_err(|_| failure("launch_context_unwritable"))?;
         }
         Ok(installed)
     }

@@ -10,7 +10,7 @@ use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::worktrees::TreeBounds;
-use kernel_sandbox::paths::{ascii_fold, same_name};
+use kernel_sandbox::paths::ASCII_FOLDS;
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1724,6 +1724,28 @@ fn fresh_link_inside(
     !entered(&walk, agents) && !walk.iter().any(|part| part.eq_ignore_ascii_case(".git"))
 }
 
+/// Folds one path part the way the volume compares names, when the result is ASCII.
+/// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
+/// the code points HFS+ ignores in names left out
+/// ([`kernel_sandbox::paths::HFS_IGNORED`], RV-DS241-148), or None when a code point
+/// stays outside ASCII.
+fn ascii_fold(part: &str) -> Option<String> {
+    let mut folded = String::with_capacity(part.len());
+    for point in part.chars() {
+        if kernel_sandbox::paths::HFS_IGNORED.contains(&point) {
+            continue;
+        }
+        if point.is_ascii() {
+            folded.push(point.to_ascii_lowercase());
+        } else {
+            let (_, ascii) = ASCII_FOLDS.iter().find(|(from, _)| *from == point)?;
+            folded.push_str(ascii);
+        }
+    }
+    assert!(folded.is_ascii());
+    Some(folded)
+}
+
 /// Tells whether a walk may name a link path on a volume that folds names: every part of
 /// the one may name the same entry as the matching part of the other ([`same_name`]).
 /// Inputs: the link path and the walk's parts. Output: true when it may.
@@ -1733,6 +1755,19 @@ fn folds_onto(link: &str, walk: &[&str]) -> bool {
             .split('/')
             .zip(walk)
             .all(|(part, step)| same_name(part, step))
+}
+
+/// Tells whether two path parts may name one entry on a volume that folds names, the one
+/// name compare of the landing checks: both fold onto the same ASCII name under
+/// [`ascii_fold`], or both stay outside ASCII, since the volume may still fold one onto
+/// the other. A part that stays outside ASCII never names the entry of one that folds onto
+/// ASCII. Inputs: the two parts. Output: true when they may.
+fn same_name(one: &str, other: &str) -> bool {
+    match (ascii_fold(one), ascii_fold(other)) {
+        (Some(one), Some(other)) => one == other,
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Tells whether a walk starts with the agents' folder. A compared part that is not ASCII

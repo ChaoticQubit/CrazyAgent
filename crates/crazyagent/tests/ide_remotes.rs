@@ -386,7 +386,7 @@ fn agent_sandbox_cannot_reach_owner_git_credentials() {
         OsStr::new("SSH_AUTH_SOCK"),
         socket.as_os_str()
     ));
-    let owner = crazyagent::sandbox::toolchains::ToolHomes::owner()
+    let owner = kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf();

@@ -94,7 +94,6 @@
   "crates/crazyagent/src/research/runner.rs": 8464,
   "crates/crazyagent/src/sandbox.rs": 6590,
   "crates/crazyagent/src/sandbox/linux.rs": 6306,
-  "crates/crazyagent/src/sandbox/linux/egress.rs": 1596,
   "crates/crazyagent/src/scheduling/tests.rs": 1970,
   "crates/crazyagent/src/storage.rs": 4608,
   "crates/crazyagent/src/storage/master_session.rs": 5664,

@@ -763,5 +763,37 @@ pub fn regex_escape(text: &str) -> String {
     pattern
 }
 
+/// The code points a case-insensitive HFS+ volume ignores in names (git's
+/// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
+/// compare that must match such a volume leaves out (RV-DS241-148).
+pub const HFS_IGNORED: [char; 16] = [
+    '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+    '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
+];
+
+/// Tells whether a name opens one of `names` on a case-insensitive volume, compared as
+/// [`folded`] compares names, so `.GIT`, `\u{feff}.git` and `.g\u{131}t` all open `.git`
+/// (DS-148 F1). Inputs: the name and the plain names. Output: true for one.
+pub fn names_one_of(name: &str, names: &[&str]) -> bool {
+    let name = folded(name);
+    names.iter().any(|known| folded(known) == name)
+}
+
+/// Folds a file name the way case-insensitive volumes compare names, so a name such a
+/// volume opens as an instruction file matches it: the code points HFS+ ignores in names
+/// (git's `core.protectHFS` list) left out, each code point in [`ASCII_FOLDS`] spelled as
+/// its ASCII and ASCII letters put in lower case. Input: the name or path. Output: the
+/// folded text.
+pub fn folded(name: &str) -> String {
+    let mut text = String::with_capacity(name.len());
+    for point in name.chars().filter(|point| !HFS_IGNORED.contains(point)) {
+        match ASCII_FOLDS.iter().find(|(from, _)| *from == point) {
+            Some((_, ascii)) => text.push_str(ascii),
+            None => text.push(point.to_ascii_lowercase()),
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests;

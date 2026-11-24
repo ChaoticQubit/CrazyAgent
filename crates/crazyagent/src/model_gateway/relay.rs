@@ -241,14 +241,14 @@ impl Shared {
 /// started one after another do not all try the same taken ports first.
 static NEXT_RELAY_PORT: AtomicUsize = AtomicUsize::new(0);
 
-/// Binds 127.0.0.1 on the first port of [`crate::sandbox::model_proxy::RELAY_PORTS`], going
+/// Binds 127.0.0.1 on the first port of [`kernel_sandbox::ports::RELAY_PORTS`], going
 /// round from a start that moves with each relay and process, that no socket holds, bound
 /// without `SO_REUSEADDR` so a wildcard listener of this user counts as holding it. Every
 /// Open-network sandbox denies binding the whole block, so no agent can take the port, not
 /// even after the relay ended while a kept pane still sends there (SA241 vid 9). Output:
 /// the listener, or the [`first_bound`] error.
 fn relay_listener() -> std::io::Result<TcpListener> {
-    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    let block = kernel_sandbox::ports::RELAY_PORTS;
     let ports: Vec<u16> = block.clone().collect();
     let start = NEXT_RELAY_PORT
         .fetch_add(1, Ordering::SeqCst)

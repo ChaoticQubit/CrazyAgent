@@ -601,7 +601,7 @@ fn a_drop_file_master_s_access_request_is_raised_when_its_reply_ends() {
     assert!(
         open[0]
             .asker
-            .starts_with(crate::sandbox::grants::ASKER_PREFIX)
+            .starts_with(kernel_sandbox::grants::ASKER_PREFIX)
     );
     assert!(
         open[0].question.contains("Port 5432 on this computer"),
@@ -632,11 +632,11 @@ fn a_sub_agent_s_access_request_is_raised_at_once_or_refused_plainly() {
         refused.starts_with("Not requested: Ports from 49152 up"),
         "{refused}"
     );
-    let held = crate::sandbox::policy::AgentPolicy {
+    let held = kernel_sandbox::policy::AgentPolicy {
         grants: vec![AccessGrant::Port { port: 6379 }],
         ..Default::default()
     };
-    crate::sandbox::policy::save(&case.db, PROJECT, &held).unwrap();
+    crate::sandbox::policy_store::save(&case.db, PROJECT, &held).unwrap();
     assert_eq!(
         agent_ask(&case.db, &case.project, AGENT, request(6379)),
         (REQUEST_HELD.to_owned(), false)

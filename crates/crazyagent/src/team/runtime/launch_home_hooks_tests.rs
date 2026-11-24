@@ -40,7 +40,7 @@ fn a_native_leads_teammates_home_is_reset_at_each_launch() {
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
         .collect();
     assert!(left.is_empty(), "the teammates' home kept {left:?}");
-    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         assert_eq!(
             std::fs::read_link(mates.join(folder)).unwrap(),
             home.join(folder)
@@ -152,7 +152,8 @@ fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
             params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
         )
         .unwrap();
-    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[long(&drafts)]).unwrap();
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[long(&drafts)])
+        .unwrap();
     let access = fixture.access.clone();
     let runtime = TeamRuntime::open(
         &fixture.base.join("engine.db"),

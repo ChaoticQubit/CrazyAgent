@@ -857,7 +857,7 @@ fn global_check_network(
     tx: &Transaction<'_>,
     id: &str,
 ) -> Result<kernel_sandbox::net::SandboxNetwork, EngineError> {
-    use crate::sandbox::policy::AgentNetwork;
+    use kernel_sandbox::policy::AgentNetwork;
     let mut ids: Vec<String> = Vec::new();
     {
         let mut statement = tx.prepare("SELECT id FROM projects").map_err(error)?;
@@ -880,7 +880,7 @@ fn global_check_network(
         if switched_off(tx, &project)?.iter().any(|item| item == id) {
             continue;
         }
-        let network = crate::sandbox::policy::load(tx, project.as_str())
+        let network = crate::sandbox::policy_store::load(tx, project.as_str())
             .map_err(|_| error("project_network_unreadable"))?
             .network;
         let replace = strictest.is_none_or(|current| rank(network) > rank(current));
@@ -1894,7 +1894,7 @@ pub(super) fn run(
             record.spec.validate()?;
             let network = match &record.scope {
                 Scope::Project { project_id } => {
-                    crate::sandbox::policy::load(tx, project_id.as_str())
+                    crate::sandbox::policy_store::load(tx, project_id.as_str())
                         .map_err(|_| error("project_network_unreadable"))?
                         .network
                         .sandbox(None)

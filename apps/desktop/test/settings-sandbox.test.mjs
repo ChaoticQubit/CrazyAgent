@@ -135,9 +135,9 @@ test("Settings, Sandbox lists Refuse agents without the full Linux sandbox, Off 
     assert.ok(tui.includes(`"${option.detail}"`), `the TUI says ${option.detail}`);
   }
   assert.match(LINUX_STRICT[1].detail, /process space of its own/);
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/settings.rs", import.meta.url), "utf8");
   const body = engine.match(/#\[serde\(rename_all = "snake_case"\)\]\s*pub enum LinuxStrict \{([^}]*)\}/);
-  assert.ok(body, "sandbox.rs declares LinuxStrict in snake case");
+  assert.ok(body, "settings.rs declares LinuxStrict in snake case");
   const names = [...body[1].matchAll(/^\s*([A-Z][A-Za-z]*),/gm)].map(([, name]) => name.toLowerCase());
   assert.deepEqual(names, LINUX_STRICT.map((option) => option.value));
   assert.match(engine, /pub enum LinuxStrict \{\s*#\[default\]\s*Off,/, "Off is the engine's default");
@@ -157,9 +157,9 @@ test("each strict option is checked as stored, and picking the other enables Sav
 });
 
 test("the supervisor options are the engine's LinuxSupervisor names", () => {
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/settings.rs", import.meta.url), "utf8");
   const body = engine.match(/#\[serde\(rename_all = "snake_case"\)\]\s*pub enum LinuxSupervisor \{([^}]*)\}/);
-  assert.ok(body, "sandbox.rs declares LinuxSupervisor in snake case");
+  assert.ok(body, "settings.rs declares LinuxSupervisor in snake case");
   const names = [...body[1].matchAll(/^\s*([A-Z][A-Za-z]*),/gm)].map(([, name]) => name.toLowerCase());
   assert.deepEqual(names, LINUX_SUPERVISOR.map((option) => option.value));
   assert.match(engine, /pub enum LinuxSupervisor \{\s*#\[default\]\s*On,/, "On is the engine's default");
@@ -182,9 +182,9 @@ test("each Linux launch refusal reads plainly and names the setting", () => {
 });
 
 test("the options are the engine's LinuxSockets names", () => {
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/settings.rs", import.meta.url), "utf8");
   const body = engine.match(/#\[serde\(rename_all = "snake_case"\)\]\s*pub enum LinuxSockets \{([^}]*)\}/);
-  assert.ok(body, "sandbox.rs declares LinuxSockets in snake case");
+  assert.ok(body, "settings.rs declares LinuxSockets in snake case");
   const names = [...body[1].matchAll(/^\s*([A-Z][A-Za-z]*),/gm)]
     .map(([, name]) => name.replace(/(?<=[a-z])([A-Z])/g, "_$1").toLowerCase());
   assert.deepEqual([...names].sort(), LINUX_SOCKETS.map((option) => option.value).sort());

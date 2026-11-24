@@ -36,17 +36,18 @@ use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
-use crate::sandbox::policy::{
-    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
-};
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::policy::{
+    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
+};
 use kernel_sandbox::settings::LinuxStrict;
+use kernel_sandbox::toolchains;
+use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -405,7 +406,7 @@ impl Plan {
         let boundary = if unconfined {
             let full = self.full_access.clone().ok_or_else(|| {
                 with_code(
-                    crate::sandbox::FULL_ACCESS_NEEDS_MACOS,
+                    kernel_sandbox::profile::consts::FULL_ACCESS_NEEDS_MACOS,
                     Some("sandbox_unavailable"),
                 )
             })?;
@@ -1130,7 +1131,7 @@ fn prepare_mates_home(
     let mates = crate::launch_context::mates_home(home);
     private_directory(&mates)?;
     crate::agent_home::reset_mates_home(&mates).map_err(|e| EngineError(e.0))?;
-    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         let shared = home.join(folder);
         match std::fs::DirBuilder::new().mode(0o700).create(&shared) {
             Ok(()) => {}
@@ -1149,7 +1150,8 @@ fn prepare_mates_home(
             return Err(EngineError("team_shared_folder_changed".into()));
         }
     }
-    toolchains::prepare_cargo_home(&mates, homes).map_err(error)?;
+    kernel_sandbox::toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &mates, homes)
+        .map_err(error)?;
     crate::harnesses::interactive::prepare_claude_home(&mates, project)
         .map_err(|e| EngineError(e.0))?;
     Ok(mates)
@@ -1603,7 +1605,7 @@ impl TeamRuntime {
         if !in_plan {
             return Ok(Err("the team plan no longer has room for it".into()));
         }
-        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+        let saved = crate::sandbox::policy_store::load(&self.connection, project.as_str())
             .map_or(AgentNetwork::None, |policy| policy.network);
         let started = record.network.unwrap_or(AgentNetwork::Open);
         if tools && started.wider_than(saved) {
@@ -4236,7 +4238,7 @@ impl TeamRuntime {
     /// choice for, each under its own reason. Takes the project's stored setup.
     fn retire_narrowed(&mut self, stored: &StoredSetup) {
         let project = &stored.project_id;
-        let saved = crate::sandbox::policy::load(&self.connection, project.as_str()).ok();
+        let saved = crate::sandbox::policy_store::load(&self.connection, project.as_str()).ok();
         let stale: Vec<i64> = self
             .workers
             .iter()
@@ -4256,7 +4258,7 @@ impl TeamRuntime {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             let running =
                 !worker.managed || worker.live || worker.kept_session || worker.busy.is_some();
-            let narrowed = crate::sandbox::policy::narrowing(
+            let narrowed = kernel_sandbox::policy::narrowing(
                 saved.as_ref(),
                 root.as_deref(),
                 running.then_some(worker.access),
@@ -4319,7 +4321,7 @@ impl TeamRuntime {
             return Ok(());
         }
         assert!(ids.len() <= self.access_restarts.len());
-        let apply = crate::sandbox::policy::load(&self.connection, project.as_str())
+        let apply = crate::sandbox::policy_store::load(&self.connection, project.as_str())
             .map(|policy| policy.apply_changes)
             .unwrap_or_default();
         if announce {
@@ -4372,18 +4374,18 @@ impl TeamRuntime {
     /// Takes the project's stored setup. Returns any SQLite failure.
     fn mark_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let saved = crate::sandbox::hidden_paths::load(&self.connection, project.as_str())
+        let saved = crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
             .map_err(error)?;
         let seers: BTreeSet<i64> = self
             .workers
             .iter()
             .filter(|(_, w)| &w.project == project && !w.stopping)
             .filter(|(_, w)| w.access != AgentAccess::Full && w.role != AgentRole::Teammate)
-            .filter(|(_, w)| !crate::sandbox::hidden_paths::covers(w.hidden.as_deref(), &saved))
+            .filter(|(_, w)| !kernel_sandbox::hidden_paths::covers(w.hidden.as_deref(), &saved))
             .map(|(id, _)| *id)
             .collect();
         assert!(seers.len() <= self.workers.len());
-        crate::sandbox::hidden_paths::set_seers(&self.connection, project.as_str(), &seers)
+        crate::sandbox::access_store::hidden::set_seers(&self.connection, project.as_str(), &seers)
             .map_err(error)
     }
 
@@ -4393,8 +4395,9 @@ impl TeamRuntime {
     /// every saved folder. Takes the project's stored setup. Returns any SQLite failure.
     fn restart_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let asked = crate::sandbox::hidden_paths::restarts(&self.connection, project.as_str())
-            .map_err(error)?;
+        let asked =
+            crate::sandbox::access_store::hidden::restarts(&self.connection, project.as_str())
+                .map_err(error)?;
         for id in asked {
             let Some(worker) = self.workers.get_mut(&id) else {
                 continue;
@@ -4538,7 +4541,7 @@ impl TeamRuntime {
             layout,
             self.workers[&id].live,
         )?;
-        let access = crate::sandbox::policy::load(&self.connection, project.as_str())
+        let access = crate::sandbox::policy_store::load(&self.connection, project.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?
             .access;
         if let Some((reason, code)) = access.refusal() {
@@ -6980,8 +6983,9 @@ impl TeamRuntime {
                     } else {
                         self.agent_layout(project, pinned).map_err(error)?
                     };
-                    let refused = crate::sandbox::policy::load(&self.connection, project.as_str())
-                        .is_ok_and(|policy| confinement(layout, policy.access).is_err());
+                    let refused =
+                        crate::sandbox::policy_store::load(&self.connection, project.as_str())
+                            .is_ok_and(|policy| confinement(layout, policy.access).is_err());
                     if refused
                         && self
                             .connection
@@ -8290,7 +8294,7 @@ impl TeamRuntime {
     }
 
     fn git_layout(&self, project: &ProjectId) -> Layout {
-        match crate::sandbox::policy::load(&self.connection, project.as_str()) {
+        match crate::sandbox::policy_store::load(&self.connection, project.as_str()) {
             Ok(policy) if policy.access != AgentAccess::Sandboxed => Layout::Clone,
             _ => Layout::Linked,
         }
@@ -8544,7 +8548,8 @@ impl TeamRuntime {
                 };
                 #[cfg(unix)]
                 let hidden =
-                    crate::sandbox::hidden_paths::load(&self.connection, project.as_str()).ok();
+                    crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
+                        .ok();
                 for name in &wanted {
                     match crate::landing::add_teammate_worktree(
                         &self.connection,
@@ -9536,8 +9541,9 @@ impl TeamRuntime {
             AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
             AgentRole::Teammate => None,
         };
-        let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
-            .map_err(|_| with_code("the project's agent access could not be read", None))?;
+        let policy =
+            crate::sandbox::policy_store::load(&self.connection, stored.project_id.as_str())
+                .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some((reason, code)) = policy.access.refusal() {
             return Err(with_code(reason, Some(code)));
         }
@@ -9573,7 +9579,7 @@ impl TeamRuntime {
             .reach(os, tools, remote, proxy.as_ref().map(|proxy| proxy.port()))
             .map_err(sandboxed)?;
         let homes = ToolHomes::owner().map_err(sandboxed)?;
-        let scratch = toolchains::make_tmp(&home)
+        let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
         #[cfg(unix)]
         let scratch_pin = toolchains::private_folder_pin(&scratch);
@@ -9583,27 +9589,45 @@ impl TeamRuntime {
                     .is_ok_and(|nested| depth < nested.depth)
             });
         let catch_up = context.catch_up_main();
-        if catch_up && let Err(error) = toolchains::catch_up_git(&scratch) {
+        if catch_up
+            && let Err(error) =
+                kernel_sandbox::toolchains::catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch)
+        {
             eprintln!("agent_catch_up_git_not_written kind={:?}", error.kind());
         }
-        if leads && let Err(error) = toolchains::lead_git(&scratch, catch_up) {
+        if leads
+            && let Err(error) = kernel_sandbox::toolchains::lead_git(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
+                &scratch,
+                catch_up,
+            )
+        {
             eprintln!("agent_lead_git_not_written kind={:?}", error.kind());
         }
         if role == AgentRole::Master
             && policy.access == AgentAccess::Full
-            && let Err(error) = toolchains::free_git(&scratch)
+            && let Err(error) =
+                kernel_sandbox::toolchains::free_git(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch)
         {
             eprintln!("agent_free_git_not_written kind={:?}", error.kind());
         }
-        toolchains::prepare_cargo_home(&home, &homes).map_err(|e| cargo_home_problem(&e))?;
+        kernel_sandbox::toolchains::prepare_cargo_home(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &home,
+            &homes,
+        )
+        .map_err(|e| cargo_home_problem(&e))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
             .map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
-        let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
-            .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        let extra =
+            crate::sandbox::access_store::read::load(&self.connection, stored.project_id.as_str())
+                .map_err(|_| {
+                    with_code("the project's read-only folders could not be read", None)
+                })?;
         let toolchains = policy.allowed(&root);
         (sandbox, _) = sandbox
             .allow_tools(&Toolchains::grant(&homes, &toolchains))
@@ -9635,7 +9659,7 @@ impl TeamRuntime {
             sandbox = sandbox.allow_engine(engine).map_err(sandboxed)?;
         }
         (sandbox, _) = sandbox
-            .allow_extra_reads(&toolchains::graphify(&homes))
+            .allow_extra_reads(&kernel_sandbox::toolchains::graphify(&homes))
             .map_err(sandboxed)?;
         if kind == Some(crate::coord::settings::HarnessKind::Codex)
             && let Some(socket) = crate::coord::delivery::codex::socket(&home)
@@ -9653,11 +9677,16 @@ impl TeamRuntime {
         let owner_tmp = policy
             .grants
             .contains(&AccessGrant::TempFolder)
-            .then(crate::sandbox::grants::owner_temp_folder)
+            .then(kernel_sandbox::grants::owner_temp_folder)
             .transpose()
-            .map_err(|code| with_code(crate::sandbox::grants::refusal_text(code), Some(code)))?;
-        let data = crate::sandbox::grants::data_root(&self.connection).unwrap_or_default();
-        let held = crate::sandbox::grants::held_now(&policy.grants, &kept, &data);
+            .map_err(|code| with_code(kernel_sandbox::grants::refusal_text(code), Some(code)))?;
+        let data = crate::sandbox::grants_store::data_root(&self.connection).unwrap_or_default();
+        let held = kernel_sandbox::grants::held_now(
+            &crate::sandbox::GRANT_HOOKS,
+            &policy.grants,
+            &kept,
+            &data,
+        );
         sandbox = sandbox
             .grant_access(&held, owner_tmp.as_deref())
             .map_err(sandboxed)?;
@@ -9755,10 +9784,12 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
-        let hidden =
-            crate::sandbox::hidden_paths::load(&self.connection, stored.project_id.as_str())
-                .map_err(|_| with_code("the project's hidden folders could not be read", None))?;
-        crate::sandbox::hidden_paths::none_tracked(&root, &hidden)
+        let hidden = crate::sandbox::access_store::hidden::load(
+            &self.connection,
+            stored.project_id.as_str(),
+        )
+        .map_err(|_| with_code("the project's hidden folders could not be read", None))?;
+        kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, &root, &hidden)
             .map_err(|code| with_code("a hidden folder is now tracked by git", Some(code)))?;
         for folder in &hidden {
             sandbox = sandbox.hide(folder).map_err(sandboxed)?;
@@ -9805,7 +9836,8 @@ impl TeamRuntime {
         expose_graph(&root, &working_dir)?;
         #[cfg(target_os = "macos")]
         if let Some(runtime) = self.state.parent() {
-            use crate::sandbox::tool_cache::{CacheShape, grant};
+            use crate::sandbox::tool_cache::grant;
+            use kernel_sandbox::tool_cache::CacheShape;
             let shape = match layout {
                 Layout::Linked => CacheShape::Worktree,
                 Layout::Clone => CacheShape::Clone,
@@ -9897,7 +9929,7 @@ impl TeamRuntime {
             task_start,
             hidden: hidden
                 .iter()
-                .map(|folder| crate::sandbox::hidden_paths::digest(folder))
+                .map(|folder| kernel_sandbox::hidden_paths::digest(folder))
                 .collect(),
         };
         let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));
@@ -10692,6 +10724,7 @@ impl TeamRuntime {
                 }
                 #[cfg(unix)]
                 let _ = toolchains::remove_tmp_keeping(
+                    &crate::sandbox::TOOLCHAIN_HOOKS,
                     &self.agent_folder(id).join("home"),
                     super::caller::CALLER_SOCKET,
                 );
@@ -13884,7 +13917,7 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
             ));
         }
     };
-    assert!(!hosts.is_empty() && hosts.len() <= crate::sandbox::model_proxy::HOSTS_MAX);
+    assert!(!hosts.is_empty() && hosts.len() <= kernel_sandbox::model_proxy::HOSTS_MAX);
     Ok(hosts)
 }
 

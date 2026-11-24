@@ -602,13 +602,13 @@ fn graph_step(
         Ok(graphify) => graphify,
         Err(line) => return Step::failed(&line),
     };
-    let Some(listed) = crate::sandbox::hidden_paths::starting(
-        crate::sandbox::hidden_paths::RunKind::CodeGraph,
+    let Some(listed) = kernel_sandbox::hidden_paths::starting(
+        kernel_sandbox::hidden_paths::RunKind::CodeGraph,
         &claimed.project,
     ) else {
         return Step::failed("project hidden folders unreadable");
     };
-    let hidden = match crate::sandbox::hidden_paths::load(database, &claimed.project) {
+    let hidden = match crate::sandbox::access_store::hidden::load(database, &claimed.project) {
         Ok(hidden) => hidden,
         Err(_) => return Step::failed("project hidden folders unreadable"),
     };
@@ -703,14 +703,14 @@ fn refresh_step(
         let Some(tip) = main_tip(database, project, repo) else {
             continue;
         };
-        let Some(listed) = crate::sandbox::hidden_paths::starting(
-            crate::sandbox::hidden_paths::RunKind::CodeGraph,
+        let Some(listed) = kernel_sandbox::hidden_paths::starting(
+            kernel_sandbox::hidden_paths::RunKind::CodeGraph,
             project,
         ) else {
             refresh.failed.insert(project.clone(), Instant::now());
             return true;
         };
-        let Ok(hidden) = crate::sandbox::hidden_paths::load(database, project) else {
+        let Ok(hidden) = crate::sandbox::access_store::hidden::load(database, project) else {
             continue;
         };
         listed.hid(&hidden);
@@ -922,7 +922,7 @@ fn refresh_build(
     work: &Work,
     database: &Connection,
     project: &str,
-    listed: crate::sandbox::hidden_paths::HiddenRun,
+    listed: kernel_sandbox::hidden_paths::HiddenRun,
     repo: &Path,
     tip: String,
     hidden: &[PathBuf],
@@ -1083,7 +1083,7 @@ fn mapping_step(
     beat: &dyn Fn() -> bool,
 ) -> (Step, Drafted) {
     let layout = claimed.repo.join(CRAZYAGENT_DIRECTORY);
-    let hidden = match crate::sandbox::hidden_paths::load(database, &claimed.project) {
+    let hidden = match crate::sandbox::access_store::hidden::load(database, &claimed.project) {
         Ok(hidden) => hidden,
         Err(_) => {
             return (
@@ -1158,7 +1158,7 @@ fn mapping_step(
             #[cfg(unix)]
             agent: "onboarding",
             #[cfg(unix)]
-            kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+            kind: Some(kernel_sandbox::hidden_paths::RunKind::Onboarding),
             #[cfg(unix)]
             project: project.as_ref(),
             #[cfg(unix)]

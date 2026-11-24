@@ -2,14 +2,14 @@ use super::{
     AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest, build,
     claude_invocation, codex_invocation,
 };
-use crate::sandbox::windows::{HELPER_NAME, container_name};
-use crate::sandbox::{
-    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, ProjectSandbox,
-};
+use crate::sandbox::windows::container_name;
+use crate::sandbox::{InstalledSandbox, LineageCheck, ProjectSandbox};
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::profile::consts::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV};
 use kernel_sandbox::settings::LinuxSupervisor;
+use kernel_sandbox::windows::HELPER_NAME;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

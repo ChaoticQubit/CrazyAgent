@@ -347,7 +347,7 @@ pub enum Call {
         version: u64,
     },
     RequestAccess {
-        grant: crate::sandbox::policy::AccessGrant,
+        grant: kernel_sandbox::policy::AccessGrant,
         reason: String,
     },
     #[serde(rename = "propose_github_rule")]
@@ -1312,7 +1312,7 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
 /// and plains the reason when it raises the question. Takes the arguments. Returns the
 /// call, or none when a part is missing, extra or outside its bounds.
 fn request_call(arguments: Option<&Value>) -> Option<Call> {
-    use crate::sandbox::policy::AccessGrant;
+    use kernel_sandbox::policy::AccessGrant;
     let arguments = arguments?.as_object()?;
     if arguments
         .keys()

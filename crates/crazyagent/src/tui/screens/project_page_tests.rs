@@ -4136,7 +4136,7 @@ fn access_writes(sent: &[Request]) -> Vec<SetupQuery> {
 fn a_new_project_carried_in_the_background_saves_its_agent_access_or_says_it_stays_sandboxed() {
     use super::project_tests::access_view;
     use crate::engine::owner::OwnerResult;
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let sandboxed = "The project is made, but its agents stay Sandboxed.";
     if AgentAccess::NEW_PROJECT.unavailable().is_some() {
         let (mut shell, _, sent) = made_in_background();

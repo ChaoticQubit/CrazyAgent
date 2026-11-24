@@ -102,7 +102,7 @@ fn assert_applied(reply: &OwnerReply) {
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reconcile_of_a_save_whose_reply_was_lost_stops_the_projects_running_ide() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let owner = Usage::start().await;
     let project = ProjectId::new("lost-reply").unwrap();
     let revision = || {

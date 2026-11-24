@@ -5,8 +5,8 @@ use crate::credentials::test_keychain::TestKeychain;
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor};
-use crate::sandbox::toolchains::{self, ToolHomes};
 use base64::Engine;
+use kernel_sandbox::toolchains::ToolHomes;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,7 +97,7 @@ fn tool_placeholders() -> Vec<(String, String)> {
             .map(|xcode| (xcode.to_path_buf(), "<XCODE_DEVELOPER>")),
     );
     folders.extend(
-        toolchains::graphify(&homes)
+        kernel_sandbox::toolchains::graphify(&homes)
             .into_iter()
             .zip(["<GRAPHIFY_TOOL>", "<GRAPHIFY_PYTHON>"]),
     );
@@ -446,7 +446,7 @@ fn master_turns(master: Master) -> (Value, Vec<(String, String)>) {
         (base.to_str().unwrap().to_owned(), "<BASE>".to_owned()),
     ];
     let cache =
-        crate::sandbox::tool_cache::project_folder(Path::new("/"), repository.to_str().unwrap());
+        kernel_sandbox::tool_cache::project_folder(Path::new("/"), repository.to_str().unwrap());
     pairs.push((
         cache.file_name().unwrap().to_str().unwrap().to_owned(),
         "<REPOSITORY_TOOL_CACHE>".to_owned(),
