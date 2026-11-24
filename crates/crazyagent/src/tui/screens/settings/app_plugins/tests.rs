@@ -1020,6 +1020,16 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
     assert!(checked >= 20, "{checked}");
 }
 
+/// A plugin that is gone tells the owner how to see the current list, since neither a
+/// failed save nor a failed check reads the list again.
+#[test]
+fn a_plugin_that_is_gone_says_how_to_see_the_current_ones() {
+    assert_eq!(
+        sentence("app_plugin_not_found"),
+        "That plugin is gone. Open App plugins again to see the current ones."
+    );
+}
+
 #[test]
 fn the_permission_words_shown_are_the_words_the_page_reply_carried() {
     let mut fake = Fake::new();
@@ -1234,14 +1244,4 @@ fn the_page_and_its_modals_match_their_frames() {
     let job = one(&mut shell);
     answer(&mut shell, &mut fake, job);
     check("app-plugin-off-80", &render(&mut shell, 80, 24), &[], None);
-}
-
-/// A plugin that is gone tells the owner how to see the current list, since neither a
-/// failed save nor a failed check reads the list again.
-#[test]
-fn a_plugin_that_is_gone_says_how_to_see_the_current_ones() {
-    assert_eq!(
-        sentence("app_plugin_not_found"),
-        "That plugin is gone. Open App plugins again to see the current ones."
-    );
 }

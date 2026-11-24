@@ -179,6 +179,13 @@ test("App plugins: every app plugin code the engine can answer has its own sente
   assert.match(api.appPluginRefusal({ code: "app_plugin_folder_unavailable" }), /can't use a plugins folder on this computer yet/u);
 });
 
+test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_not_found" }),
+    "That plugin is gone. Open App plugins again to see the current ones.",
+  );
+});
+
 test("App plugins: each action is a direct bridge call with its own arguments, and an entered key travels only in its own call", () => {
   const file = source("../src/api-app-plugins.ts");
   for (const [command, args] of [
@@ -203,11 +210,4 @@ test("Settings lists App plugins under App next to the other app pages and keeps
   const index = source("../src/screens/settings/index.tsx");
   assert.match(index, /tab === "app-plugins" \? <AppPluginsSettings \/>/u);
   assert.match(index, /tab === "plugins" \? <PluginsAndSkills skill=\{skill\} \/>/u);
-});
-
-test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
-  assert.equal(
-    api.appPluginRefusal({ code: "app_plugin_not_found" }),
-    "That plugin is gone. Open App plugins again to see the current ones.",
-  );
 });
