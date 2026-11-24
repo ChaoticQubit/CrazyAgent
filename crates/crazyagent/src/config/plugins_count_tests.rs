@@ -55,14 +55,29 @@ fn a_settings_file_with_one_plugin_setting_reads_back() {
 async fn the_store_reads_back_knowledge_and_plugin_settings() {
     use crate::engine::owner::{OwnerData, OwnerRead};
     use crate::storage::{Job, Storage};
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::Builder::new()
-        .prefix("ca-plugin-settings-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let global = root.path().join("global.toml");
-    let project = root.path().join("project.toml");
+    #[cfg(unix)]
+    let (_root, folder) = {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::Builder::new()
+            .prefix("ca-plugin-settings-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let folder = root.path().to_path_buf();
+        (root, folder)
+    };
+    #[cfg(windows)]
+    let (_root, folder) = {
+        let root = tempfile::Builder::new()
+            .prefix("ca-plugin-settings-")
+            .tempdir()
+            .unwrap();
+        let folder = root.path().join("settings");
+        drop(crazyagent_win_sandbox::private::dir(&folder).unwrap());
+        (root, folder)
+    };
+    let global = folder.join("global.toml");
+    let project = folder.join("project.toml");
     for (path, text) in [
         (
             &global,
@@ -72,11 +87,23 @@ async fn the_store_reads_back_knowledge_and_plugin_settings() {
         ),
         (&project, format!("version = {SETTINGS_VERSION}\n")),
     ] {
-        std::fs::write(path, text).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(path, text).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+            crazyagent_win_sandbox::private::file(path, true)
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+        }
     }
     let (storage, config) =
-        Storage::open_with_settings_sources(&root.path().join("engine.db"), &global, &project)
+        Storage::open_with_settings_sources(&folder.join("engine.db"), &global, &project)
             .await
             .unwrap();
     let (send, receive) = tokio::sync::oneshot::channel();
