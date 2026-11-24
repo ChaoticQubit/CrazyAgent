@@ -1,6 +1,7 @@
 use super::{
     RECORD_FAILED, RECORD_RESTORED, RECORD_RESTORING, REPLACED, RESTORE_BUSY, RESTORE_RECORD_FILE,
-    RESTORE_ROLLBACK_FAILED, alone, read_restore_record, restore_failed, write_restore_record,
+    RESTORE_ROLLBACK_FAILED, alone, read_restore_record, real_database, restore_failed,
+    write_restore_record,
 };
 use crate::StorageError;
 use crate::migrations::{
@@ -182,6 +183,7 @@ fn usable(root: &Path, name: &str) -> Result<(PathBuf, i64, Vec<String>), Storag
 /// or a restoring record over data that fails, offers the put-back of a usable named copy.
 /// Input: the database path. Output: the offer, none for any other record, or busy.
 pub fn recovery(path: &Path) -> Result<Option<Recovery>, StorageError> {
+    let path = &real_database(path)?;
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
@@ -218,6 +220,7 @@ fn code(cause: &StorageError) -> &str {
 /// [`put_back_with`] says with `check_copy`. Input: the database path. Output: the folder
 /// that keeps the data it replaced.
 pub fn put_back(path: &Path) -> Result<PathBuf, StorageError> {
+    let path = &real_database(path)?;
     put_back_with(path, check_copy, |_| {})
 }
 
@@ -284,6 +287,7 @@ fn clear(root: &Path) -> Result<(), StorageError> {
 /// restore lock, engine.db must pass its check again at a 2.5 version before the record is
 /// removed. Input: the database path. Output: Ok once the record is gone, or the refusal.
 pub fn continue_2_5(path: &Path) -> Result<(), StorageError> {
+    let path = &real_database(path)?;
     continue_2_5_with(path, |_| {})
 }
 
@@ -313,6 +317,7 @@ pub fn finish(
     path: &Path,
     after_restore: &dyn Fn(&Connection, &Path, &Path),
 ) -> Result<String, StorageError> {
+    let path = &real_database(path)?;
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
