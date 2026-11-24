@@ -6,8 +6,7 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { ROUTES, render } from "./bridge-routes.mjs";
-import { nativeSources } from "../native-commands.mjs";
+import { ROUTES, nativeSources, render } from "./bridge-routes.mjs";
 import { finishGolden, recordPath, step, waitUntil, writeRecord } from "./golden-run.mjs";
 import { INTERNALS, closedPort, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 

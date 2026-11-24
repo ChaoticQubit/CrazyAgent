@@ -7,8 +7,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { ROUTES, render } from "./bridge-routes.mjs";
-import { nativeSources } from "../native-commands.mjs";
+import { ROUTES, nativeSources, render } from "./bridge-routes.mjs";
 import { INTERNALS, closedPort, owner, required, serveApp, setUpProject, start as launch, stop, value } from "./e2e-harness.mjs";
 import { git } from "./trial4-projects.mjs";
 

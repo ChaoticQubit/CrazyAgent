@@ -8,8 +8,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { nativeSources } from "../native-commands.mjs";
+import { LIB, ROUTES, commands, nativeSources, plan, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, endTerminals, owner, refusingPort, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
