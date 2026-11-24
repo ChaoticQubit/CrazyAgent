@@ -215,6 +215,30 @@ fn access_line(line: &str) -> bool {
         })
 }
 
+/// Whether an entry still sits at its path as the same inode, read after a direct read that
+/// found no access list, since that read also finds none for a path that is gone or whose
+/// folder moved away. Inputs: the path and the inode it was listed as. Output: true when it
+/// is there as that inode.
+#[cfg(target_os = "macos")]
+fn still_there(entry: &Path, inode: u64) -> bool {
+    std::fs::symlink_metadata(entry)
+        .is_ok_and(|now| std::os::unix::fs::MetadataExt::ino(&now) == inode)
+}
+
+/// Drops every kept answer for the entries, so no answer read in a call that found a part
+/// others can change is used again: that part lets them swap what the parts below it name
+/// while their access lists are read. Input: the entries the call read.
+#[cfg(target_os = "macos")]
+pub(super) fn forget(entries: &[&Path]) {
+    let mut kept = KEPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for entry in entries {
+        kept.remove(*entry);
+    }
+    assert!(entries.iter().all(|entry| !kept.contains_key(*entry)));
+}
+
 /// The stamp of what `lstat` read of an entry. Input: the read. Output: the stamp.
 #[cfg(target_os = "macos")]
 fn stamp(metadata: &std::fs::Metadata) -> Stamp {
@@ -299,6 +323,7 @@ fn list_text(entries: &[&Path], inodes: &[u64]) -> (Vec<Option<bool>>, Option<St
                 .map_err(std::io::Error::other)
                 .and_then(|path| crazyagent_macos_fs::acl_listed(&path)),
         )
+        .filter(|_| still_there(Path::new(operands[index]), listed_inodes[index]))
     });
     let mut read = read.into_iter();
     let answers: Vec<Option<bool>> = names
