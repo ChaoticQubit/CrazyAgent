@@ -141,3 +141,6 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
                 .find_map(|key| scope.get(key)?.as_str().map(str::to_owned))
         })
 }
+
+#[cfg(all(test, unix))]
+mod tests;
