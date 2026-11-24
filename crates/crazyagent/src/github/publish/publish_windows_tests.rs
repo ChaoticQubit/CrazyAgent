@@ -20,7 +20,7 @@ fn owner_git(folder: &Path, args: &[&str]) -> String {
             .args(args)
             .current_dir(folder)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
+            .env("GIT_CONFIG_GLOBAL", kernel_common::names::NULL_DEVICE),
     )
     .unwrap();
     assert!(
@@ -356,7 +356,7 @@ fn contained_folder(made: &Project) -> PathBuf {
 /// every project command in its container. Inputs: the project and its canonical folder.
 /// Output: the routed git.
 fn routed(made: &Project, folder: &Path) -> PublishGit {
-    use crate::sandbox::windows::owner_git::farm;
+    use crate::sandbox::windows_farm as farm;
     farm::own(folder);
     let owner = farm::installed(made.place.path(), folder, git().unwrap().program());
     PublishGit::contained(Arc::new(owner))
@@ -398,7 +398,7 @@ fn ran_step(
 #[test]
 #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
 fn a_contained_windows_publish_step_opens_no_share_a_git_folder_names_after_the_check() {
-    use crate::sandbox::windows::owner_git::farm;
+    use crate::sandbox::windows_farm as farm;
     let sessions = farm::hold();
     let mut reached = Vec::new();
     for (shape, _) in farm::SHAPES {
@@ -522,7 +522,7 @@ fn gitfile_commit_wrong(
 #[test]
 #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
 fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_project() {
-    use crate::sandbox::windows::owner_git::farm;
+    use crate::sandbox::windows_farm as farm;
     let sessions = farm::hold();
     let ada = Author {
         name: "Ada".into(),
@@ -553,7 +553,7 @@ fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_
                         .current_dir(&inner)
                         .env("GIT_DIR", ".git")
                         .env("GIT_CONFIG_NOSYSTEM", "1")
-                        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
+                        .env("GIT_CONFIG_GLOBAL", kernel_common::names::NULL_DEVICE),
                 )
                 .unwrap();
                 assert_eq!(
@@ -774,7 +774,7 @@ fn the_unwrapped_scope_holds_only_on_its_own_thread_until_dropped() {
 #[test]
 #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
 fn a_planted_share_gitfile_fails_the_planted_check_when_the_commit_runs_unwrapped() {
-    use crate::sandbox::windows::owner_git::farm;
+    use crate::sandbox::windows_farm as farm;
     let sessions = farm::hold();
     let nested_head = std::env::var("CRAZYAGENT_FARM_NESTED_HEAD")
         .expect("CRAZYAGENT_FARM_NESTED_HEAD is set by unc-share-setup.ps1 on the test farm");

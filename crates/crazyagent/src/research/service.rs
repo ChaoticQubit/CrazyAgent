@@ -1048,7 +1048,7 @@ mod tests {
         std::fs::create_dir_all(
             projects
                 .join("alpha")
-                .join(crate::projects_home::CRAZYAGENT_DIRECTORY),
+                .join(kernel_common::names::CRAZYAGENT_DIRECTORY),
         )
         .unwrap();
         let db = crate::questions::open(&engine).unwrap();

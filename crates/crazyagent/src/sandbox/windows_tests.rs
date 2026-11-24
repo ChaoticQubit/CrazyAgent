@@ -1,418 +1,23 @@
-use crazyagent_win_sandbox::plan::plan;
-use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
-use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
-use kernel_sandbox::error::{SandboxError, invalid};
-use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
-use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-use kernel_sandbox::paths::{canonical, clean_absolute};
-use kernel_sandbox::profile::ProjectSandbox;
-use kernel_sandbox::profile::command::Sandbox;
-use kernel_sandbox::profile::env::agent_process_env;
-use kernel_sandbox::windows::{
-    GRANTS_FOLDER, container_for, existing_helper, helper_beside_engine,
-};
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-/// The owner's own git for one project inside an AppContainer of its own, with no capability,
-/// so a `.git` that points git elsewhere reaches nothing (V244-WIN-GIT-UNC-SIBLINGS).
-pub mod owner_git;
-
-/// The most processes one agent may run at once inside its job.
-pub const ACTIVE_PROCESSES: u32 = 512;
-/// The lock file git writes beside `.git\config` while it changes the config. The Windows
-/// boundary leaves it out of the protected paths: Windows cannot refuse creating one name, so
-/// guarding a lock that is normally missing would keep `.git` from taking new entries, git's
-/// own `index.lock` among them. A lock an agent makes never becomes the config: `config` is
-/// read only, so no agent replaces or deletes it (DEC-193 D6, step 0c).
-const GIT_CONFIG_LOCK: &str = "config.lock";
-
-const PROFILE_NAME_MAX: usize = 128;
-const SYSTEM_ROOT_DEFAULT: &str = r"C:\Windows";
-const PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
-
-const PINNED_VARIABLES: &[&str] = &[
-    "USERPROFILE",
-    "HOME",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-    "SystemRoot",
-    "SystemDrive",
-    "windir",
-    "ComSpec",
-];
-
-/// The Windows boundary for one project agent. The helper runs the agent in an AppContainer
-/// of its own with read and execute on its read roots, modify on its writable roots, read and
-/// execute only on the protected paths and nothing on secret paths inside a granted root,
-/// inside a job that kills the agent's whole tree when the helper ends (DEC-193).
-#[derive(Debug)]
-pub struct WindowsSandbox {
-    sandbox: ProjectSandbox,
-    helper: PathBuf,
-    profile: PathBuf,
-}
-
-impl WindowsSandbox {
-    /// Makes each missing guarded folder ([`make_guarded_folders`]), then writes the boundary
-    /// profile for `sandbox` at `profile`, a `.sb` file replaced atomically, bound to `helper`;
-    /// the profile and the helper's `grants` folder lie outside every writable root, so no
-    /// agent rewrites what its next launch uses. Inputs: the policy, the helper, the profile
-    /// path and the grants folder. Output: the sandbox, or the [`SandboxError`] saying why not.
-    pub fn install(
-        sandbox: ProjectSandbox,
-        helper: &Path,
-        profile: &Path,
-        grants: &Path,
-    ) -> Result<Self, SandboxError> {
-        let grants = Some(grants)
-            .filter(|grants| clean_absolute(grants) && grants.is_dir())
-            .ok_or_else(|| invalid("grants folder must exist"))?;
-        make_guarded_folders(&sandbox)?;
-        let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
-        if let Some(root) = crazyagent_win_sandbox::unreadable_read_root(&boundary) {
-            eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
-            return Err(SandboxError::Unreadable(PathBuf::from(root)));
-        }
-        let helper = existing_helper(helper)?;
-        let parent = profile
-            .parent()
-            .filter(|parent| clean_absolute(parent) && parent.is_dir())
-            .ok_or_else(|| invalid("profile directory must exist"))?;
-        let parent = canonical(parent)?;
-        let name = profile
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| name.ends_with(".sb") && name.len() <= PROFILE_NAME_MAX)
-            .ok_or_else(|| invalid("profile name must end in .sb"))?;
-        let target = parent.join(name);
-        if !clean_absolute(&target)
-            || sandbox
-                .writable_roots()
-                .any(|root| target.starts_with(root))
-        {
-            return Err(invalid(
-                "profile must live outside the sandbox's writable roots",
-            ));
-        }
-        let text = boundary
-            .encode()
-            .map_err(|error| invalid(&error.to_string()))?;
-        let staging = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-        let written = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)
-            .and_then(|mut file| {
-                file.write_all(text.as_bytes())?;
-                file.sync_all()
-            })
-            .and_then(|()| fs::rename(&staging, &target));
-        if let Err(error) = written {
-            let _ = fs::remove_file(&staging);
-            return Err(error.into());
-        }
-        assert!(target.is_file());
-        Ok(Self {
-            sandbox,
-            helper,
-            profile: target,
-        })
-    }
-
-    /// The program every wrapped command starts: the boundary helper.
-    pub fn launcher(&self) -> &Path {
-        &self.helper
-    }
-
-    /// The project policy this sandbox holds.
-    pub fn sandbox(&self) -> &ProjectSandbox {
-        &self.sandbox
-    }
-
-    /// The installed boundary profile the helper reads.
-    pub fn profile(&self) -> &Path {
-        &self.profile
-    }
-
-    fn base_env(&self) -> Vec<(&'static str, OsString)> {
-        let home = self.sandbox.agent_home();
-        let tmp = self.sandbox.agent_tmp().as_os_str();
-        let system = system_root();
-        let drive = system.chars().take(2).collect::<String>();
-        let path = format!(
-            r"{system}\System32;{system};{system}\System32\Wbem;{system}\System32\WindowsPowerShell\v1.0"
-        );
-        vec![
-            ("USERPROFILE", home.as_os_str().to_owned()),
-            ("HOME", home.as_os_str().to_owned()),
-            ("APPDATA", home.join("AppData").join("Roaming").into()),
-            ("LOCALAPPDATA", home.join("AppData").join("Local").into()),
-            ("TEMP", tmp.to_owned()),
-            ("TMP", tmp.to_owned()),
-            ("TMPDIR", tmp.to_owned()),
-            ("SystemRoot", system.clone().into()),
-            ("SystemDrive", drive.into()),
-            ("windir", system.clone().into()),
-            ("ComSpec", format!(r"{system}\System32\cmd.exe").into()),
-            ("PATHEXT", PATHEXT.into()),
-            ("PATH", path.into()),
-        ]
-    }
-}
-
-impl Sandbox for WindowsSandbox {
-    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
-        let program = Path::new(harness.get_program());
-        if !clean_absolute(program) {
-            return Err(invalid("harness program must be an absolute plain path"));
-        }
-        let cwd = harness
-            .get_current_dir()
-            .unwrap_or(self.sandbox.project_root());
-        if !clean_absolute(cwd)
-            || !std::iter::once(self.sandbox.project_root())
-                .chain(self.sandbox.worktrees().iter().map(PathBuf::as_path))
-                .any(|root| cwd.starts_with(root))
-        {
-            return Err(invalid(
-                "harness must start inside the project folder or its worktree",
-            ));
-        }
-        let owned = self.base_env();
-        let base: Vec<(&str, &OsStr)> = owned
-            .iter()
-            .map(|(name, value)| (*name, value.as_os_str()))
-            .collect();
-        let pinned = |name: &OsStr| {
-            PINNED_VARIABLES
-                .iter()
-                .any(|pinned| name.eq_ignore_ascii_case(pinned))
-        };
-        let env = agent_process_env(&base, harness.get_envs().filter(|&(name, _)| !pinned(name)))?;
-        let mut command = boundary_command(&self.helper, &self.profile, program, &env);
-        command.args(harness.get_args()).current_dir(cwd);
-        assert_eq!(command.get_program(), self.helper.as_os_str());
-        assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
-        Ok(command)
-    }
-}
-
-/// Builds a Windows agent command without a bound sandbox: the helper next to the engine's
-/// executable with `--profile <profile> -- <program>` and exactly [`agent_process_env`]. Inputs: an
-/// installed boundary profile, the absolute program and both environments. Output: the
-/// command, `Unavailable` without the helper, or `Invalid` for an unsafe input.
-pub fn agent_command<'a>(
-    profile: &Path,
-    program: &Path,
-    base: &[(&str, &OsStr)],
-    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-) -> Result<Command, SandboxError> {
-    let helper = existing_helper(&helper_beside_engine()?)?;
-    if !clean_absolute(profile) || !profile.is_file() {
-        return Err(invalid("boundary profile must be an existing plain file"));
-    }
-    if !clean_absolute(program) {
-        return Err(invalid("harness program must be an absolute plain path"));
-    }
-    let env = agent_process_env(base, harness)?;
-    let command = boundary_command(&helper, profile, program, &env);
-    assert_eq!(command.get_envs().count(), env.len());
-    Ok(command)
-}
-
-/// The AppContainer capabilities for a network reach (DESIGN-0256 O2a): the internet client
-/// when open or limited to ports on any host, a limit the AppContainer cannot hold and so
-/// widens; none when no endpoint is allowed; and [`MODEL_LOOPBACK_WINDOWS_LINE`] for any
-/// loopback port, which it cannot reach (P6). Input: the network. Output: the list or refusal.
-pub fn capabilities(network: &SandboxNetwork) -> Result<Vec<Capability>, SandboxError> {
-    match network {
-        SandboxNetwork::Open => Ok(vec![Capability::InternetClient]),
-        SandboxNetwork::Only(remotes) if remotes.is_empty() => Ok(Vec::new()),
-        SandboxNetwork::Only(remotes)
-            if remotes
-                .iter()
-                .any(|remote| matches!(remote, SandboxRemote::Loopback(_))) =>
-        {
-            Err(SandboxError::Unavailable(
-                MODEL_LOOPBACK_WINDOWS_LINE.into(),
-            ))
-        }
-        SandboxNetwork::Only(_) => Ok(vec![Capability::InternetClient]),
-    }
-}
-
-/// The AppContainer name for one agent of one project: `crazyagent.` and 32 hex digits of
-/// the SHA-256 of the project folder and the agent's home, so each agent home, which may
-/// hold account sign-ins, is reachable by its own container only. Input: the policy.
-/// Output: a name the helper's container check accepts.
-pub fn container_name(sandbox: &ProjectSandbox) -> String {
-    container_for(sandbox.project_root(), sandbox.agent_home())
-}
-
-/// The boundary profile for a policy: container, network capabilities, read and writable
-/// roots, the protected paths kept read-only but git's config lock, and the project's root
-/// `context` while `.crazyagent` is a real folder, since the state folder then holds the
-/// context the engine reads ([`crate::projects_home::state_folder`]) and a missing root
-/// `context` would keep the project root from taking new entries; none for a job folder
-/// ([`ProjectSandbox::as_job_folder`]); plain drive secret paths hidden, and the grants folder.
-/// The helper's plan check runs here too, so a policy it would refuse, such as a grants folder
-/// in a writable root, is refused at install. Inputs: the policy and the grants folder.
-/// Output: the profile, or the refusal.
-pub fn boundary_profile(
-    sandbox: &ProjectSandbox,
-    grants: &Path,
-) -> Result<BoundaryProfile, SandboxError> {
-    let capabilities = capabilities(sandbox.network())?;
-    let read_roots = sandbox
-        .read_roots()
-        .iter()
-        .map(|root| drive_path(root))
-        .collect::<Result<Vec<_>, _>>()?;
-    let write_roots = sandbox
-        .writable_roots()
-        .map(|root| drive_path(root))
-        .collect::<Result<Vec<_>, _>>()?;
-    let root = sandbox.project_root();
-    let config_lock = root.join(".git").join(GIT_CONFIG_LOCK);
-    let unread = (crate::projects_home::state_folder(root) != root).then(|| root.join("context"));
-    let guards = sandbox.holds_project_guards();
-    assert!(guards || sandbox.confinements() == 0);
-    let protected = if guards {
-        sandbox.protected_paths()
-    } else {
-        Vec::new()
-    };
-    let mut guarded = protected
-        .iter()
-        .filter(|path| **path != config_lock && Some(*path) != unread.as_ref())
-        .map(|path| {
-            Ok(Guarded {
-                path: drive_path(path)?,
-                guard: Guard::ReadOnly,
-            })
-        })
-        .collect::<Result<Vec<_>, SandboxError>>()?;
-    guarded.extend(sandbox.secret_paths().iter().filter_map(|path| {
-        drive_path(path).ok().map(|path| Guarded {
-            path,
-            guard: Guard::Hidden,
-        })
-    }));
-    let profile = BoundaryProfile {
-        container: container_name(sandbox),
-        capabilities,
-        read_roots,
-        write_roots,
-        guarded,
-        active_processes: ACTIVE_PROCESSES,
-        grants: drive_path(grants)?,
-    };
-    profile
-        .validate()
-        .map_err(|error| invalid(&error.to_string()))?;
-    plan(&profile, |_| true).map_err(invalid)?;
-    Ok(profile)
-}
-
-/// Makes `.git\hooks`, `.git\modules` and `.crazyagent\context` when missing, empty, in a parent
-/// that is a real folder, never replacing an entry and never making `.git` or `.crazyagent`,
-/// which would move a legacy project's state folder (DEC-193 F2): the helper keeps the entries
-/// of the folder above a missing guarded path, which would stop git's `index.lock`. A job
-/// folder holds no guards, so none is made there. Input: the policy. Output: how many were
-/// made, or the failure.
-fn make_guarded_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError> {
-    if !sandbox.holds_project_guards() {
-        return Ok(0);
-    }
-    let root = sandbox.project_root();
-    let git = root.join(".git");
-    let state = root.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
-    let wanted = [
-        git.join("hooks"),
-        git.join("modules"),
-        state.join("context"),
-    ];
-    let guarded = sandbox.protected_paths();
-    assert!(wanted.iter().all(|folder| guarded.contains(folder)));
-    let mut made = 0;
-    for folder in &wanted {
-        let parent = folder
-            .parent()
-            .expect("a guarded folder sits in the project");
-        let real = fs::symlink_metadata(parent)
-            .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink());
-        if !real {
-            continue;
-        }
-        match fs::create_dir(folder) {
-            Ok(()) => made += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    assert!(made <= wanted.len());
-    Ok(made)
-}
-
-fn drive_path(path: &Path) -> Result<String, SandboxError> {
-    path.to_str()
-        .filter(|text| check_path(text).is_ok())
-        .map(str::to_owned)
-        .ok_or_else(|| invalid("a sandbox path is not a plain drive path"))
-}
-
-/// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
-/// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
-/// I/O error.
-pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
-    let layout =
-        crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
-    let grants = layout.root().join(GRANTS_FOLDER);
-    fs::create_dir_all(&grants)?;
-    assert!(grants.is_dir());
-    Ok(grants)
-}
-
-fn boundary_command(
-    helper: &Path,
-    profile: &Path,
-    program: &Path,
-    env: &[(OsString, OsString)],
-) -> Command {
-    let mut command = Command::new(helper);
-    command
-        .arg(PROFILE_FLAG)
-        .arg(profile)
-        .arg(SEPARATOR)
-        .arg(program)
-        .env_clear()
-        .envs(env.iter().map(|(name, value)| (name, value)));
-    command
-}
-
-fn system_root() -> String {
-    std::env::var("SystemRoot")
-        .ok()
-        .filter(|root| check_path(root).is_ok())
-        .unwrap_or_else(|| SYSTEM_ROOT_DEFAULT.to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod profile_rows {
     use crate::sandbox::InstalledSandbox;
-    use crazyagent_win_sandbox::profile::check_container;
-    use kernel_sandbox::net::SandboxRemote;
+    use crazyagent_win_sandbox::profile::{
+        BoundaryProfile, Capability, Guard, Guarded, check_container,
+    };
+    use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
+    use kernel_sandbox::error::SandboxError;
+    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::paths::canonical;
+    use kernel_sandbox::profile::ProjectSandbox;
+    use kernel_sandbox::profile::command::Sandbox;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+    use kernel_sandbox::windows::profile::*;
     use kernel_sandbox::windows::{APPCONTAINER_MISSING, CONTAINER_PREFIX, HELPER_NAME};
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::io::Write;
     use std::io::{BufRead, BufReader};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::process::Stdio;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1141,5 +746,462 @@ mod tests {
             assert_eq!(run(r"echo note>context\brief.md"), job, "job {job}");
             assert!(!project.join(".git").exists() && !project.join(".crazyagent").exists());
         }
+    }
+}
+
+mod owner_git_rows {
+    use crate::sandbox::windows_farm as farm;
+    use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard, check_container};
+    use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
+    use kernel_sandbox::error::SandboxError;
+    use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::paths::canonical;
+    use kernel_sandbox::profile::ProjectSandbox;
+    use kernel_sandbox::windows::GRANTS_FOLDER;
+    use kernel_sandbox::windows::owner_git::*;
+    use kernel_sandbox::windows::profile::container_name;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    struct Made {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        project: PathBuf,
+        folder: PathBuf,
+        git: PathBuf,
+        grants: PathBuf,
+    }
+
+    /// A project, an owner-git folder, a grants folder and a stand-in for Git for Windows'
+    /// `cmd\git.exe` beside its `mingw64\bin\git.exe`, all in one temp folder. Output: the folders.
+    fn made() -> Made {
+        let temp = tempfile::tempdir().unwrap();
+        let root = canonical(temp.path()).unwrap();
+        let (project, folder) = (root.join("project"), root.join(OWNER_GIT_FOLDER));
+        let (git, grants) = (
+            root.join("Git").join("cmd").join("git.exe"),
+            root.join(GRANTS_FOLDER),
+        );
+        let platform = root.join("Git").join("mingw64").join("bin").join("git.exe");
+        for made in [
+            &project,
+            git.parent().unwrap(),
+            &grants,
+            platform.parent().unwrap(),
+        ] {
+            fs::create_dir_all(made).unwrap();
+        }
+        fs::write(&git, "").unwrap();
+        fs::write(&platform, "").unwrap();
+        Made {
+            _temp: temp,
+            root,
+            project,
+            folder,
+            git,
+            grants,
+        }
+    }
+
+    fn installed(made: &Made, project: &Path) -> OwnerGit {
+        let helper = std::env::current_exe().unwrap();
+        OwnerGit::install(
+            &crate::sandbox::PROFILE_HOOKS,
+            &made.folder,
+            project,
+            &made.git,
+            &helper,
+            &made.grants,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_git_the_engine_finds_on_the_path_is_one_owner_git_installs_for() {
+        let git = crate::github::git_program(std::env::var_os("PATH").as_deref())
+            .expect("git on the runner's PATH");
+        let root = install_root(&git);
+        assert!(
+            root.is_some_and(marked),
+            "git {} gives the install folder {root:?}",
+            git.display()
+        );
+    }
+
+    #[test]
+    fn git_for_windows_install_folders_are_found_from_its_programs_only() {
+        let root = Path::new(r"C:\Programs\Git");
+        for program in [
+            r"C:\Programs\Git\cmd\git.exe",
+            r"C:\Programs\Git\bin\git.exe",
+            r"C:\Programs\Git\CMD\git.exe",
+            r"C:\Programs\Git\mingw64\bin\git.exe",
+            r"C:\Programs\Git\clangarm64\bin\git.exe",
+            r"C:\Programs\Git\ucrt64\bin\git.exe",
+            r"C:\Programs\Git\clang64\bin\git.exe",
+        ] {
+            assert_eq!(install_root(Path::new(program)), Some(root), "{program}");
+        }
+        for program in [
+            r"C:\tools\git.exe",
+            r"C:\scoop\shims\git.exe",
+            r"C:\Programs\Git\mingw64\libexec\git-core\git.exe",
+            r"cmd\git.exe",
+            r"C:\cmd\git.exe",
+        ] {
+            assert_eq!(install_root(Path::new(program)), None, "{program}");
+        }
+    }
+
+    #[test]
+    fn owner_git_has_no_capability_writes_only_the_project_and_its_folders_and_is_no_agents_container()
+     {
+        let made = made();
+        let owner = installed(&made, &made.project);
+        let profile = BoundaryProfile::load(owner.profile()).unwrap();
+        let folder = canonical(&made.folder).unwrap();
+        let places = places(&folder, &made.project);
+        assert_eq!(owner.profile(), places.profile);
+        assert!(
+            profile.capabilities.is_empty(),
+            "{:?}",
+            profile.capabilities
+        );
+        assert_eq!(
+            profile.write_roots,
+            [&made.project, &places.home, &places.tmp]
+                .map(|path| path.to_str().unwrap().to_owned())
+        );
+        assert_eq!(
+            profile.read_roots,
+            [made.root.join("Git").to_str().unwrap().to_owned()]
+        );
+        assert!(
+            profile
+                .guarded
+                .iter()
+                .all(|item| item.guard == Guard::Hidden),
+            "{:?}",
+            profile.guarded
+        );
+        assert_eq!(check_container(&profile.container), Ok(()));
+        let (agent_home, agent_tmp) = (made.root.join("agent-home"), made.root.join("agent-tmp"));
+        fs::create_dir_all(&agent_home).unwrap();
+        fs::create_dir_all(&agent_tmp).unwrap();
+        let agent = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &made.project,
+            &agent_home,
+            &agent_tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap();
+        assert_ne!(container_name(&agent), profile.container);
+        let again = installed(&made, &made.project);
+        assert_eq!(again.profile(), owner.profile());
+        assert_eq!(
+            BoundaryProfile::load(again.profile()).unwrap().container,
+            profile.container
+        );
+        let other = made.root.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let elsewhere = installed(&made, &other);
+        assert_ne!(elsewhere.profile(), owner.profile());
+        assert_ne!(
+            BoundaryProfile::load(elsewhere.profile())
+                .unwrap()
+                .container,
+            profile.container
+        );
+    }
+
+    #[test]
+    fn owner_git_installed_from_a_verbatim_program_wraps_its_plain_form() {
+        let made = made();
+        let verbatim = PathBuf::from(format!(r"\\?\{}", made.git.display()));
+        let helper = std::env::current_exe().unwrap();
+        let owner = OwnerGit::install(
+            &crate::sandbox::PROFILE_HOOKS,
+            &made.folder,
+            &made.project,
+            &verbatim,
+            &helper,
+            &made.grants,
+        )
+        .unwrap();
+        assert_eq!(owner.git(), made.git);
+        let mut git = Command::new(owner.git());
+        git.current_dir(&made.project).arg("--version");
+        let wrapped = owner.wrap(&git).unwrap();
+        assert_eq!(wrapped.get_args().nth(3), Some(made.git.as_os_str()));
+    }
+
+    #[test]
+    fn owner_git_refuses_a_verbatim_program_whose_plain_path_opens_another_file() {
+        let made = made();
+        for tail in [".", " "] {
+            let verbatim = PathBuf::from(format!(r"\\?\{}{tail}", made.git.display()));
+            fs::write(&verbatim, "another git").unwrap();
+            refused_install(
+                &made,
+                &made.folder,
+                &made.project,
+                &verbatim,
+                "another file",
+            );
+        }
+    }
+
+    #[test]
+    fn owner_git_refuses_a_git_outside_a_git_for_windows_install_before_any_profile() {
+        let made = made();
+        let loose = made.root.join("tools").join("git.exe");
+        fs::create_dir_all(loose.parent().unwrap()).unwrap();
+        fs::write(&loose, "").unwrap();
+        let helper = std::env::current_exe().unwrap();
+        match OwnerGit::install(
+            &crate::sandbox::PROFILE_HOOKS,
+            &made.folder,
+            &made.project,
+            &loose,
+            &helper,
+            &made.grants,
+        ) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert!(reason.contains("Git for Windows"), "{reason}")
+            }
+            other => panic!("expected the install folder refusal, got {other:?}"),
+        }
+        let folder = canonical(&made.folder).unwrap();
+        assert!(!places(&folder, &made.project).profile.exists());
+    }
+
+    /// Lays out a stand-in Git for Windows under `root`: each relative file is written empty
+    /// and each relative folder made. Inputs: the root, the files and the folders. Output:
+    /// the root's `cmd\git.exe` or, with no such file, the first file.
+    fn laid_out(root: &Path, files: &[&str], folders: &[&str]) -> PathBuf {
+        for folder in folders {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "").unwrap();
+        }
+        let cmd = root.join("cmd").join("git.exe");
+        if cmd.is_file() {
+            cmd
+        } else {
+            root.join(files[0])
+        }
+    }
+
+    /// Asserts owner git refuses to install for `git` with `words` in its reason and writes no
+    /// profile. Inputs: the folders, the owner-git folder, the project, git and the words.
+    fn refused_install(made: &Made, folder: &Path, project: &Path, git: &Path, words: &str) {
+        let helper = std::env::current_exe().unwrap();
+        match OwnerGit::install(
+            &crate::sandbox::PROFILE_HOOKS,
+            folder,
+            project,
+            git,
+            &helper,
+            &made.grants,
+        ) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert!(reason.contains(words), "{}: {reason}", git.display())
+            }
+            other => panic!(
+                "{}: expected a refusal naming {words}, got {other:?}",
+                git.display()
+            ),
+        }
+        let folder = canonical(folder).unwrap();
+        assert!(
+            !places(&folder, &canonical(project).unwrap())
+                .profile
+                .exists()
+        );
+    }
+
+    /// CR-0443 unc9 r2: a share row waits while another holds the runner's sessions, so no
+    /// reset or session read of one row falls inside another's; the waiting hold sees the
+    /// first row's work already finished.
+    #[test]
+    fn a_share_row_waits_while_another_holds_the_runner_sessions() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let inside = Arc::new(AtomicBool::new(true));
+        let first = farm::hold();
+        let waiting = {
+            let inside = inside.clone();
+            std::thread::spawn(move || {
+                let _second = farm::hold();
+                inside.load(Ordering::SeqCst)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        inside.store(false, Ordering::SeqCst);
+        drop(first);
+        assert!(
+            !waiting.join().unwrap(),
+            "the second hold began while the first row was inside"
+        );
+    }
+
+    #[test]
+    fn owner_git_reads_only_a_folder_that_holds_git_for_windows_markers() {
+        let made = made();
+        for (name, platform) in [
+            ("Ucrt", "ucrt64"),
+            ("Clang", "clang64"),
+            ("Full", "mingw64"),
+            ("Arm", "clangarm64"),
+            ("Old", "mingw32"),
+        ] {
+            let platform_git = format!("{platform}/bin/git.exe");
+            let git = laid_out(
+                &made.root.join(name),
+                &["cmd/git.exe", "bin/git.exe", platform_git.as_str()],
+                &[],
+            );
+            let project = made.root.join(format!("project-{name}"));
+            fs::create_dir_all(&project).unwrap();
+            let helper = std::env::current_exe().unwrap();
+            let owner = OwnerGit::install(
+                &crate::sandbox::PROFILE_HOOKS,
+                &made.folder,
+                &project,
+                &git,
+                &helper,
+                &made.grants,
+            )
+            .unwrap_or_else(|problem| panic!("{name}: {problem:?}"));
+            assert_eq!(
+                BoundaryProfile::load(owner.profile()).unwrap().read_roots,
+                [made.root.join(name).to_str().unwrap().to_owned()],
+                "{name}"
+            );
+        }
+        for (name, files, folders) in [
+            ("UserBin", &["bin/git.exe"][..], &[][..]),
+            ("UserCmd", &["cmd/git.exe"][..], &[][..]),
+            (
+                "NoCmd",
+                &["bin/git.exe", "mingw64/bin/git.exe"][..],
+                &[][..],
+            ),
+            (
+                "NoPlatform",
+                &["cmd/git.exe", "bin/git.exe"][..],
+                &["usr/bin"][..],
+            ),
+            (
+                "BareMingw",
+                &["cmd/git.exe", "bin/git.exe"][..],
+                &["mingw64/bin"][..],
+            ),
+            (
+                "BareUcrt",
+                &["cmd/git.exe", "bin/git.exe"][..],
+                &["ucrt64/bin"][..],
+            ),
+        ] {
+            let git = laid_out(&made.root.join(name), files, folders);
+            refused_install(&made, &made.folder, &made.project, &git, "Git for Windows");
+        }
+    }
+
+    #[test]
+    fn owner_git_refuses_an_install_folder_that_holds_the_project_or_its_own_folder() {
+        let made = made();
+        let work = made.root.join("work");
+        let project = work.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let git = laid_out(&work, &["cmd/git.exe", "mingw64/bin/git.exe"], &[]);
+        refused_install(&made, &made.folder, &project, &git, "holds");
+        let engine = made.root.join("engine");
+        let folder = engine.join(OWNER_GIT_FOLDER);
+        let git = laid_out(&engine, &["cmd/git.exe", "mingw64/bin/git.exe"], &[]);
+        refused_install(&made, &folder, &made.project, &git, "holds");
+    }
+
+    #[test]
+    fn a_wrapped_git_starts_through_the_helper_in_its_own_home_with_no_global_config() {
+        let made = made();
+        let owner = installed(&made, &made.project);
+        let folder = canonical(&made.folder).unwrap();
+        let places = places(&folder, &made.project);
+        let mut git = Command::new(&made.git);
+        git.env("LC_ALL", "C")
+            .env(GLOBAL_CONFIG, kernel_common::names::NULL_DEVICE)
+            .env("GIT_COMMON_DIR", made.project.join(".git"))
+            .envs(crate::research::runner::GIT_SAFE_ENV)
+            .env("HOME", made.root.join("publish-home"))
+            .env("SystemRoot", r"C:\Elsewhere")
+            .env_remove("GIT_DIR")
+            .current_dir(&made.project)
+            .args(["ls-files", "-z", "--cached"]);
+        let wrapped = owner.wrap(&git).unwrap();
+        let args: Vec<&OsStr> = wrapped.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                OsStr::new(PROFILE_FLAG),
+                owner.profile().as_os_str(),
+                OsStr::new(SEPARATOR),
+                made.git.as_os_str(),
+                OsStr::new("ls-files"),
+                OsStr::new("-z"),
+                OsStr::new("--cached"),
+            ]
+        );
+        assert_eq!(wrapped.get_current_dir(), Some(made.project.as_path()));
+        let env = |name: &str| {
+            wrapped
+                .get_envs()
+                .find(|(known, _)| *known == OsStr::new(name))
+                .and_then(|(_, value)| value)
+        };
+        assert_eq!(env("HOME"), Some(places.home.as_os_str()));
+        assert_eq!(env("USERPROFILE"), Some(places.home.as_os_str()));
+        assert_eq!(env("TEMP"), Some(places.tmp.as_os_str()));
+        assert_eq!(env(GLOBAL_CONFIG), Some(OsStr::new("/dev/null")));
+        assert_eq!(
+            env("GIT_COMMON_DIR"),
+            Some(made.project.join(".git").as_os_str())
+        );
+        assert_eq!(env("GIT_NO_LAZY_FETCH"), Some(OsStr::new("1")));
+        assert_eq!(env("LC_ALL"), Some(OsStr::new("C")));
+        assert_ne!(env("SystemRoot"), Some(OsStr::new(r"C:\Elsewhere")));
+        assert_eq!(env("GIT_DIR"), None);
+    }
+
+    #[test]
+    fn a_wrapped_git_refuses_another_program_a_global_config_or_a_folder_outside_the_project() {
+        let made = made();
+        let owner = installed(&made, &made.project);
+        let refused = |git: &Command, why: &str| {
+            assert!(
+                matches!(owner.wrap(git), Err(SandboxError::Invalid(_))),
+                "{why}"
+            );
+        };
+        let mut other = Command::new(made.root.join("Git").join("bin").join("git.exe"));
+        other.current_dir(&made.project);
+        refused(&other, "another program");
+        let mut config = Command::new(&made.git);
+        config
+            .current_dir(&made.project)
+            .env(GLOBAL_CONFIG, made.root.join("gitconfig"));
+        refused(&config, "a global config file");
+        let mut outside = Command::new(&made.git);
+        outside.current_dir(&made.root);
+        refused(&outside, "a folder outside the project");
+        let mut plain = Command::new(&made.git);
+        plain.current_dir(&made.project);
+        assert!(owner.wrap(&plain).is_ok());
     }
 }

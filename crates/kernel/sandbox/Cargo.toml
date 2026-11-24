@@ -38,3 +38,6 @@ crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+
+[target.'cfg(windows)'.dev-dependencies]
+crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox", features = ["test-principals"] }

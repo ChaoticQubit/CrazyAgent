@@ -270,7 +270,7 @@ fn replace(folder: &Path, body: &[u8]) -> Result<(), EngineError> {
     let project = rustix::fs::open(folder, directory, Mode::empty()).map_err(refused)?;
     let state = rustix::fs::openat(
         &project,
-        crate::projects_home::CRAZYAGENT_DIRECTORY,
+        kernel_common::names::CRAZYAGENT_DIRECTORY,
         directory,
         Mode::empty(),
     )
@@ -302,7 +302,7 @@ fn replace(folder: &Path, body: &[u8]) -> Result<(), EngineError> {
 #[cfg(not(unix))]
 fn replace(folder: &Path, body: &[u8]) -> Result<(), EngineError> {
     let refused = |_| failure("questions_page_unavailable");
-    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     let metadata = std::fs::symlink_metadata(&state).map_err(refused)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(failure("questions_page_unavailable"));

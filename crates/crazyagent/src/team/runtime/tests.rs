@@ -7876,7 +7876,7 @@ fn master_question_box_leaves(owner_keyed: bool) {
         fixture
             .base
             .join("project")
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY),
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY),
     )
     .unwrap();
     let host = fixture.host();
@@ -7944,7 +7944,7 @@ fn master_question_box_leaves(owner_keyed: bool) {
     let page = fixture
         .base
         .join("project")
-        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
         .join("questions.md");
     assert!(
         std::fs::read_to_string(&page)
@@ -20841,11 +20841,11 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
     .unwrap();
     committed_project(fixture);
     let repository = fixture.base.join("project");
-    std::fs::create_dir(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(repository.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     let db = crate::landing::open(&fixture.base).unwrap();
     let worktrees = crate::projects_home::state_folder(&repository).join("worktrees");
-    assert!(worktrees.starts_with(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)));
+    assert!(worktrees.starts_with(repository.join(kernel_common::names::CRAZYAGENT_DIRECTORY)));
     std::fs::create_dir_all(&worktrees).unwrap();
     let clone = worktrees.join(format!("agent-{lead}"));
     let branch =
@@ -22416,7 +22416,7 @@ fn native_lead_linked_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf
     .unwrap();
     let git_home = committed_project(fixture);
     let repository = fixture.base.join("project");
-    std::fs::create_dir(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(repository.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     let worktrees = crate::projects_home::state_folder(&repository).join("worktrees");
     std::fs::create_dir_all(&worktrees).unwrap();
@@ -26644,7 +26644,7 @@ fn published_graph(base: &Path) -> PathBuf {
     let project = base.join("project");
     let graph = project.join(GRAPH_FOLDER);
     std::fs::create_dir_all(graph.join("wiki")).unwrap();
-    std::fs::create_dir_all(project.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir_all(project.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     std::fs::write(graph.join("graph.json"), "{}").unwrap();
     std::fs::write(graph.join("GRAPH_REPORT.md"), "report\n").unwrap();
     std::fs::write(graph.join("wiki").join("index.md"), "wiki\n").unwrap();
@@ -26810,7 +26810,7 @@ fn an_own_clone_leads_teammate_follows_the_clones_exclude() {
     std::fs::create_dir_all(project_exclude.parent().unwrap()).unwrap();
     let teammate = |lead: &str, exclude: &str| -> PathBuf {
         let clone = project
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
             .join("worktrees")
             .join(lead);
         std::fs::create_dir_all(clone.join(".git").join("info")).unwrap();

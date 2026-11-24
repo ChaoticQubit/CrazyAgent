@@ -1184,7 +1184,7 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let folder = PathBuf::from(&fixture.setup.folder);
-    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
     let ask =
         json!({"question": "Ship on Friday?", "options": ["Yes", "No"], "recommended": "Yes"});
@@ -1296,7 +1296,7 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
     assert_eq!(messages, 4);
     let page = std::fs::read_to_string(
         folder
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
             .join("questions.md"),
     )
     .unwrap();
@@ -6782,7 +6782,7 @@ fn a_live_master_relays_a_terminal_answer_withdraws_and_asks_a_text_question_aga
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let folder = PathBuf::from(&fixture.setup.folder);
-    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
     fixture.live(Some(MASTER));
     let project = fixture.setup.project_id.clone();
@@ -6899,7 +6899,7 @@ fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let folder = PathBuf::from(&fixture.setup.folder);
-    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
     fixture.live(Some(MASTER));
     let project = fixture.setup.project_id.clone();

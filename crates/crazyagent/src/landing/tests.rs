@@ -6811,7 +6811,7 @@ fn accept_into_a_lead_agent_branch_updates_its_worktree() {
     let tip = case.tip();
     let agents = case
         .repo
-        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
         .join("worktrees");
     std::fs::create_dir_all(&agents).unwrap();
     let worktree = agents.join("agent-2");
@@ -15812,7 +15812,7 @@ fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
     let case = Case::new();
     let agents = case
         .repo
-        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
         .join("worktrees");
     std::fs::create_dir_all(&agents).unwrap();
     let worktree = agents.join("agent-2");

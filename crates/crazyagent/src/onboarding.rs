@@ -1,8 +1,9 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::project_setup::{CONTEXT_DIRECTORY, ProjectSetup};
-use crate::projects_home::{CRAZYAGENT_DIRECTORY, holds_owner_home};
+use crate::projects_home::holds_owner_home;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use kernel_sandbox::paths::one_spelling;
 use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};

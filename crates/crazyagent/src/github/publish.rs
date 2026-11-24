@@ -3,7 +3,7 @@ use super::clone;
 use crate::engine::EngineError;
 use crate::project_setup::SECRET_PREFIXES;
 use crate::research::runner::git_safe;
-use crate::sandbox::OwnerGit;
+use kernel_sandbox::windows::owner_git::OwnerGit;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};

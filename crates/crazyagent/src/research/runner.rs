@@ -3183,8 +3183,8 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     if fs::symlink_metadata(root.join(".git")).is_ok() {
         return Ok(());
     }
-    let owners = root.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY)
-        || fs::symlink_metadata(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).is_ok();
+    let owners = root.ends_with(kernel_common::names::CRAZYAGENT_DIRECTORY)
+        || fs::symlink_metadata(root.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).is_ok();
     if owners {
         return Err(RunError::Invalid(NOT_A_REPOSITORY.into()));
     }
@@ -5294,7 +5294,7 @@ mod tests {
             (
                 bare,
                 one_refused_run(|folder| {
-                    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+                    let state = folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
                     fs::create_dir(state).unwrap();
                 }),
             ),
@@ -8119,11 +8119,11 @@ mod tests {
         };
 
         let owners = base.join("owners");
-        fs::create_dir_all(owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        fs::create_dir_all(owners.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
         fs::write(owners.join("notes.txt"), "the owner's file\n").unwrap();
         assert!(refused(&owners), "an owner's folder gets no repository");
         assert!(!owners.join(".git").exists());
-        let state = owners.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let state = owners.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
         assert!(refused(&state), "nor does its .crazyagent folder");
         assert!(!state.join(".git").exists());
 

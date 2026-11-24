@@ -2118,7 +2118,7 @@ fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach
     private(&state);
     let root = base.join("repo");
     std::fs::create_dir(&root).unwrap();
-    std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    std::fs::create_dir(root.join(kernel_common::names::CRAZYAGENT_DIRECTORY)).unwrap();
     let runner =
         ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
     let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();

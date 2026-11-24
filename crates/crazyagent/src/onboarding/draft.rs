@@ -533,7 +533,7 @@ pub(crate) fn gather(repo: &Path, hidden: &[std::path::PathBuf]) -> Evidence {
                     .then(|| format!("graph.json, {} bytes", metadata.len()))
             });
     }
-    if let Some(layout) = open_folder(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY)) {
+    if let Some(layout) = open_folder(&repo.join(kernel_common::names::CRAZYAGENT_DIRECTORY)) {
         evidence.overview = open_in(&layout, OVERVIEW_FILE)
             .and_then(|file| file_text(file, OVERVIEW_EVIDENCE_BYTES_MAX))
             .filter(|text| fences_closed(text));

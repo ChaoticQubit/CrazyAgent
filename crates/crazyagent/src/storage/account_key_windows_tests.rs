@@ -4,12 +4,12 @@ use super::{
 };
 use crate::harnesses::launch::low_probe::{Try, low_probe, probe};
 use crate::protocol::CredentialRef;
-use crate::sandbox::windows::WindowsSandbox;
 use crazyagent_win_sandbox::{dacl, private};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::windows::HELPER_NAME;
+use kernel_sandbox::windows::profile::WindowsSandbox;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 

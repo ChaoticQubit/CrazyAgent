@@ -1122,7 +1122,7 @@ pub fn label_arrived(folder: &Path) -> Result<String, EngineError> {
         CARRIED_PATH,
         format!(
             "{}/{}",
-            crate::projects_home::CRAZYAGENT_DIRECTORY,
+            kernel_common::names::CRAZYAGENT_DIRECTORY,
             crate::agent_home::PROJECT_FILE
         )
     );
@@ -1244,7 +1244,7 @@ pub fn import_marked(data: &Path, folder: &Path) -> Result<Vec<ImportFile>, Engi
 pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let imported = root
-        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
         .join(IMPORTED_DIRECTORY);
     let moved: Vec<&str> = PROJECT_FILES
         .into_iter()
@@ -1462,7 +1462,7 @@ fn find(root: &Path) -> Vec<Found> {
                 .and_then(|target| {
                     let inside = target.starts_with(root)
                         && !target
-                            .starts_with(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY));
+                            .starts_with(root.join(kernel_common::names::CRAZYAGENT_DIRECTORY));
                     match inside {
                         true => owned_text(&target).map(|text| (target, text)),
                         false => Err("process_import_outside"),
