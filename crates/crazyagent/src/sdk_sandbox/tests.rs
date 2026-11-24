@@ -7,7 +7,7 @@ use sdk::generated::sandbox as generated;
 use sdk::{Refusal, Tier};
 use sdk_host::{Bound, Providers};
 
-use super::SandboxProvider;
+use super::{SandboxProvider, kernel_settings, sdk_settings};
 use crate::protocol::{Command, Outcome};
 use crate::sdk_slice::EngineRefusals;
 use crate::security_caps::Absent;
@@ -97,7 +97,7 @@ fn as_plugin<T>(
     tx: &rusqlite::Transaction<'_>,
     plugin: &'static str,
     permissions: &'static [&'static str],
-    call: impl FnOnce(&Bound<'_, '_>) -> T,
+    call: impl FnOnce(&dyn sdk::Host) -> T,
 ) -> (T, u64) {
     let grants = Grants::new(&[(plugin, Tier::T2, permissions)]).unwrap();
     let refusals = EngineRefusals::new();
@@ -123,13 +123,13 @@ fn as_plugin<T>(
 #[test]
 fn the_cap_enums_equal_the_kernel_enums() {
     for kernel in every_settings() {
-        let sdk = generated::SandboxSettings::from(kernel);
+        let sdk = sdk_settings(kernel);
         assert_eq!(
             serde_json::to_vec(&sdk).unwrap(),
             serde_json::to_vec(&kernel).unwrap(),
             "{kernel:?}"
         );
-        assert_eq!(SandboxSettings::from(sdk), kernel);
+        assert_eq!(kernel_settings(sdk), kernel);
     }
     let file = cap::parse(include_str!("../../../sdk/caps/sandbox.cap")).unwrap();
     let save = file
@@ -176,7 +176,7 @@ fn agent_quit_is_refused_both_sandbox_capabilities_and_nothing_moves() {
     let tx = db.transaction().unwrap();
     let before = moved(&tx);
     let (saved, saved_refusals) = as_plugin(&tx, QUIT, &["settings.write"], |host| {
-        generated::save_settings(host, changed().into(), 0)
+        generated::save_settings(host, sdk_settings(changed()), 0)
     });
     assert_eq!(
         saved,
@@ -221,7 +221,7 @@ fn the_read_grant_alone_cannot_save_and_nothing_moves() {
     let tx = db.transaction().unwrap();
     let before = moved(&tx);
     let (saved, refusals) = as_plugin(&tx, SETTINGS_ROW, &[READ], |host| {
-        generated::save_settings(host, changed().into(), 0)
+        generated::save_settings(host, sdk_settings(changed()), 0)
     });
     assert_eq!(
         saved,
@@ -244,7 +244,7 @@ fn the_read_grant_reads_the_stored_settings_and_their_version() {
     assert_eq!(
         read,
         Ok(generated::StoredSandboxSettings {
-            settings: SandboxSettings::default().into(),
+            settings: sdk_settings(SandboxSettings::default()),
             version: 0,
         })
     );
@@ -257,7 +257,7 @@ fn a_granted_save_logs_the_event_the_owner_save_logs() {
     let plugin_tx = plugin.transaction().unwrap();
     let before = moved(&plugin_tx);
     let (saved, refusals) = as_plugin(&plugin_tx, SETTINGS_ROW, &[WRITE], |host| {
-        generated::save_settings(host, changed().into(), 0)
+        generated::save_settings(host, sdk_settings(changed()), 0)
     });
     assert_eq!(saved, Ok(()));
     assert_eq!(refusals, 0);
@@ -288,12 +288,12 @@ fn a_save_from_a_stale_read_is_refused_and_nothing_moves() {
     let (read, _) = as_plugin(&tx, SETTINGS_ROW, both, generated::settings);
     let version = read.unwrap().version;
     let (first, _) = as_plugin(&tx, SETTINGS_ROW, both, |host| {
-        generated::save_settings(host, changed().into(), version)
+        generated::save_settings(host, sdk_settings(changed()), version)
     });
     assert_eq!(first, Ok(()));
     let after_first = (moved(&tx), shown(&tx), logged(&tx));
     let (second, refusals) = as_plugin(&tx, SETTINGS_ROW, both, |host| {
-        generated::save_settings(host, SandboxSettings::default().into(), version)
+        generated::save_settings(host, sdk_settings(SandboxSettings::default()), version)
     });
     assert_eq!(
         second,
@@ -312,7 +312,7 @@ fn a_save_naming_the_largest_version_is_refused_and_nothing_moves() {
     let tx = db.transaction().unwrap();
     let before = moved(&tx);
     let (saved, _) = as_plugin(&tx, SETTINGS_ROW, &[WRITE], |host| {
-        generated::save_settings(host, changed().into(), u64::MAX)
+        generated::save_settings(host, sdk_settings(changed()), u64::MAX)
     });
     assert!(saved.is_err(), "{saved:?}");
     assert_eq!(moved(&tx), before);
@@ -329,7 +329,7 @@ fn the_provider_saves_through_the_one_owner_save_path() {
         revision: u64::try_from(moved(&tx).0).unwrap(),
     };
     assert_eq!(
-        generated::Provide::save_settings(&provider, SETTINGS_ROW, changed().into(), 7),
+        generated::Provide::save_settings(&provider, SETTINGS_ROW, sdk_settings(changed()), 7),
         Err(Refusal::Rejected {
             code: "stale_revision".to_owned(),
         })
