@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
-import { HOSTED_CONFIGS, NOT_RUN, SUITES, classify, denialsUnder, fixtureFor, logStart, onlyFiles, specRows } from "./e2e-hosted.mjs";
+import { HOSTED_CONFIGS, KEPT_TABLES, NOT_RUN, SUITES, classify, denialsUnder, keptQueries, fixtureFor, logStart, onlyFiles, specRows } from "./e2e-hosted.mjs";
 import rowReporter, { rowLine } from "./row-reporter.mjs";
 
 const NATIVE = new URL("../../apps/desktop/test/native/", import.meta.url);
@@ -83,4 +83,13 @@ test("the Sandbox lines kept are those naming the temporary folder, with or with
 
 test("log show starts at the run's local time to the second", () => {
   assert.equal(logStart(new Date(2026, 10, 4, 5, 6, 7, 800)), "2026-11-04 05:06:07");
+});
+
+test("an engine database's kept tables are read in their fixed order, and only those it holds", () => {
+  assert.deepEqual(keptQueries(["landing_change_sets", "team_agents", "pools"]), [
+    "SELECT * FROM team_agents ORDER BY rowid DESC LIMIT 200;",
+    "SELECT * FROM landing_change_sets ORDER BY rowid DESC LIMIT 200;",
+  ]);
+  assert.equal(keptQueries([...KEPT_TABLES]).length, KEPT_TABLES.length);
+  assert.deepEqual(keptQueries([]), []);
 });

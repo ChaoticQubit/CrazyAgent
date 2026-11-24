@@ -39,6 +39,23 @@ const KEPT_FILES_MAX = 50;
 /** How many Sandbox denial lines that name the temporary folder are kept. */
 const DENIALS_MAX = 5000;
 
+/** The engine database tables kept from each temporary root's engine.db: the team's tasks,
+ * agents, worktrees and messages (the project notes, where a landing refusal is told) and the
+ * change sets. */
+export const KEPT_TABLES = Object.freeze(["team_tasks", "team_agents", "team_worktrees", "team_messages", "landing_change_sets"]);
+
+/** How many of the newest rows of one kept table are written. */
+const KEPT_ROWS_MAX = 200;
+
+/** The read-only queries for the kept tables one engine database holds. Inputs: the table names
+ * the database lists. Output: one SELECT per kept table it holds, in KEPT_TABLES order. */
+export function keptQueries(present) {
+  assert.ok(Array.isArray(present), "the listed tables");
+  const queries = KEPT_TABLES.filter((table) => present.includes(table)).map((table) => `SELECT * FROM ${table} ORDER BY rowid DESC LIMIT ${KEPT_ROWS_MAX};`);
+  assert.ok(queries.every((query) => /^SELECT \* FROM [a-z_]+ ORDER BY rowid DESC LIMIT \d+;$/.test(query)));
+  return queries;
+}
+
 /** The closed suites `test/native/run.mjs` runs that need nothing outside the job. */
 export const SUITES = Object.freeze([
   "model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide",
@@ -141,8 +158,8 @@ export function logStart(date) {
 
 /** Keeps what tells an agent's refused write apart from a wrong working folder. For every
  * temporary root the e2e files left, it writes each git checkout's listing, status and last
- * commits, and copies each Codex rollout file (its session_meta names the stand-in's cwd) and
- * each engine log. Then it keeps the Sandbox denials since the start that name the temporary
+ * commits, copies each Codex rollout file (its session_meta names the stand-in's cwd) and
+ * each engine log, and writes the kept tables of each engine.db, read only. Then it keeps the Sandbox denials since the start that name the temporary
  * folder. The roots hold stand-in and fixture data only. Inputs: the evidence folder and the
  * run's start. Output: none; it writes evidence/roots and evidence/sandbox-deny.txt. */
 function keepRoots(evidence, started) {
@@ -161,7 +178,7 @@ function keepRoots(evidence, started) {
       }
     }
     writeFileSync(join(into, "checkouts.txt"), lines.join("\n"), { mode: 0o600 });
-    const files = [...found(["-path", "*/.codex/sessions/*", "-name", "rollout-*.jsonl"]), ...found(["-path", "*/logs/*", "-name", "*.log"])].slice(0, KEPT_FILES_MAX);
+    const files = [...found(["-name", "rollout-*.jsonl"]), ...found(["-path", "*/logs/*", "-name", "*.log"])].slice(0, KEPT_FILES_MAX);
     const index = [];
     for (const [at, file] of files.entries()) {
       const copy = `${at}-${basename(file)}`;
@@ -174,6 +191,17 @@ function keepRoots(evidence, started) {
       }
     }
     writeFileSync(join(into, "files.txt"), index.join("\n"), { mode: 0o600 });
+    const tables = [];
+    for (const database of found(["-name", "engine.db", "-type", "f"]).slice(0, KEPT_FILES_MAX)) {
+      const sqlite = (sql) => spawnSync("/usr/bin/sqlite3", ["-readonly", "-header", database, sql], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      const listed = sqlite("SELECT name FROM sqlite_master WHERE type='table';");
+      tables.push(`== ${database} (tables rc ${listed.status})`, (listed.stderr ?? "").slice(0, 2000));
+      for (const query of keptQueries((listed.stdout ?? "").split("\n").slice(1))) {
+        const rows = sqlite(query);
+        tables.push(`$ ${query} (rc ${rows.status})`, (rows.stdout ?? "").slice(-KEPT_BYTES_MAX), (rows.stderr ?? "").slice(0, 2000));
+      }
+    }
+    writeFileSync(join(into, "engine-db.txt"), tables.join("\n"), { mode: 0o600 });
   }
   const shown = spawnSync("/usr/bin/log", ["show", "--start", logStart(started), "--style", "compact", "--predicate", 'sender == "Sandbox"'], { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 });
   const denials = denialsUnder(shown.stdout ?? "", temporary);
@@ -253,8 +281,9 @@ function needed(name) {
  * CRAZYAGENT_DESKTOP_TEST_FIXTURE_CLEAN_MAC_GATE, CRAZYAGENT_CHROME and E2E_HOSTED_EVIDENCE.
  * A file whose text names the gate feature gets the gated fixture. E2E_HOSTED_ONLY, when set,
  * names the only node:test files to run, and the suites and wdio configurations are then left
- * out. After the node:test files, keepRoots keeps their checkouts, rollouts, engine logs and
- * Sandbox denials. Output: exit status 1 when any row or run failed or a file is not placed. */
+ * out. After the node:test files, keepRoots keeps their checkouts, rollouts, engine logs, engine
+ * database tables and Sandbox denials. Output: exit status 1 when any row or run failed or a
+ * file is not placed. */
 async function main() {
   const started = new Date();
   const [engine, , app, fixture, gatedFixture, , evidence] = ["E2E_ENGINE", "E2E_BRIDGE", "WD_APP",
