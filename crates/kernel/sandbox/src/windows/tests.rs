@@ -62,3 +62,10 @@ fn the_helper_ships_beside_the_engine_under_its_one_name() {
     assert!(APPCONTAINER_MISSING.contains(HELPER_NAME));
     assert!(SEATBELT_MISSING.contains("AppContainer"));
 }
+
+#[cfg(windows)]
+#[test]
+fn the_windows_profile_and_owner_git_live_in_the_kernel() {
+    assert_eq!(crate::windows::owner_git::OWNER_GIT_FOLDER, "owner-git");
+    let _ = crate::windows::profile::container_name;
+}

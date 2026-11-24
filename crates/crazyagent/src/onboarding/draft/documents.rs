@@ -5,7 +5,7 @@ use super::{
 };
 use crate::onboarding::FoundResearch;
 use crate::project_setup::{DOCUMENT_PATH_BYTES_MAX, ResearchKind};
-use crate::projects_home::CRAZYAGENT_DIRECTORY;
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};

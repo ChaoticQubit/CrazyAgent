@@ -5,10 +5,11 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, OwnerResult};
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::projects_home::{
-    CRAZYAGENT_DIRECTORY, EXCLUDES, FoundState, LAYOUT, Registered, destination, folder_name,
-    forgotten, plain_problem, plan_delete, plan_trash, slug, state_folder,
+    EXCLUDES, FoundState, LAYOUT, Registered, destination, folder_name, forgotten, plain_problem,
+    plan_delete, plan_trash, slug, state_folder,
 };
 use crazyagent::protocol::{ProjectId, ProjectSpec};
+use kernel_common::names::CRAZYAGENT_DIRECTORY;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};

@@ -520,7 +520,7 @@ impl StoredSetup {
 /// recorded folder. Output: the project folder.
 pub(crate) fn project_folder_of(folder: &Path) -> PathBuf {
     match folder.parent() {
-        Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
+        Some(parent) if folder.ends_with(kernel_common::names::CRAZYAGENT_DIRECTORY) => {
             parent.to_path_buf()
         }
         _ => folder.to_path_buf(),
@@ -2020,7 +2020,7 @@ fn stage_in_home(
             .create(context.join(directory))
             .map_err(io_failed)?;
     }
-    assert!(state.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY));
+    assert!(state.ends_with(kernel_common::names::CRAZYAGENT_DIRECTORY));
     copy_counted(
         documents,
         &context.join("documents"),

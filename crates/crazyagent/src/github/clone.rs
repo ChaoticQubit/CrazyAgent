@@ -2,6 +2,7 @@ use super::CloneReceipt;
 use super::api::Endpoints;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
+use kernel_common::names::NULL_DEVICE;
 use kernel_security::store::Store;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -9,10 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[cfg(not(windows))]
-pub(crate) const NULL_DEVICE: &str = "/dev/null";
-#[cfg(windows)]
-pub(crate) const NULL_DEVICE: &str = "NUL";
 const SESSION_BUS_NAMES: [&str; 2] = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 const CLONE_TIME: Duration = Duration::from_secs(1800);
 pub(super) const GIT_USER: &str = "x-access-token";

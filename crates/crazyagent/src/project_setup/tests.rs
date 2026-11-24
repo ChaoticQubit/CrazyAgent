@@ -1763,7 +1763,7 @@ fn a_new_project_build_counts_each_document_it_copies() {
     assert_eq!(staged.staging(), staging.as_path());
     assert!(
         staging
-            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(kernel_common::names::CRAZYAGENT_DIRECTORY)
             .join(CONTEXT_DIRECTORY)
             .join("documents")
             .join("scope.md")

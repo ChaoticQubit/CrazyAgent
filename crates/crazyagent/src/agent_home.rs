@@ -403,7 +403,7 @@ pub fn save_app(data: &Path, text: &str) -> Result<(), AgentHomeError> {
 /// file or `.crazyagent/` folder is empty. Input: the project folder. Output: the text,
 /// or a plain code when an entry is a link, not plain text or over `TEXT_BYTES_MAX` bytes.
 pub fn read_project(folder: &Path) -> Result<String, AgentHomeError> {
-    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     match fs::symlink_metadata(&state) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(_) => Err(failure("process_text_unreadable")),
@@ -421,7 +421,7 @@ pub fn read_project(folder: &Path) -> Result<String, AgentHomeError> {
 /// `process_text_unwritable` when the staging folder is a link, or another plain code.
 pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
     validate(text)?;
-    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let state = folder.join(kernel_common::names::CRAZYAGENT_DIRECTORY);
     real_folder(&state).map_err(|_| failure("process_project_folder_missing"))?;
     let staging = project_staging(&state);
     match fs::create_dir(&staging) {
