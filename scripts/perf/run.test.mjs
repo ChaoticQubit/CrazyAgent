@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -99,6 +99,23 @@ test("a caller that still sets PERF_RUNS is refused before any run", () => {
     const result = spawnSync("bash", [script, "1"], { cwd: folder, env, encoding: "utf8" });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /PERF_RUNS is gone, use PERF_BLOCKS/);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("the plan times 2.5 first and names the builds in order, whichever side calls", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const old = path.join(folder, "v244");
+    const kernel = path.join(folder, "v250");
+    mkdirSync(path.join(old, "crates", "crazyagent"), { recursive: true });
+    mkdirSync(path.join(kernel, "crates", "kernel"), { recursive: true });
+    const expected = ["order=2.5,2.4.4,2.4.4,2.5", kernel, old];
+    for (const dirs of [[old, kernel], [kernel, old]]) {
+      const planned = execFileSync("bash", [script, "--plan", ...dirs], { encoding: "utf8" }).trim().split("\n");
+      assert.deepEqual(planned, expected);
+    }
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }
