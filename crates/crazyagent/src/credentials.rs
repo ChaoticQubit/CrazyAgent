@@ -20,11 +20,13 @@ pub fn platform_store(namespace: &str) -> Result<Arc<dyn Store>, StoreError> {
 }
 
 /// Opens the macOS Keychain store for one engine namespace in the default keychain of
-/// [`store_home`]: the owner's home, or a test keychain's home in lib tests. Input: the
-/// namespace. Output: the store, or `credential_namespace_refused` /
+/// [`store_home`]: the owner's home, or a test keychain's home in lib tests. The namespace
+/// is checked before any home is looked up. Input: the namespace. Output: the store, or
+/// `credential_name_invalid` / `credential_namespace_refused` /
 /// `credential_store_unavailable`.
 #[cfg(target_os = "macos")]
 pub fn keychain(namespace: &str) -> Result<Keychain, StoreError> {
+    let namespace = kernel_security::store::macos::owned_namespace(namespace)?;
     Keychain::in_home(namespace, &store_home(namespace)?)
 }
 
