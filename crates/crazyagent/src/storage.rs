@@ -3762,7 +3762,7 @@ fn owner_read(
             let names: Vec<_> = config.descriptors.keys().cloned().collect();
             assert!(!names.is_empty());
             assert!(config.validate().is_ok());
-            assert!(names.len() <= 25 + usize::from(config.settings.model_access.is_some()));
+            assert!(names.len() <= crate::config::listed_settings_max(&config.settings));
             OwnerData::Settings { names }
         }
         OwnerRead::Setting { name } => settings::read_owner_setting(config, name)?,

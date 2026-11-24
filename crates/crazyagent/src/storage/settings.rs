@@ -783,7 +783,7 @@ pub(super) fn read_owner_setting(
         .ok_or_else(|| error("owner_setting_not_found"))?;
     assert_eq!(descriptor.name, name);
     assert!(config.validate().is_ok());
-    assert!(config.descriptors.len() <= 25 + usize::from(config.settings.model_access.is_some()));
+    assert!(config.descriptors.len() <= crate::config::listed_settings_max(&config.settings));
     Ok(OwnerData::Setting {
         descriptor: Box::new(descriptor.clone()),
     })
