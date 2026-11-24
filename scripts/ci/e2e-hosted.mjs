@@ -149,7 +149,8 @@ function needed(name) {
 }
 
 /** Runs every hosted e2e row on this Mac and prints each row's name and result, then the files
- * not run with their reason, then a tally. Environment: E2E_ENGINE, E2E_BRIDGE, WD_APP,
+ * not run with their reason, then a tally. Each node:test file runs in its own process, two at
+ * once, with its own E2E_EVIDENCE folder, so its engine and bridge logs are kept. Environment: E2E_ENGINE, E2E_BRIDGE, WD_APP,
  * CRAZYAGENT_DESKTOP_TEST_FIXTURE, CRAZYAGENT_CHROME and E2E_HOSTED_EVIDENCE. Output: exit
  * status 1 when any row or run failed or a file is not placed. */
 async function main() {
@@ -167,10 +168,20 @@ async function main() {
     process.stdout.write(rowLine(file, "(placement)", "not ok", "an e2e file the hosted job neither runs nor names as not run, or places twice"));
   }
   console.log(`E2E node:test files ${sorted.nodeTest.length}, at most ${FILES_AT_ONCE} at once`);
-  const nodeTest = spawn(process.execPath, ["--test", `--test-concurrency=${FILES_AT_ONCE}`, `--test-reporter=${REPORTER}`,
-    "--test-reporter-destination=stdout", ...sorted.nodeTest.map((file) => join("test/native", file))],
-  { cwd: APP, env: process.env, stdio: ["ignore", "inherit", "inherit"] });
-  const nodeCode = await new Promise((done) => nodeTest.on("close", (exit, signal) => done(exit ?? `signal ${signal}`)));
+  const waiting = [...sorted.nodeTest];
+  const codes = [];
+  const lane = async () => {
+    for (let file = waiting.shift(); file; file = waiting.shift()) {
+      const env = { ...process.env, E2E_EVIDENCE: join(evidence, `node-${file.replace(/\.e2e\.mjs$/, "")}`) };
+      mkdirSync(env.E2E_EVIDENCE, { recursive: true, mode: 0o700 });
+      const nodeTest = spawn(process.execPath, ["--test", `--test-reporter=${REPORTER}`, "--test-reporter-destination=stdout",
+        join("test/native", file)], { cwd: APP, env, stdio: ["ignore", "inherit", "inherit"] });
+      codes.push(await new Promise((done) => nodeTest.on("close", (exit, signal) => done(exit ?? `signal ${signal}`))));
+    }
+  };
+  await Promise.all(Array.from({ length: FILES_AT_ONCE }, lane));
+  assert.equal(codes.length, sorted.nodeTest.length, "every node:test file ran once");
+  const nodeCode = codes.find((code) => code !== 0) ?? 0;
   console.log(`E2E node:test rc ${nodeCode}`);
   for (const suite of SUITES) {
     const env = { ...process.env, CRAZYAGENT_DESKTOP_TEST_APP: app, CRAZYAGENT_DESKTOP_TEST_FIXTURE: fixture, CRAZYAGENT_DESKTOP_TEST_SUITE: suite };
