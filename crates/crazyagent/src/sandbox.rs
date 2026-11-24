@@ -39,7 +39,9 @@ pub mod grants;
 pub mod grants_store;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
-pub mod linux;
+use kernel_sandbox::linux::launch as linux;
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests;
 pub mod policy_store;
 #[cfg(all(test, target_os = "macos"))]
 mod profile_engine_tests;
@@ -197,7 +199,7 @@ pub fn linux_unbridged_notice(
 pub fn linux_host() -> Option<LinuxHost> {
     #[cfg(target_os = "linux")]
     {
-        Some(linux::host_now())
+        Some(linux::host::host_now())
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -211,7 +213,7 @@ pub fn linux_host() -> Option<LinuxHost> {
 pub fn linux_host_kept() -> Option<LinuxHost> {
     #[cfg(target_os = "linux")]
     {
-        Some(linux::host_kept())
+        Some(linux::host::host_kept())
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -388,7 +390,7 @@ fn access_owner_git(root: &Path) -> Result<Option<std::process::Command>, ()> {
 pub fn linux_other_git(project: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
-        linux::holds_other_git(project)
+        linux::host::holds_other_git(project)
     }
     #[cfg(not(target_os = "linux"))]
     {

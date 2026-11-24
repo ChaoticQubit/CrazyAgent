@@ -180,6 +180,15 @@ fn the_linux_helper_entry_lives_in_the_kernel() {
     let _ = main;
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn the_linux_launch_and_its_host_read_live_in_the_kernel() {
+    let read: fn(&std::path::Path, Option<&std::path::Path>) -> crate::host::LinuxHost =
+        crate::linux::launch::host::read_host;
+    let _ = read;
+    let _: Option<crate::linux::launch::LinuxSandbox> = None;
+}
+
 /// The confinement the kernel builds for the tmux host holds the very values the engine built
 /// it from: the sandbox runner, the keeper and pane shim words and variables, and a variable
 /// gate and a keeper undo that answer as the sandbox's own do, for a kept and a refused case.
