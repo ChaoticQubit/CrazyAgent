@@ -10,7 +10,7 @@ fn a_shared_terminal_folder_is_refused() {
     let host = Tmux::open(
         Some(tmux),
         &folder,
-        crazyagent::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crazyagent::terminal::tmux::tmux_hooks(),
     );
     let agent = AgentId::team(1).unwrap();
