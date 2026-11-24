@@ -106,14 +106,14 @@ impl std::fmt::Display for UpdateError {
 
 impl std::error::Error for UpdateError {}
 
-fn fail(code: &'static str, message: impl Into<String>) -> UpdateError {
+pub(crate) fn fail(code: &'static str, message: impl Into<String>) -> UpdateError {
     UpdateError {
         code,
         message: message.into(),
     }
 }
 
-fn io_failure(what: &str, error: std::io::Error) -> UpdateError {
+pub(crate) fn io_failure(what: &str, error: std::io::Error) -> UpdateError {
     fail("update_io", format!("{what}: {error}"))
 }
 
@@ -852,7 +852,7 @@ pub fn service_command(executable: &Path, action: &str) -> Result<String, Update
 
 /// Runs one prepared `crazyagent service <action>` command with the update's time limit.
 /// Inputs: the command and its action. Output: as `service_command`.
-fn service_step(command: &mut Command, action: &str) -> Result<String, UpdateError> {
+pub(crate) fn service_step(command: &mut Command, action: &str) -> Result<String, UpdateError> {
     let failed = || {
         fail(
             "update_service_failed",

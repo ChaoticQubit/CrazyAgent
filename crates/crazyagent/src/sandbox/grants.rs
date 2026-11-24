@@ -345,7 +345,7 @@ fn marked(words: &[String], names: &[&str], marks: &[&str]) -> bool {
 }
 
 #[cfg(unix)]
-fn socket_fit(real: &Path) -> Result<(), &'static str> {
+pub(crate) fn socket_fit(real: &Path) -> Result<(), &'static str> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let meta = std::fs::symlink_metadata(real).ok();
     let socket = meta

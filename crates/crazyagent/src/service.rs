@@ -56,7 +56,7 @@ impl From<crate::paths::PathsError> for ServiceError {
     }
 }
 
-fn failure(text: impl Into<String>) -> ServiceError {
+pub(crate) fn failure(text: impl Into<String>) -> ServiceError {
     ServiceError(text.into())
 }
 
@@ -609,7 +609,7 @@ WantedBy=default.target\n",
     /// `ProgramArguments` string of a plist or the first word of a systemd `ExecStart=`.
     /// Output: none when nothing readable is installed, the program is not an absolute path,
     /// or on Windows, whose task runs the program through `cmd.exe` and is UTF-16.
-    fn installed_program(&self) -> Option<PathBuf> {
+    pub(crate) fn installed_program(&self) -> Option<PathBuf> {
         let installed = bounded_text(&self.definition)?;
         let program = match self.platform {
             Platform::MacOs => installed
@@ -1245,7 +1245,7 @@ pub fn retire_old_copies(layout: &Layout, installed: &Path) {
 /// there stays. Only a real, private folder of this user's (700, as 2.4.0 made it) is
 /// touched, so a linked or shared `bin` never leads a removal outside the data root (rv-code
 /// F1). Inputs: the layout, the engine kept and the link folder.
-fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>) {
+pub(crate) fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>) {
     let old = &layout.root().join("bin");
     if !installed.starts_with(layout.root().join("setup").join("bin"))
         || !crate::paths::is_private_folder(old)
@@ -1543,7 +1543,7 @@ fn definition_bytes(text: &str, platform: Platform) -> Vec<u8> {
     }
 }
 
-fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
+pub(crate) fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
     let fail = |error: std::io::Error| failure(format!("{}: {error}", path.display()));
     let parent = path
         .parent()
