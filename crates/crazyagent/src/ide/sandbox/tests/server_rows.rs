@@ -501,3 +501,84 @@ fn a_rebase_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
     assert!(s.no_private_files());
     kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
+
+/// The server's data folder and its other writable folders are granted after the base
+/// profile, so the base denies there hold only when given again after that grant (sandbox-git
+/// r1 note 4): no `.git` at any depth in any letter case, no launch file or folder of an
+/// agent home, and no mode change of a granted folder itself, nor any flag or ACL in the
+/// data folder, which the engine walks and rewrites before each start, so none keeps the
+/// owner's IDE from starting (rv-sa241 b8 L1). Everything else there stays writable, npm's
+/// config too, since no launch resets the data folder and the agent config denies are an
+/// agent home's alone (RV-DS241-188).
+#[test]
+fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_grant() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    let work = mine.join("work");
+    for path in [&home, &work, &build, &root] {
+        folder(path);
+    }
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[work.as_path()],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
+    let make = r#"/bin/mkdir -p "$1""#;
+    let write = r#": > "$1""#;
+    for granted in [&home, &work] {
+        assert!(
+            !sh(&profile, make, &granted.join(".git")),
+            "{} takes no .git",
+            granted.display()
+        );
+        assert!(!sh(&profile, make, &granted.join("deep/.GIT")));
+        assert!(!sh(&profile, r#"/bin/chmod 777 "$1""#, granted));
+        assert!(sh(&profile, make, &granted.join("deep/kept")));
+        assert!(sh(&profile, write, &granted.join("kept.txt")));
+    }
+    for launch in ["settings.json", "CLAUDE.md", "Config.TOML"] {
+        assert!(!sh(&profile, write, &home.join(launch)), "{launch}");
+    }
+    assert!(!sh(&profile, make, &home.join("agents")));
+    assert!(sh(&profile, make, &home.join("data/User/globalStorage")));
+    assert!(sh(&profile, write, &home.join("data/User/settings.json")));
+    assert!(sh(&profile, write, &home.join(".npmrc")));
+    let flagged = r#"/usr/bin/chflags uchg "$1" && /usr/bin/chflags nouchg "$1""#;
+    assert!(!sh(&profile, flagged, &home.join("kept.txt")));
+    let listed = r#"/bin/chmod +a 'everyone deny read' "$1" && /bin/chmod -N "$1""#;
+    assert!(!sh(&profile, listed, &home.join("kept.txt")));
+    for granted in [&home, &work] {
+        assert!(!granted.join(".git").exists() && !granted.join("deep/.GIT").exists());
+        assert_eq!(
+            fs::metadata(granted).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert!(!home.join("settings.json").exists() && !home.join("agents").exists());
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+}
