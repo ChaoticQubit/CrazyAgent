@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { isAbsolute, join } from "node:path";
+import { displays, testWindow } from "./test/native/test-window.mjs";
 
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const port = Number(process.env.CRAZYAGENT_DESKTOP_TEST_PORT);
@@ -34,7 +35,8 @@ export const config = {
     console.log(`native-command: ${new Date().toISOString()} ${name}`);
   },
   before: async function () {
-    await globalThis.browser.setWindowSize(1180, 800);
+    const fitted = testWindow(displays());
+    await globalThis.browser.setWindowSize(Math.min(1180, fitted.width), Math.min(800, fitted.height));
     await globalThis.browser.switchToWindow(await globalThis.browser.getWindowHandle());
   },
   afterTest: async function (test, context, result) {

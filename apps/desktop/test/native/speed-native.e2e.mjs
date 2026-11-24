@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { clickUntilUsable, footprintMb, webkitHelpers } from "./speed-budget.mjs";
+import { displays, testWindow } from "./test-window.mjs";
 
 const evidence = process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE;
 const LOOK_MS = 10;
@@ -95,7 +96,8 @@ describe("speed rows on the real desktop app and the real engine (DEC-169)", () 
       assert.ok(Date.now() < deadline, "Home never became usable after launch");
     }
     await browser.switchToWindow(await browser.getWindowHandle());
-    await browser.setWindowSize(1180, 800);
+    const fitted = testWindow(displays());
+    await browser.setWindowSize(Math.min(1180, fitted.width), Math.min(800, fitted.height));
     await pause(SETTLE_MS);
     result.launch.reload_ms = await reloadHome(launch.at_ms + result.launch.webview_ms);
     await pause(SETTLE_MS);

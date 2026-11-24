@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { SevereServiceError } from "webdriverio";
 import { terminalServers } from "./e2e-harness.mjs";
 import { chooseHome, clearWebStore, lockHome } from "./run-layout.mjs";
+import { displays, testWindow } from "./test-window.mjs";
 
 process.umask(0o077);
 const app = process.env.WD_APP;
@@ -169,7 +170,8 @@ export const config = {
     }, null, 1));
   },
   before: async function () {
-    await globalThis.browser.setWindowSize(1280, 900);
+    const { width, height } = testWindow(displays());
+    await globalThis.browser.setWindowSize(width, height);
   },
   afterTest: async function (test, context, result) {
     if (!result.passed) await globalThis.browser.saveScreenshot(join(evidence, `failure-${test.title.replace(/[^A-Za-z0-9]+/g, "-").slice(0, 60)}.png`));
