@@ -401,6 +401,7 @@ fn a_valid_net_section_reads_its_hosts_and_captures() {
                 "github.com".to_owned(),
                 vec!["access_token".to_owned(), "device_code".to_owned()],
             )],
+            send: Vec::new(),
         })
     );
     assert_eq!(
@@ -596,4 +597,96 @@ fn a_hex_or_octal_ip_host_is_refused() {
         ))
         .is_ok()
     );
+}
+
+/// A `[net]` body with two hosts, one capture row and the given `[net.send]` lines.
+fn with_send(send: &str) -> String {
+    format!(
+        "hosts = [\"github.com\", \"api.github.com\"]\n\n[net.capture]\n\"github.com\" = [\"access_token\", \"device_code\"]\n\n[net.send]\n{send}"
+    )
+}
+
+#[test]
+fn a_valid_send_row_reads_its_hosts_and_keep_as() {
+    let text = net_text(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], keep_as = \"token\" }\ndevice_code = { hosts = [\"api.github.com\"] }\n",
+    ));
+    let read = manifest::parse(&text).unwrap().net.unwrap();
+    assert_eq!(
+        read.send,
+        vec![
+            manifest::NetSend {
+                field: "access_token".to_owned(),
+                hosts: vec!["api.github.com".to_owned()],
+                keep_as: Some("token".to_owned()),
+            },
+            manifest::NetSend {
+                field: "device_code".to_owned(),
+                hosts: vec!["api.github.com".to_owned()],
+                keep_as: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_send_row_for_an_uncaptured_field_is_refused() {
+    refused_net(&with_send(
+        "refresh_token = { hosts = [\"api.github.com\"] }\n",
+    ));
+}
+
+#[test]
+fn a_send_host_outside_hosts_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"uploads.github.com\"] }\n",
+    ));
+}
+
+#[test]
+fn an_empty_send_host_list_is_refused() {
+    refused_net(&with_send("access_token = { hosts = [] }\n"));
+}
+
+#[test]
+fn a_keep_as_the_store_refuses_is_refused_at_read() {
+    for name in ["nul", "con", "a.", "nul.token"] {
+        refused_net(&with_send(&format!(
+            "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
+        )));
+    }
+}
+
+#[test]
+fn a_duplicate_send_host_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\", \"api.github.com\"] }\n",
+    ));
+}
+
+#[test]
+fn a_reused_or_refused_keep_as_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], keep_as = \"token\" }\ndevice_code = { hosts = [\"api.github.com\"], keep_as = \"token\" }\n",
+    ));
+    for name in ["", "Token", ".token", "a..b", "a b"] {
+        refused_net(&with_send(&format!(
+            "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{name}\" }}\n"
+        )));
+    }
+    refused_net(&with_send(&format!(
+        "access_token = {{ hosts = [\"api.github.com\"], keep_as = \"{}\" }}\n",
+        "t".repeat(manifest::KEEP_AS_BYTES_MAX + 1)
+    )));
+}
+
+#[test]
+fn an_unknown_send_key_or_type_is_refused() {
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], to = [\"github.com\"] }\n",
+    ));
+    refused_net(&with_send("access_token = [\"api.github.com\"]\n"));
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], keep_as = 1 }\n",
+    ));
 }

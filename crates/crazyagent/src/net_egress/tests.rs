@@ -5,7 +5,7 @@ use super::*;
 use crazyagent_plugin_check as plugin_check;
 use kernel_security::net::{Field, Method, Request, Requests};
 use kernel_security::secret::SecretString;
-use kernel_security::secrets::{Handles, Scopes, Secrets};
+use kernel_security::secrets::{Handles, OwnerEntry, Scopes, Secrets};
 use kernel_security::store::{SecretRef, Store, reference};
 
 const TOKEN: &str = "ghp_net-egress-fixture-0123456789";
@@ -133,6 +133,34 @@ fn the_static_net_table_equals_each_bundled_manifest() {
         })
         .collect();
     assert_eq!(table, captures);
+    type Sends = BTreeSet<(String, String, Vec<String>, Option<String>)>;
+    let sends: Sends = manifests
+        .iter()
+        .flat_map(|manifest| {
+            manifest.net.iter().flat_map(move |net| {
+                net.send.iter().map(move |row| {
+                    (
+                        manifest.plugin.clone(),
+                        row.field.clone(),
+                        row.hosts.clone(),
+                        row.keep_as.clone(),
+                    )
+                })
+            })
+        })
+        .collect();
+    let table: Sends = NET_SENDS
+        .iter()
+        .map(|(plugin, field, hosts, keep_as)| {
+            (
+                (*plugin).to_owned(),
+                (*field).to_owned(),
+                hosts.iter().map(|host| (*host).to_owned()).collect(),
+                keep_as.map(str::to_owned),
+            )
+        })
+        .collect();
+    assert_eq!(table, sends);
     assert!(bundled_captures().is_ok());
     for manifest in &manifests {
         let asks = manifest
@@ -232,10 +260,11 @@ fn the_curl_config_is_byte_equal_to_todays_github_request() {
         "dev.crazyagent.e0123456789ab",
         &scopes,
         &handles,
-        Some((
-            "github",
-            SecretString::new(TOKEN.as_bytes().to_vec()).unwrap(),
-        )),
+        Some(OwnerEntry {
+            plugin: "github",
+            hosts: vec!["api.github.com".to_owned()],
+            value: SecretString::new(TOKEN.as_bytes().to_vec()).unwrap(),
+        }),
     );
     let bearer = secrets.put_from_owner("github", "token").unwrap();
     let rules = CaptureRules::new(&[]).unwrap();
