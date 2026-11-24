@@ -343,3 +343,56 @@ fn an_engine_db_that_is_itself_a_link_is_still_refused() {
     assert!(recovery(dir.path(), false).is_err());
     assert_eq!(std::fs::read(real.path().join("engine.db")).unwrap(), b"");
 }
+
+/// Puts the committed 2.4.2 engine.db in a root and upgrades it to 2.5, which takes the pinned
+/// 2.4 backup a restore brings back; no connection stays open. Input: the root. Output: none.
+fn pinned(root: &Path) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v242-engine.db");
+    let path = root.join(kernel_storage::migrations::DATABASE);
+    std::fs::copy(&fixture, &path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut db = rusqlite::Connection::open(&path).unwrap();
+    crate::storage::migrations::upgrade(&mut db, &path, None, crate::storage::migrations::STEPS)
+        .unwrap();
+}
+
+#[test]
+fn an_admitted_restore_through_a_linked_root_brings_back_the_pinned_backup() {
+    let (dir, _beside, link) = linked_root();
+    pinned(dir.path());
+    record(dir.path(), "pending", 0o600);
+
+    let restored = after_stop_when(
+        true,
+        &link,
+        &link.join("global.toml"),
+        &link.join("project.toml"),
+    );
+
+    assert_eq!(restored, Ok(()));
+    let Some(RestoreState::Restored { copy }) = state(dir.path()) else {
+        panic!("the record says the restore ended and names its copy");
+    };
+    assert!(dir.path().join("backups").join(copy).is_dir());
+}
+
+#[test]
+fn a_put_back_through_a_linked_root_brings_the_named_copy_back() {
+    let (dir, _beside, link) = linked_root();
+    pinned(dir.path());
+    let global = dir.path().join("global.toml");
+    let project = dir.path().join("project.toml");
+    after_stop_when(true, dir.path(), &global, &project).unwrap();
+    let Some(RestoreState::Restored { copy }) = state(dir.path()) else {
+        panic!("the restore names the copy it kept");
+    };
+    record(
+        dir.path(),
+        &format!("failed storage_restore_rollback_failed {copy}"),
+        0o600,
+    );
+
+    assert_eq!(put_back(&link, false), Ok(()));
+
+    assert_eq!(state(dir.path()), None);
+}

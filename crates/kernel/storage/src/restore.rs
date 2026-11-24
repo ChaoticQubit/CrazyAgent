@@ -198,11 +198,16 @@ pub fn restore_failed(cause: impl std::fmt::Display) -> StorageError {
 
 /// The path of engine.db through its folder's real path, so every path built beside it is
 /// real, while a link planted as engine.db itself stays a link for the no-follow open to
-/// refuse. Input: the database path. Output: that path, or `storage_restore_failed`.
+/// refuse. Input: the database path, a bare name meaning the working folder. Output: that
+/// path, or `storage_restore_failed`.
 pub(crate) fn real_database(path: &Path) -> Result<PathBuf, StorageError> {
     let folder = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
+    let folder = match folder.as_os_str().is_empty() {
+        true => Path::new("."),
+        false => folder,
+    };
     let name = path
         .file_name()
         .ok_or_else(|| restore_failed("the database has no name"))?;
