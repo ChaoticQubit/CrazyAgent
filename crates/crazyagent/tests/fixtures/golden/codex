@@ -29,7 +29,10 @@ while IFS= read -r line; do
     continue
   fi
   case "$said" in
-    *golden.md*) printf 'Apples are red.\n' > golden.md ;;
+    *golden.md*)
+      printf 'Apples are red.\n' > golden.md
+      git -c user.name='Codex stand-in' -c user.email=stand-in@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null add golden.md
+      git -c user.name='Codex stand-in' -c user.email=stand-in@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q -m 'docs: add golden.md' ;;
   esac
   said=
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
