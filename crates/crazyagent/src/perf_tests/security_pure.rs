@@ -54,7 +54,7 @@ fn holds(value: &[u8], text: &[u8]) -> bool {
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn security_pure_calls() {
     let output = output();
-    let text: Vec<u8> = output[..256].to_vec();
+    let text: Vec<u8> = output[200..456].to_vec();
     let token = format!("{TOKEN_PREFIX}{}", random_hex(TOKEN_HEX / 2).unwrap());
     let presented = token.clone();
     let matches = |value: &str| bool::from(value.as_bytes().ct_eq(token.as_bytes()));
