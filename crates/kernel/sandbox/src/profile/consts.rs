@@ -8,22 +8,22 @@ use crate::paths::PATH_BYTES_MAX;
 /// `linux::HIDDEN_MOUNTED_AGAIN`).
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
-/// Whether this system's boundary cannot hold a hidden folder, so a sandbox with one does not
-/// start ([`HIDDEN_NEEDS_SEATBELT`]), a save that hides a folder is refused and neither app
-/// offers the setting (#590): true on Windows only. Linux holds them, and each launch there
-/// refuses with its own code where the host cannot (V244-FWD-V243-4).
+/// Whether this system's boundary cannot hold a hidden folder, so a sandbox with one does not start
+/// ([`HIDDEN_NEEDS_SEATBELT`]), a save that hides a folder is refused and neither app offers the
+/// setting: true on Windows only. Linux holds them, and each launch there refuses with its own code
+/// where the host cannot.
 pub const HIDDEN_UNHELD: bool = cfg!(target_os = "windows");
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
-/// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
+/// its one-socket grant, and team agents stay macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
 
-/// Why a sandbox that protects agent folders does not start on Linux or Windows: only
-/// Seatbelt holds the per-path rule, and no IDE sandbox runs there in V1 (DEC-124).
+/// Why a sandbox that protects agent folders does not start on Linux or Windows: only Seatbelt
+/// holds the per-path rule, and no IDE sandbox runs there in V1.
 pub const AGENT_FILES_NEED_SEATBELT: &str = "agent folder protection needs the macOS sandbox";
 
-/// Why a sandbox that opens shared project folders for writing does not start on Linux or
-/// Windows: only Seatbelt keeps secret files closed inside those folders (DEC-147.9).
+/// Why a sandbox that opens shared project folders for writing does not start on Linux or Windows:
+/// only Seatbelt keeps secret files closed inside those folders.
 pub const SHARED_WRITES_NEED_SEATBELT: &str = "writable shared folders need the macOS sandbox";
 
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
@@ -55,7 +55,7 @@ pub const LINKS_MAX: usize = 4;
 pub const WORKTREES_MAX: usize = 8;
 
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
-/// git-ignored project paths (MAP-2). A project with more builds no graph.
+/// git-ignored project paths. A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
 
 /// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
@@ -76,22 +76,22 @@ pub const SOCKETS_MAX: usize = 2;
 /// own tmux server, its caller socket and its teammates' tmux server.
 pub const SOCKET_GRANTS_MAX: usize = 4;
 
-/// The writes that move, remove, replace, re-permission or flag a folder's own node while
-/// its contents stay writable: every writable root, the scratch root and a native lead's
-/// home for its teammates. A flag such as `uchg` would freeze the folder for every other
-/// writer and for the engine (CTX-M1 r1).
+/// The writes that move, remove, replace, re-permission or flag a folder's own node while its
+/// contents stay writable: every writable root, the scratch root and a native lead's home for its
+/// teammates. A flag such as `uchg` would freeze the folder for every other writer and for the
+/// engine.
 pub const FIXED_WRITES: &str =
     "file-write-unlink file-write-create file-write-mode file-write-acl file-write-flags";
 
-/// The writes that move, remove, re-permission or flag a folder's own node but still let it
-/// be made where it is missing: an agent home's `skills` folder, which Codex makes in a fresh
-/// home for its own skills, while no folder built elsewhere replaces the one holding the
-/// engine's copies and no flag keeps the engine from removing what is in it (CTX-M1 r1).
+/// The writes that move, remove, re-permission or flag a folder's own node but still let it be made
+/// where it is missing: an agent home's `skills` folder, which Codex makes in a fresh home for its
+/// own skills, while no folder built elsewhere replaces the one holding the engine's copies and no
+/// flag keeps the engine from removing what is in it.
 pub const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl file-write-flags";
 
-/// The folders of a Claude Code config home that its agent team shares, the members'
-/// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
-/// with no variable of their own, so a native lead's teammates write the lead's (TPH-2).
+/// The folders of a Claude Code config home that its agent team shares, the members' mailboxes and
+/// task lists. Claude Code 2.1.309 keeps them under each member's config home, with no variable of
+/// their own, so a native lead's teammates write the lead's.
 pub const CLAUDE_TEAM_SHARED: [&str; 2] = ["teams", "tasks"];
 
 /// The Seatbelt pattern of a lock folder's path, `<file>.lock`: the only folder a teammate
@@ -224,12 +224,12 @@ pub const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY"];
 
 pub const AGENT_ENV_MAX: usize = 128;
 
-/// The git settings every agent process gets, sandboxed or at Full access: no system git
-/// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no
-/// credential helper at all, no terminal prompt, and no bare repository found by
-/// discovery (`safe.bareRepository=explicit`, SR1-2), so a folder another agent laid out
-/// as one never runs its config, while `--git-dir` still opens it. They are set after the
-/// harness's own variables, so a harness cannot replace them.
+/// The git settings every agent process gets, sandboxed or at Full access: no system git config
+/// (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no credential helper at
+/// all, no terminal prompt, and no bare repository found by discovery
+/// (`safe.bareRepository=explicit`), so a folder another agent laid out as one never runs its
+/// config, while `--git-dir` still opens it. They are set after the harness's own variables, so a
+/// harness cannot replace them.
 pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_TERMINAL_PROMPT", "0"),
@@ -240,15 +240,14 @@ pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
     ("GIT_CONFIG_VALUE_1", "explicit"),
 ];
 
-/// The settings every agent process gets, sandboxed or at Full access, that keep its tools
-/// from reading config an earlier run left in its home, which a launch resets
-/// (RV-DS241-137, sec r1 F1): no global git config, as the engine's own git runs, so a
-/// `.gitconfig` or `.config/git/config` there never runs its hooks or programs, no Python
-/// user site, so a `.pth` file or `usercustomize` module there never runs as Python starts,
-/// and no npm user config, so an `.npmrc` there never hands its `node-options` or
-/// `script-shell` to a script. They are set after the harness's own variables, so a harness
-/// cannot replace them, and never in the owner's IDE terminal, whose home is the owner's own
-/// and no launch resets ([`owner_terminal_env`], code r1 F3).
+/// The settings every agent process gets, sandboxed or at Full access, that keep its tools from
+/// reading config an earlier run left in its home, which a launch resets: no global git config, as
+/// the engine's own git runs, so a `.gitconfig` or `.config/git/config` there never runs its hooks
+/// or programs, no Python user site, so a `.pth` file or `usercustomize` module there never runs as
+/// Python starts, and no npm user config, so an `.npmrc` there never hands its `node-options` or
+/// `script-shell` to a script. They are set after the harness's own variables, so a harness cannot
+/// replace them, and never in the owner's IDE terminal, whose home is the owner's own and no launch
+/// resets ([`owner_terminal_env`]).
 pub const AGENT_HOME_ENV: [(&str, &str); 3] = [
     ("GIT_CONFIG_GLOBAL", "/dev/null"),
     ("PYTHONNOUSERSITE", "1"),
@@ -285,10 +284,10 @@ pub const LINUX_HIDDEN_MOUNTS_NOT_PRIVATE: &str = "linux_hidden_mounts_not_priva
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
-/// Why a sandbox with an open network does not start on a Linux that cannot keep ports
-/// free. Only Landlock network rules (Linux 6.7 or newer) keep an agent's listeners off the
-/// owner's fixed ports, the kept local model ports and the model proxy ports; without them
-/// the launch is refused instead of started unprotected (DEC-137 addendum 2).
+/// Why a sandbox with an open network does not start on a Linux that cannot keep ports free. Only
+/// Landlock network rules (Linux 6.7 or newer) keep an agent's listeners off the owner's fixed
+/// ports, the kept local model ports and the model proxy ports; without them the launch is refused
+/// instead of started unprotected.
 pub const LINUX_OPEN_NETWORK_NEEDS_LANDLOCK: &str = "keeping the owner's ports free of an \
      open-network agent needs Landlock network rules (Linux 6.7 or newer)";
 
@@ -301,10 +300,9 @@ pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
 /// runs another script: the check follows a `#!` line one level only and never guesses.
 pub const LINUX_HARNESS_UNCHECKED: &str = "linux_harness_unchecked";
 
-/// The `.git` folders whose contents the owner's git reads and runs: hook scripts, rebase
-/// and sequencer plans, and remote and branch definitions. No macOS or Linux agent writes
-/// in them: Seatbelt denies each with everything below it, and Linux never grants one
-/// (RV-DS241-85).
+/// The `.git` folders whose contents the owner's git reads and runs: hook scripts, rebase and
+/// sequencer plans, and remote and branch definitions. No macOS or Linux agent writes in them:
+/// Seatbelt denies each with everything below it, and Linux never grants one.
 pub const GIT_STATE_TREES: [&str; 6] = [
     "hooks",
     "rebase-merge",
@@ -314,9 +312,9 @@ pub const GIT_STATE_TREES: [&str; 6] = [
     "sequencer",
 ];
 
-/// The single `.git` files no macOS or Linux agent writes: the config, the index, their
-/// locks, and the links git follows to a common dir or a worktree config. Seatbelt denies
-/// each by name and Linux never grants one (RV-DS241-85).
+/// The single `.git` files no macOS or Linux agent writes: the config, the index, their locks, and
+/// the links git follows to a common dir or a worktree config. Seatbelt denies each by name and
+/// Linux never grants one.
 pub const GIT_STATE_FILES: [&str; 6] = [
     "config",
     "config.lock",
@@ -326,32 +324,29 @@ pub const GIT_STATE_FILES: [&str; 6] = [
     "config.worktree",
 ];
 
-/// The links in a linked worktree's admin folder that tie it to the project and to its
-/// worktree: no confined agent rewrites, removes or relinks one. Seatbelt denies each by
-/// name, letting a worktree-adding profile create one, and the Linux call supervisor holds
-/// each (DEC-185 S2a).
+/// The links in a linked worktree's admin folder that tie it to the project and to its worktree: no
+/// confined agent rewrites, removes or relinks one. Seatbelt denies each by name, letting a
+/// worktree-adding profile create one, and the Linux call supervisor holds each.
 pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
 
-/// The files in a linked worktree's admin folder no confined agent writes: the branch it
-/// stands on and the config git reads for that worktree alone. Seatbelt denies each by name
-/// and the Linux call supervisor holds each (DEC-185 S2a).
+/// The files in a linked worktree's admin folder no confined agent writes: the branch it stands on
+/// and the config git reads for that worktree alone. Seatbelt denies each by name and the Linux
+/// call supervisor holds each.
 pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
 
-/// The files in an object store's `info` folder that send git to another store: no
-/// confined agent writes one. Seatbelt denies each by name in the project's store, the
-/// store its checkout shares and a clone's own, and the Linux call supervisor holds each
-/// in a clone (DEC-185 S2b).
+/// The files in an object store's `info` folder that send git to another store: no confined agent
+/// writes one. Seatbelt denies each by name in the project's store, the store its checkout shares
+/// and a clone's own, and the Linux call supervisor holds each in a clone.
 pub const STORE_ALTERNATES: [&str; 2] = ["alternates", "http-alternates"];
 
-/// The repository git serves beside a clone's git folder when that folder fails git's
-/// repository test (RL-1): nothing is made there. Seatbelt denies it by name and the Linux
-/// call supervisor holds it whole (DEC-185 S2b).
+/// The repository git serves beside a clone's git folder when that folder fails git's repository
+/// test: nothing is made there. Seatbelt denies it by name and the Linux call supervisor holds it
+/// whole.
 pub const GIT_FALLBACK: &str = ".git.git";
 
-/// The pack folder's multi-pack-index, which can name a pack outside the store (RL-2): no
-/// confined agent makes one. Seatbelt denies every name it begins, and the Linux call
-/// supervisor holds the file and its `.d` chain folder, the two names git reads
-/// (DEC-185 S2b).
+/// The pack folder's multi-pack-index, which can name a pack outside the store: no confined agent
+/// makes one. Seatbelt denies every name it begins, and the Linux call supervisor holds the file
+/// and its `.d` chain folder, the two names git reads.
 pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
 
 #[cfg(test)]
