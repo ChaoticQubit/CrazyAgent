@@ -96,6 +96,50 @@ fn a_windows_task_line_past_cmds_limit_is_refused() {
     assert!(refused.0.contains("8191"), "{}", refused.0);
 }
 
+/// Folders of `count` entries of `C:\Tools\folder-NNN\bin`, joined by `;`. Input: the
+/// count. Output: the folders and their PATH.
+fn tool_folders(count: usize) -> (Vec<String>, String) {
+    let folders: Vec<String> = (0..count)
+        .map(|n| format!(r"C:\Tools\folder-{n:03}\bin"))
+        .collect();
+    let joined = folders.join(";");
+    (folders, joined)
+}
+
+/// A service PATH longer than 4096 characters that still fits cmd's line beside a short
+/// engine, data folder and log is set whole by the task, not cut at a fixed size.
+#[test]
+fn a_long_service_path_that_fits_cmds_line_is_set_whole() -> TestResult {
+    let (_, long) = tool_folders(270);
+    assert!(long.len() > 6000 && long.len() < 7000, "{}", long.len());
+    let line = arguments(&windows(&long).definition_text()?);
+    assert!(
+        line.contains(&format!("set \"PATH={long}\" && ")),
+        "{}",
+        line.len()
+    );
+    assert!(WINDOWS_SHELL.len() + 1 + line.encode_utf16().count() < CMD_LINE_CHARS_MAX);
+    Ok(())
+}
+
+/// A long data folder leaves the PATH less of cmd's line: the task sets the first folders
+/// that fit, whole, and its line stays under cmd's 8191 characters instead of being refused.
+#[test]
+fn a_long_data_folder_shortens_the_task_path_and_the_line_still_fits() -> TestResult {
+    let (folders, long) = tool_folders(270);
+    let mut task = windows(&long);
+    task.root = task.root.join("d".repeat(2500));
+    let line = arguments(&task.definition_text()?);
+    let start = line.find("set \"PATH=").expect("a PATH is set") + "set \"PATH=".len();
+    let end = line[start..].find("\" && ").expect("the PATH ends") + start;
+    let kept = &line[start..end];
+    let count = kept.split(';').count();
+    assert!(count < folders.len(), "{count}");
+    assert_eq!(kept, folders[..count].join(";"));
+    assert!(WINDOWS_SHELL.len() + 1 + line.encode_utf16().count() < CMD_LINE_CHARS_MAX);
+    Ok(())
+}
+
 /// The installed Windows task is read in the UTF-16 it is written in and judged by the
 /// engine it names: one naming this service's engine runs no other program, whatever PATH
 /// it sets or whether it sets one, while one naming another engine does; with nothing
