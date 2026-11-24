@@ -4,7 +4,7 @@ pub mod address;
 pub mod capture;
 pub mod request;
 
-pub use address::address_allowed;
+pub use address::{address_allowed, pinned};
 
 pub use capture::{CAPTURES_MAX, CaptureRules, SEND_HOSTS_MAX, SendRow};
 pub use request::{

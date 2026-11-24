@@ -1,5 +1,5 @@
 {
-  "apps/desktop/src-tauri/src/bridge/intake.rs": 1730,
+  "apps/desktop/src-tauri/src/bridge/intake.rs": 1660,
   "apps/desktop/src-tauri/src/bridge/master.rs": 1609,
   "apps/desktop/src-tauri/src/bridge/terminal.rs": 1874,
   "apps/desktop/src-tauri/src/ide.rs": 1882,
@@ -7,7 +7,6 @@
   "apps/desktop/src-tauri/src/native_term/render.rs": 1899,
   "apps/desktop/src-tauri/src/native_term/windows/rows.rs": 2747,
   "apps/desktop/src-tauri/tests/native_auth.rs": 1564,
-  "apps/desktop/src/api-intake.ts": 604,
   "apps/desktop/src/api-process.ts": 644,
   "apps/desktop/src/api-projects.ts": 1024,
   "apps/desktop/src/api.ts": 1726,
@@ -57,7 +56,7 @@
   "crates/crazyagent/src/engine/owner/transport/process.rs": 2171,
   "crates/crazyagent/src/engine/owner/transport/process_tests.rs": 2506,
   "crates/crazyagent/src/engine/owner/transport/terminal/tests.rs": 1868,
-  "crates/crazyagent/src/github/github_tests.rs": 3483,
+  "crates/crazyagent/src/github/github_tests.rs": 3434,
   "crates/crazyagent/src/github/publish.rs": 2149,
   "crates/crazyagent/src/github/rules/rules_tests.rs": 1558,
   "crates/crazyagent/src/harnesses/interactive/tests.rs": 2451,

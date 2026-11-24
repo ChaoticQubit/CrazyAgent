@@ -69,7 +69,9 @@ fn the_curl_command_holds_no_token_key_or_url() {
             .unwrap();
     let (command, config) = codex_request(&url, &credential(&token), &key, true)
         .unwrap()
-        .json_command("{}")
+        .json_command("{}", |_, _| {
+            unreachable!("a literal address is never looked up")
+        })
         .unwrap();
     let shown = format!(
         "{:?} {:?}",

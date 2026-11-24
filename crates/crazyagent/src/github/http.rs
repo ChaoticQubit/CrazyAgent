@@ -2,6 +2,8 @@ use crate::engine::EngineError;
 use kernel_sandbox::egress::{BODY_BYTES_MAX, ExchangeError, exchange};
 use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use kernel_security::secret::SecretString;
+use std::io;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::process::{Command, Stdio};
 
 const CURL: &str = "/usr/bin/curl";
@@ -11,7 +13,8 @@ const USER_AGENT: &str = "CrazyAgent";
 /// One HTTP exchange through the system curl. The URL, headers, token and form body go
 /// only into curl's config on stdin, so nothing secret reaches an argument or the
 /// environment; curl reads no `.curlrc`, follows no redirects and only uses the allowed
-/// schemes.
+/// schemes. A host name is looked up once and every address checked before curl runs, and
+/// curl is pinned to the checked address, so it never looks the name up again.
 pub(crate) struct Request<'a> {
     pub(crate) url: url::Url,
     pub(crate) accept: &'a str,
@@ -52,18 +55,25 @@ impl Request<'_> {
     /// Builds curl's config: the URL, headers, token, and either the form body or a
     /// method with its JSON body, never both; a bodyless PUT, POST or PATCH sends an empty
     /// body so it says its length is zero. Input: the method and body, none for a GET or a
-    /// form. Output: the config bytes, or `github_request_invalid` for a control character.
-    fn config(&self, body: Option<(Verb, Option<&str>)>) -> Result<Vec<u8>, EngineError> {
+    /// form, and the `resolve` line value for a host name. Output: the config bytes, or
+    /// `github_request_invalid` for a control character.
+    fn config(
+        &self,
+        body: Option<(Verb, Option<&str>)>,
+        pinned: Option<&str>,
+    ) -> Result<Vec<u8>, EngineError> {
         assert!(body.is_none() || self.form.is_none());
-        let mut pieces = vec![
-            Plain("url = \""),
-            Escaped(self.url.as_str()),
-            Plain("\"\nheader = \"Accept: "),
+        let mut pieces = vec![Plain("url = \""), Escaped(self.url.as_str()), Plain("\"\n")];
+        if let Some(pinned) = pinned {
+            pieces.extend([Plain("resolve = \""), Escaped(pinned), Plain("\"\n")]);
+        }
+        pieces.extend([
+            Plain("header = \"Accept: "),
             Escaped(self.accept),
             Plain("\"\nuser-agent = \""),
             Escaped(USER_AGENT),
             Plain("\"\n"),
-        ];
+        ]);
         if self.url.host_str() == Some("api.github.com") || self.allow_http {
             pieces.push(Plain("header = \"X-GitHub-Api-Version: 2022-11-28\"\n"));
         }
@@ -108,22 +118,31 @@ impl Request<'_> {
         kernel_security::secret::sized(&pieces).ok_or_else(|| failure("github_request_invalid"))
     }
 
-    /// Builds the curl command without running it. Output: the command, whose arguments
-    /// and environment hold no URL, header or secret, and the config bytes for its stdin.
-    pub(crate) fn command(&self) -> Result<(Command, Vec<u8>), EngineError> {
-        self.command_with(None)
+    /// Builds the curl command without running it. Input: the host name lookup. Output:
+    /// the command, whose arguments and environment hold no URL, header or secret, and the
+    /// config bytes for its stdin.
+    pub(crate) fn command(
+        &self,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
+    ) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(None, resolve)
     }
 
-    /// Builds the curl command for a POST of a JSON body without running it. Input: the
-    /// body. Output: the command, whose arguments and environment hold no URL, header,
-    /// body or secret, and the config bytes for its stdin.
-    pub(crate) fn json_command(&self, json: &str) -> Result<(Command, Vec<u8>), EngineError> {
-        self.command_with(Some((Verb::Post, Some(json))))
+    /// Builds the curl command for a POST of a JSON body without running it. Inputs: the
+    /// body and the host name lookup. Output: the command, whose arguments and environment
+    /// hold no URL, header, body or secret, and the config bytes for its stdin.
+    pub(crate) fn json_command(
+        &self,
+        json: &str,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
+    ) -> Result<(Command, Vec<u8>), EngineError> {
+        self.command_with(Some((Verb::Post, Some(json))), resolve)
     }
 
     fn command_with(
         &self,
         body: Option<(Verb, Option<&str>)>,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<IpAddr>>,
     ) -> Result<(Command, Vec<u8>), EngineError> {
         let secure = self.url.scheme() == "https";
         let loopback = self.url.scheme() == "http"
@@ -132,6 +151,16 @@ impl Request<'_> {
         if !secure && !loopback {
             return Err(failure("github_request_invalid"));
         }
+        let port = self
+            .url
+            .port_or_known_default()
+            .expect("https and http always have a port");
+        let pinned = kernel_security::net::pinned(
+            &self.url,
+            port,
+            |name, port| resolve(name, port).map_err(|_| failure("github_unreachable")),
+            || failure("github_address_refused"),
+        )?;
         let mut command = Command::new(CURL);
         command
             .arg("-q")
@@ -149,30 +178,40 @@ impl Request<'_> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        Ok((command, self.config(body)?))
+        Ok((command, self.config(body, pinned.as_deref())?))
     }
 
-    /// Sends the request and waits at most 30 s. Output: the reply, or
-    /// `github_unreachable` when curl could not finish the exchange.
+    /// Looks the host up once, then sends the request and waits at most 30 s for curl.
+    /// Output: the reply, `github_address_refused` for a refused address, or
+    /// `github_unreachable` when the lookup or curl could not finish the exchange.
     pub(crate) fn send(&self) -> Result<Reply, EngineError> {
-        let (command, config) = self.command()?;
+        let (command, config) = self.command(system)?;
         exchange(command, config).map_err(code)
     }
 
-    /// POSTs a JSON body and waits at most 30 s, as `send` does. Input: the body.
-    /// Output: the reply, or `github_unreachable` when curl could not finish the exchange.
+    /// POSTs a JSON body after the one host lookup, as `send` does. Input: the body.
+    /// Output: the reply, `github_address_refused`, or `github_unreachable`.
     pub(crate) fn send_json(&self, json: &str) -> Result<Reply, EngineError> {
-        let (command, config) = self.json_command(json)?;
+        let (command, config) = self.json_command(json, system)?;
         exchange(command, config).map_err(code)
     }
 
-    /// Sends a request with a method and an optional JSON body and waits at most 30 s, as
-    /// `send` does. Inputs: the method and the body. Output: the reply, or
-    /// `github_unreachable` when curl could not finish the exchange.
+    /// Sends a request with a method and an optional JSON body after the one host lookup,
+    /// as `send` does. Inputs: the method and the body. Output: the reply,
+    /// `github_address_refused`, or `github_unreachable`.
     pub(crate) fn send_body(&self, verb: Verb, json: Option<&str>) -> Result<Reply, EngineError> {
-        let (command, config) = self.command_with(Some((verb, json)))?;
+        let (command, config) = self.command_with(Some((verb, json)), system)?;
         exchange(command, config).map_err(code)
     }
+}
+
+/// Looks a host name up once through the system resolver. Inputs: the host and port.
+/// Output: every address it resolved to, or the lookup failure.
+fn system(host: &str, port: u16) -> io::Result<Vec<IpAddr>> {
+    Ok((host, port)
+        .to_socket_addrs()?
+        .map(|found| found.ip())
+        .collect())
 }
 
 /// The engine code of an exchange that gave no reply. Input: the kernel's reason. Output:

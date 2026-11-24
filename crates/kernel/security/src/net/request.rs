@@ -195,7 +195,12 @@ impl<'r> Requests<'r> {
             .port_or_known_default()
             .expect("https and http always have a port");
         self.egress.allows(caller, parsed.scheme(), &host, port)?;
-        let pinned = pinned(self.egress, &parsed, port)?;
+        let pinned = super::pinned(
+            &parsed,
+            port,
+            |name, port| self.egress.resolve(name, port),
+            || StoreError::code("net_url_invalid"),
+        )?;
         check_shape(&request)?;
         let host_key = capture::host_key(&parsed);
         let fields = capture::fields(self.rules, caller, &host_key, &request.capture)?;
@@ -276,41 +281,6 @@ fn written_host(url: &str) -> Option<&str> {
         Some((name, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => name,
         _ => host,
     })
-}
-
-/// Checks the address a request may connect to: an IP literal host directly, a host name
-/// through egress's single lookup, every resolved address checked. Inputs: egress, the
-/// parsed URL and its port. Output: the `resolve` line value for a host name, none for a
-/// literal, or `net_url_invalid` for a refused, missing or unresolved address.
-fn pinned(egress: &dyn Egress, parsed: &url::Url, port: u16) -> Result<Option<String>, StoreError> {
-    let invalid = || StoreError::code("net_url_invalid");
-    let name = match parsed.host() {
-        Some(url::Host::Ipv4(address)) => {
-            return super::address_allowed(IpAddr::V4(address))
-                .then_some(None)
-                .ok_or_else(invalid);
-        }
-        Some(url::Host::Ipv6(address)) => {
-            return super::address_allowed(IpAddr::V6(address))
-                .then_some(None)
-                .ok_or_else(invalid);
-        }
-        Some(url::Host::Domain(name)) => name,
-        None => return Err(invalid()),
-    };
-    let resolved = egress.resolve(name, port)?;
-    let first = *resolved.first().ok_or_else(invalid)?;
-    if !resolved
-        .iter()
-        .all(|address| super::address_allowed(*address))
-    {
-        return Err(invalid());
-    }
-    let address = match first {
-        IpAddr::V4(address) => address.to_string(),
-        IpAddr::V6(address) => format!("[{address}]"),
-    };
-    Ok(Some(format!("{name}:{port}:{address}")))
 }
 
 /// Whether a name is an HTTP field name a curl config and write-out can carry: RFC 9110

@@ -195,7 +195,7 @@ test("every code the rule calls can return has its own sentence and passes the d
     assert.ok(codes.has(code), `${code} is read from the engine`);
   }
   const intake = read("src/api-intake.ts");
-  const bridge = read("src-tauri/src/bridge/intake.rs");
+  const bridge = read("src-tauri/src/bridge/intake/github_codes.rs");
   const allowed = bridge.slice(bridge.indexOf("const GITHUB_CODES"), bridge.indexOf("];", bridge.indexOf("const GITHUB_CODES")));
   const listed = [...allowed.matchAll(/"([a-z_]+)",/g)].map((match) => match[1]);
   assert.match(allowed, new RegExp(`^const GITHUB_CODES: \\[&str; ${listed.length}\\] = \\[`));
