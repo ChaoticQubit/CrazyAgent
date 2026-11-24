@@ -733,7 +733,9 @@ impl AppPluginsPage {
         let checked = self.checking.take();
         let (folder, approve) = match (&self.open, self.reviewing.take()) {
             (Open::Add(field), _) => match checked {
-                Some(sent) if PathBuf::from(field.value().trim()) == sent => (Some(sent), true),
+                Some(sent) if sent.as_path() == std::path::Path::new(field.value().trim()) => {
+                    (Some(sent), true)
+                }
                 _ => {
                     self.failure = Some(PATH_CHANGED.into());
                     return;
