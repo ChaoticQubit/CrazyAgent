@@ -56,6 +56,11 @@ pub struct ToolchainHooks {
     /// Returns the path.
     #[cfg(unix)]
     pub sandboxed_git: fn() -> &'static Path,
+    /// Removes the shell startup files from a home the engine made strictly below its data
+    /// root, without following a link, so a home kept across launches runs none of them.
+    /// Inputs: the home and the data root, both canonical. Output: done, or a refusal code.
+    #[cfg(unix)]
+    pub remove_shell_startup: fn(&Path, &Path) -> Result<(), &'static str>,
     /// The home a native lead's teammates share. Input: the lead's agent home. Output: the
     /// teammates' home.
     pub mates_home: fn(&Path) -> PathBuf,

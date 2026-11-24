@@ -399,7 +399,7 @@ async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_a
 async fn ide_terminal_tasks_run_the_owner_shell_inside_the_ide_sandbox_with_no_network() {
     let case = Terminal::start("ca-v2opt-term-ide-").await;
     let started = case.open_ide().await;
-    let shell = ide_shell::owner_shell().unwrap();
+    let shell = kernel_sandbox::ide_shell::owner_shell().unwrap();
     let profile = &started.settings["terminal.integrated.automationProfile.osx"];
     assert_eq!(profile["path"], serde_json::json!(shell.to_str().unwrap()));
     assert!(
