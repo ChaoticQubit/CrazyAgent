@@ -379,7 +379,7 @@ pub(super) fn nest_held(bwrap: &Path, helper: &Path) -> bool {
 /// [`APPARMOR_USERNS`] reads: only `1`, with or without its newline, does. Input: the text,
 /// none where the file cannot be read (no AppArmor, or an older one). Output: true when it
 /// restricts them.
-pub fn restricts(setting: Option<&str>) -> bool {
+pub(crate) fn restricts(setting: Option<&str>) -> bool {
     setting.is_some_and(|text| text.strip_suffix('\n').unwrap_or(text) == "1")
 }
 
@@ -469,7 +469,7 @@ pub(super) const GIT_SEARCH_ENTRIES_MAX: usize = 4096;
 
 /// How many times what is kept was marked unsupervised ([`forget_supervisor`]), then what is
 /// kept of this machine and when it was read.
-pub type KeptHost = Mutex<(u64, Option<(Instant, crate::host::LinuxHost)>)>;
+pub(crate) type KeptHost = Mutex<(u64, Option<(Instant, crate::host::LinuxHost)>)>;
 
 /// What [`host_within`] last read of this machine, which a launch whose own probe failed
 /// marks unsupervised ([`forget_supervisor`]).
@@ -512,7 +512,7 @@ pub(super) fn publish(kept: &KeptHost, generation: u64, host: crate::host::Linux
 /// the setting On found it does not hold (rv-secreview linux-t4c F2), so the Agent access
 /// page shows the wider lines until the next read, and counts the mark so a read that began
 /// before it is not kept ([`publish`]). Nothing kept stays nothing. Input: what is kept.
-pub fn forget_supervisor(kept: &KeptHost) {
+pub(crate) fn forget_supervisor(kept: &KeptHost) {
     let mut held = kept.lock().unwrap_or_else(PoisonError::into_inner);
     held.0 += 1;
     if let Some((_, host)) = held.1.as_mut() {
