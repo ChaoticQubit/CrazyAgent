@@ -1,4 +1,4 @@
-use crate::perf_kit::{Row, SAMPLES_MIN, line, rank, time};
+use crate::perf_kit::{Row, SAMPLES_MIN, line, line_ns, rank, time};
 
 fn row(name: &'static str, batch: usize) -> Row {
     Row {
@@ -42,6 +42,23 @@ fn a_median_of_ten_microseconds_or_more_prints_whole_microseconds() {
     assert_eq!(
         line(&row("hash", 4), &slow),
         format!("PERF 1 common hash p50=1234 p95=1234 n={SAMPLES_MIN} batch=4")
+    );
+}
+
+#[test]
+fn a_pair_row_prints_nanoseconds_and_the_batch_at_any_median() {
+    let mut sorted = vec![62_345_u64; SAMPLES_MIN];
+    sorted[SAMPLES_MIN - 1] = 229_000;
+    assert_eq!(
+        line_ns(&row("settings.save_quit", 1), &sorted),
+        format!(
+            "PERF 1 common settings.save_quit p50_ns=62345 p95_ns=62345 n={SAMPLES_MIN} batch=1"
+        )
+    );
+    let fast = vec![6_062_u64; SAMPLES_MIN];
+    assert_eq!(
+        line_ns(&row("settings.save_quit", 1), &fast),
+        line(&row("settings.save_quit", 1), &fast)
     );
 }
 
