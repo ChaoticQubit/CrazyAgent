@@ -293,6 +293,20 @@ fn a_failed_fixture_read_names_its_path_and_error() {
     fixture(&case.root.join("missing.toml"), std::fs::read);
 }
 
+/// The entry names in a folder, read through the fixture helper. An entry or a name that
+/// does not read stops the row with the folder and what failed. Input: the folder. Output:
+/// the names.
+fn names_in(folder: &Path) -> Vec<String> {
+    fixture(folder, std::fs::read_dir)
+        .map(
+            |entry| match entry.map(|entry| entry.file_name().into_string()) {
+                Ok(Ok(name)) => name,
+                failed => panic!("{}: {failed:?}", folder.display()),
+            },
+        )
+        .collect()
+}
+
 fn plugin_keys(case: &Case) -> Vec<PathBuf> {
     let keys = case.root.join("plugin-keys");
     let Ok(entries) = std::fs::read_dir(&keys) else {
@@ -1291,10 +1305,7 @@ fn a_removal_whose_rows_fail_puts_the_folder_back() {
         .unwrap();
     assert!(remove(&case.db, &case.engine(), "acme").is_err());
     let folder = plugins_folder(&case);
-    let names: Vec<String> = std::fs::read_dir(&folder)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
+    let names = names_in(&folder);
     assert_eq!(names, ["acme"]);
     assert_eq!(plugin_keys(&case).len(), 1);
     case.db.execute_batch("DROP TRIGGER held").unwrap();
@@ -1313,10 +1324,7 @@ fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
     std::fs::create_dir_all(retired.join("a/b/c/d/e/f")).unwrap();
     std::fs::write(retired.join(MANIFEST_FILE), ACME).unwrap();
     let _ = crate::registry::remove_staged(&case.root);
-    let left: Vec<String> = std::fs::read_dir(&folder)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
+    let left = names_in(&folder);
     assert!(
         !left.iter().any(|name| name.starts_with(".old-acme.")),
         "{left:?}"
