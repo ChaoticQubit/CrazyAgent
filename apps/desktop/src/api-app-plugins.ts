@@ -70,7 +70,7 @@ export const APP_PLUGIN_REFUSALS: Record<string, string> = {
   app_plugin_request_invalid: "The engine didn't accept this plugin request. Reload the page and try again.",
   app_plugins_unavailable: "App plugins aren't available in this engine yet.",
   app_plugins_readonly: "CrazyAgent's data is read-only right now, so plugins can't change. Nothing was changed.",
-  app_plugin_not_found: "That plugin is gone. The list now shows the current ones.",
+  app_plugin_not_found: "That plugin is gone. Open App plugins again to see the current ones.",
   app_plugin_name_taken: "A built-in plugin already has that name. Give your plugin another name.",
   app_plugin_bundled: "Built-in plugins can be turned off but not removed or replaced.",
   app_plugin_essential: "This built-in plugin stays on. CrazyAgent needs it to work.",

@@ -15,7 +15,9 @@ pub(in crate::tui) fn sentence(code: &str) -> String {
         }
         "app_plugins_unavailable" => "App plugins aren't available in this engine yet.",
         "app_plugins_readonly" => "App plugins can't be changed while the engine is read-only.",
-        "app_plugin_not_found" => "That plugin is gone. The list now shows the current ones.",
+        "app_plugin_not_found" => {
+            "That plugin is gone. Open App plugins again to see the current ones."
+        }
         "app_plugin_name_taken" => {
             "A bundled plugin already has that name. Give your plugin another name."
         }

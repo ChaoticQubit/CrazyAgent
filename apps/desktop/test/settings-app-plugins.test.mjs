@@ -180,6 +180,13 @@ test("App plugins: every app plugin code the engine can answer has its own sente
   assert.match(api.appPluginRefusal({ code: "app_plugin_key_store_unavailable" }), /^CrazyAgent couldn't reach its saved keys\. Nothing was changed; try again\.$/u);
 });
 
+test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_not_found" }),
+    "That plugin is gone. Open App plugins again to see the current ones.",
+  );
+});
+
 test("App plugins: each action is a direct bridge call with its own arguments, and an entered key travels only in its own call", () => {
   const file = source("../src/api-app-plugins.ts");
   for (const [command, args] of [
