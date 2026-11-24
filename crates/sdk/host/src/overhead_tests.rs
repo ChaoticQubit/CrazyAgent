@@ -99,6 +99,27 @@ impl sdk::generated::service::Provide for NoService {
     }
 }
 
+/// A sandbox provider the row never reaches: it times only the quit save.
+struct NoSandbox;
+
+impl sdk::generated::sandbox::Provide for NoSandbox {
+    fn save_settings(
+        &self,
+        _: &'static str,
+        _: sdk::generated::sandbox::SandboxSettings,
+        _: u64,
+    ) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn settings(
+        &self,
+        _: &'static str,
+    ) -> Result<sdk::generated::sandbox::StoredSandboxSettings, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
 /// An update provider the row never reaches: it times only the quit save.
 struct NoUpdate;
 
@@ -181,6 +202,7 @@ fn overhead_per_sdk_call() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &provider,
         service: &NoService,
@@ -263,6 +285,7 @@ fn gateway_secrets_call_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &Found,
         settings: &Noop,
         service: &NoService,
@@ -316,6 +339,7 @@ fn gateway_update_set_channel_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &NoService,
@@ -384,6 +408,7 @@ fn gateway_service_status_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &Noop,
         service: &Reported,

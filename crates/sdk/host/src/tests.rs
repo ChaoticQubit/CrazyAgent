@@ -85,6 +85,30 @@ impl sdk::process::Provide for UnusedProcess {
     }
 }
 
+/// The sandbox provider of rows that never reach it.
+struct UnusedSandbox;
+
+/// The one `UnusedSandbox` the rows pass.
+const UNUSED_SANDBOX: UnusedSandbox = UnusedSandbox;
+
+impl sdk::generated::sandbox::Provide for UnusedSandbox {
+    fn save_settings(
+        &self,
+        caller: &'static str,
+        _: sdk::generated::sandbox::SandboxSettings,
+        _: u64,
+    ) -> Result<(), Refusal> {
+        panic!("the sandbox provider was reached by {caller}");
+    }
+
+    fn settings(
+        &self,
+        caller: &'static str,
+    ) -> Result<sdk::generated::sandbox::StoredSandboxSettings, Refusal> {
+        panic!("the sandbox provider was reached by {caller}");
+    }
+}
+
 /// The secrets provider of rows that never reach it.
 struct UnusedSecrets;
 
@@ -201,6 +225,7 @@ fn a_granted_call_reaches_the_provider_once() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -227,6 +252,7 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -259,6 +285,7 @@ fn an_unknown_plugin_is_refused() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -294,6 +321,7 @@ fn the_provider_rejection_comes_back_unchanged() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -319,6 +347,7 @@ fn the_settings_provider_gets_the_bound_plugin_as_caller() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -344,6 +373,7 @@ fn an_ungranted_secrets_call_never_reaches_the_provider() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -374,6 +404,7 @@ fn each_secrets_call_needs_its_own_grant() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -404,6 +435,7 @@ fn the_caller_passed_to_the_secrets_provider_is_the_bound_plugin() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -437,6 +469,7 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -557,6 +590,7 @@ fn an_ungranted_net_request_never_reaches_egress_allows() {
         editor: &UNUSED_EDITOR,
         net: &fetch,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
         service: &UNUSED_SERVICE,
@@ -595,6 +629,7 @@ fn net_inputs_over_their_bounds_are_refused() {
         editor: &UNUSED_EDITOR,
         net: &fetch,
         process: &UNUSED_PROCESS,
+        sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
         service: &UNUSED_SERVICE,

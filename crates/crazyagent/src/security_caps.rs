@@ -1,7 +1,7 @@
 use kernel_security::error::StoreError;
 use kernel_security::net as kernel_net;
 use kernel_security::secrets::Secrets;
-use sdk::generated::{editor, service, update};
+use sdk::generated::{editor, sandbox, service, update};
 use sdk::secrets::Secret;
 use sdk::settings::QuitSettings;
 use sdk::{Refusal, net, process, secrets, settings};
@@ -192,6 +192,21 @@ impl process::Provide for Absent {
 
 impl settings::Provide for Absent {
     fn save_quit(&self, _: &'static str, _: QuitSettings) -> Result<(), Refusal> {
+        Err(absent())
+    }
+}
+
+impl sandbox::Provide for Absent {
+    fn save_settings(
+        &self,
+        _: &'static str,
+        _: sandbox::SandboxSettings,
+        _: u64,
+    ) -> Result<(), Refusal> {
+        Err(absent())
+    }
+
+    fn settings(&self, _: &'static str) -> Result<sandbox::StoredSandboxSettings, Refusal> {
         Err(absent())
     }
 }
