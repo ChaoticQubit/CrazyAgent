@@ -722,3 +722,7 @@ fn column(
     .optional()
     .map_err(state)
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod settings_tests;

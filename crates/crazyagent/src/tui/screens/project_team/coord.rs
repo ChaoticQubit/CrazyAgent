@@ -696,3 +696,7 @@ impl TeamView {
         (rows, Some(cursor))
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "uncommitted_reminder_tests.rs"]
+mod uncommitted_reminder_tests;

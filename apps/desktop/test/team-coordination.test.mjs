@@ -349,3 +349,12 @@ test("the coordination settings name each harness as the catalog the page hands 
   assert.equal(coord.modeHelper("codex", false, name), "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.");
   assert.equal(coord.HARNESS_NAMES, undefined, "no list of harness names of its own is left in the desktop");
 });
+
+test("the Uncommitted edits reminder is On by default and shows under the Task-start reminder", () => {
+  assert.equal(coord.COORD_DEFAULTS.uncommitted_reminder, "on");
+  const markup = renderToStaticMarkup(createElement(coord.ToolsControls, { projectId: "p", status: { coordination: undefined }, reload: forbidden }));
+  const reminder = markup.indexOf("Uncommitted edits reminder");
+  assert.ok(reminder > markup.indexOf("Task-start reminder"), markup);
+  assert.match(markup.slice(reminder), /aria-checked="true"[^>]*>On</u);
+  assert.match(markup, /Off only tells you/u);
+});

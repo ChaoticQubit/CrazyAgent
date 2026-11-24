@@ -2,18 +2,14 @@ use super::*;
 
 const PROMPT: &str = "Edit the notes";
 
-/// Starts one sub-agent on `PROMPT` in a project whose checkout tracks `notes.md`, its
-/// stand-in running `writes` in its worktree and then keeping its turn open, waits for
-/// `ready` to hold over that worktree, runs `before_stop` and stops the agent as the owner
-/// does. Inputs: the fixture, whether the agent works in its own clone, the script lines,
-/// the wait and what runs before the stop. Output: the runtime, the agent and its worktree.
-fn stopped_writer(
-    fixture: &Fixture,
-    own_clone: bool,
-    writes: &str,
-    ready: &dyn Fn(&Path) -> bool,
-    before_stop: &dyn Fn(i64),
-) -> (TeamRuntime, i64, PathBuf) {
+const NEXT: &str = "Write the menu";
+
+const AGENT_LINE: &str = "Your edits from your last turn are not committed, so they did not land; they stay only in your worktree: notes.md, page.md. Commit them on your branch if they are part of your work.";
+
+/// Makes the project folder a git checkout tracking `notes.md`, and with `own_clone` sets
+/// the project's agents to Own branch, so each works in its own clone. Inputs: the fixture
+/// and the choice.
+fn owner_checkout(fixture: &Fixture, own_clone: bool) {
     let project = fixture.base.join("project");
     std::fs::write(project.join("notes.md"), "Owner notes.\n").unwrap();
     let home = fixture.base.join("owner-home");
@@ -39,6 +35,22 @@ fn stopped_writer(
         )
         .unwrap();
     }
+}
+
+/// Starts one sub-agent on `PROMPT` in a project whose checkout tracks `notes.md`, its
+/// stand-in running `writes` in its worktree and then keeping its turn open, waits for
+/// `ready` to hold over that worktree, runs `before_stop` and stops the agent as the owner
+/// does. Inputs: the fixture, whether the agent works in its own clone, the script lines,
+/// the wait and what runs before the stop. Output: the runtime, the agent and its worktree.
+fn stopped_writer(
+    fixture: &Fixture,
+    own_clone: bool,
+    writes: &str,
+    ready: &dyn Fn(&Path) -> bool,
+    before_stop: &dyn Fn(i64),
+) -> (TeamRuntime, i64, PathBuf) {
+    let project = fixture.base.join("project");
+    owner_checkout(fixture, own_clone);
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let codex = bin.join("codex");
@@ -281,4 +293,81 @@ fn a_turn_with_many_odd_names_names_what_fits_and_counts_the_rest() {
         "{note}"
     );
     assert!(team.shutdown().unwrap().is_empty());
+}
+
+/// The resuming Codex stand-in, whose first turn adds `page.md` and edits the tracked
+/// `notes.md` in its worktree and commits nothing. Output: the script.
+fn editing_codex() -> String {
+    let script = RESUMING_CODEX.replacen(
+        r#"  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f""#,
+        r#"  [ -f page.md ] || { echo 'Written by the sub-agent.' > page.md; echo 'Agent notes.' >> notes.md; }
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f""#,
+        1,
+    );
+    assert_ne!(script, RESUMING_CODEX);
+    script
+}
+
+/// Runs `PROMPT` and then `NEXT` on one Own branch sub-agent whose first turn leaves its
+/// edits uncommitted. Input: the fixture. Output: the agent and what the engine typed into
+/// its second task turn.
+fn second_turn(fixture: &Fixture) -> (i64, String) {
+    owner_checkout(fixture, true);
+    let host = fixture.host();
+    let mut team = live_runtime(fixture, &host, &editing_codex());
+    reuse_idle_on(fixture);
+    owner(fixture, &[hand_off(fixture, PROMPT)]);
+    fixture.until(&mut team, "the first task is done", |f| {
+        task_of(f, PROMPT).0 == "done"
+    });
+    let agent = subs(fixture)[0];
+    let first = pasted(fixture, agent);
+    assert!(first.contains(PROMPT), "{first}");
+    owner(fixture, &[hand_off(fixture, NEXT)]);
+    fixture.until(&mut team, "the second task is done", |f| {
+        task_of(f, NEXT).0 == "done"
+    });
+    let text = pasted(fixture, agent);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(
+        subs(fixture),
+        [agent],
+        "the same agent took the second task"
+    );
+    (agent, text[first.len()..].to_owned())
+}
+
+/// The owner's note about the first task of [`second_turn`]. Inputs: the fixture and the
+/// agent. Output: the note.
+fn first_task_note(fixture: &Fixture, agent: i64) -> String {
+    format!(
+        "The edits from task {} (codex, sub-agent {agent}) are not committed, so nothing landed; they stay only in its worktree: notes.md, page.md.",
+        task_id(fixture)
+    )
+}
+
+#[test]
+fn with_the_reminder_on_by_default_the_next_task_turn_names_the_uncommitted_edits() {
+    let fixture = Fixture::new(1);
+    let (agent, second) = second_turn(&fixture);
+    assert!(second.contains(NEXT), "{second}");
+    assert_eq!(second.matches(AGENT_LINE).count(), 1, "{second}");
+    assert!(edit_notes(&fixture).contains(&first_task_note(&fixture, agent)));
+}
+
+#[test]
+fn with_the_reminder_off_the_next_task_turn_has_no_line_and_the_owner_is_still_told() {
+    let fixture = Fixture::new(1);
+    let mut value = serde_json::to_value(crate::coord::settings::CoordSettings::default()).unwrap();
+    value["uncommitted_reminder"] = "off".into();
+    let off: crate::coord::settings::CoordSettings = serde_json::from_value(value).unwrap();
+    crate::coord::settings::write(&fixture.connection, &fixture.setup.project_id, &off).unwrap();
+    let (agent, second) = second_turn(&fixture);
+    assert!(second.contains(NEXT), "{second}");
+    assert!(
+        !second.contains("Your edits from your last turn"),
+        "{second}"
+    );
+    assert!(edit_notes(&fixture).contains(&first_task_note(&fixture, agent)));
 }
