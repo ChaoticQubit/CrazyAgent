@@ -5745,7 +5745,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     for agent in &mut agents {
         agent.owner_stopped = stopped.contains(&agent.id);
         agent.instructions_changed = changed.contains(&agent.id) && agent.status.live();
-        agent.sees_hidden = seers.contains(&agent.id) && agent.status.live();
+        agent.sees_hidden = seers.contains(&agent.id);
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
