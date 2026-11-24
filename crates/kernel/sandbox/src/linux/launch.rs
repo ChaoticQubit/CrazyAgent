@@ -71,8 +71,8 @@ pub(crate) const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unp
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
-/// The longest the call supervisor probe may run: its one wait is a 2 s connect timeout,
-/// reached only when a guard does not hold (rv-sec3 linux-t4b N4).
+/// The longest the call supervisor probe may run: its one wait is a 2 s connect timeout, reached
+/// only when a guard does not hold.
 const SUPERVISOR_PROBE_TIME_MAX: Duration = Duration::from_secs(10);
 /// How long the routed-network probe may run: slirp4netns's ready wait and the rules.
 const ROUTE_PROBE_TIME_MAX: Duration = Duration::from_secs(15);
@@ -92,9 +92,9 @@ const PROBE_FAILED: &str = "the sandbox check failed";
 const PROBE_REASON_MAX: usize = 200;
 /// The most bytes of a failed probe's stderr that are read and logged ([`probe_said`]).
 const PROBE_SAID_MAX: usize = 4096;
-/// The launch refusal when this computer's nest check passed ([`nest_held`]) but the launch's
-/// own nest probe failed (rv-sa241 SBX-2-R2 LOW-1), so no agent runs on the shared network
-/// with Landlock rules alone while the Agent access page says it is nested.
+/// The launch refusal when this computer's nest check passed ([`nest_held`]) but the launch's own
+/// nest probe failed, so no agent runs on the shared network with Landlock rules alone while the
+/// Agent access page says it is nested.
 const LINUX_NEST_NOT_STARTED: &str = "bubblewrap did not start this agent's sandbox the way \
      this computer's check found it does; try again, or restart CrazyAgent to check this \
      computer again";
@@ -146,16 +146,16 @@ pub(crate) const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own w
      Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
      bubblewrap alone, which cannot give the git folders their own rights";
 
-/// Why an agent whose project hides a folder does not start under Landlock alone: a right
-/// to list a folder covers every folder below it, so the hidden folder's names would stay
-/// in view. It names what makes hidden folders work on this computer (leader 12:25).
+/// Why an agent whose project hides a folder does not start under Landlock alone: a right to list a
+/// folder covers every folder below it, so the hidden folder's names would stay in view. It names
+/// what makes hidden folders work on this computer.
 pub const HIDDEN_NEEDS_NAMESPACES: &str = "hidden folders on Linux need bubblewrap to start \
      agents in namespaces of their own, and this computer does not let it: install \
      bubblewrap and allow unprivileged user namespaces, then start the agent again";
 
 /// Why an agent whose project hides a folder does not start while this computer mounts that
-/// folder's disk a second time where it shows the folder: the empty cover lies on one path,
-/// and the second one leads past it (rv-code4 F1, #622, farm run 44410206144).
+/// folder's disk a second time where it shows the folder: the empty cover lies on one path, and the
+/// second one leads past it (farm run 44410206144).
 pub const HIDDEN_MOUNTED_AGAIN: &str = "a hidden folder's disk is mounted a second time where \
      it shows that folder, and an agent could reach the folder there: remove that mount or \
      stop hiding the folder, then start the agent again";
@@ -175,13 +175,11 @@ const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/shm",
 ];
 
-/// The Landlock rules of one engine git step on an agent's linked worktree, the Linux form
-/// of the macOS step profile (SECAUDIT unconfined-git-add-reads-through-raced-symlink,
-/// unconfined-read-tree-u): it reads the system, `/proc` and `read`, and writes the devices
-/// and `write`, with no network rule and no kept port, and dies with this engine process, so
-/// its git never outlives the lock the engine took for it (RV-DS241-142); an engine that is
-/// process 1 takes every process down with it. Inputs: the absolute places the step reads
-/// and writes. Output: the policy.
+/// The Landlock rules of one engine git step on an agent's linked worktree, the Linux form of the
+/// macOS step profile: it reads the system, `/proc` and `read`, and writes the devices and `write`,
+/// with no network rule and no kept port, and dies with this engine process, so its git never
+/// outlives the lock the engine took for it; an engine that is process 1 takes every process down
+/// with it. Inputs: the absolute places the step reads and writes. Output: the policy.
 pub fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPolicy {
     assert!(read.iter().chain(write).all(|path| path.is_absolute()));
     let policy = LandlockPolicy {
@@ -251,9 +249,9 @@ pub struct LinuxSandbox {
     routed: Option<Routed>,
 }
 
-/// What the call supervisor holds for a launch on this host beyond the guards every
-/// supervised launch carries: `signals` where neither a process namespace nor the
-/// kernel's signal scope keeps the agent's signals to itself (DEC-179 T4c).
+/// What the call supervisor holds for a launch on this host beyond the guards every supervised
+/// launch carries: `signals` where neither a process namespace nor the kernel's signal scope keeps
+/// the agent's signals to itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Supervision {
     pub signals: bool,
@@ -388,11 +386,10 @@ impl LinuxSandbox {
         self
     }
 
-    /// The policy with the guards this launch's supervision carries, none without one,
-    /// checked as the helper checks it ([`guard_fits`]). A nested launch never carries the
-    /// signal guard. Inputs: the policy and the places its supervisor holds (DEC-185 S2).
-    /// Output: the policy, or `Invalid` for more own git folders or held places than the
-    /// helper takes.
+    /// The policy with the guards this launch's supervision carries, none without one, checked as
+    /// the helper checks it ([`guard_fits`]). A nested launch never carries the signal guard.
+    /// Inputs: the policy and the places its supervisor holds. Output: the policy, or `Invalid` for
+    /// more own git folders or held places than the helper takes.
     fn with_guard(
         &self,
         policy: LandlockPolicy,
@@ -520,10 +517,10 @@ impl LinuxSandbox {
         &self.backend
     }
 
-    /// Whether stopping a run in this sandbox ends every process it started, those in a
-    /// session of their own included: bubblewrap's process namespace ends with its outer
-    /// process ([`NEST_ARGS`]), while under the plain Landlock helper such a process leaves
-    /// the group a stop kills and outlives the run (LINUX-KILL-GROUP). Output: the answer.
+    /// Whether stopping a run in this sandbox ends every process it started, those in a session of
+    /// their own included: bubblewrap's process namespace ends with its outer process
+    /// ([`NEST_ARGS`]), while under the plain Landlock helper such a process leaves the group a
+    /// stop kills and outlives the run. Output: the answer.
     pub(crate) fn ends_every_session(&self) -> bool {
         !matches!(self.backend, LinuxBackend::Landlock { .. })
     }
@@ -685,20 +682,20 @@ impl Sandbox for LinuxSandbox {
     }
 }
 
-/// What a launch's Landlock rules grant: folders read, folders written whole, git folders
-/// written with [`git_folder_rights`], and `guarded`, what Landlock cannot keep read-only
-/// under those grants, as the call supervisor holds it (protected paths in a git grant,
-/// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and
-/// a clone's store names, [`clone_store`]), which that supervisor must hold before a
-/// confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
+/// What a launch's Landlock rules grant: folders read, folders written whole, git folders written
+/// with [`git_folder_rights`], and `guarded`, what Landlock cannot keep read-only under those
+/// grants, as the call supervisor holds it (protected paths in a git grant, [`ADMIN_WRITES`] and
+/// [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and a clone's store names,
+/// [`clone_store`]), which that supervisor must hold before a confined launch starts, the nested
+/// binds a second layer.
 pub struct Grants {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
     pub git_write: Vec<PathBuf>,
     pub guarded: Held,
-    /// The hidden folders, each made empty first when absent so a folder made during the
-    /// run lands under the cover (rv-sec2 F2), each covered by bubblewrap with an empty
-    /// read-only folder; no write grant covers any hidden folder ([`split_above`]).
+    /// The hidden folders, each made empty first when absent so a folder made during the run lands
+    /// under the cover, each covered by bubblewrap with an empty read-only folder; no write grant
+    /// covers any hidden folder ([`split_above`]).
     pub hidden: Vec<PathBuf>,
 }
 
@@ -846,10 +843,10 @@ impl Grants {
 }
 
 /// Refuses a launch whose hidden folders a second mount of their disk shows ([`mounted_again`]),
-/// reading this computer's mount list only when the policy hides a folder, at install and at
-/// wrap. A later mount stays out, since the helper cuts the agent's tree first ([`cut`]); stated
-/// limit (leader 19:09 Q6): one made between this read and that cut still reaches the agent.
-/// Input: the policy. Output: Ok, or the refusal.
+/// reading this computer's mount list only when the policy hides a folder, at install and at wrap.
+/// A later mount stays out, since the helper cuts the agent's tree first ([`cut`]); stated limit:
+/// one made between this read and that cut still reaches the agent. Input: the policy. Output: Ok,
+/// or the refusal.
 fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     if sandbox.hidden().is_empty() {
         return Ok(());
@@ -945,11 +942,11 @@ fn writable_children(
     Ok(())
 }
 
-/// The guards a supervised launch carries (DEC-179 T4c): the loopback ports of a limited
-/// network under [`LinuxSockets::TcpOnly`], each then reached on this computer only, but a
-/// port the agent may also reach on any host; the agent's own git folders
-/// ([`git_own`]); and signals where [`Supervision`] says nothing else holds them. Inputs:
-/// the policy and what the supervisor holds here. Output: the guard.
+/// The guards a supervised launch carries: the loopback ports of a limited network under
+/// [`LinuxSockets::TcpOnly`], each then reached on this computer only, but a port the agent may
+/// also reach on any host; the agent's own git folders ([`git_own`]); and signals where
+/// [`Supervision`] says nothing else holds them. Inputs: the policy and what the supervisor holds
+/// here. Output: the guard.
 pub fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
     let loopback = match sandbox.network() {
         SandboxNetwork::Only(remotes) if sandbox.linux_sockets() == LinuxSockets::TcpOnly => {
@@ -977,18 +974,18 @@ pub fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
     held
 }
 
-/// Tells whether a launch policy's supervisor holds every guarded place, the rule that lets
-/// a confined launch past the tripwire (DEC-185 S2). Inputs: the policy and the guarded
-/// places. Output: true when there are none, or the supervisor holds exactly them.
+/// Tells whether a launch policy's supervisor holds every guarded place, the rule that lets a
+/// confined launch past the tripwire. Inputs: the policy and the guarded places. Output: true when
+/// there are none, or the supervisor holds exactly them.
 fn holds_all(policy: &LandlockPolicy, guarded: &Held) -> bool {
     guarded.is_empty() || policy.guard.held.as_ref() == Some(guarded)
 }
 
-/// What the call supervisor holds in a clone, the names macOS keeps by `clone_store_denies`
-/// (DEC-185 S2b): as entries the git folder, its `commondir`, the store with its `info` and
-/// `pack` folders, the alternates, the 256 loose-object folders and the multi-pack-index;
-/// whole the fallback repository and the index's chain folder; the store as a store.
-/// Input: the clone's real root. Output: the held places.
+/// What the call supervisor holds in a clone, the names macOS keeps by `clone_store_denies`: as
+/// entries the git folder, its `commondir`, the store with its `info` and `pack` folders, the
+/// alternates, the 256 loose-object folders and the multi-pack-index; whole the fallback repository
+/// and the index's chain folder; the store as a store. Input: the clone's real root. Output: the
+/// held places.
 fn clone_store(clone: &Path) -> Held {
     let git = clone.join(".git");
     let objects = git.join("objects");
@@ -1016,12 +1013,11 @@ fn clone_store(clone: &Path) -> Held {
     held
 }
 
-/// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git
-/// rule allows them: the top of each working tree it works in, each folder directly inside
-/// the engine's worktree folders (when it adds worktrees) or inside a setup folder, and for
-/// a linked worktree the project's `.git` its admin folder sits in, where Landlock lets it
-/// write the admin folder alone (DEC-185 S2). Input: the policy. Output: the agent's own
-/// git folders.
+/// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git rule allows
+/// them: the top of each working tree it works in, each folder directly inside the engine's
+/// worktree folders (when it adds worktrees) or inside a setup folder, and for a linked worktree
+/// the project's `.git` its admin folder sits in, where Landlock lets it write the admin folder
+/// alone. Input: the policy. Output: the agent's own git folders.
 pub(crate) fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     let (working, _) = sandbox.git_deny_roots();
     let mut kids = Vec::new();
@@ -1240,9 +1236,8 @@ fn bwrap_command(
     command
 }
 
-/// The covers a launch asks the helper's private mount tree for: its hidden folders, or no
-/// private tree when it hides none (leader 19:09 Q1). Input: the hidden folders. Output:
-/// the covers, or none.
+/// The covers a launch asks the helper's private mount tree for: its hidden folders, or no private
+/// tree when it hides none. Input: the hidden folders. Output: the covers, or none.
 fn private_tree(hidden: &[PathBuf]) -> Option<&[PathBuf]> {
     (!hidden.is_empty()).then_some(hidden)
 }

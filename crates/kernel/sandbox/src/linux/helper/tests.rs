@@ -173,10 +173,10 @@ fn the_helper_starts_only_a_fixed_bubblewrap_for_a_nest_and_takes_no_policy_with
     assert!(parse(&[NEST]).is_err());
 }
 
-/// rv-sa241 SBX-2-R2 N2: between the fixed nest arguments and the nest's `--` the helper
-/// takes only `--unshare-net` and then `--chdir` with an absolute path, the options its
-/// own builders write, and needs a command after that `--`, so no caller adds a
-/// capability, a seccomp filter, a namespace or a bind to the agent's bubblewrap.
+/// Between the fixed nest arguments and the nest's `--` the helper takes only `--unshare-net` and
+/// then `--chdir` with an absolute path, the options its own builders write, and needs a command
+/// after that `--`, so no caller adds a capability, a seccomp filter, a namespace or a bind to the
+/// agent's bubblewrap.
 #[test]
 fn a_nest_takes_only_its_network_and_working_folder_before_the_command() {
     use bridge::UNSHARE_NET;
@@ -309,9 +309,9 @@ fn a_nest_takes_exact_read_only_empty_folder_pairs_before_its_working_folder() {
     assert!(pairs(HIDDEN_MAX + 1).is_err());
 }
 
-/// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cut's proofs read the helper's own status and
-/// mount list plainly: one thread, no `shared:` or `master:` field on any mount, a mount
-/// at each cover, and all five capability sets zero; anything else does not hold.
+/// The cut's proofs read the helper's own status and mount list plainly: one thread, no `shared:`
+/// or `master:` field on any mount, a mount at each cover, and all five capability sets zero;
+/// anything else does not hold.
 #[test]
 fn the_cut_reads_threads_propagation_covers_and_capabilities_plainly() {
     let zero = "0000000000000000";
@@ -366,9 +366,9 @@ fn the_cut_reads_threads_propagation_covers_and_capabilities_plainly() {
     assert!(!covered("garbage\n", Path::new("/")));
 }
 
-/// V24x-LINUX-NEST-MOUNT-PROPAGATION: only a nested run, a probe or the socket filter
-/// asks for a private tree, with at most [`HIDDEN_MAX`] distinct clean
-/// absolute covers below the root; a cover alone, a flag twice or a nest is refused.
+/// Only a nested run, a probe or the socket filter asks for a private tree, with at most
+/// [`HIDDEN_MAX`] distinct clean absolute covers below the root; a cover alone, a flag twice or a
+/// nest is refused.
 #[test]
 fn a_private_tree_comes_with_a_nested_run_a_probe_or_the_filter_and_absolute_covers() {
     let parse = |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());

@@ -23,11 +23,10 @@ use std::time::Duration;
 pub(crate) const ROUTE: &str = "--route";
 pub(super) const EGRESS: &str = "--egress";
 pub(super) const SLIRP: &str = "--slirp";
-/// What slirp4netns reads and executes under its rules ([`confine_slirp`]), Landlock's read
-/// rights holding execute: its program and libraries, the loader cache, the resolver file it
-/// forwards names to, whose rule binds the file a link there points to, and the random
-/// source, as a trace on the farm runner showed (V243 linux routed r1, arm C). A path
-/// missing on this computer adds no rule.
+/// What slirp4netns reads and executes under its rules ([`confine_slirp`]), Landlock's read rights
+/// holding execute: its program and libraries, the loader cache, the resolver file it forwards
+/// names to, whose rule binds the file a link there points to, and the random source, as a trace on
+/// the farm runner showed. A path missing on this computer adds no rule.
 const SLIRP_READ: &[&str] = &[
     "/usr",
     "/lib",
@@ -47,9 +46,8 @@ const RESOLV_CONF: &str = "/etc/resolv.conf";
 /// The bubblewrap flags stage 1 writes itself, each with a descriptor it opened, in this
 /// order and right after `--unshare-net`, so the engine never names one ([`placed`]).
 pub(crate) const DESCRIPTOR_FLAGS: [&str; 3] = [INFO_FD, BLOCK_FD, RO_BIND_DATA];
-/// Where the setup child takes slirp4netns from, and only from there: no flag or variable
-/// names another program, which would then run with network capabilities in the agent's
-/// user namespace (DEC-179 SBX-2).
+/// Where the setup child takes slirp4netns from, and only from there: no flag or variable names
+/// another program, which would then run with network capabilities in the agent's user namespace.
 pub const SLIRP_PATHS: &[&str] = &["/usr/bin/slirp4netns"];
 /// Where the setup child takes the nf_tables `iptables` programs from, and only from
 /// there: the IPv4 restore and save, then the IPv6 restore and save.
@@ -62,28 +60,27 @@ pub(crate) const IPTABLES_PATHS: [&str; 4] = [
 /// What the setup child says when the network namespace it was handed is the one it runs
 /// in, so the agent would share this computer's network.
 pub const NETWORK_SHARED: &str = "the agent's network is not one of its own";
-/// What the setup child says when its input and output are not the two pipes stage 1
-/// hands it, as when a caller other than stage 1 starts it (leader 23:16).
+/// What the setup child says when its input and output are not the two pipes stage 1 hands it, as
+/// when a caller other than stage 1 starts it.
 pub const SETUP_UNPIPED: &str = "the setup child runs only on the pipes its nest hands it";
 /// What the setup child says when bubblewrap's info names a process its parent did not
 /// start.
 pub const SETUP_NOT_CHILD: &str = "the setup child builds a network only for its nest's child";
 /// What the setup child says when its parent is not one of the fixed bubblewraps.
 pub const SETUP_NOT_NEST: &str = "the setup child runs only under a fixed bubblewrap";
-/// What stage 2 says when no go byte came: bubblewrap starts its command on end of file,
-/// so a setup child that ended without one must not leave the agent running on a network
-/// whose rules were never read back (rv-code2 SX2-1, rv-sa241 N1).
+/// What stage 2 says when no go byte came: bubblewrap starts its command on end of file, so a setup
+/// child that ended without one must not leave the agent running on a network whose rules were
+/// never read back.
 const ROUTE_NOT_BUILT: &str = "the agent's network was not built, so the agent does not start";
 const SANDBOX_RESOLVER: &str = "10.0.2.3";
-/// slirp4netns's own network: its gateway, which maps to this computer, and its resolver
-/// alias, which maps to this computer's DNS address on any port. No route-port rule reaches
-/// it (rv-sa241 LEAD-1).
+/// slirp4netns's own network: its gateway, which maps to this computer, and its resolver alias,
+/// which maps to this computer's DNS address on any port. No route-port rule reaches it.
 const SLIRP_NETWORK: &str = "10.0.2.0/24";
 /// The loopback addresses: refused after the `lo` accept ([`REFUSE`]), so only the agent's own
-/// loopback, where its bridged ports listen, is ever reached at one (rv-sa241 LEAD-1).
+/// loopback, where its bridged ports listen, is ever reached at one.
 const LOOPBACK_NETWORK: &str = "127.0.0.0/8";
-/// The link-local addresses, where a cloud VM answers its metadata service: no route port
-/// reaches them, even 80 or 443 on any host (rv-sa241 NOTE-1).
+/// The link-local addresses, where a cloud VM answers its metadata service: no route port reaches
+/// them, even 80 or 443 on any host.
 const LINK_LOCAL_NETWORK: &str = "169.254.0.0/16";
 const TAP: &str = "tap0";
 const CHILD_PID_KEY: &[u8] = b"\"child-pid\":";
@@ -109,9 +106,9 @@ const CHAINS: &str = concat!(
     ":OUTPUT DROP [0:0]\n",
     "-A OUTPUT -o lo -j ACCEPT\n",
 );
-/// How the IPv4 rules refuse a packet: with an answer, so an agent's refused connect fails
-/// at once with "connection refused" instead of waiting out its SYN retries, written as
-/// `iptables-save` prints it so the read-back matches (V243-LINUX-EGRESS-REJECT).
+/// How the IPv4 rules refuse a packet: with an answer, so an agent's refused connect fails at once
+/// with "connection refused" instead of waiting out its SYN retries, written as `iptables-save`
+/// prints it so the read-back matches.
 const REFUSE: &str = "-j REJECT --reject-with icmp-port-unreachable";
 /// How the IPv6 rules refuse a packet, as [`REFUSE`] does for IPv4.
 const REFUSE_V6: &str = "-j REJECT --reject-with icmp6-port-unreachable";
