@@ -224,6 +224,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         }
         "github_unreachable" => "Couldn't reach GitHub. Check your connection and try again.",
         "github_reply_invalid" => "GitHub sent a reply CrazyAgent couldn't read. Try again.",
+        "github_address_refused" => {
+            "GitHub resolved to a private or local address, so CrazyAgent sent nothing."
+        }
         "github_client_missing" | "github_client_id_not_configured" => {
             "Sign in with GitHub isn't set up in this build yet. Paste a token or use the GitHub CLI."
         }

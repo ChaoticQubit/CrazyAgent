@@ -121,7 +121,7 @@ test("a setup refusal for an unsafe download, an unlocked pin, a missing app dat
 });
 
 test("every refusal code the native bridge can return has a plain sentence", () => {
-  const bridge = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
+  const bridge = ["intake.rs", "intake/github_codes.rs"].map((path) => readFileSync(new URL(`../src-tauri/src/bridge/${path}`, import.meta.url), "utf8")).join("\n");
   const codes = new Set();
   for (const name of ["INTAKE_CODES", "GITHUB_CODES", "SETUP_CODES"]) {
     const start = bridge.indexOf(`const ${name}`);
