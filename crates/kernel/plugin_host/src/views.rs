@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::problem::Problem;
 
 /// What a plugin does for the app. One variant per kind, appended as each kind lands; an
-/// embedding plugin turns text into vectors (DEC-156).
+/// embedding plugin turns text into vectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {

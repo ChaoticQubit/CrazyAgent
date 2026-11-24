@@ -369,7 +369,7 @@ fn hosts_are_exact_declared_and_used() {
     assert_eq!(refused(&fragment).0, "app_plugin_url_invalid");
 }
 
-/// V250-H4 sec N4: a plugin URL whose host is a cloud metadata address, in any spelling the
+/// A plugin URL whose host is a cloud metadata address, in any spelling the
 /// URL reader turns into one, is refused before any call can dial it, while a private
 /// address that is not one still reads.
 #[test]
