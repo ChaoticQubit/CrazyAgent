@@ -1,7 +1,7 @@
 use kernel_common::Platform;
 use markup::{
-    bounded_definition, bounded_text, plist_string, systemd_environment_quoted, systemd_quoted,
-    systemd_specifiers, systemd_unquoted, windows_quoted, windows_task_path, xml,
+    TASK_LINE_MARGIN, bounded_definition, bounded_text, plist_string, systemd_environment_quoted,
+    systemd_quoted, systemd_specifiers, systemd_unquoted, windows_quoted, windows_task_path, xml,
 };
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -392,15 +392,23 @@ WantedBy=default.target\n",
                     .as_deref()
                     .map(|user| format!("<UserId>{}</UserId>", xml(user)))
                     .unwrap_or_default();
-                let line = format!(
-                    "/d /s /c \"{}{} engine --home {} >> {} 2>&1\"",
-                    windows_task_path(&self.path)
-                        .map(|path| format!("set \"PATH={path}\" && "))
-                        .unwrap_or_default(),
+                let head = "/d /s /c \"";
+                let tail = format!(
+                    "{} engine --home {} >> {} 2>&1\"",
                     windows_quoted(&executable),
                     windows_quoted(&root),
                     windows_quoted(&log),
                 );
+                let set = |path: &str| format!("set \"PATH={path}\" && ");
+                let fixed = WINDOWS_SHELL.len()
+                    + 1
+                    + head.encode_utf16().count()
+                    + set("").encode_utf16().count()
+                    + tail.encode_utf16().count()
+                    + TASK_LINE_MARGIN;
+                let budget = CMD_LINE_CHARS_MAX.saturating_sub(fixed);
+                let path = windows_task_path(&self.path, budget).map(|path| set(&path));
+                let line = format!("{head}{}{tail}", path.unwrap_or_default());
                 if WINDOWS_SHELL.len() + 1 + line.encode_utf16().count() >= CMD_LINE_CHARS_MAX {
                     return Err(failure(format!(
                         "the Windows logon task line is longer than cmd's \
@@ -670,10 +678,10 @@ WantedBy=default.target\n",
     /// What to do with the engine service when no engine answers. Another program the
     /// installed definition runs that still exists and the `bundled` engine may not replace
     /// ([`Self::may_replace`], judged on the app's own engine and not on an AppImage's private
-    /// copy) is kept on a forced reinstall and started as it is otherwise (RV-DS241-129, DS-118
-    /// r2 F1). So is any usable definition while this service runs such a private copy, one
+    /// copy) is kept on a forced reinstall and started as it is otherwise.
+    /// So is any usable definition while this service runs such a private copy, one
     /// path every AppImage shares, which keeps a newer engine's bytes while one is known there
-    /// ([`newer_engine_at`], [`persistable`], DS-118 r3 F1). Else this definition is installed
+    /// ([`newer_engine_at`], [`persistable`]). Else this definition is installed
     /// when asked, when none is installed, when the installed one names a broken program
     /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`] or
     /// [`Self::throttled`]; otherwise the installed one starts as it is. An engine that is
@@ -843,7 +851,8 @@ WantedBy=default.target\n",
     }
 
     /// Writes the definition and registers it, replacing an earlier install of the same
-    /// name, so the engine starts now and at every login. Input: the engine's checks.
+    /// name, so the engine starts now and at every login. A failed registration leaves no
+    /// definition behind ([`Self::unregistered_after`]). Input: the engine's checks.
     /// Output: an error naming the failing step.
     pub fn install(&self, hooks: &Hooks) -> Result<(), ServiceError> {
         if transient(&self.executable) {
@@ -864,7 +873,7 @@ WantedBy=default.target\n",
         }
         write_definition(&self.definition, &text, self.platform)?;
         for command in self.register_commands(current_uid()) {
-            run_checked(&command)?;
+            run_checked(&command).map_err(|refused| self.unregistered_after(refused))?;
         }
         Ok(())
     }
@@ -1002,7 +1011,7 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// one ([`retire_old_copies`]). The version written goes in `<data root>/setup/bin-version`,
 /// and while a newer engine is known there ([`newer_engine_at`]) this user's private copy is
 /// kept as it is, so an older AppImage never puts its bytes over the engine every AppImage
-/// runs there (DS-118 r3 F1). Nothing is ever copied from another folder, so an engine other
+/// runs there. Nothing is ever copied from another folder, so an engine other
 /// users can change is returned as it is and refused where it would be kept. Inputs: the
 /// bundled engine, the data root, the AppImage mount folder when there is one and the engine's
 /// checks. Output: the executable to keep.
@@ -1128,8 +1137,8 @@ pub fn retire_old_copies(root: &Path, installed: &Path, hooks: &Hooks) {
 /// then every release file there is removed and the folder goes once empty. A link that
 /// cannot be moved keeps the old copy, so it never dangles; anything CrazyAgent did not put
 /// there stays. Only a real, private folder of this user's (700, as 2.4.0 made it) is
-/// touched, so a linked or shared `bin` never leads a removal outside the data root (rv-code
-/// F1). Inputs: the data root, the engine kept, the link folder and the engine's checks.
+/// touched, so a linked or shared `bin` never leads a removal outside the data root.
+/// Inputs: the data root, the engine kept, the link folder and the engine's checks.
 pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>, hooks: &Hooks) {
     let old = &root.join("bin");
     if !installed.starts_with(root.join("setup").join("bin")) || !(hooks.is_private_folder)(old) {
@@ -1153,18 +1162,21 @@ pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>,
 }
 
 /// Whether the command line link at `link` leads to the old copy `old`: it names `old`
-/// exactly, even when that file is already gone, or it ends at the same file once both are
-/// read through every link, as a path relative to the link's folder or a chain of links
-/// does. Inputs: the link and the old copy. Output: the answer.
+/// exactly, even when that file is already gone, or, when `old` is a regular file and not a
+/// link, it ends at that file once read through every link, as a path relative to the
+/// link's folder or a chain of links does. An `old` that is a link never counts, so a
+/// writer of its folder cannot make a link to any other file look like the old copy.
+/// Inputs: the link and the old copy. Output: the answer.
 fn names_old_copy(link: &Path, old: &Path) -> bool {
     let Ok(named) = std::fs::read_link(link) else {
         return false;
     };
     named == old
-        || matches!(
-            (std::fs::canonicalize(link), std::fs::canonicalize(old)),
-            (Ok(led), Ok(copy)) if led == copy
-        )
+        || (std::fs::symlink_metadata(old).is_ok_and(|metadata| metadata.is_file())
+            && matches!(
+                (std::fs::canonicalize(link), std::fs::canonicalize(old)),
+                (Ok(led), Ok(copy)) if led == copy
+            ))
 }
 
 /// Whether `copy` is a regular file private to this user where Unix modes exist, so no other
@@ -1211,198 +1223,6 @@ fn copy_private(source: &Path, copy: &Path) -> std::io::Result<()> {
 #[cfg(unix)]
 fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
-}
-
-/// The macOS admin group, whose members can already act as root.
-#[cfg(target_os = "macos")]
-const ADMIN_GROUP: u32 = 80;
-
-/// The macOS daemon group, whose only member is root; it owns /private/var/run, where
-/// nix-darwin's /run link leads (RV-DS241-140 r4).
-#[cfg(target_os = "macos")]
-const DAEMON_GROUP: u32 = 1;
-
-/// Whether a group that can write a folder holds only users who may already act as root:
-/// wheel, daemon and admin. Every macOS user is in staff, so a staff folder is not trusted.
-/// Input: the group id. Output: the answer.
-#[cfg(target_os = "macos")]
-fn trusted_group(group: u32) -> bool {
-    group == 0 || group == DAEMON_GROUP || group == ADMIN_GROUP
-}
-
-/// Whether a group that can write a folder holds only root or this user: root's group, or
-/// this process's own group when it is this user's private group ([`own_group_private`]);
-/// a shared primary group, whose other users can write the folder, is not trusted.
-/// Input: the group id. Output: the answer.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn trusted_group(group: u32) -> bool {
-    group == 0 || (group == rustix::process::getegid().as_raw() && own_group_private())
-}
-
-/// The largest local account file read to find a group's primary accounts.
-#[cfg(all(unix, not(target_os = "macos")))]
-const ACCOUNTS_BYTES_MAX: u64 = 4 * 1024 * 1024;
-
-/// Whether this process's own group is this user's private group ([`private_group`]), read
-/// once through the system's user and group lookup, which may ask a directory server, and
-/// the local account file for the accounts whose primary group it is ([`primary_users`]),
-/// trusted only when no directory can add accounts it lacks ([`accounts_complete`]); a
-/// failed lookup or read counts as not private, so its folders fall to the stricter rule.
-/// Output: the answer.
-#[cfg(all(unix, not(target_os = "macos")))]
-pub fn own_group_private() -> bool {
-    static PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PRIVATE.get_or_init(|| {
-        let gid = nix::unistd::getegid();
-        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
-            .ok()
-            .flatten();
-        let group = nix::unistd::Group::from_gid(gid).ok().flatten();
-        let primary = local_accounts()
-            .filter(|_| accounts_complete(Path::new("/etc")))
-            .and_then(|text| primary_users(&text, gid.as_raw()));
-        match (user, group, primary) {
-            (Some(user), Some(group), Some(primary)) => {
-                private_group(&group.name, &group.mem, &primary, &user.name)
-            }
-            _ => false,
-        }
-    })
-}
-
-/// Reads the local account file, `/etc/passwd`, at most [`ACCOUNTS_BYTES_MAX`]; a larger or
-/// unreadable file gives none. Output: the text, or none.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn local_accounts() -> Option<String> {
-    use std::io::Read as _;
-    let mut text = String::new();
-    std::fs::File::open("/etc/passwd")
-        .ok()?
-        .take(ACCOUNTS_BYTES_MAX + 1)
-        .read_to_string(&mut text)
-        .ok()?;
-    (text.len() as u64 <= ACCOUNTS_BYTES_MAX).then_some(text)
-}
-
-/// The largest user lookup configuration read to find where accounts come from.
-#[cfg(all(unix, any(test, not(target_os = "macos"))))]
-const LOOKUP_CONFIG_BYTES_MAX: u64 = 64 * 1024;
-
-/// The most entries read from SSSD's drop-in folder before it counts as configured.
-#[cfg(all(unix, any(test, not(target_os = "macos"))))]
-const SSSD_DROP_INS_MAX: usize = 4096;
-
-/// Whether the local account file holds every account the system's user lookup can give a
-/// primary group: every `passwd` source in `nsswitch.conf` is `files`, `compat` or
-/// `systemd`, or `sss` while SSSD has no configuration ([`sssd_unconfigured`]). Action
-/// items and comments are skipped; a missing or unreadable file, a larger one or no
-/// `passwd` line gives no. Input: the folder holding `nsswitch.conf` and `sssd`, `/etc`
-/// outside rows. Output: the answer.
-#[cfg(all(unix, any(test, not(target_os = "macos"))))]
-fn accounts_complete(etc: &Path) -> bool {
-    use std::io::Read as _;
-    let mut text = String::new();
-    let read = std::fs::File::open(etc.join("nsswitch.conf")).and_then(|file| {
-        file.take(LOOKUP_CONFIG_BYTES_MAX + 1)
-            .read_to_string(&mut text)
-    });
-    if read.is_err() || text.len() as u64 > LOOKUP_CONFIG_BYTES_MAX {
-        return false;
-    }
-    let mut lines = 0;
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or_default();
-        let Some(sources) = line.trim_start().strip_prefix("passwd:") else {
-            continue;
-        };
-        lines += 1;
-        let mut in_action = false;
-        for word in sources.split_whitespace() {
-            if in_action || word.starts_with('[') {
-                in_action = !word.ends_with(']');
-                continue;
-            }
-            let local = match word {
-                "files" | "compat" | "systemd" => true,
-                "sss" => sssd_unconfigured(&etc.join("sssd")),
-                _ => false,
-            };
-            if !local {
-                return false;
-            }
-        }
-    }
-    assert!(lines <= text.len());
-    lines > 0
-}
-
-/// Whether SSSD has no configuration, so it serves no directory: `sssd.conf` is missing and
-/// the `conf.d` drop-in folder is missing or holds no `.conf` entry. Any other answer, such
-/// as a folder this user cannot look into, counts as configured. Input: the SSSD folder.
-/// Output: the answer.
-#[cfg(all(unix, any(test, not(target_os = "macos"))))]
-fn sssd_unconfigured(sssd: &Path) -> bool {
-    let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
-    match std::fs::metadata(sssd.join("sssd.conf")) {
-        Err(error) if missing(&error) => {}
-        _ => return false,
-    }
-    let entries = match std::fs::read_dir(sssd.join("conf.d")) {
-        Ok(entries) => entries,
-        Err(error) => return missing(&error),
-    };
-    for (seen, entry) in entries.enumerate() {
-        if seen == SSSD_DROP_INS_MAX {
-            return false;
-        }
-        let Ok(entry) = entry else {
-            return false;
-        };
-        if entry.file_name().as_encoded_bytes().ends_with(b".conf") {
-            return false;
-        }
-    }
-    true
-}
-
-/// Whether a group named `name`, listing `members`, is the user private group of the user
-/// named `user`: it bears the user's name, lists no other member and is the primary group of
-/// this user's account alone, as Debian, Ubuntu and Fedora make one per user; a shared
-/// primary group such as openSUSE's `users` is not, and neither is one whose user the local
-/// account file does not list. Inputs: the group's name, its listed members, the accounts
-/// whose primary group it is and the user's name. Output: the answer.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn private_group(name: &str, members: &[String], primary: &[String], user: &str) -> bool {
-    !user.is_empty()
-        && name == user
-        && members.iter().all(|member| member == user)
-        && primary.iter().any(|account| account == user)
-        && primary.iter().all(|account| account == user)
-}
-
-/// The accounts in a local account file (`/etc/passwd` lines) whose primary group is `gid`,
-/// which the group's member list leaves out. Inputs: the file's text and the group id.
-/// Output: the account names, or none when a line cannot be read or names accounts kept
-/// elsewhere.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn primary_users(passwd: &str, gid: u32) -> Option<Vec<String>> {
-    let mut accounts = Vec::new();
-    for line in passwd.lines() {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with('+') || line.starts_with('-') {
-            return None;
-        }
-        let mut fields = line.split(':');
-        let name = fields.next()?;
-        let primary: u32 = fields.nth(2)?.parse().ok()?;
-        if primary == gid {
-            accounts.push(name.to_owned());
-        }
-    }
-    assert!(accounts.len() <= passwd.len());
-    Some(accounts)
 }
 
 /// Names no user id where launchd domains do not exist. Output: zero, unused off macOS.
@@ -1471,6 +1291,9 @@ mod acl;
 /// owners, modes, groups and access lists on Unix, access lists on Windows. Input: a path.
 /// Output: the first such entry, or none.
 mod changeable;
+/// Undoing a registration that failed after its definition was written. Inputs: the
+/// service and the error. Output: the error to report.
+mod register;
 #[cfg(test)]
 mod uninstall_tests;
 #[cfg(all(test, unix))]
@@ -1485,14 +1308,25 @@ pub use cli_link::{WINDOWS_PATH_FOLDER_VARIABLE, link_cli, windows_path_command}
 /// names the program, arguments, status and error text. Inputs: the commands. Outputs:
 /// their answers.
 mod run;
-#[cfg(not(unix))]
-use run::run_process;
 use run::{run_checked, run_quiet};
 
 /// The escapes and quotes each manager's definition format needs, and the bounded reads
 /// that take a written definition or Info.plist apart again. Inputs: text or a path.
 /// Outputs: the escaped, quoted or read-back text.
 mod markup;
+
+/// Which groups that can write a folder hold only root or this user: the trusted groups
+/// on macOS, and on Linux this user's private group, read through the system's lookup and
+/// its account files. Inputs: group ids or account files. Outputs: the answers.
+mod groups;
+#[cfg(all(test, unix))]
+use groups::accounts_complete;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use groups::own_group_private;
+#[cfg(unix)]
+use groups::trusted_group;
+#[cfg(test)]
+use groups::{primary_users, private_group};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
