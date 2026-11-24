@@ -18,9 +18,9 @@ fn a_code_graph_build_stops_once_a_folder_saved_hidden_is_not_one_it_hid() {
     )
     .unwrap();
     listed.hid(std::slice::from_ref(&hid));
-    crate::sandbox::access_store::hidden::save(&database, project, &[hid.clone(), below]).unwrap();
+    save(&database, project, &[hid.clone(), below]).unwrap();
     assert!(!hide_stops(&database, project, &listed, &|| false)());
     assert!(hide_stops(&database, project, &listed, &|| true)());
-    crate::sandbox::access_store::hidden::save(&database, project, &[hid, later]).unwrap();
+    save(&database, project, &[hid, later]).unwrap();
     assert!(hide_stops(&database, project, &listed, &|| false)());
 }

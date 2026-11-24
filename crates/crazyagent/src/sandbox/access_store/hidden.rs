@@ -1,7 +1,9 @@
 use kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX;
 use rusqlite::{Connection, params};
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_hidden_paths (
     project TEXT NOT NULL,
@@ -11,6 +13,9 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_hidden_paths (
 )";
 
 const SEERS: &str = "team_hidden_seers";
+
+/// How often a run's stop reads the project's saved hidden folders again.
+const HIDE_POLL: Duration = Duration::from_secs(1);
 
 const SEERS_TABLE: &str = "CREATE TABLE IF NOT EXISTS team_hidden_seers (
     agent INTEGER PRIMARY KEY,
@@ -156,5 +161,35 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     Ok(paths)
 }
 
+/// The stop a code graph build polls: yes once `stop` says so, or once a folder the
+/// project saves hidden now is one the build's sandbox did not hide at its start, so the
+/// build ends and runs again hiding it. The saved folders are read at the first poll and
+/// then at most every [`HIDE_POLL`]; a read that fails counts as yes, and a yes stays yes.
+/// Takes the worker's database, the project, the build's hidden folders guard and `stop`.
+/// Returns the stop.
+pub(crate) fn hide_stops<'a>(
+    database: &'a Connection,
+    project: &'a str,
+    listed: &'a kernel_sandbox::hidden_paths::HiddenRun,
+    stop: &'a dyn Fn() -> bool,
+) -> impl Fn() -> bool + 'a {
+    let read: Cell<Option<Instant>> = Cell::new(None);
+    let hid_too_little = Cell::new(false);
+    move || {
+        if stop() {
+            return true;
+        }
+        if !hid_too_little.get() && read.get().is_none_or(|at| at.elapsed() >= HIDE_POLL) {
+            read.set(Some(Instant::now()));
+            let covered = crate::sandbox::access_store::hidden::load(database, project)
+                .is_ok_and(|saved| listed.covers_saved(&saved));
+            hid_too_little.set(!covered);
+        }
+        hid_too_little.get()
+    }
+}
+
+#[cfg(test)]
+mod stop_tests;
 #[cfg(test)]
 mod tests;
