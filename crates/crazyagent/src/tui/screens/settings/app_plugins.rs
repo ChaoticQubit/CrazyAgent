@@ -926,7 +926,7 @@ impl AppPluginsPage {
                 let cursor = at.map(|at| Position::new(at.x, at.y + top as u16));
                 return (lines, cursor);
             }
-            Open::Key(form) => return self.key_body(form, lines, limit, ctx),
+            Open::Key(form) => return self.key_body(form, lines, (limit, height), ctx),
             _ => {}
         }
         for notice in &self.notices {
@@ -996,11 +996,14 @@ impl AppPluginsPage {
         (lines, None)
     }
 
+    /// The key dialog under the page's lines, scrolled so the chosen source, and the typed
+    /// key's input when that source is chosen, stay in view. Inputs: the dialog, the lines
+    /// above it, the width and height, and the context. Output: the lines and the cursor.
     fn key_body(
         &self,
         form: &KeyForm,
         mut lines: Vec<Line<'static>>,
-        limit: usize,
+        (limit, height): (usize, usize),
         ctx: &Ctx,
     ) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
@@ -1023,6 +1026,7 @@ impl AppPluginsPage {
             lines.push(styled("Reading API-key accounts...", Role::Muted, theme));
             return (lines, None);
         };
+        let mut shown_to = lines.len() + form.choice + 1;
         for (index, (_, name)) in accounts.iter().enumerate() {
             lines.push(list_row(
                 Line::raw(format!("Key from {name}")),
@@ -1052,6 +1056,12 @@ impl AppPluginsPage {
                 Role::Muted,
                 theme,
             ));
+            shown_to = lines.len();
+        }
+        if shown_to > height {
+            let skip = shown_to - height;
+            lines.drain(..skip);
+            cursor = cursor.map(|at| Position::new(at.x, at.y.saturating_sub(skip as u16)));
         }
         (lines, cursor)
     }
