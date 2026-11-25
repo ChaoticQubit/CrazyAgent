@@ -37,7 +37,7 @@
   "crates/crazyagent-win-sandbox/tests/boundary.rs": 1638,
   "crates/crazyagent/src/adapters/codex.rs": 1934,
   "crates/crazyagent/src/agent_home.rs": 2214,
-  "crates/crazyagent/src/agent_home/tests.rs": 3111,
+  "crates/crazyagent/src/agent_home/tests.rs": 3110,
   "crates/crazyagent/src/agents.rs": 1893,
   "crates/crazyagent/src/coord/delivery/tests.rs": 1830,
   "crates/crazyagent/src/coord/relay.rs": 1559,
