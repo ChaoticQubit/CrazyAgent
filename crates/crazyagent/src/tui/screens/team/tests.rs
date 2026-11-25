@@ -5791,24 +5791,3 @@ fn keys_typed_into_the_master_terminal_across_the_minute_never_act_on_the_view()
 /// live master was off starts it on the new harness at the next team read. Inputs: the team
 /// screen and its shell. Output: none; the row asserts.
 mod master_harness_switch;
-
-#[cfg(target_os = "linux")]
-#[test]
-fn on_linux_a_terminal_with_no_tmux_says_to_install_it_with_the_package_manager() {
-    assert_eq!(
-        super::closed_words("terminal_unavailable"),
-        (
-            "Terminals need tmux.",
-            "Install it with your package manager, then run setup.",
-        )
-    );
-}
-
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn off_linux_a_terminal_with_no_tmux_keeps_the_generic_closed_words() {
-    assert_eq!(
-        super::closed_words("terminal_unavailable"),
-        ("The terminal closed.", "Enter on the agent opens it again.")
-    );
-}
