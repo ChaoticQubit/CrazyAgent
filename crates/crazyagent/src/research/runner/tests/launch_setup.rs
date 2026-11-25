@@ -236,3 +236,69 @@ fn the_engine_makes_a_repository_only_in_a_folder_it_created() {
     );
     ensure_repository(&created, &home).unwrap();
 }
+
+/// A team or research agent's worktree, added the way the runtime adds it, is
+/// local-only: the owner's own git pushing from it gets the plain refusal and the
+/// remote gains nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_added_agent_worktree_refuses_remotes_with_the_plain_message() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let home = base.join("agent").join("home");
+    let tmp = base.join("agent").join("tmp");
+    let profiles = base.join("profiles");
+    let remote = base.join("remote.git");
+    for folder in [&project, &home, &tmp, &profiles] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    ensure_repository(&project, &tmp).unwrap();
+    let owner_git = |dir: &Path, args: &[&str]| {
+        kernel_processes::spawn_gate::output(
+            Command::new(GIT)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+    };
+    let remote_path = remote.to_str().unwrap();
+    assert!(
+        owner_git(&base, &["init", "-q", "--bare", remote_path])
+            .status
+            .success()
+    );
+    assert!(
+        owner_git(&project, &["remote", "add", "origin", remote_path])
+            .status
+            .success()
+    );
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let profile = profiles.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let worktree = project.join("worktrees").join("agent-one");
+    add_worktree(&sandbox, &profile, &worktree).unwrap();
+    let pushed = owner_git(&worktree, &["push", "origin", "HEAD:refs/heads/agent-work"]);
+    assert!(!pushed.status.success(), "{pushed:?}");
+    assert!(
+        String::from_utf8_lossy(&pushed.stderr).contains(crate::worktrees::REMOTE_REFUSAL),
+        "{pushed:?}"
+    );
+    let refs = owner_git(&remote, &["for-each-ref"]);
+    assert!(refs.status.success(), "{refs:?}");
+    assert!(refs.stdout.is_empty(), "{refs:?}");
+}

@@ -382,3 +382,136 @@ fn a_research_agent_whose_stop_left_processes_stays_listed_while_they_run() {
     assert_eq!(held.len(), 1, "{held:?}");
     assert!(named, "the listing is held while the process runs");
 }
+
+/// The shell line a stand-in harness runs to wait, without a timer of its own, until the row
+/// releases it with SIGUSR1; the token in its command line lets [`release`] find it. Input:
+/// the token. Output: the line, ending in a newline.
+pub(super) fn held_until_released(token: &str) -> String {
+    assert!(token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    format!("/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; sleep 60' {token}\n")
+}
+
+/// Sends SIGUSR1 to every process whose command line holds `token`, the stand-in waiting in
+/// [`held_until_released`]. Input: the token. Output: whether any process was found.
+pub(super) fn release(token: &str) -> bool {
+    let found = kernel_processes::spawn_gate::output(
+        std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", token])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    let ids: Vec<String> = String::from_utf8_lossy(&found.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    for id in &ids {
+        let sent = kernel_processes::spawn_gate::status(
+            std::process::Command::new("/bin/kill")
+                .args(["-USR1", id])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(sent.success(), "{id}");
+    }
+    !ids.is_empty()
+}
+
+/// Tells whether a stand-in waits in [`held_until_released`] now. Input: the token. Output:
+/// the answer.
+pub(super) fn held(token: &str) -> bool {
+    kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", token])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap()
+    .success()
+}
+
+/// A research job whose agent finishes its turn right after a folder it did not hide at its
+/// start is saved hidden, after its stop last read the saved folders, publishes no report:
+/// the job is queued again with the hidden reason, as a save seen during the run does.
+#[test]
+fn a_research_job_finishing_right_after_a_folder_is_saved_hidden_publishes_no_report() {
+    let root = engine_root();
+    let token = format!(
+        "cr3-job-{}",
+        root.base
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .trim_start_matches('.')
+    );
+    const AT: &str = "\t\tif [ \"$method\" = session/prompt ]; then\n\t\t\tnext_turn\n";
+    let script = replying_standin(REPORT);
+    assert_eq!(script.matches(AT).count(), 1);
+    let script = script.replace(AT, &format!("{AT}\t\t\t{}", held_until_released(&token)));
+    let (folder, runner, jobs, id) = listed_job(&root, &script);
+    fs::create_dir(folder.join("vault")).unwrap();
+    let (access, pool) = local_access();
+    let picked = crate::research::accounts::pool_account(&access, &pool, "standin-acp", &|_| true);
+    let project = ResearchProject {
+        id: "alpha",
+        root: &folder,
+        account: picked.map(|(_, account)| account),
+    };
+    let beat = || {
+        rusqlite::Connection::open(&root.database)
+            .unwrap()
+            .query_row(
+                "SELECT heartbeat_ms FROM research_jobs WHERE id=?1",
+                [id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap()
+    };
+    let run = std::thread::scope(|scope| {
+        let run = scope.spawn(|| runner.run_once(&project));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !held(&token) {
+            assert!(
+                !run.is_finished(),
+                "the run ended before the stand-in took the prompt: {:?}",
+                jobs.get(id)
+            );
+            assert!(
+                Instant::now() < deadline,
+                "the stand-in never took the prompt"
+            );
+        }
+        let mut seen = vec![beat()];
+        while seen.len() < 3 {
+            assert!(Instant::now() < deadline, "the run never beat twice");
+            let now = beat();
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+        }
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        crate::sandbox::access_store::hidden::save(&connection, "alpha", &[folder.join("vault")])
+            .unwrap();
+        assert!(release(&token), "the stand-in was waiting");
+        run.join().unwrap()
+    });
+    let run = run.unwrap().unwrap();
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(
+        (run.job, run.status),
+        (id, ResearchStatus::Queued),
+        "{:?}",
+        job.error
+    );
+    assert!(run.report.is_none(), "{:?}", run.report);
+    assert_eq!(job.error.as_deref(), Some(HIDDEN_REQUEUED));
+    assert!(
+        !folder
+            .join(ResearchKind::MarketResearch.report_path())
+            .exists()
+    );
+}
