@@ -432,3 +432,112 @@ fn two_folders_owed_to_one_name_are_left_by_the_sweep() {
         ACME
     );
 }
+
+/// Two folders owed to one plugin name stay ambiguous when a sweep's batch holds only one of
+/// them: the count of owed folders comes from the whole plugins folder, so neither goes
+/// back and the live folder keeps the name.
+#[test]
+fn an_owed_folder_past_the_sweep_batch_still_counts_for_its_name() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    let owed = [
+        ".back-acme.00000000000000000000000000000000000000000000000000000000000000e1",
+        ".back-acme.00000000000000000000000000000000000000000000000000000000000000e2",
+    ];
+    for name in owed {
+        std::fs::create_dir(folder.join(name)).unwrap();
+        std::fs::write(folder.join(name).join(MANIFEST_FILE), NEAR).unwrap();
+    }
+
+    crate::registry::remove_staged_within(&case.root, 1).unwrap();
+
+    let mut names = names_in(&folder);
+    names.sort();
+    assert_eq!(names, [owed[0], owed[1], "acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        ACME
+    );
+}
+
+/// Leaves a replace of acme rolled back whose new folder could not leave the name: the
+/// original is owed back as `.back-acme.<STUCK_ID>` and `.old-<STUCK_ID>` still blocks the
+/// move. Inputs: the case and the plugins folder. Output: none.
+fn stuck_rollback(case: &mut Case, folder: &Path) {
+    let text = ACME.replace("Acme embeddings", "Acme embeddings two");
+    replace_rolled_back(case, &STUCK, &text, || take_nameless(folder));
+    assert!(folder.join(format!(".back-acme.{STUCK_ID}")).exists());
+}
+
+/// Checks that the folder under acme is the one the trust rows trust: the plugins folder
+/// holds only acme, its plugin.toml is `text`, and the listing trusts that text's hash.
+/// Inputs: the case, the plugins folder and the text. Output: none.
+fn trusted_on_disk(case: &Case, folder: &Path, text: &str) {
+    assert_eq!(names_in(folder), ["acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        text
+    );
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").sha256, sha(text));
+}
+
+/// A replace of a plugin whose earlier rolled-back replace still owes its original folder,
+/// and whose owed folder cannot go back yet, is refused with nothing written, and the next
+/// start puts the trusted original back.
+#[test]
+fn a_replace_after_a_stuck_rollback_is_refused_and_a_start_keeps_the_trusted_folder() {
+    let mut case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    stuck_rollback(&mut case, &folder);
+    let third = ACME.replace("Acme embeddings", "Acme embeddings three");
+
+    let replaced = add_text(&case, &third, true, 3);
+
+    assert_eq!(code(replaced), "app_plugin_folder_unavailable");
+    sweep_staged(&case.engine());
+    trusted_on_disk(&case, &folder, ACME);
+}
+
+/// A replace of a plugin whose earlier rolled-back replace still owes its original folder
+/// first puts that original back, then replaces it, so the next start keeps the folder the
+/// trust rows now trust.
+#[test]
+fn a_replace_after_a_rollback_owed_folder_recovers_it_first() {
+    let mut case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    stuck_rollback(&mut case, &folder);
+    std::fs::remove_dir_all(folder.join(format!(".old-{STUCK_ID}"))).unwrap();
+    let third = ACME.replace("Acme embeddings", "Acme embeddings three");
+
+    add_text(&case, &third, true, 3).unwrap();
+
+    sweep_staged(&case.engine());
+    trusted_on_disk(&case, &folder, &third);
+}
+
+/// A removal of a plugin whose earlier rolled-back replace still owes its original folder
+/// stays removed through the next start: the owed folder is settled before the removal, so
+/// the start sweep has nothing to put back.
+#[test]
+fn a_removal_after_a_stuck_rollback_stays_removed_through_a_start() {
+    let mut case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    stuck_rollback(&mut case, &folder);
+    std::fs::remove_dir_all(folder.join(format!(".old-{STUCK_ID}"))).unwrap();
+
+    remove(&case.db, &case.engine(), "acme").unwrap();
+
+    start_sweep(&case).unwrap();
+    assert!(names_in(&folder).is_empty(), "{:?}", names_in(&folder));
+}
