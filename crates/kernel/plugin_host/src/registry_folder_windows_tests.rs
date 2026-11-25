@@ -195,6 +195,24 @@ fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
         .success()
 }
 
+/// A junction under a folder whose name holds parentheses is made by `mklink` and leads to
+/// its target: inside the quotes cmd.exe reads `(` and `)` as part of the path.
+#[test]
+fn windows_mklink_takes_a_path_with_parentheses() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let parent = temp.path().join("a (1)");
+    let target = parent.join("target");
+    fixture(&target, std::fs::create_dir_all);
+    let marker = target.join("marker");
+    fixture(&marker, |path| std::fs::write(path, b"marker"));
+    let link = parent.join("link");
+
+    let made = mklink(Some("/J"), &link, &target);
+
+    assert!(made, "junction {}", link.display());
+    assert_eq!(fixture(&link.join("marker"), std::fs::read), b"marker");
+}
+
 /// Makes a junction at `link` to the folder `target` with `mklink /J`.
 fn junction(link: &Path, target: &Path) {
     assert!(
