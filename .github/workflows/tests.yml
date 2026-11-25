@@ -3,8 +3,6 @@ name: Tests
 on:
   push:
     branches:
-      - "chore/v242-batch*"
-      - "chore/v25*"
       - "test-farm/**"
   workflow_dispatch:
 
@@ -16,540 +14,217 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: "1.98.1"
-  NODE_VERSION: "26.12.1"
-  BUN_VERSION: "1.4.3"
-  RCLI_SOURCE_REPOSITORY: Backboard-io/Backboard-R-CLI
-  RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
-  TMUX_VERSION: "3.8"
-  TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
-  CLAUDE_CODE_VERSION: "2.1.309"
-  CODEX_VERSION: "0.164.0"
-  UV_VERSION: "0.13.5"
-  NEXTEST_VERSION: "0.9.152"
-  NEXTEST_PROFILE: farm
-  CHROME_VERSION: "151.0.7922.34"
-  CARGO_INCREMENTAL: "0"
-  CARGO_TERM_COLOR: never
-  FARM_ENGINE_EXCLUDE: >-
-    agents_live codex_app_server_live codex_bridge_live launch_context_live
-    acceptance_v2_rcli_usage accounts_binary harness_catalog_bundled_rcli
-    worker_engine_boundary qualification_boundary/boundary_denies_escape_and_trusted_writes
-    accounts/local_model_discovery_reads_the_real_ollama accounts/an_openai_compatible_account_check_lists_the_real_ollama_models
-    harness_launch/live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups
-    harness_launch/live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file
-    harness_launch/live_tools_on_turn_completes_inside_the_project_sandbox
-    github::tests::signed_in_gh_cli_token_is_reused_through_the_real_gh
-    project_sandbox/an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run
-  FARM_DESKTOP_EXCLUDE: accounts_bridge/desktop_accounts_commands_reach_the_real_engine
-  NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
-  BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
-  NODE_TEST_TIMEOUT_MACOS_MS: "60000"
-  FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HOMEBREW_NO_ENV_HINTS: "1"
+  BOTTLES: |-
+    ca-certificates|2026-11-05|all|0|8a5a35e1a3223e6bc6ca7c853e0ac3d2568de2cc329b61688682bdf57165dab9
+    mpdecimal|4.0.1|arm64_sequoia|1|9e2dc44e47e91465c3cefa8969baa6af53a1ec339eda8443b18a30786147203e
+    openssl@4|4.1.0|arm64_sequoia|0|6fcbad388ef13f6f9481e91676e2ec1b49f0a3dbd473e838297a3c8850283978
+    readline|8.3.6|arm64_sequoia|0|461763fa21c050a59e5bbceedf67dcacf24e4aa4604490d73f0c9fa0f40e7fe5
+    sqlite|3.54.1|arm64_sequoia|0|38bdb30f8e13a07cdcd86233de9ab4d8db29f2b81cb08c15c202ecea6835ab2f
+    xz|5.8.4|arm64_sequoia|0|c2724c0db0398134694b8366d30d14f4de376115fb54c559c331d5fd0474af76
+    lz4|1.11.1|arm64_sequoia|0|69c0c38e660f81b36bbd165a77d7619d2b8b6b175bf670a4840aaaaddd86a520
+    zstd|1.6.0|arm64_sequoia|0|7c49194de54641895c5c965446472552d4619e30170eb8fd9d10eef223919730
+    python@3.15|3.15.2|arm64_sequoia|0|3b82ce3572a5aa75a3c0c33da828c1ede71812d7078b9752ed2224c8b02fa871
+    mlx|0.32.4|arm64_sequoia|0|6539ae6fa0ca10467bf410c065083646d143584fd2f7ab750054488a7a6ff4e4
+    mlx-c|0.8.0|arm64_sequoia|0|ffcb6877cde6ed171eed91b79cda3ec855849c3ce434602b811c419fca6715d4
+    ollama|0.40.18|arm64_sequoia|0|a09ff62d553e85771014c208a50882fbfbfece8c4a9f88efa651a61fdcbbac59
+    libomp|23.1.6|arm64_sequoia|0|d8d154f796a93a5fdca8470e254b402b29d6a66bbaf25bdc5e74ccd05ce09ffd
+    ggml|1.0.0|arm64_sequoia|0|d554c59c2a99d5b50010f7b4ba34dd0934b229768f24011975e8dff9bca7af3b
+    llama.cpp|1.0.0|arm64_sequoia|0|6c2507c840fc8c0f92c87827e9512b087a75227d375114460bee275b22a81730
+  GGUF_REPO: QuantFactory/SmolLM2-135M-Instruct-GGUF
+  GGUF_REVISION: 476854d00ede130660aba430d15f9347ad2e7d0e
+  GGUF_FILE: SmolLM2-135M-Instruct.Q2_K.gguf
+  GGUF_SHA256: 55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75
+  OLLAMA_MODEL: smollm2
+  OLLAMA_TAG: 135m-instruct-q2_K
+  OLLAMA_MANIFEST_SHA256: 888e2e49aff1c1ff0c073a0c46afa26f54f4fad02f31bb5ad911b0124830852b
+  OLLAMA_SMALL_BLOBS: >-
+    e9b0cf58216b9dc298a403b296b0b7bdcf3606a3d2aaa1a64bc00fbc62e6348d
+    fbacade46b4da804e0398c339c64b944d4b954452adf77cf050b49420116129e
+    d502d55c1d609104ae6127aee92eb940e51e15c56dfb26dbd067e2771ee746f1
+    58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd
+    f02dd72bb2423204352eabc5637b44d79d17f109fdb510a7c51455892aa2d216
+  OLLAMA_PORT: "11500"
+  LLAMA_PORT: "11501"
+  DUMMY_KEY: snapshot-dummy-provider-key-0001
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  build-linux:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the Linux runner
-        run: |
-          set -euo pipefail
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install Linux build packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-macos:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 330
-    strategy:
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the macOS runner
-        run: |
-          set -euo pipefail
-          df -h /
-          case "${ANDROID_HOME:-}" in "$HOME"/?*) rm -rf "$ANDROID_HOME" ;; *) echo "no Android SDK under $HOME" ;; esac
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-windows:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-linux:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-linux
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+  mocks-install:
+    name: Install probe for the real model servers (${{ matrix.pass }})
+    runs-on: macos-15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 3
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 4
-            parts: 4
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
+        pass: [cold, warm]
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
           set -euo pipefail
           [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install Linux packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
+          [ "$(uname -m)" = arm64 ] || { echo "::error::the pinned bottles are arm64_sequoia"; exit 1; }
+          sw_vers
 
-  rust-macos:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-macos
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 2
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
+      - name: Key the cache by the pinned sha256 values
+        id: key
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install tmux on macOS
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Select Xcode 26.3, whose git the engine runs
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.3.app
-          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
-          version="$("$git" --version)"
-          echo "engine git $git: $version"
-          IFS=. read -r major minor _ <<< "${version#git version }"
-          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
-          echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
+          key=$(printf '%s\n%s\n%s\n%s\n' "$BOTTLES" "$GGUF_SHA256" "$OLLAMA_MANIFEST_SHA256" "$OLLAMA_SMALL_BLOBS" | shasum -a 256 | cut -d' ' -f1)
+          echo "key=mocks-install-${key}" >> "$GITHUB_OUTPUT"
+          echo "cache key mocks-install-${key}"
 
-  rust-windows:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-windows
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-            part: 1
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 2
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Restore the downloads
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
+          path: ~/mocks-cache
+          key: ${{ steps.key.outputs.key }}
 
-  node:
-    name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 1
-            chrome: mac-arm64
-            chrome_sha256: 01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef
-            headless_sha256: cb46a336dbe3d6f1339c5039c3083e4e5dd8e4379710790e34f8f4a865e2452d
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/node.xml
-      FARM_PART: ${{ matrix.os }}-node-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install IDE extension dependencies
-        working-directory: apps/ide-extension
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install rcli source dependencies
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Build desktop frontend
-        working-directory: apps/desktop
-        run: npm run build
-      - name: Install the pinned Chrome for Testing
+      - name: Download, verify, install and start both servers
         env:
-          CHROME_PLATFORM: ${{ matrix.chrome }}
-          CHROME_SHA256: ${{ matrix.chrome_sha256 }}
+          PASS: ${{ matrix.pass }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/chrome"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$CHROME_PLATFORM/chrome-$CHROME_PLATFORM.zip"
-          echo "$CHROME_SHA256  $work/chrome.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then
-            ditto -x -k "$work/chrome.zip" "$work"
-            chrome="$work/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-          else
-            unzip -q "$work/chrome.zip" -d "$work"
-            chrome="$work/chrome-linux64/chrome"
+          set -uo pipefail
+          echo "pass $PASS cache-hit ${CACHE_HIT:-false}"
+          fail() { echo "server unavailable: $1 rc $2"; echo "::error::server unavailable: $1 rc $2"; exit 1; }
+          last=$(date +%s)
+          stamp() { now=$(date +%s); echo "time $1 $((now - last))s pass $PASS cache-hit ${CACHE_HIT:-false}"; last=$now; }
+          sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+          cache="$HOME/mocks-cache"
+          mkdir -p "$cache/bottles" "$cache/ollama" "$cache/gguf" || fail "cache folders" $?
+          bottle_file() { local suffix=""; [ "$4" = 0 ] || suffix=".$4"; echo "$cache/bottles/$1--$2.$3.bottle${suffix}.tar.gz"; }
+
+          while IFS='|' read -r name version tag rebuild pin; do
+            [ -n "$name" ] || continue
+            file=$(bottle_file "$name" "$version" "$tag" "$rebuild")
+            if [ ! -f "$file" ]; then
+              curl -fsSL --retry 3 -H "Authorization: Bearer QQ==" -o "$file.part" "https://ghcr.io/v2/homebrew/core/${name//@//}/blobs/sha256:${pin}"
+              rc=$?
+              [ "$rc" -eq 0 ] || fail "download bottle $name" "$rc"
+              mv "$file.part" "$file" || fail "keep bottle $name" $?
+            fi
+          done <<< "$BOTTLES"
+          gguf="$cache/gguf/$GGUF_FILE"
+          if [ ! -f "$gguf" ]; then
+            curl -fsSL --retry 3 -o "$gguf.part" "https://huggingface.co/${GGUF_REPO}/resolve/${GGUF_REVISION}/${GGUF_FILE}"
+            rc=$?
+            [ "$rc" -eq 0 ] || fail "download gguf" "$rc"
+            mv "$gguf.part" "$gguf" || fail "keep gguf" $?
           fi
-          "$chrome" --version
-          echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Install Linux packages
-        if: matrix.os == 'linux'
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - name: Install tmux on Linux
-        if: matrix.os == 'linux'
-        run: |
-          set -euo pipefail
-          sudo chmod go-w /usr/local/bin
-          test -z "$(find /usr/local/bin -maxdepth 0 -perm /022)"
-          work="$RUNNER_TEMP/tmux"
-          prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
-          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
-          tar -xzf "$work/tmux.tar.gz" -C "$work"
-          (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
-          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
-          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install tmux on macOS
-        if: matrix.os == 'macos'
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install the pinned Chrome headless shell for the PDF rows
-        env:
-          HEADLESS_PLATFORM: ${{ matrix.chrome }}
-          HEADLESS_SHA256: ${{ matrix.headless_sha256 }}
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/chrome-headless-shell"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/headless.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$HEADLESS_PLATFORM/chrome-headless-shell-$HEADLESS_PLATFORM.zip"
-          echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k "$work/headless.zip" "$work"; else unzip -q "$work/headless.zip" -d "$work"; fi
-          shell="$work/chrome-headless-shell-$HEADLESS_PLATFORM/chrome-headless-shell"
-          "$shell" --version
-          echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"
-      - name: Run this share of the node suites
-        timeout-minutes: 60
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          limit=""
-          if [ "$RUNNER_OS" = macOS ]; then limit="--test-timeout=$NODE_TEST_TIMEOUT_MACOS_MS"; fi
-          make test-node BUN="$BUN" NODE_TEST_ARGS="--test-shard=${{ matrix.part }}/${{ matrix.parts }} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FARM_JUNIT $limit"
-      - name: Keep a JUnit report for this part
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
+          for blob in $OLLAMA_SMALL_BLOBS; do
+            file="$cache/ollama/sha256-$blob"
+            if [ ! -f "$file" ]; then
+              curl -fsSL --retry 3 -o "$file.part" "https://registry.ollama.ai/v2/library/${OLLAMA_MODEL}/blobs/sha256:${blob}"
+              rc=$?
+              [ "$rc" -eq 0 ] || fail "download ollama blob $blob" "$rc"
+              mv "$file.part" "$file" || fail "keep ollama blob $blob" $?
+            fi
+          done
+          manifest="$cache/ollama/manifest-${OLLAMA_TAG}"
+          if [ ! -f "$manifest" ]; then
+            curl -fsSL --retry 3 -H "Accept: application/vnd.docker.distribution.manifest.v2+json" -o "$manifest.part" "https://registry.ollama.ai/v2/library/${OLLAMA_MODEL}/manifests/${OLLAMA_TAG}"
+            rc=$?
+            [ "$rc" -eq 0 ] || fail "download ollama manifest" "$rc"
+            mv "$manifest.part" "$manifest" || fail "keep ollama manifest" $?
           fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
+          stamp download
 
-  typecheck:
-    name: Desktop typecheck and Bun suites
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/bun.xml
-      FARM_PART: linux-bun-1
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Typecheck desktop
-        working-directory: apps/desktop
-        run: npm run typecheck
-      - name: Install rcli source dependencies
-        if: always()
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Run the Bun suites
-        if: always()
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          make test-bun BUN="$BUN" BUN_TEST_ARGS="--reporter=junit --reporter-outfile=$FARM_JUNIT"
-      - name: Keep a JUnit report for this part
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
+          while IFS='|' read -r name version tag rebuild pin; do
+            [ -n "$name" ] || continue
+            file=$(bottle_file "$name" "$version" "$tag" "$rebuild")
+            got=$(sha "$file")
+            [ "$got" = "$pin" ] || { rm -f "$file"; fail "verify bottle $name got $got" 1; }
+          done <<< "$BOTTLES"
+          got=$(sha "$gguf")
+          [ "$got" = "$GGUF_SHA256" ] || { rm -f "$gguf"; fail "verify gguf got $got" 1; }
+          for blob in $OLLAMA_SMALL_BLOBS; do
+            got=$(sha "$cache/ollama/sha256-$blob")
+            [ "$got" = "$blob" ] || { rm -f "$cache/ollama/sha256-$blob"; fail "verify ollama blob $blob got $got" 1; }
+          done
+          got=$(sha "$manifest")
+          [ "$got" = "$OLLAMA_MANIFEST_SHA256" ] || { rm -f "$manifest"; fail "verify ollama manifest got $got" 1; }
+          named=$(jq -r '.config.digest, .layers[].digest' "$manifest" | sed 's/^sha256://' | sort | tr '\n' ' ')
+          pinned=$(printf '%s %s' "$OLLAMA_SMALL_BLOBS" "$GGUF_SHA256" | tr ' ' '\n' | sort | tr '\n' ' ')
+          [ "$named" = "$pinned" ] || fail "ollama manifest names other blobs: $named" 1
+          echo "verified: $(grep -c . <<< "$BOTTLES") bottles, the gguf, $(wc -w <<< "$OLLAMA_SMALL_BLOBS" | tr -d ' ') ollama blobs and the manifest"
+          stamp verify
 
-  report:
-    name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          pattern: farm-junit-*
-          path: ${{ runner.temp }}/junit
-      - name: Write the summary table
-        env:
-          FARM_NEEDS: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/junit"
-          node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+          while IFS='|' read -r name version tag rebuild pin; do
+            [ -n "$name" ] || continue
+            file=$(bottle_file "$name" "$version" "$tag" "$rebuild")
+            have=$(brew list --versions "$name" 2>/dev/null || true)
+            echo "before $name: ${have:-absent}"
+            case " $have " in
+              *" $version "*) echo "keep $name $version (already on the image)" ;;
+              *)
+                brew install "$file"
+                rc=$?
+                [ "$rc" -eq 0 ] || fail "brew install $name" "$rc"
+                ;;
+            esac
+            have=$(brew list --versions "$name" 2>/dev/null || true)
+            case " $have " in
+              *" $version "*) echo "installed $have" ;;
+              *) fail "installed version of $name is ${have:-absent}, pin $version" 1 ;;
+            esac
+          done <<< "$BOTTLES"
+          ollama --version || fail "ollama --version" $?
+          llama-server --version || fail "llama-server --version" $?
+          stamp install
+
+          models="$RUNNER_TEMP/ollama-models"
+          mkdir -p "$models/blobs" "$models/manifests/registry.ollama.ai/library/$OLLAMA_MODEL" || fail "ollama folders" $?
+          cp "$gguf" "$models/blobs/sha256-$GGUF_SHA256" || fail "place ollama model blob" $?
+          for blob in $OLLAMA_SMALL_BLOBS; do
+            cp "$cache/ollama/sha256-$blob" "$models/blobs/sha256-$blob" || fail "place ollama blob $blob" $?
+          done
+          cp "$manifest" "$models/manifests/registry.ollama.ai/library/$OLLAMA_MODEL/$OLLAMA_TAG" || fail "place ollama manifest" $?
+          for file in "$models"/blobs/sha256-*; do
+            [ "$(sha "$file")" = "${file##*/sha256-}" ] || fail "placed blob ${file##*/} does not match its name" 1
+          done
+
+          show() { local label=$1; shift; echo "== $label"; curl -sS --max-time 20 -w '\nHTTP %{http_code}\n' "$@" | head -c 4000; echo; }
+          OLLAMA_MODELS="$models" OLLAMA_HOST="127.0.0.1:$OLLAMA_PORT" ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
+          ollama_pid=$!
+          up=0
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:$OLLAMA_PORT/api/version" > /dev/null 2>&1; then up=1; break; fi
+            sleep 1
+          done
+          [ "$up" = 1 ] || { tail -n 40 "$RUNNER_TEMP/ollama.log"; fail "start ollama" 1; }
+          stamp ollama-ready
+          show "ollama GET /api/version" "http://127.0.0.1:$OLLAMA_PORT/api/version"
+          show "ollama GET /api/tags" "http://127.0.0.1:$OLLAMA_PORT/api/tags"
+          show "ollama GET /v1/models" "http://127.0.0.1:$OLLAMA_PORT/v1/models"
+          show "ollama GET /models" "http://127.0.0.1:$OLLAMA_PORT/models"
+          show "ollama POST /api/copy to snapshot-model" -X POST -H "Content-Type: application/json" -d "{\"source\":\"${OLLAMA_MODEL}:${OLLAMA_TAG}\",\"destination\":\"snapshot-model\"}" "http://127.0.0.1:$OLLAMA_PORT/api/copy"
+          show "ollama GET /api/tags after the copy" "http://127.0.0.1:$OLLAMA_PORT/api/tags"
+          show "ollama GET /v1/models after the copy" "http://127.0.0.1:$OLLAMA_PORT/v1/models"
+
+          llama-server -m "$gguf" --host 127.0.0.1 --port "$LLAMA_PORT" --alias snapshot-model --api-key "$DUMMY_KEY" > "$RUNNER_TEMP/llama.log" 2>&1 &
+          llama_pid=$!
+          up=0
+          for _ in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:$LLAMA_PORT/health" > /dev/null 2>&1; then up=1; break; fi
+            sleep 1
+          done
+          [ "$up" = 1 ] || { tail -n 40 "$RUNNER_TEMP/llama.log"; kill "$ollama_pid"; fail "start llama-server" 1; }
+          stamp llama-ready
+          show "llama GET /v1/models without a key" "http://127.0.0.1:$LLAMA_PORT/v1/models"
+          show "llama GET /v1/models with the key" -H "Authorization: Bearer $DUMMY_KEY" "http://127.0.0.1:$LLAMA_PORT/v1/models"
+          show "llama GET /models with the key" -H "Authorization: Bearer $DUMMY_KEY" "http://127.0.0.1:$LLAMA_PORT/models"
+          show "llama GET /api/tags with the key" -H "Authorization: Bearer $DUMMY_KEY" "http://127.0.0.1:$LLAMA_PORT/api/tags"
+
+          kill "$llama_pid" "$ollama_pid"
+          wait "$llama_pid" "$ollama_pid" 2> /dev/null
+          echo "listening sockets left on the two ports: $(lsof -nP -iTCP:"$OLLAMA_PORT" -iTCP:"$LLAMA_PORT" -sTCP:LISTEN 2>/dev/null | grep -c LISTEN)"
+          du -sh "$cache" "$cache"/* 2>/dev/null
+          stamp finish
