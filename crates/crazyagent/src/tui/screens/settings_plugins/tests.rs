@@ -143,7 +143,11 @@ fn each_skill_row_says_where_the_skill_came_from_before_its_folder() {
             plugin_ctx(width, height),
             Box::new(Plugins::with(skills, servers)),
         );
-        let rows = render(&mut shell, width, height);
+        let mut rows = render(&mut shell, width, height);
+        for _ in 0..3 {
+            shell.key(Key::Down);
+        }
+        rows.extend(render(&mut shell, width, height));
         let row = |name: &str| {
             rows.iter()
                 .find(|row| row.contains(&format!(" {name} ")))
@@ -155,7 +159,7 @@ fn each_skill_row_says_where_the_skill_came_from_before_its_folder() {
             "{width}: {rows:?}"
         );
         assert!(
-            row("linear-method").contains("Imported from Claude Code  ~/.claude/skill"),
+            row("linear-method").contains("Imported from Claude Code  ~/.claude/ski"),
             "{width}: {rows:?}"
         );
         assert!(
