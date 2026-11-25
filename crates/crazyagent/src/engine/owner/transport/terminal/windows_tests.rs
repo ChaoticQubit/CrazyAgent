@@ -139,11 +139,7 @@ async fn shown(output: &mut TerminalOutput, text: &str) -> Option<String> {
 /// Asks the host whether the shell's app turned bracketed paste on, once now and again after
 /// each output frame the view reads, until the answer is `want`, the view ends or `WAIT`
 /// ends. Takes the shell, the view's output and the wanted answer. Output: the last answer.
-async fn bracketed(
-    shell: &Shell,
-    output: &mut TerminalOutput,
-    want: bool,
-) -> Result<bool, String> {
+async fn bracketed(shell: &Shell, output: &mut TerminalOutput, want: bool) -> Result<bool, String> {
     let ask = || {
         let (host, agent) = (shell.host.clone(), shell.agent.clone());
         async move {
