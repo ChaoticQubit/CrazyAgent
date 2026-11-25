@@ -246,6 +246,7 @@ struct Engine {
     root: tempfile::TempDir,
     home: tempfile::TempDir,
     _service: EngineService,
+    _stubs: tempfile::TempDir,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
     _refusing: [std::net::TcpStream; 2],
@@ -271,7 +272,8 @@ impl Engine {
         std::fs::write(&global, &settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let service = crate::tui::test_home::stubbed_engine(root.path(), &global, &stopped).await;
+        let (stubs, service) =
+            crate::tui::test_home::stubbed_engine(root.path(), &global, &stopped).await;
         let client = Client::new(
             root.path().join("e.sock"),
             crate::tui::test_home::ENGINE_WAIT,
@@ -285,6 +287,7 @@ impl Engine {
             root,
             home,
             _service: service,
+            _stubs: stubs,
             _stop: stop,
             controller,
             _refusing: refusing,
@@ -342,6 +345,7 @@ impl Engine {
             root,
             home,
             _service: mut service,
+            _stubs: _,
             _stop: stop,
             controller,
             _refusing: refusing,
@@ -352,7 +356,7 @@ impl Engine {
         drop(stop);
         between(root.path());
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let service = crate::tui::test_home::stubbed_engine(
+        let (stubs, service) = crate::tui::test_home::stubbed_engine(
             root.path(),
             &root.path().join("global.toml"),
             &stopped,
@@ -370,6 +374,7 @@ impl Engine {
             root,
             home,
             _service: service,
+            _stubs: stubs,
             _stop: stop,
             controller,
             _refusing: refusing,
