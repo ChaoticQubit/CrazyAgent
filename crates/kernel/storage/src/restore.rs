@@ -23,7 +23,7 @@ pub struct Hooks<'a> {
     pub after_restore: &'a dyn Fn(&Connection, &Path, &Path),
 }
 
-/// The name a restore gives the dated copy it keeps of the data it replaces (DEC-192), before
+/// The name a restore gives the dated copy it keeps of the data it replaces, before
 /// `-<UTC time>`. It holds no `-to-`, so neither the rotation nor the pin ever counts it.
 pub const REPLACED: &str = "replaced";
 
@@ -76,7 +76,7 @@ pub fn restorable_until(root: &Path, now: SystemTime) -> Option<SystemTime> {
     Some(until)
 }
 
-/// Brings back the pinned 2.4 backup the owner asked for (L5, DEC-192), at the time now.
+/// Brings back the pinned 2.4 backup the owner asked for, at the time now.
 /// Inputs: the database path and the engine's hooks. Output: as [`restore_pinned_at`].
 pub fn restore_pinned(path: &Path, hooks: &Hooks<'_>) -> Result<Restored, StorageError> {
     restore_pinned_at(path, hooks, SystemTime::now(), check_copy)
@@ -247,7 +247,7 @@ fn alone(path: &Path) -> Result<Connection, StorageError> {
     Ok(db)
 }
 
-/// Keeps one dated copy of the data a restore replaces (DEC-192): engine.db through the
+/// Keeps one dated copy of the data a restore replaces: engine.db through the
 /// SQLite backup API and the settings texts, in a new 0700 `replaced-<UTC time>` folder
 /// under backups/, checked and marked as an upgrade backup is. Inputs: the connection, the
 /// backups folder, the settings texts and the time. Output: the folder; a copy that fails
