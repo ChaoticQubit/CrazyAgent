@@ -853,11 +853,12 @@ fn settings_frames_match_the_design() {
             BIO_80[0],
             BIO_80[1],
         ];
-        check(
-            &format!("profile-{width}"),
-            &render(&mut shell, width, height),
-            &swaps,
-        );
+        let frame = if cfg!(target_os = "macos") {
+            format!("profile-{width}")
+        } else {
+            format!("profile-{width}-system")
+        };
+        check(&frame, &render(&mut shell, width, height), &swaps);
     }
 }
 

@@ -220,6 +220,17 @@ mod tests {
     }
 
     #[test]
+    fn the_follow_choice_is_saved_as_follow_system_and_the_old_word_still_reads() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("tui-colors");
+        save_colors(&path, Colors::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "follow-system");
+        assert_eq!(load_colors(&path), Colors::default());
+        std::fs::write(&path, "follow-macos").unwrap();
+        assert_eq!(load_colors(&path), Colors::default());
+    }
+
+    #[test]
     fn colors_round_trip_and_bad_files_fall_back() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("nested").join("tui-colors");

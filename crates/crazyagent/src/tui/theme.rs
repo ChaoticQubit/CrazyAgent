@@ -302,6 +302,8 @@ impl Theme {
     }
 }
 
+mod appearance;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +432,22 @@ mod tests {
         assert!(plain.selection.add_modifier.contains(Modifier::REVERSED));
         assert!(plain.muted.add_modifier.contains(Modifier::DIM));
         assert!(plain.error.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_follow_choice_names_macos_on_macos() {
+        assert_eq!(Colors::ALL[0], (Colors::default(), "Follow macOS"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_follow_choice_names_the_system_off_macos() {
+        assert_eq!(Colors::ALL[0], (Colors::default(), "Follow system"));
+        assert!(
+            Colors::ALL
+                .iter()
+                .all(|(_, label)| !label.contains("macOS"))
+        );
     }
 }
