@@ -246,14 +246,18 @@ impl Host for ConptyHost {
 
     /// Pastes the owner's keys as one write, bracketed only once the app turned bracketed
     /// paste on. Takes the name and 1 to `PASTE_BYTES_MAX` keys from `paste_keys`, which
-    /// hold no escape, so no paste ends its own bracket. Returns once written, or a code.
+    /// hold no escape, so no paste ends its own bracket. Writes outside the panes lock, so a
+    /// paste an app stops reading holds only its own pane. Returns once written, or a code.
     fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
         if keys.is_empty() || keys.len() > PASTE_BYTES_MAX || keys.contains(&0x1b) {
             return Err(failure("terminal_paste_bounds"));
         }
-        let mut panes = lock(&self.panes);
-        let pane = live(&mut panes, agent)?;
-        let bracketed = lock(&pane.view).parser.screen().bracketed_paste();
+        let (writer, bracketed) = {
+            let mut panes = lock(&self.panes);
+            let pane = live(&mut panes, agent)?;
+            let bracketed = lock(&pane.view).parser.screen().bracketed_paste();
+            (Arc::clone(&pane.writer), bracketed)
+        };
         let mut bytes = Vec::with_capacity(keys.len() + PASTE_OPEN.len() + PASTE_CLOSE.len());
         if bracketed {
             bytes.extend_from_slice(PASTE_OPEN);
@@ -269,7 +273,7 @@ impl Host for ConptyHost {
                 .count()
                 <= 1
         );
-        let mut writer = lock(&pane.writer);
+        let mut writer = lock(&writer);
         writer
             .write_all(&bytes)
             .and_then(|()| writer.flush())
