@@ -572,3 +572,26 @@ fn a_save_with_a_nested_key_more_or_a_path_off_its_digest_is_refused() {
         );
     }
 }
+
+/// The store fence answers a store with no `owner_meta` table with `owner_runtime_stale`, a
+/// table of another shape with that table's own error, and a store whose host started with
+/// that host's engine fence.
+#[test]
+fn the_store_fence_tells_a_missing_owner_table_from_one_of_another_shape() {
+    let mut missing = unhosted();
+    let tx = missing.transaction().unwrap();
+    assert_eq!(code(store_fence(&tx)), Some("owner_runtime_stale".into()));
+    drop(tx);
+    let mut shaped = unhosted();
+    shaped
+        .execute("CREATE TABLE owner_meta (unknown TEXT)", [])
+        .unwrap();
+    let tx = shaped.transaction().unwrap();
+    let refused = code(store_fence(&tx)).expect("a table of another shape refuses the fence");
+    assert_ne!(refused, "owner_runtime_stale");
+    assert!(refused.contains("no such column"), "{refused}");
+    drop(tx);
+    let mut hosted = store();
+    let tx = hosted.transaction().unwrap();
+    assert!(matches!(store_fence(&tx), Ok(Fence::Engine(_))));
+}
