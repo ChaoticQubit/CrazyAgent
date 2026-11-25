@@ -181,3 +181,136 @@ fn replacing_a_plugin_whose_folder_holds_a_subfolder_succeeds_and_settles_trust(
         "{left:?}"
     );
 }
+
+const STUCK_ID: &str = "00000000000000000000000000000000000000000000000000000000000000c3";
+
+fn stuck_ref() -> Result<String, &'static str> {
+    Ok(STUCK_ID.to_owned())
+}
+
+/// A key store whose every new id is the same, so a row can take the nameless name a
+/// removal would move its folder to.
+const STUCK: Keys = Keys {
+    new_ref: stuck_ref,
+    ..KEYS
+};
+
+/// Holds the nameless folder name the fixed id leads to with a file in it, so a rename onto
+/// it fails until the start sweep deletes it. Input: the plugins folder.
+fn take_nameless(folder: &Path) {
+    let taken = folder.join(format!(".old-{STUCK_ID}"));
+    std::fs::create_dir(&taken).unwrap();
+    std::fs::write(taken.join("note.txt"), b"taken").unwrap();
+}
+
+/// Nests folders below a plugin folder deeper than a delete goes down, so deleting it
+/// fails. Input: the plugin folder.
+fn too_deep(plugin: &Path) {
+    let mut deep = plugin.to_path_buf();
+    for level in 0..8 {
+        deep = deep.join(format!("level-{level}"));
+        std::fs::create_dir(&deep).unwrap();
+    }
+}
+
+/// The start sweeps in the order an engine start runs them. Input: the case. Output: what
+/// the removal sweep answered.
+fn start_sweep(case: &Case) -> Result<(), Refused> {
+    sweep_staged(&case.engine());
+    crate::registry::sweep_removals(&case.db, &case.engine())
+}
+
+/// A committed removal whose folder can neither lose the plugin name nor be deleted stays
+/// removed: the start sweep never puts it back under the name.
+#[test]
+fn a_removed_plugin_whose_retired_folder_cannot_move_is_not_restored_at_start() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    too_deep(&folder.join("acme"));
+    take_nameless(&folder);
+    let stuck = Engine {
+        keys: &STUCK,
+        ..case.engine()
+    };
+
+    assert!(remove(&case.db, &stuck, "acme").is_err());
+    let _ = start_sweep(&case);
+
+    let names = names_in(&folder);
+    assert!(!folder.join("acme").exists(), "{names:?}");
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().all(|plugin| plugin.name != "acme"));
+}
+
+/// A removal that stopped before its rows were deleted leaves the folder aside with the
+/// rows still there, and the start sweep puts it back as it was.
+#[test]
+fn a_removal_that_crashed_before_its_commit_is_restored_at_start() {
+    let case = case();
+    trusted(&case, ACME);
+    let before = plugin(&list(&case.db, &case.engine()).unwrap(), "acme")
+        .status
+        .clone();
+    let folder = plugins_folder(&case);
+    std::fs::rename(
+        folder.join("acme"),
+        folder.join(format!(".rm-acme.{STUCK_ID}")),
+    )
+    .unwrap();
+
+    start_sweep(&case).unwrap();
+
+    assert_eq!(names_in(&folder), ["acme"]);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").status, before);
+}
+
+/// Removing a plugin with no rows never moves its folder aside under its name, so a folder
+/// that cannot be deleted stays where it was instead of waiting to be put back.
+#[test]
+fn a_rowless_plugin_removal_never_moves_it_aside() {
+    let case = case();
+    drop_in(&case, "acme", ACME);
+    let folder = plugins_folder(&case);
+    too_deep(&folder.join("acme"));
+    take_nameless(&folder);
+    let stuck = Engine {
+        keys: &STUCK,
+        ..case.engine()
+    };
+
+    assert!(remove(&case.db, &stuck, "acme").is_err());
+
+    let names = names_in(&folder);
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.starts_with(".old-acme.") && !name.starts_with(".rm-acme.")),
+        "{names:?}"
+    );
+    assert!(folder.join("acme").join(MANIFEST_FILE).is_file());
+}
+
+/// A folder a committed removal left aside, found beside a plugin added again under the
+/// same name, is deleted at start and never replaces the live folder.
+#[test]
+fn a_stuck_removal_folder_beside_a_re_added_plugin_is_deleted_at_start() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    let stuck = folder.join(format!(".rm-acme.{STUCK_ID}"));
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join(MANIFEST_FILE), "old text").unwrap();
+
+    start_sweep(&case).unwrap();
+
+    assert_eq!(names_in(&folder), ["acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        ACME
+    );
+}

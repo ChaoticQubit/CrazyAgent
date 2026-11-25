@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kernel_security::secret::SecretString;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -220,25 +220,34 @@ pub(crate) fn drop_binding(
     source: &str,
     reference: &str,
 ) -> Result<(), Refused> {
-    db.execute(
-        "DELETE FROM app_plugin_secrets WHERE plugin=?1 AND secret=?2",
-        [plugin, secret],
-    )
-    .map_err(sqlite)?;
+    crate::store_log::record(
+        db,
+        crate::store_log::Event::Unbound {
+            plugin: plugin.to_owned(),
+            secret: secret.to_owned(),
+        },
+    )?;
     forget_key_file(db, engine, source, reference);
     Ok(())
 }
 
 /// Deletes the key file a removed or replaced binding row named, only once that change is
-/// committed: when the connection holds no open transaction. Under an open transaction, or
-/// when the delete fails, the file stays and the start sweep deletes it once no row names
-/// it. Inputs: database, engine facts and the old row's source and reference. Output: none.
+/// committed: at once when the connection holds no open transaction, after the commit when
+/// a plugin store capture holds the transaction's changes. Under any other open
+/// transaction, or when the delete fails, the file stays and the start sweep deletes it
+/// once no row names it. Inputs: database, engine facts and the old row's source and
+/// reference. Output: none.
 pub(crate) fn forget_key_file(db: &Connection, engine: &Engine<'_>, source: &str, reference: &str) {
-    if source == KEY
-        && db.is_autocommit()
-        && let Some(key) = plugin_key(reference)
-    {
+    if source != KEY {
+        return;
+    }
+    let Some(key) = plugin_key(reference) else {
+        return;
+    };
+    if db.is_autocommit() {
         let _ = (engine.keys.remove)(engine.root, KeyFolder::Plugin, &key);
+    } else {
+        let _ = crate::store_log::forget_after_commit(key);
     }
 }
 
@@ -284,13 +293,22 @@ fn save_binding(
     reference: &str,
 ) -> Result<(), Refused> {
     let old = binding_row(db, plugin, secret)?;
-    db.execute(
-        "INSERT INTO app_plugin_secrets (plugin, secret, source, reference) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(plugin, secret) DO UPDATE SET source=excluded.source,
-         reference=excluded.reference",
-        [plugin, secret, source, reference],
-    )
-    .map_err(sqlite)?;
+    if old.as_ref().is_some_and(|(old_source, old_reference)| {
+        old_source == source && old_reference == reference
+    }) {
+        return Ok(());
+    }
+    let source_word = crate::store_log::Source::from_word(source)
+        .expect("a binding is saved from an account or an entered key");
+    crate::store_log::record(
+        db,
+        crate::store_log::Event::Bound {
+            plugin: plugin.to_owned(),
+            secret: secret.to_owned(),
+            source: source_word,
+            reference: reference.to_owned(),
+        },
+    )?;
     if let Some((old_source, old_reference)) = old
         && (old_source != source || old_reference != reference)
     {
@@ -327,14 +345,16 @@ pub fn bind_account(
     save_binding(db, engine, name, secret, ACCOUNT, id.as_str())
 }
 
-/// Saves a key the owner entered for one declared secret through the engine's key store,
-/// replacing the one entered before in place with no binding write; a first key or one
-/// that replaces an account binding writes the binding and is deleted again if that write
-/// fails. The key is never logged, shown or put in argv
-/// or env, and is wiped. Inside a caller's open transaction it is refused before the key is
-/// saved. Inputs: database, engine facts, plugin, secret and key bytes. Output: Ok, or
-/// `app_plugin_key_invalid`, `_key_store_unavailable`, `_secret_not_declared`,
-/// `_needs_review`, `_not_found`, or `app_plugins_unavailable`.
+/// Saves a key the owner entered for one declared secret through the engine's key store.
+/// The key is first written to a fresh key file. One that replaces a key entered before
+/// writes no binding: a [`KeyStep`] moves it into the old key's file after the capture's
+/// commit and deletes it on a rollback. A first key or one that replaces an account binding
+/// writes the binding to the fresh file, which is deleted again if that write fails. The key
+/// is never logged, shown or put in argv or env, and is wiped. Outside the capture of its
+/// own transaction it is refused before the key is saved. Inputs: database, engine facts,
+/// plugin, secret and key bytes. Output: Ok, or `app_plugin_key_invalid`,
+/// `_key_store_unavailable`, `_secret_not_declared`, `_needs_review`, `_not_found`, or
+/// `app_plugins_unavailable`.
 pub fn set_key(
     db: &Connection,
     engine: &Engine<'_>,
@@ -343,7 +363,7 @@ pub fn set_key(
     mut key: Vec<u8>,
 ) -> Result<(), Refused> {
     let saved = (|| {
-        registry::outside_transaction(db)?;
+        crate::store_log::in_capture(db)?;
         registry::prepare(db, engine)?;
         bindable(db, engine, name, secret)?;
         if key.is_empty()
@@ -355,14 +375,10 @@ pub fn set_key(
         let kept = binding_row(db, name, secret)?
             .filter(|(source, _)| source == KEY)
             .and_then(|(_, reference)| plugin_key(&reference));
-        let reference = match &kept {
-            Some(reference) => reference.clone(),
-            None => {
-                let id = (engine.keys.new_ref)().map_err(refused)?;
-                KeyRef::new(&format!("{KEY_PREFIX}{id}"))
-                    .ok_or_else(|| refused("app_plugin_key_store_unavailable"))?
-            }
-        };
+        let id = (engine.keys.new_ref)().map_err(refused)?;
+        let reference = KeyRef::new(&format!("{KEY_PREFIX}{id}"))
+            .filter(|fresh| kept.as_ref() != Some(fresh))
+            .ok_or_else(|| refused("app_plugin_key_store_unavailable"))?;
         (engine.keys.replace)(
             engine.root,
             KeyFolder::Plugin,
@@ -370,8 +386,17 @@ pub fn set_key(
             std::mem::take(&mut key),
         )
         .map_err(|()| refused("app_plugin_key_store_unavailable"))?;
-        if kept.is_some() {
-            return Ok(());
+        if let Some(kept) = kept {
+            let step = KeyStep {
+                root: engine.root.to_path_buf(),
+                kept,
+                fresh: Some(reference),
+                keys: *engine.keys,
+            };
+            return match crate::store_log::key_after_commit(step) {
+                Some(step) => step.commit(),
+                None => Ok(()),
+            };
         }
         let bound = save_binding(db, engine, name, secret, KEY, reference.as_str());
         if bound.is_err() {
@@ -381,6 +406,60 @@ pub fn set_key(
     })();
     kernel_security::secret::wipe(&mut key);
     saved
+}
+
+/// An entered key that replaces the one before it, waiting in a fresh key file for the end
+/// of the transaction. After the commit [`KeyStep::commit`] moves it into the old key's
+/// file; a step rolled back or dropped with neither deletes the fresh file and leaves the
+/// old key as it was. It holds key file names only, never key bytes.
+#[derive(Debug)]
+pub struct KeyStep {
+    root: PathBuf,
+    kept: KeyRef,
+    fresh: Option<KeyRef>,
+    keys: Keys,
+}
+
+impl KeyStep {
+    /// Moves the new key into the old key's file, then deletes the fresh file, which goes
+    /// on every exit. Output: Ok, or `app_plugin_key_store_unavailable` with the old key
+    /// still in its file.
+    pub fn commit(mut self) -> Result<(), Refused> {
+        let Some(fresh) = self.fresh.take() else {
+            return Ok(());
+        };
+        assert_ne!(fresh, self.kept);
+        let unavailable = || refused("app_plugin_key_store_unavailable");
+        let moved = (self.keys.read)(&self.root, KeyFolder::Plugin, &fresh)
+            .map_err(|()| unavailable())?
+            .ok_or_else(unavailable)
+            .and_then(|key| {
+                let bytes = key.expose().as_bytes().to_vec();
+                (self.keys.replace)(&self.root, KeyFolder::Plugin, &self.kept, bytes)
+                    .map_err(|()| unavailable())
+            });
+        let _ = (self.keys.remove)(&self.root, KeyFolder::Plugin, &fresh);
+        moved
+    }
+
+    /// Deletes the fresh key file after the change rolled back. Output: none; a file it
+    /// cannot delete is left to the start sweep, which deletes a key no binding names.
+    pub fn roll_back(mut self) {
+        self.discard();
+    }
+
+    /// Deletes the fresh key file, once. Output: none.
+    fn discard(&mut self) {
+        if let Some(fresh) = self.fresh.take() {
+            let _ = (self.keys.remove)(&self.root, KeyFolder::Plugin, &fresh);
+        }
+    }
+}
+
+impl Drop for KeyStep {
+    fn drop(&mut self) {
+        self.discard();
+    }
 }
 
 /// Unbinds one secret and deletes the key entered for it; an account's key stays.

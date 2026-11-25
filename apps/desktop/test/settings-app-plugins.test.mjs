@@ -180,6 +180,13 @@ test("App plugins: every app plugin code the engine can answer has its own sente
   assert.match(api.appPluginRefusal({ code: "app_plugin_key_store_unavailable" }), /^CrazyAgent couldn't reach its saved keys\. Nothing was changed; try again\.$/u);
 });
 
+test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_not_found" }),
+    "That plugin is gone. Open App plugins again to see the current ones.",
+  );
+});
+
 test("App plugins: each action is a direct bridge call with its own arguments, and an entered key travels only in its own call", () => {
   const file = source("../src/api-app-plugins.ts");
   for (const [command, args] of [
@@ -204,4 +211,22 @@ test("Settings lists App plugins under App next to the other app pages and keeps
   const index = source("../src/screens/settings/index.tsx");
   assert.match(index, /tab === "app-plugins" \? <AppPluginsSettings \/>/u);
   assert.match(index, /tab === "plugins" \? <PluginsAndSkills skill=\{skill\} \/>/u);
+});
+
+test("App plugins: a stopped engine actor reads as the unknown outcome, since the change may have landed", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_actor_stopped_outcome_unknown" }), api.APP_PLUGIN_REFUSALS.app_plugin_outcome_unknown);
+});
+
+test("App plugins: a lost owner answer reads as the unknown outcome, since the change may have landed", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_outcome_unknown_reconcile_same_identity" }), api.APP_PLUGIN_REFUSALS.app_plugin_outcome_unknown);
+});
+
+test("App plugins: a change waiting on the database is a warning on the page and in a dialog, and any other refusal stays danger", () => {
+  const dialog = { kind: "trust", folder: null, trust: trust(), review: false };
+  for (const patch of [{}, { dialog }]) {
+    const waiting = render({ ...patch, failure: "Waiting its turn.", failureCode: "access_change_pending" });
+    assert.match(waiting, /<div class="notice" role="alert">(?:(?!<\/div>).)*<div>Waiting its turn\.<\/div>/u);
+    const refused = render({ ...patch, failure: "Refused.", failureCode: "app_plugin_refused" });
+    assert.match(refused, /<div class="notice danger" role="alert">(?:(?!<\/div>).)*<div>Refused\.<\/div>/u);
+  }
 });

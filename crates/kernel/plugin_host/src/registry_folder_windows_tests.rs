@@ -82,6 +82,7 @@ struct Case {
     temp: tempfile::TempDir,
     root: PathBuf,
     db: rusqlite::Connection,
+    _held: crate::store_log::RowsHold,
 }
 
 impl Case {
@@ -115,7 +116,12 @@ fn case() -> Case {
     std::fs::create_dir(&root).unwrap();
     let db = rusqlite::Connection::open_in_memory().unwrap();
     initialize(&db).unwrap();
-    Case { temp, root, db }
+    Case {
+        temp,
+        root,
+        db,
+        _held: crate::store_log::rows_hold(),
+    }
 }
 
 fn sha(text: &str) -> String {
