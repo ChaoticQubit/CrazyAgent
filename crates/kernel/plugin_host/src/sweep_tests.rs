@@ -84,7 +84,8 @@ fn a_retired_leftover_with_a_nested_folder_is_deleted_and_the_plugin_kept() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     crate::store::initialize(&db).unwrap();
     db.execute(
-        "INSERT INTO app_plugin_trust VALUES ('acme', ?1, '', 1)",
+        "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms)
+         VALUES ('acme', ?1, '', 1)",
         [kernel_common::hash(b"current text")],
     )
     .unwrap();
