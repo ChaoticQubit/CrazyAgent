@@ -1,6 +1,5 @@
 use super::*;
-use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::terminal::Host;
+use kernel_processes::terminal::PaneCommand;
 use tokio::io::AsyncReadExt;
 use tokio::sync::oneshot;
 
@@ -61,11 +60,10 @@ impl Shell {
             .terminal(&plain)
             .expect("the engine opens its ConPTY host on Windows");
         let agent = AgentId::team(1).unwrap();
-        let command = InteractiveCommand {
+        let command = PaneCommand {
             argv: vec![SHELL.into(), "/D".into(), "/Q".into()],
             cwd: folder.clone(),
             env: Vec::new(),
-            transcript: Transcript::Unavailable,
         };
         {
             let (host, agent) = (host.clone(), agent.clone());
