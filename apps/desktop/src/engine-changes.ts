@@ -71,11 +71,11 @@ export function onChanged(topics: readonly WatchTopic[], listener: Listener): ()
   };
 }
 
-/** Reads on the engine's watch: subscribes to `topics`, awaits the page's watch, then
- * reads once and again after each change to them or of unknown subject, one read at a time; a
- * change heard during a read runs it once more after it. Inputs: the topics, at least one, the
- * read, and what to do with each reply, which returns false to stop reading. Output: the
- * function that stops it and drops a reply still in flight. */
+/** Reads on the engine's watch: subscribes to `topics`, awaits the page's watch, then reads
+ * once and after each change to them or of unknown subject, one read at a time; a change heard
+ * during a read runs it once more. A failed read applies nothing and reads again on the next
+ * change. Inputs: the topics, at least one, the read, and what to do with each reply, which
+ * returns false to stop. Output: the function that stops it and drops a reply in flight. */
 export function readOnChanges<T>(topics: readonly WatchTopic[], read: () => Promise<T>, apply: (value: T) => boolean): () => void {
   if (topics.length === 0) throw new Error("readOnChanges needs a topic");
   let live = true;
@@ -90,12 +90,18 @@ export function readOnChanges<T>(topics: readonly WatchTopic[], read: () => Prom
     }
     reading = true;
     again = false;
-    void read().then((value) => {
-      reading = false;
-      if (!live) return;
-      if (!apply(value)) stop();
-      else if (again) next();
-    });
+    void read().then(
+      (value) => {
+        reading = false;
+        if (!live) return;
+        if (!apply(value)) stop();
+        else if (again) next();
+      },
+      () => {
+        reading = false;
+        if (live && again) next();
+      },
+    );
   };
   const stopHearing = onChanged(topics, next);
   const stop = (): void => {
