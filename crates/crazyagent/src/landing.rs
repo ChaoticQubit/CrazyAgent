@@ -32,6 +32,8 @@ mod merges;
 mod owner;
 pub mod owner_edit;
 #[cfg(unix)]
+mod prune;
+#[cfg(unix)]
 pub(crate) mod retire;
 #[cfg(all(test, unix))]
 pub(crate) mod signature_tests;
@@ -2380,7 +2382,7 @@ pub fn retire_worktree(
 /// Inputs: the store and the time now. Output: how many were deleted.
 pub fn prune(db: &Connection, now_ms: u64) -> Result<usize, EngineError> {
     #[cfg(unix)]
-    return flow::prune(db, now_ms);
+    return prune::prune(db, now_ms);
     #[cfg(not(unix))]
     {
         let _ = (db, now_ms);
