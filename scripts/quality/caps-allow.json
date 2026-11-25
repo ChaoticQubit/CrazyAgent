@@ -141,7 +141,7 @@
   "crates/crazyagent/src/tui/screens/usage/tests.rs": 1623,
   "crates/crazyagent/src/usage/capture.rs": 1956,
   "crates/crazyagent/src/usage/capture/counting_tests.rs": 1858,
-  "crates/crazyagent/src/usage/capture/tests.rs": 1916,
+  "crates/crazyagent/src/usage/capture/tests.rs": 1902,
   "crates/crazyagent/src/usage/metrics/tests.rs": 2288,
   "crates/crazyagent/src/worktrees.rs": 2431,
   "crates/crazyagent/tests/client_controller.rs": 1735,
