@@ -1158,3 +1158,6 @@ mod tests;
 
 #[cfg(all(test, windows))]
 mod windows_tests;
+
+#[cfg(test)]
+mod finish_tests;
