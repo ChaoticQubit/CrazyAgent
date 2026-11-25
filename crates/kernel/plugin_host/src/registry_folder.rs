@@ -283,10 +283,11 @@ pub(super) fn write(
 /// the folders a rolled-back replace owes back to their plugin names, at most
 /// `USER_PLUGINS_MAX` a start: every other entry first, in name order, then the owed ones,
 /// so a leftover that blocked a rollback is gone before its owed folder is put back.
-/// Input: the engine root. Output: Ok
-/// once each is restored or deleted or the folder is missing, else the first refusal
-/// after every entry was tried.
-pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
+/// Inputs: the engine root and the most entries one sweep acts on, 1 to
+/// `USER_PLUGINS_MAX`. Output: Ok once each is restored or deleted or the folder is
+/// missing, else the first refusal after every entry was tried.
+pub(super) fn sweep_within(root: &Path, cap: usize) -> Result<(), Refused> {
+    assert!((1..=USER_PLUGINS_MAX).contains(&cap));
     let Some(directory) = open(root, false)? else {
         return Ok(());
     };
@@ -295,10 +296,10 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
         if left_over(file.as_encoded_bytes()) {
             left.push(file.to_os_string());
         }
-        left.len() < USER_PLUGINS_MAX
+        left.len() < cap
     })
     .map_err(|()| unavailable())?;
-    assert!(left.len() <= USER_PLUGINS_MAX);
+    assert!(left.len() <= cap);
     left.sort();
     left.sort_by_key(|file| file.to_str().and_then(owed_name).is_some());
     let mut first = None;

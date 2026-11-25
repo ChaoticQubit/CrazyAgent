@@ -736,7 +736,15 @@ pub fn hold(
 /// other staged or retired entry is deleted. Input: the engine root. Output: Ok, or the
 /// first refusal after every entry was tried.
 pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
-    folder::remove_staged(root)
+    folder::sweep_within(root, USER_PLUGINS_MAX)
+}
+
+/// The start sweep acting on at most `cap` entries, so a row can put an entry outside one
+/// sweep's batch. Inputs: the engine root and the cap, 1 to `USER_PLUGINS_MAX`. Output: as
+/// [`remove_staged`].
+#[cfg(test)]
+pub(crate) fn remove_staged_within(root: &Path, cap: usize) -> Result<(), Refused> {
+    folder::sweep_within(root, cap)
 }
 
 /// Whether any row a removal deletes names the plugin: its trust record, its switch or a
