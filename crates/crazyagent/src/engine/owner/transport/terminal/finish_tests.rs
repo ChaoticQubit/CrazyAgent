@@ -72,9 +72,7 @@ impl Viewing for Revocable {
 
     fn typed(&self, _: &TerminalRequest) {}
 
-    fn heard(&self, _: String) -> impl Future<Output = ()> + Send {
-        async {}
-    }
+    async fn heard(&self, _: String) {}
 }
 
 /// A view whose grant ends while its paste is stalled in the host closes as
