@@ -149,7 +149,7 @@ fn try_from_refuses_exactly_what_reference_refuses() {
         ("aux.x", "a"),
         ("lpt9.x", "a"),
         ("nul.github", "token"),
-        ("com1", "a"),
+        ("com1.x", "a"),
         ("c", "token"),
         ("a", "x"),
         ("Svc", "a"),
