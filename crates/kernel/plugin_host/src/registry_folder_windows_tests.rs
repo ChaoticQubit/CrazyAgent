@@ -168,10 +168,10 @@ fn names(folder: &Path) -> Vec<String> {
     names
 }
 
-/// Runs `mklink` through cmd.exe with each path as its own quoted argument. A path with a
-/// forward slash, which mklink reads as a switch, a quote, or a character cmd.exe acts on
-/// inside quotes too (`%`, `!`, `&`, `|`, `^`, `<`, `>`) is refused before cmd.exe starts,
-/// so a path is never read as a command; `(` and `)` pass, being literal inside the quotes.
+/// Runs `mklink` through cmd.exe with each path as its own quoted argument. A path with `%`
+/// or `!` is refused before cmd.exe starts, because cmd.exe expands them inside quotes; one
+/// with a forward slash, which mklink reads as a switch, the quote itself or `&`, `|`, `^`,
+/// `<`, `>` is refused as well, so a path is never read as a command; `(` and `)` pass.
 /// Inputs: the switch, if any, the link and the target. Output: whether mklink made the
 /// link; a path that is not UTF-8 or a cmd.exe that cannot start stops the row naming it.
 fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
