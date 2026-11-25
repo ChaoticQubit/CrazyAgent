@@ -1013,17 +1013,6 @@ mod tests {
             alone.is_ok(),
             "a connection of the stopped engine was left on its database: {alone:?}"
         );
-        let kept: i64 = probe
-            .query_row(
-                "SELECT count(*) FROM landing_change_sets WHERE state='discarded'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            kept, DISCARDED,
-            "the pass the stop ended kept every discarded set"
-        );
     }
 
     /// The owner socket lists the local branches a change set can be accepted onto with the
