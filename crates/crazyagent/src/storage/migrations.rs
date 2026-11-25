@@ -510,10 +510,12 @@ fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
 /// is a `backups/replaced-<time>` folder this user owns, read as itself; a link, another
 /// account's folder or any other name is not read. A copy whose database does not open or
 /// read, a folder that does not list, or more than [`REPLACED_SCAN_MAX`] copies is a
-/// failure, on which the sweep keeps every key. Input: the engine root. Output: the names.
+/// failure, on which the sweep keeps every key. Inputs: the engine root and the plugin
+/// store's reader of a copy's key names. Output: the names.
 #[cfg(unix)]
 pub(crate) fn replaced_key_names(
     root: &Path,
+    named: fn(&Connection) -> Result<std::collections::BTreeSet<String>, EngineError>,
 ) -> Result<std::collections::BTreeSet<String>, EngineError> {
     use std::os::unix::fs::MetadataExt;
     let folder = root.join(kernel_storage::migrations::BACKUPS);
@@ -546,9 +548,7 @@ pub(crate) fn replaced_key_names(
         read += 1;
         let replaced = replaced_database(&copy)?;
         if has_table(&replaced, "app_plugin_secrets")? {
-            let named = kernel_plugin_host::store::named_keys(&replaced)
-                .map_err(|refused| error(refused.code))?;
-            names.extend(named);
+            names.extend(named(&replaced)?);
         }
     }
     assert!(read <= REPLACED_SCAN_MAX);

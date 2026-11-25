@@ -417,7 +417,9 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
             if bound(name) {
                 return Ok(true);
             }
-            match replaced.get_or_init(|| crate::storage::migrations::replaced_key_names(root)) {
+            match replaced.get_or_init(|| {
+                crate::storage::migrations::replaced_key_names(root, copy_key_names)
+            }) {
                 Ok(names) => Ok(names.contains(name)),
                 Err(cause) => Err(cause.clone()),
             }
@@ -426,6 +428,13 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
     }
     #[cfg(windows)]
     let _ = accounts::remove_unkept_in(root, PLUGIN_KEYS, |name: &str| Ok(bound(name)));
+}
+
+/// The key names the binding rows of a kept replaced copy name, read by the plugin store.
+/// Input: the copy's database. Output: the names, or the store's refusal.
+#[cfg(unix)]
+fn copy_key_names(copy: &Connection) -> Result<std::collections::BTreeSet<String>, EngineError> {
+    kernel_plugin_host::store::named_keys(copy).map_err(error)
 }
 
 #[cfg(all(test, unix))]
