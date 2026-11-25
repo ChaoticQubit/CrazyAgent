@@ -204,11 +204,11 @@ impl Entry<'_> {
                 (PluginStatus::Refused { .. }, _) => ("Refused".into(), Role::Error),
                 (PluginStatus::NeedsReview, _) => ("Not approved".into(), Role::Warning),
                 (PluginStatus::Changed { .. }, _) => ("Changed - review".into(), Role::Warning),
-                (_, Origin::Bundled) => (format!("Bundled  {switch}"), role),
+                (_, Origin::Bundled) => (format!("Built in  {switch}"), role),
                 (_, Origin::User) => (format!("Approved  {switch}"), role),
             },
             Self::Code(grants) if grants.essential => (format!("Essential  {switch}"), role),
-            Self::Code(_) => (format!("Bundled  {switch}"), role),
+            Self::Code(_) => (format!("Built in  {switch}"), role),
         }
     }
 }
@@ -820,7 +820,7 @@ impl AppPluginsPage {
         match entry {
             Entry::App(plugin) => {
                 let origin = match plugin.origin {
-                    Origin::Bundled => "Bundled",
+                    Origin::Bundled => "Built in",
                     Origin::User => "Added by you",
                 };
                 let mut under = vec![format!(
@@ -854,7 +854,7 @@ impl AppPluginsPage {
             Entry::Code(grants) => {
                 let count = grants.capabilities.len();
                 let mut under = vec![format!(
-                    "{}, bundled code plugin. {count} permission{}.",
+                    "{}, built-in code plugin. {count} permission{}.",
                     safe(&grants.plugin),
                     if count == 1 { "" } else { "s" }
                 )];
@@ -977,11 +977,11 @@ impl AppPluginsPage {
             }
         }
         match &self.grants {
-            Grants::Loading => lines.extend(muted("Reading bundled code plugins...")),
+            Grants::Loading => lines.extend(muted("Reading built-in code plugins...")),
             Grants::Failed(code) => lines.extend(
                 wrap(
                     &format!(
-                        "Bundled code plugins couldn't be read. {} Press r to read again.",
+                        "Built-in code plugins couldn't be read. {} Press r to read again.",
                         sentence(code)
                     ),
                     limit,
@@ -1364,7 +1364,7 @@ impl Screen for AppPluginsPage {
                 let title = if *approve {
                     format!("Review {}", safe(&trust.title))
                 } else {
-                    format!("{} (bundled)", safe(&trust.title))
+                    format!("{} (built in)", safe(&trust.title))
                 };
                 (title, texts[skip..].to_vec(), hints)
             }
