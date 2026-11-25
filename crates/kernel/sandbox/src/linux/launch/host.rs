@@ -209,7 +209,7 @@ pub(super) fn cuts(backend: &LinuxBackend) -> bool {
 /// Tells whether a bubblewrap is one the helper may nest an agent under ([`trusted_file`]).
 /// A host whose bubblewrap fails this stays on plain Landlock with its gap lines. Input:
 /// its path. Output: true when it may.
-pub fn trusted(bwrap: &Path) -> bool {
+pub(crate) fn trusted(bwrap: &Path) -> bool {
     trusted_file(bwrap).is_some()
 }
 
@@ -220,7 +220,7 @@ pub fn trusted(bwrap: &Path) -> bool {
 /// the user namespace. A bubblewrap [`trusted`] refuses is never started. Inputs:
 /// bubblewrap, the helper and the probe's arguments. Output: true only when the nested
 /// probe exits 0.
-pub fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
+pub(crate) fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
     assert!(flags.first().is_some_and(|flag| flag == PROBE));
     clean_absolute(bwrap)
         && trusted(bwrap)

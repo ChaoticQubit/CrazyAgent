@@ -50,15 +50,15 @@ pub(crate) const OPEN_SOCKETS: &str = "--open-sockets";
 
 pub(crate) const KEEP_FREE: &str = "--keep-free";
 
-pub const PROBE: &str = "--probe";
+pub(crate) const PROBE: &str = "--probe";
 
 pub(crate) const FILTER_SOCKETS: &str = "--filter-sockets";
 
 pub(crate) const DIE_WITH: &str = "--die-with";
 
-pub const NEST: &str = "--nest";
+pub(crate) const NEST: &str = "--nest";
 
-pub const NESTED: &str = "--nested";
+pub(crate) const NESTED: &str = "--nested";
 
 pub(crate) const PRIVATE_MOUNTS: &str = "--private-mounts";
 
