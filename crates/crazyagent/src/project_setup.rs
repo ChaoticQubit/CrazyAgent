@@ -3691,39 +3691,10 @@ pub fn read_context(
     Ok(text_chunk(path, size, offset, bytes))
 }
 
+mod redaction;
 mod research_logs;
+pub(crate) use redaction::redact;
 pub use research_logs::research_log;
-
-/// Hides words and lines that look like credentials before text leaves the engine: a
-/// research log line, or a past conversation's message, tool input or tool output. Takes
-/// the text, one line or many. Returns it with the same line breaks and white space: each
-/// line naming a credential field, and each line of a private key block from its BEGIN line
-/// to its END line, a fixed notice; each credential-like word, the value after a key named
-/// like a credential, a URL's user part and a wrapped token's tail replaced. This masks
-/// known shapes, not every secret: one in another shape, a short value under a key not
-/// named like a credential or one split across messages stays.
-pub(crate) fn redact(text: &str) -> String {
-    let mut key_block = false;
-    let mut wrapped = false;
-    text.split('\n')
-        .map(|line| {
-            let lower = line.to_ascii_lowercase();
-            key_block |= lower.contains(KEY_BLOCK_BEGIN);
-            let hidden = key_block || SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
-            if key_block && lower.contains(KEY_BLOCK_END) {
-                key_block = false;
-            }
-            if hidden {
-                wrapped = false;
-                return HIDDEN_LINE.to_owned();
-            }
-            let (kept, ends_hidden) = redact_words(line, wrapped);
-            wrapped = ends_hidden;
-            kept
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 /// Where the value of a key named like a credential sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
