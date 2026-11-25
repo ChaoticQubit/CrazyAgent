@@ -650,9 +650,16 @@ pub(in crate::tui) fn unopened(why: &str) -> String {
 }
 
 /// The words shown for a closed or refused terminal.
-/// Input: the code. Output: the lead line and the plain reason under it.
+/// Input: the code. Output: the lead line and the plain reason under it. On Linux a terminal
+/// with no tmux names the package manager first, since setup there installs tmux only through
+/// Linux Homebrew or when the engine already runs as root, and never calls sudo.
 fn closed_words(code: &str) -> (&'static str, &'static str) {
     match code {
+        #[cfg(target_os = "linux")]
+        "terminal_unavailable" => (
+            "Terminals need tmux.",
+            "Install it with your package manager, then run setup.",
+        ),
         NOT_READY => (
             "Not ready yet.",
             "This engine cannot stream agent terminals yet.",

@@ -5799,7 +5799,7 @@ fn on_linux_a_terminal_with_no_tmux_says_to_install_it_with_the_package_manager(
         super::closed_words("terminal_unavailable"),
         (
             "Terminals need tmux.",
-            "Install it with your package manager, then run setup."
+            "Install it with your package manager, then run setup.",
         )
     );
 }
