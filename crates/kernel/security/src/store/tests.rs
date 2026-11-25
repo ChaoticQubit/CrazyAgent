@@ -128,3 +128,55 @@ fn a_refused_name_writes_nothing() {
     store.put("svc", "token", &secret).unwrap();
     assert_eq!(store.0.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn try_from_refuses_exactly_what_reference_refuses() {
+    let long = "a".repeat(NAME_BYTES_MAX + 1);
+    let longest = "b".repeat(NAME_BYTES_MAX);
+    let cases: [(&str, &str); 26] = [
+        ("dev.crazyagent.test.github", "token"),
+        ("svc", "aux"),
+        ("aux", "a"),
+        ("svc.", "a"),
+        ("svc", "aux.x"),
+        ("console", "a"),
+        ("ab", "x"),
+        ("cd", "token"),
+        (&longest, &longest),
+        ("svc", "a."),
+        ("svc", "a_."),
+        ("con.v1", "token"),
+        ("aux.x", "a"),
+        ("lpt9.x", "a"),
+        ("nul.github", "token"),
+        ("com1", "a"),
+        ("c", "token"),
+        ("a", "x"),
+        ("Svc", "a"),
+        ("svc", "A"),
+        (&long, "a"),
+        ("svc", &long),
+        ("", "a"),
+        ("svc", ""),
+        ("x", "y:z"),
+        ("svc", "a b"),
+    ];
+    let mut accepted = 0;
+    for (service, account) in cases {
+        let joined = format!("{service}:{account}");
+        let made = reference(service, account);
+        let read = SecretRef::try_from(joined.as_str());
+        assert_eq!(made.is_ok(), read.is_ok(), "{service:?} {account:?}");
+        if let (Ok(made), Ok(read)) = (made, read) {
+            assert_eq!(made, read);
+            assert_eq!(read.as_str(), joined);
+            accepted += 1;
+        } else {
+            assert_eq!(
+                SecretRef::try_from(joined.as_str()).unwrap_err(),
+                StoreError::code("credential_reference_invalid")
+            );
+        }
+    }
+    assert_eq!(accepted, 9);
+}
