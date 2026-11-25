@@ -35,6 +35,8 @@ const PANEL_NARROW: usize = 30;
 const FILTER_CHARS_MAX: usize = 100;
 const TOOLS_TEXT_CHARS: usize = 24;
 const SETUP_ITEMS: usize = 4;
+/// The second line of the home card's harness count, naming the computer they run on.
+pub(super) const HARNESSES_HERE: &str = "on this Mac.";
 const TOPICS: [(Topic, &str); 4] = [
     (Topic::Basics, "Basics"),
     (Topic::CoreLoop, "Core loop"),

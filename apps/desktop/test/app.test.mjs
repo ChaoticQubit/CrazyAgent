@@ -200,7 +200,7 @@ test("Get set up stays until one account is ready and one pool exists; harnesses
   const empty = setupSteps(ok([]), ok([]), harnesses, toolsReady);
   assert.equal(empty.visible, true);
   assert.deepEqual(empty.items.map((item) => [item.id, item.done]), [["accounts", false], ["pools", false], ["harnesses", false], ["tools", true]]);
-  assert.equal(empty.items[2].body, "2 of 3 harnesses ready on this Mac.");
+  assert.equal(empty.items[2].body, "2 of 3 harnesses ready on this computer.");
   assert.equal(empty.items[0].href, "#/settings/accounts?action=add");
   assert.equal(empty.items[1].href, "#/settings/pools?action=new");
   assert.equal(setupSteps(ok([account({ status: "not_signed_in" })]), ok([]), harnesses, toolsReady).items[0].done, false);
@@ -209,7 +209,7 @@ test("Get set up stays until one account is ready and one pool exists; harnesses
   assert.equal(setupSteps(ok([account({})]), ok([pool]), harnesses, toolsReady).visible, false);
   const unknown = setupSteps({ kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" });
   assert.equal(unknown.visible, true);
-  assert.equal(unknown.items[2].body, "See which coding agents are installed on this Mac.");
+  assert.equal(unknown.items[2].body, "See which coding agents are installed on this computer.");
 });
 
 test("Get set up stays hidden until every read it uses has settled, so Home never flashes it", () => {

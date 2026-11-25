@@ -77,7 +77,7 @@ pub(in crate::tui) fn render(shell: &mut Shell, width: u16, height: u16) -> Vec<
 }
 
 fn fixture(name: &str, swaps: &[(&str, &str)]) -> Vec<String> {
-    let path = format!("{}/src/tui/frames/{name}.txt", env!("CARGO_MANIFEST_DIR"));
+    let path = super::screens::frame_path(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {path}"));
     text.lines()
         .map(|row| {
@@ -516,7 +516,7 @@ fn home_frames_match_the_design() {
             &[
                 ("[x] Check your harnesses", "[ ] Check your harnesses"),
                 ("2 of 9 harnesses ready", "Harness checks are not"),
-                ("on this Mac.", "ready yet."),
+                ("on this computer.", "ready yet."),
             ],
         );
     }

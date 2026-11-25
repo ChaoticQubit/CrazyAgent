@@ -120,7 +120,7 @@ test("default names take the lowest free number; form checks match the engine's 
   assert.equal(urlError("http://127.0.0.1:11434/v1"), undefined);
   assert.equal(urlError("http://localhost:8080"), undefined);
   for (const bad of ["http://example.com/v1", "api.together.xyz", "", "https://user:pass@example.com", "ftp://127.0.0.1"]) {
-    assert.equal(urlError(bad), "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.", bad);
+    assert.equal(urlError(bad), "Enter a full URL that starts with https://, or http://127.0.0.1 for this computer.", bad);
   }
   assert.equal(nameError("Work"), undefined);
   for (const bad of ["", "   ", "a".repeat(61), "two\nlines"]) assert.ok(nameError(bad), JSON.stringify(bad));

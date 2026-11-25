@@ -191,8 +191,8 @@ test("a harness the engine lists as Can't run is never the team default, sits in
     ["codex", "Codex - Can't run", "Can't run", true],
     ["gemini", "Gemini CLI - Not installed", "Not installed", true],
   ]);
-  assert.equal(wizard.teamErrors(engineTeam("codex", 1), blocked).master, "Codex can't run on this Mac. Pick another harness.");
-  assert.deepEqual(wizard.teamErrors(engineTeam("codex", 1), blocked).rows, ["Codex can't run on this Mac. Pick another harness."]);
+  assert.equal(wizard.teamErrors(engineTeam("codex", 1), blocked).master, "Codex can't run on this computer. Pick another harness.");
+  assert.deepEqual(wizard.teamErrors(engineTeam("codex", 1), blocked).rows, ["Codex can't run on this computer. Pick another harness."]);
   assert.equal(wizard.teamValid(engineTeam("codex", 1), blocked), false);
   const added = wizard.addHarnessRow({ ...engineTeam("claude", 0), sub_harnesses: [{ harness: "claude", agents: 1, tools: true }] }, blocked);
   assert.equal(added.sub_harnesses[1].harness, "claude", "a new row never starts on a harness that can't run");
@@ -228,7 +228,7 @@ test("team validation mirrors the engine agent range", () => {
   assert.equal(wizard.teamErrors({ ...ok, max_agents: 3 }, catalog).range, "This team has 4 agents: the master and 3 more. Set At most to 4 or more.");
   assert.equal(wizard.teamErrors({ ...ok, min_agents: 5, max_agents: 6 }, catalog).range, "This team has 4 agents. Set At least to 4 or less.");
   assert.equal(wizard.teamErrors({ ...ok, max_agents: 65 }, catalog).range, "At most can be up to 64.");
-  assert.equal(wizard.teamErrors({ ...ok, master: "gemini" }, catalog).master, "Gemini CLI isn't installed on this Mac. Pick another harness.");
+  assert.equal(wizard.teamErrors({ ...ok, master: "gemini" }, catalog).master, "Gemini CLI isn't installed on this computer. Pick another harness.");
   assert.equal(wizard.teamErrors({ ...ok, master: "aider" }, catalog).master, "Aider can't run team agents yet. Pick another harness.");
   assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "aider", agents: 1, tools: true }] }, catalog).rows, ["Aider can't run team agents yet. Pick another harness."]);
   for (const [gone, name] of [["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]) {

@@ -41,7 +41,7 @@ const MODELS_SHOWN_MAX: usize = 8;
 /// The title of a check of the sign-in an account already has (DEC-141 PA-13).
 pub(super) const CHECK_TITLE: &str = crate::tui::native_auth::CHECK_SIGN_IN;
 /// What a running check of an account's sign-in says, the same for every harness.
-const CHECK_LINE: &str = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this computer is read.";
+pub(super) const CHECK_LINE: &str = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this computer is read.";
 /// What a check that found no sign-in says, the same for every harness.
 const CHECK_SIGNED_OUT: &str = "This account isn't signed in. Choose Sign in again.";
 
@@ -220,7 +220,7 @@ pub fn key_problem(provider: Provider, chars: usize, required: bool) -> Option<S
     })
 }
 
-fn url_problem(provider: Provider, text: &str) -> Option<&'static str> {
+pub(super) fn url_problem(provider: Provider, text: &str) -> Option<&'static str> {
     if text.trim().is_empty() {
         return Some("Type the server address.");
     }

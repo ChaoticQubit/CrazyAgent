@@ -10,7 +10,7 @@ const client = await import("../src/engine-client.ts");
 const research = await import("../src/screens/project/research.ts");
 const { updateMessage } = await import("../src/screens/settings/updates-state.ts");
 const { signInFailure } = await import("../src/screens/settings/sign-in.tsx");
-const { isMac, thisComputer } = await import("../src/ui/keys.ts");
+const { isMac, thisComputer, signInStore } = await import("../src/ui/keys.ts");
 
 const ENGINE = new URL("../../../crates/crazyagent/src/", import.meta.url).pathname;
 const FALLBACK = "Something went wrong. Try again.";
@@ -253,6 +253,24 @@ test("the app names the computer as the TUI does: this Mac on macOS, this comput
   assert.equal(thisComputer(isMac("Win32")), "this computer");
   assert.equal(signInFailure("native_auth_host_executable_changed", "claude").text,
     `Claude Code changed on ${thisComputer()} after CrazyAgent checked it, perhaps from an update. Try again.`);
+});
+
+test("the GitHub sign-in names the store each system keeps it in", () => {
+  assert.equal(signInStore(true, false), "your Mac's keychain");
+  assert.equal(signInStore(false, true), "Windows Credential Manager");
+  assert.equal(signInStore(false, false), "your system keyring");
+});
+
+test("account and server refusals name this computer off macOS", () => {
+  const url = "Enter a full URL that starts with https://, or http://127.0.0.1 for this computer.";
+  for (const [code, line] of [["account_url_required", url], ["account_url_invalid", url],
+    ["account_local_url_required", "Enter a URL on this computer, such as http://127.0.0.1:11434."],
+    ["account_probe_https_unsupported", "CrazyAgent can only check http URLs on this computer. The account is saved."],
+    ["native_auth_host_unavailable", "Sign-in isn't available on this computer right now. Check that the harness is installed."]]) {
+    assert.equal(api.plainError(code), line, code);
+  }
+  assert.equal(client.errorMessage({ code: "server_url_invalid" }),
+    "Use an https address. Plain http works only for this computer, and the address can't hold a password.");
 });
 
 const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";

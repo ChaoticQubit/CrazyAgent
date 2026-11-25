@@ -260,7 +260,7 @@ test("signed in, GitHub account has one line: who and how left, Sign out right",
   const [line] = section.rows;
   assert.equal(section.rows.length, 1);
   assert.equal(line.label, "Signed in to GitHub as mira.");
-  assert.match(line.help, /keeps this sign-in in your Mac's keychain/);
+  assert.ok(line.help.includes(`keeps this sign-in in ${{ darwin: "your Mac's keychain", win32: "Windows Credential Manager" }[process.platform] ?? "your system keyring"}`), line.help);
   assert.deepEqual(line.buttons, ["Sign out of GitHub"]);
   assert.ok(line.controlLeft > line.labelRight, JSON.stringify(line));
 });
@@ -392,7 +392,7 @@ test("Profile then Appearance then Learn CrazyAgent, each field on its own line"
   const by = Object.fromEntries(sections.flatMap((section) => section.rows).map((row) => [row.label, row]));
   for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Terminal input", "Terminal renderer", "Questions show"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
   for (const label of ["Short bio", "Preferred stack"]) assert.ok(by[label].controlLeft < by[label].labelRight, `${label} stacks ${JSON.stringify(by[label])}`);
-  assert.equal(by.Theme.help, "System follows your Mac. This choice is kept in this app only.");
+  assert.equal(by.Theme.help, `System follows ${process.platform === "darwin" ? "this Mac" : "this computer"}. This choice is kept in this app only.`);
   assert.match(by["Terminal input"].help, /Where you type to the master and every agent, on every screen/);
   assert.match(by["Terminal renderer"].help, /^How every terminal draws its text\. GPU draws on the graphics card/);
 });

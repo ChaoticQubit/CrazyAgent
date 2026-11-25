@@ -13,7 +13,7 @@
                                               │                                 
                                               │   [x] Check your harnesses      
                                               │       2 of 9 harnesses ready    
-                                              │       on this Mac.              
+                                              │       on this computer.         
                                               │                                 
                                               │   [ ] Install tools             
                                               │       Missing: uv, Graphify.    

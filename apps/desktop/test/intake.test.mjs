@@ -359,7 +359,7 @@ const dep = (name, state, label = name) => ({ name, label, state });
 
 test("setup lists each tool's state in plain words", () => {
   assert.deepEqual(intake.dependencyView(dep("tmux", { state: "found", version: "3.5a" })),
-    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Found", tone: "ok", line: "Version 3.5a on this Mac." });
+    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Found", tone: "ok", line: "Version 3.5a on this computer." });
   assert.deepEqual(intake.dependencyView(dep("uv", { state: "installed", version: "0.9.2" })),
     { title: "uv", about: "Installs graphify.", word: "Installed", tone: "ok", line: "Version 0.9.2 installed." });
   assert.deepEqual(intake.dependencyView(dep("graphify", { state: "installing" })),
@@ -953,7 +953,7 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   const markup = html(ToolsSetupView, base);
   const rows = markup.split('<li class="in-row">');
   const rowWith = (text) => { const found = rows.filter((row) => row.includes(text)); assert.equal(found.length, 1, text); return found[0]; };
-  assert.match(markup, /tmux[\s\S]*Version 3\.5a on this Mac\.[\s\S]*Found/);
+  assert.match(markup, /tmux[\s\S]*Version 3\.5a on this computer\.[\s\S]*Found/);
   assert.match(rowWith("Graphify command"), /Not installed/);
   assert.match(markup, /<legend>Code graph<\/legend>[\s\S]*Graphify skill for agents/);
   assert.doesNotMatch(markup, /always on/i);

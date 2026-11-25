@@ -278,6 +278,8 @@ test("the Add MCP server form turns typed text into the engine's spec and refuse
     { spec: { kind: "stdio", command: "/usr/local/bin/uvx", args: ["mcp-server-git", "--repository", "/Users/owner/code"] } });
   assert.deepEqual(serverSpecInput({ kind: "http", command: "", args: "", url: " https://mcp.example.invalid/sse " }),
     { spec: { kind: "http", url: "https://mcp.example.invalid/sse" } });
+  assert.deepEqual(serverSpecInput({ kind: "http", command: "", args: "", url: "http://mcp.example.invalid/sse" }),
+    { error: { url: "Use an https address. Plain http works only for this computer, and the address can't hold a password." } });
   assert.deepEqual(serverSpecInput({ kind: "stdio", command: "uvx", args: "", url: "" }), { error: { command: "Enter the full path to the command, starting with /." } });
   const many = Array.from({ length: 33 }, (_, index) => `arg${index}`).join("\n");
   assert.deepEqual(serverSpecInput({ kind: "stdio", command: "/bin/x", args: many, url: "" }), { error: { args: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together." } });

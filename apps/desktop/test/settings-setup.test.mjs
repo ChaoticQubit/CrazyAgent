@@ -85,7 +85,7 @@ const present = { state: "found", version: "3.5a" };
 test("Settings, Pack lists tmux, uv and graphify after the pack and offers Install tools while one is missing", () => {
   const skipped = html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, { state: "missing" }, { state: "failed", reason: "Checksum didn't match." }) }))));
   assert.match(skipped, /<h3[^>]*>Code graph[\s\S]*<h3[^>]*>Tools<\/h3>/);
-  assert.match(rowOf(skipped, "tmux"), /Version 3\.5a on this Mac\.[\s\S]*Found/);
+  assert.match(rowOf(skipped, "tmux"), /Version 3\.5a on this computer\.[\s\S]*Found/);
   assert.match(rowOf(skipped, "uv"), /Not installed/);
   assert.match(rowOf(skipped, "graphify"), /Checksum didn&#x27;t match\./);
   assert.match(skipped, /<button type="button" class="btn primary small"[^>]*>(<svg[\s\S]*?<\/svg>)?Install tools<\/button>/);

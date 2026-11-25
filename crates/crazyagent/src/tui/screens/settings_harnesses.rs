@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const LABEL_WIDTH: usize = 13;
 const DETAIL_ROWS: usize = 6;
 const CHROME_ROWS: usize = 4 + 1;
-const SUBTITLE: &str = "Agents run inside these tools. CrazyAgent finds them on this Mac. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.";
+pub(super) const SUBTITLE: &str = "Agents run inside these tools. CrazyAgent finds them on this Mac. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.";
 const MODAL_WIDTH: u16 = 72;
 const UPDATE_POLLS_MAX: usize = 240;
 const NODE_POLLS_MAX: usize = 240;

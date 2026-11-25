@@ -15,6 +15,18 @@ use ratatui::text::Line;
 
 const FORM_WIDTH: usize = 72;
 
+/// The warning when the profile saved but the Colors choice could not be written.
+pub(in crate::tui::screens) const COLORS_LOST: &str =
+    "Profile saved, but the color choice could not be kept on this Mac.";
+
+/// The warning when the profile saved but the Shift-arrows choice could not be written.
+pub(in crate::tui::screens) const ARROWS_LOST: &str =
+    "Profile saved, but the Shift-arrows choice could not be kept on this Mac.";
+
+/// The warning when the profile saved but the Shift-Enter choice could not be written.
+pub(in crate::tui::screens) const ENTER_LOST: &str =
+    "Profile saved, but the Shift-Enter choice could not be kept on this Mac.";
+
 /// Settings, Profile: the welcome form prefilled, plus the Colors choice and the
 /// Learn CrazyAgent replay entries. Input: keys and the profile arrivals. Output: the
 /// form; Save changes saves the profile in the engine and the Colors choice on this Mac.
@@ -158,18 +170,9 @@ impl Screen for ProfilePage {
                         ctx.shift_enter = shift_enter;
                         match (saved_colors, saved_keys, saved_enter) {
                             (Ok(()), Ok(()), Ok(())) => ctx.say(Message::success("Saved.", "")),
-                            (Err(_), _, _) => ctx.say(Message::warning(
-                                "Profile saved, but the color choice could not be kept on this Mac.",
-                                "",
-                            )),
-                            (Ok(()), Err(_), _) => ctx.say(Message::warning(
-                                "Profile saved, but the Shift-arrows choice could not be kept on this Mac.",
-                                "",
-                            )),
-                            (Ok(()), Ok(()), Err(_)) => ctx.say(Message::warning(
-                                "Profile saved, but the Shift-Enter choice could not be kept on this Mac.",
-                                "",
-                            )),
+                            (Err(_), _, _) => ctx.say(Message::warning(COLORS_LOST, "")),
+                            (Ok(()), Err(_), _) => ctx.say(Message::warning(ARROWS_LOST, "")),
+                            (Ok(()), Ok(()), Err(_)) => ctx.say(Message::warning(ENTER_LOST, "")),
                         }
                     }
                     Err(code) => {

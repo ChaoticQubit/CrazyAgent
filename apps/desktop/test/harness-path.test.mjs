@@ -22,7 +22,7 @@ test("each refusal of a harness file has its own sentence, and an unknown code r
   for (const code of CODES) assert.equal(api.isPathCode(code), true, code);
   assert.equal(api.isPathCode("engine_unreachable"), false);
   assert.equal(api.pathCopy("something_new"), api.pathCopy("harness_path_refused"));
-  assert.equal(api.pathCopy("harness_path_not_executable"), "That file isn't a program this Mac can run.");
+  assert.equal(api.pathCopy("harness_path_not_executable"), "That file isn't a program this computer can run.");
 });
 
 test("only Codex and Claude Code have a file to choose, named as the owner finds it", () => {
@@ -59,7 +59,7 @@ test("the looked list never shows more than the engine's bound", () => {
 
 test("a refused file names the file with home as ~ and the reason, and offers to forget a chosen file", () => {
   const html = block({ found: { kind: "refused", path: "/Users/someone/tools/codex", code: "harness_path_not_executable" } });
-  assert.match(html, /CrazyAgent won't use ~\/tools\/codex\. That file isn't a program this Mac can run\./);
+  assert.match(html, /CrazyAgent won't use ~\/tools\/codex\. That file isn't a program this computer can run\./);
   assert.doesNotMatch(html, /but won't use it/);
   assert.match(html, />Forget the chosen file<\/button>/);
   assert.match(html, />Choose the codex file<\/button>/);
