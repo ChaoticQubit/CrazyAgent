@@ -330,3 +330,47 @@ fn a_root_reaching_a_secret_through_a_link_is_refused() {
     std::os::unix::fs::symlink(dotfiles.join("aws"), home.join(".aws")).unwrap();
     assert!(secret_refused(&dotfiles, &secrets));
 }
+
+/// A harness home that is a link: the folder it leads to, a folder inside that and a folder
+/// holding it are refused as an extra read-only folder is checked (its canonical form, then
+/// the secret and granted-root checks), whether named through the link, in another case or
+/// by their own path; and the harness check alone refuses the folders it leads to.
+#[cfg(unix)]
+#[test]
+fn a_harness_home_that_is_a_link_refuses_the_folder_it_leads_to() {
+    let (folder, home, secrets) = secret_home();
+    let elsewhere = folder.path().join("elsewhere");
+    let target = elsewhere.join("claude");
+    std::fs::create_dir_all(target.join("projects")).unwrap();
+    std::fs::remove_dir(home.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&target, home.join(".claude")).unwrap();
+    let mut typed = vec![
+        home.join(".claude"),
+        home.join(".claude").join("projects"),
+        target.join("projects"),
+        target.clone(),
+        elsewhere.clone(),
+    ];
+    if cfg!(target_os = "macos") {
+        typed.push(home.join(".CLAUDE"));
+        typed.push(home.join(".Claude").join("projects"));
+    }
+    for typed in &typed {
+        let real = canonical(typed).unwrap();
+        assert!(secret_refused(&real, &secrets), "{}", typed.display());
+        assert!(
+            granted_root(&real, &home, &secrets, &[".claude"]).is_err(),
+            "{}",
+            typed.display()
+        );
+    }
+    for inside in [target.clone(), target.join("projects")] {
+        let real = canonical(&inside).unwrap();
+        match granted_root(&real, &home, &[], &[".claude"]) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert_eq!(reason, "sandbox roots must not be owner harness homes")
+            }
+            other => panic!("{}: {other:?}", inside.display()),
+        }
+    }
+}
