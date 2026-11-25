@@ -1,5 +1,5 @@
 use super::*;
-use crate::linux::launch::{LANDLOCK_DEVICES, SYSTEM_READ_ROOTS};
+use crate::linux::places::{fixed_place, granted_place, held_roots};
 use ::landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, RestrictionStatus, Ruleset,
     RulesetAttr, RulesetCreatedAttr, RulesetError, Scope, make_bitflags,
@@ -7,7 +7,6 @@ use ::landlock::{
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach};
 use crazyagent_linux_supervisor::serve::Supervised;
 use rustix::fs::{FileType, Mode, OFlags};
-use rustix::io::Errno;
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
     SeccompRule, TargetArch,
@@ -16,7 +15,6 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
-use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -263,48 +261,6 @@ pub fn git_folder_rights() -> BitFlags<AccessFs> {
     })
 }
 
-/// Whether `path` is one of the fixed system folders and devices every policy reads or
-/// writes, some of which are links on this computer (`/bin` to `/usr/bin`), so their rules
-/// follow links as before; every other rule path is a granted folder. Input: the path.
-/// Output: the answer.
-fn fixed_place(path: &Path) -> bool {
-    SYSTEM_READ_ROOTS
-        .iter()
-        .chain(&["/proc"])
-        .chain(LANDLOCK_DEVICES)
-        .any(|fixed| path == Path::new(fixed))
-}
-
-/// Opens a granted folder or file one component at a time from `/`, each with `O_PATH` and
-/// `O_NOFOLLOW` and each checked not to be a link, since such an open of a link returns the
-/// link itself. Input: the absolute path. Output: the open place, none when it cannot be
-/// opened as today, or the refusal when any component is a link or not a folder.
-fn granted_place(path: &Path) -> Result<Option<OwnedFd>, String> {
-    assert!(path.is_absolute());
-    let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let link = || format!("{GRANT_BECAME_LINK}: {}", path.display());
-    let Ok(mut place) = rustix::fs::open("/", flags, Mode::empty()) else {
-        return Ok(None);
-    };
-    for component in path.components().skip(1) {
-        let Component::Normal(name) = component else {
-            return Err(link());
-        };
-        place = match rustix::fs::openat(&place, name, flags, Mode::empty()) {
-            Ok(next) => next,
-            Err(Errno::NOTDIR) => return Err(link()),
-            Err(_) => return Ok(None),
-        };
-        let Ok(stat) = rustix::fs::fstat(&place) else {
-            return Ok(None);
-        };
-        if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink {
-            return Err(link());
-        }
-    }
-    Ok(Some(place))
-}
-
 /// The rules for one list of policy paths: a fixed place opens as the crate opens it, a
 /// granted place through [`granted_place`]; a place that does not open gets no rule, and
 /// one that is not a folder gets only the file rights of `access`. Inputs: the paths and
@@ -491,17 +447,24 @@ pub(super) fn refused_sockets(tcp_only: bool, plain_tcp: bool) -> Result<Vec<Sec
 /// Starts a harness bubblewrap launched, after a private mount tree if it hides folders ([`cut`]),
 /// behind the socket filter a Landlock agent with a network limit gets ([`refuse_sockets`] with
 /// `tcp_only`): no Unix-domain socket, no io_uring ring, no family but TCP and routing netlink, so
-/// no AF_VSOCK leaves the closed network. Inputs: the harness and the covers. Output: 3 when the
-/// cut or the filter fails, 126 when the harness cannot start.
+/// no AF_VSOCK leaves the closed network. Each bound grant root is checked first to be the place
+/// the engine opened at wrap ([`held_roots`]). Inputs: the harness, the covers and the bound
+/// roots. Output: 3 when the cut, the check or the filter fails, 126 when the harness cannot
+/// start.
 pub(super) fn filtered(
     program: &Path,
     args: Vec<OsString>,
     covers: Option<&[PathBuf]>,
+    bound: &[Bound],
 ) -> ExitCode {
     if let Some(covers) = covers
         && let Err(reason) = cut(covers)
     {
         eprintln!("crazyagent-landlock: {HIDDEN_MOUNTS_NOT_PRIVATE}: {reason}");
+        return ExitCode::from(3);
+    }
+    if let Err(reason) = held_roots(bound) {
+        eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
     if let Err(reason) = refuse_sockets(true, false) {

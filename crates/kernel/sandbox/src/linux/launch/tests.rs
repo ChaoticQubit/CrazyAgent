@@ -1,4 +1,5 @@
 use super::*;
+use crate::linux::places::BOUND;
 use std::os::unix::fs::MetadataExt;
 
 fn helper() -> PathBuf {
@@ -18,6 +19,7 @@ fn bubblewrap_starts_the_agent_in_a_new_session() {
         Path::new(BWRAP_PATHS[0]),
         &helper(),
         &grants,
+        &[],
         Path::new("/tmp"),
         &SandboxNetwork::Open,
     );
@@ -38,6 +40,7 @@ fn bubblewrap_cuts_off_the_network_only_when_nothing_is_allowed() {
             Path::new(BWRAP_PATHS[0]),
             &helper(),
             &grants,
+            &[],
             Path::new("/tmp"),
             &network,
         )
@@ -93,6 +96,7 @@ fn bubblewrap_never_takes_a_git_folder_grant() {
         Path::new(BWRAP_PATHS[0]),
         &helper(),
         &grants,
+        &[],
         Path::new("/tmp"),
         &SandboxNetwork::Open,
     );
@@ -265,6 +269,7 @@ fn a_closed_bubblewrap_agent_gets_no_name_resolver_and_starts_behind_the_socket_
         Path::new(BWRAP_PATHS[0]),
         &helper(),
         &grants,
+        &[],
         Path::new("/tmp"),
         &SandboxNetwork::Only(Vec::new()),
     );
@@ -726,6 +731,7 @@ fn a_launch_with_hidden_folders_asks_the_helper_for_a_private_tree_on_both_backe
             Path::new(BWRAP_PATHS[0]),
             &helper(),
             grants,
+            &[],
             Path::new("/tmp"),
             &SandboxNetwork::Open,
         )
@@ -744,6 +750,73 @@ fn a_launch_with_hidden_folders_asks_the_helper_for_a_private_tree_on_both_backe
         ]
     );
     assert_eq!(tail(&grants(Vec::new())), [OsString::from(FILTER_SOCKETS)]);
+}
+
+#[test]
+fn a_bubblewrap_launch_names_each_bound_grant_root_to_the_helper_in_bind_order() {
+    let grants = Grants {
+        read: vec![PathBuf::from("/w/p")],
+        write: vec![PathBuf::from("/w/p/a"), PathBuf::from("/w/h")],
+        git_write: Vec::new(),
+        guarded: Held::default(),
+        hidden: Vec::new(),
+    };
+    let bound: Vec<Bound> = [("/w/p", 1), ("/w/p/a", 2), ("/w/h", 3)]
+        .into_iter()
+        .map(|(root, ino)| Bound {
+            root: PathBuf::from(root),
+            dev: 8,
+            ino,
+        })
+        .collect();
+    let command = bwrap_command(
+        Path::new(BWRAP_PATHS[0]),
+        &helper(),
+        &grants,
+        &bound,
+        Path::new("/tmp"),
+        &SandboxNetwork::Open,
+    );
+    let tail: Vec<&OsStr> = command
+        .get_args()
+        .skip_while(|arg| *arg != FILTER_SOCKETS)
+        .collect();
+    assert_eq!(tail.len(), 1 + 4 * bound.len(), "{tail:?}");
+    assert_eq!(
+        tail[1..5],
+        [BOUND, "/w/p", "8", "1"].map(OsStr::new),
+        "{tail:?}"
+    );
+    assert_eq!(
+        tail[9..],
+        [BOUND, "/w/h", "8", "3"].map(OsStr::new),
+        "{tail:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "assertion failed")]
+fn a_bubblewrap_grant_root_without_its_identity_is_a_bug() {
+    let grants = Grants {
+        read: vec![PathBuf::from("/w/p")],
+        write: vec![PathBuf::from("/w/h")],
+        git_write: Vec::new(),
+        guarded: Held::default(),
+        hidden: Vec::new(),
+    };
+    let bound = [Bound {
+        root: PathBuf::from("/w/p"),
+        dev: 8,
+        ino: 1,
+    }];
+    let _command = bwrap_command(
+        Path::new(BWRAP_PATHS[0]),
+        &helper(),
+        &grants,
+        &bound,
+        Path::new("/tmp"),
+        &SandboxNetwork::Open,
+    );
 }
 
 fn guarded() -> LandlockPolicy {
