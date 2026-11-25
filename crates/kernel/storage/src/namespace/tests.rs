@@ -398,11 +398,45 @@ fn sources(folder: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Whether a source file may name a plugin's namespace without the gateway's grant check.
+/// Input: the path from the repo root. Output: true for the bus gateway's source and for
+/// the storage crate's own test-only files that make a namespace (its namespace tests and
+/// its perf rows), false for every other file.
+fn exempt(path: &Path) -> bool {
+    path.starts_with("crates/kernel/bus_gateway/src")
+        || path == Path::new("crates/kernel/storage/src/namespace/tests.rs")
+}
+
+#[test]
+fn a_storage_perf_row_is_exempt_and_product_code_is_not() {
+    for path in [
+        "crates/kernel/storage/src/perf_tests.rs",
+        "crates/kernel/storage/src/perf_tests/store.rs",
+    ] {
+        assert!(exempt(Path::new(path)), "{path}");
+    }
+    for path in [
+        "crates/kernel/storage/src/namespace.rs",
+        "crates/kernel/storage/src/lib.rs",
+        "crates/crazyagent/src/lib.rs",
+    ] {
+        assert!(!exempt(Path::new(path)), "{path}");
+    }
+}
+
 #[test]
 fn namespace_is_made_only_by_the_bus_gateway() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let gateway = repo.join("crates/kernel/bus_gateway/src");
-    let own_tests = repo.join("crates/kernel/storage/src/namespace/tests.rs");
+    let lib = std::fs::read_to_string(repo.join("crates/kernel/storage/src/lib.rs")).unwrap();
+    let lines: Vec<&str> = lib.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|line| *line == "mod perf_tests;")
+        .expect("lib.rs declares perf_tests");
+    assert!(
+        at > 0 && lines[at - 1] == "#[cfg(test)]",
+        "perf_tests stays test code"
+    );
     let walked: Vec<PathBuf> = ["crates", "apps"]
         .iter()
         .flat_map(|top| sources(&repo.join(top)))
@@ -413,10 +447,15 @@ fn namespace_is_made_only_by_the_bus_gateway() {
             .iter()
             .any(|path| path.ends_with("namespace/tests.rs"))
     );
+    assert!(
+        walked
+            .iter()
+            .any(|path| path.ends_with("storage/src/perf_tests.rs"))
+    );
 
     let callers: Vec<&PathBuf> = walked
         .iter()
-        .filter(|path| !path.starts_with(&gateway) && **path != own_tests)
+        .filter(|path| !exempt(path.strip_prefix(&repo).unwrap()))
         .filter(|path| {
             std::fs::read_to_string(path).is_ok_and(|code| code.contains("Namespace::for_plugin"))
         })
