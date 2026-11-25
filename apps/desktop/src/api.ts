@@ -38,7 +38,7 @@ const COPY: Record<string, string> = {
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
   ...RESTORE_COPY,
   git_safe_unavailable: "CrazyAgent's engine didn't start: Windows is installed in a folder whose name CrazyAgent can't use to keep git from running other programs, so it runs no git on this computer.",
-  owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
+  owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.", owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
   engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",

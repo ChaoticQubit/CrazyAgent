@@ -112,7 +112,6 @@ const REFUSALS: Record<string, string> = {
   questions_bulk_invalid: `Dismiss between 1 and ${BULK_DISMISS_MAX} waiting questions at once.`,
   owner_authentication_failed: "CrazyAgent couldn't confirm this app with the engine. Restart the app, then try again.",
   owner_authority_unavailable: "The engine isn't ready for owner actions yet. Try again in a moment.",
-  owner_busy: "The engine is busy with other owner requests. Try again in a moment.",
   owner_grant_stale_or_revoked: "This app's access to the engine changed. Reconnect, then try again.",
   owner_request_failed: "The engine couldn't take this request. Try again.",
   owner_root_replaced_or_unsafe: "The engine's data folder changed or isn't safe. Restart the engine, then try again.",
