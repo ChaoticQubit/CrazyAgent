@@ -504,8 +504,9 @@ pub(super) fn sweep_replaced(
 /// Settles one retired folder beside the live folder of its plugin name by the trusted
 /// SHA-256, each plugin.toml read without following a link and hashed as the trust row
 /// is: deleted while the live text is trusted, put back in place of the live folder while
-/// only its own text is trusted, else kept. Inputs: the plugins folder, the retired entry,
-/// its plugin name and the trust check. Output: Ok, or the refusal with both folders kept.
+/// only its own text is trusted and the live one reads, else kept. Inputs: the plugins
+/// folder, the retired entry, its plugin name and the trust check. Output: Ok, or the
+/// refusal with both folders kept.
 fn settle_replaced(
     directory: &Dir,
     file: &str,
@@ -530,7 +531,10 @@ fn settle_replaced(
         .expect("a retired name ends in its id");
     let nameless = format!("{RETIRED}{id}");
     assert!(retired_name(&nameless).is_none());
-    if hashed(name).as_deref() == Some(sha256.as_str()) {
+    let Some(live) = hashed(name) else {
+        return Ok(());
+    };
+    if live == sha256 {
         if os::rename(directory, file.as_ref(), nameless.as_ref()).is_ok() {
             return remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
         }
