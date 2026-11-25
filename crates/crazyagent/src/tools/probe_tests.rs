@@ -1,19 +1,30 @@
 use kernel_processes::finding::test_support::*;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Names the path a filesystem step failed on. Inputs: the path and the step's result.
+/// Output: the value, or an error naming the path.
+fn at<T>(path: &Path, result: std::io::Result<T>) -> TestResult<T> {
+    result.map_err(|error| format!("{path:?}: {error}").into())
+}
 
 /// A scratch folder no other user can change, its real path, for rows that need a folder
 /// kept: the probe drops every folder others can change, and a plain temp folder sits in
 /// the shared `/tmp` on Linux. Output: the folder and its real path.
-fn private_scratch() -> (tempfile::TempDir, PathBuf) {
-    let folder = tempfile::Builder::new()
-        .prefix("tools-probe-")
-        .tempdir_in(crate::harnesses::finding::private_root())
-        .unwrap();
-    let real = folder.path().canonicalize().unwrap();
+fn private_scratch() -> TestResult<(tempfile::TempDir, PathBuf)> {
+    let root = crate::harnesses::finding::private_root();
+    let folder = at(
+        &root,
+        tempfile::Builder::new()
+            .prefix("tools-probe-")
+            .tempdir_in(&root),
+    )?;
+    let real = at(folder.path(), folder.path().canonicalize())?;
     assert_eq!(kernel_processes::service::changeable_by_others(&real), None);
-    (folder, real)
+    Ok((folder, real))
 }
 
 fn joined(folders: &[PathBuf]) -> OsString {
@@ -21,19 +32,24 @@ fn joined(folders: &[PathBuf]) -> OsString {
 }
 
 #[test]
-fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_folders() {
-    let (_folder, home) = private_scratch();
+fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_folders() -> TestResult
+{
+    let (_folder, home) = private_scratch()?;
     let tools = home.join("tools");
     let project = home.join("projects/app");
     let shared = home.join("shared");
     let inside = home.join("x/.crazyagent/bin");
     for folder in [&tools, &project.join(".crazyagent"), &shared, &inside] {
-        std::fs::create_dir_all(folder).unwrap();
+        at(folder, std::fs::create_dir_all(folder))?;
     }
-    std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
-    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let bin = project.join("node_modules/.bin");
+    at(&bin, std::fs::create_dir_all(&bin))?;
+    at(
+        &shared,
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)),
+    )?;
     let file = home.join("plain-file");
-    std::fs::write(&file, "x").unwrap();
+    at(&file, std::fs::write(&file, "x"))?;
     let path = joined(&[
         tools.clone(),
         PathBuf::from("relative/bin"),
@@ -50,7 +66,8 @@ fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_fol
         kept(&crate::tools::HOOKS, OsStr::new(""), Some(&home)),
         Vec::<PathBuf>::new()
     );
-    std::fs::create_dir_all(home.join(".crazyagent")).unwrap();
+    let own = home.join(".crazyagent");
+    at(&own, std::fs::create_dir_all(&own))?;
     assert_eq!(
         kept(
             &crate::tools::HOOKS,
@@ -63,12 +80,21 @@ fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_fol
     let many: Vec<PathBuf> = (0..FOLDERS_MAX + 10)
         .map(|index| {
             let folder = home.join(format!("many/{index}"));
-            std::fs::create_dir_all(&folder).unwrap();
-            folder
+            at(&folder, std::fs::create_dir_all(&folder))?;
+            Ok(folder)
         })
-        .collect();
+        .collect::<TestResult<_>>()?;
     assert_eq!(
         kept(&crate::tools::HOOKS, &joined(&many), Some(&home)).len(),
         FOLDERS_MAX
     );
+    Ok(())
+}
+
+/// The engine's hooks turn folder runs off in crazyagent's own unit rows, so no row runs the
+/// developer's shell files, and on in every other build, the engine a `cargo test` launches
+/// included.
+#[test]
+fn the_engine_hooks_turn_folder_runs_off_only_in_its_own_unit_rows() {
+    assert!(!crate::tools::finding_seed().hooks.folder_probes);
 }

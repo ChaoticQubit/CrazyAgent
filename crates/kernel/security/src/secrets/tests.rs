@@ -69,7 +69,7 @@ impl Store for FakeStore {
         let bytes = self.items.lock().unwrap().get(found).cloned();
         bytes.map_or_else(
             || Err(StoreError::code("credential_missing")),
-            SecretString::new,
+            SecretString::stored,
         )
     }
 
