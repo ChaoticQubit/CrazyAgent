@@ -414,30 +414,63 @@ mod tests {
         }
     }
 
-    /// Setup's tmux row and the live master's start ask the same resolver on this machine:
-    /// setup finds tmux exactly when [`crate::terminal::tmux::installed`] does and names the
-    /// same program, and a missing tmux gives the resolver's tmux line.
+    /// Setup's tmux row and the live master's start ask the same resolver on this machine and
+    /// give the user the same answer: a tmux setup finds is the program the start runs; a tmux
+    /// setup calls too old is one the start does not find, and both lines say too old; a
+    /// missing tmux gives the resolver's tmux line and no program to start.
     #[test]
-    fn setup_finds_tmux_exactly_when_the_live_start_does() {
-        let root = tempfile::tempdir().unwrap();
+    fn setup_and_the_live_start_agree_on_this_machines_tmux()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
         let places = crate::tools::tools_places(Some(root.path()));
         let shared = PinnedInstaller::with_places(root.path(), vec![], places);
         let installer = LinuxInstaller::new(Box::new(shared));
         let started = crate::terminal::tmux::installed(root.path());
-        let found = installer.program("tmux");
-        assert_eq!(
-            found.map(|entry| entry.canonicalize().unwrap()),
-            started
-                .as_ref()
-                .map(|program| program.canonicalize().unwrap())
-        );
         match installer.lookup(Dependency::Tmux) {
-            Ok(Ok(_)) => assert!(started.is_some()),
+            Ok(Ok(_)) => {
+                let found = installer.program("tmux");
+                assert!(
+                    found.is_some(),
+                    "setup's lookup found tmux, its program did not"
+                );
+                assert!(
+                    started.is_some(),
+                    "setup found tmux at {found:?}, the start found none"
+                );
+                if let (Some(found), Some(started)) = (found, started) {
+                    assert_eq!(found.canonicalize()?, started.canonicalize()?);
+                }
+            }
+            Ok(Err(missing))
+                if missing.reason == kernel_processes::finding::Reason::WrongVersion =>
+            {
+                assert!(
+                    started.is_none(),
+                    "setup calls tmux too old, the start found it"
+                );
+                let version = missing
+                    .found
+                    .as_deref()
+                    .expect("a too-old tmux names its version");
+                assert_ne!(
+                    kernel_processes::terminal::tmux::supported(version),
+                    Some(true)
+                );
+                assert_eq!(
+                    missing.needs,
+                    Some(kernel_processes::terminal::tmux::version_needed())
+                );
+                assert!(missing.line().contains("too old"));
+                assert!(
+                    crate::terminal::plain_reason("terminal_tmux_unsupported").contains("too old")
+                );
+            }
             Ok(Err(missing)) => {
                 assert!(started.is_none());
                 assert_eq!(missing.line(), kernel_processes::finding::TMUX_MISSING);
             }
             Err(code) => assert_eq!(code, InstallError("setup_version_unreadable")),
         }
+        Ok(())
     }
 }

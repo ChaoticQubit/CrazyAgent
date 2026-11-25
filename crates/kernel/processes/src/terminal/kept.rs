@@ -609,7 +609,7 @@ mod tests {
 
     /// A view opened while the agent's kill sits between tmux ending its window and keeping
     /// its last screen waits for that kill and shows the kept screen, labeled with its end
-    /// time, instead of `terminal_agent_unknown` (rv-code3 ds-tmux r1 F1).
+    /// time, instead of `terminal_agent_unknown`.
     #[test]
     fn a_view_opened_during_the_agents_kill_waits_for_the_screen_it_keeps() {
         use std::sync::{Arc, mpsc};

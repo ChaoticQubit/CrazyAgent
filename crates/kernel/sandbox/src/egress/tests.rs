@@ -166,3 +166,98 @@ fn each_exchange_failure_maps_to_its_net_code() {
     assert_eq!(net_code(ExchangeError::Unreachable), "net_unreachable");
     assert_eq!(net_code(ExchangeError::ReplyInvalid), "net_reply_invalid");
 }
+
+/// A plugin request's lookup that never answers is `net_host_unresolved` once the lookup
+/// bound passes. The lookup runs on its own thread so a lookup with no bound fails this
+/// row instead of hanging it.
+#[test]
+fn a_plugin_lookup_that_never_answers_is_unresolved_within_the_bound() {
+    let (_held, never) = std::sync::mpsc::channel::<()>();
+    let (done, finished) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let found = resolve_with("api.github.com", 443, move |_, _| {
+            let _ = never.recv();
+            Ok(Vec::new())
+        });
+        let _ = done.send(found.map_err(|error| error.0));
+    });
+    let margin = Duration::from_secs(5);
+    let answer = finished.recv_timeout(LOOKUP_TIME + margin);
+    assert_eq!(answer, Ok(Err("net_host_unresolved".to_owned())));
+    assert!(started.elapsed() < LOOKUP_TIME + margin);
+}
+
+/// While as many lookups as the cap are still running past their bound, a new lookup is
+/// refused at once as a timeout, and lookups answer again once those end. The row counts on
+/// its own counter, so lookups of rows running beside it never take one of its places.
+#[test]
+fn stalled_lookups_at_the_cap_refuse_a_new_lookup_until_they_end() {
+    static COUNTED: AtomicUsize = AtomicUsize::new(0);
+    let public = |_: &str, _: u16| Ok(vec![IpAddr::from([140, 82, 112, 4])]);
+    let mut held = Vec::new();
+    let mut calls = Vec::new();
+    for _ in 0..LOOKUPS_MAX {
+        let (hold, never) = std::sync::mpsc::channel::<()>();
+        held.push(hold);
+        calls.push(std::thread::spawn(move || {
+            lookup_counted(&COUNTED, "stalled.example", 443, move |_, _| {
+                let _ = never.recv();
+                Ok(Vec::new())
+            })
+            .map_err(|error| error.kind())
+        }));
+    }
+    for call in calls {
+        assert_eq!(call.join().unwrap(), Err(std::io::ErrorKind::TimedOut));
+    }
+    let started = Instant::now();
+    let refused =
+        lookup_counted(&COUNTED, "api.github.com", 443, public).map_err(|error| error.kind());
+    assert_eq!(refused, Err(std::io::ErrorKind::TimedOut));
+    assert!(started.elapsed() < LOOKUP_TIME);
+    drop(held);
+    let answered = loop {
+        match lookup_counted(&COUNTED, "api.github.com", 443, public) {
+            Ok(found) => break found,
+            Err(_) if started.elapsed() < LOOKUP_TIME * 2 => std::thread::yield_now(),
+            Err(error) => panic!("{error}"),
+        }
+    };
+    assert_eq!(answered, vec![IpAddr::from([140, 82, 112, 4])]);
+}
+
+/// A lookup refused at the cap never raises the count, even for a moment: with the count
+/// at the cap, refusals racing on four threads never let it read past the cap, so a lookup
+/// thread ending meanwhile never takes the count below what is alive.
+#[test]
+fn a_refused_lookup_never_raises_the_count_past_the_cap() {
+    static COUNTED: AtomicUsize = AtomicUsize::new(LOOKUPS_MAX);
+    static RAN: AtomicUsize = AtomicUsize::new(0);
+    let callers: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                for _ in 0..20_000 {
+                    let refused = lookup_counted(&COUNTED, "api.github.com", 443, |_, _| {
+                        RAN.fetch_add(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    });
+                    assert_eq!(
+                        refused.map_err(|error| error.kind()),
+                        Err(std::io::ErrorKind::TimedOut)
+                    );
+                }
+            })
+        })
+        .collect();
+    let mut highest = 0;
+    while !callers.iter().all(|caller| caller.is_finished()) {
+        highest = highest.max(COUNTED.load(Ordering::SeqCst));
+    }
+    for caller in callers {
+        caller.join().unwrap();
+    }
+    assert_eq!(highest, LOOKUPS_MAX);
+    assert_eq!(COUNTED.load(Ordering::SeqCst), LOOKUPS_MAX);
+    assert_eq!(RAN.load(Ordering::SeqCst), 0);
+}

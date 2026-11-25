@@ -3,7 +3,7 @@ use kernel_plugin_host::registry::Switch;
 use kernel_plugin_host::usage::{TurnOff, Usage};
 use rusqlite::Connection;
 
-use super::{OffSet, engine, initialize};
+use super::{OffSet, engine};
 
 /// The agent-quit plugin's id, from the generated grant table.
 const QUIT: &str = kernel_plugin_host::generated::permissions::BUNDLED_GRANTS[0].plugin;
@@ -18,11 +18,10 @@ fn off(unlocked: bool, usage: &Usage) -> Switch<'_> {
     }
 }
 
-/// A database with the plugin store's tables. Output: the connection.
+/// A database with the plugin store's tables and a running engine host, so a switch is
+/// logged. Output: the connection.
 fn plugin_store() -> Connection {
-    let db = Connection::open_in_memory().unwrap();
-    initialize(&db).unwrap();
-    db
+    crate::settings_log::tests::store()
 }
 
 #[test]

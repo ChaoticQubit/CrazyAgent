@@ -12900,45 +12900,6 @@ fn quoted_lines(names: &[String], max: usize) -> String {
     text
 }
 
-/// Keeps the harness conversation a sub-agent's pane records, replacing the one kept
-/// before, so waking the agent continues it (DEC-102). A record path that is not plain text
-/// or too long, or an id out of bounds, is not kept. Takes the database, the agent, its
-/// project, launch harness and account, and the conversation. Returns any SQLite failure.
-fn keep_agent_conversation(
-    connection: &Connection,
-    agent: i64,
-    project: &ProjectId,
-    harness: &str,
-    account: &CredentialRef,
-    resume: &Resume,
-) -> Result<(), EngineError> {
-    let Some(record) = resume
-        .record
-        .to_str()
-        .filter(|record| !record.is_empty() && record.len() <= 4096)
-    else {
-        return Ok(());
-    };
-    if resume.id.is_empty() || resume.id.len() > 128 {
-        return Ok(());
-    }
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                agent,
-                project.as_str(),
-                harness,
-                account.as_str(),
-                resume.id,
-                record
-            ],
-        )
-        .map_err(error)?;
-    Ok(())
-}
-
 /// The newest result a sub-agent reported for a task, on one line and bounded, the handoff a
 /// woken agent gets when its harness conversation cannot continue. Takes the database and
 /// the agent. Returns the result, or none before its first.
@@ -13933,23 +13894,6 @@ pub(crate) fn wake_loops() {
     WOKEN.notify_all();
 }
 
-/// The count of team loop wakes so far, read before a tick so a wake during it is not
-/// missed. Output: the count.
-fn wakes_seen() -> u64 {
-    *WAKES.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Waits until a wake newer than `seen` or `tick` has passed. Inputs: the count read before
-/// the tick and the tick. Output: the count now.
-fn wait_for_wake(seen: u64, tick: Duration) -> u64 {
-    let wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
-    let (wakes, waited) = WOKEN
-        .wait_timeout_while(wakes, tick, |wakes| *wakes == seen)
-        .unwrap_or_else(PoisonError::into_inner);
-    assert!(waited.timed_out() || *wakes != seen);
-    *wakes
-}
-
 /// Background loop that keeps every project's team moving.
 pub struct TeamService {
     stop: Arc<AtomicBool>,
@@ -14752,6 +14696,11 @@ mod turn_end;
 
 mod teammates;
 
+/// The team loop's side of a wake: the count read before a tick, and the wait that ends at
+/// a newer wake or the tick. Inputs: the count and the tick. Outputs: the count.
+mod wake;
+use wake::{wait_for_wake, wakes_seen};
+
 /// Who a test's agent is to a leftover hold: no project, so a hold it leaves ends its
 /// processes by the default setting and no owner view lists it. Output: the label.
 #[cfg(all(test, unix))]
@@ -14834,3 +14783,6 @@ mod live_stop_hook_tests;
 /// Where Git keeps a new agent worktree's metadata, read before any agent runs in it.
 mod worktree_git_dir;
 use worktree_git_dir::agent_git_dir;
+
+mod agent_conversation;
+use agent_conversation::keep_agent_conversation;

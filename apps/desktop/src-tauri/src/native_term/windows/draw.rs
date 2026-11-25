@@ -30,7 +30,8 @@ const UNAVAILABLE: &str = "native_terminal_render_unavailable";
 /// Device requests a scale may make after its first lost device, for the run, as
 /// device-replace allows on macOS: one is counted where a surface is made on shared state
 /// holding no device, failed ones too. Each lost device (adapter, device, queue, pipeline,
-/// glyph cache) is forgotten, never dropped: at most `DEVICE_REPLACE_MAX` + 1 per scale.
+/// glyph cache) is released on the render thread, so at most `DEVICE_REPLACE_MAX` + 1 are
+/// made per scale.
 const DEVICE_REPLACE_MAX: u32 = 2;
 
 static STARTED: OnceLock<bool> = OnceLock::new();
@@ -56,6 +57,8 @@ static LOSE_AFTER_WAIT: AtomicU64 = AtomicU64::new(0);
 static SHARED_MADE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static REMOVE_AT_PRESENT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static REMOVE_BEFORE_HAND_BACK: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static FAIL_WAITS: AtomicU64 = AtomicU64::new(0);
 
@@ -135,10 +138,27 @@ pub fn trial_remove_at_present(id: u64) {
     assert_eq!(REMOVE_AT_PRESENT.load(Ordering::SeqCst), id);
 }
 
-/// Test builds only: how many D3D12 devices the present seam removed. Output: the count.
+/// Test builds only: removes the D3D12 device at the top of one view's next hand back, after
+/// its frame was acquired and encoded, so that frame goes back on a removed device. Input:
+/// the view id, above 0.
+#[cfg(test)]
+pub fn trial_remove_before_hand_back(id: u64) {
+    assert!(id > 0, "a view id");
+    REMOVE_BEFORE_HAND_BACK.store(id, Ordering::SeqCst);
+    assert_eq!(REMOVE_BEFORE_HAND_BACK.load(Ordering::SeqCst), id);
+}
+
+/// Test builds only: how many D3D12 devices the removal seams removed. Output: the count.
 #[cfg(test)]
 pub fn trial_removals() -> u64 {
     super::super::render::trial_removals()
+}
+
+/// Test builds only: how many lost devices and frames the render thread released, and the
+/// longest release. Output: the device count, the frame count and the time.
+#[cfg(test)]
+pub fn trial_releases() -> (u64, u64, Duration) {
+    super::super::render::trial_releases()
 }
 
 /// Test builds only: fails every swap-chain wait of one view, or none, each recording a
@@ -184,6 +204,11 @@ fn after_wait(id: u64, shared: &Shared) {
     let removal = REMOVE_AT_PRESENT.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
     if removal.is_ok() {
         shared.trial_remove_at_present();
+    }
+    let before =
+        REMOVE_BEFORE_HAND_BACK.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    if before.is_ok() {
+        shared.trial_remove_before_hand_back();
     }
 }
 

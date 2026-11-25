@@ -482,6 +482,54 @@ pub fn tcp_listeners(port: u16) -> std::io::Result<Vec<(i32, std::net::IpAddr)>>
     Ok(found)
 }
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn acl_get_link_np(path: *const std::ffi::c_char, kind: std::ffi::c_int) -> *mut libc::c_void;
+    fn acl_get_entry(
+        acl: *mut libc::c_void,
+        entry_id: std::ffi::c_int,
+        entry: *mut *mut libc::c_void,
+    ) -> std::ffi::c_int;
+    fn acl_free(object: *mut libc::c_void) -> std::ffi::c_int;
+}
+
+/// The extended access-list type of `<sys/acl.h>`.
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: std::ffi::c_int = 0x100;
+
+/// The entry id that asks `acl_get_entry` for a list's first entry.
+#[cfg(target_os = "macos")]
+const ACL_FIRST_ENTRY: std::ffi::c_int = 0;
+
+/// Whether one entry carries an extended access list with at least one entry, read with
+/// `acl_get_link_np` and `ACL_TYPE_EXTENDED`, so a link's own list is read and its target's
+/// never. Input: the entry's path. Output: Ok(true) for a list with an entry, Ok(false) for
+/// none, or the system error of a list that could not be read. Safety contract of its unsafe
+/// calls: the path is a valid C string for the call, and a list read is freed exactly once.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn acl_listed(path: &std::ffi::CStr) -> std::io::Result<bool> {
+    let acl = unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) => Ok(false),
+            _ => Err(error),
+        };
+    }
+    let mut entry: *mut libc::c_void = std::ptr::null_mut();
+    let got = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+    let error = std::io::Error::last_os_error();
+    let freed = unsafe { acl_free(acl) };
+    assert_eq!(freed, 0, "a list just read could not be freed");
+    match got {
+        0 => Ok(true),
+        _ if error.raw_os_error() == Some(libc::EINVAL) => Ok(false),
+        _ => Err(error),
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
@@ -490,6 +538,55 @@ mod tests {
         tcp_listeners,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    /// A fresh folder under the system temp folder, removed by the caller. Input: a tag.
+    /// Output: the folder.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let folder = std::env::temp_dir().join(format!(
+            "macos-fs-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        folder
+    }
+
+    /// The path as a C string. Input: the path. Output: the string.
+    fn c_path(path: &std::path::Path) -> std::ffi::CString {
+        std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap()
+    }
+
+    /// A file with no access list reads none, one given an entry reads it, and one whose
+    /// folder denies search cannot be read, which is an error, never "none".
+    #[test]
+    fn an_access_list_is_read_as_none_present_or_unreadable() {
+        let folder = scratch("acl");
+        let file = folder.join("file");
+        std::fs::write(&file, "x").unwrap();
+        assert!(!super::acl_listed(&c_path(&file)).unwrap());
+        let added = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow write"])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(added.success());
+        assert!(super::acl_listed(&c_path(&file)).unwrap());
+        let shut = folder.join("shut");
+        std::fs::create_dir(&shut).unwrap();
+        std::fs::write(shut.join("inside"), "x").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unread = super::acl_listed(&c_path(&shut.join("inside")));
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert_eq!(
+            unread.map_err(|error| error.raw_os_error()),
+            Err(Some(libc::EACCES))
+        );
+    }
 
     /// The C probe that prints, from the SDK header itself, every size, offset and constant
     /// the listener check reads, one `name value` line each, in the order the test lists them.

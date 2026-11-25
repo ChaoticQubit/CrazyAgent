@@ -14,8 +14,10 @@ const FOLDER_BYTES_MAX: usize = 4096;
 const ACTION_TIME: Duration = Duration::from_secs(30);
 
 /// Every code an App plugins request can answer an owner client with: the plugin store's
-/// refusals, this protocol's own, and the owner connection's.
+/// refusals, this protocol's own, the owner connection's, and storage's change that waits
+/// its turn.
 pub const APP_PLUGINS_CODES: &[&str] = &[
+    "access_change_pending",
     "app_plugin_account_has_no_key",
     "app_plugin_account_not_found",
     "app_plugin_bundled",
@@ -40,11 +42,13 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "app_plugin_setting_unsafe",
     "app_plugins_readonly",
     "app_plugins_unavailable",
+    "owner_actor_stopped_outcome_unknown",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
     "owner_entropy_unavailable",
     "owner_grant_stale_or_revoked",
+    "owner_outcome_unknown_reconcile_same_identity",
     "owner_request_failed",
     "owner_root_replaced_or_unsafe",
     "owner_root_unavailable",
@@ -62,7 +66,7 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
-    List,
+    List {},
     Preview {
         folder: PathBuf,
     },
@@ -187,7 +191,7 @@ impl OwnerClient {
     /// Reads the App plugins page: bundled plugins, then the owner's, with the permission
     /// words and the change notices not yet shown. Output: the page.
     pub async fn app_plugins(&self) -> Result<AppPluginsPage, EngineError> {
-        self.app_plugins_page(Action::List, None).await
+        self.app_plugins_page(Action::List {}, None).await
     }
 
     /// Reads the trust screen of a folder the owner picked, saving nothing; the engine reads
@@ -437,16 +441,15 @@ async fn handle(
     } else {
         None
     };
-    {
-        let _barrier = engine.owner_egress.write().await;
-        if &authority.authenticate(packet)? != admission {
-            return Err(failure("owner_grant_stale_or_revoked"));
-        }
+    let barrier = engine.owner_egress.write().await;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
     }
     let command = command(action, key.map(AccountSecret::into_bytes));
     let done = engine
         .owner_job(|reply| Job::AppPlugins(command, reply))
         .await?;
+    drop(barrier);
     Ok(match done {
         Done::Page {
             listing,
@@ -489,7 +492,7 @@ async fn handle(
 /// came with a `set_key`. Output: the command.
 fn command(action: Action, key: Option<Vec<u8>>) -> Command {
     match action {
-        Action::List => Command::List,
+        Action::List {} => Command::List,
         Action::Preview { folder } => Command::Preview { folder },
         Action::Review { name } => Command::Review { name },
         Action::Add {
@@ -557,9 +560,10 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         Action::BindAccount { name, secret, .. }
         | Action::SetKey { name, secret }
         | Action::Unbind { name, secret } => vec![name, secret],
-        Action::List | Action::Preview { .. } | Action::Add { .. } | Action::SetWhenOff { .. } => {
-            Vec::new()
-        }
+        Action::List {}
+        | Action::Preview { .. }
+        | Action::Add { .. }
+        | Action::SetWhenOff { .. } => Vec::new(),
     };
     let folder_invalid =
         |folder: &PathBuf| !folder.is_absolute() || folder.as_os_str().len() > FOLDER_BYTES_MAX;

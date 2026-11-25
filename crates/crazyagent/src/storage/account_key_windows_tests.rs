@@ -1,4 +1,7 @@
-use super::{ACCOUNT_KEYS, read_key_file, remove_key_file, replace_key_file, store_key_file};
+use super::{
+    ACCOUNT_KEYS, KEY_BYTES_MAX, PLUGIN_KEYS, key_saved_in, read_key_file, read_key_in,
+    remove_key_file, remove_key_in, replace_key_file, replace_key_in, store_key_file,
+};
 use crate::harnesses::launch::low_probe::{Try, low_probe, probe};
 use crate::protocol::CredentialRef;
 use crazyagent_win_sandbox::{dacl, private};
@@ -311,4 +314,291 @@ fn a_key_name_windows_reads_as_another_file_is_refused() {
         "account_key_reference_invalid"
     );
     assert!(!root.join(ACCOUNT_KEYS).exists());
+}
+
+/// Makes a file symbolic link at `link` to `target`, falling back to `mklink` when the std
+/// call is refused. Inputs: the link and target paths.
+fn file_link(link: &Path, target: &Path) {
+    if std::os::windows::fs::symlink_file(target, link).is_err() {
+        run(
+            "cmd",
+            &[
+                "/C",
+                "mklink",
+                link.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ],
+        );
+    }
+}
+
+fn plugin_saved(root: &Path, name: &str) -> String {
+    read_key_in(root, PLUGIN_KEYS, &reference(name))
+        .unwrap()
+        .unwrap()
+        .expose()
+        .to_owned()
+}
+
+/// A plugin key is saved into its own labelled private folder by a replace of a key that
+/// was never saved, read back, replaced with no staged copy left, and removed, after which a
+/// second remove is fine; an empty key and one past the bound are refused with nothing
+/// written, and the account key folder is never made.
+#[test]
+fn windows_a_plugin_key_is_saved_read_replaced_and_removed_in_its_own_folder() {
+    let (_temp, root) = engine_root();
+    let keys = root.join(PLUGIN_KEYS);
+    assert!(
+        read_key_in(&root, PLUGIN_KEYS, &reference(NAME))
+            .unwrap()
+            .is_none()
+    );
+    replace_key_in(
+        &root,
+        PLUGIN_KEYS,
+        &reference(NAME),
+        b"sk-plugin-first".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(plugin_saved(&root, NAME), "sk-plugin-first");
+    assert_secret_file(&keys.join(NAME));
+    replace_key_in(
+        &root,
+        PLUGIN_KEYS,
+        &reference(NAME),
+        b"sk-plugin-second".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(plugin_saved(&root, NAME), "sk-plugin-second");
+    assert_secret_file(&keys.join(NAME));
+    assert_eq!(names(&keys), [NAME]);
+    let too_long = vec![b'k'; usize::try_from(KEY_BYTES_MAX).unwrap() + 1];
+    for key in [Vec::new(), too_long] {
+        assert_eq!(
+            replace_key_in(&root, PLUGIN_KEYS, &reference(OTHER), key)
+                .unwrap_err()
+                .0,
+            "account_key_store_unavailable"
+        );
+    }
+    assert_eq!(names(&keys), [NAME]);
+    remove_key_in(&root, PLUGIN_KEYS, NAME).unwrap();
+    assert!(
+        read_key_in(&root, PLUGIN_KEYS, &reference(NAME))
+            .unwrap()
+            .is_none()
+    );
+    assert!(names(&keys).is_empty());
+    remove_key_in(&root, PLUGIN_KEYS, NAME).unwrap();
+    assert!(!root.join(ACCOUNT_KEYS).exists());
+}
+
+/// Whether a key is saved is answered without reading it: true for a saved key in either
+/// folder, false for a missing folder, a missing key, a file link and a folder in its place.
+#[test]
+fn windows_key_saved_in_sees_a_saved_key_and_not_a_link_or_a_missing_one() {
+    let (temp, root) = engine_root();
+    for folder in [PLUGIN_KEYS, ACCOUNT_KEYS] {
+        assert!(
+            !key_saved_in(&root, folder, &reference(NAME)).unwrap(),
+            "{folder}"
+        );
+        replace_key_in(&root, folder, &reference(NAME), b"sk-saved-key".to_vec()).unwrap();
+        assert!(
+            key_saved_in(&root, folder, &reference(NAME)).unwrap(),
+            "{folder}"
+        );
+        assert!(
+            !key_saved_in(&root, folder, &reference(OTHER)).unwrap(),
+            "{folder}"
+        );
+    }
+    let target = temp.path().join("target.txt");
+    std::fs::write(&target, "sk-elsewhere").unwrap();
+    file_link(&root.join(PLUGIN_KEYS).join(OTHER), &target);
+    assert!(!key_saved_in(&root, PLUGIN_KEYS, &reference(OTHER)).unwrap());
+    std::fs::create_dir(root.join(ACCOUNT_KEYS).join(OTHER)).unwrap();
+    assert!(!key_saved_in(&root, ACCOUNT_KEYS, &reference(OTHER)).unwrap());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-elsewhere");
+}
+
+/// The start sweep deletes the staged key copies a crash left in both key folders and keeps
+/// every saved key; an engine root with no key folder sweeps clean.
+#[test]
+fn windows_the_start_sweep_deletes_staged_key_copies_and_keeps_keys() {
+    let (_empty_temp, empty) = engine_root();
+    crate::app_plugins::sweep_staged(&empty);
+    let (_temp, root) = engine_root();
+    for folder in [PLUGIN_KEYS, ACCOUNT_KEYS] {
+        replace_key_in(&root, folder, &reference(NAME), b"sk-kept-key".to_vec()).unwrap();
+        for staged in [".replace-0000000000000001", ".replace-crashed"] {
+            std::fs::write(root.join(folder).join(staged), b"sk-staged-copy").unwrap();
+        }
+    }
+    crate::app_plugins::sweep_staged(&root);
+    for folder in [PLUGIN_KEYS, ACCOUNT_KEYS] {
+        assert_eq!(names(&root.join(folder)), [NAME], "{folder}");
+        assert_eq!(
+            read_key_in(&root, folder, &reference(NAME))
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "sk-kept-key"
+        );
+    }
+}
+
+/// A plugin key folder that is a junction is refused as unsafe by the read, the check, the
+/// save and the delete, and the folder it points to is left as it was.
+#[test]
+fn windows_a_plugin_key_folder_that_is_a_junction_is_refused() {
+    let (temp, root) = engine_root();
+    let elsewhere = temp.path().join("elsewhere");
+    drop(private::dir(&elsewhere).unwrap());
+    std::fs::write(elsewhere.join(NAME), b"sk-elsewhere").unwrap();
+    let link = root.join(PLUGIN_KEYS);
+    run(
+        "cmd",
+        &[
+            "/C",
+            "mklink",
+            "/J",
+            link.to_str().unwrap(),
+            elsewhere.to_str().unwrap(),
+        ],
+    );
+    let unsafe_code = "account_key_store_unsafe";
+    assert_eq!(
+        read_key_in(&root, PLUGIN_KEYS, &reference(NAME))
+            .unwrap_err()
+            .0,
+        unsafe_code
+    );
+    assert_eq!(
+        key_saved_in(&root, PLUGIN_KEYS, &reference(NAME))
+            .unwrap_err()
+            .0,
+        unsafe_code
+    );
+    assert_eq!(
+        replace_key_in(&root, PLUGIN_KEYS, &reference(OTHER), b"sk-new".to_vec())
+            .unwrap_err()
+            .0,
+        unsafe_code
+    );
+    assert_eq!(
+        remove_key_in(&root, PLUGIN_KEYS, NAME).unwrap_err().0,
+        unsafe_code
+    );
+    assert_eq!(names(&elsewhere), [NAME]);
+    assert_eq!(
+        std::fs::read(elsewhere.join(NAME)).unwrap(),
+        b"sk-elsewhere"
+    );
+}
+
+/// A process of the same user at low integrity cannot read a saved or replaced plugin key,
+/// while it reads an unlabelled file beside the engine root and the engine reads the key.
+#[test]
+fn windows_a_low_integrity_process_cannot_read_a_plugin_key() {
+    let (temp, root) = engine_root();
+    let plain = temp.path().join("plain.txt");
+    std::fs::write(&plain, "plain").unwrap();
+    let key = root.join(PLUGIN_KEYS).join(NAME);
+    replace_key_in(
+        &root,
+        PLUGIN_KEYS,
+        &reference(NAME),
+        b"sk-plugin-low".to_vec(),
+    )
+    .unwrap();
+    let low = low_probe(temp.path());
+    let seen = probe(&low, &[(Try::Read, &plain), (Try::Read, &key)]);
+    assert!(
+        seen.contains(&format!("READ {}", plain.display())),
+        "{seen}"
+    );
+    assert!(
+        seen.contains(&format!("DENIED {}", key.display())),
+        "{seen}"
+    );
+    replace_key_in(
+        &root,
+        PLUGIN_KEYS,
+        &reference(NAME),
+        b"sk-plugin-low-2".to_vec(),
+    )
+    .unwrap();
+    let seen = probe(&low, &[(Try::Read, &key)]);
+    assert!(
+        seen.contains(&format!("DENIED {}", key.display())),
+        "{seen}"
+    );
+    assert_eq!(plugin_saved(&root, NAME), "sk-plugin-low-2");
+}
+
+/// The start sweep deletes only plugin key files no binding names: a named plugin key, a
+/// file that is no plugin key, and every key in the account key folder stay, and with no
+/// readable binding table nothing is deleted.
+#[test]
+fn windows_the_start_sweep_deletes_unnamed_plugin_keys_and_keeps_named_ones() {
+    use crate::app_plugins::{KEYS, sweep_at_start};
+    use kernel_plugin_host::store::{KeyFolder, KeyRef};
+    let (_temp, root) = engine_root();
+    let key = |name: &str| KeyRef::new(name).unwrap();
+    let save = |folder: KeyFolder, name: &str| {
+        (KEYS.replace)(&root, folder, &key(name), b"sk-sweep-key-01".to_vec()).unwrap();
+    };
+    let saved = |folder: KeyFolder, name: &str| (KEYS.saved)(&root, folder, &key(name)).unwrap();
+    save(KeyFolder::Plugin, "plugin-key-named");
+    save(KeyFolder::Plugin, "plugin-key-orphan");
+    save(KeyFolder::Plugin, "acct-other");
+    save(KeyFolder::Account, "plugin-key-account");
+    let bare = rusqlite::Connection::open_in_memory().unwrap();
+    sweep_at_start(&bare, &root);
+    assert!(saved(KeyFolder::Plugin, "plugin-key-orphan"));
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    crate::app_plugins::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO app_plugin_secrets (plugin, secret, source, reference)
+         VALUES ('acme', 'api_key', 'key', 'plugin-key-named')",
+        [],
+    )
+    .unwrap();
+    sweep_at_start(&db, &root);
+    assert!(saved(KeyFolder::Plugin, "plugin-key-named"));
+    assert!(!saved(KeyFolder::Plugin, "plugin-key-orphan"));
+    assert!(saved(KeyFolder::Plugin, "acct-other"));
+    assert!(saved(KeyFolder::Account, "plugin-key-account"));
+}
+
+/// The plugin host's key store is the engine's own on Windows: a plugin key goes into
+/// `plugin-keys` as a labelled secret file, reads back, survives the staged sweep and is
+/// deleted, and an account key saved by the account store can be bound.
+#[test]
+fn windows_the_engine_key_store_backs_the_plugin_host() {
+    use crate::app_plugins::{KEYS, sweep_staged};
+    use kernel_plugin_host::store::{KeyFolder, KeyRef};
+    let (_temp, root) = engine_root();
+    let reference_of = KeyRef::new(&format!("plugin-key-{}", (KEYS.new_ref)().unwrap())).unwrap();
+    assert!(!(KEYS.saved)(&root, KeyFolder::Plugin, &reference_of).unwrap());
+    (KEYS.replace)(
+        &root,
+        KeyFolder::Plugin,
+        &reference_of,
+        b"sk-adapter-key-01".to_vec(),
+    )
+    .unwrap();
+    assert!((KEYS.saved)(&root, KeyFolder::Plugin, &reference_of).unwrap());
+    assert_secret_file(&root.join(PLUGIN_KEYS).join(reference_of.as_str()));
+    let value = (KEYS.read)(&root, KeyFolder::Plugin, &reference_of)
+        .unwrap()
+        .unwrap();
+    assert_eq!(value.expose(), "sk-adapter-key-01");
+    sweep_staged(&root);
+    assert!((KEYS.saved)(&root, KeyFolder::Plugin, &reference_of).unwrap());
+    (KEYS.remove)(&root, KeyFolder::Plugin, &reference_of).unwrap();
+    assert!(!(KEYS.saved)(&root, KeyFolder::Plugin, &reference_of).unwrap());
+    store_key_file(&root, &reference(NAME), b"sk-ant-account").unwrap();
+    assert!((KEYS.saved)(&root, KeyFolder::Account, &KeyRef::new(NAME).unwrap()).unwrap());
 }

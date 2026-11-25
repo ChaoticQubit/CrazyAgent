@@ -94,8 +94,9 @@ fn the_kernel_names_no_crazyagent_or_sandbox_item() {
     ));
 }
 
-/// The dependency tables of one Cargo.toml that turn on this crate's `test-support`
-/// feature, read as TOML so a dependency table of its own or a wrapped features line counts
+/// The tables of one Cargo.toml that turn on this crate's `test-support` feature: its
+/// dependency tables, `workspace.dependencies`, and `features` when one forwards the
+/// feature. Read as TOML so a dependency table of its own or a wrapped features line counts
 /// as an inline one. Panics naming the manifest when it does not parse. Inputs: the
 /// manifest's path and text. Output: each such table's name.
 fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
@@ -115,8 +116,41 @@ fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
             }
         }
     }
+    if let Some(shared) = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+    {
+        tables.push(("workspace.dependencies".to_owned(), shared));
+    }
     let name = "crazyagent-kernel-processes";
-    tables
+    let keys: Vec<&str> = tables
+        .iter()
+        .filter_map(|(_, table)| table.as_table())
+        .flat_map(|table| table.iter())
+        .filter(|(key, entry)| {
+            key.as_str() == name || entry.get("package").and_then(toml::Value::as_str) == Some(name)
+        })
+        .map(|(key, _)| key.as_str())
+        .collect();
+    let forwards = manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|features| {
+            features
+                .values()
+                .filter_map(toml::Value::as_array)
+                .flatten()
+                .filter_map(toml::Value::as_str)
+                .any(|feature| {
+                    std::iter::once(name)
+                        .chain(keys.iter().copied())
+                        .any(|key| {
+                            feature == format!("{key}/test-support")
+                                || feature == format!("{key}?/test-support")
+                        })
+                })
+        });
+    let mut found: Vec<String> = tables
         .into_iter()
         .filter(|(_, table)| {
             table.as_table().is_some_and(|table| {
@@ -140,22 +174,31 @@ fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
             })
         })
         .map(|(table, _)| table)
-        .collect()
+        .collect();
+    if forwards {
+        found.push("features".to_owned());
+    }
+    found
 }
 
 /// A folder that holds a link to a sibling folder gives each file once, never through the
 /// link, so a linked folder never counts a file twice.
 #[cfg(unix)]
 #[test]
-fn files_named_skips_folder_links() {
-    let temporary = tempfile::tempdir().unwrap();
-    let real = temporary.path().canonicalize().unwrap();
-    std::fs::create_dir(real.join("held")).unwrap();
-    std::fs::write(real.join("held").join("one.rs"), "fn one() {}\n").unwrap();
-    std::os::unix::fs::symlink(real.join("held"), real.join("linked")).unwrap();
+fn files_named_skips_folder_links() -> crate::update::test_support::TestResult {
+    use crate::update::test_support::at;
+    let temporary = tempfile::tempdir()?;
+    let real = at(temporary.path(), temporary.path().canonicalize())?;
+    let held = real.join("held");
+    at(&held, std::fs::create_dir(&held))?;
+    let one = held.join("one.rs");
+    at(&one, std::fs::write(&one, "fn one() {}\n"))?;
+    let linked = real.join("linked");
+    at(&linked, std::os::unix::fs::symlink(&held, &linked))?;
     let mut found = Vec::new();
     files_named(&real, &|_| true, &mut found);
-    assert_eq!(found, vec![real.join("held").join("one.rs")]);
+    assert_eq!(found, vec![one]);
+    Ok(())
 }
 
 /// A manifest that turns `test-support` on through a dependency table of its own, with the
@@ -166,6 +209,28 @@ fn a_dependency_table_turning_test_support_on_is_caught() {
     assert_eq!(
         test_support_tables(Path::new("other/Cargo.toml"), text),
         ["dev-dependencies"]
+    );
+}
+
+/// A manifest whose own feature forwards this crate's `test-support` is caught, since a
+/// forward in `default` reaches a release build.
+#[test]
+fn a_feature_forwarding_test_support_is_caught() {
+    let text = "[package]\nname = \"other\"\n\n[features]\ndefault = [\"crazyagent-kernel-processes/test-support\"]\n\n[dependencies]\ncrazyagent-kernel-processes = { path = \"../kernel/processes\" }\n";
+    assert_eq!(
+        test_support_tables(Path::new("other/Cargo.toml"), text),
+        ["features"]
+    );
+}
+
+/// A workspace dependency row that turns `test-support` on is caught, since every member
+/// that inherits it with `workspace = true` gets the feature.
+#[test]
+fn a_workspace_dependency_turning_test_support_on_is_caught() {
+    let text = "[workspace]\nmembers = [\"crates/other\"]\n\n[workspace.dependencies]\ncrazyagent-kernel-processes = { path = \"crates/kernel/processes\", features = [\"test-support\"] }\n";
+    assert_eq!(
+        test_support_tables(Path::new("Cargo.toml"), text),
+        ["workspace.dependencies"]
     );
 }
 
@@ -246,6 +311,7 @@ fn finding_test_support_exports_exactly_the_named_items() {
         "at_roots",
         "below",
         "entry_at",
+        "forget_last_good",
         "kept",
         "last_run_finished",
         "log_own_node_passed_over",

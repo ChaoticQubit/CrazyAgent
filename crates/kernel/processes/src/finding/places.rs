@@ -20,7 +20,7 @@ impl Places {
         Self::kept(
             folders,
             Vec::new(),
-            home,
+            (home, None),
             Vec::new(),
             false,
             (Some(Vec::new()), Vec::new()),
@@ -32,14 +32,16 @@ impl Places {
     /// and repeated ones and every one agents can write, at most [`PLACES_MAX`], and sets
     /// aside one of those in an engine `setup` folder ([`Places::in_engine_setup`]). The
     /// ordinary folders fill only the room the fallback folders leave, so those are always
-    /// kept, last. Inputs: the folders, the fallback folders (the system's, then the
-    /// engine's), HOME, the engine data folders, whether probed temp folders are refused, the
-    /// set-up projects' folders, none when they could not be read, with the last good read's
-    /// folders kept for that case, and the seed. Output: the bounded places.
+    /// kept, last. The app's folder is set first, so the checks count it as installed
+    /// ([`Places::installed`]). Inputs: the folders, the fallback folders (the system's, then
+    /// the engine's), HOME and the app's folder, the engine data folders, whether probed temp
+    /// folders are refused, the set-up projects' folders, none when they could not be read,
+    /// with the last good read's folders kept for that case, and the seed. Output: the
+    /// bounded places.
     pub(super) fn kept(
         folders: Vec<PathBuf>,
         tail: Vec<PathBuf>,
-        home: Option<PathBuf>,
+        (home, app_folder): (Option<PathBuf>, Option<PathBuf>),
         engine_roots: Vec<PathBuf>,
         temp_refused: bool,
         (projects, last_good): (Option<Vec<PathBuf>>, Vec<PathBuf>),
@@ -62,7 +64,7 @@ impl Places {
             },
             refused_setup: Vec::new(),
             refused_temp: Vec::new(),
-            app_folder: None,
+            app_folder: app_folder.filter(|folder| usable(folder)),
             projects,
             last_good,
             seed,
@@ -181,21 +183,16 @@ impl Places {
                 .into_iter()
                 .flat_map(|root| engine_folders(&hooks, root)),
         );
-        Self {
-            app_folder: app_folder
-                .filter(|folder| usable(folder))
-                .map(Path::to_path_buf),
-            ..Self::kept(
-                folders,
-                tail,
-                home,
-                engine_roots(&hooks, engine_root),
-                true,
-                (Some(Vec::new()), Vec::new()),
-                seed,
-            )
-            .set_aside_temp(temp)
-        }
+        Self::kept(
+            folders,
+            tail,
+            (home, app_folder.map(Path::to_path_buf)),
+            engine_roots(&hooks, engine_root),
+            true,
+            (Some(Vec::new()), Vec::new()),
+            seed,
+        )
+        .set_aside_temp(temp)
     }
 
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
@@ -281,11 +278,10 @@ impl Places {
         folders.extend(probed);
         let set_aside = self.refused_setup;
         let carried = self.refused_temp;
-        let app_folder = self.app_folder;
         let mut places = Self::kept(
             folders,
             last,
-            self.home,
+            (self.home, self.app_folder),
             self.engine_roots,
             temp_refused,
             (self.projects, self.last_good),
@@ -296,10 +292,7 @@ impl Places {
                 places.refused_setup.push(folder);
             }
         }
-        Self {
-            app_folder,
-            ..places.set_aside_temp(carried.into_iter().chain(temp))
-        }
+        places.set_aside_temp(carried.into_iter().chain(temp))
     }
 
     /// The folders looked in, in order. Output: the folders.
@@ -435,10 +428,11 @@ impl Places {
 
     /// Whether a path lies under an install root, in either of its macOS names
     /// ([`FindingHooks::data_twin`]), or in the app's folder: [`INSTALL_ROOTS`] on Unix and
-    /// [`windows_install_roots`] on Windows. Input: the path. Output: the answer.
+    /// [`windows_install_roots`] on Windows. Below a Homebrew prefix only the folders Homebrew
+    /// fills count ([`homebrew_filled`]). Input: the path. Output: the answer.
     pub(super) fn installed(&self, path: &Path) -> bool {
         let roots: Vec<PathBuf> = if cfg!(windows) {
-            windows_install_roots()
+            windows_install_roots(&self.seed.hooks)
         } else {
             INSTALL_ROOTS.iter().map(PathBuf::from).collect()
         };
@@ -446,7 +440,7 @@ impl Places {
             path.starts_with(root)
                 || (self.seed.hooks.data_twin)(root).is_some_and(|twin| path.starts_with(twin))
         };
-        roots.iter().any(|root| under(root))
+        (roots.iter().any(|root| under(root)) && homebrew_filled(&self.seed.hooks, path))
             || self
                 .app_folder
                 .as_deref()

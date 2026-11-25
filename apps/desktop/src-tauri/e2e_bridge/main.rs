@@ -31,6 +31,10 @@ const WORKTREE_MODE: &str = "record-worktree-start";
 const RECORD_ARGS_MAX: usize = 10;
 const IDE_OPEN: &str = "e2e_ide_open";
 const CONFIGURE_PROFILE: &str = "desktop_configure_account_profile";
+/// The stack each async worker thread gets. A dev build polls the one `routes::route`
+/// future unoptimized, and its frame overflows tokio's 2 MiB default on the first call;
+/// 4 MiB is the smallest power of two that answers, so this keeps four times that.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// The one bridge every route shares, as the app's `NativeState` does.
 type Shared = Arc<BridgeQueue>;
@@ -523,8 +527,24 @@ fn role_skills(args: &[OsString]) -> Result<String, String> {
 /// agent worktree starts. Input: the engine socket path. Output: prints `ready <port> <token>`
 /// once listening, or the recorded change set, the question's id, the installed skills, the
 /// start's or finish's answer or `started`; exits non-zero when it cannot.
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            eprintln!("no async runtime");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run())
+}
+
+/// Runs the mode `main` was started in on the runtime it builds. Input: the process
+/// arguments. Output: the exit code `main` returns.
+async fn run() -> std::process::ExitCode {
     let all: Vec<OsString> = std::env::args_os().skip(1).take(RECORD_ARGS_MAX).collect();
     if all.first().is_some_and(|mode| mode == ASK_MODE) {
         return match ask_owner(&all[1..]) {

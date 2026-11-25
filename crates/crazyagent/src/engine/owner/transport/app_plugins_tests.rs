@@ -20,7 +20,7 @@ fn folder() -> String {
 fn every_action_reads_from_its_json_shape() {
     let folder = folder();
     let cases = [
-        (r#"{"kind":"list"}"#.to_string(), Action::List),
+        (r#"{"kind":"list"}"#.to_string(), Action::List {}),
         (
             format!(r#"{{"kind":"preview","folder":"{folder}"}}"#),
             Action::Preview {
@@ -142,4 +142,65 @@ fn the_protocol_refusals_are_listed_for_the_clients() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted, APP_PLUGINS_CODES);
+}
+
+/// An App plugins change holds the owner barrier until storage answers it, so a revocation
+/// sent while the change waits on storage waits for it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_waits_for_an_app_plugin_change_in_flight() {
+    use super::super::barrier_tests::{revocation, storage_settled};
+    use super::super::usage_tests::{IN_FLIGHT, Usage, busy_storage, hold_storage};
+    use crate::engine::owner::OwnerClientKind;
+    use std::time::Duration;
+    let settled = Duration::from_secs(60);
+    let _disk = busy_storage().await;
+    let owner = Usage::start_waiting(30_000).await;
+    let runtime = owner.runtime();
+    let release = hold_storage(&runtime.engine.storage.sender);
+    let mut changed = Box::pin(owner.client.app_plugin_set_enabled(
+        "held-plugin".into(),
+        false,
+        None,
+    ));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut changed).await.is_err(),
+        "the change waits behind the busy storage"
+    );
+    assert!(
+        runtime.engine.owner_egress.try_write().is_err(),
+        "the change holds the owner barrier while it waits"
+    );
+    let control = revocation(runtime, OwnerClientKind::Tui, "revoke-during-app-plugin");
+    let mut revoke = Box::pin(runtime.control(control.clone()));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
+        "a revocation waits for the change already in flight"
+    );
+    release.send(()).unwrap();
+    let _ = tokio::time::timeout(settled, changed).await.unwrap();
+    let revoked = match tokio::time::timeout(settled, revoke).await.unwrap() {
+        Ok(reply) => reply,
+        Err(error) => {
+            assert_eq!(error.0, "access_change_pending");
+            storage_settled(&owner).await;
+            runtime.reconcile_control(control).await.unwrap().unwrap()
+        }
+    };
+    assert!(
+        !revoked.active,
+        "the revocation committed once the change was answered"
+    );
+    assert!(
+        !runtime
+            .active_kinds()
+            .unwrap()
+            .contains(&OwnerClientKind::Tui),
+        "the owner state holds the TUI client revoked"
+    );
+    assert!(
+        owner.client.app_plugins().await.is_err(),
+        "the revoked client is refused"
+    );
+    owner.stop().await;
 }

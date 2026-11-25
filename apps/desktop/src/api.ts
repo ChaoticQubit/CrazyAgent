@@ -1,5 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, STORAGE_COPY, withCode } from "./engine-client";
+import { RESTORE_COPY } from "./restore-copy";
 import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, HarnessSubAgents, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 import type { AccountCheck, AccountDraft, AccountView, ProviderEntry } from "./api-account-types";
@@ -36,13 +37,7 @@ const COPY: Record<string, string> = {
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
   engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
-  engine_restoring: "CrazyAgent is bringing back your 2.4 data, so its engine stays stopped. Wait a minute, then reconnect.",
-  engine_restore_broken: "Restore did not finish. Your data is safe in a backup.",
-  engine_restored: "Your 2.4 data is back. Install CrazyAgent 2.4.2 to use it. Restart engine goes back to 2.5, which updates that data again.",
-  storage_restore_unavailable: "There's no 2.4 backup to bring back. CrazyAgent keeps it for 30 days after the update to 2.5.",
-  storage_restore_agents_running: "Agents are running. Stop every agent and research run, then bring back your 2.4 data.",
-  storage_restore_busy: "Something else had CrazyAgent's data open, so your 2.4 data wasn't brought back. Close other CrazyAgent windows, then try again.",
-  storage_restore_failed: "Your 2.4 data wasn't brought back, and CrazyAgent went on with your 2.5 data. Try again.",
+  ...RESTORE_COPY,
   git_safe_unavailable: "CrazyAgent's engine didn't start: Windows is installed in a folder whose name CrazyAgent can't use to keep git from running other programs, so it runs no git on this computer.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",

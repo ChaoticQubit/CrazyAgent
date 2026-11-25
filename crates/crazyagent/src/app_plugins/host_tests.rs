@@ -149,9 +149,10 @@ fn the_owner_read_lists_plugin_grants() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mut db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     initialize(&db).unwrap();
-    let crate::engine::owner::OwnerData::PluginGrants { plugins } = super::grants(&db).unwrap()
+    let tx = db.transaction().unwrap();
+    let crate::engine::owner::OwnerData::PluginGrants { plugins } = super::grants(&tx).unwrap()
     else {
         panic!("plugin grants");
     };

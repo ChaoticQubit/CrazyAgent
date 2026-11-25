@@ -377,7 +377,7 @@ fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 56] = [
+const KINDS: [&str; 62] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -434,6 +434,12 @@ const KINDS: [&str; 56] = [
     crate::settings_log::KIND_COMPACTION,
     crate::settings_log::KIND_PROFILE,
     crate::sdk_slice::KIND_CALL_REFUSED,
+    kernel_plugin_host::store_log::KINDS[0],
+    kernel_plugin_host::store_log::KINDS[1],
+    kernel_plugin_host::store_log::KINDS[2],
+    kernel_plugin_host::store_log::KINDS[3],
+    kernel_plugin_host::store_log::KINDS[4],
+    kernel_plugin_host::store_log::KINDS[5],
 ];
 
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
@@ -447,8 +453,10 @@ const FREE_FORM: [(&str, &str); 2] = [
 /// The source files outside tests that name the log's appender or build one of its drafts,
 /// as paths under `src` in sorted order, each with the kinds its drafts may name: the code
 /// after `kind:` with its spaces removed, the constants of its own kinds. ide/log.rs and
-/// landing_log.rs write `change.kind()`, which maps each `Change` variant to one of theirs.
-const WRITERS: [(&str, &[&str]); 10] = [
+/// landing_log.rs write `change.kind()`, which maps each `Change` variant to one of theirs;
+/// app_plugins/log.rs writes `event.kind()`, one of the plugin store's kinds.
+const WRITERS: [(&str, &[&str]); 11] = [
+    ("app_plugins/log.rs", &["event.kind()"]),
     ("ide/log.rs", &["change.kind()"]),
     ("landing_log.rs", &["change.kind()"]),
     ("memory/log.rs", &["KIND"]),
@@ -1224,7 +1232,13 @@ fn no_event_body_can_carry_a_secret() {
             "the landing kind {kind} needs a body rule"
         );
     }
-    let sources = sources();
+    for kind in kernel_plugin_host::store_log::KINDS {
+        assert!(
+            KINDS.contains(&kind),
+            "the plugin store kind {kind} needs a body rule"
+        );
+    }
+    let sources = sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
     let mut writers: Vec<(&str, Vec<Option<String>>)> = Vec::new();
     for (name, code) in &sources {
         let scoped =
@@ -1318,9 +1332,55 @@ fn no_event_body_can_carry_a_secret() {
                 }),
                 &["plugin", "capability", "needs"],
             ),
+            store if kernel_plugin_host::store_log::KINDS.contains(&store) => {
+                plugin_store_body_is_closed(store)
+            }
             other => panic!("the kind {other} has no body rule"),
         }
     }
+}
+
+/// Checks one plugin store kind's body: plugin names, a declared secret name, hashes, hosts,
+/// a switch, a time and a key reference, closed to their keys with no free text. A
+/// reference is the store's own `plugin-key-` name or an account id, never key bytes, so a
+/// key-shaped reference for an entered key is refused. Input: the kind. Output: none.
+fn plugin_store_body_is_closed(kind: &str) {
+    use kernel_plugin_host::store_log::{Event, KINDS as STORE, SCHEMA};
+    let code_plugin = kernel_plugin_host::generated::permissions::BUNDLED_GRANTS[0].plugin;
+    let sha = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    let reference = format!("plugin-key-{}c1", "0".repeat(62));
+    let at = STORE.iter().position(|store| *store == kind);
+    let (sample, keys): (serde_json::Value, &[&str]) = match at {
+        Some(0) => (
+            json!({"plugin": "acme", "enabled": true}),
+            &["plugin", "enabled"],
+        ),
+        Some(1) => (
+            json!({"plugin": code_plugin, "enabled": false}),
+            &["plugin", "enabled"],
+        ),
+        Some(2) => (
+            json!({"plugin": "acme", "sha256": sha, "hosts": ["api.acme.example"], "trusted_ms": 7}),
+            &["plugin", "sha256", "hosts", "trusted_ms"],
+        ),
+        Some(3) => (
+            json!({"plugin": "acme", "secret": "api_key", "source": "key", "reference": reference}),
+            &["plugin", "secret", "source", "reference"],
+        ),
+        Some(4) => (
+            json!({"plugin": "acme", "secret": "api_key"}),
+            &["plugin", "secret"],
+        ),
+        Some(5) => (json!({"plugin": "acme"}), &["plugin"]),
+        _ => panic!("{kind} is no plugin store kind"),
+    };
+    let decodes = |body: &[u8]| Event::decode(kind, SCHEMA, body).is_ok();
+    if at == Some(3) {
+        let mut keyed = sample.clone();
+        keyed["reference"] = json!("sk-ant-api03-key");
+        assert!(!decodes(&serde_json::to_vec(&keyed).unwrap()), "{kind}");
+    }
+    closed_body(kind, decodes, sample, keys);
 }
 
 /// Every aggregate with the string its 2.4 and 2.5 logs store for it, written out by hand so

@@ -1,7 +1,11 @@
 /// The plain words the owner reads for each permission a plugin may hold, keyed by the
 /// permission name, one row per entry of the generated permission table, sent with the
 /// plugin listing so every screen shows the same text.
-pub const WORDS: [(&str, &str); 11] = [
+pub const WORDS: [(&str, &str); 12] = [
+    (
+        "editor.spawn",
+        "Open one of your projects in the code editor",
+    ),
     (
         "net.request",
         "Send requests to the internet addresses it lists",

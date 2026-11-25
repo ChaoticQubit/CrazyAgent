@@ -8,9 +8,8 @@ use crate::embedding::{self, Manifest};
 use crate::generated::permissions::BUNDLED_GRANTS;
 use crate::manifest::MANIFEST_BYTES_MAX;
 use crate::problem::{PORT_HANDED_OUT, Problem};
-use crate::store::{
-    Keys, Loaded, binding_rows, drop_binding, forget_key_file, refused, resolve, sqlite,
-};
+use crate::store::{Keys, Loaded, binding_rows, forget_key_file, refused, resolve, sqlite};
+use crate::store_log;
 use crate::trust;
 use crate::usage::{ChangeNotice, Holder, Lease, TurnOff, Usage};
 use crate::views::{
@@ -201,12 +200,13 @@ pub(crate) fn found(engine: &Engine<'_>, name: &str) -> Result<Found, Refused> {
     find(engine, name)?.ok_or_else(|| refused("app_plugin_not_found"))
 }
 
-/// Drops what an older plugin of the owner's left under a name a bundled plugin or a
-/// bundled code plugin now has: its secret bindings with the keys entered for it, its switch
-/// and its trust record. Neither kind ever gets a trust record, so one is the mark of such a
-/// leftover, and it goes last so an interrupted pass runs again. Each binding row goes
-/// before its key file, as [`drop_binding`] does. Inputs: database and engine facts.
-/// Output: Ok, or `app_plugins_unavailable`.
+/// Forgets what a reserved name holds that a bundled plugin or a bundled code plugin does
+/// not own: a trust record, which neither kind ever gets, marks an older plugin of the
+/// owner's of that name, and a switch row under a bare code plugin id is such a leftover
+/// too, since a code plugin's own switch sits under `code:<id>`. Each leftover goes as one
+/// [`store_log::Event::Forgotten`], then the keys entered for its bindings go, as
+/// `store::drop_binding` does. Inputs: database and engine facts. Output: Ok, or
+/// `app_plugins_unavailable`.
 pub(crate) fn prepare(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
     let reserved = BUNDLED
         .iter()
@@ -215,21 +215,25 @@ pub(crate) fn prepare(db: &Connection, engine: &Engine<'_>) -> Result<(), Refuse
     for name in reserved {
         let leftover: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)",
-                [name],
+                "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
+                 OR (?2 AND EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1))",
+                params![name, is_code_plugin(name)],
                 |row| row.get(0),
             )
             .map_err(sqlite)?;
         if !leftover {
             continue;
         }
-        for (secret, source, reference) in binding_rows(db, name)? {
-            drop_binding(db, engine, name, &secret, &source, &reference)?;
+        let bindings = binding_rows(db, name)?;
+        store_log::record(
+            db,
+            store_log::Event::Forgotten {
+                plugin: name.to_owned(),
+            },
+        )?;
+        for (_, source, reference) in &bindings {
+            forget_key_file(db, engine, source, reference);
         }
-        db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
-            .map_err(sqlite)?;
-        db.execute("DELETE FROM app_plugin_trust WHERE name=?1", [name])
-            .map_err(sqlite)?;
     }
     Ok(())
 }
@@ -255,7 +259,37 @@ fn enabled_flag(db: &Connection, name: &str) -> Result<bool, Refused> {
     Ok(stored.unwrap_or(false))
 }
 
+/// Switches a plugin by its switch table key, a plugin name or a code plugin's
+/// `code:<id>`, recording the change; a switch to the state the row already holds records
+/// nothing. Inputs: database, key and the state. Output: Ok, or the store's refusal.
 pub(crate) fn set_flag(db: &Connection, name: &str, enabled: bool) -> Result<(), Refused> {
+    let stored: Option<bool> = db
+        .query_row(
+            "SELECT enabled FROM app_plugin_state WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sqlite)?;
+    if stored == Some(enabled) {
+        return Ok(());
+    }
+    let event = match name.strip_prefix(CODE_KEY_PREFIX) {
+        Some(plugin) => store_log::Event::CodeSwitched {
+            plugin: plugin.to_owned(),
+            enabled,
+        },
+        None => store_log::Event::Switched {
+            plugin: name.to_owned(),
+            enabled,
+        },
+    };
+    store_log::record(db, event)
+}
+
+/// Writes one switch row as the store keeps it. Inputs: database, key and the state.
+/// Output: Ok, or `app_plugins_unavailable`.
+pub(crate) fn set_flag_row(db: &Connection, name: &str, enabled: bool) -> Result<(), Refused> {
     db.execute(
         "INSERT INTO app_plugin_state (name, enabled) VALUES (?1, ?2)
          ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled",
@@ -422,7 +456,9 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
 /// or `app_plugin_changed`, `_refused`, `_name_taken`, `_past_cap` (the listing would not
 /// show it, or would drop a listed plugin for it), `_port_handed_out` (its loopback port
-/// is in the range the engine reads now), or the folder's refusal.
+/// is in the range the engine reads now), or the folder's refusal; outside the capture of
+/// its own transaction, `app_plugins_unavailable` before anything is written. A replaced
+/// folder is deleted only after the capture's commit and put back after its rollback.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -431,6 +467,7 @@ pub fn add(
     replace: bool,
     now_ms: i64,
 ) -> Result<(), Refused> {
+    store_log::in_capture(db)?;
     prepare(db, engine)?;
     let bytes = folder::read_source(source).map_err(|_| refused("app_plugin_refused"))?;
     if kernel_common::hash(&bytes) != sha256 {
@@ -450,7 +487,16 @@ pub fn add(
     if handed_problem(&manifest, engine.handed_out.as_ref()).is_some() {
         return Err(refused(PORT_HANDED_OUT));
     }
-    folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
+    let replaced = folder::write(
+        engine.root,
+        &manifest.name,
+        &bytes,
+        replace,
+        engine.keys.new_ref,
+    )?;
+    if let Some(step) = replaced.and_then(store_log::after_commit) {
+        step.commit()?;
+    }
     trust::settle(db, engine, &manifest, now_ms)
 }
 
@@ -501,8 +547,16 @@ pub fn set_enabled(
     }
 }
 
-/// Turns a bundled code plugin on or off by its plugin id in the switch table, where no row
-/// reads as on. An essential one is refused with `app_plugin_essential` while the
+/// The switch table key of a bundled code plugin: `code:<id>`, which no user plugin name can
+/// carry. Input: the plugin id. Output: the key.
+pub(crate) fn code_key(name: &str) -> String {
+    format!("{CODE_KEY_PREFIX}{name}")
+}
+
+const CODE_KEY_PREFIX: &str = "code:";
+
+/// Turns a bundled code plugin on or off under its `code:<id>` key in the switch table,
+/// where no row reads as on. An essential one is refused with `app_plugin_essential` while the
 /// `plugins.essential_unlocked` setting is false; turning off with `stop_runs` stops each
 /// run holding it once the off state is written. Inputs: database, plugin id and switch.
 /// Output: Ok, `app_plugin_essential`, or `app_plugins_unavailable`.
@@ -511,8 +565,10 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
         .iter()
         .find(|grant| grant.plugin == name)
         .expect("only a bundled code plugin id switches here");
+    let key = code_key(name);
+    assert!(!embedding::valid_name(&key));
     match switch {
-        Switch::On => set_flag(db, name, true),
+        Switch::On => set_flag(db, &key, true),
         Switch::Off {
             usage,
             when_off,
@@ -521,7 +577,7 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
             if grant.essential && !essential_unlocked {
                 return Err(refused("app_plugin_essential"));
             }
-            set_flag(db, name, false)?;
+            set_flag(db, &key, false)?;
             if when_off == TurnOff::StopRuns {
                 usage.stop_runs(name);
             }
@@ -532,15 +588,12 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
 }
 
 /// The bundled code plugins turned off, by plugin id, for the engine's in-memory off set.
-/// A switch row under a code plugin id that also has a trust record belongs to an older
-/// plugin of the owner's and is left out. Input: the database. Output: the ids, or
-/// `app_plugins_unavailable`.
+/// Only `code:<id>` switch rows count, so a row an older plugin of the owner's left under a
+/// bare code plugin id never turns that plugin off; an id no bundled code plugin has is
+/// left out. Input: the database. Output: the ids, or `app_plugins_unavailable`.
 pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<String>, Refused> {
     let mut statement = db
-        .prepare(
-            "SELECT name FROM app_plugin_state WHERE enabled=0
-             AND NOT EXISTS (SELECT 1 FROM app_plugin_trust WHERE app_plugin_trust.name=app_plugin_state.name)",
-        )
+        .prepare("SELECT name FROM app_plugin_state WHERE enabled=0 AND name LIKE 'code:%'")
         .map_err(sqlite)?;
     let names: Vec<String> = statement
         .query_map([], |row| row.get(0))
@@ -548,18 +601,24 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
         .collect::<Result<_, _>>()
         .map_err(sqlite)?;
     Ok(names
-        .into_iter()
+        .iter()
+        .filter_map(|key| key.strip_prefix(CODE_KEY_PREFIX))
         .filter(|name| is_code_plugin(name))
+        .map(str::to_owned)
         .collect())
 }
 
-/// Removes a user plugin: its bindings, trust record and state in one savepoint first, then,
-/// once those rows are gone, the keys entered for it and its folder (or the .yaml file an
-/// older version left). A failed row write changes nothing. Account keys stay. Under a
-/// bundled plugin's name it removes only what the owner's folder still holds, which the
-/// bundled plugin shadows. Inputs: database, engine facts and name. Output: Ok, or
-/// `app_plugin_bundled`, `app_plugin_not_found`, the database's or the folder's refusal.
+/// Removes a user plugin: its folder moved aside under its removal name, then its bindings,
+/// trust record and state as one Forgotten event in a savepoint, then the keys entered for
+/// it; the folder moved aside and any .yaml file an older version left are deleted only
+/// after the capture's commit, and the folder goes back after its rollback. A failed row
+/// write, or a savepoint release that cannot commit outside a capture, changes nothing. Account keys stay. Under a bundled plugin's name it removes only
+/// what the owner's folder still holds, which the bundled plugin shadows. Outside the
+/// capture of its own transaction it is refused before anything is written. Inputs:
+/// database, engine facts and name. Output: Ok, or `app_plugin_bundled`,
+/// `app_plugin_not_found`, `app_plugins_unavailable`, the database's or the folder's refusal.
 pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Refused> {
+    let captured = store_log::in_capture(db)?;
     prepare(db, engine)?;
     if is_bundled(name) {
         return if folder::remove(engine.root, name, engine.keys.new_ref)? {
@@ -572,39 +631,48 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
         return Err(refused("app_plugin_not_found"));
     }
     let present = folder::read(engine.root, name)?.is_some();
-    let known: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
-             OR EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1)
-             OR EXISTS(SELECT 1 FROM app_plugin_secrets WHERE plugin=?1)",
-            [name],
-            |row| row.get(0),
-        )
-        .map_err(sqlite)?;
+    let known = known(db, name)?;
     if !present && !known {
         return Err(refused("app_plugin_not_found"));
     }
+    let retired = if known {
+        Some(folder::retire(engine.root, name, engine.keys.new_ref)?)
+    } else {
+        None
+    };
     let bindings = binding_rows(db, name)?;
-    db.execute_batch("SAVEPOINT app_plugin_remove")
-        .map_err(sqlite)?;
-    let written = [
-        "DELETE FROM app_plugin_secrets WHERE plugin=?1",
-        "DELETE FROM app_plugin_trust WHERE name=?1",
-        "DELETE FROM app_plugin_state WHERE name=?1",
-    ]
-    .iter()
-    .try_for_each(|sql| db.execute(sql, [name]).map(|_| ()));
-    if let Err(error) = written {
-        let _ = db.execute_batch("ROLLBACK TO app_plugin_remove; RELEASE app_plugin_remove");
-        return Err(sqlite(error));
+    if known {
+        assert_eq!(db.is_autocommit(), !captured);
+        db.execute_batch("SAVEPOINT app_plugin_remove")
+            .map_err(sqlite)?;
+        let forgotten = store_log::Event::Forgotten {
+            plugin: name.to_owned(),
+        };
+        let written = store_log::record(db, forgotten).and_then(|()| {
+            db.execute_batch("RELEASE app_plugin_remove")
+                .map_err(sqlite)
+        });
+        if let Err(refusal) = written {
+            let undo = if captured {
+                "ROLLBACK TO app_plugin_remove; RELEASE app_plugin_remove"
+            } else {
+                "ROLLBACK"
+            };
+            let _ = db.execute_batch(undo);
+            return Err(refusal);
+        }
     }
-    db.execute_batch("RELEASE app_plugin_remove")
-        .map_err(sqlite)?;
     for (_, source, reference) in &bindings {
         forget_key_file(db, engine, source, reference);
     }
-    folder::remove(engine.root, name, engine.keys.new_ref)?;
-    Ok(())
+    let step = match retired {
+        Some(retired) => retired.into_step(engine.keys.new_ref),
+        None => folder::removal(engine.root, name, engine.keys.new_ref),
+    };
+    match store_log::after_commit(step) {
+        Some(step) => step.commit(),
+        None => Ok(()),
+    }
 }
 
 /// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
@@ -674,11 +742,44 @@ pub fn hold(
 /// other staged or retired entry is deleted. Input: the engine root. Output: Ok, or the
 /// first refusal after every entry was tried.
 pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
-    folder::remove_staged(root)
+    folder::sweep_within(root, USER_PLUGINS_MAX)
+}
+
+/// The start sweep acting on at most `cap` entries, so a row can put an entry outside one
+/// sweep's batch. Inputs: the engine root and the cap, 1 to `USER_PLUGINS_MAX`. Output: as
+/// [`remove_staged`].
+#[cfg(all(test, unix))]
+pub(crate) fn remove_staged_within(root: &Path, cap: usize) -> Result<(), Refused> {
+    folder::sweep_within(root, cap)
+}
+
+/// Whether any row a removal deletes names the plugin: its trust record, its switch or a
+/// secret binding. Inputs: the database and the name. Output: the answer, or the
+/// database's refusal.
+fn known(db: &Connection, name: &str) -> Result<bool, Refused> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
+         OR EXISTS(SELECT 1 FROM app_plugin_state WHERE name=?1)
+         OR EXISTS(SELECT 1 FROM app_plugin_secrets WHERE plugin=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(sqlite)
+}
+
+/// Settles at start each folder a removal moved aside, by the rows that removal deletes:
+/// while they still name the plugin, the removal never committed and the folder goes back
+/// under the name when that name is missing; otherwise it loses the name and is deleted.
+/// Inputs: database and engine facts. Output: Ok, or the first refusal after every entry
+/// was tried.
+pub fn sweep_removals(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
+    folder::sweep_removals(engine.root, |name| known(db, name))
 }
 
 const STAGED: &str = ".add-";
 const RETIRED: &str = ".old-";
+const REMOVING: &str = ".rm-";
+const OWED: &str = ".back-";
 
 /// The most folder levels below a plugin folder that deleting it goes down.
 const TREE_DEPTH_MAX: usize = 4;
@@ -686,15 +787,16 @@ const TREE_DEPTH_MAX: usize = 4;
 /// The most entries deleting a plugin folder reads from any one folder in it.
 const TREE_ENTRIES_MAX: usize = 64;
 
-/// Whether a plugins folder entry is a staged copy or a retired folder. Input: the entry
-/// name. Output: the answer.
+/// Whether a plugins folder entry is a staged copy, a retired folder or a folder owed back
+/// to its plugin name. Input: the entry name. Output: the answer.
 fn left_over(file: &[u8]) -> bool {
-    file.starts_with(STAGED.as_bytes()) || file.starts_with(RETIRED.as_bytes())
+    file.starts_with(STAGED.as_bytes())
+        || file.starts_with(RETIRED.as_bytes())
+        || file.starts_with(OWED.as_bytes())
 }
 
 /// The retired folder name a replace moves a plugin's old folder to: the plugin name and
 /// the write id. Inputs: a valid name and the id. Output: the folder name.
-#[cfg(unix)]
 fn retired(name: &str, id: &str) -> String {
     assert!(embedding::valid_name(name));
     format!("{RETIRED}{name}.{id}")
@@ -707,674 +809,43 @@ fn retired_name(file: &str) -> Option<&str> {
     embedding::valid_name(name).then_some(name)
 }
 
+/// The folder name a rolled-back replace gives the original folder it could not put back
+/// under the plugin name, so the start sweep puts it back: the plugin name and the write id.
+/// Inputs: a valid name and the id. Output: the folder name.
+fn owed(name: &str, id: &str) -> String {
+    assert!(embedding::valid_name(name));
+    format!("{OWED}{name}.{id}")
+}
+
+/// The plugin name a folder is owed back to. Input: the entry name. Output: the name, or
+/// none when the entry is no owed folder or carries no valid name.
+fn owed_name(file: &str) -> Option<&str> {
+    let (name, _id) = file.strip_prefix(OWED)?.rsplit_once('.')?;
+    embedding::valid_name(name).then_some(name)
+}
+
+/// The folder name a removal moves a plugin's folder to until its rows are gone: the plugin
+/// name and an id. Inputs: a valid name and the id. Output: the folder name.
+fn removing(name: &str, id: &str) -> String {
+    assert!(embedding::valid_name(name));
+    format!("{REMOVING}{name}.{id}")
+}
+
+/// The plugin name a removal moved a folder aside from. Input: the entry name. Output: the
+/// name, or none when the entry is no removal folder or carries no valid name.
+fn removing_name(file: &str) -> Option<&str> {
+    let (name, _id) = file.strip_prefix(REMOVING)?.rsplit_once('.')?;
+    embedding::valid_name(name).then_some(name)
+}
+
 /// One user plugin the folder listing returns: its name and its plugin.toml bytes, or the
 /// refusal that kept it unread.
 type UserFile = (String, Result<Vec<u8>, Problem>);
 
-#[cfg(unix)]
-mod folder {
-    use super::{
-        FOLDER, MANIFEST_FILE, Problem, RETIRED, STAGED, TREE_DEPTH_MAX, TREE_ENTRIES_MAX,
-        USER_PLUGINS_MAX, UserFile, left_over, retired, retired_name,
-    };
+#[cfg(not(any(unix, windows)))]
+compile_error!("the plugins folder is built for Unix and Windows only");
 
-    use crate::Refused;
-    use crate::embedding::valid_name;
-    use crate::manifest::MANIFEST_BYTES_MAX;
-    use crate::store::refused;
-    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
-    use std::collections::BTreeMap;
-    use std::ffi::CStr;
-    use std::os::unix::fs::MetadataExt;
-    use std::path::Path;
+#[path = "registry_folder.rs"]
+mod folder;
 
-    const LEGACY_SUFFIX: &str = ".yaml";
-
-    /// The most entries read from one plugin folder before it is refused for holding more
-    /// than its plugin.toml.
-    const ENTRIES_MAX: usize = 4;
-
-    /// What one name in the plugins folder is: a plugin folder, or the `.yaml` file a
-    /// version before plugin folders wrote.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Entry {
-        Folder,
-        Legacy,
-    }
-
-    fn unavailable() -> Refused {
-        refused("app_plugin_folder_unavailable")
-    }
-
-    fn unsafe_entry() -> Problem {
-        Problem::new("app_plugin_file_unsafe", None, None)
-    }
-
-    fn legacy() -> Problem {
-        Problem::new("app_plugin_format_old", None, None)
-    }
-
-    fn open(root: &Path, create: bool) -> Result<Option<std::fs::File>, Refused> {
-        if create {
-            match rustix::fs::mkdir(root.join(FOLDER), Mode::from_raw_mode(0o700)) {
-                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                Err(_) => return Err(unavailable()),
-            }
-        }
-        let directory = match rustix::fs::open(
-            root.join(FOLDER),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(fd) => std::fs::File::from(fd),
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
-            Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
-                return Err(refused("app_plugin_folder_unsafe"));
-            }
-            Err(_) => return Err(unavailable()),
-        };
-        let metadata = directory.metadata().map_err(|_| unavailable())?;
-        if !metadata.is_dir()
-            || metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.mode() & 0o7777 != 0o700
-        {
-            return Err(refused("app_plugin_folder_unsafe"));
-        }
-        Ok(Some(directory))
-    }
-
-    fn entry_of(file: &[u8]) -> Option<(&str, Entry)> {
-        let name = std::str::from_utf8(file).ok()?;
-        if let Some(stem) = name.strip_suffix(LEGACY_SUFFIX) {
-            return valid_name(stem).then_some((stem, Entry::Legacy));
-        }
-        valid_name(name).then_some((name, Entry::Folder))
-    }
-
-    /// Reads a plugin folder's plugin.toml: the folder opened without following a link,
-    /// holding that one entry, the file a plain file read without following a link or
-    /// waiting on a FIFO, at most `MANIFEST_BYTES_MAX` + 1 bytes. Inputs: the folder and
-    /// whether it must be owned by this user. Output: the bytes, or the refusal.
-    fn read_dir(directory: std::fs::File, owned: bool) -> Result<Vec<u8>, Problem> {
-        use std::io::Read;
-        let uid = rustix::process::getuid().as_raw();
-        let metadata = directory.metadata().map_err(|_| unsafe_entry())?;
-        if !metadata.is_dir() || (owned && metadata.uid() != uid) {
-            return Err(unsafe_entry());
-        }
-        let mut seen = 0;
-        for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unsafe_entry())? {
-            let entry = entry.map_err(|_| unsafe_entry())?;
-            let name = entry.file_name().to_bytes();
-            if name == b"." || name == b".." {
-                continue;
-            }
-            seen += 1;
-            if name != MANIFEST_FILE.as_bytes() || seen >= ENTRIES_MAX {
-                return Err(Problem::new("plugin_folder_extra_entry", None, None));
-            }
-        }
-        assert!(seen < ENTRIES_MAX);
-        let file = std::fs::File::from(
-            rustix::fs::openat(
-                &directory,
-                MANIFEST_FILE,
-                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-                Mode::empty(),
-            )
-            .map_err(|error| match error {
-                rustix::io::Errno::NOENT => Problem::new("plugin_manifest_invalid", Some(1), None),
-                _ => unsafe_entry(),
-            })?,
-        );
-        let metadata = file.metadata().map_err(|_| unsafe_entry())?;
-        if !metadata.is_file() || (owned && metadata.uid() != uid) {
-            return Err(unsafe_entry());
-        }
-        let mut bytes = Vec::new();
-        file.take(MANIFEST_BYTES_MAX as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| unsafe_entry())?;
-        assert!(bytes.len() <= MANIFEST_BYTES_MAX + 1);
-        Ok(bytes)
-    }
-
-    fn read_in(directory: &std::fs::File, name: &str) -> Result<Vec<u8>, Problem> {
-        let folder = rustix::fs::openat(
-            directory,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| unsafe_entry())?;
-        read_dir(std::fs::File::from(folder), true)
-    }
-
-    /// Reads a folder the owner picked to add: not a link itself, opened without following
-    /// one, holding its plugin.toml only. Input: the folder. Output: the
-    /// plugin.toml bytes, or the refusal.
-    pub(super) fn read_source(source: &Path) -> Result<Vec<u8>, Problem> {
-        let metadata = std::fs::symlink_metadata(source).map_err(|_| unsafe_entry())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(unsafe_entry());
-        }
-        let folder = rustix::fs::open(
-            source,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| unsafe_entry())?;
-        read_dir(std::fs::File::from(folder), false)
-    }
-
-    fn names(directory: &std::fs::File) -> Result<(BTreeMap<String, Entry>, bool), Refused> {
-        let mut names = BTreeMap::new();
-        let mut more = false;
-        for entry in rustix::fs::Dir::read_from(directory).map_err(|_| unavailable())? {
-            let entry = entry.map_err(|_| unavailable())?;
-            let Some((name, kind)) = entry_of(entry.file_name().to_bytes()) else {
-                continue;
-            };
-            let kept = names.entry(name.to_owned()).or_insert(kind);
-            if kind == Entry::Folder {
-                *kept = Entry::Folder;
-            }
-            if names.len() > USER_PLUGINS_MAX {
-                names.pop_last();
-                more = true;
-            }
-        }
-        assert!(names.len() <= USER_PLUGINS_MAX);
-        Ok((names, more))
-    }
-
-    /// The owner's plugins by name, at most `USER_PLUGINS_MAX`, each read without following
-    /// a link; a `.yaml` file an older version wrote is listed refused and kept. Input: the
-    /// engine root. Output: (name, bytes or refusal) pairs, whether more exist, or the
-    /// folder's refusal.
-    pub(super) fn entries(root: &Path) -> Result<(Vec<UserFile>, bool), Refused> {
-        let Some(directory) = open(root, false)? else {
-            return Ok((Vec::new(), false));
-        };
-        let (names, more) = names(&directory)?;
-        Ok((
-            names
-                .into_iter()
-                .map(|(name, kind)| {
-                    let read = match kind {
-                        Entry::Folder => read_in(&directory, &name),
-                        Entry::Legacy => Err(legacy()),
-                    };
-                    (name, read)
-                })
-                .collect(),
-            more,
-        ))
-    }
-
-    /// Whether a plugin is among the first `USER_PLUGINS_MAX` by name, the ones `entries`
-    /// lists; one past them is refused so it never runs with an unkept port. Inputs: the
-    /// engine root and a valid plugin name. Output: the answer, or the folder's refusal.
-    pub(super) fn listed(root: &Path, name: &str) -> Result<bool, Refused> {
-        let Some(directory) = open(root, false)? else {
-            return Ok(false);
-        };
-        let (names, _) = names(&directory)?;
-        Ok(names.contains_key(name))
-    }
-
-    /// Whether a plugin of this name, once written, is among the first `USER_PLUGINS_MAX`
-    /// by name without dropping another from them: it is listed already, or the folder
-    /// holds fewer entries than the cap, old plugin files included. Inputs: the engine root
-    /// and a valid plugin name. Output: the answer, or the folder's refusal.
-    pub(super) fn fits(root: &Path, name: &str) -> Result<bool, Refused> {
-        let Some(directory) = open(root, false)? else {
-            return Ok(true);
-        };
-        let (names, _) = names(&directory)?;
-        Ok(names.contains_key(name) || names.len() < USER_PLUGINS_MAX)
-    }
-
-    fn exists(directory: &std::fs::File, name: &str) -> Result<bool, Refused> {
-        match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(_) => Ok(true),
-            Err(rustix::io::Errno::NOENT) => Ok(false),
-            Err(_) => Err(unavailable()),
-        }
-    }
-
-    /// One user plugin. Inputs: the engine root and a valid plugin name. Output: none when
-    /// it is missing, else its plugin.toml bytes or the refusal (a left-over `.yaml` file
-    /// is `app_plugin_format_old`); or the folder's refusal.
-    pub(super) fn read(
-        root: &Path,
-        name: &str,
-    ) -> Result<Option<Result<Vec<u8>, Problem>>, Refused> {
-        let Some(directory) = open(root, false)? else {
-            return Ok(None);
-        };
-        if exists(&directory, name)? {
-            return Ok(Some(read_in(&directory, name)));
-        }
-        if exists(&directory, &format!("{name}{LEGACY_SUFFIX}"))? {
-            return Ok(Some(Err(legacy())));
-        }
-        Ok(None)
-    }
-
-    /// What one entry is, read without following a link. Inputs: its folder and name.
-    /// Output: its type, none when it is missing, or `app_plugin_folder_unavailable`.
-    fn kind(directory: &std::fs::File, name: &CStr) -> Result<Option<FileType>, Refused> {
-        match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode))),
-            Err(rustix::io::Errno::NOENT) => Ok(None),
-            Err(_) => Err(unavailable()),
-        }
-    }
-
-    fn unlink(directory: &std::fs::File, name: &CStr) -> Result<(), Refused> {
-        match rustix::fs::unlinkat(directory, name, AtFlags::empty()) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
-            Err(_) => Err(unavailable()),
-        }
-    }
-
-    /// Deletes one plugin folder and what it holds, never following a link: a link in it is
-    /// unlinked itself, so nothing outside the plugin is touched. Inputs: the plugins folder
-    /// and the entry name. Output: Ok once it is gone, or `app_plugin_folder_unavailable`
-    /// past `TREE_DEPTH_MAX` levels or `TREE_ENTRIES_MAX` entries in one folder.
-    fn remove_tree(directory: &std::fs::File, name: &str) -> Result<(), Refused> {
-        let name = std::ffi::CString::new(name).map_err(|_| unavailable())?;
-        remove_level(directory, &name, TREE_DEPTH_MAX)
-    }
-
-    fn remove_level(directory: &std::fs::File, name: &CStr, depth: usize) -> Result<(), Refused> {
-        let folder = std::fs::File::from(
-            rustix::fs::openat(
-                directory,
-                name,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| unavailable())?,
-        );
-        let mut inside = Vec::new();
-        for entry in rustix::fs::Dir::read_from(&folder).map_err(|_| unavailable())? {
-            let entry = entry.map_err(|_| unavailable())?;
-            let file = entry.file_name();
-            if file.to_bytes() == b"." || file.to_bytes() == b".." {
-                continue;
-            }
-            inside.push(file.to_owned());
-            if inside.len() > TREE_ENTRIES_MAX {
-                return Err(unavailable());
-            }
-        }
-        for file in &inside {
-            match kind(&folder, file)? {
-                Some(FileType::Directory) if depth == 0 => return Err(unavailable()),
-                Some(FileType::Directory) => remove_level(&folder, file, depth - 1)?,
-                Some(_) => unlink(&folder, file)?,
-                None => {}
-            }
-        }
-        rustix::fs::unlinkat(directory, name, AtFlags::REMOVEDIR).map_err(|_| unavailable())
-    }
-
-    /// Writes a user plugin as a staged 0700 folder holding a 0600 plugin.toml, renamed into
-    /// place, creating the 0700 plugins folder when missing. An older folder of that name is
-    /// moved aside first and moved back when the new one cannot take its place; once the
-    /// new one is in place it moves to a retired name with no plugin name in it and is
-    /// deleted, and one it cannot delete stays aside for the start sweep. Inputs: the engine
-    /// root, a valid name, the bytes and the random id source. Output: Ok with the folder
-    /// synced, or the folder's refusal with nothing staged left.
-    pub(super) fn write(
-        root: &Path,
-        name: &str,
-        bytes: &[u8],
-        new_ref: fn() -> Result<String, &'static str>,
-    ) -> Result<(), Refused> {
-        let directory = open(root, true)?.ok_or_else(unavailable)?;
-        let id = new_ref().map_err(refused)?;
-        let staged = format!("{STAGED}{id}");
-        rustix::fs::mkdirat(&directory, staged.as_str(), Mode::from_raw_mode(0o700))
-            .map_err(|_| unavailable())?;
-        let written = (|| {
-            let folder = std::fs::File::from(
-                rustix::fs::openat(
-                    &directory,
-                    staged.as_str(),
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| unavailable())?,
-            );
-            let mut file = std::fs::File::from(
-                rustix::fs::openat(
-                    &folder,
-                    MANIFEST_FILE,
-                    OFlags::WRONLY
-                        | OFlags::CREATE
-                        | OFlags::EXCL
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC,
-                    Mode::from_raw_mode(0o600),
-                )
-                .map_err(|_| unavailable())?,
-            );
-            std::io::Write::write_all(&mut file, bytes)
-                .and_then(|()| file.sync_all())
-                .and_then(|()| folder.sync_all())
-                .map_err(|_| unavailable())?;
-            let retired = retired(name, &id);
-            let replaced = exists(&directory, name)?;
-            if replaced {
-                rustix::fs::renameat(&directory, name, &directory, retired.as_str())
-                    .map_err(|_| unavailable())?;
-            }
-            if rustix::fs::renameat(&directory, staged.as_str(), &directory, name).is_err() {
-                if replaced {
-                    let _ = rustix::fs::renameat(&directory, retired.as_str(), &directory, name);
-                }
-                return Err(unavailable());
-            }
-            if replaced {
-                let aside = format!("{RETIRED}{id}");
-                let nameless =
-                    rustix::fs::renameat(&directory, retired.as_str(), &directory, aside.as_str());
-                let _ = remove_tree(&directory, if nameless.is_ok() { &aside } else { &retired });
-            }
-            Ok(())
-        })();
-        if written.is_err() {
-            let _ = remove_tree(&directory, &staged);
-        }
-        written?;
-        directory.sync_all().map_err(|_| unavailable())
-    }
-
-    /// Sweeps the staged and retired entries a crash between a write and its rename left, at
-    /// most `USER_PLUGINS_MAX` a start, in name order. Input: the engine root. Output: Ok
-    /// once each is restored or deleted or the folder is missing, else the first refusal
-    /// after every entry was tried.
-    pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
-        let Some(directory) = open(root, false)? else {
-            return Ok(());
-        };
-        let mut left = Vec::new();
-        for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unavailable())? {
-            let entry = entry.map_err(|_| unavailable())?;
-            if left_over(entry.file_name().to_bytes()) {
-                left.push(entry.file_name().to_owned());
-                if left.len() == USER_PLUGINS_MAX {
-                    break;
-                }
-            }
-        }
-        assert!(left.len() <= USER_PLUGINS_MAX);
-        left.sort();
-        let mut first = None;
-        for file in &left {
-            if let Err(refusal) = sweep(&directory, file) {
-                first.get_or_insert(refusal);
-            }
-        }
-        directory.sync_all().map_err(|_| unavailable())?;
-        first.map_or(Ok(()), Err)
-    }
-
-    /// Restores or deletes one staged or retired entry: a retired folder goes back under its
-    /// plugin name when that name is missing, any other folder is deleted, and a file or
-    /// link is unlinked. Inputs: the plugins folder and the entry. Output: Ok, or the
-    /// refusal.
-    fn sweep(directory: &std::fs::File, file: &CStr) -> Result<(), Refused> {
-        match kind(directory, file)? {
-            None => Ok(()),
-            Some(FileType::Directory) => {
-                if let Some(name) = file.to_str().ok().and_then(retired_name)
-                    && !exists(directory, name)?
-                {
-                    return rustix::fs::renameat(directory, file, directory, name)
-                        .map_err(|_| unavailable());
-                }
-                remove_level(directory, file, TREE_DEPTH_MAX)
-            }
-            Some(_) => unlink(directory, file),
-        }
-    }
-
-    /// Deletes a user plugin's folder and any `.yaml` file an older version left under its
-    /// name. The folder first moves to a retired name with no plugin name in it, so one it
-    /// cannot delete is never listed or restored again and stays for the start sweep; an
-    /// entry that is not a folder, such as a link, is unlinked itself without following it.
-    /// Inputs: the engine root, a valid name and the random id source. Output: whether
-    /// anything was deleted, or the folder's refusal.
-    pub(super) fn remove(
-        root: &Path,
-        name: &str,
-        new_ref: fn() -> Result<String, &'static str>,
-    ) -> Result<bool, Refused> {
-        let Some(directory) = open(root, false)? else {
-            return Ok(false);
-        };
-        let kind = match rustix::fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => Some(rustix::fs::FileType::from_raw_mode(stat.st_mode)),
-            Err(rustix::io::Errno::NOENT) => None,
-            Err(_) => return Err(unavailable()),
-        };
-        match kind {
-            Some(rustix::fs::FileType::Directory) => {
-                let aside = format!("{RETIRED}{}", new_ref().map_err(refused)?);
-                rustix::fs::renameat(&directory, name, &directory, aside.as_str())
-                    .map_err(|_| unavailable())?;
-                let _ = remove_tree(&directory, &aside);
-            }
-            Some(_) => match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
-                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                Err(_) => return Err(unavailable()),
-            },
-            None => {}
-        }
-        let folder = kind.is_some();
-        let legacy = match rustix::fs::unlinkat(
-            &directory,
-            format!("{name}{LEGACY_SUFFIX}").as_str(),
-            AtFlags::empty(),
-        ) {
-            Ok(()) => true,
-            Err(rustix::io::Errno::NOENT) => false,
-            Err(_) => return Err(unavailable()),
-        };
-        Ok(folder || legacy)
-    }
-}
-
-#[cfg(not(unix))]
-mod folder {
-    use super::{
-        FOLDER, MANIFEST_FILE, Problem, TREE_DEPTH_MAX, TREE_ENTRIES_MAX, USER_PLUGINS_MAX,
-        UserFile, left_over, retired_name,
-    };
-    use crate::Refused;
-    use crate::manifest::{Bounded, MANIFEST_BYTES_MAX, read_bounded};
-    use crate::store::refused;
-    use std::path::Path;
-
-    /// No user plugins folder off Unix: nothing is listed. Output: an empty listing.
-    pub(super) fn entries(_root: &Path) -> Result<(Vec<UserFile>, bool), Refused> {
-        Ok((Vec::new(), false))
-    }
-
-    /// No user plugins folder off Unix, so no plugin is past its cap. Output: true.
-    pub(super) fn listed(_root: &Path, _name: &str) -> Result<bool, Refused> {
-        Ok(true)
-    }
-
-    /// No user plugins folder off Unix, so no add is past its cap. Output: true.
-    pub(super) fn fits(_root: &Path, _name: &str) -> Result<bool, Refused> {
-        Ok(true)
-    }
-
-    /// No user plugins folder off Unix. Output: none.
-    pub(super) fn read(
-        _root: &Path,
-        _name: &str,
-    ) -> Result<Option<Result<Vec<u8>, Problem>>, Refused> {
-        Ok(None)
-    }
-
-    /// Reads a folder the owner picked: not a reparse point, holding its plugin.toml only,
-    /// read through the guarded open. Input: the folder. Output: the bytes, or the refusal.
-    pub(super) fn read_source(source: &Path) -> Result<Vec<u8>, Problem> {
-        let unsafe_entry = || Problem::new("app_plugin_file_unsafe", None, None);
-        let metadata = std::fs::symlink_metadata(source).map_err(|_| unsafe_entry())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(unsafe_entry());
-        }
-        let mut seen = 0;
-        for entry in std::fs::read_dir(source).map_err(|_| unsafe_entry())? {
-            let entry = entry.map_err(|_| unsafe_entry())?;
-            seen += 1;
-            if entry.file_name() != MANIFEST_FILE || seen > 1 {
-                return Err(Problem::new("plugin_folder_extra_entry", None, None));
-            }
-        }
-        match read_bounded(&source.join(MANIFEST_FILE), MANIFEST_BYTES_MAX) {
-            Bounded::Text(text) => Ok(text.into_bytes()),
-            Bounded::TooLarge | Bounded::Unreadable => {
-                Err(Problem::new("plugin_manifest_invalid", Some(1), None))
-            }
-        }
-    }
-
-    /// No user plugins folder off Unix. Output: `app_plugin_folder_unavailable`.
-    pub(super) fn write(
-        _root: &Path,
-        _name: &str,
-        _bytes: &[u8],
-        _new_ref: fn() -> Result<String, &'static str>,
-    ) -> Result<(), Refused> {
-        Err(refused("app_plugin_folder_unavailable"))
-    }
-
-    fn unavailable() -> Refused {
-        refused("app_plugin_folder_unavailable")
-    }
-
-    fn missing(error: &std::io::Error) -> bool {
-        error.kind() == std::io::ErrorKind::NotFound
-    }
-
-    /// What one entry is, read without following a link. Input: its path. Output: its
-    /// type, none when it is missing, or `app_plugin_folder_unavailable`.
-    fn kind(path: &Path) -> Result<Option<std::fs::FileType>, Refused> {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) => Ok(Some(metadata.file_type())),
-            Err(error) if missing(&error) => Ok(None),
-            Err(_) => Err(unavailable()),
-        }
-    }
-
-    /// Unlinks a file, or a link without following it. Inputs: the path and its type.
-    /// Output: Ok once it is gone, or `app_plugin_folder_unavailable`.
-    fn unlink(path: &Path, file_type: std::fs::FileType) -> Result<(), Refused> {
-        let removed = if file_type.is_symlink() {
-            std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path))
-        } else {
-            std::fs::remove_file(path)
-        };
-        match removed {
-            Ok(()) => Ok(()),
-            Err(error) if missing(&error) => Ok(()),
-            Err(_) => Err(unavailable()),
-        }
-    }
-
-    /// Deletes one folder and what it holds, unlinking a link in it without following it.
-    /// Inputs: the folder and the levels left. Output: Ok once it is gone, or
-    /// `app_plugin_folder_unavailable` past the depth or `TREE_ENTRIES_MAX` entries.
-    fn remove_level(path: &Path, depth: usize) -> Result<(), Refused> {
-        let mut inside = Vec::new();
-        for entry in std::fs::read_dir(path).map_err(|_| unavailable())? {
-            inside.push(entry.map_err(|_| unavailable())?.path());
-            if inside.len() > TREE_ENTRIES_MAX {
-                return Err(unavailable());
-            }
-        }
-        for child in &inside {
-            match kind(child)? {
-                Some(file_type) if file_type.is_dir() && depth == 0 => {
-                    return Err(unavailable());
-                }
-                Some(file_type) if file_type.is_dir() => remove_level(child, depth - 1)?,
-                Some(file_type) => unlink(child, file_type)?,
-                None => {}
-            }
-        }
-        std::fs::remove_dir(path).map_err(|_| unavailable())
-    }
-
-    /// Restores or deletes one staged or retired entry: a retired folder goes back under its
-    /// plugin name when that name is missing, any other folder is deleted, and a file or
-    /// link is unlinked. Inputs: the plugins folder and the entry. Output: Ok, or the
-    /// refusal.
-    fn sweep(folder: &Path, file: &str) -> Result<(), Refused> {
-        let path = folder.join(file);
-        match kind(&path)? {
-            None => Ok(()),
-            Some(file_type) if file_type.is_dir() => {
-                if let Some(name) = retired_name(file)
-                    && kind(&folder.join(name))?.is_none()
-                {
-                    return std::fs::rename(&path, folder.join(name)).map_err(|_| unavailable());
-                }
-                remove_level(&path, TREE_DEPTH_MAX)
-            }
-            Some(file_type) => unlink(&path, file_type),
-        }
-    }
-
-    /// Sweeps the staged and retired entries a crash between a write and its rename left, at
-    /// most `USER_PLUGINS_MAX` a start, in name order. Input: the engine root. Output: Ok
-    /// once each is restored or deleted or the folder is missing, else the first refusal
-    /// after every entry was tried.
-    pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
-        let folder = root.join(FOLDER);
-        let entries = match std::fs::read_dir(&folder) {
-            Ok(entries) => entries,
-            Err(error) if missing(&error) => return Ok(()),
-            Err(_) => return Err(unavailable()),
-        };
-        let mut left = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|_| unavailable())?;
-            let Some(file) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if left_over(file.as_bytes()) {
-                left.push(file);
-                if left.len() == USER_PLUGINS_MAX {
-                    break;
-                }
-            }
-        }
-        assert!(left.len() <= USER_PLUGINS_MAX);
-        left.sort();
-        let mut first = None;
-        for file in &left {
-            if let Err(refusal) = sweep(&folder, file) {
-                first.get_or_insert(refusal);
-            }
-        }
-        first.map_or(Ok(()), Err)
-    }
-
-    /// No user plugins folder off Unix. Output: false, nothing was deleted.
-    pub(super) fn remove(
-        _root: &Path,
-        _name: &str,
-        _new_ref: fn() -> Result<String, &'static str>,
-    ) -> Result<bool, Refused> {
-        Ok(false)
-    }
-}
+pub use folder::FolderStep;

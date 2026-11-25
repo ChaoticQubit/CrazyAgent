@@ -36,6 +36,7 @@ pub struct FindingHooks {
     pub in_agent_tmp: fn(&Path) -> bool,
     pub harness_prefix: fn(&Path) -> PathBuf,
     pub gate_root: fn() -> Option<PathBuf>,
+    pub folder_probes: bool,
 }
 
 impl std::fmt::Debug for FindingHooks {
@@ -148,6 +149,52 @@ const INSTALL_ROOTS: [&str; 8] = [
     "/run/current-system/sw",
     "/nix/var/nix/profiles/default",
 ];
+/// The Homebrew prefixes ([`INSTALL_ROOTS`] holds `/usr/local` through `/usr`). Below one,
+/// only [`HOMEBREW_FILLED`] counts as installed, whichever install root the path lies under,
+/// since the owner can write a prefix and may keep repositories there.
+const HOMEBREW_PREFIXES: [&str; 3] = ["/usr/local", "/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
+/// The folders in a Homebrew prefix that hold the tools it installs: links, kegs and their
+/// frameworks, casks and Homebrew's own code, plus npm's global packages ([`HOMEBREW_NPM`]).
+/// `share`, `etc`, `include`, `var`, the rest of `lib` and every other folder are left out,
+/// so a tool there counts as agents' while the set-up projects cannot be read.
+const HOMEBREW_FILLED: [&str; 8] = [
+    "bin",
+    "sbin",
+    "Cellar",
+    "opt",
+    "Caskroom",
+    "Homebrew",
+    "Library",
+    "Frameworks",
+];
+/// npm's global packages in a Homebrew prefix, the one installed folder below its `lib`.
+const HOMEBREW_NPM: [&str; 2] = ["lib", "node_modules"];
+
+/// Whether a path below a Homebrew prefix, in the form given or the prefix's macOS data
+/// volume name ([`FindingHooks::data_twin`]), lies in a folder that holds Homebrew's tools
+/// ([`HOMEBREW_FILLED`] or [`HOMEBREW_NPM`]); a path below no prefix passes. Inputs: the
+/// hooks and the path. Output: the answer.
+fn homebrew_filled(hooks: &FindingHooks, path: &Path) -> bool {
+    for prefix in HOMEBREW_PREFIXES.iter().map(Path::new) {
+        let twin = (hooks.data_twin)(prefix);
+        let below = std::iter::once(prefix)
+            .chain(twin.as_deref())
+            .find_map(|form| path.strip_prefix(form).ok());
+        if let Some(rest) = below {
+            let mut names = rest.components().map(|part| match part {
+                std::path::Component::Normal(name) => Some(name),
+                _ => None,
+            });
+            let first = names.next().flatten();
+            if first.is_some_and(|name| name == HOMEBREW_NPM[0]) {
+                return names.next().flatten() == Some(std::ffi::OsStr::new(HOMEBREW_NPM[1]));
+            }
+            return first.is_some_and(|name| HOMEBREW_FILLED.iter().any(|filled| name == *filled));
+        }
+    }
+    true
+}
+
 /// The file name of the tmux the app ships beside the engine, which the name `tmux` finds
 /// before every folder ([`Places::bundled`]).
 pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
@@ -279,10 +326,11 @@ impl Eq for Places {}
 
 /// The Windows folders whose tools stay usable while the set-up projects cannot be read: the
 /// engine's own `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)` and `ProgramW6432`, each
-/// kept only when it names an absolute folder, as given and in the verbatim spelling
-/// `canonicalize` gives, so every form of a tool under one meets a root in its own spelling
-/// ([`Places::agent_writable`]). Output: the folders, at most 8.
-fn windows_install_roots() -> Vec<PathBuf> {
+/// kept only when it names an absolute folder, as given, in the verbatim spelling
+/// `canonicalize` gives and in the canonical hook's spelling, as [`engine_roots`] keeps the
+/// data folder, so every form of a tool under one meets a root in its own spelling
+/// ([`Places::agent_writable`]). Input: the hooks. Output: the folders, at most 12.
+fn windows_install_roots(hooks: &FindingHooks) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     for root in [
         "SystemRoot",
@@ -295,14 +343,14 @@ fn windows_install_roots() -> Vec<PathBuf> {
     .map(PathBuf::from)
     .filter(|root| root.is_absolute())
     {
-        let resolved = root.canonicalize().ok();
-        for name in std::iter::once(root).chain(resolved) {
+        let resolved = [root.canonicalize().ok(), (hooks.canonical)(&root).ok()];
+        for name in std::iter::once(root).chain(resolved.into_iter().flatten()) {
             if !roots.contains(&name) {
                 roots.push(name);
             }
         }
     }
-    assert!(roots.len() <= 8);
+    assert!(roots.len() <= 12);
     roots
 }
 
@@ -655,15 +703,24 @@ impl BundleNote {
 /// Finds the tmux the engine uses, the one answer for setup, the terminal and the sandbox
 /// grant: the bundled copy when it passes the entry checks and `runs`, else the usual
 /// order with the reason the bundled one was not used; with no other tmux, the usual
-/// search's own miss. Inputs: the places, whether this build ships tmux and the check that
-/// the bundled copy runs. Output: the tmux and its note, or why none can run.
+/// search's own miss. A tmux of the usual order that fails `runs` gives way to a bundled
+/// copy that runs; with none, one too old for agent terminals is a [`Reason::WrongVersion`]
+/// miss naming its version, and one that cannot run is still returned. Inputs: the places,
+/// whether this build ships tmux and the check that a tmux runs: none when it cannot run,
+/// its version when it is too old. Output: the tmux and its note, or why none can run.
 pub fn resolve_tmux(
     places: &Places,
     ships_bundle: bool,
-    runs: impl Fn(&Resolved) -> bool,
+    runs: impl Fn(&Resolved) -> Result<(), Option<String>>,
 ) -> Result<(Resolved, Option<BundleNote>), Missing> {
+    let settled = |found: Resolved, note: Option<BundleNote>, failed: Option<String>| match failed {
+        Some(version) => Err(too_old_tmux(&found, version)),
+        None => Ok((found, note)),
+    };
     let Some(bundled) = places.bundled("tmux") else {
-        return resolve("tmux", places).map(|found| (found, None));
+        let found = resolve("tmux", places)?;
+        let failed = runs(&found).err().flatten();
+        return settled(found, None, failed);
     };
     let note = if std::fs::symlink_metadata(&bundled).is_ok() {
         Some(BundleNote::CannotRun)
@@ -673,12 +730,44 @@ pub fn resolve_tmux(
         None
     };
     match resolve("tmux", places) {
-        Ok(found) if found.entry == bundled && runs(&found) => Ok((found, None)),
-        Ok(found) if found.entry != bundled => Ok((found, note)),
-        _ => resolve("tmux", &places.without_bundled()).map(|found| {
+        Ok(found) if found.entry == bundled && runs(&found).is_ok() => Ok((found, None)),
+        Ok(found) if found.entry != bundled => match runs(&found) {
+            Ok(()) => Ok((found, note)),
+            Err(failed) => match resolve_entry(&bundled, places) {
+                Ok(copy) if runs(&copy).is_ok() => Ok((copy, None)),
+                _ => settled(found, note, failed),
+            },
+        },
+        _ => {
+            let found = resolve("tmux", &places.without_bundled())?;
             assert_ne!(found.entry, bundled);
-            (found, note)
-        }),
+            let failed = runs(&found).err().flatten();
+            settled(found, note, failed)
+        }
+    }
+}
+
+/// The miss for a tmux too old for agent terminals: its version, the oldest one they
+/// support where the terminal host builds, and its folder. Inputs: the tmux and its
+/// version. Output: the miss.
+fn too_old_tmux(found: &Resolved, version: String) -> Missing {
+    assert!(!version.is_empty());
+    #[cfg(unix)]
+    let needs = Some(crate::terminal::tmux::version_needed());
+    #[cfg(not(unix))]
+    let needs = None;
+    Missing {
+        tool: "tmux".to_owned(),
+        reason: Reason::WrongVersion,
+        needs,
+        found: Some(version),
+        looked: found
+            .entry
+            .parent()
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect(),
+        refused: None,
     }
 }
 
