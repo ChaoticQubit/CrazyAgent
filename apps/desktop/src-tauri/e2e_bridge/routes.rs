@@ -4341,6 +4341,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_log_compaction(choice, generation) .await }.await;
             routed(result)
         }
+        "desktop_native_terminal_enabled" => {
+            let result: Result<_, BridgeError> = async { Ok(false) }.await;
+            routed(result)
+        }
         _ => Routed::Unknown,
     }
 }
