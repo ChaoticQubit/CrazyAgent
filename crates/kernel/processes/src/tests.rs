@@ -96,11 +96,11 @@ fn the_kernel_names_no_crazyagent_or_sandbox_item() {
 
 /// The tables of one Cargo.toml that turn on this crate's `test-support` feature: its
 /// dependency tables, `workspace.dependencies`, and `features` when one forwards the
-/// feature. Read as TOML so a dependency table of its own or a wrapped features line counts
+/// feature, or in this crate's own manifest lists it. Read as TOML so a dependency table of its own or a wrapped features line counts
 /// as an inline one. Panics naming the manifest when it does not parse. Inputs: the
 /// manifest's path and text, and the aliases the workspace root names for this crate.
 /// Output: each such table's name.
-fn test_support_tables(path: &Path, text: &str, _shared: &[String]) -> Vec<String> {
+fn test_support_tables(path: &Path, text: &str, shared: &[String]) -> Vec<String> {
     let manifest: toml::Table = toml::from_str(text)
         .unwrap_or_else(|error| panic!("{path:?} does not parse as a manifest: {error}"));
     let kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
@@ -124,31 +124,41 @@ fn test_support_tables(path: &Path, text: &str, _shared: &[String]) -> Vec<Strin
         tables.push(("workspace.dependencies".to_owned(), shared));
     }
     let name = "crazyagent-kernel-processes";
+    let names_crate = |key: &str, entry: &toml::Value| {
+        key == name
+            || entry.get("package").and_then(toml::Value::as_str) == Some(name)
+            || (shared.iter().any(|alias| alias == key)
+                && entry.get("workspace").and_then(toml::Value::as_bool) == Some(true))
+    };
     let keys: Vec<&str> = tables
         .iter()
         .filter_map(|(_, table)| table.as_table())
         .flat_map(|table| table.iter())
-        .filter(|(key, entry)| {
-            key.as_str() == name || entry.get("package").and_then(toml::Value::as_str) == Some(name)
-        })
+        .filter(|(key, entry)| names_crate(key, entry))
         .map(|(key, _)| key.as_str())
         .collect();
+    let own = manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        == Some(name);
     let forwards = manifest
         .get("features")
         .and_then(toml::Value::as_table)
         .is_some_and(|features| {
             features
-                .values()
-                .filter_map(toml::Value::as_array)
-                .flatten()
-                .filter_map(toml::Value::as_str)
-                .any(|feature| {
-                    std::iter::once(name)
-                        .chain(keys.iter().copied())
-                        .any(|key| {
-                            feature == format!("{key}/test-support")
-                                || feature == format!("{key}?/test-support")
-                        })
+                .iter()
+                .filter_map(|(feature, list)| Some((feature, list.as_array()?)))
+                .flat_map(|(feature, list)| list.iter().map(move |item| (feature, item)))
+                .filter_map(|(feature, item)| Some((feature, item.as_str()?)))
+                .any(|(feature, item)| {
+                    (own && feature != "test-support" && item == "test-support")
+                        || std::iter::once(name)
+                            .chain(keys.iter().copied())
+                            .any(|key| {
+                                item == format!("{key}/test-support")
+                                    || item == format!("{key}?/test-support")
+                            })
                 })
         });
     let mut found: Vec<String> = tables
@@ -156,16 +166,8 @@ fn test_support_tables(path: &Path, text: &str, _shared: &[String]) -> Vec<Strin
         .filter(|(_, table)| {
             table.as_table().is_some_and(|table| {
                 table.iter().any(|(key, entry)| {
-                    let entry = entry.as_table();
-                    let named = key == name
-                        || entry
-                            .and_then(|entry| entry.get("package"))
-                            .and_then(toml::Value::as_str)
-                            == Some(name);
-                    let features = entry
-                        .and_then(|entry| entry.get("features"))
-                        .and_then(toml::Value::as_array);
-                    named
+                    let features = entry.get("features").and_then(toml::Value::as_array);
+                    names_crate(key, entry)
                         && features.is_some_and(|features| {
                             features
                                 .iter()
@@ -273,6 +275,21 @@ fn a_workspace_alias_turning_test_support_on_in_a_member_is_caught() {
 #[test]
 fn test_support_is_enabled_only_by_crazyagent_dev_dependencies() {
     let root = workspace_root();
+    let top = root.join("Cargo.toml");
+    let workspace: toml::Table = toml::from_str(&text_of(&top))
+        .unwrap_or_else(|error| panic!("{top:?} does not parse as a manifest: {error}"));
+    let shared: Vec<String> = workspace
+        .get("workspace")
+        .and_then(|section| section.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter(|(_, entry)| {
+            entry.get("package").and_then(toml::Value::as_str)
+                == Some("crazyagent-kernel-processes")
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
     let mut manifests = Vec::new();
     files_named(
         &root,
@@ -283,7 +300,7 @@ fn test_support_is_enabled_only_by_crazyagent_dev_dependencies() {
     let mut enabling = Vec::new();
     for manifest in &manifests {
         let text = text_of(manifest);
-        for table in test_support_tables(manifest, &text, &[]) {
+        for table in test_support_tables(manifest, &text, &shared) {
             let place = manifest
                 .strip_prefix(&root)
                 .unwrap_or_else(|_| panic!("{manifest:?} is outside {root:?}"))
