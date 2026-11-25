@@ -1,4 +1,5 @@
 use super::*;
+use kernel_security::secret::SecretString;
 
 #[test]
 fn a_secret_binds_to_an_api_key_account_with_a_saved_key() {
@@ -298,4 +299,64 @@ fn a_new_key_at_the_same_reference_needs_no_binding_write() {
     let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
     let value = secret_value(&case.engine(), &loaded.bindings[0]).unwrap();
     assert_eq!(value.expose(), "sk-own-plugin-02");
+}
+
+/// A key store read, as [`Keys::read`] takes it.
+type KeyRead = fn(&Path, KeyFolder, &KeyRef) -> Result<Option<SecretString>, ()>;
+
+/// Replaces acme's entered key in place with an engine whose key store reads with `read`,
+/// after a first key was saved. Inputs: the case and the read. Output: the replace's
+/// result.
+fn replace_key_reading(case: &Case, read: KeyRead) -> Result<(), Refused> {
+    trusted(case, ACME);
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"pa-old-key-000001".to_vec(),
+    )
+    .unwrap();
+    let keys = Keys { read, ..KEYS };
+    let engine = Engine {
+        keys: &keys,
+        ..case.engine()
+    };
+    set_key(
+        &case.db,
+        &engine,
+        "acme",
+        "api_key",
+        b"pa-new-key-000002".to_vec(),
+    )
+}
+
+/// A key replace whose read of the fresh key file fails deletes that file and leaves the
+/// old key in its own file.
+#[test]
+fn a_key_commit_whose_read_fails_deletes_the_fresh_key_file() {
+    fn failing(_: &Path, _: KeyFolder, _: &KeyRef) -> Result<Option<SecretString>, ()> {
+        Err(())
+    }
+    let case = case();
+    let replaced = replace_key_reading(&case, failing);
+    assert_eq!(code(replaced), "app_plugin_key_store_unavailable");
+    let files = plugin_keys(&case);
+    assert_eq!(files.len(), 1);
+    assert_eq!(fixture(&files[0], std::fs::read), b"pa-old-key-000001");
+}
+
+/// A key replace whose read of the fresh key file finds nothing deletes that file and
+/// leaves the old key in its own file.
+#[test]
+fn a_key_commit_whose_read_finds_nothing_deletes_the_fresh_key_file() {
+    fn nothing(_: &Path, _: KeyFolder, _: &KeyRef) -> Result<Option<SecretString>, ()> {
+        Ok(None)
+    }
+    let case = case();
+    let replaced = replace_key_reading(&case, nothing);
+    assert_eq!(code(replaced), "app_plugin_key_store_unavailable");
+    let files = plugin_keys(&case);
+    assert_eq!(files.len(), 1);
+    assert_eq!(fixture(&files[0], std::fs::read), b"pa-old-key-000001");
 }

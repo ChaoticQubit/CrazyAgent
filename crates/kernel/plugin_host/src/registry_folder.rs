@@ -1,6 +1,7 @@
 use super::{
     MANIFEST_FILE, Problem, REMOVING, RETIRED, STAGED, TREE_DEPTH_MAX, TREE_ENTRIES_MAX,
-    USER_PLUGINS_MAX, UserFile, left_over, removing, removing_name, retired, retired_name,
+    USER_PLUGINS_MAX, UserFile, left_over, owed, owed_name, removing, removing_name, retired,
+    retired_name,
 };
 
 use crate::Refused;
@@ -278,8 +279,11 @@ pub(super) fn write(
     Ok(step)
 }
 
-/// Sweeps the staged and retired entries a crash between a write and its rename left, at
-/// most `USER_PLUGINS_MAX` a start, in name order. Input: the engine root. Output: Ok
+/// Sweeps the staged and retired entries a crash between a write and its rename left, and
+/// the folders a rolled-back replace owes back to their plugin names, at most
+/// `USER_PLUGINS_MAX` a start: every other entry first, in name order, then the owed ones,
+/// so a leftover that blocked a rollback is gone before its owed folder is put back.
+/// Input: the engine root. Output: Ok
 /// once each is restored or deleted or the folder is missing, else the first refusal
 /// after every entry was tried.
 pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
@@ -296,9 +300,17 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
     .map_err(|()| unavailable())?;
     assert!(left.len() <= USER_PLUGINS_MAX);
     left.sort();
+    left.sort_by_key(|file| file.to_str().and_then(owed_name).is_some());
     let mut first = None;
     for file in &left {
-        if let Err(refusal) = sweep(&directory, file) {
+        let owed_to = file.to_str().and_then(owed_name);
+        let shared = owed_to.is_some_and(|name| {
+            left.iter()
+                .filter(|other| other.to_str().and_then(owed_name) == Some(name))
+                .count()
+                > 1
+        });
+        if let Err(refusal) = sweep(&directory, file, shared) {
             first.get_or_insert(refusal);
         }
     }
@@ -306,15 +318,35 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
     first.map_or(Ok(()), Err)
 }
 
-/// Restores or deletes one staged or retired entry: a retired folder goes back under its
-/// plugin name when that name is missing; one beside a live plugin of its name first loses
-/// that name, so a folder it cannot delete is never restored later; any other folder is
-/// deleted, and a file or link is unlinked. Inputs: the plugins folder and the entry.
-/// Output: Ok, or the refusal.
-fn sweep(directory: &Dir, file: &OsStr) -> Result<(), Refused> {
+/// Restores or deletes one staged, retired or owed entry. A folder owed back to its plugin
+/// name goes back under it: a live folder of that name first loses the name and is deleted,
+/// and when it cannot lose the name both stay; when more than one folder is owed to the
+/// name, none is touched, since which one is the original is not known. A retired folder
+/// goes back under its plugin name when that name is missing; one beside a live plugin of
+/// its name first loses that name, so a folder it cannot delete is never restored later;
+/// any other folder is deleted, and a file or link is unlinked. Inputs: the plugins folder,
+/// the entry and whether another folder is owed to the same name. Output: Ok, or the
+/// refusal.
+fn sweep(directory: &Dir, file: &OsStr, shared: bool) -> Result<(), Refused> {
     match os::kind(directory, file).map_err(|()| unavailable())? {
         None => Ok(()),
         Some(Kind::Folder) => {
+            if let Some(text) = file.to_str()
+                && let Some(name) = owed_name(text)
+            {
+                if shared {
+                    return Ok(());
+                }
+                if exists(directory, name)? {
+                    let (_, id) = text.rsplit_once('.').expect("an owed name ends in its id");
+                    let nameless = format!("{RETIRED}{id}");
+                    assert!(retired_name(&nameless).is_none());
+                    os::rename(directory, name.as_ref(), nameless.as_ref())
+                        .map_err(|()| unavailable())?;
+                    let _ = remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
+                }
+                return os::rename(directory, file, name.as_ref()).map_err(|()| unavailable());
+            }
             if let Some(text) = file.to_str()
                 && let Some(name) = retired_name(text)
             {
@@ -525,8 +557,9 @@ impl FolderStep {
     }
 
     /// Puts the folder moved aside back under the plugin name, once. A replace first moves
-    /// the new folder off the name, renamed without it and deleted; if that move fails both
-    /// stay and the start sweep keeps the new one. Output: none.
+    /// the new folder off the name, renamed without it by the aside's own id and deleted;
+    /// if that move fails, the original is renamed as owed back to the name, which the start
+    /// sweep puts back in place of the new folder. Output: none.
     fn put_back(&mut self) {
         let Some(aside) = self.aside.take() else {
             return;
@@ -535,12 +568,14 @@ impl FolderStep {
             return;
         };
         if self.replaced {
-            let Ok(id) = (self.new_ref)() else {
-                return;
-            };
+            let (_, id) = aside
+                .rsplit_once('.')
+                .expect("an aside name ends in its id");
             let nameless = format!("{RETIRED}{id}");
             assert!(retired_name(&nameless).is_none());
             if os::rename(&directory, self.name.as_ref(), nameless.as_ref()).is_err() {
+                let _ = os::rename(&directory, aside.as_ref(), owed(&self.name, id).as_ref());
+                let _ = os::sync(&directory);
                 return;
             }
             let _ = remove_tree(&directory, &nameless);

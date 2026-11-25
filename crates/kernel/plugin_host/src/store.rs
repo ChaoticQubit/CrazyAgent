@@ -431,8 +431,8 @@ impl KeyStep {
         assert_ne!(fresh, self.kept);
         let unavailable = || refused("app_plugin_key_store_unavailable");
         let moved = (self.keys.read)(&self.root, KeyFolder::Plugin, &fresh)
-            .map_err(|()| unavailable())?
-            .ok_or_else(unavailable)
+            .map_err(|()| unavailable())
+            .and_then(|key| key.ok_or_else(unavailable))
             .and_then(|key| {
                 let bytes = key.expose().as_bytes().to_vec();
                 (self.keys.replace)(&self.root, KeyFolder::Plugin, &self.kept, bytes)
