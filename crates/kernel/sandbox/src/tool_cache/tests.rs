@@ -359,6 +359,146 @@ fn a_record_write_sweeps_staging_files_another_process_left() {
     );
 }
 
+std::thread_local! {
+    /// The names the priming rows' removal stand-ins were asked for, on this row's thread.
+    static ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A removal stand-in that notes each name it is asked for, then removes it as
+/// [`removed`] does. Inputs and output: as [`removed`].
+fn noted(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    otherwise: &'static str,
+) -> Result<(), &'static str> {
+    ASKED.with(|asked| asked.borrow_mut().push(name.to_owned()));
+    removed(parent, name, otherwise)
+}
+
+/// A removal stand-in that notes each name it is asked for and refuses every one, as a
+/// folder too deep or still gaining entries is refused. Inputs: as [`removed`]. Output: the
+/// refusal.
+fn noted_and_kept(
+    _parent: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    _otherwise: &'static str,
+) -> Result<(), &'static str> {
+    ASKED.with(|asked| asked.borrow_mut().push(name.to_owned()));
+    Err("kept by the stand-in")
+}
+
+/// A removal stand-in that notes each name it is asked for, removes this process's own
+/// priming folder as [`removed`] does and refuses any other. Inputs: as [`removed`].
+/// Output: done for its own folder, else the refusal.
+fn noted_and_kept_unless_own(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    otherwise: &'static str,
+) -> Result<(), &'static str> {
+    ASKED.with(|asked| asked.borrow_mut().push(name.to_owned()));
+    if name.starts_with(&format!(".priming-{}-", std::process::id())) {
+        removed(parent, name, otherwise)
+    } else {
+        Err("kept by the stand-in")
+    }
+}
+
+/// A priming command that fails. Inputs: the priming folder and uv. Output: the command.
+fn priming_fails(_folder: &Path, _uv: &Path) -> Command {
+    Command::new("/usr/bin/false")
+}
+
+/// A priming command that ends well with an empty cache, so no bucket is found. Inputs: the
+/// priming folder and uv. Output: the command.
+fn priming_empty(folder: &Path, _uv: &Path) -> Command {
+    let mut command = Command::new("/bin/mkdir");
+    command.arg(folder.join("cache"));
+    command
+}
+
+/// The hooks the priming rows use: the given removal and priming command. Inputs: the two.
+/// Output: the hooks.
+fn priming_hooks(
+    remove_agent_entry: fn(
+        std::os::fd::BorrowedFd<'_>,
+        &str,
+        &'static str,
+    ) -> Result<(), &'static str>,
+    priming_command: fn(&Path, &Path) -> Command,
+) -> ToolCacheHooks {
+    fn unpin(_parent: std::os::fd::BorrowedFd<'_>, _name: &str) {}
+    ToolCacheHooks {
+        unpin,
+        remove_agent_entry,
+        priming_command,
+    }
+}
+
+/// A priming first removes, through the hooks, each priming folder another process left,
+/// and keeps this process's own and every name that is not exactly a priming folder's.
+#[test]
+fn a_priming_sweeps_the_priming_folders_another_process_left() {
+    let (folder, tools) = record_folder();
+    let own = std::process::id();
+    let other = own.wrapping_add(1);
+    assert_ne!(other, own);
+    let left = format!(".priming-{other}-1");
+    std::fs::create_dir_all(folder.path().join(&left).join("home")).unwrap();
+    std::fs::write(folder.path().join(&left).join("home").join("x"), b"x").unwrap();
+    let own_folder = format!(".priming-{own}-2");
+    let kept = [
+        own_folder.as_str(),
+        ".priming-x-1",
+        ".priming-1",
+        ".priming-1-1-1",
+        "priming-1-1",
+        "0123456789abcdef0123456789abcdef",
+    ];
+    for name in kept {
+        std::fs::create_dir(folder.path().join(name)).unwrap();
+    }
+    let hooks = priming_hooks(noted, priming_fails);
+    let primed = prime(&hooks, &tools, folder.path(), Path::new("/usr/bin/true"));
+    assert_eq!(primed, Err("tool_cache_priming_failed"));
+    let mut expected: Vec<String> = kept.iter().map(|name| (*name).to_owned()).collect();
+    expected.sort_unstable();
+    assert_eq!(names_in(folder.path()), expected);
+    assert!(ASKED.with(|asked| asked.borrow().contains(&left)));
+}
+
+/// A priming folder another process left that the removal refuses stays, and the priming
+/// goes on and finds its buckets.
+#[test]
+fn a_priming_goes_on_when_a_left_folder_cannot_be_removed() {
+    let (folder, tools) = record_folder();
+    let left = format!(".priming-{}-1", std::process::id().wrapping_add(1));
+    std::fs::create_dir(folder.path().join(&left)).unwrap();
+    let hooks = priming_hooks(noted_and_kept_unless_own, priming_empty);
+    let primed = prime(&hooks, &tools, folder.path(), Path::new("/usr/bin/true"));
+    assert!(ASKED.with(|asked| asked.borrow().contains(&left)));
+    assert_eq!(names_in(folder.path()), [left]);
+    assert_eq!(primed, Ok(Vec::new()));
+}
+
+/// A priming removes its own folder through the hooks: the folder is gone once the removal
+/// takes it, and a removal that refuses fails the priming with its plain code.
+#[test]
+fn a_priming_removes_its_own_folder_through_the_hooks() {
+    let (folder, tools) = record_folder();
+    let hooks = priming_hooks(noted, priming_empty);
+    let primed = prime(&hooks, &tools, folder.path(), Path::new("/usr/bin/true"));
+    assert_eq!(primed, Ok(Vec::new()));
+    assert_eq!(names_in(folder.path()), Vec::<String>::new());
+    let own = format!(".priming-{}-", std::process::id());
+    let asked = ASKED.with(|asked| asked.borrow().clone());
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].starts_with(&own));
+    let (folder, tools) = record_folder();
+    let hooks = priming_hooks(noted_and_kept, priming_empty);
+    let primed = prime(&hooks, &tools, folder.path(), Path::new("/usr/bin/true"));
+    assert_eq!(primed, Err("tool_cache_priming_failed"));
+}
+
 /// A rename that fails removes the writer's staging file and refuses the record.
 #[test]
 fn a_failed_rename_removes_the_staging_file() {
