@@ -922,13 +922,6 @@ export function setAccountSchedule(scheduleChange: ScheduleChange, version: numb
   return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
-/** Makes the id of a new pool, so the page can select the pool it creates. Output: the id. */
-export function newPoolId(): string {
-  const bytes = new Uint8Array(10);
-  crypto.getRandomValues(bytes);
-  return "pool-" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 /** Validates a pool before saving. Inputs: name and member ids. Output: the trimmed name
  * and members, or a plain error. */
 export function poolInput(name: string, members: string[]): Result<{ name: string; members: string[] }> {
