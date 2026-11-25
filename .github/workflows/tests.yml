@@ -42,22 +42,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 3
+          fetch-depth: 4
       - name: Restore the branch tip's tests.yml under the farm one, and on the red side take out the supervise hide check
         id: restore
         run: |
           set -euo pipefail
           git log -1 --format='farm %H %s'
-          git log -1 --format='branch tip %H %s' HEAD^
-          [ "$(git rev-parse HEAD^)" = e8d9dff24ef3ea76c1a09f955de116cd619d12bb ] || { echo "::error::the parent is not the row tip e8d9dff24e"; exit 1; }
-          [ "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/tests.yml ] || { echo "::error::the farm commit touches more than tests.yml"; exit 1; }
-          git checkout HEAD^ -- .github/workflows/tests.yml
-          git diff --quiet HEAD^ || { echo "::error::the tree is not the branch tip"; exit 1; }
+          git log -1 --format='branch tip %H %s' HEAD^^
+          [ "$(git rev-parse HEAD^^)" = e8d9dff24ef3ea76c1a09f955de116cd619d12bb ] || { echo "::error::the grandparent is not the row tip e8d9dff24e"; exit 1; }
+          [ "$(git diff --name-only HEAD^^ HEAD)" = .github/workflows/tests.yml ] || { echo "::error::the farm commits touch more than tests.yml"; exit 1; }
+          git checkout HEAD^^ -- .github/workflows/tests.yml
+          git diff --quiet HEAD^^ || { echo "::error::the tree is not the branch tip"; exit 1; }
           if [ "${{ matrix.side }}" = red ]; then
             runner=crates/crazyagent/src/research/runner.rs
             perl -0pi -e 's/\n        if matches!\(ending, Ending::Exited\(true\)\) && granted\.hide_stops\(jobs, listed, &never\)\(\) \{\n            return Ok\(Ending::Hidden\);\n        \}//' "$runner"
-            git diff --numstat HEAD^ -- "$runner"
-            [ "$(git diff --numstat HEAD^ | tr '\t' ' ')" = "0 3 $runner" ] || { echo "::error::the red tree is not the tip minus the 3 supervise lines"; exit 1; }
+            git diff --numstat HEAD^^ -- "$runner"
+            [ "$(git diff --numstat HEAD^^ | tr '\t' ' ')" = "0 3 $runner" ] || { echo "::error::the red tree is not the tip minus the 3 supervise lines"; exit 1; }
             [ "$(grep -c 'matches!(ending, Ending::Exited(true))' "$runner" || true)" = 0 ] || { echo "::error::the supervise hide check is still there"; exit 1; }
             echo "side red: supervise hide check taken out"
           fi
@@ -93,7 +93,7 @@ jobs:
           grep -E '^(warning|error)(\[|:)|^ +--> ' "$log" | head -n 80 || true
           tail -n 5 "$log"
           lines="$(grep -cE '^(warning|error)(\[|:)' "$log" || true)"
-          checked="$(grep -c 'Checking crazyagent v' "$log" || true)"
+          checked="$(grep -cE '^ +(Checking|Compiling) crazyagent v' "$log" || true)"
           echo "clippy rc $code warning-or-error lines $lines crazyagent checked $checked"
           [ "$checked" -gt 0 ] || { echo "::error::clippy never checked crazyagent (a restored target read as fresh)"; exit 1; }
           [ "$code" = 0 ] && [ "$lines" = 0 ] || exit 1
@@ -113,7 +113,7 @@ jobs:
           failed="$(grep -E '^test result:' "$log" | awk '{f+=$6} END {print f+0}')"
           compared="$(grep -cE '^ +left: ' "$log" || true)"
           early="$(grep -cE 'never started|never beat|ended before the stand-in' "$log" || true)"
-          compiled="$(cat "$log.list" "$log" | grep -c 'Compiling crazyagent v' || true)"
+          compiled="$(cat "$log.list" "$log" | grep -cE '^ +(Checking|Compiling) crazyagent v' || true)"
           echo "row side ${{ matrix.side }} rc $code listed $listed passed $passed failed $failed assert_eq-left $compared early $early crazyagent compiled $compiled"
           [ "$compiled" -gt 0 ] || { echo "::error::the row build never compiled crazyagent (a restored target read as fresh)"; exit 1; }
           if [ "${{ matrix.side }}" = tip ]; then
