@@ -1074,15 +1074,19 @@ async fn pump(
 }
 
 /// Finishes the send still running when a view ends, so a prompt it took is heard and a
-/// refusal is logged. Takes the send, if any, and the grant. Returns once it finished.
+/// refusal is logged, waiting at most `WRITE_TIME`: a send still blocked then, such as a paste
+/// into an app that stopped reading its input, is left to its thread and logged as abandoned,
+/// so the view still closes. Takes the send, if any, and the grant. Returns once it finished
+/// or was abandoned.
 async fn finish(sending: Option<Sending>, viewing: &impl Viewing) {
     let Some(sending) = sending else {
         return;
     };
-    match sending
-        .await
-        .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
-    {
+    let Ok(sent) = tokio::time::timeout(WRITE_TIME, sending).await else {
+        eprintln!("terminal_send_abandoned");
+        return;
+    };
+    match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
         Ok(Some(text)) => viewing.heard(text).await,
         Ok(None) => {}
         Err(error) => refused(&error),
