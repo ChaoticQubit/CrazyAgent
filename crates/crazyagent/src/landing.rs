@@ -32,7 +32,7 @@ mod merges;
 mod owner;
 pub mod owner_edit;
 #[cfg(unix)]
-mod prune;
+pub(crate) mod prune;
 #[cfg(unix)]
 pub(crate) mod retire;
 #[cfg(all(test, unix))]
