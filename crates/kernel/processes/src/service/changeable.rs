@@ -31,8 +31,9 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 /// Reads a path as written, with its links resolved, and every link, `..` folder and first
 /// missing part its resolution passes through ([`link_chain`]), and names the first
 /// changeable part of any of them ([`first_changeable_part`]). A link that cannot be read,
-/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. Inputs: the path and whether
-/// world-writable stores pass. Output: the entry, or none.
+/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. A call that finds a changeable
+/// part keeps no access answer it read. Inputs: the path and whether world-writable stores
+/// pass. Output: the entry, or none.
 #[cfg(unix)]
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
@@ -61,6 +62,8 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
         if let Some(entry) = first_changeable_part(&parts, me, open_stores)
             .and_then(|depth| path.ancestors().nth(depth))
         {
+            #[cfg(target_os = "macos")]
+            super::acl::forget(&entries);
             return Some(entry.to_path_buf());
         }
     }
