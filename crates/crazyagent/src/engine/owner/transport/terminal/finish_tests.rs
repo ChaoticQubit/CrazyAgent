@@ -81,7 +81,10 @@ impl Viewing for Revocable {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paste_stalled_when_the_grant_ends_still_ends_the_view() {
     let close_max = GRANT_CHECK + WRITE_TIME + Duration::from_secs(5);
-    assert!(HELD > close_max + WAIT, "the hold outlasts the close it is measured against");
+    assert!(
+        HELD > close_max + WAIT,
+        "the hold outlasts the close it is measured against"
+    );
     let (began, mut begun) = tokio::sync::mpsc::unbounded_channel();
     let (release, released) = std::sync::mpsc::channel();
     let host: Arc<dyn Host> = Arc::new(Stalled {
@@ -107,7 +110,14 @@ async fn a_paste_stalled_when_the_grant_ends_still_ends_the_view() {
     let pumping = {
         let viewing = viewing.clone();
         tokio::spawn(async move {
-            pump(&mut ours, View::of(viewer, seated), &mut asked, host, &*viewing).await
+            pump(
+                &mut ours,
+                View::of(viewer, seated),
+                &mut asked,
+                host,
+                &*viewing,
+            )
+            .await
         })
     };
     requests
