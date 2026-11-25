@@ -1442,4 +1442,7 @@ mod tests {
             read.head
         );
     }
+
+    #[cfg(unix)]
+    mod upkeep_stop_tests;
 }
