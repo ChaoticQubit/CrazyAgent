@@ -41,7 +41,7 @@ const MODELS_SHOWN_MAX: usize = 8;
 /// The title of a check of the sign-in an account already has (DEC-141 PA-13).
 pub(super) const CHECK_TITLE: &str = crate::tui::native_auth::CHECK_SIGN_IN;
 /// What a running check of an account's sign-in says, the same for every harness.
-const CHECK_LINE: &str = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this Mac is read.";
+const CHECK_LINE: &str = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this computer is read.";
 /// What a check that found no sign-in says, the same for every harness.
 const CHECK_SIGNED_OUT: &str = "This account isn't signed in. Choose Sign in again.";
 
@@ -67,7 +67,7 @@ pub fn provider_line(provider: Provider) -> &'static str {
         Provider::OpenaiApi => "Pay-as-you-go OpenAI API key",
         Provider::AnthropicApi => "Pay-as-you-go Anthropic API key",
         Provider::OpenaiCompatible => "Any server that speaks the OpenAI API",
-        Provider::Local => "Ollama, LM Studio or another server on this Mac",
+        Provider::Local => "Ollama, LM Studio or a server on this computer",
         Provider::Gemini => "Pay-as-you-go Google Gemini API key",
     }
 }
@@ -232,10 +232,10 @@ fn url_problem(provider: Provider, text: &str) -> Option<&'static str> {
     match checked {
         Ok(()) => None,
         Err(error) if error.0 == "account_local_url_required" => {
-            Some("Use an http address on this Mac, such as http://127.0.0.1:11434/v1.")
+            Some("Use an http address on this computer, such as http://127.0.0.1:11434/v1.")
         }
         Err(error) if error.0 == "account_url_port_refused" => Some(plain(&error.0)),
-        Err(_) => Some("Use an https address. Plain http works only on this Mac."),
+        Err(_) => Some("Use an https address. Plain http works only on this computer."),
     }
 }
 

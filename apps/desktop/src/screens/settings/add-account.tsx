@@ -15,7 +15,7 @@ export const TILE_LINES: Record<string, string> = {
   gemini: "Pay-as-you-go Google Gemini API key.",
   openrouter: "One key for many models.",
   openai_compatible: "Any server that speaks the OpenAI API.",
-  local: "Ollama or another model running on this Mac.",
+  local: "Ollama, LM Studio or a server on this computer.",
 };
 
 const COMPANIES: { key: string; name: string; subscription: AccountProvider; keyed: AccountProvider }[] = [
@@ -300,10 +300,10 @@ export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
         helper={entry.model === "optional" ? "Optional. Leave empty to use the provider's default." : undefined} spellCheck={false} />)}
     {local && <div className="row">
       <Button icon="search" onClick={() => void findModels()}>Find models</Button>
-      {models?.kind === "ok" && models.value.length === 0 && <span className="secondary">No models found. Pull one in Ollama, then try again.</span>}
+      {models?.kind === "ok" && models.value.length === 0 && <span className="secondary">No models found. Pull one on the local server at {url.trim()}, then try again.</span>}
     </div>}
     {models && models.kind !== "ok" && <Notice tone="danger" alert>{models.kind === "not_ready" ? "Finding models isn't ready yet in this build. Type the model name instead."
-      : models.code === "account_url_unreachable" ? `Can't reach Ollama at ${url.trim()}. Start Ollama, then try again.` : models.message}</Notice>}
+      : models.code === "account_url_unreachable" ? `Can't reach the local server at ${url.trim()}. Start it, then try again.` : models.message}</Notice>}
     {errors.form && <Notice tone="danger" alert>{errors.form}</Notice>}
     <div className="row"><Button type="submit" variant="primary" pending={pending} pendingLabel="Saving...">{entry.method === "api_key" ? "Save key" : "Save"}</Button></div>
   </form>;
