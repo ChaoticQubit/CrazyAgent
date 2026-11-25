@@ -476,7 +476,7 @@ impl Plugins {
     }
 
     fn windows(&self, ctx: &Ctx, subtitle_rows: usize) -> (usize, usize, usize) {
-        let content = (ctx.height as usize).saturating_sub(4 + 1 + ctx.extra_hint_rows());
+        let content = (ctx.height as usize).saturating_sub(4 + 1 + usize::from(ctx.hint_rows));
         let avail = content
             .saturating_sub(1 + subtitle_rows + 1 + 3 + 2 + 1)
             .max(3);
