@@ -45,11 +45,15 @@ fn unavailable() -> Refused {
 const OWED_SCAN_ENTRIES_MAX: usize = 4096;
 
 /// The folders owed back to each plugin name, read over the whole plugins folder in one
-/// listing. Input: the plugins folder. Output: the owed entries per name, or none when the
-/// listing failed or ran past `OWED_SCAN_ENTRIES_MAX` entries.
+/// listing. Only an owed-named entry whose kind, read without following a link, is a
+/// folder counts; a file or link of that name is not owed and is left to the start sweep's
+/// unlink. Input: the plugins folder. Output: the owed folders per name, or none when the
+/// listing failed, ran past `OWED_SCAN_ENTRIES_MAX` entries, or a kind could not be read,
+/// so that every owed folder is then ambiguous and nothing moves.
 fn owed_entries(directory: &Dir) -> Option<BTreeMap<String, Vec<OsString>>> {
     let mut read = 0_usize;
     let mut cut = false;
+    let mut unread = false;
     let mut owed: BTreeMap<String, Vec<OsString>> = BTreeMap::new();
     os::each(directory, |file| {
         read += 1;
@@ -57,24 +61,38 @@ fn owed_entries(directory: &Dir) -> Option<BTreeMap<String, Vec<OsString>>> {
             cut = true;
             return false;
         }
-        if let Some(name) = file.to_str().and_then(owed_name) {
-            owed.entry(name.to_owned())
+        let Some(name) = file.to_str().and_then(owed_name) else {
+            return true;
+        };
+        match os::kind(directory, file) {
+            Ok(Some(Kind::Folder)) => owed
+                .entry(name.to_owned())
                 .or_default()
-                .push(file.to_os_string());
+                .push(file.to_os_string()),
+            Ok(_) => {}
+            Err(()) => {
+                unread = true;
+                return false;
+            }
         }
         true
     })
     .ok()?;
     assert!(owed.values().map(Vec::len).sum::<usize>() <= OWED_SCAN_ENTRIES_MAX);
-    (!cut).then_some(owed)
+    (!cut && !unread).then_some(owed)
 }
 
-/// Puts one owed folder back under its plugin name: a live folder of that name first moves
-/// to a name with no plugin name in it, by the owed folder's id, and is deleted; when it
-/// cannot move, both stay. Inputs: the plugins folder, the owed entry and its plugin name.
-/// Output: Ok, or the refusal with the owed folder kept.
+/// Puts one owed folder back under its plugin name: the owed entry's kind is read again
+/// without following a link and anything but a folder is refused before the live folder is
+/// touched; then a live folder of that name moves to a name with no plugin name in it, by
+/// the owed folder's id, and is deleted; when it cannot move, both stay. Inputs: the plugins
+/// folder, the owed entry and its plugin name. Output: Ok, or the refusal with the owed
+/// entry and the live folder kept.
 fn restore_owed(directory: &Dir, owed: &str, name: &str) -> Result<(), Refused> {
     assert_eq!(owed_name(owed), Some(name));
+    if os::kind(directory, owed.as_ref()).map_err(|()| unavailable())? != Some(Kind::Folder) {
+        return Err(unavailable());
+    }
     if exists(directory, name)? {
         let (_, id) = owed.rsplit_once('.').expect("an owed name ends in its id");
         let nameless = format!("{RETIRED}{id}");
