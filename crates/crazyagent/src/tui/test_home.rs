@@ -41,6 +41,37 @@ pub(in crate::tui) fn connecting(link: &crate::tui::ctx::Link) -> bool {
     )
 }
 
+/// Starts a test engine on `root` whose harness search holds only stub `codex` and `claude`
+/// programs in `root/stub-bin`, so its catalog reads both installed on any host.
+/// Input: the engine folder, its global settings file and the stop signal.
+/// Output: the started engine service.
+pub(in crate::tui) async fn stubbed_engine(
+    root: &std::path::Path,
+    global: &std::path::Path,
+    stopped: &tokio::sync::watch::Receiver<bool>,
+) -> crate::engine::bootstrap::EngineService {
+    let bin = root.join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["codex", "claude"] {
+        let path = bin.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut service = crate::engine::bootstrap::EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        global,
+        &root.join("project.toml"),
+        stopped,
+    )
+    .await
+    .unwrap();
+    service
+        .set_harness_search(crate::harnesses::Search::new(vec![bin], None, Vec::new()))
+        .unwrap();
+    service
+}
+
 /// How long a TUI engine test lets the engine and its client wait for one answer.
 /// Parallel test engines share one disk, so their flushed writes queue behind
 /// each other and one write can take seconds; the 1 s default then answers

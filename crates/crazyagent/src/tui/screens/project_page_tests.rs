@@ -271,15 +271,7 @@ impl Engine {
         std::fs::write(&global, &settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let service = EngineService::start_with_settings_sources(
-            root.path(),
-            "e.sock",
-            &global,
-            &root.path().join("project.toml"),
-            &stopped,
-        )
-        .await
-        .unwrap();
+        let service = crate::tui::test_home::stubbed_engine(root.path(), &global, &stopped).await;
         let client = Client::new(
             root.path().join("e.sock"),
             crate::tui::test_home::ENGINE_WAIT,
@@ -360,15 +352,12 @@ impl Engine {
         drop(stop);
         between(root.path());
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let service = EngineService::start_with_settings_sources(
+        let service = crate::tui::test_home::stubbed_engine(
             root.path(),
-            "e.sock",
             &root.path().join("global.toml"),
-            &root.path().join("project.toml"),
             &stopped,
         )
-        .await
-        .unwrap();
+        .await;
         let client = Client::new(
             root.path().join("e.sock"),
             crate::tui::test_home::ENGINE_WAIT,
