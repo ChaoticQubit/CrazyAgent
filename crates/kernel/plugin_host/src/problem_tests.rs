@@ -103,3 +103,12 @@ fn the_past_cap_sentence_names_the_cap_and_old_plugin_files() {
         )
     );
 }
+
+#[test]
+fn a_taken_name_says_a_built_in_plugin_holds_it() {
+    let taken = Problem::new("app_plugin_name_taken", None, None);
+    assert_eq!(
+        taken.message,
+        "A built-in plugin already has this name; give this plugin another name."
+    );
+}

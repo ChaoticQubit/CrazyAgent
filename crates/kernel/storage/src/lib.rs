@@ -31,4 +31,9 @@ impl std::fmt::Display for StorageError {
 impl std::error::Error for StorageError {}
 
 #[cfg(test)]
+#[path = "../../common/src/perf_kit.rs"]
+mod perf_kit;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
 mod tests;

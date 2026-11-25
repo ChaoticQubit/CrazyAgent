@@ -2,13 +2,13 @@ use std::time::{Duration, Instant};
 
 /// How long a group its holder saw end stays refused to every later claim: past
 /// `GROUP_FRESH` and the keeper's wait, so a session that saw its pane alive just before
-/// another path ended the group finds the number refused and only watches it (CB-2 r1 F1).
+/// another path ended the group finds the number refused and only watches it.
 const ENDED_REFUSED: Duration = Duration::from_secs(10);
 
 /// The process groups some path is ending now, with no time, and those a holder saw end,
 /// with the time it saw that, so a pane's stop and the terminal host's close never both
-/// signal one group (CB-2 one signal) and no later path claims a number that may lead a
-/// new group by then (CB-2 r1 F1).
+/// signal one group and no later path claims a number that may lead a
+/// new group by then.
 static ENDING: std::sync::Mutex<std::collections::BTreeMap<u32, Option<Instant>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 

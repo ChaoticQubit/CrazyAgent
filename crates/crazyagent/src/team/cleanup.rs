@@ -262,10 +262,6 @@ fn missing(path: &Path) -> bool {
     matches!(std::fs::symlink_metadata(path), Err(problem) if problem.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn agent_folder(team: &Path, id: i64) -> PathBuf {
-    team.join("agents").join(format!("agent-{id}"))
-}
-
 fn profile(team: &Path, id: i64) -> PathBuf {
     team.join("profiles").join(format!("agent-{id}.sb"))
 }
@@ -1798,3 +1794,6 @@ pub use sweep::{Swept, sweep};
 
 #[cfg(all(test, unix))]
 mod tests;
+
+mod agent_folder;
+use agent_folder::agent_folder;

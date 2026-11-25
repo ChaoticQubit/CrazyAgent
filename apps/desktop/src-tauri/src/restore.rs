@@ -118,7 +118,8 @@ pub(crate) async fn desktop_restore_status(
 
 /// Asks the default engine to stop and bring back its pinned 2.4 backup after the owner's
 /// confirm (L5). Refused `storage_restore_unavailable` while `CRAZYAGENT_DESKTOP_SOCKET` names
-/// another engine, whose restore this window could not follow.
+/// another engine, whose restore this window could not follow. The bridge is held only for the
+/// admit round trip, bounded by the client timeout; the copy runs after the engine stops.
 #[tauri::command]
 pub(crate) async fn desktop_restore_pinned(
     webview: Webview,
@@ -220,6 +221,7 @@ mod tests {
             recover(&root, true, "put_back", settings),
             Err("storage_putback_busy")
         );
+        std::fs::write(root.join("engine.db"), b"").unwrap();
         let view = recovery(&root, false).unwrap();
         assert_eq!(view.offer, None);
         assert_eq!(view.folder, root.join("backups").display().to_string());

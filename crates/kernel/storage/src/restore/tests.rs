@@ -512,3 +512,11 @@ pub(super) fn damage(path: &Path) {
     .unwrap();
     std::io::Write::write_all(&mut file, &[0xff]).unwrap();
 }
+
+#[test]
+fn a_bare_database_name_is_the_database_in_the_working_folder() {
+    assert_eq!(
+        real_database(Path::new(DATABASE)).unwrap(),
+        std::fs::canonicalize(".").unwrap().join(DATABASE)
+    );
+}

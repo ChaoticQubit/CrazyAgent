@@ -198,7 +198,7 @@ fn a_put_back_whose_result_fails_its_check_keeps_the_record_and_both_copies() {
     let (root, path, kept) = broken(true);
     let line = read_restore_record(root.path());
 
-    let refused = put_back_with(&path, always_fails).unwrap_err().0;
+    let refused = put_back_with(&path, always_fails, |_| {}).unwrap_err().0;
 
     assert!(refused.starts_with(PUTBACK_CHECK_FAILED), "{refused}");
     assert_eq!(read_restore_record(root.path()), line);
@@ -316,4 +316,78 @@ fn any_other_record_needs_no_recovery() {
             "{line}: {refused}"
         );
     }
+}
+
+#[test]
+fn a_record_cleared_before_the_put_back_takes_the_lock_is_read_again_under_it() {
+    let (root, path, _kept) = broken(true);
+    let bytes = std::fs::read(&path).unwrap();
+    let copies = replaced(root.path());
+
+    let refused = put_back_with(&path, check_copy, |root| {
+        std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).unwrap();
+    })
+    .unwrap_err()
+    .0;
+
+    assert!(refused.starts_with(PUTBACK_COPY_MISSING), "{refused}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(replaced(root.path()), copies);
+    assert_eq!(read_restore_record(root.path()), None);
+}
+
+#[test]
+fn a_record_rewritten_before_continue_takes_the_lock_is_read_again_under_it() {
+    let (root, path) = upgraded(true);
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
+    let line = format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}");
+
+    let refused = continue_2_5_with(&path, |root| {
+        write_restore_record(root, &format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}")).unwrap();
+    })
+    .unwrap_err()
+    .0;
+
+    assert!(refused.starts_with(PUTBACK_CHECK_FAILED), "{refused}");
+    assert_eq!(read_restore_record(root.path()), Some(line));
+}
+
+/// A folder that links to an engine root, as a moved home or a data folder on another volume
+/// reaches it, kept beside the root in a canonical folder of its own. Input: the root.
+/// Output: the folder holding the link, removed on drop, and engine.db's path through it, or
+/// the error of the folder or link that failed.
+fn linked(root: &Path) -> std::io::Result<(tempfile::TempDir, PathBuf)> {
+    let beside = tempfile::Builder::new().tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    let link = beside.path().join("engine");
+    std::os::unix::fs::symlink(root, &link)?;
+    Ok((beside, link.join(DATABASE)))
+}
+
+#[test]
+fn an_engine_folder_reached_through_a_link_reads_its_offer_and_restores() -> std::io::Result<()> {
+    let (root, real) = upgraded(true);
+    let (_beside, path) = linked(root.path())?;
+
+    assert_eq!(recovery(&path).unwrap(), None);
+    let restored = restore_pinned(&path, &quiet_hooks());
+
+    assert!(restored.is_ok(), "{:?}", restored.err());
+    assert_eq!(read(&real), (vec!["one".to_owned()], 11));
+    assert_eq!(replaced(root.path()).len(), 1);
+    Ok(())
+}
+
+#[test]
+fn an_engine_db_that_is_itself_a_link_is_still_refused_before_any_write() {
+    let (root, path) = upgraded(true);
+    let (other, target) = upgraded(true);
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+
+    assert!(recovery(&path).is_err());
+    assert!(restore_pinned(&path, &quiet_hooks()).is_err());
+
+    assert_eq!(read(&target), (vec!["two".to_owned()], 12));
+    assert!(replaced(root.path()).is_empty());
+    assert!(replaced(other.path()).is_empty());
 }

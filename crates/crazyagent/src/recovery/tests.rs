@@ -599,3 +599,30 @@ fn a_codex_agent_interrupted_mid_turn_names_its_own_rollout_file() {
     );
     team.shutdown().unwrap();
 }
+
+/// A sub-agent stopped with no session record is captured with no working folder, even when
+/// its worktree column holds an absolute folder: the folder comes from the record alone, as
+/// the resume that reads it needs the record too.
+#[test]
+fn a_sub_agent_with_no_session_record_is_captured_with_no_folder() {
+    let fixture = Fixture::new();
+    let sub = fixture.agent(AgentRole::Sub, AgentStatus::Idle, 0);
+    fixture.running(sub, "Fix the login page");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET worktree=?2 WHERE id=?1",
+            params![sub, fixture.base.to_str().unwrap()],
+        )
+        .unwrap();
+    super::capture(&fixture.connection, Some(HEARTBEAT)).unwrap();
+    let stored: (Option<String>, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT record,cwd FROM recovery_runs WHERE agent=?1",
+            [sub],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, (None, None));
+}

@@ -315,6 +315,38 @@ fn on_linux_a_root_spelled_in_another_case_is_another_folder() {
     assert!(secret_refused(&home.join(".ssh"), &secrets));
 }
 
+/// A root not made yet, named through a link to the folder that holds a secret still to
+/// come, is refused as the secret itself, and so is a root below it; a secret named through
+/// such a link refuses the root it names.
+#[cfg(unix)]
+#[test]
+fn a_new_root_through_a_link_to_a_missing_secret_is_refused() {
+    let (folder, home, secrets) = secret_home();
+    assert!(!home.join(".aws").exists());
+    let alias = folder.path().join("alias");
+    std::os::unix::fs::symlink(&home, &alias).unwrap();
+    assert!(secret_refused(&alias.join(".aws"), &secrets));
+    assert!(secret_refused(&alias.join(".aws").join("new"), &secrets));
+    assert!(secret_refused(&home.join(".aws"), &[alias.join(".aws")]));
+}
+
+/// On Linux names do not fold: a root not made yet, named through a link to the folder that
+/// holds a secret still to come, is another folder when its name differs from the secret's,
+/// also only in case or outside ASCII.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_a_new_root_beside_a_missing_secret_is_not_refused() {
+    let (folder, home, secrets) = secret_home();
+    let alias = folder.path().join("alias");
+    std::os::unix::fs::symlink(&home, &alias).unwrap();
+    for name in ["project", ".AWS", "\u{65B0}"] {
+        assert!(
+            clear_of_secrets(&alias.join(name), &secrets).is_ok(),
+            "{name}"
+        );
+    }
+}
+
 /// A root that reaches a secret folder through a link is refused, and so is a root that
 /// holds the folder a linked secret leads to.
 #[cfg(unix)]

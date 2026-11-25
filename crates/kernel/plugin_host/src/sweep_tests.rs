@@ -6,6 +6,9 @@ const ID: &str = "00000000000000000000000000000000000000000000000000000000000000
 
 fn plugins_folder(root: &Path) -> PathBuf {
     let folder = root.join(FOLDER);
+    #[cfg(windows)]
+    drop(crazyagent_win_sandbox::private::dir(&folder).unwrap());
+    #[cfg(not(windows))]
     std::fs::create_dir_all(&folder).unwrap();
     #[cfg(unix)]
     {
@@ -67,9 +70,9 @@ fn a_plain_staged_file_is_deleted_and_the_sweep_goes_on_past_it() {
     assert_eq!(names(&plugins), ["kept"]);
 }
 
-/// A retired folder whose plugin name is taken again is a leftover of a finished replace.
-/// The sweep deletes it even when it holds a nested folder, and keeps the plugin of that
-/// name as it is.
+/// A retired folder beside the live plugin of its name, whose text the trust row holds, is
+/// a leftover of a finished replace. The start sweeps delete it even when it holds a nested
+/// folder, and keep the plugin of that name as it is.
 #[test]
 fn a_retired_leftover_with_a_nested_folder_is_deleted_and_the_plugin_kept() {
     let temp = tempfile::tempdir().unwrap();
@@ -78,8 +81,17 @@ fn a_retired_leftover_with_a_nested_folder_is_deleted_and_the_plugin_kept() {
     let retired = folder_with(&plugins, &format!(".old-acme.{ID}"), "old text");
     std::fs::create_dir(retired.join("assets")).unwrap();
     std::fs::write(retired.join("assets").join("logo.txt"), b"logo").unwrap();
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    crate::store::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms)
+         VALUES ('acme', ?1, '', 1)",
+        [kernel_common::hash(b"current text")],
+    )
+    .unwrap();
 
     remove_staged(temp.path()).unwrap();
+    crate::registry::sweep_replaced(&db, temp.path()).unwrap();
 
     assert_eq!(names(&plugins), ["acme"]);
     assert_eq!(

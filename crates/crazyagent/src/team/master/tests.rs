@@ -4579,37 +4579,6 @@ fn lead_delegate_is_refused_at_max_teammates() {
     assert_eq!(tasks(&fixture).len(), 1);
 }
 
-/// A lead's `merge` reaches only its own workers: a worker of another lead is not one of
-/// its sub-agents, whatever it is called (feat/coord-spawn 372ee630).
-#[test]
-fn merge_refuses_a_worker_of_another_lead() {
-    let mut fixture = Fixture::new();
-    let access = codex_pool();
-    let agents = fixture.base.join("team/agents");
-    team_agent(&fixture, LEAD, "claude-code", "working", None);
-    team_agent(&fixture, 61, "claude-code", "working", None);
-    team_agent(&fixture, WORKER, "codex", "idle", Some(LEAD));
-    let answer = lead_call(
-        &mut fixture,
-        &access,
-        &agents,
-        61,
-        Call::Merge {
-            agent: WORKER.to_string(),
-        },
-    );
-    assert_eq!(
-        answer,
-        (
-            format!(
-                "Not merged: none of your own sub-agents is called {WORKER}. Call {}() for their names.",
-                tool::INSPECT_WORK_TOOL
-            ),
-            true
-        )
-    );
-}
-
 /// Makes the fixture's project folder a real git repository with one commit on `main`, the
 /// engine's state folder excluded and its worktrees folder made. Takes the fixture.
 /// Returns the git home and the project folder.
@@ -6956,3 +6925,6 @@ fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
             .is_empty()
     );
 }
+
+#[path = "tests/other_lead.rs"]
+mod other_lead;
