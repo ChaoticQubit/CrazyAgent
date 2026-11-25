@@ -487,7 +487,13 @@ pub fn add(
     if handed_problem(&manifest, engine.handed_out.as_ref()).is_some() {
         return Err(refused(PORT_HANDED_OUT));
     }
-    let replaced = folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
+    let replaced = folder::write(
+        engine.root,
+        &manifest.name,
+        &bytes,
+        replace,
+        engine.keys.new_ref,
+    )?;
     if let Some(step) = replaced.and_then(store_log::after_commit) {
         step.commit()?;
     }
