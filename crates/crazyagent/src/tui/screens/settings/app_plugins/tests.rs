@@ -891,7 +891,7 @@ fn remove_confirms_naming_the_entered_key_and_bundled_rows_offer_no_x() {
         shell.key(Key::Char('x'));
         assert!(requests(&mut shell).is_empty());
         assert!(!shows(&mut shell, "Remove "));
-        assert!(said(&shell).contains("Bundled plugins can be turned off but not removed"));
+        assert!(said(&shell).contains("Built-in plugins can be turned off but not removed"));
     }
     select(&mut shell, 3);
     shell.key(Key::Char('x'));
@@ -1026,6 +1026,14 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
     assert_eq!(
         sentence("app_plugin_key_store_unavailable"),
         "CrazyAgent couldn't reach its saved keys. Nothing was changed; try again."
+    );
+    assert_eq!(
+        sentence("app_plugin_name_taken"),
+        "A built-in plugin already has that name. Give your plugin another name."
+    );
+    assert_eq!(
+        sentence("app_plugin_bundled"),
+        "Built-in plugins can be turned off but not removed or replaced."
     );
 }
 
