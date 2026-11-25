@@ -21,6 +21,9 @@ pub(in crate::tui) fn sentence(code: &str) -> String {
         "app_plugin_name_taken" => {
             "A bundled plugin already has that name. Give your plugin another name."
         }
+        "app_plugin_name_used" => {
+            "A plugin with that name was added after you reviewed this one. Review it again to replace it."
+        }
         "app_plugin_bundled" => "Bundled plugins can be turned off but not removed or replaced.",
         "app_plugin_essential" => "The app relies on this plugin, so it stays on.",
         "app_plugin_changed" => {

@@ -304,7 +304,7 @@ fn remove_level(directory: &Dir, name: &OsStr, depth: usize) -> Result<(), Refus
 /// the commit or puts it back after a rollback. Inputs: the engine root, a valid name, the
 /// bytes, whether it may replace and the random id source. Output: the step for an older
 /// folder, none when there was none, with the folder synced, or the folder's refusal or
-/// `app_plugin_name_taken` with nothing staged left.
+/// `app_plugin_name_used` with nothing staged left.
 pub(super) fn write(
     root: &Path,
     name: &str,
@@ -315,7 +315,7 @@ pub(super) fn write(
     let directory = open(root, true)?.ok_or_else(unavailable)?;
     settle_owed(&directory, name)?;
     if !replace && exists(&directory, name)? {
-        return Err(refused("app_plugin_name_taken"));
+        return Err(refused("app_plugin_name_used"));
     }
     let id = new_ref().map_err(refused)?;
     let staged = format!("{STAGED}{id}");

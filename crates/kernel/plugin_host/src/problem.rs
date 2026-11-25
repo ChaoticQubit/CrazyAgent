@@ -241,6 +241,10 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
         "a plugin with this name already exists; remove it or choose replace.",
     ),
     (
+        "app_plugin_name_used",
+        "a plugin with this name was added after its trust screen; review it again to replace it.",
+    ),
+    (
         "app_plugin_bundled",
         "plugins that ship with the app can only be turned off.",
     ),
