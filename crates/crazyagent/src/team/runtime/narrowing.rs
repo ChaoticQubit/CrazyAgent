@@ -5,6 +5,7 @@ use super::{
 use crate::agents::Agents;
 use crate::engine::EngineError;
 use crate::project_setup::StoredSetup;
+use crate::protocol::ProjectId;
 use crate::team::{AgentRole, now_ms};
 use kernel_sandbox::policy::{AccessApply, AgentAccess, Narrowing};
 use kernel_sandbox::toolchains::Toolchain;
@@ -197,6 +198,26 @@ impl TeamRuntime {
         assert!(seers.len() <= self.hidden_held.len());
         crate::sandbox::access_store::hidden::set_seers(&self.connection, project.as_str(), &seers)
             .map_err(error)
+    }
+
+    /// The projects a tick steps for a restart: those with an agent restart planned, and
+    /// those with a listed agent the owner asked to restart, an ask only a step of that
+    /// project serves. Takes nothing. Returns the projects, or any SQLite failure.
+    pub(super) fn restarting_projects(&self) -> Result<Vec<ProjectId>, EngineError> {
+        let asked = crate::sandbox::access_store::hidden::asked_projects(&self.connection)
+            .map_err(error)?;
+        let mut projects: Vec<ProjectId> = self
+            .restarts
+            .values()
+            .map(|(project, _)| project.clone())
+            .collect();
+        projects.extend(
+            asked
+                .into_iter()
+                .filter_map(|project| ProjectId::new(project).ok()),
+        );
+        assert!(projects.len() >= self.restarts.len());
+        Ok(projects)
     }
 
     /// Serves the owner's Restart them (SA-VID14-A): a listed agent still running stops with its

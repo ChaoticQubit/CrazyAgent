@@ -3456,7 +3456,7 @@ impl TeamRuntime {
             .filter_map(|row| row.ok().and_then(|p| ProjectId::new(p).ok()))
             .collect();
         projects.extend(self.workers.values().map(|w| w.project.clone()));
-        projects.extend(self.restarts.values().map(|(project, _)| project.clone()));
+        projects.extend(self.restarting_projects()?);
         Ok(projects.into_iter().collect())
     }
 
