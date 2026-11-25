@@ -882,6 +882,7 @@ name = "crazyagent"
 version = "2.4.4"
 dependencies = [
  "base64 0.22.1",
+ "crazyagent",
  "crazyagent-bus-gateway",
  "crazyagent-cap",
  "crazyagent-kernel-common",
