@@ -1052,7 +1052,8 @@ async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone
 
 /// Slice C (DEC-203): an input-only view opens at the size it asked for and sends no output,
 /// and its typed keys and its paste reach the agent's pane, as a full view of the same agent
-/// then shows; a size out of bounds is refused at the handshake.
+/// then shows; a size out of bounds is refused at the handshake. The full view holds its control
+/// open until the line is read, so no detach can end its output first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_input_only_view_types_and_pastes_without_sending_output() {
     let tmp = tempfile::Builder::new()
@@ -1146,6 +1147,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         cols,
         rows,
         output: mut full,
+        control: full_control,
         ..
     } = owner.terminal_attach(agent).await.unwrap();
     assert_eq!(
@@ -1171,6 +1173,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
     .unwrap_or_else(|_| "the pane never showed the typed and pasted line".into());
     assert_eq!(shown, "typed and pasted");
 
+    drop(full_control);
     drop(control);
     drop(owner);
     tokio::time::timeout(WAIT, service.shutdown())
