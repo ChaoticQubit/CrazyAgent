@@ -120,11 +120,14 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
         size += match piece {
             Piece::Plain(text) => text.len(),
             Piece::Escaped(text) => {
-                if text.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-                    return None;
+                let mut escapes = 0;
+                for byte in text.bytes() {
+                    if byte < 0x20 || byte == 0x7f {
+                        return None;
+                    }
+                    escapes += usize::from(matches!(byte, b'\\' | b'"'));
                 }
-                let escapes = text.bytes().filter(|byte| matches!(byte, b'\\' | b'"'));
-                text.len() + escapes.count()
+                text.len() + escapes
             }
             Piece::Form(text) => form_urlencoded::byte_serialize(text.as_bytes())
                 .map(str::len)
@@ -132,32 +135,41 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
             Piece::Hex(bytes) => bytes.len() * 2,
         };
     }
-    let mut buffer = Vec::with_capacity(size);
+    let mut buffer = vec![0_u8; size];
     let capacity = buffer.capacity();
+    let mut at = 0;
     for piece in pieces {
         match piece {
-            Piece::Plain(text) => buffer.extend_from_slice(text.as_bytes()),
+            Piece::Plain(text) => {
+                buffer[at..at + text.len()].copy_from_slice(text.as_bytes());
+                at += text.len();
+            }
             Piece::Escaped(text) => {
                 for byte in text.bytes() {
                     if matches!(byte, b'\\' | b'"') {
-                        buffer.push(b'\\');
+                        buffer[at] = b'\\';
+                        at += 1;
                     }
-                    buffer.push(byte);
+                    buffer[at] = byte;
+                    at += 1;
                 }
             }
             Piece::Form(text) => {
                 for part in form_urlencoded::byte_serialize(text.as_bytes()) {
-                    buffer.extend_from_slice(part.as_bytes());
+                    buffer[at..at + part.len()].copy_from_slice(part.as_bytes());
+                    at += part.len();
                 }
             }
             Piece::Hex(bytes) => {
                 for byte in *bytes {
-                    buffer.push(HEX_DIGITS[usize::from(byte >> 4)]);
-                    buffer.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
+                    buffer[at] = HEX_DIGITS[usize::from(byte >> 4)];
+                    buffer[at + 1] = HEX_DIGITS[usize::from(byte & 0x0f)];
+                    at += 2;
                 }
             }
         }
     }
+    assert_eq!(at, size);
     assert_eq!(buffer.len(), size);
     assert_eq!(buffer.capacity(), capacity);
     Some(buffer)
