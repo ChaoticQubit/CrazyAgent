@@ -26,6 +26,8 @@ impl TryFrom<&str> for SecretRef {
     fn try_from(text: &str) -> Result<Self, StoreError> {
         let invalid = || StoreError::code("credential_reference_invalid");
         let (service, account) = text.split_once(':').ok_or_else(invalid)?;
+        checked_name(service).map_err(|_| invalid())?;
+        checked_name(account).map_err(|_| invalid())?;
         allowed(service, account, text).map_err(|_| invalid())?;
         Ok(SecretRef(text.to_owned()))
     }
@@ -90,17 +92,15 @@ pub fn reference(service: &str, account: &str) -> Result<SecretRef, StoreError> 
     Ok(SecretRef(joined))
 }
 
-/// Runs every rule a reference must pass on its two names and their joined text: both
-/// names checked, an account not ending in `.`, no Windows device stem and no one-letter
-/// service. Inputs: the service, the account and `<service>:<account>`. Output: Ok, or
-/// `credential_name_invalid`.
+/// Runs the rules a reference must pass beyond [`checked_name`] on its two names and their
+/// joined text: an account not ending in `.`, no Windows device stem and no one-letter
+/// service. Inputs: the service and account, both already passed by [`checked_name`], and
+/// `<service>:<account>`. Output: Ok, or `credential_name_invalid`.
 fn allowed(service: &str, account: &str, joined: &str) -> Result<(), StoreError> {
     let invalid = || StoreError::code("credential_name_invalid");
     if !kernel_common::names::is_store_account(account) {
         return Err(invalid());
     }
-    checked_name(service)?;
-    checked_name(account)?;
     let drive = service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
     if kernel_common::windows_device(joined) || drive {
         return Err(invalid());
