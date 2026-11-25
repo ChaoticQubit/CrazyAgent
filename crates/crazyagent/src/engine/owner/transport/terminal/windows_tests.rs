@@ -285,11 +285,16 @@ async fn an_owner_shell_view_types_resizes_scrolls_and_detaches() {
 }
 
 /// A view whose desktop capability changes on disk mid-view ends as
-/// `owner_grant_stale_or_revoked` at its next grant check, with no further output.
+/// `owner_grant_stale_or_revoked` at its next grant check, with no further output. The view
+/// holds its control open until the close is read, so only the grant check can end it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_changed_grant_ends_an_owner_shell_view() {
     let shell = Shell::start().await;
-    let TerminalSession { mut output, .. } = shell
+    let TerminalSession {
+        mut output,
+        control,
+        ..
+    } = shell
         .client
         .terminal_attach(shell.agent.clone())
         .await
@@ -304,6 +309,7 @@ async fn a_changed_grant_ends_an_owner_shell_view() {
         closed_within(&mut output, GRANT_CHECK_ROW + WAIT).await,
         "owner_grant_stale_or_revoked"
     );
+    drop(control);
     println!("w4 row: changed grant ended the view");
     shell.end().await;
 }
