@@ -748,7 +748,7 @@ pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
 /// The start sweep acting on at most `cap` entries, so a row can put an entry outside one
 /// sweep's batch. Inputs: the engine root and the cap, 1 to `USER_PLUGINS_MAX`. Output: as
 /// [`remove_staged`].
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn remove_staged_within(root: &Path, cap: usize) -> Result<(), Refused> {
     folder::sweep_within(root, cap)
 }
