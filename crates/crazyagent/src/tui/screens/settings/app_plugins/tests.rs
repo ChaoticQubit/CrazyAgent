@@ -528,27 +528,30 @@ fn the_page_reads_then_lists_each_plugin_with_one_label_and_code_plugins_last() 
     ));
     assert!(bar(&mut shell).contains("r Try again"));
     shell.key(Key::Char('r'));
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(shows(&mut shell, "Reading built-in code plugins..."));
     serve(&mut shell, &mut fake);
     assert_eq!(fake.seen, ["AppPlugins", "PluginGrants"]);
 
-    assert!(line(&mut shell, "OpenAI embeddings").contains("Bundled  Off"));
-    assert!(line(&mut shell, "Ollama embeddings").contains("Bundled  On"));
+    assert!(line(&mut shell, "OpenAI embeddings").contains("Built in  Off"));
+    assert!(line(&mut shell, "Ollama embeddings").contains("Built in  On"));
     assert!(line(&mut shell, "Dock embeddings").contains("Approved  On"));
     assert!(line(&mut shell, "Harbor embeddings").contains("Not approved"));
     assert!(line(&mut shell, "Cove embeddings").contains("Changed - review"));
     assert!(line(&mut shell, "Broken plugin").contains("Refused"));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
-    assert!(line(&mut shell, "  service-kit").contains("Bundled  On"));
+    assert!(line(&mut shell, "  service-kit").contains("Built in  On"));
     assert!(shows(
         &mut shell,
-        "agent-quit, bundled code plugin. 1 permission."
+        "agent-quit, built-in code plugin. 1 permission."
     ));
     assert!(shows(
         &mut shell,
-        "service-kit, bundled code plugin. 2 permissions."
+        "service-kit, built-in code plugin. 2 permissions."
     ));
     assert!(shows(&mut shell, "Essential, stays on."));
-    assert!(shows(&mut shell, "openai, version 1. Bundled."));
+    assert!(shows(&mut shell, "openai, version 1. Built in."));
     assert!(shows(&mut shell, "dock-embed, version 1. Added by you."));
     assert!(shows(
         &mut shell,
@@ -584,12 +587,15 @@ fn a_failed_grants_read_marks_only_the_code_rows_and_r_reads_them_again() {
     fake.refuse_grants = Some("owner_busy".into());
     let mut shell = page(&mut fake);
     assert!(line(&mut shell, "Dock embeddings").contains("Approved  On"));
-    assert!(shows(&mut shell, "Bundled code plugins couldn't be read."));
+    assert!(shows(&mut shell, "Built-in code plugins couldn't be read."));
     assert!(!shows(&mut shell, "agent-quit"));
     assert!(!shows(&mut shell, "App plugins aren't available"));
     shell.key(Key::Char('r'));
     serve(&mut shell, &mut fake);
-    assert!(!shows(&mut shell, "Bundled code plugins couldn't be read."));
+    assert!(!shows(
+        &mut shell,
+        "Built-in code plugins couldn't be read."
+    ));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
 }
 
@@ -719,12 +725,12 @@ fn a_bundled_review_is_read_only_and_space_switches_it() {
     let job = one(&mut shell);
     assert!(matches!(job, AppPluginsJob::Review { ref name } if name == "ollama"));
     answer(&mut shell, &mut fake, job);
-    assert!(shows(&mut shell, "Ollama embeddings (bundled)"));
+    assert!(shows(&mut shell, "Ollama embeddings (built in)"));
     assert!(!bar(&mut shell).contains("Approve"));
     shell.key(Key::Char('y'));
     assert!(requests(&mut shell).is_empty(), "a bundled review has no y");
     shell.key(Key::Esc);
-    assert!(!shows(&mut shell, "Ollama embeddings (bundled)"));
+    assert!(!shows(&mut shell, "Ollama embeddings (built in)"));
     shell.key(Key::Char(' '));
     assert!(matches!(
         one(&mut shell),
