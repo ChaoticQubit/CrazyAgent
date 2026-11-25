@@ -136,40 +136,6 @@ fn plugin_frames_match_the_design() {
 }
 
 #[test]
-fn each_skill_row_says_where_the_skill_came_from_before_its_folder() {
-    for (width, height) in [(80, 24), (120, 36)] {
-        let (skills, servers) = lists();
-        let mut shell = Shell::with(
-            plugin_ctx(width, height),
-            Box::new(Plugins::with(skills, servers)),
-        );
-        let mut rows = render(&mut shell, width, height);
-        for _ in 0..3 {
-            shell.key(Key::Down);
-        }
-        rows.extend(render(&mut shell, width, height));
-        let row = |name: &str| {
-            rows.iter()
-                .find(|row| row.contains(&format!(" {name} ")))
-                .cloned()
-                .unwrap_or_default()
-        };
-        assert!(
-            row("frontend-design").contains("Added by you  ~/Skills/frontend-design"),
-            "{width}: {rows:?}"
-        );
-        assert!(
-            row("linear-method").contains("Imported from Claude Code  ~/.claude/ski"),
-            "{width}: {rows:?}"
-        );
-        assert!(
-            row("release-notes").contains("Default pack: release-notes  ~/Library/"),
-            "the label comes first, so a cut keeps it: {width}: {rows:?}"
-        );
-    }
-}
-
-#[test]
 fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     let (skills, servers) = lists();
     let mut ctx = plugin_ctx(80, 24);
@@ -1872,3 +1838,7 @@ fn space_on_a_plugin_row_sets_every_hook_and_on_an_event_row_sets_that_hook() {
 /// Windows hint example reads as written, an unchanged line writes nothing, a changed
 /// command asks for approval, and one without a full path is refused. Output: none.
 mod command_line;
+
+/// The skill origin row: each skill row names where the skill came from before its folder,
+/// at 80 by 24 and 120 by 36, and a cut row keeps the label. Output: none.
+mod skill_origin;
