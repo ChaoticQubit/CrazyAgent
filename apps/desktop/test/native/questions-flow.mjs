@@ -68,7 +68,7 @@ const ASKS = {
 const POPUP = "section.qp-popup";
 const POPUP_QUIET_MS = 12000;
 const CHAT_ANSWER = "Use Stripe for checkout.";
-const TUI_ANSWER = "Europe, close to the owner.";
+const TUI_ANSWER = { comment: "close to the owner.", stored: "Europe\nComment: close to the owner." };
 const RESTART_NOTE = "The engine restarted. Carry on.";
 const CLEAR = "\x1b[2J\x1b[H";
 const PERMISSION = " Bash command\n   cargo test\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for cargo test commands\n   3. No, and tell Claude what to do differently (esc)\n";
@@ -607,7 +607,7 @@ async function main() {
         const id = needs(state.asked.view, "1");
         const view = onPage();
         await view.follow(".qs-list .qs-card .qs-option input[type=radio]");
-        await view.click("Answer");
+        await view.click("Answer", ".qs-list button");
         await view.waitFor("the answered note", (text) => text.includes("Answered. The agent that asked gets your answer once."), VIEW_MS);
         await view.capture("questions-answered");
         const row = question(id);
@@ -639,7 +639,7 @@ async function main() {
         const id = await ask("dismiss");
         const view = onPage();
         await view.waitFor("the second question", (text) => text.includes(ASKS.dismiss.question), VIEW_MS);
-        await view.click("Dismiss");
+        await view.click("Dismiss", ".qs-list button");
         await view.waitFor("the dismiss confirmation", (text) => text.includes("Dismiss this question?"));
         await view.click("Dismiss", "dialog button");
         await view.waitFor("the dismissed note", (text) => text.includes("Dismissed. The agent that asked is told once."), VIEW_MS);
@@ -830,7 +830,8 @@ async function main() {
     await step("7", "the TUI shows the footer badge on every screen and the Questions page, and an answer there reaches the master once", ["QL-1", "QL-3"], async () => {
       if (!tmux) throw new Blocked("tmux_missing");
       const id = await ask("tui");
-      const pending = Number(rows(database, "SELECT COUNT(*) AS n FROM questions_log WHERE status = 'pending'")[0].n);
+      const waiting = rows(database, "SELECT id FROM questions_log WHERE status = 'pending'").map((row) => String(row.id));
+      if (waiting.join() !== String(id)) throw new Refused("tui_other_questions_waiting", JSON.stringify(waiting));
       const pty = tuiPty(tmux, join(root, "tui.sock"), `'${engineBinary}' tui '${socket}'`, { ...env, TERM: "xterm-256color" });
       try {
         let home = null;
@@ -841,8 +842,8 @@ async function main() {
           await pause(POLL_MS);
         }
         if (!home) throw new Refused("tui_never_reached_home");
-        const atHome = await pty.until("badge_on_home", (screen) => badge(screen) === pending).catch(() => {
-          throw new Refused("tui_home_without_badge", `wanted ${pending} questions: ${pty.screen().split("\n").slice(-3).join(" | ")}`);
+        const atHome = await pty.until("badge_on_home", (screen) => badge(screen) === waiting.length).catch(() => {
+          throw new Refused("tui_home_without_badge", `wanted ${waiting.length} questions: ${pty.screen().split("\n").slice(-3).join(" | ")}`);
         });
         for (let pressed = 0; pressed < TABS_MAX && !OPEN_HINT.test(pty.screen()); pressed += 1) {
           pty.keys("Tab");
@@ -857,19 +858,18 @@ async function main() {
           await pty.until("next_tab", (screen) => tabShown(screen, REPO) !== before);
         }
         const listed = await pty.until("question_on_page", (screen) => screen.includes(ASKS.tui.question));
-        if (badge(listed) !== pending) throw new Refused("tui_project_screen_without_badge", `wanted ${pending}`);
+        if (badge(listed) !== waiting.length) throw new Refused("tui_project_screen_without_badge", `wanted ${waiting.length}`);
         const key = hintKey(listed, "Answer");
         if (!key) throw new Refused("tui_questions_page_without_answer_hint", listed.split("\n").slice(-3).join(" | "));
         pty.keys(key);
         await pause(POLL_MS * 2);
-        pty.text(TUI_ANSWER);
-        pty.keys("Enter");
+        pty.keys("Space", "c", TUI_ANSWER.comment, "Enter");
         await until("tui_answer_recorded", VIEW_MS, () => question(id)?.status === "answered");
-        if (question(id).answer !== TUI_ANSWER) throw new Refused("tui_answer_mismatch", JSON.stringify(question(id)));
-        await deliveredOnce(id, "answered", TUI_ANSWER);
+        if (question(id).answer !== TUI_ANSWER.stored) throw new Refused("tui_answer_mismatch", JSON.stringify(question(id)));
+        await deliveredOnce(id, "answered", TUI_ANSWER.stored);
         writeFileSync(join(evidence, "tui-home.txt"), atHome);
         writeFileSync(join(evidence, "tui-questions.txt"), listed);
-        return `badge ${pending} on Home and the project screen; answered with key ${key}; delivered once`;
+        return `badge ${waiting.length} on Home and the project screen; answered with key ${key}; delivered once`;
       } finally {
         pty.close();
       }
