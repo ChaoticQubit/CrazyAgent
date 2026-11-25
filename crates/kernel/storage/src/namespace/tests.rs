@@ -421,6 +421,7 @@ fn a_storage_perf_row_is_exempt_and_product_code_is_not() {
         "crates/kernel/storage/src/namespace.rs",
         "crates/kernel/storage/src/lib.rs",
         "crates/crazyagent/src/lib.rs",
+        "crates/kernel/processes/src/perf_tests/update.rs",
     ] {
         assert!(!exempt(Path::new(path)), "{path}");
     }
