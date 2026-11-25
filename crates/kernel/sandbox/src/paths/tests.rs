@@ -107,7 +107,7 @@ fn a_name_win32_would_normalise_is_refused_in_either_spelling() {
     }
 }
 
-/// V243-FIRMLINK-SWEEP D1: an owner home the account names through /System/Volumes/Data
+/// An owner home the account names through /System/Volumes/Data
 /// settles to its short name, the spelling every sandbox root has, so the owner home and
 /// secret denies built from it still match.
 #[cfg(target_os = "macos")]
