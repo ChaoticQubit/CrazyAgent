@@ -876,10 +876,10 @@ fn a_home_move_covers_every_folder_or_refuses_before_anything_moves() {
     assert!(names(&case.home).is_empty());
 }
 
-#[cfg(target_os = "macos")]
-mod image_support;
 #[path = "projects_home/git_entry.rs"]
 mod git_entry;
+#[cfg(target_os = "macos")]
+mod image_support;
 
 /// A scratch disk image mounted for one test, holding the shared disk image lock from
 /// before its attach until after its detach, so no other test process renumbers a volume

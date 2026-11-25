@@ -34986,7 +34986,7 @@ fn only_codex_and_claude_code_name_model_hosts_for_a_signed_in_agent_with_no_net
 #[path = "launch_home_hooks_tests.rs"]
 mod launch_home_hooks_tests;
 
-#[path = "tests/status_log.rs"]
-mod status_log;
 #[path = "tests/run_time.rs"]
 mod run_time;
+#[path = "tests/status_log.rs"]
+mod status_log;
