@@ -740,9 +740,10 @@ pub fn hold(
 }
 
 /// Sweeps what a crash between a staged copy and its rename left in the plugins folder: a
-/// retired folder whose plugin name is missing is moved back under that name, and every
-/// other staged or retired entry is deleted. Input: the engine root. Output: Ok, or the
-/// first refusal after every entry was tried.
+/// retired folder whose plugin name is missing is moved back under that name, one beside
+/// the live plugin of its name is left for [`sweep_replaced`], and every other staged or
+/// retired entry is deleted. Input: the engine root. Output: Ok, or the first refusal
+/// after every entry was tried.
 pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
     folder::sweep_within(root, USER_PLUGINS_MAX)
 }
@@ -776,6 +777,15 @@ fn known(db: &Connection, name: &str) -> Result<bool, Refused> {
 /// was tried.
 pub fn sweep_removals(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
     folder::sweep_removals(engine.root, |name| known(db, name))
+}
+
+/// Settles at start each retired folder a replace left beside the live plugin of its name,
+/// by the SHA-256 the trust row holds: deleted while the live text is trusted, put back in
+/// place of the live folder while only its own text is trusted, since that replace never
+/// committed, and otherwise kept. Inputs: the database and the engine root. Output: Ok, or
+/// the first refusal after every name was tried.
+pub fn sweep_replaced(db: &Connection, root: &Path) -> Result<(), Refused> {
+    folder::sweep_replaced(root, |name| trust::trusted_sha256(db, name))
 }
 
 const STAGED: &str = ".add-";

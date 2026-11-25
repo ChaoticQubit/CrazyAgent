@@ -213,11 +213,13 @@ fn too_deep(plugin: &Path) {
     }
 }
 
-/// The start sweeps in the order an engine start runs them. Input: the case. Output: what
-/// the removal sweep answered.
+/// The start sweeps in the order an engine start runs them. Input: the case. Output: the
+/// removal sweep's refusal, else the replace sweep's answer.
 fn start_sweep(case: &Case) -> Result<(), Refused> {
     sweep_staged(&case.engine());
-    crate::registry::sweep_removals(&case.db, &case.engine())
+    let replaced = crate::registry::sweep_replaced(&case.db, &case.root);
+    let removed = crate::registry::sweep_removals(&case.db, &case.engine());
+    removed.and(replaced)
 }
 
 /// A committed removal whose folder can neither lose the plugin name nor be deleted stays
@@ -626,4 +628,217 @@ fn a_back_named_file_does_not_make_an_owed_folder_ambiguous() {
         ),
         original
     );
+}
+
+/// Leaves acme as a replace cut after both its renames and before its commit: the trusted
+/// folder moved aside to `.old-acme.<STUCK_ID>` and `live` under acme. Inputs: the case and
+/// the live text. Output: the plugins folder.
+fn cut_after_renames(case: &Case, live: &str) -> PathBuf {
+    let folder = plugins_folder(case);
+    std::fs::rename(
+        folder.join("acme"),
+        folder.join(format!(".old-acme.{STUCK_ID}")),
+    )
+    .unwrap();
+    drop_in(case, "acme", live);
+    folder
+}
+
+/// Checks that the start sweep kept both folders of a cut replace: `live` under acme and
+/// the trusted ACME under its retired name. Inputs: the plugins folder and the live text.
+/// Output: none.
+fn both_kept(folder: &Path, live: &str) {
+    let retired = format!(".old-acme.{STUCK_ID}");
+    let mut names = names_in(folder);
+    names.sort();
+    assert_eq!(names, [retired.as_str(), "acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        live
+    );
+    assert_eq!(
+        fixture(
+            &folder.join(&retired).join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        ACME
+    );
+}
+
+/// Sets the trusted SHA-256 of acme straight in its trust row. Inputs: the case and the
+/// text whose hash the row then holds. Output: none.
+fn trust_row_holds(case: &Case, text: &str) {
+    let changed = case
+        .db
+        .execute(
+            "UPDATE app_plugin_trust SET sha256 = ?1 WHERE name = 'acme'",
+            [sha(text)],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+/// A replace cut after both its renames and before its commit leaves the new folder under
+/// the name and the original aside, with the trust row still the original's: the start
+/// sweep puts the original back in place of the new folder.
+#[test]
+fn a_replace_cut_after_its_renames_keeps_the_original_on_the_start_sweep() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let folder = cut_after_renames(&case, &two);
+
+    start_sweep(&case).unwrap();
+
+    trusted_on_disk(&case, &folder, ACME);
+}
+
+/// A replace rolled back while the plugins folder cannot be opened leaves the original
+/// aside beside the new folder: once the folder opens again, the start sweep puts the
+/// original back.
+#[test]
+fn a_replace_rolled_back_with_the_plugins_folder_unopenable_keeps_the_original() {
+    let mut case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    let shut = |mode: u32| {
+        let permissions =
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(mode);
+        std::fs::set_permissions(&folder, permissions).unwrap();
+    };
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+
+    replace_rolled_back(&mut case, &KEYS, &two, || shut(0o000));
+    shut(0o700);
+
+    let names = names_in(&folder);
+    assert!(
+        names.iter().any(|name| name.starts_with(".old-acme.")),
+        "{names:?}"
+    );
+    start_sweep(&case).unwrap();
+    trusted_on_disk(&case, &folder, ACME);
+}
+
+/// A retired folder beside the live one of its name, where the trust row holds neither
+/// text, is kept with the live folder, since which one the owner trusted is not known.
+#[test]
+fn a_retired_folder_neither_text_trusts_is_kept_with_the_live_one() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let three = ACME.replace("Acme embeddings", "Acme embeddings three");
+    let folder = cut_after_renames(&case, &two);
+    trust_row_holds(&case, &three);
+
+    start_sweep(&case).unwrap();
+
+    both_kept(&folder, &two);
+}
+
+/// A retired folder beside the live one of its name is kept with it when the trust rows do
+/// not read, so nothing is deleted without them.
+#[test]
+fn a_retired_folder_is_kept_when_the_rows_do_not_read() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let folder = cut_after_renames(&case, &two);
+    case.db
+        .execute_batch("ALTER TABLE app_plugin_trust RENAME TO app_plugin_trust_away")
+        .unwrap();
+
+    let _ = start_sweep(&case);
+
+    both_kept(&folder, &two);
+}
+
+/// A committed replace whose older folder could not lose the plugin name leaves it aside
+/// beside the live folder the trust row holds: the start sweep still deletes it.
+#[test]
+fn a_committed_replace_leftover_beside_its_live_plugin_is_still_deleted() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let folder = cut_after_renames(&case, &two);
+    trust_row_holds(&case, &two);
+
+    start_sweep(&case).unwrap();
+
+    trusted_on_disk(&case, &folder, &two);
+}
+
+/// A retired folder whose text the trust row holds is kept with the live folder of its name
+/// when the live plugin.toml does not read, so a live folder is never deleted unread.
+#[test]
+fn a_retired_folder_is_kept_when_the_live_one_does_not_read() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let folder = cut_after_renames(&case, &two);
+    std::fs::write(folder.join("acme").join("notes.txt"), b"extra").unwrap();
+
+    start_sweep(&case).unwrap();
+
+    both_kept(&folder, &two);
+}
+
+/// A plugin removed while a retired folder of its name was kept beside it stays removed
+/// through the next start: the removal takes the plugin name off the retired folder, so the
+/// start sweep has nothing to put back.
+#[test]
+fn a_removed_plugin_with_a_kept_retired_folder_stays_removed_through_a_start() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let three = ACME.replace("Acme embeddings", "Acme embeddings three");
+    let folder = cut_after_renames(&case, &two);
+    trust_row_holds(&case, &three);
+    start_sweep(&case).unwrap();
+    both_kept(&folder, &two);
+
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    start_sweep(&case).unwrap();
+
+    let names = names_in(&folder);
+    assert!(
+        names
+            .iter()
+            .all(|name| name != "acme" && !name.starts_with(".old-acme.")),
+        "{names:?}"
+    );
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().all(|plugin| plugin.name != "acme"));
+}
+
+/// A removal whose retired folder of the same name cannot lose the plugin name is refused
+/// before the live folder or any row changes, so the plugin stays as it was.
+#[test]
+fn a_removal_whose_retired_folder_cannot_lose_the_name_is_refused_with_nothing_moved() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let folder = cut_after_renames(&case, &two);
+    take_nameless(&folder);
+
+    let removed = remove(&case.db, &case.engine(), "acme");
+
+    assert_eq!(code(removed), "app_plugin_folder_unavailable");
+    let retired = format!(".old-acme.{STUCK_ID}");
+    let nameless = format!(".old-{STUCK_ID}");
+    let mut names = names_in(&folder);
+    names.sort();
+    assert_eq!(names, [nameless.as_str(), retired.as_str(), "acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        two
+    );
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").name, "acme");
 }
