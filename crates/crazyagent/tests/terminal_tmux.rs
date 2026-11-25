@@ -2046,6 +2046,25 @@ fn until_refused(socket: &Path) {
     }
 }
 
+/// Waits until the keepers a host holds for a lead's ended servers have exited, as the host
+/// reads such a server as ended only then, not when its socket first refuses. Takes the host,
+/// the lead and whether only the keeper of its teammates' server counts.
+#[cfg(target_os = "macos")]
+fn until_keepers_end(host: &dyn Host, lead: &AgentId, mates_only: bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while host
+        .server_keepers(lead)
+        .iter()
+        .any(|(_, mates)| !mates_only || *mates)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the keepers of the lead's ended servers still run"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn wait_text(path: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -2366,6 +2385,7 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     .unwrap();
     assert!(killed.success());
     until_refused(&lead.mates);
+    until_keepers_end(host.as_ref(), &leader, true);
 
     let ended = "terminal_teammates_server_ended";
     assert_eq!(host.panes(&leader).unwrap_err().0, ended);
@@ -2457,6 +2477,7 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
     .unwrap();
     assert!(killed.success());
     until_refused(&lead.mates);
+    until_keepers_end(host.as_ref(), &leader, true);
 
     let gone = Some("terminal_agent_unknown".to_owned());
     let reads_as_gone = |host: &dyn Host| {
@@ -2626,14 +2647,7 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
         assert!(killed.success());
         until_refused(socket);
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !host.server_keepers(&leader).is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "the keepers of the lead's ended servers still run"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    until_keepers_end(host.as_ref(), &leader, false);
     let ended = "terminal_teammates_server_ended";
     assert_eq!(
         host.panes(&leader).unwrap_err().0,
