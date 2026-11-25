@@ -152,6 +152,14 @@ impl Rig {
                     ),
                     ("unresolved.example", Vec::new()),
                     ("v6.example", vec!["2606:4700::1111".parse().unwrap()]),
+                    (
+                        "dual.example",
+                        vec![
+                            "140.82.112.4".parse().unwrap(),
+                            "2606:4700::1111".parse().unwrap(),
+                            "140.82.112.3".parse().unwrap(),
+                        ],
+                    ),
                 ]),
                 events,
                 configs: Mutex::new(Vec::new()),
@@ -1035,6 +1043,10 @@ fn the_curl_config_pins_the_checked_address() {
         (
             "https://v6.example:8443/user",
             "resolve = \"v6.example:8443:[2606:4700::1111]\"\n",
+        ),
+        (
+            "https://dual.example/user",
+            "resolve = \"dual.example:443:140.82.112.4,[2606:4700::1111],140.82.112.3\"\n",
         ),
     ] {
         let rig = Rig::new(b"{}");

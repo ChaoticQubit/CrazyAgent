@@ -19,7 +19,11 @@ const FAST_CLIENT_MS: u64 = 1000;
 
 /// The owner control that revokes one client kind at its current epoch.
 /// Inputs: the runtime, the client kind and the operation name. Output: the control.
-fn revocation(runtime: &OwnerRuntimeHandle, target: OwnerClientKind, name: &str) -> OwnerControl {
+pub(super) fn revocation(
+    runtime: &OwnerRuntimeHandle,
+    target: OwnerClientKind,
+    name: &str,
+) -> OwnerControl {
     OwnerControl {
         operation_id: RequestId::new(name).unwrap(),
         target,
@@ -129,7 +133,7 @@ async fn storage_queue_reaches(owner: &Usage, count: usize) -> bool {
 
 /// Waits until storage has answered every job queued before this call, so a change it ran
 /// after the owner stopped waiting is committed. Input: the engine.
-async fn storage_settled(owner: &Usage) {
+pub(super) async fn storage_settled(owner: &Usage) {
     let (send, settled) = oneshot::channel();
     owner
         .runtime()

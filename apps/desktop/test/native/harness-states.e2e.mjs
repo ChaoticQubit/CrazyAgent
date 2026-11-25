@@ -19,7 +19,7 @@ describe("Task 21: harness states and the Gemini API key tile on the real deskto
     await type("#account-name", NAME);
     await type("#account-key", KEY);
     await type("#account-model", MODEL);
-    await click("button=Save");
+    await click("button=Save key");
     await until(async () => (await texts("dialog[open] .success strong")).includes(NAME), 30000, "the Gemini API account was not saved");
     await shot("gemini-key-saved");
   });

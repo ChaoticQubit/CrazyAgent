@@ -4,13 +4,13 @@
   with. Each one shows what it reaches before you approve it.                   
   When turned off: Refuse new calls                                             
                                                                                 
-  > OpenAI embeddings                                             Bundled  Off  
-      openai, version 1. Bundled.                                               
+  > OpenAI embeddings                                            Built in  Off  
+      openai, version 1. Built in.                                              
       Reaches api.openai.com                                                    
       Set a key for each secret it needs.                                       
       api_key: Not set                                                          
-    Ollama embeddings                                              Bundled  On  
-      ollama, version 1. Bundled.                                               
+    Ollama embeddings                                             Built in  On  
+      ollama, version 1. Built in.                                              
       Reaches 127.0.0.1 (local, not encrypted)                                  
     Dock embeddings                                               Approved  On  
       dock-embed, version 1. Added by you.                                      

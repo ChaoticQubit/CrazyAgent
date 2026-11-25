@@ -69,19 +69,23 @@ fn taken<'a>(project_id: &'a str, config_id: &'a str) -> SnapshotFacts<'a> {
 }
 
 /// A canonical scratch folder, so the no-follow walk meets no symlinked temp prefix.
-/// Output: the folder guard and its canonical path.
+/// Output: the folder guard and its canonical path; a failure stops the row naming it.
 #[cfg(unix)]
 fn scratch() -> (tempfile::TempDir, PathBuf) {
-    let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let root = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let base = root
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("{}: {error}", root.path().display()));
     (root, base)
 }
 
-/// Writes a file owned by this user. Inputs: folder, name and text. Output: its path.
+/// Writes a file owned by this user. Inputs: folder, name and text. Output: its path; a
+/// failed write stops the row naming the path and the I/O error.
 #[cfg(unix)]
 fn file(base: &Path, name: &str, text: &str) -> PathBuf {
     let path = base.join(name);
-    std::fs::write(&path, text).unwrap();
+    std::fs::write(&path, text).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     path
 }
 
@@ -382,7 +386,8 @@ fn renumbered(pinned: &[(u64, u64)], live: &[(u64, u64)]) -> bool {
 
 /// Admits two global files, empties the recorded calls and pins each source to the given
 /// identity while the live map shows each real file as the given live identity. Inputs:
-/// the transaction, a scratch folder and two (pinned, live) pairs, name order. Output: none.
+/// the transaction, a scratch folder and two (pinned, live) pairs, name order. Output: none;
+/// a file whose metadata cannot be read stops the row naming its path and the I/O error.
 #[cfg(unix)]
 fn two_sources(tx: &Transaction<'_>, base: &Path, pairs: [((u64, u64), (u64, u64)); 2]) {
     CALLS.with_borrow_mut(Vec::clear);
@@ -392,7 +397,8 @@ fn two_sources(tx: &Transaction<'_>, base: &Path, pairs: [((u64, u64), (u64, u64
         let path = file(base, &format!("{name}.md"), "text");
         let admitted = source(&name, &name, Scope::Global, Kind::Skill, path.clone());
         assert_eq!(admit(tx, &ADMIT, &admitted), Ok(()));
-        let real = std::fs::metadata(&path).unwrap();
+        let real =
+            std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         LIVE.with_borrow_mut(|map| map.insert((real.dev(), real.ino()), live));
         let body = serde_json::to_string(&Admitted {
             source: admitted,

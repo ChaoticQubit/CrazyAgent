@@ -344,7 +344,7 @@ test("Linux CI frees the hosted runner's unused toolsets first, builds with line
   const removals = free.split("\n").filter((line) => /\brm\b/.test(line)).map((line) => line.trim());
   assert.deepEqual(removals, ["sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL"], "only the five literal toolset folders");
   const last = all.at(-1);
-  assert.match(all.at(-2), /^ {6}- name: Lint workspace\n/, "the disk report comes right after the lint");
+  assert.deepEqual(all.slice(-3, -1).map((step) => step.split("\n")[0]), ["      - name: Lint workspace", "      - name: Check the bundled plugins"], "the disk report comes right after the lint and the bundled plugins check");
   assert.match(last, /^ {6}- name: [^\n]+\n {8}if: always\(\)\n/, "it runs even when a step failed");
   assert.match(last, /\n\s+df -h \/\n/);
   assert.match(last, /\n\s+target="\$\{CARGO_TARGET_DIR:-target\}"\n\s+if \[ -d "\$target" \]; then\n\s+du -sh "\$target"\n\s+fi\n/, "the target size shows, so the disk need is known");

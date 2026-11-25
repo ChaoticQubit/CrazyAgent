@@ -1,5 +1,5 @@
 use super::accounts::PROFILE_BUSY;
-use super::jobs::{JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
+use super::jobs::{ATTEMPTS_MAX, JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
 use crate::agents::{Agents, Hold, Holder};
 use crate::config::ModelConnection;
 use crate::engine::bootstrap::{AgentCredential, NativeProfileUse, NativeProfileUsePurpose};
@@ -204,7 +204,7 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 const SETUP_TIMED_OUT: &str = "setup_timed_out";
 #[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
-const RUNS_PER_ATTEMPT_MAX: u32 = 100;
+pub(crate) const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
@@ -1714,6 +1714,9 @@ impl ResearchRunner {
             }
             std::thread::sleep(POLL);
         };
+        if matches!(ending, Ending::Exited(true)) && granted.hide_stops(jobs, listed, &never)() {
+            return Ok(Ending::Hidden);
+        }
         Ok(ending)
     }
 
@@ -1832,6 +1835,10 @@ impl ResearchRunner {
                 }
             }
         };
+        let ending = match ending {
+            Ending::Exited(true) if granted.hide_stops(jobs, listed, &never)() => Ending::Hidden,
+            ending => ending,
+        };
         let _ = jobs.heartbeat(job, counted);
         if matches!(ending, Ending::Exited(true))
             && let Some(text) = reply.text()
@@ -1864,18 +1871,15 @@ impl ResearchRunner {
         }))
     }
 
-    /// Names this launch of a job so it never reuses the agent state or the
-    /// worktree of an earlier launch, such as one an engine stop interrupted
-    /// without spending its attempt. Takes the project folder and the job.
-    /// Returns the agent state name and the worktree path, or an error after
-    /// `RUNS_PER_ATTEMPT_MAX` launches of the same attempt.
+    /// Names a launch of a job that reuses no earlier launch's agent state or worktree.
+    /// Takes the project folder and the job. Returns the agent state name and worktree path,
+    /// or an error for an attempt outside `1..=ATTEMPTS_MAX` or past `RUNS_PER_ATTEMPT_MAX`.
     fn free_run(&self, root: &Path, job: &ResearchJob) -> Result<(String, PathBuf), RunError> {
-        for launch in 0..RUNS_PER_ATTEMPT_MAX {
-            let suffix = if launch == 0 {
-                String::new()
-            } else {
-                format!("-{launch}")
-            };
+        if !(1..=ATTEMPTS_MAX).contains(&job.attempts) {
+            return Err(RunError::Invalid("research attempt out of range".into()));
+        }
+        let launches = (1..RUNS_PER_ATTEMPT_MAX).map(|launch| format!("-{launch}"));
+        for suffix in std::iter::once(String::new()).chain(launches) {
             let name = format!("job-{}-{}{suffix}", job.id, job.attempts);
             let worktree = crate::projects_home::state_folder(root)
                 .join("worktrees")
@@ -2280,6 +2284,23 @@ impl ResearchRunner {
                 break Some(ReadOnlyEnding::Stopped);
             }
             std::thread::sleep(POLL);
+        };
+        let ending = match ending {
+            None if jobs
+                .as_ref()
+                .zip(run.project)
+                .is_some_and(|(jobs, project)| {
+                    crate::sandbox::access_store::hidden::hide_stops(
+                        jobs.connection(),
+                        project.as_str(),
+                        listed.as_ref(),
+                        &|| false,
+                    )()
+                }) =>
+            {
+                Some(ReadOnlyEnding::Stopped)
+            }
+            ending => ending,
         };
         drop(hides);
         let stopped = running.stop();
@@ -5992,6 +6013,7 @@ mod tests {
         assert!(ProviderReach::system().refused_everywhere(&[address]));
     }
 
+    mod attempts;
     #[cfg(target_os = "macos")]
     mod read_only;
 
@@ -6646,90 +6668,6 @@ mod tests {
         assert_eq!(ends, [ResearchStatus::Queued; 5]);
     }
 
-    /// RV-DS241-159: only rate-limited ends in a row count toward the cap, so a run that is
-    /// saved, stopped, failed before its harness started or taken back stale starts the count
-    /// again. Each such end after two rate-limited ones leaves the count at zero, and the job
-    /// taken back stale takes two more rate-limited ends before the third fails it.
-    #[test]
-    fn an_end_other_than_a_rate_limit_starts_the_rate_limit_count_again() {
-        let root = engine_root();
-        let folder = root.base.join("repo");
-        fs::create_dir(&folder).unwrap();
-        register_project(&root.database, "alpha", &folder);
-        let jobs = ResearchJobs::open(&root.database).unwrap();
-        let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let account = reference("codex-connection");
-        let limited = |id: i64| -> i64 {
-            connection
-                .query_row(
-                    "SELECT limited FROM research_jobs WHERE id = ?1",
-                    [id],
-                    |row| row.get(0),
-                )
-                .unwrap()
-        };
-        let limited_twice = |kind: &str| {
-            let id = jobs.enqueue("alpha", kind, "codex", false).unwrap();
-            for _ in 0..2 {
-                let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-                assert_eq!(held.id, id);
-                assert_eq!(
-                    jobs.rate_limited(&held, &account).unwrap().0,
-                    ResearchStatus::Queued
-                );
-            }
-            assert_eq!(limited(id), 2);
-            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-            assert_eq!(held.id, id);
-            held
-        };
-
-        let saved = limited_twice("market_research");
-        jobs.finish(&saved, "context/research/market.md").unwrap();
-        assert_eq!(limited(saved.id), 0, "a saved run starts the count again");
-
-        let stopped = limited_twice("competitor_research");
-        jobs.cancelled(&stopped).unwrap();
-        assert_eq!(
-            limited(stopped.id),
-            0,
-            "a stopped run starts the count again"
-        );
-
-        let unspent = limited_twice("design_research");
-        assert_eq!(
-            jobs.fail_unspent(&unspent, "Provider refused").unwrap(),
-            ResearchStatus::Failed
-        );
-        assert_eq!(
-            limited(unspent.id),
-            0,
-            "a run failed before its harness started starts the count again"
-        );
-
-        let stale = limited_twice("tech_stack_research");
-        assert_eq!(jobs.recover_stale(0, 10).unwrap(), 1);
-        assert_eq!(
-            limited(stale.id),
-            0,
-            "a run taken back stale starts the count again"
-        );
-        let mut ends = Vec::new();
-        for _ in 0..3 {
-            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
-            assert_eq!(held.id, stale.id);
-            ends.push(jobs.rate_limited(&held, &account).unwrap().0);
-        }
-        assert_eq!(
-            ends,
-            [
-                ResearchStatus::Queued,
-                ResearchStatus::Queued,
-                ResearchStatus::Failed
-            ]
-        );
-    }
-
     /// DEC-170 addendum 6 (RV-DS241-27): a research job its runner hands back because a
     /// projects home move holds its folder spends no attempt, is not claimed again until its
     /// backoff ends, shows why it waits and records no start, since no harness ran.
@@ -6989,72 +6927,6 @@ mod tests {
             !marker.exists(),
             "the engine's git ran the project fsmonitor"
         );
-    }
-
-    /// A team or research agent's worktree, added the way the runtime adds it, is
-    /// local-only: the owner's own git pushing from it gets the plain refusal and the
-    /// remote gains nothing.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn an_added_agent_worktree_refuses_remotes_with_the_plain_message() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let project = base.join("project");
-        let home = base.join("agent").join("home");
-        let tmp = base.join("agent").join("tmp");
-        let profiles = base.join("profiles");
-        let remote = base.join("remote.git");
-        for folder in [&project, &home, &tmp, &profiles] {
-            fs::create_dir_all(folder).unwrap();
-        }
-        ensure_repository(&project, &tmp).unwrap();
-        let owner_git = |dir: &Path, args: &[&str]| {
-            kernel_processes::spawn_gate::output(
-                Command::new(GIT)
-                    .env_clear()
-                    .env("GIT_CONFIG_NOSYSTEM", "1")
-                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                    .arg("-C")
-                    .arg(dir)
-                    .args(args)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped()),
-            )
-            .unwrap()
-        };
-        let remote_path = remote.to_str().unwrap();
-        assert!(
-            owner_git(&base, &["init", "-q", "--bare", remote_path])
-                .status
-                .success()
-        );
-        assert!(
-            owner_git(&project, &["remote", "add", "origin", remote_path])
-                .status
-                .success()
-        );
-        let sandbox = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &project,
-            &home,
-            &tmp,
-            SandboxNetwork::Only(Vec::new()),
-        )
-        .unwrap();
-        let profile = profiles.join("agent.sb");
-        sandbox.install(&profile).unwrap();
-        let worktree = project.join("worktrees").join("agent-one");
-        add_worktree(&sandbox, &profile, &worktree).unwrap();
-        let pushed = owner_git(&worktree, &["push", "origin", "HEAD:refs/heads/agent-work"]);
-        assert!(!pushed.status.success(), "{pushed:?}");
-        assert!(
-            String::from_utf8_lossy(&pushed.stderr).contains(crate::worktrees::REMOTE_REFUSAL),
-            "{pushed:?}"
-        );
-        let refs = owner_git(&remote, &["for-each-ref"]);
-        assert!(refs.status.success(), "{refs:?}");
-        assert!(refs.stdout.is_empty(), "{refs:?}");
     }
 
     /// The engine's sandboxed setup git must be the real git, not the `/usr/bin/git` xcrun
@@ -7869,6 +7741,8 @@ mod tests {
         assert_eq!(limited.answer(), None);
         assert!(limited.limited());
     }
+
+    mod rate_limit_count;
 }
 
 #[cfg(all(test, windows))]

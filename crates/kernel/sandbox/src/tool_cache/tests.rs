@@ -181,13 +181,19 @@ fn a_linked_folder_above_the_cache_removes_nothing_through_it() {
 }
 
 /// A stand-in by-handle removal: empties the folder `name` of `parent` through handles,
-/// never following a link, then removes it. Inputs: the open parent, the folder name and
-/// the refusal code. Output: done, or the code.
+/// never following a link, then removes it; an entry that is no folder, a link included,
+/// is unlinked from `parent` as it is. Inputs: the open parent, the entry name and the
+/// refusal code. Output: done, or the code.
 fn removed(
     parent: std::os::fd::BorrowedFd<'_>,
     name: &str,
     otherwise: &'static str,
 ) -> Result<(), &'static str> {
+    let found =
+        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| otherwise)?;
+    if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
+        return rustix::fs::unlinkat(parent, name, AtFlags::empty()).map_err(|_| otherwise);
+    }
     let folder =
         rustix::fs::openat(parent, name, OPEN_FOLDER, Mode::empty()).map_err(|_| otherwise)?;
     let names: Vec<String> = rustix::fs::Dir::read_from(&folder)

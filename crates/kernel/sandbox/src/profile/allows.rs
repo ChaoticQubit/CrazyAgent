@@ -1211,7 +1211,10 @@ impl ProjectSandbox {
     /// teammates the team folders they share in the lead's home, then its tool cache, the
     /// owner's temp folder when granted and each shared writable folder.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        self.project_writes().into_iter().chain(self.other_writes())
+        self.project_writes()
+            .into_iter()
+            .chain(self.other_writes())
+            .chain(self.shared_writes.iter())
     }
 
     /// The writable roots in the project: the project folder, or a confinement's own roots.
@@ -1228,9 +1231,9 @@ impl ProjectSandbox {
 
     /// Refuses a confined sandbox whose writable roots outside its confinement reach the
     /// project: one that holds the project folder or lies in it outside the confinement's
-    /// own roots would leave the project writable beside the confinement. Roots disjoint
-    /// from the project pass, as does any sandbox that is not confined. Output: Ok, or
-    /// `Invalid`.
+    /// own roots would leave the project writable beside the confinement. Shared writable
+    /// folders pass: each is a top-level project folder the owner chose to share, which
+    /// [`Self::allow_shared_write`] already checked. Output: Ok, or `Invalid`.
     pub(crate) fn confinement_kept(&self) -> Result<(), SandboxError> {
         if self.confinements() == 0 {
             return Ok(());
@@ -1249,9 +1252,9 @@ impl ProjectSandbox {
         Ok(())
     }
 
-    /// The writable roots besides the project's: the agent's home and temp folders, its short
-    /// temp folder, extra worktrees, team folders, tool cache, the owner's temp folder when
-    /// granted and each shared writable folder. Output: the roots.
+    /// The writable roots besides the project's and the shared writable folders: the agent's
+    /// home and temp folders, its short temp folder, extra worktrees, team folders, tool cache
+    /// and the owner's temp folder when granted. Output: the roots.
     fn other_writes(&self) -> impl Iterator<Item = &PathBuf> {
         [&self.agent_home, &self.agent_tmp]
             .into_iter()
@@ -1260,7 +1263,6 @@ impl ProjectSandbox {
             .chain(self.shared.iter())
             .chain(self.tool_cache.iter().map(|(root, _)| root))
             .chain(self.owner_tmp.iter())
-            .chain(self.shared_writes.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.

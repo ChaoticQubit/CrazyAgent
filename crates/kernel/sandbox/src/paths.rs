@@ -336,11 +336,16 @@ pub(crate) fn walks() -> usize {
     WALKS.with(std::cell::Cell::get)
 }
 
+/// The most links whose targets do not exist yet one walk follows from its first missing
+/// run before it refuses the path.
+const DANGLING_LINK_HOPS: usize = 16;
+
 /// A path's parts with the identity of each leading run of them, top down: None from the
 /// first run that does not exist on, and None for a Windows drive prefix alone, which names
 /// the drive's current folder. `reached` holds the identities of the folders the deepest
-/// existing run resolves through once its links are followed, so a run that leads into a
-/// protected folder by a link is told too.
+/// existing run resolves through once its links are followed, and of the folders above
+/// where a first missing run that is a link leads ([`dangling_reach`]), so a run that leads
+/// into a protected folder by a link, made or still to be made, is told too.
 struct Walk<'a> {
     path: &'a Path,
     parts: Vec<Component<'a>>,
@@ -349,10 +354,11 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    /// Reads the identities of a path's leading runs, and of every folder above the deepest
-    /// existing run once its links are resolved. Input: the path. Output: the walk, or
-    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or the resolve fails other than
-    /// not found.
+    /// Reads the identities of a path's leading runs, of every folder above the deepest
+    /// existing run once its links are resolved, and of every folder above where its first
+    /// missing run leads when that run is a link. Input: the path. Output: the walk, or
+    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or a resolve fails other than not
+    /// found, or a missing run leads through more than [`DANGLING_LINK_HOPS`] links.
     fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
         #[cfg(all(test, target_os = "macos"))]
         WALKS.with(|walks| walks.set(walks.get() + 1));
@@ -361,8 +367,9 @@ impl<'a> Walk<'a> {
         let mut ids = Vec::with_capacity(parts.len());
         let mut run = PathBuf::new();
         let mut existing = None;
+        let mut missing = None;
         let mut gone = false;
-        for part in &parts {
+        for (at, part) in parts.iter().enumerate() {
             run.push(part);
             let prefix = matches!(part, Component::Prefix(_));
             let found = if gone || prefix {
@@ -372,14 +379,22 @@ impl<'a> Walk<'a> {
             };
             if found.is_some() {
                 existing = Some(run.clone());
-            } else if !prefix {
+            } else if !prefix && !gone {
+                missing = Some(at);
                 gone = true;
             }
             ids.push(found);
         }
-        let mut reached = Vec::new();
+        let mut reals = Vec::with_capacity(2);
         if let Some(existing) = existing {
-            let real = existing.canonicalize().map_err(refused)?;
+            reals.push(existing.canonicalize().map_err(refused)?);
+        }
+        if let Some(at) = missing {
+            let run: PathBuf = parts[..=at].iter().collect();
+            reals.extend(dangling_reach(&run, &parts[at + 1..])?);
+        }
+        let mut reached = Vec::new();
+        for real in &reals {
             for above in real.ancestors() {
                 if let Some(found) = identity(above).map_err(refused)? {
                     reached.push(found);
@@ -387,6 +402,7 @@ impl<'a> Walk<'a> {
             }
         }
         assert_eq!(ids.len(), parts.len());
+        assert!(reals.len() <= 2);
         Ok(Walk {
             path,
             parts,
@@ -396,9 +412,10 @@ impl<'a> Walk<'a> {
     }
 
     /// Tells whether this path equals or lies under `outer`: by text; or by entry, when
-    /// `outer` exists and one of this path's existing runs is that entry; or, on a volume
-    /// that folds names, when this path's new parts start under the same folder as
-    /// `outer`'s ([`Walk::folds_into`]). Input: the outer walk. Output: true when it does.
+    /// `outer` exists and one of this path's existing runs is that entry; or when this path's
+    /// new parts start under the same folder as `outer`'s and name it, folded on a volume
+    /// that folds names and exactly elsewhere ([`Walk::new_parts_in`]). Input: the outer
+    /// walk. Output: true when it does.
     fn sits_in(&self, outer: &Walk) -> bool {
         if self.path.starts_with(outer.path) {
             return true;
@@ -408,16 +425,15 @@ impl<'a> Walk<'a> {
         {
             return true;
         }
-        cfg!(any(target_os = "macos", windows)) && self.folds_into(outer)
+        self.new_parts_in(outer, cfg!(any(target_os = "macos", windows)))
     }
 
-    /// Compares the parts of this path that do not exist yet, on a volume that folds names.
-    /// When this path's deepest existing run is `outer` or one of `outer`'s existing runs,
-    /// a new part that folds to no ASCII name, or is not a plain name, may name anything
-    /// there and counts as inside; else the new parts sit in `outer` when they are at least
-    /// as many as `outer`'s parts below that run and each is the [`same_name`] as its match.
-    /// Input: the outer walk. Output: true when this path may sit in `outer`.
-    fn folds_into(&self, outer: &Walk) -> bool {
+    /// Compares this path's new parts below its deepest existing run when that run is one of
+    /// `outer`'s: a part that is no plain name, or with `fold` folds to no ASCII name, counts
+    /// as inside; else they sit in `outer` when at least as many as its parts below and each
+    /// matches, the [`same_name`] with `fold` and the same text without. Inputs: the outer
+    /// walk and whether the volume folds names. Output: true when this path may sit in it.
+    fn new_parts_in(&self, outer: &Walk, fold: bool) -> bool {
         let Some(deepest) = self.ids.iter().rposition(Option::is_some) else {
             return false;
         };
@@ -426,18 +442,77 @@ impl<'a> Walk<'a> {
         };
         let Some(new) = self.parts[deepest + 1..]
             .iter()
-            .map(|part| plain_name(*part).filter(|name| ascii_fold(name).is_some()))
+            .map(|part| plain_name(*part).filter(|name| !fold || ascii_fold(name).is_some()))
             .collect::<Option<Vec<&str>>>()
         else {
             return true;
         };
         let below = &outer.parts[level + 1..];
+        let named = |part: &str, step: &str| {
+            if fold {
+                same_name(part, step)
+            } else {
+                part == step
+            }
+        };
         new.len() >= below.len()
             && new
                 .iter()
                 .zip(below)
-                .all(|(part, step)| plain_name(*step).is_some_and(|step| same_name(part, step)))
+                .all(|(part, step)| plain_name(*step).is_some_and(|step| named(part, step)))
     }
+}
+
+/// Where a run that does not exist leads when it is a link whose target does not exist yet:
+/// the target, read against the link's own folder, with the parts after the run, walked top
+/// down again, and on through each further such link it meets, at most
+/// [`DANGLING_LINK_HOPS`] of them. Inputs: the missing run and the parts after it. Output:
+/// the canonical deepest existing folder of where it leads, None when the run is no link,
+/// or `Invalid` with [`SECRET_ROOT_REFUSED`] past the bound or when a read fails.
+fn dangling_reach(run: &Path, rest: &[Component<'_>]) -> Result<Option<PathBuf>, SandboxError> {
+    let refused = |_| invalid(SECRET_ROOT_REFUSED);
+    let mut link = run.to_path_buf();
+    let mut after: PathBuf = rest.iter().collect();
+    let mut deepest = None;
+    for hop in 0..=DANGLING_LINK_HOPS {
+        let linked = match std::fs::symlink_metadata(&link) {
+            Ok(found) => found.file_type().is_symlink(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(refused(error)),
+        };
+        if !linked {
+            break;
+        }
+        if hop == DANGLING_LINK_HOPS {
+            return Err(invalid(SECRET_ROOT_REFUSED));
+        }
+        let target = std::fs::read_link(&link).map_err(refused)?;
+        let folder = link.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        let led = folder.join(target).join(&after);
+        let parts: Vec<Component<'_>> = led.components().collect();
+        let mut walked = PathBuf::new();
+        let mut next = None;
+        deepest = None;
+        for (at, part) in parts.iter().enumerate() {
+            walked.push(part);
+            if matches!(part, Component::Prefix(_)) {
+                continue;
+            }
+            if identity(&walked).map_err(refused)?.is_none() {
+                next = Some(at);
+                break;
+            }
+            deepest = Some(walked.clone());
+        }
+        let Some(at) = next else {
+            break;
+        };
+        after = parts[at + 1..].iter().collect();
+        link = walked;
+    }
+    deepest
+        .map(|found| found.canonicalize().map_err(refused))
+        .transpose()
 }
 
 /// The text of a plain folder or file name part. Input: the part. Output: its text, or

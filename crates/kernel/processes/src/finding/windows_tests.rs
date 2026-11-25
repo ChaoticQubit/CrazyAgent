@@ -22,7 +22,7 @@ fn copy_named(from: &Path, to: &Path) {
 /// program) and places that look there. Input: none. Output: the folder guard, its real
 /// spelling and the places.
 fn node_folder() -> (tempfile::TempDir, PathBuf, Places) {
-    let folder = tempfile::tempdir().unwrap();
+    let folder = or_named(tempfile::tempdir(), &std::env::temp_dir());
     let real = or_named(folder.path().canonicalize(), folder.path());
     copy_named(&shipped_where(), &real.join("node.exe"));
     let places = stub_new(vec![real.clone()], None);
@@ -50,15 +50,15 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
     assert_eq!(resolved.entry, shim);
     assert_eq!(
         resolved.program,
-        package.join("codex.js").canonicalize().unwrap()
+        or_named(
+            package.join("codex.js").canonicalize(),
+            &package.join("codex.js")
+        )
     );
     assert_eq!(
         resolved.argv(),
         vec![
-            real.join("node.exe")
-                .canonicalize()
-                .unwrap()
-                .into_os_string(),
+            or_named(real.join("node.exe").canonicalize(), &real.join("node.exe")).into_os_string(),
             resolved.program.clone().into_os_string(),
         ]
     );
@@ -80,18 +80,16 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     assert_eq!(
         resolved.argv(),
         vec![
-            real.join("node.exe")
-                .canonicalize()
-                .unwrap()
-                .into_os_string(),
-            npm.join("npx-cli.js")
-                .canonicalize()
-                .unwrap()
-                .into_os_string(),
+            or_named(real.join("node.exe").canonicalize(), &real.join("node.exe")).into_os_string(),
+            or_named(
+                npm.join("npx-cli.js").canonicalize(),
+                &npm.join("npx-cli.js")
+            )
+            .into_os_string(),
         ]
     );
 
-    let other = tempfile::tempdir().unwrap();
+    let other = or_named(tempfile::tempdir(), &std::env::temp_dir());
     let other = or_named(other.path().canonicalize(), other.path());
     let lone_npx = other.join("npx.cmd");
     copy_named(&npx, &lone_npx);
@@ -106,7 +104,7 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
         let missing = resolve_entry(&file, &places).unwrap_err();
         let refused = missing.refused.unwrap();
         assert_eq!(refused.why, Refusal::Batch, "{file:?}");
-        assert_eq!(refused.file, file.canonicalize().unwrap());
+        assert_eq!(refused.file, or_named(file.canonicalize(), &file));
     }
 }
 
@@ -123,7 +121,7 @@ fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
     or_named(std::fs::write(&npx, "@ECHO off\r\n"), &npx);
     let elsewhere = stub_new(Vec::new(), None);
     let resolved = resolve_entry(&npx, &elsewhere).unwrap();
-    let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
+    let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(
         resolved.argv(),
         vec![
@@ -158,7 +156,7 @@ fn a_cmd_shim_off_the_engine_s_path_runs_with_the_node_beside_it() {
     let (shim, script) = shim_beside_node(&real);
     let elsewhere = stub_new(Vec::new(), None);
     let resolved = resolve_entry(&shim, &elsewhere).unwrap();
-    let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
+    let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(resolved.entry, shim);
     assert_eq!(
         resolved.argv(),
@@ -174,7 +172,7 @@ fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
     let (_folder, real, _places) = node_folder();
     let (shim, script) = shim_beside_node(&real);
     let resolved = resolve_entry(&shim, &path_places).unwrap();
-    let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
+    let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(
         resolved.argv(),
         vec![real_of(real.join("node.exe")), real_of(script)]
@@ -186,7 +184,7 @@ fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
 /// check reads `.exe` and case away, so `ENV.EXE` and `BusyBox.exe` count and `node.exe` not.
 #[test]
 fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
-    let folder = tempfile::tempdir().unwrap();
+    let folder = or_named(tempfile::tempdir(), &std::env::temp_dir());
     let real = or_named(folder.path().canonicalize(), folder.path());
     copy_named(&shipped_where(), &real.join("env.exe"));
     let script = real.join("tool.js");
@@ -222,7 +220,7 @@ fn no_batch_file_is_ever_started_on_windows() {
     for name in ["x.exe", "x.cmdx", "cmd", "x.js", "x.bat.exe"] {
         assert!(!batch_file(Path::new(name)), "{name}");
     }
-    let folder = tempfile::tempdir().unwrap();
+    let folder = or_named(tempfile::tempdir(), &std::env::temp_dir());
     let marker = folder.path().join("ran");
     let script = folder.path().join("x.cmd");
     or_named(
@@ -272,7 +270,7 @@ fn a_program_is_fixed_only_when_absolute_or_a_bare_file_name() {
 /// its verbatim `\\?\` spelling included.
 #[test]
 fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_read() {
-    let home = tempfile::tempdir().unwrap();
+    let home = or_named(tempfile::tempdir(), &std::env::temp_dir());
     let places = Places {
         projects: None,
         ..stub_new(
@@ -287,13 +285,47 @@ fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_
     assert!(!places.agent_writable(&kept), "{}", kept.display());
     let shipped = shipped_where();
     assert!(
-        shipped
-            .canonicalize()
-            .unwrap()
+        or_named(shipped.canonicalize(), &shipped)
             .to_string_lossy()
             .starts_with(r"\\?\")
     );
     assert!(!places.agent_writable(&shipped), "{}", shipped.display());
+}
+
+/// A canonical hook that spells the `ProgramFiles` folder as `Z:\row-programs`, a third
+/// spelling neither the variable nor `canonicalize` gives, and leaves every other path as it
+/// is. Input: the path. Output: its one spelling, or a not-found error when the
+/// `ProgramFiles` variable is unset.
+fn programs_elsewhere(path: &Path) -> std::io::Result<PathBuf> {
+    let programs = PathBuf::from(std::env::var_os("ProgramFiles").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the ProgramFiles variable is not set",
+        )
+    })?);
+    Ok(match path.strip_prefix(&programs) {
+        Ok(rest) => Path::new(r"Z:\row-programs").join(rest),
+        Err(_) => path.to_path_buf(),
+    })
+}
+
+/// While the set-up projects cannot be read, a tool under an install root in the spelling
+/// the canonical hook gives that root stays usable, as the engine data folder is met in that
+/// spelling too.
+#[test]
+fn a_tool_in_the_canonical_spelling_of_program_files_stays_usable_while_the_projects_cannot_be_read()
+ {
+    let folder = or_named(tempfile::tempdir(), &std::env::temp_dir());
+    let home = or_named(folder.path().canonicalize(), folder.path());
+    let mut seed = stub_seed();
+    seed.hooks.canonical = programs_elsewhere;
+    let places = Places {
+        projects: None,
+        ..Places::new(Vec::new(), Some(home), seed)
+    };
+    let tool = Path::new(r"Z:\row-programs\Git\cmd\git.exe");
+    assert!(!places.agent_writable(tool), "{}", tool.display());
+    assert!(places.agent_writable(Path::new(r"Z:\elsewhere\git.exe")));
 }
 
 /// A name starting with this drive's letter and `:` joined to a searched folder replaces

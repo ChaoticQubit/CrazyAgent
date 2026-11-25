@@ -277,7 +277,8 @@ pub(super) fn regenerate(
 /// driver or filter on any path either side touched. Without the hold it takes the tip's
 /// side of each lockfile, runs each tool confined like an agent in a temporary linked
 /// worktree within one deadline, stops the tools once the project saves a folder hidden
-/// that their sandbox did not hide, which refuses the set with no commit, ends every
+/// that their sandbox did not hide, which refuses the set with no commit even when the
+/// last tool ended before its stop read the folders again, ends every
 /// process of each run, refuses any other path
 /// the tools changed and reads each lockfile through handles that follow no link. Under
 /// the hold again, unless the set, main, the owner's stop or the team's pause changed, it
@@ -417,6 +418,14 @@ fn regenerated(
         if ran.map(|(code, _)| code) != Some(0) {
             return Ok(Regenerated::Refused);
         }
+    }
+    if crate::sandbox::access_store::hidden::hide_stops(
+        db,
+        record.project.as_str(),
+        Some(&listed),
+        &|| false,
+    )() {
+        return Ok(Regenerated::Refused);
     }
     if changed_outside(&repository, &scratch, &worktree, &merged, paths)? {
         return Ok(Regenerated::Refused);
