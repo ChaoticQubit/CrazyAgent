@@ -26,11 +26,7 @@ fn every_owner_client_connects_through_the_checked_connect() {
     let mut alone: Vec<String> = files
         .iter()
         .filter(|path| **path != shared)
-        .filter(|path| {
-            std::fs::read_to_string(path)
-                .unwrap()
-                .contains(own_connect)
-        })
+        .filter(|path| std::fs::read_to_string(path).unwrap().contains(own_connect))
         .map(|path| path.strip_prefix(owner).unwrap().display().to_string())
         .collect();
     alone.sort();
@@ -56,16 +52,15 @@ async fn the_check_after_the_connect_refuses_a_replaced_endpoint() {
     let client = fixture.client().await;
     let socket = client.root.path.join(SOCKET);
     let first = crate::ipc::owner_connect(&socket).await.unwrap();
-    assert!(client.checked(first).is_ok(), "the admitted endpoint passes");
+    assert!(
+        client.checked(first).is_ok(),
+        "the admitted endpoint passes"
+    );
     let stream = crate::ipc::owner_connect(&socket).await.unwrap();
     let kept = client.root.path.join("kept.sock");
     std::fs::rename(&socket, &kept).unwrap();
     let swap = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    std::fs::set_permissions(
-        &socket,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .unwrap();
+    std::fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     let refused = client.checked(stream).err().map(|error| error.0);
     drop(swap);
     std::fs::rename(&kept, &socket).unwrap();
@@ -91,7 +86,10 @@ async fn the_check_after_the_connect_refuses_a_replaced_endpoint() {
     let first = crate::ipc::owner_connect(owners.join(SOCKET))
         .await
         .unwrap();
-    assert!(client.checked(first).is_ok(), "the admitted endpoint passes");
+    assert!(
+        client.checked(first).is_ok(),
+        "the admitted endpoint passes"
+    );
     let stream = crate::ipc::owner_connect(owners.join(SOCKET))
         .await
         .unwrap();
