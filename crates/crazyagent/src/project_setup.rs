@@ -55,8 +55,6 @@ pub const RESEARCH_LOG_BYTES_MAX: usize = 24 * 1024;
 const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
 #[cfg(unix)]
 const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
-#[cfg(unix)]
-const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
 const SECRET_MARKERS: [&str; 13] = [
     "api_key",
     "api-key",
