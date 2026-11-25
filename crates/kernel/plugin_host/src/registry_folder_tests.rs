@@ -842,3 +842,30 @@ fn a_removal_whose_retired_folder_cannot_lose_the_name_is_refused_with_nothing_m
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").name, "acme");
 }
+
+/// A removal whose rows fail to commit keeps a retired folder kept beside the live one of
+/// its name: after the failed removal both folders are still there, the trusted original
+/// under its retired name, so nothing the owner trusted is lost.
+#[test]
+fn a_failed_removal_keeps_the_retired_folder_kept_beside_the_live_one() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let three = ACME.replace("Acme embeddings", "Acme embeddings three");
+    let folder = cut_after_renames(&case, &two);
+    trust_row_holds(&case, &three);
+    start_sweep(&case).unwrap();
+    both_kept(&folder, &two);
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_remove BEFORE DELETE ON app_plugin_trust
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+
+    case.db.execute_batch("DROP TRIGGER refuse_remove").unwrap();
+    assert!(case.db.is_autocommit());
+    both_kept(&folder, &two);
+}
