@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -259,18 +259,23 @@ test("the GitHub sign-in names the store each system keeps it in", () => {
   assert.equal(signInStore(true, false), "your Mac's keychain");
   assert.equal(signInStore(false, true), "Windows Credential Manager");
   assert.equal(signInStore(false, false), "your system keyring");
+  assert.equal(thisComputer(true), "this Mac");
+  assert.equal(thisComputer(false), "this computer");
 });
 
-test("account and server refusals name this computer off macOS", () => {
-  const url = "Enter a full URL that starts with https://, or http://127.0.0.1 for this computer.";
-  for (const [code, line] of [["account_url_required", url], ["account_url_invalid", url],
-    ["account_local_url_required", "Enter a URL on this computer, such as http://127.0.0.1:11434."],
-    ["account_probe_https_unsupported", "CrazyAgent can only check http URLs on this computer. The account is saved."],
-    ["native_auth_host_unavailable", "Sign-in isn't available on this computer right now. Check that the harness is installed."]]) {
-    assert.equal(api.plainError(code), line, code);
-  }
-  assert.equal(client.errorMessage({ code: "server_url_invalid" }),
-    "Use an https address. Plain http works only for this computer, and the address can't hold a password.");
+test("account and server refusals name this Mac on macOS and this computer on Windows and Linux", async () => {
+  await eachComputer("../src/api.ts", (plain, { os, computer }) => {
+    const url = `Enter a full URL that starts with https://, or http://127.0.0.1 for ${computer}.`;
+    for (const [code, line] of [["account_url_required", url], ["account_url_invalid", url],
+      ["account_local_url_required", `Enter a URL on ${computer}, such as http://127.0.0.1:11434.`],
+      ["account_probe_https_unsupported", `CrazyAgent can only check http URLs on ${computer}. The account is saved.`],
+      ["native_auth_host_unavailable", `Sign-in isn't available on ${computer} right now. Check that the harness is installed.`]]) {
+      assert.equal(plain.plainError(code), line, `${os} ${code}`);
+    }
+  });
+  await eachComputer("../src/engine-client.ts", (engine, { os, computer }) =>
+    assert.equal(engine.errorMessage({ code: "server_url_invalid" }),
+      `Use an https address. Plain http works only for ${computer}, and the address can't hold a password.`, os));
 });
 
 const TUI_SIGN_IN = "tui/screens/settings_add_account/words.rs";

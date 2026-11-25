@@ -4,24 +4,29 @@ import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
 import { transformSync } from "rolldown/utils";
 
+export { COMPUTERS, HOST, eachComputer, importOn, onPlatform } from "./platform.mjs";
+
 const sourceRoot = new URL("../src/", import.meta.url).href;
+const platformQuery = /\?platform=(mac|windows|linux)$/;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier.startsWith(".") && context.parentURL?.startsWith(sourceRoot)) {
+      const platform = context.parentURL.match(platformQuery)?.[0] ?? "";
       if (specifier.endsWith(".svg?raw") || specifier.endsWith(".css")) {
         return { url: new URL(specifier, context.parentURL).href, shortCircuit: true };
       }
       for (const extension of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) {
         const candidate = new URL(specifier + extension, context.parentURL);
         if (extension === "" && !/\.tsx?$/.test(specifier)) continue;
-        if (existsSync(candidate)) return nextResolve(candidate.href, context);
+        if (existsSync(candidate)) return nextResolve(candidate.href + platform, context);
       }
     }
     return nextResolve(specifier, context);
   },
-  load(url, context, nextLoad) {
-    if (!url.startsWith(sourceRoot)) return nextLoad(url, context);
+  load(address, context, nextLoad) {
+    if (!address.startsWith(sourceRoot)) return nextLoad(address, context);
+    const url = address.replace(platformQuery, "");
     if (url.endsWith(".svg?raw")) {
       const text = readFileSync(new URL(url.slice(0, -"?raw".length)), "utf8");
       return { format: "module", source: `export default ${JSON.stringify(text)};`, shortCircuit: true };

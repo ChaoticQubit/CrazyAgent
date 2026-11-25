@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 
 const wizard = await import("../src/screens/new-project/wizard.ts");
 
@@ -178,7 +178,7 @@ test("harness choices list every harness and say why one can't be picked", () =>
   assert.equal(wizard.harnessChoices(catalog, "agent")[3].label, "Gemini CLI - Not installed");
 });
 
-test("a harness the engine lists as Can't run is never the team default, sits in its own group and can't be picked", () => {
+test("a harness the engine lists as Can't run is never the team default, sits in its own group and can't be picked", async () => {
   const cantRun = { kind: "cant_run", reason: "codex needs node, which is missing. Install Node.js from nodejs.org, or run brew install node in Terminal. Then try again." };
   const blocked = [harness("codex", "Codex", cantRun), harness("claude", "Claude Code", ready), harness("gemini", "Gemini CLI", missing, undefined, undefined, noReader)];
   const moved = wizard.defaultTeam(engineTeam("codex", 2), blocked);
@@ -191,8 +191,10 @@ test("a harness the engine lists as Can't run is never the team default, sits in
     ["codex", "Codex - Can't run", "Can't run", true],
     ["gemini", "Gemini CLI - Not installed", "Not installed", true],
   ]);
-  assert.equal(wizard.teamErrors(engineTeam("codex", 1), blocked).master, "Codex can't run on this computer. Pick another harness.");
-  assert.deepEqual(wizard.teamErrors(engineTeam("codex", 1), blocked).rows, ["Codex can't run on this computer. Pick another harness."]);
+  await eachComputer("../src/screens/new-project/wizard.ts", (team, { os, computer }) => {
+    assert.equal(team.teamErrors(engineTeam("codex", 1), blocked).master, `Codex can't run on ${computer}. Pick another harness.`, os);
+    assert.deepEqual(team.teamErrors(engineTeam("codex", 1), blocked).rows, [`Codex can't run on ${computer}. Pick another harness.`], os);
+  });
   assert.equal(wizard.teamValid(engineTeam("codex", 1), blocked), false);
   const added = wizard.addHarnessRow({ ...engineTeam("claude", 0), sub_harnesses: [{ harness: "claude", agents: 1, tools: true }] }, blocked);
   assert.equal(added.sub_harnesses[1].harness, "claude", "a new row never starts on a harness that can't run");
@@ -220,7 +222,7 @@ test("a master-only harness is offered and valid as the master but never for an 
   assert.equal(wizard.masterNote(engineTeam("codex"), withRcli), null);
 });
 
-test("team validation mirrors the engine agent range", () => {
+test("team validation mirrors the engine agent range", async () => {
   const ok = engineTeam("codex", 3);
   assert.deepEqual(wizard.teamErrors(ok, catalog), { rows: [undefined] });
   assert.equal(wizard.teamErrors({ ...ok, min_agents: 0 }, catalog).range, "At most must be at least 1 and not less than At least.");
@@ -228,7 +230,8 @@ test("team validation mirrors the engine agent range", () => {
   assert.equal(wizard.teamErrors({ ...ok, max_agents: 3 }, catalog).range, "This team has 4 agents: the master and 3 more. Set At most to 4 or more.");
   assert.equal(wizard.teamErrors({ ...ok, min_agents: 5, max_agents: 6 }, catalog).range, "This team has 4 agents. Set At least to 4 or less.");
   assert.equal(wizard.teamErrors({ ...ok, max_agents: 65 }, catalog).range, "At most can be up to 64.");
-  assert.equal(wizard.teamErrors({ ...ok, master: "gemini" }, catalog).master, "Gemini CLI isn't installed on this computer. Pick another harness.");
+  await eachComputer("../src/screens/new-project/wizard.ts", (team, { os, computer }) =>
+    assert.equal(team.teamErrors({ ...ok, master: "gemini" }, catalog).master, `Gemini CLI isn't installed on ${computer}. Pick another harness.`, os));
   assert.equal(wizard.teamErrors({ ...ok, master: "aider" }, catalog).master, "Aider can't run team agents yet. Pick another harness.");
   assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "aider", agents: 1, tools: true }] }, catalog).rows, ["Aider can't run team agents yet. Pick another harness."]);
   for (const [gone, name] of [["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]) {

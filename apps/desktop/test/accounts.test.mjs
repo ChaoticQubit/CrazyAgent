@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { HOST, eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -48,7 +48,7 @@ const forbidden = () => { throw new Error("static rendering must not start, canc
 const panel = (state, props = {}) => renderToStaticMarkup(createElement(SignInPanel, {
   provider: "chatgpt", method: "codex_device_code", state, onStart: forbidden, onCancel: forbidden, onCheck: forbidden, onClaudeCode: forbidden, ...props }));
 
-test("step 2 lists catalog methods in order with Recommended first, and no subscription offers a sign-in taken from this Mac (PA-13)", () => {
+test("step 2 lists catalog methods in order with Recommended first, and no subscription offers a sign-in taken from this Mac (PA-13)", async () => {
   const chatgpt = methodOptions(catalog[0]);
   assert.deepEqual(chatgpt.map((option) => [option.title, option.recommended, option.native ?? null]), [
     ["Sign in with ChatGPT", true, "codex_device_code"], ["Use an API key", false, null]]);
@@ -59,7 +59,8 @@ test("step 2 lists catalog methods in order with Recommended first, and no subsc
   assert.equal(single[0].recommended, false);
   for (const tile of ["openai", "anthropic", "gemini", "openrouter", "openai_compatible", "local"]) assert.ok(TILE_LINES[tile], tile);
   assert.match(TILE_LINES.openai_compatible, /OpenAI API/);
-  assert.equal(TILE_LINES.local, "Ollama, LM Studio or a server on this computer.");
+  await eachComputer("../src/screens/settings/add-account.tsx", (form, { os, computer }) =>
+    assert.equal(form.TILE_LINES.local, `Ollama, LM Studio or a server on ${computer}.`, os));
   const claudeKey = methodOptions(catalog[1]).find((option) => option.entry.method === "api_key");
   assert.deepEqual([claudeKey.recommended, claudeKey.native], [false, undefined]);
 });
@@ -111,7 +112,7 @@ test("a catalog provider with no way to add an account trips the tile check", ()
   assert.throws(() => providerTiles([{ provider: "openrouter", name: "OpenRouter", methods: [] }]), /every Add account tile offers a way to add an account/);
 });
 
-test("default names take the lowest free number; form checks match the engine's rules", () => {
+test("default names take the lowest free number; form checks match the engine's rules", async () => {
   assert.equal(defaultAccountName(catalog[0], []), "ChatGPT 1");
   assert.equal(defaultAccountName(catalog[0], [account({}), account({ id: "x", name: "ChatGPT 3" })]), "ChatGPT 2");
   assert.equal(defaultAccountName(catalog[0], [account({ name: "ChatGPT 1" }), account({ id: "y", name: "ChatGPT 2" })]), "ChatGPT 3");
@@ -119,9 +120,11 @@ test("default names take the lowest free number; form checks match the engine's 
   assert.equal(urlError("https://api.together.xyz/v1"), undefined);
   assert.equal(urlError("http://127.0.0.1:11434/v1"), undefined);
   assert.equal(urlError("http://localhost:8080"), undefined);
-  for (const bad of ["http://example.com/v1", "api.together.xyz", "", "https://user:pass@example.com", "ftp://127.0.0.1"]) {
-    assert.equal(urlError(bad), "Enter a full URL that starts with https://, or http://127.0.0.1 for this computer.", bad);
-  }
+  await eachComputer("../src/screens/settings/add-account.tsx", (form, { os, computer }) => {
+    for (const bad of ["http://example.com/v1", "api.together.xyz", "", "https://user:pass@example.com", "ftp://127.0.0.1"]) {
+      assert.equal(form.urlError(bad), `Enter a full URL that starts with https://, or http://127.0.0.1 for ${computer}.`, `${os} ${bad}`);
+    }
+  });
   assert.equal(nameError("Work"), undefined);
   for (const bad of ["", "   ", "a".repeat(61), "two\nlines"]) assert.ok(nameError(bad), JSON.stringify(bad));
 });
@@ -240,16 +243,18 @@ test("a check that finds no sign-in says so for both harnesses and offers Sign i
   }
 });
 
-test("the start panel offers each managed method with the design copy", () => {
+test("the start panel offers each managed method with the design copy", async () => {
   const idle = panel(undefined, { idle: true });
   assert.match(idle, />Get sign-in code<\/button>/);
   assert.match(idle, />Sign in in this browser instead<\/button>/);
   for (const [provider, method] of [["chatgpt", "codex_existing"], ["claude", "claude_existing"]]) {
     const check = panel(undefined, { idle: true, provider, method });
-    assert.match(check, /Checking the sign-in this account already has in CrazyAgent\. Nothing else on this computer is read\./);
+    assert.ok(check.includes(`Checking the sign-in this account already has in CrazyAgent. Nothing else on ${HOST.computer} is read.`), check);
     assert.match(check, />Check this account&#x27;s sign-in<\/button>/);
     assert.doesNotMatch(check, /copies this sign-in|Use this sign-in/);
   }
+  await eachComputer("../src/screens/settings/sign-in.tsx", (signIn, { os, computer }) =>
+    assert.equal(signIn.CHECK_LINE, `Checking the sign-in this account already has in CrazyAgent. Nothing else on ${computer} is read.`, os));
   const claude = panel(undefined, { idle: true, provider: "claude", method: "claude_official" });
   assert.match(claude, />Open Claude sign-in<\/button>[\s\S]*Claude Code has no sign-in code\. It signs in through your browser\./);
   assert.doesNotMatch(idle, /has no sign-in code/);
