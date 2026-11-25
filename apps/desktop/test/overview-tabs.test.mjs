@@ -194,26 +194,6 @@ test("the picked tab is kept per project and a missing or unknown stored value r
   assert.doesNotThrow(() => view.storeTab("alpha", "readme", broken));
 });
 
-test("the tabs are read again only while a run is going or a change set landed", () => {
-  assert.equal(view.pollEvery({ ...base(), running: true }), api.OVERVIEW_POLL_MS);
-  assert.equal(view.pollEvery({ ...base(), stale: true, due_in_ms: 0 }), api.OVERVIEW_POLL_MS);
-  assert.equal(view.pollEvery({ ...base(), stale: true }), api.OVERVIEW_POLL_MS, "an older engine says no due time, so the tabs are read at the run pace");
-  assert.equal(view.pollEvery({ ...base(), stale: true, refresh: "refresh_only", due_in_ms: 0 }), api.OVERVIEW_POLL_MS);
-  assert.equal(view.pollEvery({ ...base(), stale: true, refresh: "off" }), null, "no run comes while the tabs are off, so nothing is waited for");
-  assert.equal(view.pollEvery(base()), null);
-  assert.equal(view.pollEvery(null), null);
-  assert.equal(api.OVERVIEW_POLL_MS, 5_000);
-});
-
-test("a due run is waited for until it is due, never more often than the run pace and never longer than ten minutes", () => {
-  assert.equal(view.pollEvery({ ...base(), stale: true, due_in_ms: 60_000 }), 60_000, "a run due in a minute, as after a missing account, is read once then");
-  assert.equal(view.pollEvery({ ...base(), stale: true, due_in_ms: 1_000 }), api.OVERVIEW_POLL_MS);
-  assert.equal(view.pollEvery({ ...base(), stale: true, due_in_ms: 10 * 60_000 }), 10 * 60_000, "a landed change set's quiet period is one read");
-  assert.equal(view.pollEvery({ ...base(), stale: true, due_in_ms: 30 * 24 * 3_600_000 }), 10 * 60_000, "a far due time is read at least every ten minutes");
-  assert.equal(view.pollEvery({ ...base(), running: true, due_in_ms: 60_000 }), api.OVERVIEW_POLL_MS, "a writing run is read at the run pace");
-  assert.equal(view.pollEvery({ ...base(), stale: true, refresh: "off", due_in_ms: 0 }), null);
-});
-
 test("a failed read again keeps the tabs a good read showed, as the TUI does, so a tab pick never blanks them", () => {
   const good = { kind: "ok", value: base() };
   const newer = { kind: "ok", value: { ...base(), checked_ms: NOW } };
@@ -426,7 +406,6 @@ test("a project outside the CrazyAgent folder says the tabs need it there and of
     assert.doesNotMatch(html, />Run research</, selected);
     assert.match(html, /<button[^>]*disabled=""[^>]*>Refresh<\/button>/, selected);
   }
-  assert.equal(view.pollEvery(overview), null, "no run can start, so nothing is waited for");
 });
 
 test("a project outside the CrazyAgent folder keeps README and Activity as they are", () => {

@@ -1,6 +1,7 @@
 import { createElement as h } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
+import { changed } from "../../src/engine-changes.ts";
 import { QuestionPopup } from "../../src/screens/project/question-popup.tsx";
 
 const NOW = Date.UTC(2026, 10, 11, 13, 0);
@@ -19,6 +20,7 @@ window.__TAURI_INTERNALS__ = {
   plugins: {},
   transformCallback: () => 0,
   invoke: async (command) => {
+    if (command === "desktop_watch") return null;
     if (command !== "desktop_questions") throw `Command ${command} not found`;
     reads += 1;
     return { items: waiting.map((item) => ({ ...item })), next: null };
@@ -31,11 +33,12 @@ function render() {
   flushSync(() => root.render(h(QuestionPopup, { data: DATA, shown })));
 }
 
-/** Mounts the project's pop-up on the Conversation tab with one question waiting, as the
- * project page holds it, and lets its first read land. Output: nothing. */
-export async function mount() {
+/** Mounts the project's pop-up on the Conversation tab with one question waiting, or none, as
+ * the project page holds it, and lets its first read land. Input: whether none waits. Output:
+ * nothing. */
+export async function mount(empty = false) {
   root?.unmount();
-  waiting = [QUESTION];
+  waiting = empty ? [] : [QUESTION];
   reads = 0;
   shown = true;
   document.body.innerHTML = '<div id="root"></div>';
@@ -45,7 +48,7 @@ export async function mount() {
 }
 
 /** Switches to the Questions tab, where the owner answers the question, then back to the
- * Conversation tab well inside the pop-up's 5 s poll. Output: nothing. */
+ * Conversation tab with no change heard from the engine's watch. Output: nothing. */
 export async function answerOnTheTab() {
   shown = false;
   render();
@@ -53,6 +56,20 @@ export async function answerOnTheTab() {
   waiting = [];
   shown = true;
   render();
+  await settle();
+}
+
+/** An agent asks the question while the pop-up is open: the engine holds it before its watch
+ * says so. Output: nothing. */
+export async function agentAsks() {
+  waiting = [QUESTION];
+  await settle();
+}
+
+/** The engine's watch says the team changed, as it does after an agent's question commits.
+ * Output: nothing. */
+export async function teamChanged() {
+  changed({ topics: ["team"] });
   await settle();
 }
 
