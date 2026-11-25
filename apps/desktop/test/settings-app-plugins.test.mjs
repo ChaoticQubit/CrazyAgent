@@ -180,6 +180,13 @@ test("App plugins: every app plugin code the engine can answer has its own sente
   assert.match(api.appPluginRefusal({ code: "app_plugin_key_store_unavailable" }), /^CrazyAgent couldn't reach its saved keys\. Nothing was changed; try again\.$/u);
 });
 
+test("App plugins: a name another add took after the review says to review again, not to rename", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_name_used" }),
+    "A plugin with that name was added after you reviewed this one. Review it again to replace it.",
+  );
+});
+
 test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
   assert.equal(
     api.appPluginRefusal({ code: "app_plugin_not_found" }),
