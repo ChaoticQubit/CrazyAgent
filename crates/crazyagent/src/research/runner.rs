@@ -2318,15 +2318,15 @@ impl ResearchRunner {
         }
         drop(credential);
         drop(lease);
+        if let Some(ending) = ending {
+            return Ok(ending);
+        }
         if exited_failing {
             return Ok(ReadOnlyEnding::Failed(agent_failure(
                 &agent.join(stdout_log),
                 harness,
                 self.limits.output_bytes_max,
             )));
-        }
-        if let Some(ending) = ending {
-            return Ok(ending);
         }
         let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
             .ok()
