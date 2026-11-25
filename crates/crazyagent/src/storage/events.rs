@@ -2,11 +2,9 @@ use super::{error, owner_revision, settings};
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::protocol::{ClientId, Cursor, Event, Outcome, RequestId, Topic, WireRequest};
-use rusqlite::{Connection, Transaction, params};
+use kernel_storage::events::CATCH_UP_MAX;
+use rusqlite::{Connection, Transaction};
 use std::collections::BTreeSet;
-
-/// The most events [`logged`] reads at once.
-const CATCH_UP_MAX: usize = 128;
 
 #[cfg(test)]
 mod tests;
@@ -65,22 +63,12 @@ fn logged(
     after: u64,
     revision: u64,
 ) -> Result<Option<Vec<Event>>, EngineError> {
-    let first: Option<i64> = tx
-        .query_row("SELECT MIN(cursor) FROM events", [], |row| row.get(0))
-        .map_err(error)?;
-    if after > revision || first.is_some_and(|first| after.saturating_add(1) < first as u64) {
+    let Some(bodies) = kernel_storage::events::logged(tx, after, revision)? else {
         return Ok(None);
-    }
-    let mut statement = tx
-        .prepare("SELECT body FROM events WHERE cursor>?1 ORDER BY cursor LIMIT ?2")
-        .map_err(error)?;
-    let rows = statement
-        .query_map(params![after as i64, CATCH_UP_MAX as i64], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(error)?;
-    let events = rows
-        .map(|row| serde_json::from_str(&row.map_err(error)?).map_err(error))
+    };
+    let events = bodies
+        .iter()
+        .map(|body| serde_json::from_str(body).map_err(error))
         .collect::<Result<Vec<Event>, _>>()?;
     assert!(events.len() <= CATCH_UP_MAX);
     assert!(
@@ -141,21 +129,8 @@ fn persist_topic(
         client_id: client_id.clone(),
         topic,
     };
-    tx.execute("UPDATE state SET revision=?1 WHERE id=1", [revision as i64])
-        .map_err(error)?;
-    tx.execute(
-        "INSERT INTO events VALUES (?1,?2)",
-        params![
-            revision as i64,
-            serde_json::to_string(&event).map_err(error)?
-        ],
-    )
-    .map_err(error)?;
-    tx.execute(
-        "DELETE FROM events WHERE cursor<=?1",
-        [revision.saturating_sub(config.settings.events_retained as u64) as i64],
-    )
-    .map_err(error)?;
+    let body = serde_json::to_string(&event).map_err(error)?;
+    kernel_storage::events::persist(tx, revision, &body, config.settings.events_retained as u64)?;
     assert!(revision > 0);
     assert_eq!(event.cursor.value(), revision);
     Ok(())
