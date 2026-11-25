@@ -54,6 +54,12 @@ const LANGUAGE = {
 /** A Rust `#[cfg(...)]` attribute on its own line; groups: indent, condition. */
 const CFG = /^(\s*)#\[cfg\((.*)\)\]\s*$/;
 
+/**
+ * The cfg predicate of the kernels' `test-support` feature, which only dev-dependencies turn
+ * on, so it is false in every build that is not a test build.
+ */
+const TEST_SUPPORT = /^feature\s*=\s*"test-support"$/;
+
 /** The deepest cfg nesting read, far past any condition in the tree (three levels). */
 const CFG_DEPTH_MAX = 16;
 
@@ -94,16 +100,16 @@ function testPath(kind, file) {
 }
 
 /**
- * The value of one cfg predicate with `test` false and every other predicate unknown: false,
- * true, or null for unknown. Inputs: the condition's tokens, the predicate's first token and
- * its nesting depth, at most `CFG_DEPTH_MAX`.
+ * The value of one cfg predicate with `test` and `feature = "test-support"` false and every
+ * other predicate unknown: false, true, or null for unknown. Inputs: the condition's tokens,
+ * the predicate's first token and its nesting depth, at most `CFG_DEPTH_MAX`.
  * Output: `[value, index of the token after the predicate]`.
  */
 function cfgValue(tokens, at, depth) {
   assert.ok(depth <= CFG_DEPTH_MAX, `a cfg condition nests past ${CFG_DEPTH_MAX} levels`);
   const token = tokens[at];
   if (!["all", "any", "not"].includes(token) || tokens[at + 1] !== "(") {
-    return [token === "test" ? false : null, at + 1];
+    return [token === "test" || TEST_SUPPORT.test(token) ? false : null, at + 1];
   }
   const values = [];
   let index = at + 2;
