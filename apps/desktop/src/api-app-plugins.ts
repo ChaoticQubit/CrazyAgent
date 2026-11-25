@@ -66,7 +66,6 @@ export const APP_PLUGIN_REFUSALS: Record<string, string> = {
   app_plugin_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
   owner_outcome_unknown_reconcile_same_identity: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
   owner_actor_stopped_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
-  owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
   app_plugin_request_bounds: "This plugin request was too large to send.",
   app_plugin_request_invalid: "The engine didn't accept this plugin request. Reload the page and try again.",
   app_plugins_unavailable: "App plugins aren't available in this engine yet.",
