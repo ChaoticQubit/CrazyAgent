@@ -364,3 +364,55 @@ fn a_research_launch_that_errs_keeps_its_cause_in_the_run_log() {
         "{lines:?}"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn adding_an_agent_worktree_never_runs_the_project_fsmonitor() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let home = base.join("agent").join("home");
+    let tmp = base.join("agent").join("tmp");
+    let profiles = base.join("profiles");
+    for folder in [&project, &home, &tmp, &profiles] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    ensure_repository(&project, &tmp).unwrap();
+    let marker = tmp.join("fsmonitor-ran");
+    let monitor = tmp.join("monitor.sh");
+    fs::write(
+        &monitor,
+        format!("#!/bin/sh\necho ran >> '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = kernel_processes::spawn_gate::status(
+        Command::new(GIT)
+            .env_clear()
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(&project)
+            .args(["config", "core.fsmonitor"])
+            .arg(&monitor),
+    )
+    .unwrap();
+    assert!(configured.success());
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let profile = profiles.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let worktree = project.join("worktrees").join("agent-one");
+    add_worktree(&sandbox, &profile, &worktree).unwrap();
+    assert!(worktree.join(".git").is_file());
+    assert!(
+        !marker.exists(),
+        "the engine's git ran the project fsmonitor"
+    );
+}
