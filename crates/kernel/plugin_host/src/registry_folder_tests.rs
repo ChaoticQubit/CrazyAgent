@@ -65,7 +65,7 @@ fn a_failed_remove_write_keeps_the_plugin_and_its_key() {
     case.db.execute_batch("DROP TRIGGER refuse_remove").unwrap();
     assert!(case.db.is_autocommit());
     assert_eq!(plugin_keys(&case), keys);
-    assert_eq!(std::fs::read(&keys[0]).unwrap(), b"sk-kept-on-fail-01");
+    assert_eq!(fixture(&keys[0], std::fs::read), b"sk-kept-on-fail-01");
     assert!(
         case.root
             .join(FOLDER)
@@ -94,7 +94,7 @@ fn a_replace_over_an_old_folder_it_cannot_delete_still_succeeds() {
 
     add_text(&case, &text, true, 2).unwrap();
 
-    assert_eq!(std::fs::read_to_string(&old).unwrap(), text);
+    assert_eq!(fixture(&old, std::fs::read_to_string), text);
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").sha256, sha(&text));
     let left = left_over(&case);
