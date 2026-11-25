@@ -60,6 +60,15 @@ fn git(folder: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
+/// The folder an agent's worktree or clone takes in the project's worktrees folder, as the
+/// stand-in hooks place it, made ready for it. Inputs: the project and the folder name.
+/// Output: the folder's path, not yet made.
+fn agent_folder(project: &Path, name: &str) -> PathBuf {
+    let worktrees = (crate::test_hooks::STAND_IN.access.state_folder)(project).join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    worktrees.join(name)
+}
+
 /// A project with one commit and a linked worktree in its worktrees folder, then the
 /// sandbox over it with the agent's home and temp folders. No input. Output: the temp
 /// folder, the project, the sandbox and the worktree.
@@ -75,8 +84,7 @@ fn linked() -> (tempfile::TempDir, PathBuf, ProjectSandbox, PathBuf) {
     git(&project, &["init", "-q"]);
     git(&project, &["add", "owner.txt"]);
     git(&project, &["commit", "-q", "-m", "start"]);
-    fs::create_dir(project.join("worktrees")).unwrap();
-    let worktree = project.join("worktrees").join("agent-1");
+    let worktree = agent_folder(&project, "agent-1");
     let path = worktree.to_str().unwrap();
     git(
         &project,
@@ -271,7 +279,7 @@ fn a_linked_worktree_agent_makes_entries_in_its_admin_folder_and_no_other_git() 
 #[test]
 fn a_supervised_clone_launches_with_its_store_held() {
     let (_temp, project, sandbox, _) = linked();
-    let clone = project.join("worktrees").join("agent-2");
+    let clone = agent_folder(&project, "agent-2");
     fs::create_dir(&clone).unwrap();
     git(&clone, &["init", "-q"]);
     let confined = sandbox.confine_to_clone(&clone).unwrap();
@@ -317,7 +325,7 @@ fn a_supervised_clone_launches_with_its_store_held() {
 #[test]
 fn a_clone_writes_its_whole_clone_and_has_no_git_folder_grant() {
     let (_temp, project, sandbox, _) = linked();
-    let clone = project.join("worktrees").join("agent-2");
+    let clone = agent_folder(&project, "agent-2");
     fs::create_dir(&clone).unwrap();
     git(&clone, &["init", "-q"]);
     let confined = sandbox.confine_to_clone(&clone).unwrap();
@@ -358,7 +366,7 @@ fn a_clone_writes_its_whole_clone_and_has_no_git_folder_grant() {
 #[test]
 fn a_clone_on_the_bubblewrap_backend_is_refused_with_the_landlock_line() {
     let (_temp, project, sandbox, _) = linked();
-    let clone = project.join("worktrees").join("agent-2");
+    let clone = agent_folder(&project, "agent-2");
     fs::create_dir(&clone).unwrap();
     git(&clone, &["init", "-q"]);
     let launch = LinuxSandbox::assembled(
