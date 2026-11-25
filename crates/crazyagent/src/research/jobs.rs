@@ -36,10 +36,11 @@ const ADDED_COLUMNS: [(&str, &str); 4] = [
     ("run_name", "TEXT"),
 ];
 /// The assignments that start a job over: no rate-limited ends in a row, no refused launches
-/// in a row, no wait left by a refusal, and an empty run name, so its log shows no earlier
-/// run until a new one is placed. Every statement that queues a stopped or finished job again
-/// for the owner sets them, so the job runs as a new one does (RV-DS241-159).
-pub(crate) const RUN_AGAIN: &str = "limited = 0, refused = 0, not_before_ms = NULL, run_name = ''";
+/// in a row, no wait left by a refusal, and for a stopped or finished job an empty run name,
+/// so its log shows no earlier run until a new one is placed, while a waiting job keeps the
+/// run it last placed. Every statement that queues a stopped or finished job again for the
+/// owner sets them, so the job runs as a new one does (RV-DS241-159).
+pub(crate) const RUN_AGAIN: &str = "limited = 0, refused = 0, not_before_ms = NULL, run_name = CASE WHEN status IN ('failed', 'cancelled', 'done') THEN '' ELSE run_name END";
 
 const COLUMNS: &str = "id, project, kind, harness, tools, status, attempts, claimer, report_path, error, cancel_requested, output_bytes, created_ms, started_ms, heartbeat_ms, finished_ms";
 
