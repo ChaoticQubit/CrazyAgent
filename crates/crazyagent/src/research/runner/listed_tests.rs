@@ -476,6 +476,11 @@ fn a_research_job_finishing_right_after_a_folder_is_saved_hidden_publishes_no_re
         let deadline = Instant::now() + Duration::from_secs(30);
         while !held(&token) {
             assert!(
+                !run.is_finished(),
+                "the run ended before the stand-in took the prompt: {:?}",
+                jobs.get(id)
+            );
+            assert!(
                 Instant::now() < deadline,
                 "the stand-in never took the prompt"
             );
