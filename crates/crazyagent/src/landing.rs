@@ -7,6 +7,7 @@ use std::time::Duration;
 
 #[cfg(unix)]
 mod ancestry;
+mod change_set_id;
 #[cfg(unix)]
 mod clone;
 #[cfg(unix)]
@@ -233,19 +234,6 @@ impl ChangeSetId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl TryFrom<String> for ChangeSetId {
-    type Error = EngineError;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<ChangeSetId> for String {
-    fn from(id: ChangeSetId) -> Self {
-        id.0
     }
 }
 
