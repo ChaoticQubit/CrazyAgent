@@ -1412,3 +1412,16 @@ fn a_lost_owner_answer_reads_as_an_unknown_plugin_outcome() {
         sentence("app_plugin_outcome_unknown")
     );
 }
+
+/// Settings, Plugins and skills lists App plugins as its last row, with the help bar as it
+/// was, and Enter on that row opens the App plugins page.
+#[test]
+fn the_plugins_and_skills_page_lists_app_plugins_and_enter_opens_it() {
+    let page = crate::tui::screens::settings_plugins::Plugins::with(Vec::new(), Vec::new());
+    let mut shell = Shell::with(ctx(80, 24), Box::new(page));
+    assert!(shows(&mut shell, "App plugins"));
+    assert!(!bar(&mut shell).contains("App plugins"));
+    shell.key(Key::End);
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::AppPlugins));
+}
