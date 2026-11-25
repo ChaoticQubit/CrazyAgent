@@ -317,4 +317,22 @@ impl TeamRuntime {
         assert!(self.hidden_held.len() <= held_before + named.len());
         Ok(())
     }
+
+    /// Tells whether a master worker of the project is still stopping or restarting, so no
+    /// other master starts or gets a message until it ended. Takes the project. Returns the
+    /// answer.
+    pub(super) fn master_settling(&self, project: &ProjectId) -> bool {
+        self.workers.values().any(|w| {
+            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
+        })
+    }
+
+    /// Tells whether the project's master is held for a folder hidden after it started and
+    /// not yet restarted by the owner's Restart them, so the live master stays down until
+    /// then. Takes the project. Returns the answer.
+    pub(super) fn master_held(&self, project: &ProjectId) -> bool {
+        self.hidden_held
+            .values()
+            .any(|(owner, role, _)| owner == project && *role == AgentRole::Master)
+    }
 }
