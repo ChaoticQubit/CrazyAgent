@@ -101,7 +101,7 @@
   "crates/crazyagent/src/storage/setup_tests.rs": 2346,
   "crates/crazyagent/src/team.rs": 5860,
   "crates/crazyagent/src/team/cleanup.rs": 1932,
-  "crates/crazyagent/src/team/cleanup/tests.rs": 2829,
+  "crates/crazyagent/src/team/cleanup/tests.rs": 2719,
   "crates/crazyagent/src/team/events.rs": 2919,
   "crates/crazyagent/src/team/events/tests.rs": 3009,
   "crates/crazyagent/src/team/graph/tests.rs": 1909,
