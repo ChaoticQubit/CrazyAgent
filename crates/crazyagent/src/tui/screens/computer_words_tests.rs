@@ -3,7 +3,7 @@ use super::harness_setup::{INSTALLED, READING};
 use super::home::HARNESSES_HERE;
 use super::settings::profile::{ARROWS_LOST, COLORS_LOST, ENTER_LOST};
 use super::settings_accounts::plain;
-use super::settings_add_account::{CHECK_LINE, url_problem};
+use super::settings_add_account::{url_problem, words::CHECK_LINE};
 use super::settings_harnesses::{SUBTITLE, path_copy, update_copy};
 use super::settings_plugins::plugin_plain;
 use crate::accounts::Provider;

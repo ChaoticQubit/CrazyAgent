@@ -41,7 +41,7 @@ test("the TUI progress sentences are the desktop's, with the same counts filled 
 });
 
 test("the TUI says needs Node and a bad list in the desktop's words", () => {
-  const copy = rustLiterals("settings_harnesses.rs");
+  const copy = rustLiterals("settings_harnesses/words.rs");
   for (const code of ["harness_install_needs_node", "harness_install_list_invalid"]) {
     const at = copy.indexOf(code);
     assert.ok(at >= 0, code);

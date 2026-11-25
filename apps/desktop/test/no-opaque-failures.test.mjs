@@ -273,7 +273,7 @@ test("account and server refusals name this computer off macOS", () => {
     "Use an https address. Plain http works only for this computer, and the address can't hold a password.");
 });
 
-const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";
+const TUI_SIGN_IN = "tui/screens/settings_add_account/words.rs";
 const TUI_SCREENS = "tui/screens/mod.rs";
 const TUI_OWN = new Set(["native_auth_recovery_required"]);
 const TUI_COMPUTER = [

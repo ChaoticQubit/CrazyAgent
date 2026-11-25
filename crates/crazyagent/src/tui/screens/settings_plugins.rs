@@ -22,14 +22,7 @@ use crate::tui::widgets::{TextField, buttons, radio};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-
-const COMMAND_HINT: &str = if cfg!(target_os = "windows") {
-    "Use the full path of the command, such as C:\\Users\\you\\.local\\bin\\uvx.exe."
-} else if cfg!(target_os = "linux") {
-    "Use the full path of the command, such as /usr/local/bin/uvx."
-} else {
-    "Use the full path of the command, such as /opt/homebrew/bin/uvx."
-};
+use words::COMMAND_HINT;
 
 const NAME_WIDTH: usize = 22;
 const SKILL_STATE_WIDTH: usize = 5;
@@ -2346,6 +2339,7 @@ impl Screen for EditServer {
 mod import_page;
 mod skill_detail;
 mod tool_page;
+mod words;
 pub use import_page::ImportSkillsPage;
 pub use skill_detail::SkillDetailPage;
 pub use tool_page::ToolsPage;
