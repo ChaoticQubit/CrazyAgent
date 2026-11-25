@@ -169,15 +169,19 @@ fn names(folder: &Path) -> Vec<String> {
 }
 
 /// Runs `mklink` through cmd.exe with each path as its own quoted argument. A path with a
-/// forward slash, which mklink reads as a switch, a quote or a character cmd.exe acts on is
-/// refused before cmd.exe starts, so a path is never read as a command. Inputs: the switch,
-/// if any, the link and the target. Output: whether mklink made the link.
+/// forward slash, which mklink reads as a switch, a quote, or a character cmd.exe acts on
+/// inside quotes too (`%`, `!`, `&`, `|`, `^`, `<`, `>`) is refused before cmd.exe starts,
+/// so a path is never read as a command; `(` and `)` pass, being literal inside the quotes.
+/// Inputs: the switch, if any, the link and the target. Output: whether mklink made the
+/// link; a path that is not UTF-8 or a cmd.exe that cannot start stops the row naming it.
 fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
     use std::os::windows::process::CommandExt;
     let quoted = |path: &Path| {
-        let text = path.to_str().unwrap();
+        let text = path
+            .to_str()
+            .unwrap_or_else(|| panic!("{} is not UTF-8", path.display()));
         assert!(
-            !text.contains(['/', '"', '&', '|', '^', '<', '>', '%', '!', '(', ')']),
+            !text.contains(['/', '"', '&', '|', '^', '<', '>', '%', '!']),
             "{text}"
         );
         format!("\"{text}\"")
@@ -191,7 +195,9 @@ fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
         .raw_arg(quoted(link))
         .raw_arg(quoted(target))
         .status()
-        .unwrap()
+        .unwrap_or_else(|error| {
+            panic!("mklink {} {}: {error}", link.display(), target.display())
+        })
         .success()
 }
 
