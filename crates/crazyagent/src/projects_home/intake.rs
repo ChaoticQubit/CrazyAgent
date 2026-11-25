@@ -1390,3 +1390,6 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod words_tests;
