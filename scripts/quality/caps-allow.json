@@ -54,7 +54,7 @@
   "crates/crazyagent/src/engine/owner/transport/plugins.rs": 1654,
   "crates/crazyagent/src/engine/owner/transport/process.rs": 2171,
   "crates/crazyagent/src/engine/owner/transport/process_tests.rs": 2506,
-  "crates/crazyagent/src/engine/owner/transport/terminal/tests.rs": 1868,
+  "crates/crazyagent/src/engine/owner/transport/terminal/tests.rs": 1861,
   "crates/crazyagent/src/github/github_tests.rs": 3434,
   "crates/crazyagent/src/github/publish.rs": 2149,
   "crates/crazyagent/src/github/rules/rules_tests.rs": 1558,
