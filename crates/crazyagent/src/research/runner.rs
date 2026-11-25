@@ -1318,7 +1318,10 @@ impl ResearchRunner {
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
         #[cfg(target_os = "macos")]
-        toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
+        {
+            private_directory(&home.join(crate::launch_context::STATE))?;
+            toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
+        }
         kernel_sandbox::toolchains::prepare_cargo_home(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             &home,
