@@ -18,6 +18,14 @@ export function thisComputer(mac: boolean = isMac()): string {
   return mac ? "this Mac" : "this computer";
 }
 
+/** Where the system keeps the GitHub sign-in, in a sentence's words: the Mac's keychain on
+ * macOS, Windows Credential Manager on Windows, the system keyring on Linux. Inputs: whether
+ * this is macOS and whether it is Windows, by default the window's. Output: the words. */
+export function signInStore(mac: boolean = isMac(), windows: boolean = isWindows()): string {
+  if (mac) return "your Mac's keychain";
+  return windows ? "Windows Credential Manager" : "your system keyring";
+}
+
 /** Whether this window runs on Windows, where the engine takes drive paths such as
  * `C:\Program Files\nodejs\npx.cmd`. Input: the platform name, by default the window's.
  * Output: true on Windows. */

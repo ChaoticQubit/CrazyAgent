@@ -5,12 +5,15 @@ import test from "node:test";
 
 const model = await import("../src/screens/first-run/harnesses.ts");
 const api = await import("../src/api-harness-updates.ts");
+const { thisComputer } = await import("../src/ui/keys.ts");
 
 /** Every string literal in one TUI source file, in source order, unescaped, so a desktop word
- * can be found in the TUI whatever way rustfmt splits the lines. Input: the file under the
- * TUI screens folder. Output: the literals. */
+ * can be found in the TUI whatever way rustfmt splits the lines. A sentence joined around the
+ * computer's name reads as one literal with the Windows and Linux word, the word the desktop
+ * gives under node. Input: the file under the TUI screens folder. Output: the literals. */
 function rustLiterals(file) {
-  const source = readFileSync(new URL(`../../../crates/crazyagent/src/tui/screens/${file}`, import.meta.url), "utf8");
+  const source = readFileSync(new URL(`../../../crates/crazyagent/src/tui/screens/${file}`, import.meta.url), "utf8")
+    .replace(/on_this_computer!\(\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)",?\s*\)/g, (_, before, after) => `"${before}${thisComputer(false)}${after}"`);
   return [...source.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1].replace(/\\(["\\])/g, "$1"));
 }
 

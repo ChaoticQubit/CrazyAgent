@@ -16,16 +16,22 @@ use ratatui::text::Line;
 const FORM_WIDTH: usize = 72;
 
 /// The warning when the profile saved but the Colors choice could not be written.
-pub(in crate::tui::screens) const COLORS_LOST: &str =
-    "Profile saved, but the color choice could not be kept on this Mac.";
+pub(in crate::tui::screens) const COLORS_LOST: &str = on_this_computer!(
+    "Profile saved, but the color choice could not be kept on ",
+    "."
+);
 
 /// The warning when the profile saved but the Shift-arrows choice could not be written.
-pub(in crate::tui::screens) const ARROWS_LOST: &str =
-    "Profile saved, but the Shift-arrows choice could not be kept on this Mac.";
+pub(in crate::tui::screens) const ARROWS_LOST: &str = on_this_computer!(
+    "Profile saved, but the Shift-arrows choice could not be kept on ",
+    "."
+);
 
 /// The warning when the profile saved but the Shift-Enter choice could not be written.
-pub(in crate::tui::screens) const ENTER_LOST: &str =
-    "Profile saved, but the Shift-Enter choice could not be kept on this Mac.";
+pub(in crate::tui::screens) const ENTER_LOST: &str = on_this_computer!(
+    "Profile saved, but the Shift-Enter choice could not be kept on ",
+    "."
+);
 
 /// Settings, Profile: the welcome form prefilled, plus the Colors choice and the
 /// Learn CrazyAgent replay entries. Input: keys and the profile arrivals. Output: the

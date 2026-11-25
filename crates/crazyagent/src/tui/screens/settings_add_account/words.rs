@@ -1,5 +1,18 @@
 /// What a running check of an account's sign-in says, the same for every harness.
-pub(in crate::tui::screens) const CHECK_LINE: &str = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this computer is read.";
+pub(in crate::tui::screens) const CHECK_LINE: &str = on_this_computer!(
+    "Checking the sign-in this account already has in CrazyAgent. Nothing else on ",
+    " is read."
+);
+
+/// The hint under a local model address that is not plain http on this computer.
+pub(super) const LOCAL_URL_HINT: &str = on_this_computer!(
+    "Use an http address on ",
+    ", such as http://127.0.0.1:11434/v1."
+);
+
+/// The hint under any other model address the engine refuses.
+pub(super) const HTTPS_HINT: &str =
+    on_this_computer!("Use an https address. Plain http works only on ", ".");
 
 /// The sentence for each sign-in failure code the engine can record: the words the app's sign-in
 /// panel shows, so both clients say the same thing, except `native_auth_recovery_required`:

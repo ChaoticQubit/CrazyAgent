@@ -25,7 +25,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
-use words::{CHECK_LINE, SIGN_IN_SENTENCES};
+use words::{CHECK_LINE, HTTPS_HINT, LOCAL_URL_HINT, SIGN_IN_SENTENCES};
 
 pub(super) mod words;
 
@@ -68,7 +68,7 @@ pub fn provider_line(provider: Provider) -> &'static str {
         Provider::OpenaiApi => "Pay-as-you-go OpenAI API key",
         Provider::AnthropicApi => "Pay-as-you-go Anthropic API key",
         Provider::OpenaiCompatible => "Any server that speaks the OpenAI API",
-        Provider::Local => "Ollama, LM Studio or a server on this computer",
+        Provider::Local => on_this_computer!("Ollama, LM Studio or a server on ", ""),
         Provider::Gemini => "Pay-as-you-go Google Gemini API key",
     }
 }
@@ -232,11 +232,9 @@ pub(super) fn url_problem(provider: Provider, text: &str) -> Option<&'static str
     };
     match checked {
         Ok(()) => None,
-        Err(error) if error.0 == "account_local_url_required" => {
-            Some("Use an http address on this computer, such as http://127.0.0.1:11434/v1.")
-        }
+        Err(error) if error.0 == "account_local_url_required" => Some(LOCAL_URL_HINT),
         Err(error) if error.0 == "account_url_port_refused" => Some(plain(&error.0)),
-        Err(_) => Some("Use an https address. Plain http works only on this computer."),
+        Err(_) => Some(HTTPS_HINT),
     }
 }
 

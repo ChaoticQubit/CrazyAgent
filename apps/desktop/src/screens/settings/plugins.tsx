@@ -11,7 +11,7 @@ import {
   Button, Checkbox, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, SecretField, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea,
   TextField,
 } from "../../ui";
-import { isMac, isWindows } from "../../ui/keys";
+import { isMac, isWindows, thisComputer } from "../../ui/keys";
 import { navigate } from "../../ui/router";
 import { SkillTag } from "../skill-tag";
 import { displayText } from "../conversation";
@@ -23,7 +23,7 @@ const SECRETS_MAX = 16;
 const NAME_COPY = "Use 1 to 64 lowercase letters, digits, - or _ for the name.";
 const SECRET_NAME_COPY = "Use letters, digits, _ or - for the secret name, starting with a letter.";
 const ARGS_COPY = "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.";
-const URL_COPY = "Use an https address. Plain http works only for this Mac, and the address can't hold a password.";
+const URL_COPY = `Use an https address. Plain http works only for ${thisComputer()}, and the address can't hold a password.`;
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const NOT_READY = "This change isn't ready in this build yet.";
 

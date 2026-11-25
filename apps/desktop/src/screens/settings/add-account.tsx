@@ -5,7 +5,7 @@ import {
 } from "../../api";
 import type { NativeAuthMethod } from "../../native-auth";
 import { useAppSession, useLoad } from "../../state";
-import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField, thisComputer } from "../../ui";
 import { readyAdded } from "./pools";
 import { discardAccount, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
@@ -15,7 +15,7 @@ export const TILE_LINES: Record<string, string> = {
   gemini: "Pay-as-you-go Google Gemini API key.",
   openrouter: "One key for many models.",
   openai_compatible: "Any server that speaks the OpenAI API.",
-  local: "Ollama, LM Studio or a server on this computer.",
+  local: `Ollama, LM Studio or a server on ${thisComputer()}.`,
 };
 
 const COMPANIES: { key: string; name: string; subscription: AccountProvider; keyed: AccountProvider }[] = [
@@ -105,7 +105,7 @@ export function defaultAccountName(provider: ProviderEntry, accounts: AccountVie
  * on another machine never on a port a cloud metadata service answers on (80, 988, 32526).
  * Input: the text. Output: an error sentence, or undefined when it is acceptable. */
 export function urlError(text: string): string | undefined {
-  const message = "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.";
+  const message = `Enter a full URL that starts with https://, or http://127.0.0.1 for ${thisComputer()}.`;
   try {
     const url = new URL(text.trim());
     if (url.username || url.password) return message;

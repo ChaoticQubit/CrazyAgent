@@ -33,7 +33,10 @@ use words::{COPY, PATH_COPY};
 const LABEL_WIDTH: usize = 13;
 const DETAIL_ROWS: usize = 6;
 const CHROME_ROWS: usize = 4 + 1;
-pub(super) const SUBTITLE: &str = "Agents run inside these tools. CrazyAgent finds them on this Mac. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.";
+pub(super) const SUBTITLE: &str = on_this_computer!(
+    "Agents run inside these tools. CrazyAgent finds them on ",
+    ". It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it."
+);
 const MODAL_WIDTH: u16 = 72;
 const UPDATE_POLLS_MAX: usize = 240;
 const NODE_POLLS_MAX: usize = 240;
@@ -1161,7 +1164,7 @@ impl Harnesses {
                     Line::default(),
                     Line::from(vec![
                         Span::styled(ctx.spinner(), theme.running),
-                        Span::raw(" Looking for harnesses on this Mac"),
+                        Span::raw(on_this_computer!(" Looking for harnesses on ", "")),
                     ]),
                 ];
             }

@@ -3,6 +3,7 @@ import type { AccessLevel, AgentAccess, HarnessSlot, JobKind, Platform, PoolChoi
 import type { AccountPool, ModelConnection } from "../../engine-client";
 import { emptyPublish } from "./publish";
 import type { PublishDraft } from "./publish";
+import { thisComputer } from "../../ui/keys";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
 
@@ -418,8 +419,8 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
     const gone = REMOVED_HARNESSES.get(id);
     if (gone !== undefined) return `${gone} is no longer supported. Pick another harness.`;
     const harness = entry(harnesses, id);
-    if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
-    if (harness?.status.kind === "cant_run") return `${harness.name} can't run on this Mac. Pick another harness.`;
+    if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on ${thisComputer()}. Pick another harness.`;
+    if (harness?.status.kind === "cant_run") return `${harness.name} can't run on ${thisComputer()}. Pick another harness.`;
     if (harness?.team.kind === "unavailable") return `${harness.name} can't run team agents yet. Pick another harness.`;
     if (harness?.team.kind === "master_only" && role === "agent") return `${harness.name} runs only as the master. Pick another harness.`;
     return undefined;

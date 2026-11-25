@@ -10,7 +10,7 @@ pub(super) const PATH_COPY: [(&str, &str); 13] = [
     (finding::PATH_NOT_FOUND, "There's no file there."),
     (
         finding::PATH_NOT_EXECUTABLE,
-        "That file isn't a program this Mac can run.",
+        on_this_computer!("That file isn't a program ", " can run."),
     ),
     (
         finding::PATH_AGENT_SPACE,
@@ -22,7 +22,10 @@ pub(super) const PATH_COPY: [(&str, &str); 13] = [
     ),
     (
         finding::PATH_CHANGEABLE,
-        "Another user on this Mac can change that file or a folder above it, so CrazyAgent won't run it.",
+        on_this_computer!(
+            "Another user on ",
+            " can change that file or a folder above it, so CrazyAgent won't run it."
+        ),
     ),
     (
         finding::PATH_UNREADABLE,
@@ -30,7 +33,10 @@ pub(super) const PATH_COPY: [(&str, &str); 13] = [
     ),
     (
         "native_auth_host_executable_unsafe",
-        "Another user on this Mac can change that file, or it isn't a plain program file, so CrazyAgent won't run it.",
+        on_this_computer!(
+            "Another user on ",
+            " can change that file, or it isn't a plain program file, so CrazyAgent won't run it."
+        ),
     ),
     (
         "native_auth_host_executable_changed",
@@ -57,7 +63,7 @@ pub(super) const COPY: [(&str, &str); 28] = [
     ),
     (
         "harness_update_tool_missing",
-        "The tool that updates it is no longer on this Mac.",
+        on_this_computer!("The tool that updates it is no longer on ", "."),
     ),
     (
         "harness_update_tool_unsafe",
@@ -82,7 +88,7 @@ pub(super) const COPY: [(&str, &str); 28] = [
     ),
     (
         "harness_update_not_installed",
-        "It isn't installed on this Mac.",
+        on_this_computer!("It isn't installed on ", "."),
     ),
     (
         "harness_update_timeout",
@@ -129,7 +135,7 @@ pub(super) const COPY: [(&str, &str); 28] = [
     ),
     (
         "harness_install_already",
-        "It's already installed on this Mac.",
+        on_this_computer!("It's already installed on ", "."),
     ),
     (
         NOT_FOUND,
@@ -138,7 +144,10 @@ pub(super) const COPY: [(&str, &str); 28] = [
     ("harness_install_failed", "The install didn't finish."),
     (
         "harness_install_needs_node",
-        "CrazyAgent installs this one with npm, and Node.js isn't on this Mac yet.",
+        on_this_computer!(
+            "CrazyAgent installs this one with npm, and Node.js isn't on ",
+            " yet."
+        ),
     ),
     (
         "harness_install_list_invalid",

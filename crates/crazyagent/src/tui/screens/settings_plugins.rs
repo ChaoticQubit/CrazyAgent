@@ -22,7 +22,7 @@ use crate::tui::widgets::{TextField, buttons, radio};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use words::COMMAND_HINT;
+use words::{COMMAND_HINT, URL_HINT};
 
 const NAME_WIDTH: usize = 22;
 const SKILL_STATE_WIDTH: usize = 5;
@@ -126,7 +126,7 @@ pub fn plugin_plain(code: &str) -> &'static str {
         }
         "server_command_invalid" => COMMAND_HINT,
         "server_args_invalid" => "An argument is too long or has control characters.",
-        "server_url_invalid" => "Use an https address. Plain http works only for this Mac.",
+        "server_url_invalid" => URL_HINT,
         "server_name_invalid" => {
             "Use 1 to 64 lowercase letters, digits, - or _, starting with a letter or digit."
         }
@@ -136,7 +136,7 @@ pub fn plugin_plain(code: &str) -> &'static str {
         "server_secret_invalid" => "This secret cannot be saved. Paste it on one line.",
         "server_secret_not_found" | "plugin_not_found" => "It was removed already.",
         "server_command_not_found" | "server_command_not_runnable" => {
-            "That command is not on this Mac or cannot run."
+            on_this_computer!("That command is not on ", " or cannot run.")
         }
         "server_cant_start"
         | "server_exited"
@@ -1710,7 +1710,7 @@ impl AddPlugin {
                 place(&mut lines, &self.name, self.focus == Focus::Name);
                 let kinds = format!(
                     "{}   {}",
-                    radio(!self.url, "Command on this Mac"),
+                    radio(!self.url, on_this_computer!("Command on ", "")),
                     radio(self.url, "URL")
                 );
                 let kinds = if self.focus == Focus::Type {

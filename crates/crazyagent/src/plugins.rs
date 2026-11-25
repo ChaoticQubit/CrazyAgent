@@ -718,7 +718,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     (
         "server_url_invalid",
-        "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
+        on_this_computer!(
+            "Use an https address. Plain http works only for ",
+            ", and the address can't hold a password."
+        ),
     ),
     (
         "server_secret_name_invalid",

@@ -1,6 +1,7 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, STORAGE_COPY, withCode } from "./engine-client";
 import { RESTORE_COPY } from "./restore-copy";
+import { thisComputer } from "./ui/keys";
 import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, HarnessSubAgents, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 import type { AccountCheck, AccountDraft, AccountView, ProviderEntry } from "./api-account-types";
@@ -92,14 +93,14 @@ const COPY: Record<string, string> = {
   account_key_required: "Enter an API key.",
   account_key_invalid: "This API key can't be saved. Check it and try again.",
   account_key_not_allowed: "This sign-in method doesn't use an API key.",
-  account_url_required: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
-  account_url_invalid: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
+  account_url_required: `Enter a full URL that starts with https://, or http://127.0.0.1 for ${thisComputer()}.`,
+  account_url_invalid: `Enter a full URL that starts with https://, or http://127.0.0.1 for ${thisComputer()}.`,
   account_url_port_refused:
     "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there.",
-  account_local_url_required: "Enter a URL on this Mac, such as http://127.0.0.1:11434.",
+  account_local_url_required: `Enter a URL on ${thisComputer()}, such as http://127.0.0.1:11434.`,
   account_url_not_allowed: "This sign-in method doesn't use a URL.",
   account_url_unreachable: "Can't reach this URL. Check the address and that the server is running.",
-  account_probe_https_unsupported: "CrazyAgent can only check http URLs on this Mac. The account is saved.",
+  account_probe_https_unsupported: `CrazyAgent can only check http URLs on ${thisComputer()}. The account is saved.`,
   account_model_required: "Choose a model.",
   account_model_invalid: "Use a model name without spaces.",
   account_model_not_allowed: "This sign-in method doesn't use a model name.",
@@ -111,7 +112,7 @@ const COPY: Record<string, string> = {
   native_auth_cancel_pending: "The sign-in is still stopping. Try again in a moment.",
   account_not_found: "This account no longer exists.",
   native_profile_not_managed: "This account doesn't use a subscription sign-in.",
-  native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
+  native_auth_host_unavailable: `Sign-in isn't available on ${thisComputer()} right now. Check that the harness is installed.`,
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
   native_auth_sign_in_running: "A sign-in is still running. Wait for it to finish or cancel it, then try again.",

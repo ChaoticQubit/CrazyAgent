@@ -1,7 +1,7 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
-import { isWindows } from "./ui/keys";
+import { isWindows, thisComputer } from "./ui/keys";
 
 /** Storage's own answers to a request, one sentence each, the same on every page and in the
  * terminal: a full queue, a database still starting and a request withdrawn unrun changed
@@ -324,7 +324,7 @@ export function errorMessage(error: unknown): string {
     server_not_found: "This MCP server was removed.",
     server_command_invalid: commandPathCopy(isWindows()),
     server_args_invalid: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
-    server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
+    server_url_invalid: `Use an https address. Plain http works only for ${thisComputer()}, and the address can't hold a password.`,
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
     server_secret_limit: "A server can have up to 16 secrets.",
     server_secret_duplicate: "Each secret needs its own name.",
