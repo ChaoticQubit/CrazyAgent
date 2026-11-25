@@ -69,7 +69,7 @@ impl RunState {
 /// One agent run an engine stop cut short: the record id, the team agent, its project,
 /// whether it is the master or a sub-agent, its harness, when the engine last saw it
 /// running in ms since the epoch, its last turn, the pane record naming its harness
-/// session's source, its working folder (the pane's, else its worktree), the exact session
+/// session's source, its working folder (the pane's, none without a record), the exact session
 /// record file a resume continues, whether its team was paused when it was recorded, where
 /// its resume stands and why a failed resume failed.
 /// `record.source`, `cwd` and `record_file` are the inputs `TranscriptReader::resumed` takes.
