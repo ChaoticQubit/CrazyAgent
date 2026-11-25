@@ -42,7 +42,7 @@
   "crates/crazyagent/src/coord/delivery/tests.rs": 1830,
   "crates/crazyagent/src/coord/relay.rs": 1559,
   "crates/crazyagent/src/coord/tests.rs": 3716,
-  "crates/crazyagent/src/engine/bootstrap.rs": 2384,
+  "crates/crazyagent/src/engine/bootstrap.rs": 2376,
   "crates/crazyagent/src/engine/bootstrap/native_profiles/use_tests/agent_copy_tests.rs": 1502,
   "crates/crazyagent/src/engine/claude_host/tests.rs": 2716,
   "crates/crazyagent/src/engine/owner/transport.rs": 4466,
