@@ -130,6 +130,53 @@ fn only_an_end_before_any_marker_hides_the_lines_before_it() {
     assert_eq!(redact(&joined), ["before", HIDDEN_LINE, "after"].join("\n"));
 }
 
+/// A separator that only starts like an END line, met before any marker, hides nothing above
+/// it and is shown itself, since it is not the END line of a key block.
+#[test]
+fn a_separator_starting_like_an_end_line_keeps_the_lines_above_it() {
+    let text =
+        "Searching ocean sensor pricing\nRead buoywatch.io/pricing\n-----End of output-----\nafter";
+    assert_eq!(redact(text), text);
+}
+
+/// A key block's END line met before any BEGIN still hides every line above it, also after
+/// a separator that only starts like an END line and in the joined form a JSON key file
+/// holds, so the body above an END is never shown.
+#[test]
+fn a_key_end_after_a_separator_still_hides_the_lines_above_it() {
+    let shown = redact(&format!(
+        "-----End of output-----\n{BODY_NO_DIGIT}\n{END}\nafter"
+    ));
+    assert_eq!(
+        shown,
+        [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
+    );
+    let rsa = redact(&format!(
+        "{BODY_NO_DIGIT}\n{BODY_SHORT}\n-----END RSA PRIVATE KEY-----\nafter"
+    ));
+    assert_eq!(
+        rsa,
+        [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
+    );
+    let joined = redact(&format!(
+        "{BODY_NO_DIGIT}\nBg/kq+hk/iG9w\\n-----END PRIVATE KEY-----\\n\"}}\nafter"
+    ));
+    assert_eq!(joined, [HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n"));
+}
+
+/// A key block's END line whose label holds a hyphen, as RFC 7468 labels may, met before any
+/// BEGIN still hides every line above it.
+#[test]
+fn an_end_with_a_hyphenated_label_hides_the_lines_above_it() {
+    let shown = redact(&format!(
+        "{BODY_NO_DIGIT}\n{BODY_SHORT}\n-----END RSA-PSS PRIVATE KEY-----\nafter"
+    ));
+    assert_eq!(
+        shown,
+        [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
+    );
+}
+
 #[test]
 fn a_run_listed_after_many_unrelated_entries_is_still_found() {
     let root = runtime();
