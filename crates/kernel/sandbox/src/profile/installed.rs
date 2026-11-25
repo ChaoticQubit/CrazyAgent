@@ -225,6 +225,23 @@ impl InstalledSandbox {
         assert_eq!(command.get_program(), self.launcher().as_os_str());
         Ok(command)
     }
+
+    /// Rebuilds a harness command as [`InstalledSandbox::wrap`] does for a launch that hands
+    /// its account over, through [`linux::LinuxSandbox::wrap_handing`]. Inputs: the harness
+    /// command and the launch's exception. Output: the command, or the refusal.
+    #[cfg(target_os = "linux")]
+    pub fn wrap_handing(
+        &self,
+        harness: &Command,
+        handed: crate::profile::env::Handed<'_>,
+    ) -> Result<Command, SandboxError> {
+        if self.unconfined {
+            return Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()));
+        }
+        let command = self.linux.wrap_handing(harness, handed)?;
+        assert_eq!(command.get_program(), self.launcher().as_os_str());
+        Ok(command)
+    }
 }
 
 impl Sandbox for InstalledSandbox {
