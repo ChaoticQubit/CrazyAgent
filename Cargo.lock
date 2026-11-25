@@ -992,7 +992,9 @@ dependencies = [
 name = "crazyagent-kernel-common"
 version = "2.4.4"
 dependencies = [
+ "rusqlite",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
