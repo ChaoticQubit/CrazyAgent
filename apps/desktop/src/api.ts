@@ -923,6 +923,8 @@ export function setAccountSchedule(scheduleChange: ScheduleChange, version: numb
   return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
+export { newPoolId } from "./pool-id";
+
 /** Validates a pool before saving. Inputs: name and member ids. Output: the trimmed name
  * and members, or a plain error. */
 export function poolInput(name: string, members: string[]): Result<{ name: string; members: string[] }> {
