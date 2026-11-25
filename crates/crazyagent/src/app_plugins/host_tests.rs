@@ -179,15 +179,20 @@ fn sweep_root() -> (tempfile::TempDir, std::path::PathBuf) {
 
 /// Saves one plugin key file under the engine root. Inputs: the root and the key name.
 fn save_plugin_key(root: &std::path::Path, name: &str) {
-    let reference = KeyRef::new(name).unwrap_or_else(|error| panic!("{name}: {error:?}"));
-    (KEYS.replace)(root, KeyFolder::Plugin, &reference, b"sk-sweep-key-02".to_vec())
-        .unwrap_or_else(|error| panic!("save {name}: {error:?}"));
+    let reference = KeyRef::new(name).unwrap_or_else(|| panic!("{name} is no key name"));
+    (KEYS.replace)(
+        root,
+        KeyFolder::Plugin,
+        &reference,
+        b"sk-sweep-key-02".to_vec(),
+    )
+    .unwrap_or_else(|error| panic!("save {name}: {error:?}"));
 }
 
 /// Whether one plugin key file is still saved. Inputs: the root and the key name.
 /// Output: the answer.
 fn plugin_key_saved(root: &std::path::Path, name: &str) -> bool {
-    let reference = KeyRef::new(name).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    let reference = KeyRef::new(name).unwrap_or_else(|| panic!("{name} is no key name"));
     (KEYS.saved)(root, KeyFolder::Plugin, &reference)
         .unwrap_or_else(|error| panic!("read {name}: {error:?}"))
 }
@@ -251,7 +256,10 @@ fn a_key_a_kept_replaced_copy_names_survives_the_start_sweep() {
     let (_temp, root) = sweep_root();
     let backups = root.join("backups");
     private_folder(&backups);
-    let older = copy_naming(&backups.join("replaced-20261101T000000Z"), &["plugin-key-kept"]);
+    let older = copy_naming(
+        &backups.join("replaced-20261101T000000Z"),
+        &["plugin-key-kept"],
+    );
     let newer = copy_naming(&backups.join("replaced-20261120T000000Z"), &[]);
     let (older_bytes, newer_bytes) = (fixture_bytes(&older), fixture_bytes(&newer));
     save_plugin_key(&root, "plugin-key-kept");
@@ -264,7 +272,9 @@ fn a_key_a_kept_replaced_copy_names_survives_the_start_sweep() {
     assert_eq!(fixture_bytes(&older), older_bytes);
     assert_eq!(fixture_bytes(&newer), newer_bytes);
     for copy in [&older, &newer] {
-        let folder = copy.parent().unwrap_or_else(|| panic!("{} has no folder", copy.display()));
+        let folder = copy
+            .parent()
+            .unwrap_or_else(|| panic!("{} has no folder", copy.display()));
         assert_eq!(names_in(folder), ["engine.db"], "{}", folder.display());
     }
 }
@@ -282,7 +292,10 @@ fn an_unreadable_replaced_copy_keeps_every_plugin_key() {
     copy_naming(&outside, &["plugin-key-orphan"]);
     std::os::unix::fs::symlink(&outside, backups.join("replaced-20261102T000000Z"))
         .unwrap_or_else(|error| panic!("{}: {error}", backups.display()));
-    copy_naming(&backups.join("11-to-12-20261103T000000Z"), &["plugin-key-orphan"]);
+    copy_naming(
+        &backups.join("11-to-12-20261103T000000Z"),
+        &["plugin-key-orphan"],
+    );
     save_plugin_key(&root, "plugin-key-orphan");
     sweep_at_start(&restored_engine(), &root);
     assert!(!plugin_key_saved(&root, "plugin-key-orphan"));
