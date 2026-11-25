@@ -99,6 +99,8 @@ mod owner_deadline_tests;
 mod owner_pipe_windows_tests;
 #[cfg(all(test, unix))]
 mod owner_server_tests;
+#[cfg(test)]
+mod owner_stream_tests;
 #[cfg(all(test, unix))]
 mod reply_skew_tests;
 #[cfg(all(test, windows))]
