@@ -405,6 +405,8 @@ fn sources(folder: &Path) -> Vec<PathBuf> {
 fn exempt(path: &Path) -> bool {
     path.starts_with("crates/kernel/bus_gateway/src")
         || path == Path::new("crates/kernel/storage/src/namespace/tests.rs")
+        || path == Path::new("crates/kernel/storage/src/perf_tests.rs")
+        || path.starts_with("crates/kernel/storage/src/perf_tests")
 }
 
 #[test]
