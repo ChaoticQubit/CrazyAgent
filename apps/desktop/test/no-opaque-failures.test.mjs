@@ -384,3 +384,22 @@ test("an agent start refused for a home reset past its walk budget says what hap
   assert.ok(worded, "the team start line words the refusal");
   assert.equal(sentence, `${worded[1].replace(/\\\n\s*/g, "")}.`, "the desktop and the team panels give the same sentence");
 });
+
+test("owner_busy reads the one shared sentence on every page, and only api.ts holds it", async () => {
+  const busy = { kind: "error", code: "owner_busy", message: "" };
+  const shared = "CrazyAgent is busy with other requests. Try again in a moment.";
+  const plugins = await import("../src/api-app-plugins.ts");
+  const recovery = await import("../src/api-recovery.ts");
+  const usage = await import("../src/api-usage.ts");
+  const questions = await import("../src/api-questions.ts");
+  const native = await import("../src/native-auth.ts");
+  assert.equal(api.knownError("owner_busy"), shared);
+  assert.equal(plugins.appPluginRefusal(busy), shared);
+  assert.equal(recovery.recoveryMessage(busy), shared);
+  assert.equal(usage.usageRefusal(busy), shared);
+  assert.equal(questions.questionsRefusal(busy), shared);
+  assert.equal(native.nativeAuthError("owner_busy"), shared);
+  const src = new URL("../src/", import.meta.url).pathname;
+  const holders = readdirSync(src).filter((name) => /\.tsx?$/u.test(name) && readFileSync(join(src, name), "utf8").includes("busy with other"));
+  assert.deepEqual(holders, ["api.ts"]);
+});
