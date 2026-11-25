@@ -43,10 +43,10 @@ pub fn rank(sorted: &[u64], percentile: usize) -> u64 {
     sorted[index]
 }
 
-/// The PERF line of one row from its per-call times in ns, ascending: whole microseconds
-/// for a median of 10 us or more, else nanoseconds with the batch. Inputs: the row and
-/// the samples. Output: the line; a row out of shape panics.
-pub fn line(row: &Row, sorted: &[u64]) -> String {
+/// Checks one row's shape and reads its samples. Inputs: the row and its per-call times in
+/// ns, ascending. Output: the line head, the sample count, p50 and p95; a row out of shape
+/// panics.
+fn shaped(row: &Row, sorted: &[u64]) -> (String, usize, u64, u64) {
     assert!((1..=3).contains(&row.layer), "perf row layer {}", row.layer);
     assert!(
         MODULES.contains(&row.module),
@@ -64,12 +64,19 @@ pub fn line(row: &Row, sorted: &[u64]) -> String {
     );
     assert!((1..=BATCH_MAX).contains(&row.batch));
     assert!(sorted.len() >= SAMPLES_MIN);
-    let (p50, p95) = (rank(sorted, 50), rank(sorted, 95));
     let head = format!("PERF {} {} {}", row.layer, row.module, row.name);
-    let n = sorted.len();
-    if p50 < 10_000 {
-        format!("{head} p50_ns={p50} p95_ns={p95} n={n} batch={}", row.batch)
-    } else if row.batch == 1 {
+    (head, sorted.len(), rank(sorted, 50), rank(sorted, 95))
+}
+
+/// The PERF line of one row from its per-call times in ns, ascending: whole microseconds
+/// for a median of 10 us or more, else nanoseconds with the batch. Inputs: the row and
+/// the samples. Output: the line; a row out of shape panics.
+pub fn line(row: &Row, sorted: &[u64]) -> String {
+    if rank(sorted, 50) < 10_000 {
+        return line_ns(row, sorted);
+    }
+    let (head, n, p50, p95) = shaped(row, sorted);
+    if row.batch == 1 {
         format!("{head} p50={} p95={} n={n}", p50 / 1000, p95 / 1000)
     } else {
         format!(
@@ -79,6 +86,15 @@ pub fn line(row: &Row, sorted: &[u64]) -> String {
             row.batch
         )
     }
+}
+
+/// The PERF line of one row in nanoseconds with the batch at any median, for a row whose
+/// two builds fall on either side of 10 us, so both builds print the pair in one unit.
+/// Inputs: the row and its per-call times in ns, ascending. Output: the line; a row out of
+/// shape panics.
+pub fn line_ns(row: &Row, sorted: &[u64]) -> String {
+    let (head, n, p50, p95) = shaped(row, sorted);
+    format!("{head} p50_ns={p50} p95_ns={p95} n={n} batch={}", row.batch)
 }
 
 /// Times one row: a warm-up of a tenth of the samples, then each sample runs the step
