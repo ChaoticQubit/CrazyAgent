@@ -7,8 +7,9 @@ use super::*;
 /// to its END line, a fixed notice, also every line up to a key block's END line met before
 /// any BEGIN line or such END line, since such text starts inside a block; each
 /// credential-like word, the value after a key named like a credential, a URL's user part
-/// and a wrapped token's tail replaced. This masks known shapes, not every secret: one in another shape, a short value
-/// under a key not named like a credential or one split across messages stays.
+/// and a wrapped token's tail replaced. This masks known shapes, not every secret: one in
+/// another shape, a short value under a key not named like a credential or one split across
+/// messages stays.
 pub(crate) fn redact(text: &str) -> String {
     let mut key_block = false;
     let mut marked = false;
