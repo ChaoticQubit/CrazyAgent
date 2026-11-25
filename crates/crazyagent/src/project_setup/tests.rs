@@ -722,18 +722,6 @@ fn claims_follow_pool_assignment_and_finish_records_the_report() {
 }
 
 #[test]
-fn markdown_sections_are_selected_by_heading() {
-    let report = "# Market\nintro\n## Size\nbig\n### Detail\nfine\n## Trends\nup\n";
-    assert_eq!(section(report, None).unwrap(), report.trim());
-    assert_eq!(
-        section(report, Some("Size")).unwrap(),
-        "## Size\nbig\n### Detail\nfine"
-    );
-    assert_eq!(section(report, Some("Trends")).unwrap(), "## Trends\nup");
-    assert!(section(report, Some("Absent")).is_none());
-}
-
-#[test]
 fn job_table_matches_the_research_runner_queue_columns() {
     let root = tempfile::tempdir().unwrap();
     let runner_first = Connection::open(root.path().join("runner-first.db")).unwrap();
@@ -1792,3 +1780,5 @@ fn a_new_project_build_stopped_before_it_starts_leaves_no_staging_folder() {
     );
     assert!(!home.join("notes").exists());
 }
+
+mod markdown_sections;

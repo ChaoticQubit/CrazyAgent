@@ -31,7 +31,7 @@ mod merges;
 mod owner;
 pub mod owner_edit;
 #[cfg(unix)]
-mod retire;
+pub(crate) mod retire;
 #[cfg(all(test, unix))]
 pub(crate) mod signature_tests;
 #[cfg(unix)]

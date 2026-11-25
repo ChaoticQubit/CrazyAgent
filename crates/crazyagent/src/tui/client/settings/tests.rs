@@ -3,16 +3,21 @@ use crate::accounts::{AccountDraft, Provider, SignInMethod};
 use crate::engine::bootstrap::EngineService;
 use std::os::unix::fs::PermissionsExt;
 
+/// The error a settings client row stops on: any failed file, engine or connection step.
+type Failure = Box<dyn std::error::Error>;
+
+/// What a settings client row returns, so a failed setup step ends the row with its error.
+type TestResult = Result<(), Failure>;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn full_loads_read_every_page_and_delete_reaches_the_engine() {
+async fn full_loads_read_every_page_and_delete_reaches_the_engine() -> TestResult {
     let root = tempfile::Builder::new()
         .prefix("ca-tset-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     let global = root.path().join("global.toml");
-    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
-    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n")?;
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))?;
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start_with_settings_sources(
         root.path(),
@@ -21,8 +26,7 @@ async fn full_loads_read_every_page_and_delete_reaches_the_engine() {
         &root.path().join("project.toml"),
         &stopped,
     )
-    .await
-    .unwrap();
+    .await?;
     let mut native = NativeOwner::new(
         root.path().join("e.sock"),
         crate::tui::test_home::ENGINE_WAIT,
@@ -50,7 +54,7 @@ async fn full_loads_read_every_page_and_delete_reaches_the_engine() {
         ));
     }
     let mut lost = false;
-    let accounts = native.all_accounts(2, &mut lost).await.unwrap();
+    let accounts = native.all_accounts(2, &mut lost).await?;
     assert!(!lost);
     let mut names: Vec<&str> = accounts
         .iter()
@@ -74,7 +78,7 @@ async fn full_loads_read_every_page_and_delete_reaches_the_engine() {
     let nowhere = native
         .settings(SettingsJob::AddMemory {
             scope: MemoryScope::Project {
-                project_id: ProjectId::new("nowhere").unwrap(),
+                project_id: ProjectId::new("nowhere")?,
             },
             text: "A project that was never made.".into(),
             generation: 3,
@@ -123,14 +127,13 @@ async fn full_loads_read_every_page_and_delete_reaches_the_engine() {
     ));
 
     drop(native);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await??;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one_already_gone() {
+async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one_already_gone()
+-> TestResult {
     use crate::tui::client::OwnerEvent;
     use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
     use crate::tui::keys::Key;
@@ -140,10 +143,9 @@ async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one
 
     let root = tempfile::Builder::new()
         .prefix("ca-tdel-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (mut service, _stop) = engine(root.path()).await;
+        .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let (mut service, _stop) = engine(root.path()).await?;
     let mut native = NativeOwner::new(
         root.path().join("e.sock"),
         crate::tui::test_home::ENGINE_WAIT,
@@ -169,7 +171,7 @@ async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one
         ));
     }
     let mut lost = false;
-    let accounts = native.all_accounts(2, &mut lost).await.unwrap();
+    let accounts = native.all_accounts(2, &mut lost).await?;
     let mut ctx = crate::tui::screens::settings_accounts::tests::ctx(80, 24);
     let mut screen = Accounts::with(accounts.clone());
     for name in ["Laptop", "Mini", "Studio"] {
@@ -181,12 +183,12 @@ async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one
         screen.key(&Key::Char(' '), &mut ctx);
         screen.key(&Key::Esc, &mut ctx);
     }
-    assert_eq!(ctx.message().unwrap().lead, "3 selected.");
+    assert_eq!(ctx.message().ok_or("no message")?.lead, "3 selected.");
     screen.key(&Key::Char('d'), &mut ctx);
     assert_eq!(
         screen
             .modal(&ctx)
-            .expect("a confirm before deleting")
+            .ok_or("a confirm before deleting")?
             .0
             .title,
         "Delete accounts"
@@ -194,7 +196,7 @@ async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one
     let laptop = accounts
         .iter()
         .find(|account| account.name == "Laptop")
-        .unwrap()
+        .ok_or("Laptop was not added")?
         .id
         .clone();
     let gone = native
@@ -226,23 +228,22 @@ async fn deleting_selected_accounts_removes_each_on_the_engine_and_names_the_one
     }
     assert_eq!(sent, 4, "three removes one at a time, then one list reload");
     assert!(!screen.busy(&ctx));
-    let message = ctx.message().unwrap();
+    let message = ctx.message().ok_or("no message")?;
     assert_eq!(message.lead, "Deleted 2 accounts.");
     assert_eq!(
         message.rest,
         "Could not delete Laptop: This account no longer exists."
     );
-    assert!(native.all_accounts(2, &mut lost).await.unwrap().is_empty());
+    assert!(native.all_accounts(2, &mut lost).await?.is_empty());
 
     drop(native);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await??;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accounts() {
+async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accounts() -> TestResult
+{
     use crate::accounts::AccountStatus;
     use crate::tui::client::OwnerEvent;
     use crate::tui::ctx::Ctx;
@@ -287,10 +288,9 @@ async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accou
 
     let root = tempfile::Builder::new()
         .prefix("ca-tadd-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (mut service, _stop) = engine(root.path()).await;
+        .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let (mut service, _stop) = engine(root.path()).await?;
     let mut native = NativeOwner::new(
         root.path().join("e.sock"),
         crate::tui::test_home::ENGINE_WAIT,
@@ -336,8 +336,10 @@ async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accou
     let methods = text(&screen, &ctx).join("\n");
     let first = methods
         .find("Sign in with your Claude subscription")
-        .expect(&methods);
-    let key = methods.find("Use an API key").expect(&methods);
+        .ok_or_else(|| methods.clone())?;
+    let key = methods
+        .find("Use an API key")
+        .ok_or_else(|| methods.clone())?;
     assert!(first < key && !methods.contains("Codex"), "{methods}");
     assert!(methods.starts_with("Anthropic\n"), "{methods}");
     screen.key(&Key::Down, &mut ctx);
@@ -351,7 +353,7 @@ async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accou
     type_text(&mut screen, &mut ctx, "claude-sonnet-4-5");
     screen.key(&Key::Enter, &mut ctx);
     assert_eq!(pump(&mut screen, &mut ctx, &mut native).await, 0);
-    assert_eq!(ctx.message().unwrap().lead, "Account added.");
+    assert_eq!(ctx.message().ok_or("no message")?.lead, "Account added.");
 
     let mut screen = AddAccount::new();
     screen.shown(&mut ctx);
@@ -360,8 +362,9 @@ async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accou
     let methods = text(&screen, &ctx).join("\n");
     let order: Vec<usize> = ["Sign in with ChatGPT", "Use an API key"]
         .iter()
-        .map(|title| methods.find(title).expect(&methods))
-        .collect();
+        .map(|title| methods.find(title))
+        .collect::<Option<_>>()
+        .ok_or_else(|| methods.clone())?;
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{methods}");
     assert!(
         !methods.contains("on this Mac") && methods.starts_with("OpenAI\n"),
@@ -398,8 +401,7 @@ async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accou
     let mut lost = false;
     let mut added: Vec<(Provider, SignInMethod, String, String, AccountStatus)> = native
         .all_accounts(2, &mut lost)
-        .await
-        .unwrap()
+        .await?
         .into_iter()
         .map(|account| {
             (
@@ -447,10 +449,8 @@ async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accou
     );
 
     drop(native);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await??;
+    Ok(())
 }
 
 fn changed(event: SettingsEvent) {
@@ -462,15 +462,14 @@ fn changed(event: SettingsEvent) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
+async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() -> TestResult {
     let root = tempfile::Builder::new()
         .prefix("ca-tplug-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     let global = root.path().join("global.toml");
-    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
-    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n")?;
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))?;
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start_with_settings_sources(
         root.path(),
@@ -479,21 +478,22 @@ async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
         &root.path().join("project.toml"),
         &stopped,
     )
-    .await
-    .unwrap();
+    .await?;
     let mut native = NativeOwner::new(
         root.path().join("e.sock"),
         crate::tui::test_home::ENGINE_WAIT,
     );
     let _ = native.attach().await;
     assert!(native.ready);
-    let _home = crate::tui::test_home::projects_home(native.controller.as_mut().unwrap(), 1).await;
+    let _home =
+        crate::tui::test_home::projects_home(native.controller.as_mut().ok_or("not attached")?, 1)
+            .await;
 
-    let project = ProjectId::new("tidepool").unwrap();
+    let project = ProjectId::new("tidepool")?;
     let created = native
         .controller
         .as_mut()
-        .unwrap()
+        .ok_or("not attached")?
         .setup_project(
             project.clone(),
             ProjectSpec {
@@ -511,8 +511,7 @@ async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
             },
             1,
         )
-        .await
-        .unwrap();
+        .await?;
     assert!(matches!(
         created,
         OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
@@ -531,7 +530,7 @@ async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
     );
     let missing = Suggestion {
         project: project.clone(),
-        entry: RequestId::new("entry-never-made").unwrap(),
+        entry: RequestId::new("entry-never-made")?,
         version: 1,
         text: "Never researched.".into(),
         kept: false,
@@ -548,12 +547,11 @@ async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
         SettingsEvent::SuggestionDone(done, Err(_)) if done == missing
     ));
     let folder = root.path().join("picked/release");
-    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&folder)?;
     std::fs::write(
         folder.join("SKILL.md"),
         "---\nname: release-notes\ndescription: Teaches release notes.\n---\n\nSteps.\n",
-    )
-    .unwrap();
+    )?;
     let added = native
         .settings(SettingsJob::Plugin(PluginChange::AddSkill {
             scope: Scope::Global,
@@ -625,13 +623,12 @@ async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
     assert_eq!(here, vec![("release-notes".to_owned(), Some(false))]);
 
     let found = root.path().join("home/.claude/skills/zeta");
-    std::fs::create_dir_all(&found).unwrap();
+    std::fs::create_dir_all(&found)?;
     std::fs::write(
         found.join("SKILL.md"),
         "---\nname: zeta\ndescription: Zeta steps.\n---\n",
-    )
-    .unwrap();
-    std::fs::write(found.join("deploy.pem"), "dummy").unwrap();
+    )?;
+    std::fs::write(found.join("deploy.pem"), "dummy")?;
     let folder = found.display().to_string();
     match native
         .settings(SettingsJob::ImportSkills {
@@ -641,7 +638,7 @@ async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
     {
         SettingsEvent::Imported(Ok(done)) => {
             assert_eq!(done.len(), 2);
-            let first = done[0].1.as_ref().unwrap();
+            let first = done[0].1.as_ref().map_err(|code| code.clone())?;
             assert_eq!(first.skill.name, "zeta");
             assert!(first.skill.enabled);
             assert_eq!(first.skipped, vec!["deploy.pem"]);
@@ -651,21 +648,19 @@ async fn a_project_reads_its_plugins_and_switches_an_every_project_skill_off() {
         _ => panic!("an import reply required"),
     }
     drop(native);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await??;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn agent_memory_writes_change_on_the_engine_and_only_a_requested_memory_is_approved() {
+async fn agent_memory_writes_change_on_the_engine_and_only_a_requested_memory_is_approved()
+-> TestResult {
     use crate::memory::library::MemoryOrigin;
     let root = tempfile::Builder::new()
         .prefix("ca-twrites-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (mut service, _stop) = engine(root.path()).await;
+        .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let (mut service, _stop) = engine(root.path()).await?;
     let mut native = NativeOwner::new(
         root.path().join("e.sock"),
         crate::tui::test_home::ENGINE_WAIT,
@@ -700,25 +695,31 @@ async fn agent_memory_writes_change_on_the_engine_and_only_a_requested_memory_is
         SettingsEvent::AgentScope(Ok(AgentScope::Agent))
     ));
 
-    let mut db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
-    db.execute("INSERT INTO projects(id,body) VALUES ('alpha','{}')", [])
-        .unwrap();
-    assert_eq!(
+    let path = root.path().join("engine.db");
+    let alpha = ProjectId::new("alpha")?;
+    let saved = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let mut db = rusqlite::Connection::open(path).map_err(|error| error.to_string())?;
+        db.busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        db.execute("INSERT INTO projects(id,body) VALUES ('alpha','{}')", [])
+            .map_err(|error| error.to_string())?;
         crate::memory::library::agent_remember(
             &mut db,
-            &ProjectId::new("alpha").unwrap(),
+            &alpha,
             "Ada (@lead-a)",
             true,
             "Ship on Fridays.",
         )
-        .unwrap(),
+        .map_err(|error| error.to_string())
+    })
+    .await??;
+    assert_eq!(
+        saved,
         Ok(crate::memory::library::AgentSaved {
             waiting: true,
             narrowed: false
         })
     );
-    drop(db);
     let agent = "Ada (@lead-a)".to_owned();
     let listed = |event: SettingsEvent| {
         let SettingsEvent::Memories(_, Ok(list)) = event else {
@@ -767,16 +768,20 @@ async fn agent_memory_writes_change_on_the_engine_and_only_a_requested_memory_is
         SettingsEvent::AgentScope(Ok(AgentScope::Project))
     ));
     drop(native);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await??;
+    Ok(())
 }
 
-async fn engine(root: &std::path::Path) -> (EngineService, tokio::sync::watch::Sender<bool>) {
+async fn engine(
+    root: &std::path::Path,
+) -> Result<(EngineService, tokio::sync::watch::Sender<bool>), Failure> {
     let global = root.join("global.toml");
-    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
-    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let written = global.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::write(&written, "version = 1\ntimeout_ms = 10000\n")?;
+        std::fs::set_permissions(&written, std::fs::Permissions::from_mode(0o600))
+    })
+    .await??;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let service = EngineService::start_with_settings_sources(
         root,
@@ -785,9 +790,8 @@ async fn engine(root: &std::path::Path) -> (EngineService, tokio::sync::watch::S
         &root.join("project.toml"),
         &stopped,
     )
-    .await
-    .unwrap();
-    (service, stop)
+    .await?;
+    Ok((service, stop))
 }
 
 fn failure(event: &SettingsEvent) -> Option<&str> {
@@ -828,7 +832,8 @@ fn only_a_failed_transport_counts_as_a_lost_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reattaches() {
+async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reattaches() -> TestResult
+{
     type Job = (&'static str, fn() -> SettingsJob);
     let jobs: [Job; 7] = [
         ("accounts list", || {
@@ -857,22 +862,18 @@ async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reatta
     for ((label, job), restart) in jobs.into_iter().flat_map(|job| [(job, false), (job, true)]) {
         let root = tempfile::Builder::new()
             .prefix("ca-tlost-")
-            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-            .unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let (mut service, _stop) = engine(root.path()).await;
+            .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+        let (mut service, _stop) = engine(root.path()).await?;
         let mut native = NativeOwner::new(
             root.path().join("e.sock"),
             crate::tui::test_home::ENGINE_WAIT,
         );
         let _ = native.attach().await;
         assert!(native.ready, "{label}: attach");
-        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown()).await??;
         let restarted = if restart {
-            Some(engine(root.path()).await)
+            Some(engine(root.path()).await?)
         } else {
             None
         };
@@ -886,10 +887,7 @@ async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reatta
             kept.push(format!("{label} (restart {restart}): {code:?}"));
         }
         if let Some((mut service, _stop)) = restarted {
-            tokio::time::timeout(Duration::from_secs(10), service.shutdown())
-                .await
-                .unwrap()
-                .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), service.shutdown()).await??;
         }
         last = Some((root, native));
     }
@@ -898,8 +896,8 @@ async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reatta
         "still attached after the engine went away: {kept:#?}"
     );
 
-    let (root, mut native) = last.unwrap();
-    let (mut service, _stop) = engine(root.path()).await;
+    let (root, mut native) = last.ok_or("no engine was started")?;
+    let (mut service, _stop) = engine(root.path()).await?;
     let _ = native.attach().await;
     assert!(native.ready);
     let listed = native
@@ -913,22 +911,19 @@ async fn a_stopped_or_restarted_engine_detaches_every_settings_job_and_it_reatta
         SettingsEvent::Accounts(Ok(AccountsReply::Page(_)))
     ));
     drop(native);
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await??;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_sign_in_read_on_a_stopped_engine_drops_the_trusted_connection() {
+async fn a_sign_in_read_on_a_stopped_engine_drops_the_trusted_connection() -> TestResult {
     let root = tempfile::Builder::new()
         .prefix("ca-tsign-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     let global = root.path().join("global.toml");
-    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
-    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n")?;
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))?;
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start_with_settings_sources(
         root.path(),
@@ -937,24 +932,23 @@ async fn a_sign_in_read_on_a_stopped_engine_drops_the_trusted_connection() {
         &root.path().join("project.toml"),
         &stopped,
     )
-    .await
-    .unwrap();
+    .await?;
     let mut native = NativeOwner::new(
         root.path().join("e.sock"),
         crate::tui::test_home::ENGINE_WAIT,
     );
     let _ = native.attach().await;
     assert!(native.ready);
-    let controller = native.controller.as_mut().unwrap();
-    let read = controller.read(OwnerRead::Capabilities).await.unwrap();
+    let controller = native.controller.as_mut().ok_or("not attached")?;
+    let read = controller.read(OwnerRead::Capabilities).await?;
     let ticket = SignInTicket {
         scope: crate::engine::owner::NativeAuthScope {
             expected_database_instance: controller.identity().database_instance().into(),
-            connection: CredentialRef::new("missing-login").unwrap(),
+            connection: CredentialRef::new("missing-login")?,
             expected_config_id: read.config_id,
             expected_source_hash: "a".repeat(64),
         },
-        operation: fresh_id().unwrap(),
+        operation: fresh_id()?,
     };
     let check = || {
         SettingsJob::SignIn(SignInJob::Read {
@@ -969,14 +963,12 @@ async fn a_sign_in_read_on_a_stopped_engine_drops_the_trusted_connection() {
         "a sign-in the engine refuses keeps the connection"
     );
 
-    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await??;
     let unanswered = native.settings(check()).await;
     assert!(matches!(unanswered, SettingsEvent::SignIn(Err(_))));
     assert!(
         !native.ready,
         "a sign-in read the stopped engine never answers drops the connection"
     );
+    Ok(())
 }

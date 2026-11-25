@@ -16,7 +16,7 @@ pub mod windows;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
 /// The marker that closes a bracketed paste. A program may read typed bytes per read, so
-/// no split of them cuts it (RV-DS241-69).
+/// no split of them cuts it.
 pub const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 pub const PROMPT_BYTES_MAX: usize = 4096;
 /// The most bytes one owner paste may hold once the engine gathered its `Paste` chunks, the
@@ -336,7 +336,6 @@ pub struct TerminalStream {
     pub history: Vec<u8>,
     pub screen: Vec<u8>,
     pub chunks: buffer::Chunks,
-    #[cfg(unix)]
     pub at: Option<PaneAt>,
 }
 
@@ -353,7 +352,6 @@ pub struct PaneAt {
 /// still use it, else by the agent's name as `input` does. Takes the host the view was
 /// attached through, the view's pane, the agent and at most `INPUT_BYTES_MAX` bytes.
 /// Returns as `input`.
-#[cfg(unix)]
 pub fn type_into(
     host: &dyn Host,
     at: Option<&PaneAt>,
@@ -916,7 +914,6 @@ pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool,
 /// host, the terminal name, the pane and the text. Returns as `type_prompt`, or
 /// `terminal_agent_unknown` once that pane is no longer one the host can type into, which ends
 /// the view so it opens again with a fresh pin, as its other pinned sends do.
-#[cfg(unix)]
 pub fn type_prompt_at(
     host: &dyn Host,
     agent: &AgentId,
@@ -1046,7 +1043,7 @@ pub fn harness_socket(
     lead_temp_socket(engine_root, lead, HARNESS_SOCKET, paths)
 }
 
-/// The socket of a native lead's teammates' own tmux server (rv-audit S1 F1), in the lead's
+/// The socket of a native lead's teammates' own tmux server, in the lead's
 /// short private temp folder under the name its latest start chose (see
 /// [`renew_teammates_socket`]). That server and every teammate pane it forks run in the
 /// teammates' profile, which serves this socket but never reaches or unlinks it, nor the
@@ -1130,7 +1127,7 @@ pub fn renew_teammates_socket(
 
 /// Writes one engine record in the profiles folder no agent writes, in place of any earlier
 /// one: a staged file only this user reads, under a random name of its own so no other
-/// writer's staged file is met or removed (RV-DS241-22), renamed over the record so no
+/// writer's staged file is met or removed, renamed over the record so no
 /// reader sees part of it. Takes the record path and its text. Returns Ok, or
 /// `terminal_own_server_unavailable`.
 #[cfg(unix)]

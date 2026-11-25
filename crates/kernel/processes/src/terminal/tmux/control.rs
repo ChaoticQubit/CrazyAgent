@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod read_tests;
+
 pub(super) struct Control {
     pub(super) child: Mutex<Option<Child>>,
     pub(super) input: Mutex<Option<ChildStdin>>,
@@ -42,9 +45,40 @@ pub(super) enum Pending {
     /// to keep: the capture's pane rows cannot be counted, so the reader drops every line up
     /// to the marker line, as it does for a cut capture.
     Marker(Vec<u8>),
-    /// The block that prints the marker of an attach already answered: it holds no pane
-    /// text, so the reader finds its end by its guard and drops it, whatever it printed.
+    /// The block that prints an attach's marker, sent on its own command line right after
+    /// the attach, so tmux runs it even after the attach failed: it holds no pane text, so
+    /// the reader finds its end by its guard and drops it, whatever it printed.
     Spent,
+}
+
+/// The server option a connect sets once it emptied the server's environment. A server
+/// started again lacks it, so it is emptied again.
+const EMPTIED: &str = "@crazyagent-environment-emptied";
+
+/// The lines tmux writes for a command's error before its `%error` guard: the one message
+/// line, so a counted capture takes its error guard only after exactly this many rows.
+const ERROR_LINES: usize = 1;
+
+/// Empties the environment of a server no connect emptied yet, as [`clear_environment`]
+/// does, then marks it emptied; a reattach to a marked server keeps what a lead's
+/// environment set there. Either way no attaching client's variables are copied.
+/// Input: the control client. Output: Ok, or `terminal_environment_unclean`.
+pub(super) fn clear_unmarked_environment(control: &Control) -> Result<(), HostError> {
+    let unclean = || failure("terminal_environment_unclean");
+    control
+        .run("set-option -g update-environment \"\"")
+        .map_err(|_| unclean())?;
+    let mark = control
+        .run(&format!("show-options -gqv {EMPTIED}"))
+        .map_err(|_| unclean())?;
+    if mark.iter().any(|line| line.as_slice() == b"on") {
+        return Ok(());
+    }
+    clear_environment(control)?;
+    control
+        .run(&format!("set-option -g {EMPTIED} on"))
+        .map_err(|_| unclean())?;
+    Ok(())
 }
 
 /// Empties the private server's environment so nothing reaches a pane from it: no
@@ -271,14 +305,14 @@ impl Control {
         }
     }
 
+    /// Ends the client at once: marks it closed, kills and reaps the child, then drops the
+    /// input. The child goes first, since a write blocked on a full pipe holds the input
+    /// until the child's end of the pipe closes.
     pub(super) fn stop(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
             state.pending.clear();
             state.viewers.clear();
-        }
-        if let Ok(mut input) = self.input.lock() {
-            *input = None;
         }
         if let Ok(mut child) = self.child.lock()
             && let Some(mut child) = child.take()
@@ -286,13 +320,31 @@ impl Control {
             let _ = child.kill();
             let _ = child.wait();
         }
-    }
-
-    pub(super) fn close(&self) {
         if let Ok(mut input) = self.input.lock() {
             *input = None;
         }
+    }
+
+    /// Ends the client gently: drops the input so tmux sees the end of its commands and
+    /// waits for it to exit, then stops it, all within `CLOSE_TIME`. A write that still holds
+    /// the input at the deadline is blocked on a full pipe, so the client is stopped then.
+    pub(super) fn close(&self) {
         let deadline = Instant::now() + CLOSE_TIME;
+        loop {
+            match self.input.try_lock() {
+                Ok(mut input) => {
+                    *input = None;
+                    break;
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => break,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() >= deadline => {
+                    return self.stop();
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
         if let Ok(mut slot) = self.child.lock()
             && let Some(child) = slot.as_mut()
         {
@@ -453,10 +505,10 @@ pub(super) fn error_code(lines: &[Vec<u8>]) -> HostError {
 
 /// Hands one closed reply block to the request at the front of the queue. `ran` is whether
 /// the block closed with `%end`, since tmux skips the rest of a command line after an
-/// `%error`: an attach whose located reply ran keeps its place for the capture, one whose
-/// located reply was too large to keep leaves its capture and marker to be drained, and one
-/// whose capture ran leaves its marker block to be dropped. Takes the state, the answer and
-/// whether the command ran.
+/// `%error`: an attach whose located reply ran keeps its place for the capture, and one whose
+/// located reply was too large to keep leaves its capture and marker to be drained. The
+/// marker block, from its own command line, is queued after the attach as `Spent`. Takes the
+/// state, the answer and whether the command ran.
 pub(super) fn finish(state: &mut State, answer: Answer, ran: bool) {
     let Some(front) = state.pending.pop_front() else {
         return;
@@ -500,9 +552,6 @@ pub(super) fn finish(state: &mut State, answer: Answer, ran: bool) {
             let opened =
                 answer.and_then(|screen| viewer(state, agent, &lines, &screen, history, view));
             let _ = reply.send(opened);
-            if ran {
-                state.pending.push_front(Pending::Spent);
-            }
         }
     }
 }
@@ -541,7 +590,10 @@ pub(super) enum Rows {
 /// block.
 pub(super) fn opening(state: &mut State) -> Rows {
     match state.pending.pop_front() {
-        Some(Pending::Marker(marker)) => Rows::Drained(marker),
+        Some(Pending::Marker(marker)) => {
+            drop_spent(state);
+            Rows::Drained(marker)
+        }
         Some(Pending::Attach {
             agent,
             located: Some(lines),
@@ -552,6 +604,7 @@ pub(super) fn opening(state: &mut State) -> Rows {
         }) => {
             let Some((rows, found)) = counted(&lines) else {
                 let _ = reply.send(Err(failure(REPLY_CUT)));
+                drop_spent(state);
                 return Rows::Drained(marker);
             };
             let rows = found.min(history) + usize::from(rows);
@@ -570,6 +623,36 @@ pub(super) fn opening(state: &mut State) -> Rows {
             Rows::Searched
         }
         None => Rows::Searched,
+    }
+}
+
+/// Takes off the queue the block that prints an attach's marker, which its own command line
+/// always runs, since a drain to that marker reads the block itself. Takes the state, whose
+/// front must be that block's `Spent`.
+fn drop_spent(state: &mut State) {
+    let spent = state.pending.pop_front();
+    assert!(matches!(spent, Some(Pending::Spent)));
+}
+
+/// Answers an attach whose counted capture met its error guard right after one row with that
+/// error, then drains to the attach's marker. tmux writes a command's error as one message
+/// line before the guard, so only the second line can be a real error; the guard there may
+/// still be pane text, so no row after it is read as a control line, and a real error leaves
+/// only the marker block to drop. A pane whose second row is the exact guard of its own
+/// capture still ends that capture with an error, one guess per attach. Takes the state, the
+/// rows read and the capture's guard. Returns the drain.
+fn capture_failed(state: &mut State, lines: &[Vec<u8>], opened: Vec<u8>) -> Drain {
+    let marker = match state.pending.front() {
+        Some(Pending::Attach { marker, .. }) => marker.clone(),
+        _ => unreachable!("only an attach's capture is counted"),
+    };
+    finish(state, Err(error_code(lines)), false);
+    drop_spent(state);
+    Drain {
+        marker,
+        opened,
+        found: false,
+        lines: 0,
     }
 }
 
@@ -705,6 +788,16 @@ pub(super) fn read(output: ChildStdout, state: &Mutex<State>) {
             let closing = !counted && dropped == 0;
             let ended = closing && guard(&line, b"%end") == Some(open.opened.as_slice());
             let failed = closing && guard(&line, b"%error") == Some(open.opened.as_slice());
+            if counted
+                && open.seen == ERROR_LINES
+                && dropped == 0
+                && guard(&line, b"%error") == Some(open.opened.as_slice())
+            {
+                let opened = std::mem::take(&mut open.opened);
+                drain = Some(capture_failed(&mut state, &open.lines, opened));
+                block = None;
+                continue;
+            }
             if ended || failed {
                 let lines = std::mem::take(&mut open.lines);
                 let answer = if open.oversized {
@@ -819,3 +912,6 @@ pub(super) fn windows(control: &Control) -> Result<Vec<AgentId>, HostError> {
     agents.dedup();
     Ok(agents)
 }
+
+#[cfg(test)]
+mod tests;

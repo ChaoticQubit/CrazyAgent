@@ -1,12 +1,16 @@
 use super::*;
 
+#[cfg(all(test, target_os = "macos"))]
+mod close_tests;
+
 impl Tmux {
     /// Closes panes with one tmux command, then ends what they leave in their process groups
     /// (FINDING bridge orphan): tmux only hangs up a closing pane, which a busy Codex
     /// app-server the tools-on bridge started in the background outlives, still working on
-    /// the user's account. `kill`, `kill_pane` and the server's close go through here. Takes
-    /// the control, the open panes the command closes and the command. Returns the command's
-    /// answer at once; a reaper ends the groups (r1 SG-L2).
+    /// the user's account. `kill`, `kill_pane` and the server's close go through here. A
+    /// command never sent ends no group; one whose answer failed ends only the groups of the
+    /// panes no longer open. Takes the control, the open panes the command closes and the
+    /// command. Returns the command's answer at once; a reaper ends the groups.
     pub(super) fn close_panes(
         &self,
         control: &Control,
@@ -14,9 +18,58 @@ impl Tmux {
         line: &str,
     ) -> Result<(), HostError> {
         let groups = pane_groups(&self.served(panes));
-        let closed = control.run(line).map(drop);
-        self.reap(groups);
+        let (reply, answer) = sync_channel(1);
+        control.send(line, Pending::Reply(reply))?;
+        let closed = control.wait(&answer).map(drop);
+        let ended = match closed {
+            Ok(()) => groups,
+            Err(_) => self.closed_groups(panes, groups),
+        };
+        self.reap(ended);
         closed
+    }
+
+    /// Keeps the holds of the panes no longer open after a close whose answer failed, and
+    /// drops the rest unended; when the open panes cannot be read, no group is ended. Takes
+    /// the panes and their holds. Returns the holds to end.
+    fn closed_groups(&self, panes: &[PaneInfo], groups: Vec<Ending>) -> Vec<Ending> {
+        let Some(open) = self.open_panes() else {
+            return Vec::new();
+        };
+        let gone: Vec<u32> = panes
+            .iter()
+            .filter(|pane| !open.iter().any(|id| id.as_slice() == pane.id.as_bytes()))
+            .map(|pane| pane.pid)
+            .collect();
+        groups
+            .into_iter()
+            .filter(|hold| {
+                u32::try_from(hold.pid().as_raw_nonzero().get())
+                    .is_ok_and(|pid| gone.contains(&pid))
+            })
+            .collect()
+    }
+
+    /// The ids of the panes the server holds open: none once it no longer listens, else as a
+    /// control that cannot start a server lists them, asked again every 10 ms while an ending
+    /// server drops it, for at most `REPLY_TIME`. Output: the ids, or none when unread.
+    fn open_panes(&self) -> Option<Vec<Vec<u8>>> {
+        let deadline = Instant::now() + REPLY_TIME;
+        loop {
+            if !self.running() || self.listening() == Ok(false) {
+                return Some(Vec::new());
+            }
+            let listed = self.control_with(false).and_then(|control| {
+                control.ask(&format!("list-panes -a -F '#{{pane_id}}{FORMAT_END}'"))
+            });
+            if let Ok(open) = listed {
+                return Some(open);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Ends groups on a thread of their own, so a caller such as the team tick never waits
@@ -102,7 +155,7 @@ impl Tmux {
 /// background stay. A pane whose first process ended or leads no group of its own gives
 /// none, so a stop never signals a group it did not read from its pane. A group another
 /// path holds, as the session stop that ends this pane, is left to that path, so one group
-/// is signalled from one path only (CB-2 one signal). Takes the panes. Returns the holds on
+/// is signalled from one path only. Takes the panes. Returns the holds on
 /// their groups.
 pub(super) fn pane_groups(panes: &[PaneInfo]) -> Vec<Ending> {
     assert!(panes.len() <= PANES_LISTED_MAX);
@@ -124,8 +177,8 @@ pub(super) fn pane_groups(panes: &[PaneInfo]) -> Vec<Ending> {
 /// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
 /// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group,
 /// and a group that answered ESRCH once is never tested or signalled again: its number may
-/// lead a new group by then (r1 SG-L1); its hold is marked gone and dropped then, so the
-/// number stays refused to later paths (CB-2 r1 F1). Takes the holds `pane_groups` took
+/// lead a new group by then; its hold is marked gone and dropped then, so the
+/// number stays refused to later paths. Takes the holds `pane_groups` took
 /// before their panes closed.
 pub(super) fn end_groups(groups: Vec<Ending>) {
     end_groups_with(
@@ -164,7 +217,7 @@ pub(super) fn end_groups_with(
 }
 
 /// Keeps the holds whose group still answers `left` and marks every other one gone, so
-/// its number stays refused to later paths once dropped (CB-2 r1 F1). Takes the holds and
+/// its number stays refused to later paths once dropped. Takes the holds and
 /// the test.
 pub(super) fn keep_left(
     groups: &mut Vec<Ending>,

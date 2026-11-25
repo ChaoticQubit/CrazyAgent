@@ -528,27 +528,30 @@ fn the_page_reads_then_lists_each_plugin_with_one_label_and_code_plugins_last() 
     ));
     assert!(bar(&mut shell).contains("r Try again"));
     shell.key(Key::Char('r'));
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(shows(&mut shell, "Reading built-in code plugins..."));
     serve(&mut shell, &mut fake);
-    assert_eq!(fake.seen, ["AppPlugins", "AppPlugins", "PluginGrants"]);
+    assert_eq!(fake.seen, ["AppPlugins", "PluginGrants"]);
 
-    assert!(line(&mut shell, "OpenAI embeddings").contains("Bundled  Off"));
-    assert!(line(&mut shell, "Ollama embeddings").contains("Bundled  On"));
+    assert!(line(&mut shell, "OpenAI embeddings").contains("Built in  Off"));
+    assert!(line(&mut shell, "Ollama embeddings").contains("Built in  On"));
     assert!(line(&mut shell, "Dock embeddings").contains("Approved  On"));
     assert!(line(&mut shell, "Harbor embeddings").contains("Not approved"));
     assert!(line(&mut shell, "Cove embeddings").contains("Changed - review"));
     assert!(line(&mut shell, "Broken plugin").contains("Refused"));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
-    assert!(line(&mut shell, "  service-kit").contains("Bundled  On"));
+    assert!(line(&mut shell, "  service-kit").contains("Built in  On"));
     assert!(shows(
         &mut shell,
-        "agent-quit, bundled code plugin. 1 permission."
+        "agent-quit, built-in code plugin. 1 permission."
     ));
     assert!(shows(
         &mut shell,
-        "service-kit, bundled code plugin. 2 permissions."
+        "service-kit, built-in code plugin. 2 permissions."
     ));
     assert!(shows(&mut shell, "Essential, stays on."));
-    assert!(shows(&mut shell, "openai, version 1. Bundled."));
+    assert!(shows(&mut shell, "openai, version 1. Built in."));
     assert!(shows(&mut shell, "dock-embed, version 1. Added by you."));
     assert!(shows(
         &mut shell,
@@ -584,12 +587,15 @@ fn a_failed_grants_read_marks_only_the_code_rows_and_r_reads_them_again() {
     fake.refuse_grants = Some("owner_busy".into());
     let mut shell = page(&mut fake);
     assert!(line(&mut shell, "Dock embeddings").contains("Approved  On"));
-    assert!(shows(&mut shell, "Bundled code plugins couldn't be read."));
+    assert!(shows(&mut shell, "Built-in code plugins couldn't be read."));
     assert!(!shows(&mut shell, "agent-quit"));
     assert!(!shows(&mut shell, "App plugins aren't available"));
     shell.key(Key::Char('r'));
     serve(&mut shell, &mut fake);
-    assert!(!shows(&mut shell, "Bundled code plugins couldn't be read."));
+    assert!(!shows(
+        &mut shell,
+        "Built-in code plugins couldn't be read."
+    ));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
 }
 
@@ -719,12 +725,12 @@ fn a_bundled_review_is_read_only_and_space_switches_it() {
     let job = one(&mut shell);
     assert!(matches!(job, AppPluginsJob::Review { ref name } if name == "ollama"));
     answer(&mut shell, &mut fake, job);
-    assert!(shows(&mut shell, "Ollama embeddings (bundled)"));
+    assert!(shows(&mut shell, "Ollama embeddings (built in)"));
     assert!(!bar(&mut shell).contains("Approve"));
     shell.key(Key::Char('y'));
     assert!(requests(&mut shell).is_empty(), "a bundled review has no y");
     shell.key(Key::Esc);
-    assert!(!shows(&mut shell, "Ollama embeddings (bundled)"));
+    assert!(!shows(&mut shell, "Ollama embeddings (built in)"));
     shell.key(Key::Char(' '));
     assert!(matches!(
         one(&mut shell),
@@ -891,7 +897,7 @@ fn remove_confirms_naming_the_entered_key_and_bundled_rows_offer_no_x() {
         shell.key(Key::Char('x'));
         assert!(requests(&mut shell).is_empty());
         assert!(!shows(&mut shell, "Remove "));
-        assert!(said(&shell).contains("Bundled plugins can be turned off but not removed"));
+        assert!(said(&shell).contains("Built-in plugins can be turned off but not removed"));
     }
     select(&mut shell, 3);
     shell.key(Key::Char('x'));
@@ -1018,6 +1024,33 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
         checked += 1;
     }
     assert!(checked >= 20, "{checked}");
+    assert!(APP_PLUGINS_CODES.contains(&"app_plugin_name_used"));
+    assert_eq!(
+        sentence("app_plugin_name_used"),
+        "A plugin with that name was added after you reviewed this one. Review it again to replace it."
+    );
+    assert_eq!(
+        sentence("app_plugin_key_store_unavailable"),
+        "CrazyAgent couldn't reach its saved keys. Nothing was changed; try again."
+    );
+    assert_eq!(
+        sentence("app_plugin_name_taken"),
+        "A built-in plugin already has that name. Give your plugin another name."
+    );
+    assert_eq!(
+        sentence("app_plugin_bundled"),
+        "Built-in plugins can be turned off but not removed or replaced."
+    );
+}
+
+/// A plugin that is gone says how to see the current list, since neither a failed save
+/// nor a failed check reads the list again.
+#[test]
+fn a_plugin_that_is_gone_says_how_to_see_the_current_ones() {
+    assert_eq!(
+        sentence("app_plugin_not_found"),
+        "That plugin is gone. Open App plugins again to see the current ones."
+    );
 }
 
 #[test]
@@ -1234,4 +1267,180 @@ fn the_page_and_its_modals_match_their_frames() {
     let job = one(&mut shell);
     answer(&mut shell, &mut fake, job);
     check("app-plugin-off-80", &render(&mut shell, 80, 24), &[], None);
+}
+
+/// Opens the Add form and sends `path` for its check. Output: the Preview job it sent.
+fn check_path(shell: &mut Shell, path: &str) -> AppPluginsJob {
+    shell.key(Key::Char('a'));
+    shell.key(Key::Paste(path.into()));
+    shell.key(Key::Enter);
+    one(shell)
+}
+
+#[test]
+fn an_add_path_edited_while_its_check_runs_is_checked_again_and_never_added_as_typed_later() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    let job = check_path(&mut shell, DOCK_TWO);
+    shell.key(Key::Paste("-copy".into()));
+    answer(&mut shell, &mut fake, job);
+    assert!(
+        !shows(&mut shell, "Review Dock two"),
+        "a review of another path is never offered for approval"
+    );
+    assert!(shows(&mut shell, PATH_CHANGED));
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    assert!(matches!(
+        job,
+        AppPluginsJob::Preview { ref folder }
+            if folder.as_path() == std::path::Path::new("/Users/owner/plugins/dock-two-copy")
+    ));
+}
+
+#[test]
+fn the_review_scroll_stops_at_its_last_line_so_one_up_moves_back_one_line() {
+    let mut fake = Fake::new();
+    let Preview::Ready { trust } = fake.folders[0].1.clone() else {
+        panic!("the dock-two folder has a review");
+    };
+    let texts = trust_lines(&trust, usize::from(MODAL_WIDTH) - 4);
+    let before_last = texts[texts.len() - 2].clone();
+    let mut shell = page(&mut fake);
+    let job = check_path(&mut shell, DOCK_TWO);
+    answer(&mut shell, &mut fake, job);
+    assert!(shows(&mut shell, "Review Dock two"));
+    for _ in 0..40 {
+        shell.key(Key::Down);
+    }
+    assert!(
+        !shows(&mut shell, &before_last),
+        "only the last line is left"
+    );
+    shell.key(Key::Up);
+    assert!(
+        shows(&mut shell, &before_last),
+        "one Up shows the line before the last"
+    );
+}
+
+#[test]
+fn a_turn_off_sent_with_y_shows_it_is_saving_and_offers_no_keep_on() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 2);
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(bar(&mut shell).contains("Esc Keep on"));
+    shell.key(Key::Char('y'));
+    let job = one(&mut shell);
+    assert!(!bar(&mut shell).contains("Keep on"), "{}", bar(&mut shell));
+    assert!(shows(&mut shell, TURNING_OFF));
+    shell.key(Key::Esc);
+    assert!(requests(&mut shell).is_empty(), "Esc sends no cancel");
+    answer(&mut shell, &mut fake, job);
+    serve(&mut shell, &mut fake);
+    assert!(said(&shell).starts_with("Saved."), "{}", said(&shell));
+    assert!(line(&mut shell, "Dock embeddings").contains("Approved  Off"));
+}
+
+#[test]
+fn the_key_source_list_scrolls_so_the_typed_key_source_and_its_input_stay_in_view() {
+    let mut fake = Fake::new();
+    fake.accounts = (1..=30)
+        .map(|index| account(index, &format!("Key account {index}"), SignInMethod::ApiKey))
+        .collect();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 0);
+    shell.key(Key::Char('k'));
+    let _ = requests(&mut shell);
+    arrive(
+        &mut shell,
+        SettingsEvent::AllAccounts(Ok(fake.accounts.clone())),
+    );
+    for _ in 0..30 {
+        shell.key(Key::Down);
+    }
+    let shown = render(&mut shell, 100, 24);
+    assert!(
+        shown.iter().any(|row| row.contains("Key for api_key")),
+        "{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.contains("Enter a key for this plugin")),
+        "{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.contains("Sent to the engine once and never shown again.")),
+        "{shown:#?}"
+    );
+}
+
+#[test]
+fn the_add_path_hint_names_a_path_starting_with_slash() {
+    assert_eq!(
+        ABSOLUTE,
+        "Type the full path of the plugin folder, starting with /."
+    );
+}
+
+#[test]
+fn a_change_waiting_its_turn_reads_waiting_and_other_refusals_still_read_not_saved() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    select(&mut shell, 2);
+    shell.key(Key::Char('x'));
+    shell.key(Key::Char('y'));
+    fake.refuse = Some("access_change_pending".into());
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    let message = shell.ctx.message().expect("a message").clone();
+    assert_eq!(message.lead, "Waiting.");
+    assert_eq!(message.rest, crate::config::ACCESS_CHANGE_PENDING_LINE);
+    assert_eq!(message.tone, crate::tui::frame::Tone::Warning);
+
+    shell.key(Key::Char('x'));
+    shell.key(Key::Char('y'));
+    fake.refuse = Some("app_plugin_not_found".into());
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(said(&shell).starts_with("Not saved. "), "{}", said(&shell));
+}
+
+/// A plugin change whose engine actor stopped before it answered reads as the page's
+/// unknown outcome, since the change may have landed.
+#[test]
+fn a_stopped_owner_actor_reads_as_an_unknown_plugin_outcome() {
+    assert_eq!(
+        sentence("owner_actor_stopped_outcome_unknown"),
+        sentence("app_plugin_outcome_unknown")
+    );
+}
+
+/// A plugin change whose owner answer was lost reads as the page's unknown outcome, since
+/// the change may have landed.
+#[test]
+fn a_lost_owner_answer_reads_as_an_unknown_plugin_outcome() {
+    assert_eq!(
+        sentence("owner_outcome_unknown_reconcile_same_identity"),
+        sentence("app_plugin_outcome_unknown")
+    );
+}
+
+/// Settings, Plugins and skills lists App plugins as its last row, with the help bar as it
+/// was, and Enter on that row opens the App plugins page.
+#[test]
+fn the_plugins_and_skills_page_lists_app_plugins_and_enter_opens_it() {
+    let page = crate::tui::screens::settings_plugins::Plugins::with(Vec::new(), Vec::new());
+    let mut shell = Shell::with(ctx(80, 24), Box::new(page));
+    assert!(shows(&mut shell, "App plugins"));
+    assert!(!bar(&mut shell).contains("App plugins"));
+    shell.key(Key::End);
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::AppPlugins));
 }

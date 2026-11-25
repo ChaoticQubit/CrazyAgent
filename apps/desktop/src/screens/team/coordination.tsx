@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTerminalsPerWindow, type Result, type SkillView } from "../../api";
 import { loadTeamStatus } from "../../api-projects";
 import { BARE_NO_HOOKS, OVERLAP_CHOICES } from "../../engine-client";
-import type { TerminalDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, HeavyLane, IntentReceipt, LaneEntry, LaneView, Nudges, Overlaps, QuestionsTo, SharedResource, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
+import type { TerminalDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, HeavyLane, IntentReceipt, LaneEntry, LaneView, Nudges, Overlaps, QuestionsTo, SharedResource, SkillRole, SubagentMode, TaskStart, TeamStatus, UncommittedReminder } from "../../engine-client";
 import { sameJson, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select, isMac } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -32,6 +32,7 @@ export const COORD_DEFAULTS: CoordSettings = {
   task_start: "on",
   heavy_lane: "one",
   shared_resources: [],
+  uncommitted_reminder: "on",
 };
 
 export const SHARED_RESOURCES_MAX = 16;
@@ -369,6 +370,12 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
       <Segmented label="Task-start reminder" value={settings.task_start} onValue={(value: TaskStart) => void save({ task_start: value }, "the task-start reminder")}
         options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
       <span className="tg-terminal-note">On adds a short reminder to the first turn of each task of every sub-agent and teammate with tools on: load the context-mode tools (Claude Code runs ToolSearch with their select string) and use the approved skills that fit. Off adds nothing. It is advice; nothing is blocked.</span>
+    </SettingRow>
+    <SettingRow label="Uncommitted edits reminder">
+      <span className="set-label" aria-hidden="true">Uncommitted edits reminder</span>
+      <Segmented label="Uncommitted edits reminder" value={settings.uncommitted_reminder} onValue={(value: UncommittedReminder) => void save({ uncommitted_reminder: value }, "the uncommitted edits reminder")}
+        options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+      <span className="tg-terminal-note">On tells an agent working in its own clone, at its next task, which of its edits are not committed and did not land. Off only tells you. Your note is written either way.</span>
     </SettingRow>
     <SettingRow label="Counted tools" wide>
       <form className="pj-row" aria-label="Counted tools" onSubmit={(event) => { event.preventDefault(); void saveCounted(); }}>

@@ -109,8 +109,9 @@ fn a_github_host_that_resolves_to_a_metadata_address_is_refused_before_curl() {
     assert!(refusal(&api, Ok(vec![PUBLIC])).is_none());
 }
 
-/// curl's config pins a resolved host name to the address that was checked, an IPv6 one
-/// in brackets, while a loopback literal is checked without a lookup and gets no pin.
+/// curl's config pins a resolved host name to every address that was checked, in the
+/// lookup's order, an IPv6 one in brackets, while a loopback literal is checked without a
+/// lookup and gets no pin.
 #[test]
 fn the_checked_address_is_pinned_in_the_curl_config() {
     let api = get("https://api.github.com/user", false);
@@ -121,10 +122,16 @@ fn the_checked_address_is_pinned_in_the_curl_config() {
         "{config}"
     );
     let v6 = IpAddr::V6(Ipv6Addr::new(0x2606, 0x50c0, 0x8000, 0, 0, 0, 0, 0x0154));
-    let (_, config) = api.command(|_, _| Ok(vec![v6])).unwrap();
+    let (_, config) = api.command(move |_, _| Ok(vec![v6])).unwrap();
     let config = String::from_utf8(config).unwrap();
     assert!(
         config.contains("resolve = \"api.github.com:443:[2606:50c0:8000::154]\"\n"),
+        "{config}"
+    );
+    let (_, config) = api.command(move |_, _| Ok(vec![v6, PUBLIC])).unwrap();
+    let config = String::from_utf8(config).unwrap();
+    assert!(
+        config.contains("resolve = \"api.github.com:443:[2606:50c0:8000::154],140.82.112.6\"\n"),
         "{config}"
     );
     let loopback = get("http://127.0.0.1:9/user", true);
@@ -209,4 +216,26 @@ fn curl_config_bytes_stay_the_same() {
         refused.command(public).err().unwrap().0,
         "github_request_invalid"
     );
+}
+
+/// A lookup that never answers ends the request as `github_unreachable` once the lookup
+/// bound passes, and no curl command is built. The request runs on its own thread so a
+/// lookup with no bound fails this row instead of hanging it.
+#[test]
+fn a_lookup_that_never_answers_is_unreachable_within_the_bound() {
+    let (_held, never) = std::sync::mpsc::channel::<()>();
+    let (done, finished) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let request = get("https://api.github.com/user", false);
+        let built = request.command(move |_, _| {
+            let _ = never.recv();
+            Ok(vec![PUBLIC])
+        });
+        let _ = done.send(built.map(|_| ()).map_err(|error| error.0));
+    });
+    let margin = std::time::Duration::from_secs(5);
+    let answer = finished.recv_timeout(kernel_sandbox::egress::LOOKUP_TIME + margin);
+    assert_eq!(answer, Ok(Err("github_unreachable".to_owned())));
+    assert!(started.elapsed() < kernel_sandbox::egress::LOOKUP_TIME + margin);
 }

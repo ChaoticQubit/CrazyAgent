@@ -576,7 +576,7 @@ fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
 fn a_launch_getconf_written_under_a_narrow_umask_is_a_private_program() {
     let folder = tempfile::tempdir().unwrap();
     let status = kernel_processes::spawn_gate::row_alone(
-        "sandbox::toolchains::tests::a_launch_getconf_written_under_a_narrow_umask_in_its_own_process",
+        "sandbox::toolchains_tests::a_launch_getconf_written_under_a_narrow_umask_in_its_own_process",
         ":",
         folder.path(),
     );

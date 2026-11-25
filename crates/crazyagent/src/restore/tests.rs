@@ -311,3 +311,94 @@ fn a_recovery_refusal_reaches_a_client_as_its_known_code() {
     let dir = root();
     assert_eq!(backups(dir.path()), dir.path().join("backups"));
 }
+
+/// An engine root holding an empty engine.db, and a folder that links to it, as a moved
+/// home or CRAZYAGENT_HOME through a link reaches it. Output: the root and the folder
+/// holding the link, both removed on drop, and the root's path through the link, or the
+/// error of the write or link that failed.
+fn linked_root() -> std::io::Result<(tempfile::TempDir, tempfile::TempDir, std::path::PathBuf)> {
+    let dir = root();
+    std::fs::write(dir.path().join("engine.db"), b"")?;
+    let beside = root();
+    let link = beside.path().join("engine");
+    std::os::unix::fs::symlink(dir.path(), &link)?;
+    Ok((dir, beside, link))
+}
+
+#[test]
+fn an_engine_folder_reached_through_a_link_reads_no_offer() -> std::io::Result<()> {
+    let (_dir, _beside, link) = linked_root()?;
+
+    assert_eq!(recovery(&link, false), Ok(None));
+    Ok(())
+}
+
+#[test]
+fn an_engine_db_that_is_itself_a_link_is_still_refused() -> std::io::Result<()> {
+    let (dir, _beside, _link) = linked_root()?;
+    let real = root();
+    std::fs::write(real.path().join("engine.db"), b"").unwrap();
+    std::fs::remove_file(dir.path().join("engine.db")).unwrap();
+    std::os::unix::fs::symlink(real.path().join("engine.db"), dir.path().join("engine.db"))
+        .unwrap();
+
+    assert!(recovery(dir.path(), false).is_err());
+    assert_eq!(std::fs::read(real.path().join("engine.db")).unwrap(), b"");
+    Ok(())
+}
+
+/// Puts the committed 2.4.2 engine.db in a root and upgrades it to 2.5, which takes the pinned
+/// 2.4 backup a restore brings back; no connection stays open. Input: the root. Output: none.
+fn pinned(root: &Path) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v242-engine.db");
+    let path = root.join(kernel_storage::migrations::DATABASE);
+    std::fs::copy(&fixture, &path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut db = rusqlite::Connection::open(&path).unwrap();
+    crate::storage::migrations::upgrade(&mut db, &path, None, crate::storage::migrations::STEPS)
+        .unwrap();
+}
+
+#[test]
+fn an_admitted_restore_through_a_linked_root_brings_back_the_pinned_backup() -> std::io::Result<()>
+{
+    let (dir, _beside, link) = linked_root()?;
+    pinned(dir.path());
+    record(dir.path(), "pending", 0o600);
+
+    let restored = after_stop_when(
+        true,
+        &link,
+        &link.join("global.toml"),
+        &link.join("project.toml"),
+    );
+
+    assert_eq!(restored, Ok(()));
+    let Some(RestoreState::Restored { copy }) = state(dir.path()) else {
+        panic!("the record says the restore ended and names its copy");
+    };
+    assert!(dir.path().join("backups").join(copy).is_dir());
+    Ok(())
+}
+
+#[test]
+fn a_put_back_through_a_linked_root_brings_the_named_copy_back() -> std::io::Result<()> {
+    let (dir, _beside, link) = linked_root()?;
+    pinned(dir.path());
+    let global = dir.path().join("global.toml");
+    let project = dir.path().join("project.toml");
+    after_stop_when(true, dir.path(), &global, &project).unwrap();
+    let Some(RestoreState::Restored { copy }) = state(dir.path()) else {
+        panic!("the restore names the copy it kept");
+    };
+    record(
+        dir.path(),
+        &format!("failed storage_restore_rollback_failed {copy}"),
+        0o600,
+    );
+
+    assert_eq!(put_back(&link, false), Ok(()));
+
+    assert_eq!(state(dir.path()), None);
+    Ok(())
+}
