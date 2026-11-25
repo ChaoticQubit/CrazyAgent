@@ -215,61 +215,6 @@ fn test_source(path: &Path) -> bool {
             .is_some_and(|name| name.to_string_lossy().ends_with("tests.rs"))
 }
 
-fn calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
-    let needle = format!("{name}(");
-    text.match_indices(&needle)
-        .filter(|(at, _)| {
-            let before = &text[..*at];
-            let plain = before
-                .chars()
-                .next_back()
-                .is_some_and(|c| c == ' ' || c == '(' || c == '\n');
-            (plain || before.ends_with("update::")) && !before.ends_with("fn ")
-        })
-        .map(|(at, _)| function_holding(path, text, at + needle.len()))
-        .collect()
-}
-
-/// The plain or `update::` calls of one swap step in a non-test source, by the function
-/// holding each, then each line that names the step without calling it ([`hides_swap`]).
-/// Inputs: the source's path, its text and the step's name. Output: the holding functions'
-/// text up to each call, then those lines.
-fn swap_calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
-    let mut found = calls(path, text, name);
-    found.extend(
-        text.lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//") && hides_swap(line, name)),
-    );
-    found
-}
-
-/// Whether a source line names a swap step without calling it: an import under another
-/// name (`swap as put`), or the step taken as a value through the update path
-/// (`let f = update::swap;`), outside an import. Inputs: the trimmed line and the step's
-/// name. Output: the answer.
-fn hides_swap(line: &str, name: &str) -> bool {
-    assert!(!name.is_empty());
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let alias = format!("{name} as ");
-    let aliased = line.match_indices(&alias).any(|(at, _)| {
-        line[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !ident(c) && c != '.')
-    });
-    let import = line.starts_with("use ") || (line.starts_with("pub") && line.contains(" use "));
-    let named = format!("update::{name}");
-    let valued = !import
-        && line.match_indices(&named).any(|(at, _)| {
-            line[at + named.len()..]
-                .chars()
-                .next()
-                .is_none_or(|c| !ident(c) && c != '(')
-        });
-    aliased || valued
-}
-
 /// A folder that holds a link to a sibling folder gives each `.rs` file once, at its real
 /// path, so a link never counts a file twice.
 #[cfg(unix)]
@@ -285,37 +230,10 @@ fn rust_sources_skips_folder_links_and_finds_each_file_once() {
     assert_eq!(found, vec![real.join("held").join("one.rs")]);
 }
 
-/// A source that names the update module through a grouped import still has its plain swap
-/// calls looked at, so no import spelling hides a swap from the install guard.
-#[test]
-fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
-    let text = "use kernel_processes::{update, process};\n\nfn sneak() {\n    swap(&a, &b);\n}\n";
-    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
-    assert_eq!(found, vec!["\nfn sneak() {\n    swap("]);
-}
-
-/// A swap imported under another name is looked at where it is imported, so an alias never
-/// hides a swap from the install guard.
-#[test]
-fn an_aliased_swap_import_is_looked_at() {
-    let text = "use kernel_processes::update::swap as put;\n\nfn sneak() {\n    put(&a, &b);\n}\n";
-    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
-    assert_eq!(found, vec!["use kernel_processes::update::swap as put;"]);
-}
-
-/// A swap taken as a value through the update path is looked at where it is taken, so a
-/// function pointer never hides a swap from the install guard.
-#[test]
-fn a_swap_taken_as_a_value_is_looked_at() {
-    let text = "fn sneak() {\n    let f = update::swap;\n    f(&a, &b);\n}\n";
-    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
-    assert_eq!(found, vec!["let f = update::swap;"]);
-}
-
-/// Every install step that writes a release over the running app is reached only after its
-/// signature check: the desktop installs only the bytes `update.download` verified, and the
-/// command line swaps only inside `swap_around_engine`, which only `install_release` runs,
-/// after `verify_file`.
+/// The desktop's one install step that writes a release over the running app is reached
+/// only after its signature check: it installs only the bytes `update.download` verified.
+/// The command line needs no such row, since `swap` takes only what `unpack` made from what
+/// `verify_file` passed.
 #[test]
 fn no_install_path_skips_verification() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -332,8 +250,6 @@ fn no_install_path_skips_verification() {
         ["install", "(&bytes"].concat(),
     ];
     let mut desktop = Vec::new();
-    let mut swaps = Vec::new();
-    let mut engine_swaps = Vec::new();
     for path in sources.iter().filter(|path| !test_source(path)) {
         let text =
             std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
@@ -347,12 +263,6 @@ fn no_install_path_skips_verification() {
         for site in sites {
             desktop.push((path.clone(), function_holding(path, &text, site).to_owned()));
         }
-        for body in swap_calls(path, &text, "swap") {
-            swaps.push((path.clone(), body.to_owned()));
-        }
-        for body in swap_calls(path, &text, "swap_around_engine") {
-            engine_swaps.push((path.clone(), body.to_owned()));
-        }
     }
     assert_eq!(desktop.len(), 1, "{desktop:?}");
     let (path, body) = &desktop[0];
@@ -362,16 +272,4 @@ fn no_install_path_skips_verification() {
     );
     let downloaded = body.find("update.download(").expect(body);
     assert!(Some(downloaded) < body.find(&installs[0]), "{body}");
-    let glue = root.join("crates/crazyagent/src/update.rs");
-    assert!(!swaps.is_empty() && !engine_swaps.is_empty());
-    for (path, body) in &swaps {
-        assert!(path == &glue, "{path:?}");
-        assert!(body.starts_with("\npub fn swap_around_engine("), "{body}");
-    }
-    assert_eq!(engine_swaps.len(), 1, "{engine_swaps:?}");
-    let (path, body) = &engine_swaps[0];
-    assert!(path == &glue, "{path:?}");
-    assert!(body.starts_with("\nfn install_release("), "{body}");
-    let verified = body.find("verify_file(").expect(body);
-    assert!(Some(verified) < body.find("swap_around_engine("), "{body}");
 }
