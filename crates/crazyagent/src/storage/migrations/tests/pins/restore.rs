@@ -694,3 +694,42 @@ fn a_replaced_link_naming_a_key_does_not_keep_it() {
     assert_eq!(key_files(&newest, PLUGIN_KEYS), ["plugin-key-newest"]);
     assert_eq!(key_files(&newest, ACCOUNT_KEYS), ["account-key-newest"]);
 }
+
+#[test]
+fn an_account_key_only_an_older_replaced_copy_names_stays_after_a_later_restore() {
+    use crate::storage::accounts::ACCOUNT_KEYS;
+    let (root, newest) = second_restore(false);
+
+    sweep_second_restore(&root, &newest);
+
+    assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["account-key-older"]);
+    assert_eq!(key_files(&newest, ACCOUNT_KEYS), ["account-key-newest"]);
+}
+
+#[test]
+fn an_unlisted_backups_folder_keeps_every_key() {
+    use crate::storage::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS};
+    let (root, newest) = second_restore(false);
+    let backups = root.path().join(BACKUPS);
+    std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let listed = std::fs::read_dir(&backups).is_ok();
+    if listed && rustix::process::geteuid().is_root() {
+        std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    if !listed {
+        sweep_second_restore(&root, &newest);
+    }
+    std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        !listed,
+        "this user lists a 0300 folder, so the row proves nothing"
+    );
+    for (folder, kind) in [(PLUGIN_KEYS, "plugin"), (ACCOUNT_KEYS, "account")] {
+        let all = ["newest", "older", "orphan"].map(|which| format!("{kind}-key-{which}"));
+        assert_eq!(key_files(root.path(), folder), all, "{folder}");
+        assert!(key_files(&newest, folder).is_empty(), "{folder}");
+    }
+}
