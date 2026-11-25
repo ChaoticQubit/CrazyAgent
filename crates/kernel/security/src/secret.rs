@@ -164,25 +164,24 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
 }
 
 /// Serializes a value as compact JSON into one buffer of exactly its size, measured by a
-/// first pass, so no growth frees a partial copy of a secret the value holds; the caller
-/// wipes the result after use. Public in the kernel crate only because its callers stay in
-/// crazyagent. Input: the value. Output: the bytes, or serde_json's error.
+/// first pass and written by the second through a fixed slice that cannot grow, so no
+/// growth frees a partial copy of a secret the value holds; the caller wipes the result.
+/// Public in the kernel crate only because its callers stay in crazyagent. Input: the
+/// value. Output: the bytes, or serde_json's error when the value changed between passes.
 #[cfg(unix)]
 pub fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
     let mut counted = Counted(0);
     serde_json::to_writer(&mut counted, value)?;
-    let mut bounded = Bounded {
-        bytes: Vec::with_capacity(counted.0),
-        limit: counted.0,
-    };
-    let capacity = bounded.bytes.capacity();
-    let written = serde_json::to_writer(&mut bounded, value);
-    let mut buffer = bounded.bytes;
+    let mut buffer = vec![0_u8; counted.0];
+    let capacity = buffer.capacity();
+    let mut room: &mut [u8] = &mut buffer;
+    let written = serde_json::to_writer(&mut room, value);
+    let left = room.len();
     if let Err(problem) = written {
         wipe_owned(&mut buffer);
         return Err(problem);
     }
-    if buffer.len() != counted.0 {
+    if left != 0 {
         wipe_owned(&mut buffer);
         let changed = std::io::Error::other("the value changed between the two passes");
         return Err(serde_json::Error::io(changed));
@@ -200,33 +199,6 @@ struct Counted(usize);
 impl std::io::Write for Counted {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// A writer into a buffer that refuses any write past `limit` bytes, for [`sized_json`]'s
-/// second pass, so a value that grew since the first pass never makes the buffer grow and
-/// free a partial copy. Nothing of a refused write is kept.
-#[cfg(unix)]
-struct Bounded {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-
-#[cfg(unix)]
-impl std::io::Write for Bounded {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len() > self.limit - self.bytes.len() {
-            return Err(std::io::Error::other(
-                "the value grew between the two passes",
-            ));
-        }
-        self.bytes.extend_from_slice(bytes);
-        assert!(self.bytes.len() <= self.limit);
         Ok(bytes.len())
     }
 
