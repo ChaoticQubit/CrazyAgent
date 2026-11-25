@@ -133,7 +133,7 @@ fn a_refused_name_writes_nothing() {
 fn try_from_refuses_exactly_what_reference_refuses() {
     let long = "a".repeat(NAME_BYTES_MAX + 1);
     let longest = "b".repeat(NAME_BYTES_MAX);
-    let cases: [(&str, &str); 26] = [
+    let cases: [(&str, &str); 27] = [
         ("dev.crazyagent.test.github", "token"),
         ("svc", "aux"),
         ("aux", "a"),
@@ -159,6 +159,7 @@ fn try_from_refuses_exactly_what_reference_refuses() {
         ("", "a"),
         ("svc", ""),
         ("x", "y:z"),
+        ("svc", "y:z"),
         ("svc", "a b"),
     ];
     let mut accepted = 0;
@@ -179,4 +180,8 @@ fn try_from_refuses_exactly_what_reference_refuses() {
         }
     }
     assert_eq!(accepted, 9);
+    assert_eq!(
+        SecretRef::try_from("svcx").unwrap_err(),
+        StoreError::code("credential_reference_invalid")
+    );
 }
