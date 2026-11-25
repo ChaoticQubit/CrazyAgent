@@ -486,7 +486,14 @@ fn trusted_on_disk(case: &Case, folder: &Path, text: &str) {
         text
     );
     let listing = list(&case.db, &case.engine()).unwrap();
-    assert_eq!(plugin(&listing, "acme").sha256, sha(text));
+    let view = plugin(&listing, "acme");
+    assert_eq!(view.sha256, sha(text));
+    assert_ne!(view.status, PluginStatus::NeedsReview);
+    assert!(
+        !matches!(view.status, PluginStatus::Changed { .. }),
+        "{:?}",
+        view.status
+    );
 }
 
 /// A replace of a plugin whose earlier rolled-back replace still owes its original folder,
@@ -540,4 +547,83 @@ fn a_removal_after_a_stuck_rollback_stays_removed_through_a_start() {
 
     start_sweep(&case).unwrap();
     assert!(names_in(&folder).is_empty(), "{:?}", names_in(&folder));
+}
+
+/// Puts an entry named like a folder owed to acme that is not a folder: a regular file, or
+/// on unix a link to a folder outside the plugins folder holding a plugin.toml. Inputs: the
+/// plugins folder, the entry name and whether it is a link. Output: the link's target, when
+/// one was made.
+fn owed_named_entry(folder: &Path, name: &str, link: bool) -> Option<PathBuf> {
+    let entry = folder.join(name);
+    if !link {
+        std::fs::write(&entry, NEAR).unwrap();
+        return None;
+    }
+    let target = folder.parent().unwrap().join(format!("{name}-target"));
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join(MANIFEST_FILE), NEAR).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &entry).unwrap();
+    Some(target)
+}
+
+/// A file or link named like a folder owed to acme is not owed: a replace that rolls back
+/// leaves the original acme in place, and the next start unlinks the entry without
+/// following it.
+#[test]
+fn a_back_named_file_never_moves_the_live_folder() {
+    let links: &[bool] = if cfg!(unix) { &[false, true] } else { &[false] };
+    for &link in links {
+        let mut case = case();
+        trusted(&case, ACME);
+        let folder = plugins_folder(&case);
+        let entry = ".back-acme.00000000000000000000000000000000000000000000000000000000000000e5";
+        let target = owed_named_entry(&folder, entry, link);
+        let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+
+        replace_rolled_back(&mut case, &KEYS, &two, || {});
+
+        assert_eq!(
+            fixture(
+                &folder.join("acme").join(MANIFEST_FILE),
+                std::fs::read_to_string
+            ),
+            ACME,
+            "link {link}"
+        );
+        start_sweep(&case).unwrap();
+        assert_eq!(names_in(&folder), ["acme"], "link {link}");
+        if let Some(target) = target {
+            assert!(target.join(MANIFEST_FILE).exists());
+        }
+    }
+}
+
+/// A file named like a folder owed to acme does not count as a second owed folder: the start
+/// sweep puts the one owed folder back under acme and unlinks the file.
+#[test]
+fn a_back_named_file_does_not_make_an_owed_folder_ambiguous() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    let owed = ".back-acme.00000000000000000000000000000000000000000000000000000000000000a1";
+    let original = ACME.replace("Acme embeddings", "Acme embeddings original");
+    std::fs::create_dir(folder.join(owed)).unwrap();
+    std::fs::write(folder.join(owed).join(MANIFEST_FILE), &original).unwrap();
+    owed_named_entry(
+        &folder,
+        ".back-acme.00000000000000000000000000000000000000000000000000000000000000b1",
+        false,
+    );
+
+    crate::registry::remove_staged(&case.root).unwrap();
+
+    assert_eq!(names_in(&folder), ["acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        original
+    );
 }
