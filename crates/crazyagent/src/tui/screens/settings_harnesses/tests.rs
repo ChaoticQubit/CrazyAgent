@@ -939,13 +939,13 @@ fn every_update_sentence_is_the_desktop_sentence_and_no_two_are_alike() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../apps/desktop/src/api-harness-updates.ts"
     ))
-    .unwrap();
+    .unwrap()
+    .replace("${thisComputer()}", crate::tui::screens::THIS_COMPUTER)
+    .replace('`', "\"");
     let mut seen = std::collections::BTreeSet::new();
     for (code, sentence) in COPY {
-        assert!(
-            desktop.contains(&format!("{code}: \"{sentence}\",")),
-            "{code}"
-        );
+        let line = format!("{code}: \"{sentence}\",");
+        assert!(desktop.contains(&line), "{code}");
         assert!(seen.insert(sentence), "{code}");
         assert_eq!(update_copy(code), sentence);
     }

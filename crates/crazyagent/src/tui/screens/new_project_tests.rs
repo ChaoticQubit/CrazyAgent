@@ -707,7 +707,10 @@ fn a_harness_the_engine_lists_as_cant_run_is_never_ready_the_default_or_picked()
     wizard.team.as_mut().unwrap().master = "codex".into();
     assert_eq!(
         wizard.check_team().unwrap_err().text,
-        format!("Codex can't run on {}. Pick another harness.", super::THIS_COMPUTER)
+        format!(
+            "Codex can't run on {}. Pick another harness.",
+            super::THIS_COMPUTER
+        )
     );
 }
 

@@ -192,7 +192,7 @@ test("Settings, GitHub shows the account with Sign out, or the three sign-in way
   };
   const account = html(GitHubSettingsView, { ...panels, status: ok(signedIn) });
   assert.match(account, /Signed in to GitHub as mira\./);
-  assert.match(account, /keychain[\s\S]*Agents never get it\./);
+  assert.ok(account.replaceAll("&#x27;", "'").includes(`keeps this sign-in in ${{ darwin: "your Mac's keychain", win32: "Windows Credential Manager" }[process.platform] ?? "your system keyring"} and uses it to list, clone and publish your repositories and set their rules. Agents never get it.`), account);
   assert.match(account, />Sign out of GitHub<\/button>/);
   assert.doesNotMatch(account, /Sign in with GitHub/);
   const cli = html(GitHubAccountView, { status: { ...signedIn, login: null, method: "cli" }, busy: false, problem: "", onSignOut: forbidden });
