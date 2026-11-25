@@ -1379,6 +1379,7 @@ fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
     std::fs::create_dir_all(retired.join("a/b/c/d/e/f")).unwrap();
     std::fs::write(retired.join(MANIFEST_FILE), ACME).unwrap();
     let _ = crate::registry::remove_staged(&case.root);
+    let _ = crate::registry::sweep_replaced(&case.db, &case.root);
     let left = names_in(&folder);
     assert!(
         !left.iter().any(|name| name.starts_with(".old-acme.")),

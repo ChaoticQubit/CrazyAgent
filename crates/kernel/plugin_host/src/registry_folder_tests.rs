@@ -213,11 +213,13 @@ fn too_deep(plugin: &Path) {
     }
 }
 
-/// The start sweeps in the order an engine start runs them. Input: the case. Output: what
-/// the removal sweep answered.
+/// The start sweeps in the order an engine start runs them. Input: the case. Output: the
+/// removal sweep's refusal, else the replace sweep's answer.
 fn start_sweep(case: &Case) -> Result<(), Refused> {
     sweep_staged(&case.engine());
-    crate::registry::sweep_removals(&case.db, &case.engine())
+    let replaced = crate::registry::sweep_replaced(&case.db, &case.root);
+    let removed = crate::registry::sweep_removals(&case.db, &case.engine());
+    removed.and(replaced)
 }
 
 /// A committed removal whose folder can neither lose the plugin name nor be deleted stays
