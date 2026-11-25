@@ -463,6 +463,7 @@ fn every_loader_of_saved_hidden_folders_holds_the_guard_or_is_classified() {
         "storage.rs",
         "storage/master_session.rs",
         "team/runtime.rs",
+        "team/runtime/narrowing.rs",
     ]);
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut folders = vec![src.clone()];
