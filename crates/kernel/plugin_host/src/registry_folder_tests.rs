@@ -770,3 +770,18 @@ fn a_committed_replace_leftover_beside_its_live_plugin_is_still_deleted() {
 
     trusted_on_disk(&case, &folder, &two);
 }
+
+/// A retired folder whose text the trust row holds is kept with the live folder of its name
+/// when the live plugin.toml does not read, so a live folder is never deleted unread.
+#[test]
+fn a_retired_folder_is_kept_when_the_live_one_does_not_read() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let folder = cut_after_renames(&case, &two);
+    std::fs::write(folder.join("acme").join("notes.txt"), b"extra").unwrap();
+
+    start_sweep(&case).unwrap();
+
+    both_kept(&folder, &two);
+}
