@@ -301,10 +301,9 @@ fn a_case_variant_crazyagent_folder_made_before_the_first_agent_stays_in_place()
     }
 }
 
-/// In a project with a `.crazyagent` folder, the older agents root `<project>/worktrees` is
-/// held only while engine-made worktrees stay there; until then it may be the owner's own
-/// folder, which stays changeable. A project without one always holds it
-/// (`ide::workspace::agent_files_rule`, DEC-124 r1 M1).
+/// In a project with a `.crazyagent` folder, the older agents root `<project>/worktrees` is held
+/// only while engine-made worktrees stay there; until then it may be the owner's own folder, which
+/// stays changeable. A project without one always holds it (`ide::workspace::agent_files_rule`).
 #[test]
 fn the_older_agents_root_is_held_only_while_agents_stay_there() {
     for (older_agents, held) in [(false, false), (true, true)] {

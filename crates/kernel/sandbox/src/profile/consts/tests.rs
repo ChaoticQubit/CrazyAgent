@@ -17,10 +17,9 @@ fn the_fixed_agent_variables_fit_the_environment_bound_once_each() {
     assert_eq!(once.len(), names.len());
 }
 
-/// A Linux run the call supervisor stopped because it could not take back an entry
-/// read as a held name is told so; the same code on another system, and every other
-/// code on Linux (125, the supervisor's other stops, among them) stays the harness's
-/// own (DEC-185 S2a, rv-sec3 F1).
+/// A Linux run the call supervisor stopped because it could not take back an entry read as a held
+/// name is told so; the same code on another system, and every other code on Linux (125, the
+/// supervisor's other stops, among them) stays the harness's own.
 #[test]
 fn a_linux_run_stopped_with_a_held_name_not_put_back_is_told_so() {
     let said = held_stop("linux", HELD_NOT_PUT_BACK_EXIT);

@@ -12,11 +12,11 @@ pub enum LinuxSockets {
     TcpPorts,
 }
 
-/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the
-/// owner's setting "Linux call supervisor" (DEC-179 addendum 2). `On` (the default) adds
-/// the guards a launch needs: ports on this computer only, no new `.git` outside the
-/// agent's own git folders, signals only to programs it started. `Off` keeps the launch
-/// and every line as they were before the supervisor. Other systems ignore it.
+/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the owner's
+/// setting "Linux call supervisor". `On` (the default) adds the guards a launch needs: ports on
+/// this computer only, no new `.git` outside the agent's own git folders, signals only to programs
+/// it started. `Off` keeps the launch and every line as they were before the supervisor. Other
+/// systems ignore it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinuxSupervisor {
@@ -25,11 +25,11 @@ pub enum LinuxSupervisor {
     Off,
 }
 
-/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's
-/// setting "Refuse agents without the full Linux sandbox" (DEC-185). `Off` (the default)
-/// starts it with what this Linux holds and the lines that say what it cannot; `On` refuses
-/// it unless the engine finds the launch holds the full Linux sandbox. Team agents need the full sandbox whatever it says.
-/// Other systems ignore it.
+/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's setting
+/// "Refuse agents without the full Linux sandbox". `Off` (the default) starts it with what this
+/// Linux holds and the lines that say what it cannot; `On` refuses it unless the engine finds the
+/// launch holds the full Linux sandbox. Team agents need the full sandbox whatever it says. Other
+/// systems ignore it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinuxStrict {
@@ -38,11 +38,11 @@ pub enum LinuxStrict {
     On,
 }
 
-/// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held
-/// on Linux ("Linux limited-network sockets"), whether Linux agents run under the call
-/// supervisor ("Linux call supervisor") and whether a Linux launch without the full sandbox
-/// is refused (DEC-185). Before the first save every value is its default; a client that
-/// sends no supervisor or strict choice gets the default.
+/// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held on Linux
+/// ("Linux limited-network sockets"), whether Linux agents run under the call supervisor ("Linux
+/// call supervisor") and whether a Linux launch without the full sandbox is refused. Before the
+/// first save every value is its default; a client that sends no supervisor or strict choice gets
+/// the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxSettings {
@@ -53,10 +53,9 @@ pub struct SandboxSettings {
     pub linux_strict: LinuxStrict,
 }
 
-/// The owner's sandbox settings with the version of the read that showed them. A save
-/// names that version, so a save from a window that read older settings is refused
-/// `stale_revision` instead of turning a newer choice back (rv-sec2 F1). Fields: the
-/// settings and the version, 0 before the first save.
+/// The owner's sandbox settings with the version of the read that showed them. A save names that
+/// version, so a save from a window that read older settings is refused `stale_revision` instead of
+/// turning a newer choice back. Fields: the settings and the version, 0 before the first save.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredSandboxSettings {
