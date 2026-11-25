@@ -42,19 +42,23 @@ pub(crate) fn redact(text: &str) -> String {
 }
 
 /// Whether a line holds a key block's END line as PEM writes it: `-----END `, in any case,
-/// then a label of capitals, digits and spaces with at least one capital, then `-----`. A
-/// separator such as `-----End of output-----` is not one. Input: the line. Output: true when
-/// one is found anywhere in it, also inside a joined key such as a JSON key file's value.
+/// then a label of capitals, digits, spaces and hyphens with at least one capital, then
+/// `-----`. A separator such as `-----End of output-----` is not one. Input: the line.
+/// Output: true when one is found anywhere in it, also inside a joined key such as a JSON
+/// key file's value.
 fn block_end(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     assert_eq!(lower.len(), line.len());
     lower.match_indices("-----end ").any(|(at, marker)| {
         let rest = &line[at + marker.len()..];
-        let label = rest
-            .bytes()
-            .take_while(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b' ')
-            .count();
-        rest.as_bytes()[..label].iter().any(u8::is_ascii_uppercase)
-            && rest[label..].starts_with("-----")
+        rest.find("-----").is_some_and(|size| {
+            let label = &rest.as_bytes()[..size];
+            label.iter().any(u8::is_ascii_uppercase)
+                && label.iter().all(|byte| {
+                    byte.is_ascii_uppercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b' ' | b'-')
+                })
+        })
     })
 }
