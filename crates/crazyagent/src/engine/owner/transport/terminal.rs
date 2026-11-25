@@ -2,32 +2,21 @@ use super::sizing::{Apply, Seat, Units};
 use super::*;
 use crate::ipc::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
-#[cfg(unix)]
 use crate::protocol::plain_code;
 use crate::terminal::{TerminalFrame, TerminalRequest};
-#[cfg(unix)]
-use kernel_processes::terminal::attach_again;
-#[cfg(unix)]
 use kernel_processes::terminal::buffer::Chunk;
 use kernel_processes::terminal::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, PaneAt, TerminalStream,
+    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PASTE_BYTES_MAX, PROMPT_BYTES_MAX,
+    PaneAt, TerminalStream, attach_again, paste_keys, type_into, type_prompt, type_prompt_at,
 };
-#[cfg(unix)]
-use kernel_processes::terminal::{CHUNK_BYTES_MAX, PASTE_BYTES_MAX, type_into};
-#[cfg(unix)]
-use kernel_processes::terminal::{paste_keys, type_prompt, type_prompt_at};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
-#[cfg(unix)]
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
 const VIEWERS_FULL: &str = "terminal_viewers_full";
-#[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
-#[cfg(unix)]
 const VIEWER_GONE: &str = "terminal_viewer_gone";
-#[cfg(unix)]
 const GRANT_ENDED: &str = "owner_grant_stale_or_revoked";
 
 /// An owner's live view of one agent terminal: its size at attach, then output and controls.
@@ -152,7 +141,6 @@ impl OwnerClient {
     /// Takes the terminal name; fails with the engine's plain code, such as
     /// `terminal_agent_unknown` or `terminal_unavailable`.
     /// Returns the session with the size, the screen then live output, and the controls.
-    #[cfg(unix)]
     pub async fn terminal_attach(&self, agent: AgentId) -> Result<TerminalSession, EngineError> {
         let request = TerminalRequest::Attach {
             agent_id: agent.clone(),
@@ -165,7 +153,6 @@ impl OwnerClient {
     /// Takes the terminal name and a pane id the team lists for it; fails like
     /// `terminal_attach`, or with `terminal_pane_unknown` for a pane of another window.
     /// Returns the session.
-    #[cfg(unix)]
     pub async fn terminal_attach_pane(
         &self,
         agent: AgentId,
@@ -184,7 +171,6 @@ impl OwnerClient {
     /// Takes the terminal name, the pane if any, and the viewer's columns and rows within
     /// `SIZE_MIN..=SIZE_MAX`; fails like those, or with `terminal_size_bounds`.
     /// Returns the session with the size the engine reports.
-    #[cfg(unix)]
     pub async fn terminal_attach_sized(
         &self,
         agent: AgentId,
@@ -206,7 +192,6 @@ impl OwnerClient {
     /// but sends no output, for a viewer that draws the pane from elsewhere. Takes the name,
     /// the pane if any, the size within `SIZE_MIN..=SIZE_MAX` and whether it follows. Returns
     /// the session, whose output gives only the final `Closed`.
-    #[cfg(unix)]
     pub async fn terminal_attach_input(
         &self,
         agent: AgentId,
@@ -224,7 +209,6 @@ impl OwnerClient {
         self.attach_with(agent, &request).await
     }
 
-    #[cfg(unix)]
     async fn attach_with(
         &self,
         agent: AgentId,
@@ -354,7 +338,6 @@ impl Engine {
     /// open terminal host still keeps (N-D21). Any other read, and every read before a host
     /// opened, passes unchanged: a host opened later keeps no screen yet. Takes the read.
     /// Returns it, or `terminal_unavailable` when the host check could not finish.
-    #[cfg(unix)]
     pub(crate) async fn kept_named(
         &self,
         read: OwnerReadReply,
@@ -387,22 +370,23 @@ impl Engine {
         })
     }
 
-    /// Passes a read unchanged where no terminal host opens, so no finished worker's screen
-    /// is kept to name. Takes the read. Returns it.
-    #[cfg(not(unix))]
-    pub(crate) async fn kept_named(
-        &self,
-        read: OwnerReadReply,
-    ) -> Result<OwnerReadReply, EngineError> {
-        Ok(read)
-    }
-
-    /// Refuses a terminal host where no tmux runs: no agent pane opens off the macOS
-    /// confinement, and the engine does not run on Windows in this version. Takes the engine
-    /// root, unused. Returns `terminal_unavailable`.
-    #[cfg(not(unix))]
-    pub(crate) fn terminal(&self, _root: &Path) -> Result<Arc<dyn Host>, EngineError> {
-        Err(failure("terminal_unavailable"))
+    /// Gives the ConPTY terminal host on Windows, opened on first use and kept for the
+    /// engine's life, so every view and launcher reaches the same terminals and the last
+    /// screens it keeps. Takes the engine root. Returns the host, or `terminal_unavailable`
+    /// when the host's lock is poisoned.
+    #[cfg(windows)]
+    pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
+        let mut slot = self
+            .terminal
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        if let Some((_, host, _)) = slot.as_ref() {
+            return Ok(host.clone());
+        }
+        let (runs, host) = crate::terminal::platform(root);
+        assert!(runs, "the ConPTY host always runs");
+        *slot = Some((None, host.clone(), 0));
+        Ok(host)
     }
 }
 
@@ -429,7 +413,6 @@ async fn granted(
 /// It reads the authority directly, without the owner barrier, so typing never waits on
 /// other owner work and a revocation published a moment ago already refuses the next key.
 /// Inputs: the authority, the viewer's packet and its admission. Output: whether it holds.
-#[cfg(unix)]
 fn still_granted(authority: &Authority, packet: &[u8; 37], admission: &Admission) -> bool {
     authority.authenticate(packet).ok().as_ref() == Some(admission)
 }
@@ -449,7 +432,6 @@ async fn write(
 /// at most `CHUNK_BYTES_MAX` bytes, each bounded by `WRITE_TIME`. Takes the writer and the
 /// fresh stream. Returns the first failed write's error, after which the stream may hold
 /// part of a frame.
-#[cfg(unix)]
 async fn redraw(
     writer: &mut (impl AsyncWrite + Unpin),
     viewer: &TerminalStream,
@@ -467,7 +449,6 @@ async fn redraw(
 
 /// One owner request a view sends to its host, on a blocking thread, so the view's output
 /// keeps flowing while tmux answers.
-#[cfg(unix)]
 type Sending = tokio::task::JoinHandle<Result<Option<String>, HostError>>;
 
 /// What one attach opened: the agent and the size its view starts at, the viewer whose
@@ -582,13 +563,11 @@ fn pin_and_seat(
 
 /// One owner paste the engine gathers from its `Paste` chunks before it filters and pastes
 /// it whole: the bytes so far, at most `PASTE_BYTES_MAX`.
-#[cfg(unix)]
 #[derive(Default)]
 struct Pasting {
     bytes: Vec<u8>,
 }
 
-#[cfg(unix)]
 impl Pasting {
     /// Tells whether a paste has chunks and waits for its last one. Takes the paste.
     /// Returns the answer.
@@ -621,7 +600,6 @@ impl Pasting {
 /// Starts pasting one owner paste's filtered keys into the view's pane on a blocking thread:
 /// its pinned pane only when it has one, else the agent's by name. Takes the host, the agent,
 /// the pinned pane and the keys. Returns the send, which answers none.
-#[cfg(unix)]
 fn paste(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<PaneAt>, keys: Vec<u8>) -> Sending {
     assert!(!keys.is_empty() && keys.len() <= PASTE_BYTES_MAX);
     assert!(
@@ -643,7 +621,6 @@ fn paste(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<PaneAt>, keys: Ve
 /// lives: for a pinned view gone once the agent's own pane is another one, else once that
 /// call answers ended, or fails while the host no longer lists the agent; a host that
 /// cannot tell leaves the view open. Takes the host, the agent and the pin. Returns it.
-#[cfg(unix)]
 async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneAt>) -> bool {
     let host = host.clone();
     let agent = agent.clone();
@@ -675,7 +652,6 @@ async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneA
 /// keys, prompt and resize go to its pane only, never by name. Takes the host, the agent,
 /// the view's pane, its pin, its seat and the request. Returns the send, which answers the
 /// prompt's text once the agent took it as a prompt, none for any other, or the host's error.
-#[cfg(unix)]
 fn send(
     host: &Arc<dyn Host>,
     agent: &AgentId,
@@ -807,7 +783,6 @@ async fn open(
 /// and the grant checked again every `GRANT_CHECK`. Takes the writer, the view, the engine,
 /// authority, packet and admission. Returns why the view ends early: `VIEWER_GONE` after a
 /// failed write, when the stream may hold part of a frame, or `GRANT_ENDED`.
-#[cfg(unix)]
 async fn replay(
     writer: &mut (impl AsyncWrite + Unpin),
     view: &View,
@@ -847,7 +822,6 @@ async fn replay(
 
 /// What a sent prompt does to the owner's line for the owner typing signal: a line sent
 /// with Enter.
-#[cfg(unix)]
 const PROMPT_SENT: &[u8] = b"\r";
 
 /// The keys an owner request puts into a team agent's terminal, for the owner typing
@@ -856,7 +830,6 @@ const PROMPT_SENT: &[u8] = b"\r";
 /// the keys, or none for a request that types nothing or only the view's wheel keys, which
 /// are the owner reading, not typing (OB-10). A wheel request holding any other byte counts
 /// as typed keys (OB10-L1).
-#[cfg(unix)]
 fn owner_keys(request: &TerminalRequest) -> Option<&[u8]> {
     match request {
         TerminalRequest::Scroll { bytes } if crate::team::master::wheel_only(bytes) => None,
@@ -877,7 +850,6 @@ fn owner_keys(request: &TerminalRequest) -> Option<&[u8]> {
 /// Records a prompt the owner sent to a team sub-agent for the master's next turn.
 /// Takes the engine database, the team agent id and the prompt. A failure loses only the
 /// note; the prompt already reached the terminal.
-#[cfg(unix)]
 async fn heard(database: PathBuf, agent: i64, text: String) {
     let _ = tokio::task::spawn_blocking(move || {
         let connection = rusqlite::Connection::open_with_flags(
@@ -898,68 +870,6 @@ async fn heard(database: PathBuf, agent: i64, text: String) {
     .await;
 }
 
-#[cfg(not(unix))]
-impl OwnerClient {
-    /// Refuses a terminal view where the owner socket is a Unix domain socket the platform
-    /// does not have. Takes the terminal name, unused. Returns `terminal_owner_unavailable`.
-    pub async fn terminal_attach(&self, _agent: AgentId) -> Result<TerminalSession, EngineError> {
-        Err(failure("terminal_owner_unavailable"))
-    }
-
-    /// Refuses a pane view for the same reason. Takes the terminal name and pane id, unused.
-    /// Returns `terminal_owner_unavailable`.
-    pub async fn terminal_attach_pane(
-        &self,
-        _agent: AgentId,
-        _pane: String,
-    ) -> Result<TerminalSession, EngineError> {
-        Err(failure("terminal_owner_unavailable"))
-    }
-
-    /// Refuses a sized view for the same reason. Takes the terminal name, pane and size,
-    /// unused. Returns `terminal_owner_unavailable`.
-    pub async fn terminal_attach_sized(
-        &self,
-        _agent: AgentId,
-        _pane: Option<String>,
-        _cols: u16,
-        _rows: u16,
-    ) -> Result<TerminalSession, EngineError> {
-        Err(failure("terminal_owner_unavailable"))
-    }
-
-    /// Refuses an input-only view for the same reason. Takes the terminal name, pane, size
-    /// and whether it follows, unused. Returns `terminal_owner_unavailable`.
-    pub async fn terminal_attach_input(
-        &self,
-        _agent: AgentId,
-        _pane: Option<String>,
-        _size: (u16, u16),
-        _follows: bool,
-    ) -> Result<TerminalSession, EngineError> {
-        Err(failure("terminal_owner_unavailable"))
-    }
-}
-
-/// Ends a view at once where the engine has no terminal pump yet (Windows until W4): the
-/// stream is closed unanswered. Takes the same inputs as the Unix version; only the stream
-/// is used.
-#[cfg(not(unix))]
-#[allow(clippy::too_many_arguments)]
-async fn watch(
-    stream: Stream,
-    _packet: &[u8; 37],
-    _admission: Admission,
-    _view: View,
-    _host: Arc<dyn Host>,
-    _member: Option<i64>,
-    _engine: &Engine,
-    _authority: &Authority,
-) {
-    drop(stream);
-}
-
-#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn watch(
     stream: Stream,
@@ -1014,7 +924,6 @@ async fn watch(
 /// What a view's loop asks of the engine: whether the owner's grant still stands, read right
 /// before each send and on each grant check, and the owner's keys and prompts it records.
 /// The engine's answer is [`Grant`]; a row stands in for it to hold a send.
-#[cfg(unix)]
 trait Viewing {
     fn allows(&self) -> bool;
     fn holds(&self) -> impl Future<Output = bool> + Send;
@@ -1024,7 +933,6 @@ trait Viewing {
 
 /// One view's owner grant as the engine reads it, with the team agent its owner keys and
 /// prompts count for and the database that records a prompt heard.
-#[cfg(unix)]
 struct Grant<'a> {
     engine: &'a Engine,
     authority: &'a Authority,
@@ -1034,7 +942,6 @@ struct Grant<'a> {
     database: Option<PathBuf>,
 }
 
-#[cfg(unix)]
 impl Viewing for Grant<'_> {
     fn allows(&self) -> bool {
         still_granted(self.authority, self.packet, self.admission)
@@ -1071,7 +978,6 @@ impl Viewing for Grant<'_> {
 /// so a prompt taken is heard. A paste's chunks come back to back or the view ends invalid;
 /// an input-only view ends once its terminal is gone. Takes the writer, the view, the
 /// request queue, the host and the grant. Returns why it ended.
-#[cfg(unix)]
 async fn pump(
     writer: &mut (impl AsyncWrite + Unpin),
     view: View,
@@ -1169,7 +1075,6 @@ async fn pump(
 
 /// Finishes the send still running when a view ends, so a prompt it took is heard and a
 /// refusal is logged. Takes the send, if any, and the grant. Returns once it finished.
-#[cfg(unix)]
 async fn finish(sending: Option<Sending>, viewing: &impl Viewing) {
     let Some(sending) = sending else {
         return;
@@ -1187,7 +1092,6 @@ async fn finish(sending: Option<Sending>, viewing: &impl Viewing) {
 /// Logs a send the host refused with a code that does not end the view, by its plain code
 /// only, so a dropped request is never silent. Takes the host's error. An ended code is the
 /// view's own end, which the pump reports, so it logs nothing for one.
-#[cfg(unix)]
 fn refused(error: &HostError) {
     if !kernel_processes::terminal::ended_code(&error.0) {
         eprintln!("terminal_send_refused code={}", plain_code(&error.0));
@@ -1251,3 +1155,6 @@ pub(super) async fn refuse(
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
