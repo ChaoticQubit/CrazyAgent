@@ -130,6 +130,8 @@ fn only_an_end_before_any_marker_hides_the_lines_before_it() {
     assert_eq!(redact(&joined), ["before", HIDDEN_LINE, "after"].join("\n"));
 }
 
+/// The legacy read, for a job recorded before its run name was stored: a run listed after
+/// many unrelated entries in the agents folder is still found and read.
 #[test]
 fn a_run_listed_after_many_unrelated_entries_is_still_found() {
     let root = runtime();
@@ -145,6 +147,8 @@ fn a_run_listed_after_many_unrelated_entries_is_still_found() {
     assert_eq!(read_job(&root, 42), ["found it"]);
 }
 
+/// The legacy read, for a job recorded before its run name was stored: the newest attempt,
+/// then its newest launch, is read, and a job with no run of its own reads nothing.
 #[test]
 fn the_newest_attempt_then_the_newest_launch_is_read() {
     let root = runtime();
