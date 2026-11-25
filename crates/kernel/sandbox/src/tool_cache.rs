@@ -18,6 +18,9 @@ const NAME_BYTES_MAX: usize = 64;
 const RECORD_BYTES_MAX: u64 = 4096;
 const PRIMING_TIME: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
+
+/// The count of priming records this process has written, which names each staging file.
+static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const OPEN_FOLDER: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -397,33 +400,52 @@ fn read_record(owned: &OwnedFd, record: &str) -> Option<(String, Vec<String>)> {
         .then_some((identity, buckets))
 }
 
-/// Writes a priming record in place of the last one, through a side file renamed over it.
-/// Inputs: the open project folder, the record's name, the uv identity and the buckets.
-/// Output: Ok, or `tool_cache_record_unwritten`.
+/// Writes a priming record in place of the last one, through a staging file of this writer
+/// alone, named by this process and a count of its writes, so launches priming one cache at
+/// once never share one. Inputs: the open project folder, the record's name, the uv
+/// identity and the buckets. Output: Ok, or `tool_cache_record_unwritten`.
 fn write_record(
     owned: &OwnedFd,
     record: &str,
     identity: &str,
     buckets: &[String],
 ) -> Result<(), &'static str> {
-    let unwritten = |_| "tool_cache_record_unwritten";
-    let side = format!("{record}.new");
+    let count = STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let side = format!("{record}.{}.{count}.new", std::process::id());
     let mut text = format!("{identity}\n");
     for bucket in buckets {
         text.push_str(bucket);
         text.push('\n');
     }
-    let file = rustix::fs::openat(
-        owned,
-        side.as_str(),
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(0o600),
-    )
+    publish(owned, record, &side, text.as_bytes())
+}
+
+/// Puts a record in place through a staging file made with exclusive creation, so no other
+/// writer opens it; one already there can only be left by a dead process with this pid and
+/// is removed once. The rename comes after the whole text, and any failure removes the
+/// staging file. Inputs: the folder, the record, the staging name and the text. Output: Ok,
+/// or `tool_cache_record_unwritten`.
+fn publish(owned: &OwnedFd, record: &str, side: &str, text: &[u8]) -> Result<(), &'static str> {
+    assert!(side.ends_with(".new") && side != record);
+    let unwritten = |_| "tool_cache_record_unwritten";
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mode = Mode::from_raw_mode(0o600);
+    let file = match rustix::fs::openat(owned, side, flags, mode) {
+        Err(Errno::EXIST) => {
+            rustix::fs::unlinkat(owned, side, AtFlags::empty()).map_err(unwritten)?;
+            rustix::fs::openat(owned, side, flags, mode)
+        }
+        opened => opened,
+    }
     .map_err(unwritten)?;
-    std::fs::File::from(file)
-        .write_all(text.as_bytes())
-        .map_err(|_| "tool_cache_record_unwritten")?;
-    rustix::fs::renameat(owned, side.as_str(), owned, record).map_err(unwritten)
+    let published = std::fs::File::from(file)
+        .write_all(text)
+        .map_err(|_| "tool_cache_record_unwritten")
+        .and_then(|()| rustix::fs::renameat(owned, side, owned, record).map_err(unwritten));
+    if published.is_err() {
+        let _ = rustix::fs::unlinkat(owned, side, AtFlags::empty());
+    }
+    published
 }
 
 /// Finds the cache buckets this uv makes a `.git` file in by running it once in a fresh
