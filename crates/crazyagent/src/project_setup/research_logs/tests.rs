@@ -272,6 +272,28 @@ fn a_block_whose_begin_row_the_tail_window_cuts_hides_its_body_rows() {
     assert!(lines.iter().all(|line| line == HIDDEN_LINE), "{lines:?}");
 }
 
+/// A key block whose whole BEGIN row starts right after a line break, at the first byte read
+/// before the tail window, and whose body runs to the log's end with no END hides every row
+/// the window shows.
+#[test]
+fn a_block_whose_begin_row_starts_at_the_first_byte_read_hides_its_body_rows() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let row = BODY_NO_DIGIT.len() + 1;
+    let head = "starting\n";
+    let body = 2 * tail - (BEGIN.len() + 1);
+    let log = format!(
+        "{head}{BEGIN}\n{}",
+        body_rows((body - 1) / row, (body - 1) % row)
+    );
+    assert_eq!(log.len(), head.len() + 2 * tail);
+    assert_eq!(window_start(log.len()) - tail, log.find(BEGIN).unwrap());
+    assert_eq!(log.as_bytes()[head.len() - 1], b'\n');
+    assert!(!log.contains(END));
+    let (_root, lines) = reply_of(&log);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| line == HIDDEN_LINE), "{lines:?}");
+}
+
 /// A key block that ends before the tail window leaves the window's plain rows shown, though
 /// the 64 KiB before the window holds the whole block.
 #[test]
