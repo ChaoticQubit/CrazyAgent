@@ -3,8 +3,6 @@ name: Tests
 on:
   push:
     branches:
-      - "chore/v242-batch*"
-      - "chore/v25*"
       - "test-farm/**"
   workflow_dispatch:
 
@@ -18,56 +16,244 @@ concurrency:
 env:
   RUST_TOOLCHAIN: "1.98.1"
   NODE_VERSION: "26.12.1"
-  BUN_VERSION: "1.4.3"
-  RCLI_SOURCE_REPOSITORY: Backboard-io/Backboard-R-CLI
-  RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
   TMUX_VERSION: "3.8"
-  TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
-  CLAUDE_CODE_VERSION: "2.1.309"
-  CODEX_VERSION: "0.164.0"
   UV_VERSION: "0.13.5"
-  NEXTEST_VERSION: "0.9.152"
-  NEXTEST_PROFILE: farm
-  CHROME_VERSION: "151.0.7922.34"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  FARM_ENGINE_EXCLUDE: >-
-    agents_live codex_app_server_live codex_bridge_live launch_context_live
-    acceptance_v2_rcli_usage accounts_binary harness_catalog_bundled_rcli
-    worker_engine_boundary qualification_boundary/boundary_denies_escape_and_trusted_writes
-    accounts/local_model_discovery_reads_the_real_ollama accounts/an_openai_compatible_account_check_lists_the_real_ollama_models
-    harness_launch/live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups
-    harness_launch/live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file
-    harness_launch/live_tools_on_turn_completes_inside_the_project_sandbox
-    github::tests::signed_in_gh_cli_token_is_reused_through_the_real_gh
-    project_sandbox/an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run
-  FARM_DESKTOP_EXCLUDE: accounts_bridge/desktop_accounts_commands_reach_the_real_engine
-  NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
-  BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
-  NODE_TEST_TIMEOUT_MACOS_MS: "60000"
-  FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+  BASE_SHA: 9af0fed035548e0468d31f5db66792da23bf7496
+  ROWS_SH: |
+    set -uo pipefail
+    T=$(cygpath -m "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")
+    out="$T/b25"
+    mkdir -p "$out/cmd" "$out/log"
+    touch "$out/reds.tsv" "$out/summary.txt" "$out/verdict.tsv"
+    wrapped() {
+      local wrap="$1"
+      shift
+      case "$wrap" in
+        dbus) dbus-run-session -- bash -c 'printf "farm-keyring\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null; exec "$@"' wrapped "$@" ;;
+        flag) env CRAZYAGENT_BUNDLES_TMUX=1 "$@" ;;
+        *) env -u CRAZYAGENT_BUNDLES_TMUX "$@" ;;
+      esac
+    }
+    results() {
+      awk '/^test result:/{for(k=1;k<NF;k++){w=$(k+1); sub(/;$/,"",w); if(w=="passed")p+=$k; if(w=="failed")f+=$k; if(w=="ignored")i+=$k}} END{print p+0, f+0, i+0}' "$1"
+    }
+    verdict() {
+      printf '%s\t%s\t%s\t%s\t%s\n' "$FARM_OS" "$1" "$2" "$3" "$4" >> "$out/verdict.tsv"
+    }
+    mode="$1"
+    shift
+    if [ "$mode" = run ]; then
+      label="$1"
+      wrap="$2"
+      zero_ok="$3"
+      shift 3
+      pre=()
+      while [ $# -gt 0 ] && [ "$1" != -- ]; do pre+=("$1"); shift; done
+      [ $# -gt 0 ] && shift
+      filters=()
+      flags=()
+      for a in "$@"; do
+        case "$a" in -*) flags+=("$a") ;; *) filters+=("$a") ;; esac
+      done
+      printf '%s\n' "$wrap" "${pre[@]}" > "$out/cmd/$label"
+      : > "$out/cmd/$label.filters"
+      : > "$out/cmd/$label.flags"
+      [ ${#filters[@]} -eq 0 ] || printf '%s\n' "${filters[@]}" > "$out/cmd/$label.filters"
+      [ ${#flags[@]} -eq 0 ] || printf '%s\n' "${flags[@]}" > "$out/cmd/$label.flags"
+      echo "$label on $FARM_OS: cargo test ${pre[*]} -- ${flags[*]+${flags[*]}} ${filters[*]+${filters[*]}} ($wrap)"
+      wrapped "$wrap" cargo test "${pre[@]}" -- --list > "$out/log/$label.list" 2> "$out/log/$label.build"
+      lrc=$?
+      if [ "$lrc" -ne 0 ]; then
+        grep -E -A 8 '^error' "$out/log/$label.build" | head -n 200
+        tail -n 20 "$out/log/$label.build"
+        printf '%s\tCOMPILE\n' "$label" >> "$out/reds.tsv"
+        printf '%s %s COMPILE-RED rc=%s\n' "$FARM_OS" "$label" "$lrc" | tee -a "$out/summary.txt"
+        exit 1
+      fi
+      sed -n 's/: test$//p' "$out/log/$label.list" > "$out/log/$label.names"
+      total=$(grep -c '' "$out/log/$label.names" || true)
+      bad=0
+      pkg=""
+      prev=""
+      for a in "${pre[@]}"; do
+        [ "$prev" = -p ] && pkg="$a"
+        prev="$a"
+      done
+      sel="${pre[*]}"
+      touch "$out/built.txt"
+      if grep -qxF -- "$sel" "$out/built.txt"; then
+        echo "$label: cargo test $sel was built earlier in this job, so no Compiling count"
+      else
+        printf '%s\n' "$sel" >> "$out/built.txt"
+        comp=$(grep -c -E "^ +Compiling $pkg v" "$out/log/$label.build" || true)
+        echo "$label: Compiling $pkg lines $comp"
+        if [ -z "$pkg" ] || [ "$comp" -eq 0 ]; then
+          printf '%s %s ZERO cargo compiled no %s unit, so its rows prove nothing\n' "$FARM_OS" "$label" "${pkg:-package}" | tee -a "$out/summary.txt"
+          bad=1
+        fi
+      fi
+      echo "$label: the target lists $total rows"
+      if [ "$total" -eq 0 ]; then
+        printf '%s %s ZERO the target lists no row\n' "$FARM_OS" "$label" | tee -a "$out/summary.txt"
+        bad=1
+      fi
+      hits=0
+      for f in ${filters[@]+"${filters[@]}"}; do
+        n=$(grep -cF -- "$f" "$out/log/$label.names" || true)
+        hits=$((hits + n))
+        if [ "$n" -gt 0 ]; then
+          echo "filter $f matches $n rows"
+        else
+          case ",$zero_ok," in
+            *",$f,"*|*",*,"*) printf '%s %s ZERO-EXPECTED %s\n' "$FARM_OS" "$label" "$f" | tee -a "$out/summary.txt" ;;
+            *) printf '%s %s ZERO %s matches no row\n' "$FARM_OS" "$label" "$f" | tee -a "$out/summary.txt"; bad=1 ;;
+          esac
+        fi
+      done
+      if [ ${#filters[@]} -gt 0 ] && [ "$hits" -eq 0 ]; then
+        printf '%s %s ZERO no filter matches a row\n' "$FARM_OS" "$label" | tee -a "$out/summary.txt"
+        bad=1
+      fi
+      log="$out/log/$label.log"
+      wrapped "$wrap" cargo test "${pre[@]}" -- ${flags[@]+"${flags[@]}"} ${filters[@]+"${filters[@]}"} > "$log" 2>&1
+      rc=$?
+      grep -E '^running [0-9]+ test|^test .* FAILED$|^test result:' "$log" || true
+      grep -oE 'budget [a-z0-9_]+ p95_us=[0-9]+ runs=[0-9]+' "$log" | tee -a "$out/summary.txt" || true
+      awk '/^failures:$/{p=1} p' "$log"
+      grep -E '^test .* \.\.\. FAILED$' "$log" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/; s/ - should panic$//' | awk '!s[$0]++' > "$out/log/$label.red"
+      set -- $(results "$log")
+      while IFS= read -r n; do printf '%s\t%s\n' "$label" "$n" >> "$out/reds.tsv"; done < "$out/log/$label.red"
+      if [ "$rc" -ne 0 ] && [ ! -s "$out/log/$label.red" ]; then
+        printf '%s\tCRASH\n' "$label" >> "$out/reds.tsv"
+        tail -n 40 "$log"
+      fi
+      printf '%s %s rc=%s listed=%s filter_hits=%s passed=%s failed=%s ignored=%s\n' "$FARM_OS" "$label" "$rc" "$total" "$hits" "$1" "$2" "$3" | tee -a "$out/summary.txt"
+      [ "$rc" -eq 0 ] && [ "$bad" -eq 0 ]
+      exit $?
+    fi
+    if [ "$mode" = base ]; then
+      if [ ! -s "$out/reds.tsv" ]; then
+        echo "no red row on $FARM_OS, so no base rerun"
+        exit 0
+      fi
+      git fetch --no-tags --depth=1 origin "$BASE_SHA" || { echo "base fetch failed"; exit 1; }
+      git worktree add --detach "$T/base" FETCH_HEAD || exit 1
+      cd "$T/base" || exit 1
+      export CARGO_TARGET_DIR="$T/base-target"
+      git log -1 --format='base %H %s'
+      run_s="${BASE_RUN_S:-1200}"
+      row_s="${BASE_ROW_S:-300}"
+      stamp() { printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
+      cat > "$out/tmo" <<'TMO'
+    s="$1"
+    shift
+    case "${FARM_OS:-}" in windows-*) exec "$@" ;; esac
+    if timeout --version 2>/dev/null | grep GNU >/dev/null; then exec timeout -k 30 "$s" "$@"; fi
+    exec perl -e 'my $s = shift @ARGV; my $pid = fork; defined $pid or die "fork: $!"; if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127 } setpgrp($pid, $pid); $SIG{ALRM} = sub { kill "TERM", -$pid; for (1 .. 30) { last if waitpid($pid, 1) == $pid; sleep 1 } kill "KILL", -$pid; waitpid($pid, 0); exit 124 }; alarm $s; waitpid($pid, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$s" "$@"
+    TMO
+      if [ -n "${BASE_PREP:-}" ]; then bash -c "$BASE_PREP" || echo "base prep rc $?"; fi
+      for label in $(awk -F'\t' '!s[$1]++{print $1}' "$out/reds.tsv"); do
+        wrap=""
+        pre=()
+        first=1
+        while IFS= read -r line; do
+          if [ "$first" = 1 ]; then wrap="$line"; first=0; else pre+=("$line"); fi
+        done < "$out/cmd/$label"
+        flags=()
+        while IFS= read -r line; do flags+=("$line"); done < "$out/cmd/$label.flags"
+        if awk -F'\t' -v l="$label" '$1==l && $2=="COMPILE"{f=1} END{exit !f}' "$out/reds.tsv"; then
+          wrapped "$wrap" cargo test "${pre[@]}" --no-run > "$out/log/$label.base-build" 2>&1
+          brc=$?
+          grep -E -A 8 '^error' "$out/log/$label.base-build" | head -n 80
+          if [ "$brc" -eq 0 ]; then verdict "$label" "(compile)" NEW "compiles at base"; else verdict "$label" "(compile)" BASE "fails to compile at base too, rc $brc"; fi
+          continue
+        fi
+        if awk -F'\t' -v l="$label" '$1==l && $2=="CRASH"{f=1} END{exit !f}' "$out/reds.tsv"; then
+          filters=()
+          while IFS= read -r line; do filters+=("$line"); done < "$out/cmd/$label.filters"
+          stamp "$label base build start, cargo prints nothing until it ends"
+          wrapped "$wrap" cargo test "${pre[@]}" --no-run > "$out/log/$label.base-crash.log" 2>&1
+          brc=$?
+          stamp "$label base build end, rc $brc"
+          if [ "$brc" -eq 0 ]; then
+            wrapped "$wrap" cargo test "${pre[@]}" -- ${flags[@]+"${flags[@]}"} ${filters[@]+"${filters[@]}"} >> "$out/log/$label.base-crash.log" 2>&1
+            brc=$?
+          fi
+          grep -E '^test result:' "$out/log/$label.base-crash.log" || true
+          if [ "$brc" -eq 0 ]; then verdict "$label" "(crash)" NEW "the same call is green at base"; else verdict "$label" "(crash)" BASE "the same call fails at base too, rc $brc"; fi
+        fi
+        names=()
+        while IFS= read -r n; do names+=("$n"); done < <(awk -F'\t' -v l="$label" '$1==l && $2!="COMPILE" && $2!="CRASH" && !s[$2]++ {print $2}' "$out/reds.tsv")
+        [ ${#names[@]} -gt 0 ] || continue
+        blog="$out/log/$label.base.log"
+        stamp "$label base build start, cargo prints nothing until it ends"
+        wrapped "$wrap" cargo test "${pre[@]}" --no-run > "$blog" 2>&1
+        brc=$?
+        stamp "$label base build end, rc $brc"
+        if [ "$brc" -eq 0 ]; then
+          wrapped "$wrap" bash "$out/tmo" "$run_s" cargo test "${pre[@]}" -- ${flags[@]+"${flags[@]}"} --exact "${names[@]}" >> "$blog" 2>&1
+          brc=$?
+          if [ "$brc" -eq 124 ] || [ "$brc" -eq 137 ]; then
+            stamp "$label base rows passed ${run_s}s, so each row without a result runs alone for at most ${row_s}s"
+            for n in "${names[@]}"; do
+              grep -qF -e "test $n ... " -e "test $n - should panic ... " "$blog" && continue
+              wrapped "$wrap" bash "$out/tmo" "$row_s" cargo test "${pre[@]}" -- ${flags[@]+"${flags[@]}"} --exact "$n" >> "$blog" 2>&1
+              r=$?
+              if [ "$r" -eq 124 ] || [ "$r" -eq 137 ]; then printf 'test %s ... TIMEOUT\n' "$n" >> "$blog"; fi
+            done
+          fi
+        fi
+        stamp "$label at base: rc $brc"
+        grep -E '^test |^test result:' "$blog" || true
+        awk '/^failures:$/{p=1} p' "$blog"
+        built=1
+        grep -q '^test result:' "$blog" || built=0
+        grep -qE 'no test target named|did not match any packages' "$blog" && built=absent
+        for n in "${names[@]}"; do
+          if grep -qxF -e "test $n ... ok" -e "test $n - should panic ... ok" "$blog"; then verdict "$label" "$n" NEW "green at base"
+          elif grep -qxF -e "test $n ... FAILED" -e "test $n - should panic ... FAILED" "$blog"; then verdict "$label" "$n" BASE "red at base"
+          elif grep -qxF "test $n ... TIMEOUT" "$blog"; then verdict "$label" "$n" UNKNOWN "timed out at base after ${row_s}s"
+          elif grep -qF "test $n ... ignored" "$blog"; then verdict "$label" "$n" NEW "ignored at base"
+          elif [ "$built" = absent ]; then verdict "$label" "$n" NEW "its target is absent at base"
+          elif [ "$built" = 0 ]; then verdict "$label" "$n" UNKNOWN "no base test binary ran, rc $brc"
+          else verdict "$label" "$n" NEW "absent at base"
+          fi
+        done
+      done
+      exit 0
+    fi
+    if [ "$mode" = summary ]; then
+      {
+        echo "rows on $FARM_OS:"
+        cat "$out/summary.txt"
+        echo "NEW vs BASE on $FARM_OS (os, label, row, verdict, detail):"
+        if [ -s "$out/verdict.tsv" ]; then cat "$out/verdict.tsv"; else echo "none"; fi
+      } | tee -a "$GITHUB_STEP_SUMMARY"
+      if [ -s "$out/reds.tsv" ] || grep -qE ' (ZERO|COMPILE-RED) ' "$out/summary.txt"; then exit 1; fi
+      exit 0
+    fi
+    echo "unknown mode $mode"
+    exit 2
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  build-linux:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
+  linux:
+    name: Batch b25 rows on ubuntu-22.04
+    runs-on: ubuntu-22.04
+    timeout-minutes: 330
+    env:
+      FARM_OS: ubuntu-22.04
+      BASE_PREP: cargo build -p crazyagent --bin crazyagent-landlock --locked
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
       - name: Free disk on the Linux runner
         run: |
           set -euo pipefail
@@ -77,479 +263,897 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install Linux build packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-macos:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 330
-    strategy:
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
+          fetch-depth: 2
+      - name: Restore the batch tip's tests.yml under the farm one
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the macOS runner
+          git log -1 --format='farm %H %s'
+          git log -1 --format='batch tip %H %s' HEAD^
+          git checkout HEAD^ -- .github/workflows/tests.yml
+          git diff --quiet HEAD^ || { echo "::error::the tree is not the batch tip"; exit 1; }
+      - name: Write the row runner
         run: |
           set -euo pipefail
-          df -h /
-          case "${ANDROID_HOME:-}" in "$HOME"/?*) rm -rf "$ANDROID_HOME" ;; *) echo "no Android SDK under $HOME" ;; esac
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-windows:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-linux:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-linux
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 3
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 4
-            parts: 4
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
+          printf '%s\n' "$ROWS_SH" > "$RUNNER_TEMP/rows.sh"
+          bash -n "$RUNNER_TEMP/rows.sh"
       - name: Install Linux packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-macos:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-macos
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 2
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install tmux on macOS
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Select Xcode 26.3, whose git the engine runs
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.3.app
-          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
-          version="$("$git" --version)"
-          echo "engine git $git: $version"
-          IFS=. read -r major minor _ <<< "${version#git version }"
-          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
-          echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-windows:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-windows
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-            part: 1
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 2
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  node:
-    name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 1
-            chrome: mac-arm64
-            chrome_sha256: 01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef
-            headless_sha256: cb46a336dbe3d6f1339c5039c3083e4e5dd8e4379710790e34f8f4a865e2452d
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/node.xml
-      FARM_PART: ${{ matrix.os }}-node-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install IDE extension dependencies
-        working-directory: apps/ide-extension
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install rcli source dependencies
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Build desktop frontend
-        working-directory: apps/desktop
-        run: npm run build
-      - name: Install the pinned Chrome for Testing
-        env:
-          CHROME_PLATFORM: ${{ matrix.chrome }}
-          CHROME_SHA256: ${{ matrix.chrome_sha256 }}
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/chrome"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$CHROME_PLATFORM/chrome-$CHROME_PLATFORM.zip"
-          echo "$CHROME_SHA256  $work/chrome.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then
-            ditto -x -k "$work/chrome.zip" "$work"
-            chrome="$work/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-          else
-            unzip -q "$work/chrome.zip" -d "$work"
-            chrome="$work/chrome-linux64/chrome"
-          fi
-          "$chrome" --version
-          echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
+          bash scripts/ci/linux-packages.sh
+          sudo apt-get install -y --no-install-recommends libsecret-tools musl-tools bison binutils
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Install Linux packages
-        if: matrix.os == 'linux'
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - name: Install tmux on Linux
-        if: matrix.os == 'linux'
+          for attempt in 1 2 3; do
+            rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 20
+          done
+          [ "$(rustup run "$RUST_TOOLCHAIN" rustc -V | cut -d' ' -f2)" = "$RUST_TOOLCHAIN" ] || { echo "::error::rustc is not $RUST_TOOLCHAIN"; exit 1; }
+          {
+            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
+            echo "CARGO_PROFILE_DEV_DEBUG=0"
+            echo "CARGO_PROFILE_TEST_DEBUG=0"
+          } >> "$GITHUB_ENV"
+      - name: Install tmux from the pinned source build into a root-owned folder
+        timeout-minutes: 30
         run: |
           set -euo pipefail
-          sudo chmod go-w /usr/local/bin
-          test -z "$(find /usr/local/bin -maxdepth 0 -perm /022)"
+          test "$(uname -m)" = x86_64
+          if dpkg -s tmux >/dev/null 2>&1; then sudo apt-get remove -y tmux; fi
           work="$RUNNER_TEMP/tmux"
-          prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
           mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
-          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
-          tar -xzf "$work/tmux.tar.gz" -C "$work"
-          (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
-          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
-          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install tmux on macOS
-        if: matrix.os == 'macos'
+          scripts/release/build-tmux.sh --target x86_64-unknown-linux-gnu --work "$work/build" --out "$work/tmux"
+          clean() {
+            local p="$1"
+            while :; do
+              [ -e "$p" ] || return 1
+              stat -c '%A %U:%G %n' "$p"
+              [ -z "$(find "$p" -maxdepth 0 -perm /022)" ] || return 1
+              [ "$(stat -c %u "$p")" = 0 ] || return 1
+              [ "$p" = / ] && return 0
+              p=$(dirname "$p")
+            done
+          }
+          dir=""
+          for root in /usr/lib /usr/libexec /srv; do
+            if clean "$root"; then dir="$root/farm-tools/bin"; break; fi
+            echo "$root has a group or world writable or foreign-owned hop"
+          done
+          [ -n "$dir" ] || { echo "::error::no root-owned folder without a writable hop"; exit 1; }
+          sudo install -d -m 0755 -o root -g root "$(dirname "$dir")" "$dir"
+          sudo install -m 0755 -o root -g root "$work/tmux" "$dir/tmux"
+          clean "$dir/tmux" || { echo "::error::$dir/tmux has a group or world writable or foreign-owned hop"; exit 1; }
+          [ ! -e /usr/local/bin/tmux ] || { echo "::error::/usr/local/bin/tmux exists"; exit 1; }
+          echo "$dir" >> "$GITHUB_PATH"
+          echo "FARM_TMUX_DIR=$dir" >> "$GITHUB_ENV"
+          test "$("$dir/tmux" -V)" = "tmux $TMUX_VERSION"
+      - name: Install uv at the pinned version
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user "uv==$UV_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          test "$("$HOME/.local/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+      - name: Check the tools the rows find
+        run: |
+          set -euo pipefail
+          test "$(command -v tmux)" = "$FARM_TMUX_DIR/tmux"
+          stat -c '%A %U:%G %n' /home "$HOME" "$HOME/.local" "$HOME/.local/bin"
+          tmux -V
+          command -v uv
+          uv --version
+      - name: Build the Linux landlock helper
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent --bin crazyagent-landlock --locked
+          ls -l target/debug/crazyagent-landlock
+      - name: Setup done
+        id: setup
+        run: |
+          echo "setup done on $FARM_OS"
+      - name: Fetch every locked crate for every target
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo fetch --locked
+      - name: kernel security rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-security dbus - -p crazyagent-kernel-security --locked --
+      - name: kernel common rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-common plain - -p crazyagent-kernel-common --locked --
+      - name: kernel storage rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-storage plain - -p crazyagent-kernel-storage --locked --
+      - name: kernel plugin host rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-plugin-host plain - -p crazyagent-kernel-plugin-host --locked --
+      - name: bus_gateway rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-bus-gateway plain - -p crazyagent-bus-gateway --locked --
+      - name: sdk host rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-sdk-host plain - -p crazyagent-sdk-host --locked --
+      - name: capgen rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-capgen plain - -p crazyagent-capgen --locked --
+      - name: sdk rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-sdk plain - -p crazyagent-sdk --locked --
+      - name: plugin check rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-plugin-check plain - -p crazyagent-plugin-check --locked --
+      - name: cap rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-cap plain - -p crazyagent-cap --locked --
+      - name: kernel processes rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-processes plain - -p crazyagent-kernel-processes --locked --
+      - name: kernel sandbox rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-sandbox plain - -p crazyagent-kernel-sandbox --locked --
+      - name: Linux supervisor rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-linux-supervisor plain - -p crazyagent-linux-supervisor --locked --
+      - name: engine lib rows, whole lib
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 240
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-lib plain - -p crazyagent --lib --locked --
+      - name: engine credential_platforms
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-credential-platforms dbus - -p crazyagent --locked --test credential_platforms --
+      - name: engine e2e_clone
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-e2e-clone dbus - -p crazyagent --locked --test e2e_clone --
+      - name: engine acceptance_b18_tui
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-acceptance-b18-tui plain - -p crazyagent --locked --test acceptance_b18_tui --
+      - name: engine coord_relay
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-coord-relay plain - -p crazyagent --locked --test coord_relay --
+      - name: engine ide_remotes
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-ide-remotes plain - -p crazyagent --locked --test ide_remotes --
+      - name: engine new_project_home
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-new-project-home plain - -p crazyagent --locked --test new_project_home --
+      - name: engine onboarding
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-onboarding plain - -p crazyagent --locked --test onboarding --
+      - name: engine restore_broken_start
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-restore-broken-start plain - -p crazyagent --locked --test restore_broken_start --
+      - name: engine sandbox_secret_roots
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-sandbox-secret-roots plain - -p crazyagent --locked --test sandbox_secret_roots --
+      - name: engine sub_agent_landing
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-sub-agent-landing plain - -p crazyagent --locked --test sub_agent_landing --
+      - name: engine terminal_tmux
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-terminal-tmux plain - -p crazyagent --locked --test terminal_tmux --
+      - name: engine plugins
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-plugins plain - -p crazyagent --locked --test plugins --
+      - name: engine native_auth_flow
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-native-auth-flow plain - -p crazyagent --locked --test native_auth_flow --
+      - name: engine native_auth_recovery
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-native-auth-recovery plain - -p crazyagent --locked --test native_auth_recovery --
+      - name: engine e2e_team
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-e2e-team plain - -p crazyagent --locked --test e2e_team --
+      - name: engine projects_home
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-projects-home plain - -p crazyagent --locked --test projects_home --
+      - name: engine qualification_resources
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-qualification-resources plain - -p crazyagent --locked --test qualification_resources --
+      - name: engine team_live_tools
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-team-live-tools plain - -p crazyagent --locked --test team_live_tools --
+      - name: engine terminal_owner
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-terminal-owner plain - -p crazyagent --locked --test terminal_owner --
+      - name: engine sandbox_budget
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-sandbox-budget plain - -p crazyagent --locked --test sandbox_budget --
+      - name: engine security_budget
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-security-budget plain - -p crazyagent --locked --test security_budget --
+      - name: engine claude_auth_status
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-claude-auth-status plain - -p crazyagent --locked --test claude_auth_status --
+      - name: engine masked_field_spare
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-masked-field-spare plain - -p crazyagent --locked --test masked_field_spare --
+      - name: engine secret_realloc_residue
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-realloc-residue plain - -p crazyagent --locked --test secret_realloc_residue --
+      - name: engine mcp_config_secret_copies
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-mcp-config-secret-copies plain - -p crazyagent --locked --test mcp_config_secret_copies --
+      - name: engine secret_drops_wipe
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-drops-wipe plain - -p crazyagent --locked --test secret_drops_wipe --
+      - name: engine secret_format_copies
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-format-copies plain - -p crazyagent --locked --test secret_format_copies --
+      - name: engine secret_value_wipe
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-value-wipe plain - -p crazyagent --locked --test secret_value_wipe --
+      - name: engine linux_sandbox
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-linux-sandbox plain - -p crazyagent --locked --test linux_sandbox --
+      - name: engine linux_hidden_mounts
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-linux-hidden-mounts plain - -p crazyagent --locked --test linux_hidden_mounts --
+      - name: Base rerun of the red rows at chore/v250 9af0fed035, cold base build first
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 180
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" base
+      - name: Rows and NEW versus BASE
+        if: ${{ always() }}
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" summary
+
+  windows:
+    name: Batch b25 rows on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - windows-2022
+          - windows-2025
+    env:
+      FARM_OS: ${{ matrix.runner }}
+      BASE_PREP: cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked && cp "$CARGO_TARGET_DIR/debug/crazyagent-win-boundary.exe" "$CARGO_TARGET_DIR/debug/deps/crazyagent-win-boundary.exe"; mkdir -p apps/desktop/dist; printf '<!doctype html><title>farm</title>\n' > apps/desktop/dist/index.html
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Restore the batch tip's tests.yml under the farm one
+        run: |
+          set -euo pipefail
+          git log -1 --format='farm %H %s'
+          git log -1 --format='batch tip %H %s' HEAD^
+          git checkout HEAD^ -- .github/workflows/tests.yml
+          git diff --quiet HEAD^ || { echo "::error::the tree is not the batch tip"; exit 1; }
+      - name: Write the row runner
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$ROWS_SH" > "$RUNNER_TEMP/rows.sh"
+          bash -n "$RUNNER_TEMP/rows.sh"
+      - name: Install SQLite for Windows
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 20
+          done
+          [ "$(rustup run "$RUST_TOOLCHAIN" rustc -V | cut -d' ' -f2)" = "$RUST_TOOLCHAIN" ] || { echo "::error::rustc is not $RUST_TOOLCHAIN"; exit 1; }
+          {
+            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
+            echo "CARGO_PROFILE_DEV_DEBUG=0"
+            echo "CARGO_PROFILE_TEST_DEBUG=0"
+          } >> "$GITHUB_ENV"
+      - name: Build the Windows boundary helper
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe
+      - name: Setup done
+        id: setup
+        run: |
+          echo "setup done on $FARM_OS"
+      - name: Fetch every locked crate for every target
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 20
+        run: cargo fetch --locked
+      - name: kernel security rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-security plain - -p crazyagent-kernel-security --locked --
+      - name: kernel common rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-common plain - -p crazyagent-kernel-common --locked --
+      - name: kernel storage rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-storage plain - -p crazyagent-kernel-storage --locked --
+      - name: kernel plugin host rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-plugin-host plain - -p crazyagent-kernel-plugin-host --locked --
+      - name: bus_gateway rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-bus-gateway plain - -p crazyagent-bus-gateway --locked --
+      - name: sdk host rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-sdk-host plain - -p crazyagent-sdk-host --locked --
+      - name: capgen rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-capgen plain - -p crazyagent-capgen --locked --
+      - name: sdk rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-sdk plain - -p crazyagent-sdk --locked --
+      - name: plugin check rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-plugin-check plain - -p crazyagent-plugin-check --locked --
+      - name: cap rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-cap plain - -p crazyagent-cap --locked --
+      - name: kernel processes rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-processes plain - -p crazyagent-kernel-processes --locked --
+      - name: kernel sandbox rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-kernel-sandbox plain - -p crazyagent-kernel-sandbox --locked --
+      - name: Windows sandbox rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-win-sandbox plain - -p crazyagent-win-sandbox --locked --
+      - name: engine lib rows, whole lib
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 240
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-lib plain - -p crazyagent --lib --locked --
+      - name: engine credential_platforms
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-credential-platforms plain - -p crazyagent --locked --test credential_platforms --
+      - name: engine windows_terminal
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-windows-terminal plain - -p crazyagent --locked --test windows_terminal --
+      - name: engine sandbox_budget
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-sandbox-budget plain - -p crazyagent --locked --test sandbox_budget --
+      - name: engine security_budget
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-security-budget plain - -p crazyagent --locked --test security_budget --
+      - name: engine claude_auth_status
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-claude-auth-status plain - -p crazyagent --locked --test claude_auth_status --
+      - name: engine masked_field_spare
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-masked-field-spare plain - -p crazyagent --locked --test masked_field_spare --
+      - name: engine secret_realloc_residue
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-realloc-residue plain - -p crazyagent --locked --test secret_realloc_residue --
+      - name: engine mcp_config_secret_copies
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-mcp-config-secret-copies plain - -p crazyagent --locked --test mcp_config_secret_copies --
+      - name: engine secret_drops_wipe
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-drops-wipe plain - -p crazyagent --locked --test secret_drops_wipe --
+      - name: engine secret_format_copies
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-format-copies plain - -p crazyagent --locked --test secret_format_copies --
+      - name: engine secret_value_wipe
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-test-secret-value-wipe plain - -p crazyagent --locked --test secret_value_wipe --
+      - name: Write the stub frontend the desktop crate embeds
+        id: desktop
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          mkdir -p apps/desktop/dist
+          [ -f apps/desktop/dist/index.html ] || printf '<!doctype html><title>farm</title>\n' > apps/desktop/dist/index.html
+      - name: desktop lib rows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.desktop.outcome == 'success' }}
+        timeout-minutes: 120
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-desktop-lib plain - -p crazyagent-desktop --lib --locked --
+      - name: desktop command_permissions
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.desktop.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-desktop-test-command-permissions plain - -p crazyagent-desktop --locked --test command_permissions --
+      - name: desktop picker_windows
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.desktop.outcome == 'success' }}
+        timeout-minutes: 90
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-desktop-test-picker-windows plain - -p crazyagent-desktop --locked --test picker_windows --
+      - name: Native terminal Windows rows, device_lost and removal rows skipped
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.desktop.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-native-rows plain - -p crazyagent-desktop --lib --locked -- --include-ignored --test-threads=1 --skip=rows::device_lost:: --skip=a_device_removed_inside_present_faults_the_view --skip=the_render_thread_answers_a_view_placed_after_a_removal_inside_present native_term::windows::rows::
+      - name: Native terminal removal row 1 in a process of its own
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.desktop.outcome == 'success' }}
+        timeout-minutes: 30
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-native-removal-1 plain - -p crazyagent-desktop --lib --locked -- --include-ignored --test-threads=1 a_device_removed_inside_present_faults_the_view
+      - name: Native terminal removal row 2 in a process of its own
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.desktop.outcome == 'success' }}
+        timeout-minutes: 30
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" run b25-native-removal-2 plain - -p crazyagent-desktop --lib --locked -- --include-ignored --test-threads=1 the_render_thread_answers_a_view_placed_after_a_removal_inside_present
+      - name: Base rerun of the red rows at chore/v250 9af0fed035, cold base build first
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 180
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" base
+      - name: Rows and NEW versus BASE
+        if: ${{ always() }}
+        run: |
+          bash "$RUNNER_TEMP/rows.sh" summary
+
+  linux-clippy:
+    name: Batch b25 clippy on ubuntu-22.04
+    runs-on: ubuntu-22.04
+    timeout-minutes: 330
+    env:
+      FARM_OS: ubuntu-22.04
+      BASE_PREP: cargo build -p crazyagent --bin crazyagent-landlock --locked
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - name: Free disk on the Linux runner
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Restore the batch tip's tests.yml under the farm one
+        run: |
+          set -euo pipefail
+          git log -1 --format='farm %H %s'
+          git log -1 --format='batch tip %H %s' HEAD^
+          git checkout HEAD^ -- .github/workflows/tests.yml
+          git diff --quiet HEAD^ || { echo "::error::the tree is not the batch tip"; exit 1; }
+      - name: Install Linux packages
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          bash scripts/ci/linux-packages.sh
+          sudo apt-get install -y --no-install-recommends libsecret-tools musl-tools bison binutils
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 20
+          done
+          [ "$(rustup run "$RUST_TOOLCHAIN" rustc -V | cut -d' ' -f2)" = "$RUST_TOOLCHAIN" ] || { echo "::error::rustc is not $RUST_TOOLCHAIN"; exit 1; }
+          {
+            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
+            echo "CARGO_PROFILE_DEV_DEBUG=0"
+            echo "CARGO_PROFILE_TEST_DEBUG=0"
+          } >> "$GITHUB_ENV"
+      - name: Install tmux from the pinned source build into a root-owned folder
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          if dpkg -s tmux >/dev/null 2>&1; then sudo apt-get remove -y tmux; fi
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target x86_64-unknown-linux-gnu --work "$work/build" --out "$work/tmux"
+          clean() {
+            local p="$1"
+            while :; do
+              [ -e "$p" ] || return 1
+              stat -c '%A %U:%G %n' "$p"
+              [ -z "$(find "$p" -maxdepth 0 -perm /022)" ] || return 1
+              [ "$(stat -c %u "$p")" = 0 ] || return 1
+              [ "$p" = / ] && return 0
+              p=$(dirname "$p")
+            done
+          }
+          dir=""
+          for root in /usr/lib /usr/libexec /srv; do
+            if clean "$root"; then dir="$root/farm-tools/bin"; break; fi
+            echo "$root has a group or world writable or foreign-owned hop"
+          done
+          [ -n "$dir" ] || { echo "::error::no root-owned folder without a writable hop"; exit 1; }
+          sudo install -d -m 0755 -o root -g root "$(dirname "$dir")" "$dir"
+          sudo install -m 0755 -o root -g root "$work/tmux" "$dir/tmux"
+          clean "$dir/tmux" || { echo "::error::$dir/tmux has a group or world writable or foreign-owned hop"; exit 1; }
+          [ ! -e /usr/local/bin/tmux ] || { echo "::error::/usr/local/bin/tmux exists"; exit 1; }
+          echo "$dir" >> "$GITHUB_PATH"
+          echo "FARM_TMUX_DIR=$dir" >> "$GITHUB_ENV"
+          test "$("$dir/tmux" -V)" = "tmux $TMUX_VERSION"
+      - name: Install uv at the pinned version
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user "uv==$UV_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          test "$("$HOME/.local/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+      - name: Check the tools the rows find
+        run: |
+          set -euo pipefail
+          test "$(command -v tmux)" = "$FARM_TMUX_DIR/tmux"
+          stat -c '%A %U:%G %n' /home "$HOME" "$HOME/.local" "$HOME/.local/bin"
+          tmux -V
+          command -v uv
+          uv --version
+      - name: Build the Linux landlock helper
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent --bin crazyagent-landlock --locked
+          ls -l target/debug/crazyagent-landlock
+      - name: Setup done
+        id: setup
+        run: |
+          echo "setup done on $FARM_OS"
+      - name: Install the desktop build packages
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         timeout-minutes: 20
         run: |
           set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install the pinned Chrome headless shell for the PDF rows
-        env:
-          HEADLESS_PLATFORM: ${{ matrix.chrome }}
-          HEADLESS_SHA256: ${{ matrix.headless_sha256 }}
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Write the stub frontend the desktop crate embeds
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: |
           set -euo pipefail
-          work="$RUNNER_TEMP/chrome-headless-shell"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/headless.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$HEADLESS_PLATFORM/chrome-headless-shell-$HEADLESS_PLATFORM.zip"
-          echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k "$work/headless.zip" "$work"; else unzip -q "$work/headless.zip" -d "$work"; fi
-          shell="$work/chrome-headless-shell-$HEADLESS_PLATFORM/chrome-headless-shell"
-          "$shell" --version
-          echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"
-      - name: Run this share of the node suites
-        timeout-minutes: 60
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
+          mkdir -p apps/desktop/dist
+          [ -f apps/desktop/dist/index.html ] || printf '<!doctype html><title>farm</title>\n' > apps/desktop/dist/index.html
+      - name: Clippy per crate, lib and tests, deny warnings
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 240
         run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          limit=""
-          if [ "$RUNNER_OS" = macOS ]; then limit="--test-timeout=$NODE_TEST_TIMEOUT_MACOS_MS"; fi
-          make test-node BUN="$BUN" NODE_TEST_ARGS="--test-shard=${{ matrix.part }}/${{ matrix.parts }} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FARM_JUNIT $limit"
-      - name: Keep a JUnit report for this part
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
+          set +e
+          worst=0
+          for p in crazyagent crazyagent-kernel-common crazyagent-kernel-security crazyagent-kernel-storage crazyagent-kernel-processes crazyagent-kernel-sandbox crazyagent-kernel-plugin-host crazyagent-bus-gateway crazyagent-capgen crazyagent-sdk crazyagent-sdk-host crazyagent-desktop crazyagent-plugin-check crazyagent-cap crazyagent-plugin-agent-quit crazyagent-linux-supervisor; do
+            log="$RUNNER_TEMP/clippy-$p.log"
+            cargo clippy -p "$p" --lib --tests --locked -- -D warnings > "$log" 2>&1
+            rc=$?
+            checked=$(grep -c -E "^ +(Checking|Compiling) $p v" "$log" || true)
+            echo "clippy $FARM_OS $p rc=$rc checked=$checked"
+            if [ "$checked" -eq 0 ]; then
+              echo "::error::clippy did not check $p, so its rc proves nothing"
+              worst=1
+            fi
+            echo "$FARM_OS $p rc=$rc" >> "$RUNNER_TEMP/clippy.txt"
+            if [ "$rc" -ne 0 ]; then
+              worst=1
+              grep -E -A 8 '^(error|warning)(\[[A-Za-z0-9_:]+\])?:' "$log" | head -n 120
+            fi
+          done
+          echo "clippy summary on $FARM_OS:"
+          cat "$RUNNER_TEMP/clippy.txt"
+          exit "$worst"
 
-  typecheck:
-    name: Desktop typecheck and Bun suites
+  windows-clippy:
+    name: Batch b25 clippy on windows-2022
+    runs-on: windows-2022
+    timeout-minutes: 330
+    env:
+      FARM_OS: windows-2022
+      BASE_PREP: cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked && cp "$CARGO_TARGET_DIR/debug/crazyagent-win-boundary.exe" "$CARGO_TARGET_DIR/debug/deps/crazyagent-win-boundary.exe"; mkdir -p apps/desktop/dist; printf '<!doctype html><title>farm</title>\n' > apps/desktop/dist/index.html
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Restore the batch tip's tests.yml under the farm one
+        run: |
+          set -euo pipefail
+          git log -1 --format='farm %H %s'
+          git log -1 --format='batch tip %H %s' HEAD^
+          git checkout HEAD^ -- .github/workflows/tests.yml
+          git diff --quiet HEAD^ || { echo "::error::the tree is not the batch tip"; exit 1; }
+      - name: Install SQLite for Windows
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 20
+          done
+          [ "$(rustup run "$RUST_TOOLCHAIN" rustc -V | cut -d' ' -f2)" = "$RUST_TOOLCHAIN" ] || { echo "::error::rustc is not $RUST_TOOLCHAIN"; exit 1; }
+          {
+            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
+            echo "CARGO_PROFILE_DEV_DEBUG=0"
+            echo "CARGO_PROFILE_TEST_DEBUG=0"
+          } >> "$GITHUB_ENV"
+      - name: Build the Windows boundary helper
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe
+      - name: Setup done
+        id: setup
+        run: |
+          echo "setup done on $FARM_OS"
+      - name: Write the stub frontend the desktop crate embeds
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          mkdir -p apps/desktop/dist
+          [ -f apps/desktop/dist/index.html ] || printf '<!doctype html><title>farm</title>\n' > apps/desktop/dist/index.html
+      - name: Clippy per crate, lib and tests, deny warnings
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 240
+        run: |
+          set +e
+          worst=0
+          for p in crazyagent crazyagent-kernel-common crazyagent-kernel-security crazyagent-kernel-storage crazyagent-kernel-processes crazyagent-kernel-sandbox crazyagent-kernel-plugin-host crazyagent-bus-gateway crazyagent-capgen crazyagent-sdk crazyagent-sdk-host crazyagent-desktop crazyagent-plugin-check crazyagent-cap crazyagent-plugin-agent-quit crazyagent-win-sandbox; do
+            log="$RUNNER_TEMP/clippy-$p.log"
+            cargo clippy -p "$p" --lib --tests --locked -- -D warnings > "$log" 2>&1
+            rc=$?
+            checked=$(grep -c -E "^ +(Checking|Compiling) $p v" "$log" || true)
+            echo "clippy $FARM_OS $p rc=$rc checked=$checked"
+            if [ "$checked" -eq 0 ]; then
+              echo "::error::clippy did not check $p, so its rc proves nothing"
+              worst=1
+            fi
+            echo "$FARM_OS $p rc=$rc" >> "$RUNNER_TEMP/clippy.txt"
+            if [ "$rc" -ne 0 ]; then
+              worst=1
+              grep -E -A 8 '^(error|warning)(\[[A-Za-z0-9_:]+\])?:' "$log" | head -n 120
+            fi
+          done
+          echo "clippy summary on $FARM_OS:"
+          cat "$RUNNER_TEMP/clippy.txt"
+          exit "$worst"
+
+  node:
+    name: Batch b25 node rows and caps on ubuntu-22.04
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/bun.xml
-      FARM_PART: linux-bun-1
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
+          fetch-depth: 2
+      - name: Restore the batch tip's tests.yml under the farm one
+        run: |
+          set -euo pipefail
+          git log -1 --format='farm %H %s'
+          git log -1 --format='batch tip %H %s' HEAD^
+          git checkout HEAD^ -- .github/workflows/tests.yml
+          git diff --quiet HEAD^ || { echo "::error::the tree is not the batch tip"; exit 1; }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Typecheck desktop
-        working-directory: apps/desktop
-        run: npm run typecheck
-      - name: Install rcli source dependencies
-        if: always()
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Run the Bun suites
-        if: always()
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
+      - name: desktop node rows
+        id: node
+        timeout-minutes: 60
         run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          make test-bun BUN="$BUN" BUN_TEST_ARGS="--reporter=junit --reporter-outfile=$FARM_JUNIT"
-      - name: Keep a JUnit report for this part
-        if: always()
+          set +e
+          red=0
+          : > "$RUNNER_TEMP/node.red"
+          : > "$RUNNER_TEMP/node.redfiles"
+          cd apps/desktop || exit 1
+          npm ci --ignore-scripts --no-audit --no-fund || { echo "npm ci failed"; exit 1; }
+          for f in test/account-actions.test.mjs test/account-choice.test.mjs test/account-onboarding.test.mjs test/account-pools.test.mjs test/account-profile.test.mjs test/account-ranking.test.mjs test/account-sign-out.test.mjs test/accounts.test.mjs test/agent-instructions.test.mjs test/agent-messages.test.mjs test/agent-settings-browser.test.mjs test/agent-settings-layout.test.mjs test/agent-setup.test.mjs test/agents-look.test.mjs test/api-intake.test.mjs test/api-learning.test.mjs test/api-projects.test.mjs test/api.test.mjs test/app-error-boundary.test.mjs test/app-metrics-browser.test.mjs test/app-metrics.test.mjs test/app-theme.test.mjs test/app.test.mjs test/base-weights.test.mjs test/brand.test.mjs test/browser-page.test.mjs test/bundles.test.mjs test/button-look.test.mjs test/changes-card.test.mjs test/changes-look.test.mjs test/changes-poll.test.mjs test/changes-review.test.mjs test/changes.test.mjs test/chip-look.test.mjs test/chrome.test.mjs test/claude-auth-input.test.mjs test/command-registration.test.mjs test/command-wiring.test.mjs test/composer-keys.test.mjs test/conflict.test.mjs test/console-look.test.mjs test/console-model.test.mjs test/console.test.mjs test/context-menu.test.mjs test/context-tree-browser.test.mjs test/controls-look.test.mjs test/conversation-fixed.test.mjs test/conversation-layout.test.mjs test/delete-job.test.mjs test/demo-words.test.mjs test/demo.test.mjs test/display-text.test.mjs test/done-quiet.test.mjs test/e2e-harness-page.test.mjs test/engine-changes.test.mjs test/engine-menu.test.mjs test/engine-watch-reads.test.mjs test/finished-agents.test.mjs test/first-run-harnesses-words.test.mjs test/first-run-harnesses.test.mjs test/first-run-look.test.mjs test/first-run.test.mjs test/full-width.test.mjs test/github-settings.test.mjs test/go-to.test.mjs test/harness-path.test.mjs test/harness-updates.test.mjs test/heavy-lane.test.mjs test/home-look.test.mjs test/icons.test.mjs test/ide-extensions.test.mjs test/ide-guard.test.mjs test/ide-tab.test.mjs test/intake-job.test.mjs test/intake-windows-path.test.mjs test/intake.test.mjs test/kept-terminals.test.mjs test/kept-views.test.mjs test/launch-reads.test.mjs test/learn-panel.test.mjs test/learn-replay.test.mjs test/limit-extras.test.mjs test/list-look.test.mjs test/live-master.test.mjs test/load-cache.test.mjs test/markdown.test.mjs test/master-console.test.mjs test/master.test.mjs test/metrics-money.test.mjs test/metrics-usage.test.mjs test/metrics-view.test.mjs test/model-access.test.mjs test/move-home.test.mjs test/native-auth.test.mjs test/native-panel.test.mjs test/new-project-carry.test.mjs test/new-project-publish.test.mjs test/new-project.test.mjs test/no-opaque-failures.test.mjs test/notify.test.mjs test/one-terminal.test.mjs test/overlay-look.test.mjs test/overlay.test.mjs test/overview-activity-parity.test.mjs test/overview-activity-poll.test.mjs test/overview-activity-undo.test.mjs test/overview-activity.test.mjs test/overview-bar-layout.test.mjs test/overview-foreign.test.mjs test/overview-tabs.test.mjs test/owner-setup.test.mjs test/pending-change.test.mjs test/planning-line-browser.test.mjs test/planning.test.mjs test/plugins.test.mjs test/pool-assignment.test.mjs test/pool-from-selection.test.mjs test/pool-merge.test.mjs test/pool-order.test.mjs test/pools.test.mjs test/process.test.mjs test/project-access.test.mjs test/project-cleanup.test.mjs test/project-files.test.mjs test/project-head-settle.test.mjs test/project-header.test.mjs test/project-memory-edit.test.mjs test/project-menu.test.mjs test/project-page.test.mjs test/project-publish.test.mjs test/project-sandbox.test.mjs test/project-usage.test.mjs test/question-popup.test.mjs test/questions-focus.test.mjs test/questions.test.mjs test/recount-panel.test.mjs test/recovery-banner.test.mjs test/reinstall-offer.test.mjs test/remove-dialog.test.mjs test/research-retry.test.mjs test/reset-notice.test.mjs test/restore-recovery.test.mjs test/roadmap-status.test.mjs test/router.test.mjs test/run-command.test.mjs test/secret-rows.test.mjs test/session-messages.test.mjs test/session-polls-renders.test.mjs test/sessions.test.mjs test/setting-row.test.mjs test/settings-access-layout.test.mjs test/settings-alerts-layout.test.mjs test/settings-app-plugins.test.mjs test/settings-finished-agents.test.mjs test/settings-frame.test.mjs test/settings-harness-research.test.mjs test/settings-harnesses-layout.test.mjs test/settings-home-layout.test.mjs test/settings-look.test.mjs test/settings-master.test.mjs test/settings-memory-layout.test.mjs test/settings-memory.test.mjs test/settings-pack-layout.test.mjs test/settings-plugins-layout.test.mjs test/settings-plugins.test.mjs test/settings-pools-controls.test.mjs test/settings-pools-edit.test.mjs test/settings-pools-layout.test.mjs test/settings-process-layout.test.mjs test/settings-provider-retry.test.mjs test/settings-quitting.test.mjs test/settings-restore.test.mjs test/settings-sandbox-layout.test.mjs test/settings-sandbox.test.mjs test/settings-setup.test.mjs test/settings-tools.test.mjs test/settings-updates-layout.test.mjs test/settings-updates.test.mjs test/setup-job.test.mjs test/setup.test.mjs test/shortcuts.test.mjs test/sidebar-layout.test.mjs test/sidebar-live.test.mjs test/sign-in-min.test.mjs test/skill-tag.test.mjs test/spend-reset.test.mjs test/status.test.mjs test/stuck-sign-in-panel.test.mjs test/stuck-sign-in.test.mjs test/style-guards.test.mjs test/tabs-look.test.mjs test/team-activity.test.mjs test/team-alerts-renders.test.mjs test/team-controls.test.mjs test/team-coordination.test.mjs test/team-events.test.mjs test/team-graph-layout.test.mjs test/team-graph.test.mjs test/team-leftovers.test.mjs test/team-look.test.mjs test/team-rows-save.test.mjs test/team-settings-held.test.mjs test/team-waits.test.mjs test/terminal-copy.test.mjs test/terminal-ended.test.mjs test/terminal-follow.test.mjs test/terminal-history.test.mjs test/terminal-input.test.mjs test/terminal-queries.test.mjs test/terminal-renderer-policy.test.mjs test/terminal-renderer.test.mjs test/terminal-scroll.test.mjs test/terminal-wall.test.mjs test/terminal-wheel.test.mjs test/tokens.test.mjs test/updates-reachable.test.mjs test/user-menu.test.mjs test/waiting-changes.test.mjs test/wall-reads.test.mjs test/window-scroll.test.mjs test/native/bridge-routes.test.mjs test/native/trial-kit.test.mjs; do
+            tap="$RUNNER_TEMP/$(basename "$f").tap"
+            node --test --test-reporter=tap "$f" > "$tap" 2>&1
+            code=$?
+            echo "$f on ubuntu-22.04: rc $code"
+            grep -E '^# (tests|pass|fail)' "$tap" || true
+            { grep -E '^[[:space:]]*not ok' "$tap" || true; } | sed -E 's/^[[:space:]]*not ok [0-9]+ - //' | awk -v f="$f" '!s[$0]++{print f "\t" $0}' >> "$RUNNER_TEMP/node.red"
+            if [ "$code" -ne 0 ]; then printf '%s\n' "$f" >> "$RUNNER_TEMP/node.redfiles"; red=1; grep -E -A 12 '^[[:space:]]*not ok' "$tap" | head -n 60; fi
+            grep -qE '^# pass [1-9]' "$tap" || { echo "$f: no row passed"; printf '%s\n' "$f" >> "$RUNNER_TEMP/node.redfiles"; red=1; }
+          done
+          cat "$RUNNER_TEMP/node.red"
+          [ "$red" -eq 0 ]
+      - name: Caps and sleeps gates, their tests and the perf runner tests at the b25 tip
+        id: caps
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
         run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
-
-  report:
-    name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
+          set +e
+          node scripts/quality/caps.mjs
+          a=$?
+          node --test scripts/quality/caps.test.mjs
+          b=$?
+          node scripts/quality/sleeps.mjs
+          c=$?
+          node --test scripts/quality/sleeps.test.mjs
+          d=$?
+          node --test scripts/perf/run.test.mjs
+          e=$?
+          echo "caps rc=$a caps-tests rc=$b sleeps rc=$c sleeps-tests rc=$d perf-run-tests rc=$e"
+          [ "$a" -eq 0 ] && [ "$b" -eq 0 ] && [ "$c" -eq 0 ] && [ "$d" -eq 0 ] && [ "$e" -eq 0 ]
+      - name: Base rerun of the red node rows at chore/v250 9af0fed035
+        if: ${{ failure() && steps.node.outcome == 'failure' }}
+        timeout-minutes: 45
         run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          pattern: farm-junit-*
-          path: ${{ runner.temp }}/junit
-      - name: Write the summary table
-        env:
-          FARM_NEEDS: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/junit"
-          node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+          set +e
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/base" FETCH_HEAD
+          cd "$RUNNER_TEMP/base" || exit 1
+          git log -1 --format='base %H %s'
+          cd apps/desktop || exit 1
+          npm ci --ignore-scripts --no-audit --no-fund || echo "base npm ci failed"
+          echo "NEW vs BASE on ubuntu-22.04 node:"
+          sort -u "$RUNNER_TEMP/node.redfiles" | while IFS= read -r f; do
+            if [ ! -f "$f" ]; then
+              awk -F'\t' -v f="$f" '$1==f{print "node " f " " $2 ": NEW (file absent at base)"}' "$RUNNER_TEMP/node.red"
+              continue
+            fi
+            tap="$RUNNER_TEMP/$(basename "$f").base.tap"
+            node --test --test-reporter=tap "$f" > "$tap" 2>&1
+            brc=$?
+            echo "$f at base: rc $brc"
+            if ! awk -F'\t' -v f="$f" '$1==f{h=1} END{exit !h}' "$RUNNER_TEMP/node.red"; then
+              if [ "$brc" -ne 0 ] || ! grep -qE '^# pass [1-9]' "$tap"; then echo "node $f whole file: BASE (red at base, rc $brc)"; else echo "node $f whole file: NEW (green at base)"; fi
+            fi
+            awk -F'\t' -v f="$f" '$1==f{print $2}' "$RUNNER_TEMP/node.red" | while IFS= read -r name; do
+              if grep -E '^[[:space:]]*not ok' "$tap" | sed -E 's/^[[:space:]]*not ok [0-9]+ - //' | grep -qxF -- "$name"; then
+                echo "node $f $name: BASE (red at base)"
+              else
+                echo "node $f $name: NEW (green or absent at base)"
+              fi
+            done
+          done
+          exit 1
