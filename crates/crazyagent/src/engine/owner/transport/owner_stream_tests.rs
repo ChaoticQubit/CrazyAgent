@@ -59,7 +59,7 @@ async fn the_check_after_the_connect_refuses_a_replaced_endpoint() {
     let stream = crate::ipc::owner_connect(&socket).await.unwrap();
     let kept = client.root.path.join("kept.sock");
     std::fs::rename(&socket, &kept).unwrap();
-    let swap = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let swap = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     std::fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     let refused = client.checked(stream).err().map(|error| error.0);
     drop(swap);
