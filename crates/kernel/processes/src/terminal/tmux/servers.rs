@@ -32,7 +32,7 @@ const KEEPER_POLL: Duration = Duration::from_millis(50);
 
 /// The engine's terminal host across its tmux servers: its own private server, and per
 /// native-mode lead one server started inside that lead's Seatbelt profile and one inside
-/// its teammates' profile, where the lead's app splits its teammates (rv-audit S1 F1).
+/// its teammates' profile, where the lead's app splits its teammates.
 /// Every call for an agent whose own server listens goes to that server, through a client
 /// inside the lead's profile, every call for a teammate adopted into one to its lead's
 /// teammates' server, or its lead's own for a lead started without one; every other call

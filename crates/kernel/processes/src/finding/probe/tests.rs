@@ -1,4 +1,5 @@
 use super::*;
+use crate::finding::stub::or_named;
 
 use std::os::unix::fs::PermissionsExt;
 
@@ -6,11 +7,11 @@ use std::time::Instant;
 
 /// A scratch folder, its real path, so kept folders compare equal.
 fn scratch() -> (tempfile::TempDir, PathBuf) {
-    let folder = tempfile::Builder::new()
-        .prefix("tools-probe-")
-        .tempdir()
-        .unwrap();
-    let real = folder.path().canonicalize().unwrap();
+    let folder = or_named(
+        tempfile::Builder::new().prefix("tools-probe-").tempdir(),
+        &std::env::temp_dir(),
+    );
+    let real = or_named(folder.path().canonicalize(), folder.path());
     (folder, real)
 }
 
@@ -20,16 +21,22 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
 /// as Linux `/tmp`. Output: the folder and its real path.
 fn private_scratch() -> (tempfile::TempDir, PathBuf) {
     let folder = crate::service::test_support::durable_folder();
-    let real = folder.path().canonicalize().unwrap();
+    let real = or_named(folder.path().canonicalize(), folder.path());
     assert_eq!(crate::service::changeable_by_others(&real), None);
     (folder, real)
 }
 
 /// Writes an executable file with the given text, its folders made first.
 fn program(file: &Path, text: &str) -> PathBuf {
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, text).unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    or_named(
+        std::fs::create_dir_all(file.parent().unwrap()),
+        file.parent().unwrap(),
+    );
+    or_named(std::fs::write(file, text), file);
+    or_named(
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)),
+        file,
+    );
     file.to_path_buf()
 }
 
@@ -88,12 +95,14 @@ fn the_login_shell_path_is_read_between_markers_and_startup_noise_is_ignored() {
 fn a_login_shell_run_gives_the_path_its_startup_files_set_and_a_hang_gives_none() {
     let (_folder, home) = scratch();
     let tools = home.join("tools");
-    std::fs::create_dir_all(&tools).unwrap();
-    std::fs::write(
-        home.join(".profile"),
-        "echo noise\nPATH=\"$HOME/tools:$PATH\"\nexport PATH\n",
-    )
-    .unwrap();
+    or_named(std::fs::create_dir_all(&tools), &tools);
+    or_named(
+        std::fs::write(
+            home.join(".profile"),
+            "echo noise\nPATH=\"$HOME/tools:$PATH\"\nexport PATH\n",
+        ),
+        &home.join(".profile"),
+    );
     let path = login_path(Path::new("/bin/sh"), &home, "owner", SHELL_LIMIT)
         .expect("the shell printed its PATH");
     assert!(
@@ -141,7 +150,7 @@ fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders(
     let other = home.join("other");
     let global = home.join("global/bin");
     for folder in [&tools, &other, &global] {
-        std::fs::create_dir_all(folder).unwrap();
+        or_named(std::fs::create_dir_all(folder), folder);
     }
     let npm = program(&tools.join("npm"), "#!/bin/sh\necho \"$HOME/global\"\n");
     let places = || crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
@@ -154,13 +163,16 @@ fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders(
         (vec![other.clone()], true),
         "no npm found, the login folders alone, and nothing failed"
     );
-    std::fs::write(&npm, "#!/bin/sh\necho \"$HOME/absent\"\n").unwrap();
+    or_named(
+        std::fs::write(&npm, "#!/bin/sh\necho \"$HOME/absent\"\n"),
+        &npm,
+    );
     assert_eq!(
         probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
         (vec![tools.clone(), other.clone()], true),
         "a prefix with no bin folder adds nothing"
     );
-    std::fs::write(&npm, "#!/bin/sh\nexit 1\n").unwrap();
+    or_named(std::fs::write(&npm, "#!/bin/sh\nexit 1\n"), &npm);
     assert_eq!(
         probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
         (vec![tools, other], false),
@@ -357,13 +369,16 @@ fn a_daemon_holding_the_output_neither_keeps_the_run_waiting_nor_the_output_open
         started.elapsed() < Duration::from_secs(15),
         "the run ends a short grace after its program, not at the limit"
     );
-    std::fs::write(root.join("daemon.go"), b"").unwrap();
+    or_named(
+        std::fs::write(root.join("daemon.go"), b""),
+        &root.join("daemon.go"),
+    );
     let late = root.join("daemon.late");
     while !late.exists() && started.elapsed() < Duration::from_secs(60) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(
-        std::fs::read_to_string(&late).unwrap(),
+        or_named(std::fs::read_to_string(&late), &late),
         "closed",
         "the output's read end is closed once the run ends"
     );
@@ -425,12 +440,8 @@ fn answered(tool: &Path) -> Option<String> {
 
 /// Sets a file's modification time without touching its contents.
 fn modified_at(file: &Path, time: std::time::SystemTime) {
-    std::fs::File::options()
-        .write(true)
-        .open(file)
-        .unwrap()
-        .set_modified(time)
-        .unwrap();
+    let opened = or_named(std::fs::File::options().write(true).open(file), file);
+    or_named(opened.set_modified(time), file);
 }
 
 #[test]
@@ -445,15 +456,21 @@ fn version_answers_at_once_then_from_its_cache_until_the_file_is_updated_in_plac
     );
     assert!(started.elapsed() < Duration::from_secs(1), "never waits");
     assert_eq!(answered(&tool).as_deref(), Some("4.5.6"));
-    let modified = std::fs::metadata(&tool).unwrap().modified().unwrap();
-    std::fs::write(&tool, "#!/bin/sh\necho \"tool 9.9.9\"\n").unwrap();
+    let modified = or_named(or_named(std::fs::metadata(&tool), &tool).modified(), &tool);
+    or_named(
+        std::fs::write(&tool, "#!/bin/sh\necho \"tool 9.9.9\"\n"),
+        &tool,
+    );
     modified_at(&tool, modified);
     assert_eq!(
         version(&tool, crate::finding::stub::stub_seed).as_deref(),
         Some("4.5.6"),
         "the same file, size and time answer from the cache"
     );
-    std::fs::write(&tool, "#!/bin/sh\necho \"tool 10.0.0\"\n").unwrap();
+    or_named(
+        std::fs::write(&tool, "#!/bin/sh\necho \"tool 10.0.0\"\n"),
+        &tool,
+    );
     modified_at(&tool, modified + Duration::from_secs(5));
     assert_eq!(
         version(&tool, crate::finding::stub::stub_seed),
@@ -571,4 +588,24 @@ fn the_module_mark_starts_a_due_run_first_as_folders_does() {
     let mark = mark(crate::finding::stub::stub_seed);
     assert!(!mark.first_run_pending);
     assert!(lock(&FOLDERS).last.is_some());
+}
+
+/// A folder run starts only in a build that is not a row build and only when the hooks allow
+/// it, so the engine's own unit rows and a seed whose hooks turn probes off never run the
+/// owner's shell files, while an engine `cargo test` launches still probes.
+#[test]
+fn a_folder_run_starts_only_outside_row_builds_and_when_the_hooks_allow_it() {
+    let on = crate::finding::FindingHooks {
+        folder_probes: true,
+        ..crate::finding::stub::STUB_HOOKS
+    };
+    let off = crate::finding::FindingHooks {
+        folder_probes: false,
+        ..crate::finding::stub::STUB_HOOKS
+    };
+    assert!(may_probe(false, &on));
+    assert!(!may_probe(true, &on));
+    assert!(!may_probe(false, &off));
+    assert!(!may_probe(true, &off));
+    assert!(!crate::finding::stub::stub_seed().hooks.folder_probes);
 }

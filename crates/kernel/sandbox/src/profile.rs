@@ -36,8 +36,9 @@ use crate::host::LinuxHost;
 use crate::lines::*;
 use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{
-    any_case, at_or_below, canonical, clean_absolute, clear_of_secrets, fold_case, granted_root,
-    owner_home, owner_secrets, plain_top, regex_escape,
+    Walked, any_case, at_or_below, canonical, clean_absolute, clear_of_secrets, fold_case,
+    granted_root, granted_walked, harness_homes, owner_home, owner_secrets, plain_top,
+    regex_escape,
 };
 use crate::ports::{
     BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
@@ -162,11 +163,11 @@ pub type WindowsAgentCommand = fn(
     Vec<(&OsStr, Option<&OsStr>)>,
 ) -> Result<Command, SandboxError>;
 
-/// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
-/// (the nested backend), the call supervisor running, and its network limits held, so none
-/// of the gap lines would show for it. An open network has no limit to hold; a limited one
-/// needs TCP-only sockets and, for a port on any host, a network of its own (DEC-179 SBX-2).
-/// Inputs: what the launch got and its sandbox. Output: true when it holds all of it.
+/// Tells whether a launch holds the full Linux sandbox: a process space of its own (the nested
+/// backend), the call supervisor running, and its network limits held, so none of the gap lines
+/// would show for it. An open network has no limit to hold; a limited one needs TCP-only sockets
+/// and, for a port on any host, a network of its own. Inputs: what the launch got and its sandbox.
+/// Output: true when it holds all of it.
 pub fn linux_holds_fully(
     nested: bool,
     supervised: bool,
@@ -301,9 +302,9 @@ pub struct ProjectSandbox {
     engine_home: Option<bool>,
 }
 
-/// What the engine's git may write, with a linked lead's rights, while it adds the lead's
-/// native teammates' linked worktrees (OP-9b): the teammates' folder inside the lead's
-/// worktree and the project repository's worktree records.
+/// What the engine's git may write, with a linked lead's rights, while it adds the lead's native
+/// teammates' linked worktrees: the teammates' folder inside the lead's worktree and the project
+/// repository's worktree records.
 #[derive(Debug, Clone)]
 pub struct TeammatesSetup {
     folder: PathBuf,
@@ -312,7 +313,8 @@ pub struct TeammatesSetup {
 
 impl TeammatesSetup {
     /// The folder the teammates' clones sit in.
-    pub fn folder(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn folder(&self) -> &PathBuf {
         &self.folder
     }
 }
@@ -339,10 +341,12 @@ impl ProjectSandbox {
         network: SandboxNetwork,
     ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
-        let secrets: Vec<PathBuf> =
-            owner_secrets(&owner, &(hooks.access.harness_folders)()).collect();
+        let harnesses = (hooks.access.harness_folders)();
+        let secrets: Vec<PathBuf> = owner_secrets(&owner, &harnesses).collect();
+        let homes = harness_homes(&owner, &harnesses);
+        let walked = Walked::of(&owner, &homes, &secrets)?;
         for root in [project_root, agent_home, agent_tmp] {
-            granted_root(root, &owner, &secrets, &(hooks.access.harness_folders)())?;
+            granted_walked(root, &walked)?;
         }
         if let SandboxNetwork::Only(remotes) = &network
             && (remotes.len() > REMOTES_MAX
@@ -403,14 +407,14 @@ impl ProjectSandbox {
         })
     }
 
-    /// Adds the narrow extras the owner allowed the project's agents (F08): each socket
-    /// grant as a connect-and-read grant of its exact path in a list of its own, never bind,
-    /// write or unlink; each port grant as an outbound loopback port when the network is
-    /// limited (an open network reaches it already); and the temp folder grant as the
-    /// owner's private temp folder, written as a root and handed over as `TMPDIR`, with every
-    /// socket node in it kept unwritable. Inputs: the saved grants and the owner's temp
-    /// folder as [`crate::grants::owner_temp_folder`] gives it, none when it cannot be given.
-    /// Output: the widened sandbox, or `Invalid`; sockets and the temp folder need Seatbelt.
+    /// Adds the narrow extras the owner allowed the project's agents: each socket grant as a
+    /// connect-and-read grant of its exact path in a list of its own, never bind, write or unlink;
+    /// each port grant as an outbound loopback port when the network is limited (an open network
+    /// reaches it already); and the temp folder grant as the owner's private temp folder, written
+    /// as a root and handed over as `TMPDIR`, with every socket node in it kept unwritable. Inputs:
+    /// the saved grants and the owner's temp folder as [`crate::grants::owner_temp_folder`] gives
+    /// it, none when it cannot be given. Output: the widened sandbox, or `Invalid`; sockets and the
+    /// temp folder need Seatbelt.
     pub fn grant_access(
         mut self,
         grants: &[crate::policy::AccessGrant],
@@ -495,11 +499,11 @@ impl ProjectSandbox {
         &self.granted
     }
 
-    /// Lets the agent bind and connect one Unix socket at an exact path, read and write that
-    /// file and its `<path>.lock`, and read its folder's metadata, nothing else there: its
-    /// own Codex app-server socket in the shared daemon folder (DEC-104 K2b). Input: a plain
-    /// absolute path of letters, digits, `/`, `.`, `-` and `_` in an existing folder.
-    /// Output: the widened sandbox, or `Invalid`; only Seatbelt can hold the grant.
+    /// Lets the agent bind and connect one Unix socket at an exact path, read and write that file
+    /// and its `<path>.lock`, and read its folder's metadata, nothing else there: its own Codex
+    /// app-server socket in the shared daemon folder. Input: a plain absolute path of letters,
+    /// digits, `/`, `.`, `-` and `_` in an existing folder. Output: the widened sandbox, or
+    /// `Invalid`; only Seatbelt can hold the grant.
     pub fn allow_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
         self.socket_room(socket)?;
         if self.sockets.len() >= SOCKETS_MAX {
@@ -510,11 +514,11 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Lets the agent serve one Unix socket at an exact path but never connect to it or
-    /// unlink it: bind, create and change that file and its `<path>.lock`, and read its
-    /// folder's metadata. A native lead's teammates run their tmux server this way, so none
-    /// of them reaches it or swaps the node for a listener of its own (rv-audit S1 F1).
-    /// Input: as [`Self::allow_unix_socket`]. Output: the widened sandbox, or `Invalid`.
+    /// Lets the agent serve one Unix socket at an exact path but never connect to it or unlink it:
+    /// bind, create and change that file and its `<path>.lock`, and read its folder's metadata. A
+    /// native lead's teammates run their tmux server this way, so none of them reaches it or swaps
+    /// the node for a listener of its own. Input: as [`Self::allow_unix_socket`]. Output: the
+    /// widened sandbox, or `Invalid`.
     pub fn serve_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
         self.socket_room(socket)?;
         self.served.push(socket.to_path_buf());
@@ -522,11 +526,10 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Lets the agent connect to one Unix socket at an exact path and read it, never bind
-    /// it or create, change, link or unlink a node there, such as a native lead reaching its
-    /// teammates' tmux server and its teammates reaching the engine's caller socket (rv-audit
-    /// S1 F1, TTDL F1). Input: as [`Self::allow_unix_socket`]. Output: the widened sandbox,
-    /// or `Invalid`.
+    /// Lets the agent connect to one Unix socket at an exact path and read it, never bind it or
+    /// create, change, link or unlink a node there, such as a native lead reaching its teammates'
+    /// tmux server and its teammates reaching the engine's caller socket. Input: as
+    /// [`Self::allow_unix_socket`]. Output: the widened sandbox, or `Invalid`.
     pub fn reach_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
         self.socket_room(socket)?;
         self.reached.push(socket.to_path_buf());
@@ -534,10 +537,10 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Keeps the agent from writing, unlinking or locking one Unix socket at an exact path
-    /// inside its writable folders, with no grant to bind or reach it, such as a native
-    /// lead's own tmux socket for its teammates (rv-audit S1 F1). Input: as
-    /// [`Self::allow_unix_socket`]. Output: the narrowed sandbox, or `Invalid`.
+    /// Keeps the agent from writing, unlinking or locking one Unix socket at an exact path inside
+    /// its writable folders, with no grant to bind or reach it, such as a native lead's own tmux
+    /// socket for its teammates. Input: as [`Self::allow_unix_socket`]. Output: the narrowed
+    /// sandbox, or `Invalid`.
     pub fn shut_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
         self.socket_room(socket)?;
         self.shut.push(socket.to_path_buf());
@@ -732,11 +735,10 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Lets git create a checkout's `.git` link in the project's worktrees folders and the
-    /// `gitdir` and `commondir` files of its admin folder, which no other profile may plant
-    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Only the engine's own worktree-add step installs it,
-    /// and its callers confine and reinstall the profile before any agent runs.
-    /// Output: the sandbox with that exemption.
+    /// Lets git create a checkout's `.git` link in the project's worktrees folders and the `gitdir`
+    /// and `commondir` files of its admin folder, which no other profile may plant. Only the
+    /// engine's own worktree-add step installs it, and its callers confine and reinstall the
+    /// profile before any agent runs. Output: the sandbox with that exemption.
     #[cfg(unix)]
     pub fn adding_worktrees(mut self) -> Self {
         self.adds_worktrees = true;
@@ -805,12 +807,12 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Confines an Own branch or Full access agent (DEC-102) to its own clone of the project:
-    /// the clone, with its git folder inside it, is the agent's only writable project path,
-    /// so it commits on its own branch with full git while the project folder, its `.git`
-    /// and the object store the clone borrows through `objects/info/alternates` stay
-    /// read-only. Input: a canonical folder in the project's `worktrees/` folder whose
-    /// `.git` is a real folder, not a link. Output: the confined sandbox, or `Invalid`.
+    /// Confines an Own branch or Full access agent to its own clone of the project: the clone, with
+    /// its git folder inside it, is the agent's only writable project path, so it commits on its
+    /// own branch with full git while the project folder, its `.git` and the object store the clone
+    /// borrows through `objects/info/alternates` stay read-only. Input: a canonical folder in the
+    /// project's `worktrees/` folder whose `.git` is a real folder, not a link. Output: the
+    /// confined sandbox, or `Invalid`.
     pub fn confine_to_clone(mut self, worktree: &Path) -> Result<Self, SandboxError> {
         if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
@@ -840,11 +842,11 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Names the branch a clone lead works on, as the engine records it, so its native
-    /// teammates write only the refs of its `<branch>--<name>` teammate branches in the
-    /// clone, never the lead's own (AGENT-REF-ALLOW-NARROW). Input: an agent branch, as
-    /// [`crate::agent_git::is_agent_branch`] says. Output: the sandbox, or `Invalid` before
-    /// [`Self::confine_to_clone`], a second time or for any other branch.
+    /// Names the branch a clone lead works on, as the engine records it, so its native teammates
+    /// write only the refs of its `<branch>--<name>` teammate branches in the clone, never the
+    /// lead's own. Input: an agent branch, as [`crate::agent_git::is_agent_branch`] says. Output:
+    /// the sandbox, or `Invalid` before [`Self::confine_to_clone`], a second time or for any other
+    /// branch.
     pub fn lead_branch(mut self, branch: &str) -> Result<Self, SandboxError> {
         if self.clone.is_none() || self.lead_branch.is_some() {
             return Err(invalid(
@@ -858,15 +860,14 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Confines the engine's own git, run with a linked lead's rights, to adding the lead's
-    /// native teammates' linked worktrees (OP-9b): it writes only the teammates' folder of
-    /// the lead's worktree, the project repository's `.git/worktrees` records and the refs
-    /// and reflogs of the lead's own `<branch>--<name>` teammate branches with their
-    /// `crazyagent` folders (AGENT-REF-ALLOW-NARROW), beside the lead's home and temp dir;
-    /// the project stays readable. Makes the teammates' folder as a plain folder. Inputs:
-    /// the lead's canonical linked worktree in `worktrees/`, whose `.git` link names a
-    /// record in `.git/worktrees`, and its agent branch as the engine records it. Output:
-    /// the confined sandbox, `Invalid` or the disk error.
+    /// Confines the engine's own git, run with a linked lead's rights, to adding the lead's native
+    /// teammates' linked worktrees: it writes only the teammates' folder of the lead's worktree,
+    /// the project repository's `.git/worktrees` records and the refs and reflogs of the lead's own
+    /// `<branch>--<name>` teammate branches with their `crazyagent` folders, beside the lead's home
+    /// and temp dir; the project stays readable. Makes the teammates' folder as a plain folder.
+    /// Inputs: the lead's canonical linked worktree in `worktrees/`, whose `.git` link names a
+    /// record in `.git/worktrees`, and its agent branch as the engine records it. Output: the
+    /// confined sandbox, `Invalid` or the disk error.
     pub fn confine_to_teammates_setup(
         mut self,
         worktree: &Path,
@@ -924,32 +925,33 @@ impl ProjectSandbox {
 
 impl Checkout {
     /// The worktree the agent is confined to.
-    pub fn worktree(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn worktree(&self) -> &PathBuf {
         &self.worktree
     }
 
     /// The worktree's admin folder in the project's `.git/worktrees`.
-    pub fn admin(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn admin(&self) -> &PathBuf {
         &self.admin
     }
 
     /// The object store the worktree's commits land in.
-    pub fn objects(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn objects(&self) -> &PathBuf {
         &self.objects
     }
 
-    /// The Seatbelt rules that keep a confined agent from adding to or changing the git
-    /// objects the owner and the other agents share: no write in `info/` or `pack/`, nor of
-    /// either folder entry, in any letter case, no new, moved or removed fan-out folder, no
-    /// new object file by any route (create, rename or link) and no rewrite, removal or
-    /// replacement of one, no hard link of one under a name it could change it through
-    /// (rv-sa241 NV-1), no symlink anywhere in the store, and no mode, flag or ACL change
-    /// of anything in it, which would keep the owner's git and every landing from reading an
-    /// object (RV-DS241-185). Git reads a loose object before a packed one without checking
-    /// its bytes, so any object an agent could add would stand in for the owner's own;
-    /// object writes are the engine's, at turn end.
-    /// Seatbelt regexes take no `{n}` counts, so the hex digits repeat. Input: the checkout.
-    /// Output: the rule text.
+    /// The Seatbelt rules that keep a confined agent from adding to or changing the git objects the
+    /// owner and the other agents share: no write in `info/` or `pack/`, nor of either folder
+    /// entry, in any letter case, no new, moved or removed fan-out folder, no new object file by
+    /// any route (create, rename or link) and no rewrite, removal or replacement of one, no hard
+    /// link of one under a name it could change it through, no symlink anywhere in the store, and
+    /// no mode, flag or ACL change of anything in it, which would keep the owner's git and every
+    /// landing from reading an object. Git reads a loose object before a packed one without
+    /// checking its bytes, so any object an agent could add would stand in for the owner's own;
+    /// object writes are the engine's, at turn end. Seatbelt regexes take no `{n}` counts, so the
+    /// hex digits repeat. Input: the checkout. Output: the rule text.
     fn object_denies(&self) -> String {
         const HEX: &str = "[0-9a-fA-F]";
         let objects = self.objects.display();

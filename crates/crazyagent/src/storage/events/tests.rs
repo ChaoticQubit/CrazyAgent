@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::{Command, ProjectId, ProjectSpec, TaskId};
+use rusqlite::params;
 
 /// An in-memory store holding the `state` row at `revision` and one event per cursor in
 /// `logged`, each with its topic, as storage.rs creates and writes them. Inputs: the

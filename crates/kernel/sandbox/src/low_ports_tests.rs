@@ -1,7 +1,7 @@
-/// A refusing port stands for a stopped model provider in a row's settings, so it lies where
-/// an owner's model port would: below every range the system hands out by itself, which on
-/// Linux a kept model port must stay out of or no Landlock agent starts (G1 N8 P4), and apart
-/// from the owner's and the model proxy's ports.
+/// A refusing port stands for a stopped model provider in a row's settings, so it lies where an
+/// owner's model port would: below every range the system hands out by itself, which on Linux a
+/// kept model port must stay out of or no Landlock agent starts, and apart from the owner's and the
+/// model proxy's ports.
 #[test]
 fn a_refusing_port_lies_below_the_ports_the_system_hands_out() {
     use crate::ports::{OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS};

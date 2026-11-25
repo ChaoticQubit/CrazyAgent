@@ -3,7 +3,7 @@ use crate::error::StoreError;
 use crate::secret::Piece::{Hex, Plain};
 use crate::secret::sized;
 use crate::secret::{STORED_BYTES_MAX, SecretString};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -261,13 +261,8 @@ fn run(
         }
     }
     let stdout = child.stdout.take().ok_or_else(unavailable)?;
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout
-            .take(OUTPUT_BYTES_MAX as u64 + 1)
-            .read_to_end(&mut bytes);
-        (read, bytes)
-    });
+    let reader =
+        std::thread::spawn(move || crate::read_limited::read_limited(stdout, OUTPUT_BYTES_MAX));
     let deadline = Instant::now() + STEP_TIME;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|_| unavailable())? {
@@ -276,7 +271,9 @@ fn run(
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            if let Ok((_, mut bytes)) = reader.join() {
+                crate::secret::wipe(&mut bytes);
+            }
             return Err(unavailable());
         }
         std::thread::sleep(Duration::from_millis(10));

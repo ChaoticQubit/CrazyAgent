@@ -49,9 +49,9 @@ mod hidden_seers_tests;
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
 
-const PROJECT: &str = "team-panes";
+pub(super) const PROJECT: &str = "team-panes";
 
-const ENDPOINT: &str = "local-a";
+pub(super) const ENDPOINT: &str = "local-a";
 
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Plan the page"}}"#;
 
@@ -63,17 +63,17 @@ fn reference(value: &str) -> CredentialRef {
     CredentialRef::new(value).unwrap()
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     _root: tempfile::TempDir,
-    base: PathBuf,
+    pub(super) base: PathBuf,
     tmux: PathBuf,
-    connection: Connection,
-    setup: StoredSetup,
-    access: ModelAccess,
+    pub(super) connection: Connection,
+    pub(super) setup: StoredSetup,
+    pub(super) access: ModelAccess,
 }
 
 impl Fixture {
-    fn new(subs: u8) -> Self {
+    pub(super) fn new(subs: u8) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-team-panes-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -170,7 +170,7 @@ impl Fixture {
         }
     }
 
-    fn host(&self) -> Arc<dyn Host> {
+    pub(super) fn host(&self) -> Arc<dyn Host> {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
             &self.base.join(FOLDER),
@@ -191,7 +191,7 @@ impl Fixture {
         .unwrap()
     }
 
-    fn agent(&self, role: AgentRole, harness: &str, status: AgentStatus) -> i64 {
+    pub(super) fn agent(&self, role: AgentRole, harness: &str, status: AgentStatus) -> i64 {
         self.connection
             .execute(
                 "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,?3,0,?4,?5,1,1)",
@@ -268,11 +268,11 @@ impl Fixture {
             .unwrap()
     }
 
-    fn status(&self) -> super::super::TeamStatus {
+    pub(super) fn status(&self) -> super::super::TeamStatus {
         status(&self.connection, &self.setup).unwrap()
     }
 
-    fn agent_status(&self, id: i64) -> (AgentStatus, Option<String>) {
+    pub(super) fn agent_status(&self, id: i64) -> (AgentStatus, Option<String>) {
         let agent = self
             .status()
             .agents
@@ -289,7 +289,7 @@ impl Fixture {
             .any(|message| message.state == MessageState::Note && message.text == text)
     }
 
-    fn until(&self, team: &mut TeamRuntime, what: &str, done: impl Fn(&Self) -> bool) {
+    pub(super) fn until(&self, team: &mut TeamRuntime, what: &str, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + WAIT;
         while !done(self) {
             assert!(Instant::now() < deadline, "{what}: {:#?}", self.status());
@@ -4093,7 +4093,7 @@ fn page_task(fixture: &Fixture, member: i64) -> (i64, String) {
 /// The worktree folder and git folder of an agent, as its worktree row keeps them. Takes the
 /// fixture and the agent. Returns both.
 #[cfg(target_os = "macos")]
-fn agent_places(fixture: &Fixture, member: i64) -> (PathBuf, PathBuf) {
+pub(super) fn agent_places(fixture: &Fixture, member: i64) -> (PathBuf, PathBuf) {
     let (worktree, git_dir): (String, String) = fixture
         .connection
         .query_row(
@@ -4766,7 +4766,7 @@ done
 "#;
 
 #[cfg(target_os = "macos")]
-fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
+pub(super) fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
     limited_runtime(fixture, host, script, TeamLimits::default())
 }
 
@@ -6121,7 +6121,7 @@ fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {
 }
 
 #[cfg(target_os = "macos")]
-const RESUMING_CODEX: &str = r#"#!/bin/sh
+pub(super) const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
@@ -8526,7 +8526,7 @@ done
 /// under `limits`. Inputs: the fixture, its terminal host, the script and the limits.
 /// Output: the runtime.
 #[cfg(target_os = "macos")]
-fn limited_runtime(
+pub(super) fn limited_runtime(
     fixture: &Fixture,
     host: &Arc<dyn Host>,
     script: &str,
@@ -8552,7 +8552,7 @@ fn limited_runtime(
 
 /// Applies owner team actions in one transaction, as the owner socket does.
 #[cfg(target_os = "macos")]
-fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
+pub(super) fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
     let tx = connection.transaction().unwrap();
     for action in actions {
@@ -8566,7 +8566,7 @@ fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
 }
 
 #[cfg(target_os = "macos")]
-fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
+pub(super) fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
     crate::team::TeamAction::Delegate {
         project_id: fixture.setup.project_id.clone(),
         harness: Some("codex".into()),
@@ -8574,7 +8574,7 @@ fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
     }
 }
 
-fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
+pub(super) fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
     fixture
         .connection
         .query_row(
@@ -8603,7 +8603,7 @@ fn idle_stop(fixture: &Fixture, idle: Duration) {
 }
 
 #[cfg(target_os = "macos")]
-fn subs(fixture: &Fixture) -> Vec<i64> {
+pub(super) fn subs(fixture: &Fixture) -> Vec<i64> {
     fixture
         .connection
         .prepare("SELECT id FROM team_agents WHERE project=?1 AND role='sub' ORDER BY id")
@@ -14168,7 +14168,7 @@ fn stop_live(fixture: &Fixture, team: &mut TeamRuntime) {
 
 /// What the engine typed into one agent's pasted inputs, from its stand-in's log.
 #[cfg(target_os = "macos")]
-fn pasted(fixture: &Fixture, agent: i64) -> String {
+pub(super) fn pasted(fixture: &Fixture, agent: i64) -> String {
     std::fs::read_to_string(
         fixture
             .base
@@ -15207,7 +15207,7 @@ const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 /// Runs git as the owner on the test project: no system or global config, the test's own
 /// home. Inputs: the folder, the home and the arguments. Output: git's output.
 #[cfg(target_os = "macos")]
-fn level_git(folder: &Path, home: &Path, arguments: &[&str]) -> std::process::Output {
+pub(super) fn level_git(folder: &Path, home: &Path, arguments: &[&str]) -> std::process::Output {
     kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
@@ -27389,7 +27389,7 @@ fn reuse_idle(fixture: &Fixture, mode: crate::team::ReuseIdle) {
 /// Turns the owner's "Reuse idle agents" setting on, for a row about an idle agent taking
 /// the next task. Takes the fixture.
 #[cfg(target_os = "macos")]
-fn reuse_idle_on(fixture: &Fixture) {
+pub(super) fn reuse_idle_on(fixture: &Fixture) {
     reuse_idle(fixture, crate::team::ReuseIdle::On);
 }
 

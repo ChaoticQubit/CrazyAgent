@@ -19,9 +19,13 @@ fn a_harness_yaml_error_keeps_its_sentence() {
 /// account reads as none.
 #[test]
 fn the_engine_key_store_backs_the_plugin_host() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let root = temp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("{}: {error}", temp.path().display()));
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("{}: {error}", root.display()));
     let reference = KeyRef::new(&format!("plugin-key-{}", (KEYS.new_ref)().unwrap())).unwrap();
     assert!(!(KEYS.saved)(&root, KeyFolder::Plugin, &reference).unwrap());
     (KEYS.replace)(
@@ -35,10 +39,11 @@ fn the_engine_key_store_backs_the_plugin_host() {
     let file = root
         .join(crate::storage::accounts::PLUGIN_KEYS)
         .join(reference.as_str());
-    assert_eq!(
-        std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
-        0o600
-    );
+    let mode = std::fs::metadata(&file)
+        .unwrap_or_else(|error| panic!("{}: {error}", file.display()))
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o600);
     let value = (KEYS.read)(&root, KeyFolder::Plugin, &reference)
         .unwrap()
         .unwrap();
@@ -59,9 +64,13 @@ fn the_engine_key_store_backs_the_plugin_host() {
 /// readable binding table nothing is deleted.
 #[test]
 fn the_start_sweep_removes_only_unreferenced_plugin_key_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let root = temp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("{}: {error}", temp.path().display()));
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("{}: {error}", root.display()));
     let key = |name: &str| KeyRef::new(name).unwrap();
     let save = |folder: KeyFolder, name: &str| {
         (KEYS.replace)(&root, folder, &key(name), b"sk-sweep-key-01".to_vec()).unwrap();
@@ -94,7 +103,7 @@ fn the_start_sweep_removes_only_unreferenced_plugin_key_files() {
 #[cfg(target_os = "linux")]
 #[test]
 fn on_linux_the_adapter_passes_the_handed_out_range() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
     let engine = super::engine(temp.path());
     let range =
         kernel_sandbox::linux::helper::read_picked_ports().expect("this Linux names its range");
@@ -146,10 +155,16 @@ fn the_handshake_flags_are_unchanged() {
 /// in: the bundled code plugin with its granted capability, the bundled data plugins off.
 #[test]
 fn the_owner_read_lists_plugin_grants() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let root = temp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("{}: {error}", temp.path().display()));
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("{}: {error}", root.display()));
+    let path = root.join("engine.db");
+    let mut db = rusqlite::Connection::open(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     initialize(&db).unwrap();
     let tx = db.transaction().unwrap();
     let crate::engine::owner::OwnerData::PluginGrants { plugins } = super::grants(&tx).unwrap()

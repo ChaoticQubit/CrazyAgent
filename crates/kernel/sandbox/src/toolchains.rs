@@ -30,8 +30,8 @@ const MARKER_SKIPPED: &[&str] = &["node_modules", "target", "worktrees", "graphi
 /// Where `xcode-select` keeps the developer folder the owner picked.
 const XCODE_SELECT_LINK: &str = "/private/var/db/xcode_select_link";
 
-/// Apple's Command Line Tools, whose own compilers, linkers and git an agent runs in place
-/// of the `/usr/bin` xcrun shims (R7-XCRUN).
+/// Apple's Command Line Tools, whose own compilers, linkers and git an agent runs in place of the
+/// `/usr/bin` xcrun shims.
 const DEVELOPER_TOOLS: &str = "/Library/Developer/CommandLineTools";
 
 const NODE_HOMES: &[&str] = &[".nvm", ".volta", ".local/share/fnm"];
@@ -85,9 +85,9 @@ pub struct ToolHomes {
 }
 
 impl ToolHomes {
-    /// The owner's tool homes: `~/.rustup` and `~/.cargo` in the account's home folder,
-    /// and the Xcode app `xcode-select` picked, if it picked one (F26). Takes nothing.
-    /// Returns the homes, or the refusal when the owner account is unknown.
+    /// The owner's tool homes: `~/.rustup` and `~/.cargo` in the account's home folder, and the
+    /// Xcode app `xcode-select` picked, if it picked one. Takes nothing. Returns the homes, or the
+    /// refusal when the owner account is unknown.
     pub fn owner() -> Result<Self, SandboxError> {
         let homes = Self::at(&owner_home()?);
         Ok(match xcode_from_link(Path::new(XCODE_SELECT_LINK)) {
@@ -170,12 +170,11 @@ impl Toolchains {
         Self::grant(homes, &used)
     }
 
-    /// Grants the chosen toolchains read-only: Rust grants rustup's toolchains and settings
-    /// and cargo's proxies, registry and git checkouts; Node grants nvm, Volta and fnm;
-    /// Python grants pyenv and uv's Pythons. Homebrew is already a system root, and the
-    /// Xcode app `xcode-select` picked is granted with every choice, as the Command Line
-    /// Tools are a system root (F26). Inputs: the tool homes and the chosen toolchains.
-    /// Output: the existing grants.
+    /// Grants the chosen toolchains read-only: Rust grants rustup's toolchains and settings and
+    /// cargo's proxies, registry and git checkouts; Node grants nvm, Volta and fnm; Python grants
+    /// pyenv and uv's Pythons. Homebrew is already a system root, and the Xcode app `xcode-select`
+    /// picked is granted with every choice, as the Command Line Tools are a system root. Inputs:
+    /// the tool homes and the chosen toolchains. Output: the existing grants.
     pub fn grant(homes: &ToolHomes, chosen: &[Toolchain]) -> Self {
         let mut roots: Vec<PathBuf> = homes.xcode.iter().cloned().collect();
         let mut files = Vec::new();
@@ -242,10 +241,10 @@ impl Toolchain {
     }
 
     /// Tells whether a project uses this toolchain: one of its marker files (`Cargo.toml` or
-    /// `rust-toolchain*`; `package.json`, `.nvmrc` or `.node-version`; `pyproject.toml`,
-    /// `uv.lock`, `.python-version` or `requirements.txt`) sits at the project root or in
-    /// one of the first [`MARKER_FOLDERS_MAX`] plain folders directly in it (F26). Input: the
-    /// project folder. Output: true when used.
+    /// `rust-toolchain*`; `package.json`, `.nvmrc` or `.node-version`; `pyproject.toml`, `uv.lock`,
+    /// `.python-version` or `requirements.txt`) sits at the project root or in one of the first
+    /// [`MARKER_FOLDERS_MAX`] plain folders directly in it. Input: the project folder. Output: true
+    /// when used.
     pub fn used_by(self, project: &Path) -> bool {
         let markers = match self {
             Self::Rust => RUST_MARKERS,
@@ -392,12 +391,11 @@ pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)
     env
 }
 
-/// The program folder and macOS SDK of the developer tools an agent runs: the Command Line
-/// Tools when their folder holds `cc`, else the picked Xcode app's default toolchain when
-/// it holds `cc` (F26). Every lookup by an xcrun shim under an agent's own home misses
-/// xcrun's cache, whose write in the per-user temp folder the sandbox denies (R7-XCRUN), so
-/// an agent runs these programs directly. Takes the tool homes. Returns the folder and the
-/// SDK path, none when neither has the tools.
+/// The program folder and macOS SDK of the developer tools an agent runs: the Command Line Tools
+/// when their folder holds `cc`, else the picked Xcode app's default toolchain when it holds `cc`.
+/// Every lookup by an xcrun shim under an agent's own home misses xcrun's cache, whose write in the
+/// per-user temp folder the sandbox denies, so an agent runs these programs directly. Takes the
+/// tool homes. Returns the folder and the SDK path, none when neither has the tools.
 fn developer(homes: &ToolHomes) -> Option<(String, PathBuf)> {
     let tools = (
         homes.developer().join("usr").join("bin"),
@@ -413,10 +411,10 @@ fn developer(homes: &ToolHomes) -> Option<(String, PathBuf)> {
     Some((text, sdk))
 }
 
-/// The read-only folders graphify needs in an agent's sandbox when the default pack
-/// installed it with uv (I3): its own environment, holding the `graphify` program, and the
-/// uv Python install its interpreter runs from when that sits in the owner's home. Takes the
-/// tool homes. Returns the canonical folders, none when graphify is not installed there.
+/// The read-only folders graphify needs in an agent's sandbox when the default pack installed it
+/// with uv: its own environment, holding the `graphify` program, and the uv Python install its
+/// interpreter runs from when that sits in the owner's home. Takes the tool homes. Returns the
+/// canonical folders, none when graphify is not installed there.
 pub fn graphify(homes: &ToolHomes) -> Vec<PathBuf> {
     let Ok(tool) = below(homes.home(), GRAPHIFY_TOOL).canonicalize() else {
         return Vec::new();
@@ -470,18 +468,16 @@ pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
     parts.join(":")
 }
 
-/// Makes the agent's own cargo home, `.cargo` in its home with mode 0700, and links its
-/// `registry` and `git` to the owner's, which the sandbox grants read-only, so offline
-/// builds reuse the owner's crates and never change them. Those names hold only that link
-/// (DEC-173): where the owner has the cache, whatever else is there, a folder or a link
-/// elsewhere, gives way to it; where the owner has none, a link there goes, and a folder an
-/// agent made goes at the engine's launch reset, while a folder in
-/// the owner's IDE terminal home stays. A launch that finds the exact link another launch
-/// of the same home made at a name it saw free takes it (RV-DS241-199). Inputs: the agent
-/// home, the hooks the removal goes through and the owner's tool homes. Output: the cargo
-/// home, or a refusal when `.cargo` is
-/// not a plain folder or a name will not give way, whose text is `cleanup_walk_too_long`
-/// when removing the name ran past its walk budget (RESET-WALK-CODE).
+/// Makes the agent's own cargo home, `.cargo` in its home with mode 0700, and links its `registry`
+/// and `git` to the owner's, which the sandbox grants read-only, so offline builds reuse the
+/// owner's crates and never change them. Those names hold only that link: where the owner has the
+/// cache, whatever else is there, a folder or a link elsewhere, gives way to it; where the owner
+/// has none, a link there goes, and a folder an agent made goes at the engine's launch reset, while
+/// a folder in the owner's IDE terminal home stays. A launch that finds the exact link another
+/// launch of the same home made at a name it saw free takes it. Inputs: the agent home, the hooks
+/// the removal goes through and the owner's tool homes. Output: the cargo home, or a refusal when
+/// `.cargo` is not a plain folder or a name will not give way, whose text is
+/// `cleanup_walk_too_long` when removing the name ran past its walk budget.
 #[cfg(unix)]
 pub fn prepare_cargo_home(
     hooks: &ToolchainHooks,
@@ -547,7 +543,7 @@ pub const GIT_FOLDER: &str = "bin";
 
 pub const GIT_PROGRAM: &str = "git";
 
-/// The xcrun shim a Mac has at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
+/// The xcrun shim a Mac has at `/usr/bin/git`, whose cache file write Seatbelt denies.
 #[cfg(unix)]
 const GIT_SHIM: &str = "/usr/bin/git";
 
@@ -563,14 +559,13 @@ fn xcrun_shim(git: &Path, macos: bool) -> bool {
 #[cfg(unix)]
 const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
 
-/// The script an agent's own `git` holds, with `@GIT@` for the real git, `@LEAD@` for 1 in
-/// a lead's copy, `@FREE@` for 1 in the free copy and `@MAIN@` for 1 while "Catch up with
-/// main" is on, else 0. It refuses merge, pull, rebase and cherry-pick, and aliases for
-/// them, with a plain reason (DEC-107 rule 2); with main on any copy merges
-/// `crazyagent/main` only while that name resolves to the commit `refs/crazyagent/main`
-/// holds, a courtesy check, since the copy lets an agent set that ref and the engine's turn
-/// end check is what refuses a merge of anything else, a lead its own workers'
-/// `BRANCH--NAME` branches, telling a lead with main on how to merge main (F19), and the
+/// The script an agent's own `git` holds, with `@GIT@` for the real git, `@LEAD@` for 1 in a lead's
+/// copy, `@FREE@` for 1 in the free copy and `@MAIN@` for 1 while "Catch up with main" is on, else
+/// 0. It refuses merge, pull, rebase and cherry-pick, and aliases for them, with a plain reason;
+/// with main on any copy merges `crazyagent/main` only while that name resolves
+/// to the commit `refs/crazyagent/main` holds, a courtesy check, since the copy lets an agent set
+/// that ref and the engine's turn end check is what refuses a merge of anything else, a lead its
+/// own workers' `BRANCH--NAME` branches, telling a lead with main on how to merge main, and the
 /// free copy runs every command as is.
 #[cfg(unix)]
 const GIT_SCRIPT: &str = r##"#!/bin/sh
@@ -758,7 +753,7 @@ pub fn plain_path(path: &Path) -> Option<&str> {
 }
 
 /// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
-/// lead merge its own workers' branches (DEC-107 rule 2), and `crazyagent/main` while
+/// lead merge its own workers' branches, and `crazyagent/main` while
 /// "Catch up with main" is on, after the engine's `make_tmp` wrote the copy every agent gets. Inputs:
 /// the hooks naming the real git, the folder `make_tmp` returned and the setting. Output:
 /// Ok, also when git is the shim and no copy is written, or the write failure.
@@ -770,11 +765,10 @@ pub fn lead_git(hooks: &ToolchainHooks, tmp: &Path, catch_up: bool) -> io::Resul
     }
 }
 
-/// Rewrites the agent's own `git` in its short temp folder as the free copy, which runs
-/// every git command as is: the master's at Full access (DEC-117 Q2), after the engine's `make_tmp`
-/// wrote the worker copy. Inputs: the hooks naming the real git and the folder `make_tmp`
-/// returned. Output: Ok, also when git is the shim and no copy is written, or the write
-/// failure.
+/// Rewrites the agent's own `git` in its short temp folder as the free copy, which runs every git
+/// command as is: the master's at Full access, after the engine's `make_tmp` wrote the worker copy.
+/// Inputs: the hooks naming the real git and the folder `make_tmp` returned. Output: Ok, also when
+/// git is the shim and no copy is written, or the write failure.
 #[cfg(unix)]
 pub fn free_git(hooks: &ToolchainHooks, tmp: &Path) -> io::Result<()> {
     match git_script((hooks.sandboxed_git)(), GitCopy::Free, true) {
@@ -1002,16 +996,15 @@ fn getconf_script(mates: &Path, shared: &Path, own: &Path) -> Option<String> {
     (script.len() <= GETCONF_SCRIPT_BYTES_MAX).then_some(script)
 }
 
-/// Writes the agent's own `getconf` into `bin` of the launch folder the engine has just
-/// made for one launch, which neither the agent nor a native lead's teammates may write
-/// (LL-2, TPH). context-mode makes its script folders under `getconf DARWIN_USER_TEMP_DIR`,
-/// ignoring TMPDIR, and Seatbelt denies the system answer, so this one names where the
-/// caller may write: its short temp folder, or the lead's own one in it for a native lead
-/// (T3-15/18). A research job makes its short temp folder after the install, so it calls this
-/// again then (R7-CTX F1): a launch folder that already holds this same `getconf` is kept,
-/// and one that holds anything else is refused. Inputs: the agent home and whether it leads a
-/// native team. Output: done, also when the agent has no short temp folder or a path is not
-/// plain and none is written, or the write failure.
+/// Writes the agent's own `getconf` into `bin` of the launch folder the engine has just made for
+/// one launch, which neither the agent nor a native lead's teammates may write (TPH). context-mode
+/// makes its script folders under `getconf DARWIN_USER_TEMP_DIR`, ignoring TMPDIR, and Seatbelt
+/// denies the system answer, so this one names where the caller may write: its short temp folder,
+/// or the lead's own one in it for a native lead. A research job makes its short temp
+/// folder after the install, so it calls this again then: a launch folder that already holds this
+/// same `getconf` is kept, and one that holds anything else is refused. Inputs: the agent home and
+/// whether it leads a native team. Output: done, also when the agent has no short temp folder or a
+/// path is not plain and none is written, or the write failure.
 #[cfg(target_os = "macos")]
 pub fn write_getconf(hooks: &ToolchainHooks, home: &Path, native_lead: bool) -> io::Result<()> {
     use std::io::Write;
@@ -1139,8 +1132,8 @@ pub fn existing_tmp(home: &Path) -> Option<PathBuf> {
 }
 
 /// A native lead's own temp folder, its `TMPDIR`: `lead` in its short temp folder, which its
-/// teammates share for their tmux socket and temp files but never reach inside (TPH-2
-/// residual). Input: the lead's short temp folder. Output: the path, which may not exist.
+/// teammates share for their tmux socket and temp files but never reach inside. Input: the lead's
+/// short temp folder. Output: the path, which may not exist.
 pub fn native_lead_tmp(scratch: &Path) -> PathBuf {
     scratch.join(NATIVE_LEAD_TMP)
 }
@@ -1232,12 +1225,11 @@ fn agent_tree_gone(hooks: &ToolchainHooks, folder: &Path) -> io::Result<()> {
     (hooks.remove_agent_tree)(folder)
 }
 
-/// Removes everything in the agent's short temp folder but the socket named `kept`, which
-/// stays there with the folder; with no such socket in this user's folder the folder goes
-/// as [`remove_tmp`] removes it. A native lead's caller socket is kept this way as the lead
-/// ends, so a teammate still running asks a socket no engine answers on and is refused,
-/// never finding no socket (rv-secreview RH2R2-1). Input: the agent home and the kept name.
-/// Output: as [`remove_tmp`].
+/// Removes everything in the agent's short temp folder but the socket named `kept`, which stays
+/// there with the folder; with no such socket in this user's folder the folder goes as
+/// [`remove_tmp`] removes it. A native lead's caller socket is kept this way as the lead ends, so a
+/// teammate still running asks a socket no engine answers on and is refused, never finding no
+/// socket. Input: the agent home and the kept name. Output: as [`remove_tmp`].
 #[cfg(unix)]
 pub fn remove_tmp_keeping(hooks: &ToolchainHooks, home: &Path, kept: &str) -> io::Result<()> {
     let path = tmp_path(home);

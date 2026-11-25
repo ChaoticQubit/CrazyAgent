@@ -42,7 +42,7 @@ pub fn one_spelling(real: PathBuf) -> PathBuf {
     real
 }
 
-/// The plain Windows spelling of path text (rv-sec2 #717 C1): a verbatim disk path
+/// The plain Windows spelling of path text: a verbatim disk path
 /// `\\?\C:\...` gives `C:\...`, and plain text stays as it is, when the result passes
 /// [`windows_clean_text`]. A UNC, device or other verbatim form, or text Win32 would
 /// normalise to another name, gives none. Input: the text. Output: the plain text, or none.
@@ -173,9 +173,9 @@ pub fn plain_top(name: &str) -> bool {
 
 /// The Seatbelt filter for a path and everything below it: one `^X(/|$)` in place of
 /// `^X(/.*)?$`, whose `(/.*)` tail libsandbox fails to compile again in lower case after a
-/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`
-/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). One regex keeps the profile under its cap
-/// for long roots, where an `X$` and `X/` pair did not (V243-PROFILE-CAP-ROW, DEC-195 Q6).
+/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`.
+/// One regex keeps the profile under its cap
+/// for long roots, where an `X$` and `X/` pair did not.
 /// Input: the pattern after `^`, an absolute path first. Output: the filter.
 pub fn at_or_below(pattern: &str) -> String {
     assert!(pattern.starts_with('/'));
@@ -186,7 +186,7 @@ pub fn at_or_below(pattern: &str) -> String {
 /// ASCII they fold onto: on APFS the full case fold of their canonical decomposition, each
 /// checked on the volume (probe 2026-10-28), and U+0131 DOTLESS I, which the NTFS upcase
 /// table maps to `I`. The one list the landing checks, the name compares and the Seatbelt
-/// name spellings share (SA vid 202, DS-148 F1).
+/// name spellings share.
 pub const ASCII_FOLDS: [(char, &str); 14] = [
     ('\u{DF}', "ss"),
     ('\u{131}', "i"),
@@ -323,11 +323,29 @@ fn identity(path: &Path) -> io::Result<Option<Identity>> {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// How many walks [`Walk::of`] took on this thread, which rows read through [`walks`].
+    static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of walks [`Walk::of`] took on this thread so far, read by the macOS profile
+/// rows. Takes nothing. Returns the count.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn walks() -> usize {
+    WALKS.with(std::cell::Cell::get)
+}
+
+/// The most links whose targets do not exist yet one walk follows from its first missing
+/// run before it refuses the path.
+const DANGLING_LINK_HOPS: usize = 16;
+
 /// A path's parts with the identity of each leading run of them, top down: None from the
 /// first run that does not exist on, and None for a Windows drive prefix alone, which names
 /// the drive's current folder. `reached` holds the identities of the folders the deepest
-/// existing run resolves through once its links are followed, so a run that leads into a
-/// protected folder by a link is told too.
+/// existing run resolves through once its links are followed, and of the folders above
+/// where a first missing run that is a link leads ([`dangling_reach`]), so a run that leads
+/// into a protected folder by a link, made or still to be made, is told too.
 struct Walk<'a> {
     path: &'a Path,
     parts: Vec<Component<'a>>,
@@ -336,18 +354,22 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    /// Reads the identities of a path's leading runs, and of every folder above the deepest
-    /// existing run once its links are resolved. Input: the path. Output: the walk, or
-    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or the resolve fails other than
-    /// not found.
+    /// Reads the identities of a path's leading runs, of every folder above the deepest
+    /// existing run once its links are resolved, and of every folder above where its first
+    /// missing run leads when that run is a link. Input: the path. Output: the walk, or
+    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or a resolve fails other than not
+    /// found, or a missing run leads through more than [`DANGLING_LINK_HOPS`] links.
     fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
+        #[cfg(all(test, target_os = "macos"))]
+        WALKS.with(|walks| walks.set(walks.get() + 1));
         let refused = |_| invalid(SECRET_ROOT_REFUSED);
         let parts: Vec<Component<'a>> = path.components().collect();
         let mut ids = Vec::with_capacity(parts.len());
         let mut run = PathBuf::new();
         let mut existing = None;
+        let mut missing = None;
         let mut gone = false;
-        for part in &parts {
+        for (at, part) in parts.iter().enumerate() {
             run.push(part);
             let prefix = matches!(part, Component::Prefix(_));
             let found = if gone || prefix {
@@ -357,14 +379,22 @@ impl<'a> Walk<'a> {
             };
             if found.is_some() {
                 existing = Some(run.clone());
-            } else if !prefix {
+            } else if !prefix && !gone {
+                missing = Some(at);
                 gone = true;
             }
             ids.push(found);
         }
-        let mut reached = Vec::new();
+        let mut reals = Vec::with_capacity(2);
         if let Some(existing) = existing {
-            let real = existing.canonicalize().map_err(refused)?;
+            reals.push(existing.canonicalize().map_err(refused)?);
+        }
+        if let Some(at) = missing {
+            let run: PathBuf = parts[..=at].iter().collect();
+            reals.extend(dangling_reach(&run, &parts[at + 1..])?);
+        }
+        let mut reached = Vec::new();
+        for real in &reals {
             for above in real.ancestors() {
                 if let Some(found) = identity(above).map_err(refused)? {
                     reached.push(found);
@@ -372,6 +402,7 @@ impl<'a> Walk<'a> {
             }
         }
         assert_eq!(ids.len(), parts.len());
+        assert!(reals.len() <= 2);
         Ok(Walk {
             path,
             parts,
@@ -381,9 +412,10 @@ impl<'a> Walk<'a> {
     }
 
     /// Tells whether this path equals or lies under `outer`: by text; or by entry, when
-    /// `outer` exists and one of this path's existing runs is that entry; or, on a volume
-    /// that folds names, when this path's new parts start under the same folder as
-    /// `outer`'s ([`Walk::folds_into`]). Input: the outer walk. Output: true when it does.
+    /// `outer` exists and one of this path's existing runs is that entry; or when this path's
+    /// new parts start under the same folder as `outer`'s and name it, folded on a volume
+    /// that folds names and exactly elsewhere ([`Walk::new_parts_in`]). Input: the outer
+    /// walk. Output: true when it does.
     fn sits_in(&self, outer: &Walk) -> bool {
         if self.path.starts_with(outer.path) {
             return true;
@@ -393,16 +425,15 @@ impl<'a> Walk<'a> {
         {
             return true;
         }
-        cfg!(any(target_os = "macos", windows)) && self.folds_into(outer)
+        self.new_parts_in(outer, cfg!(any(target_os = "macos", windows)))
     }
 
-    /// Compares the parts of this path that do not exist yet, on a volume that folds names.
-    /// When this path's deepest existing run is `outer` or one of `outer`'s existing runs,
-    /// a new part that folds to no ASCII name, or is not a plain name, may name anything
-    /// there and counts as inside; else the new parts sit in `outer` when they are at least
-    /// as many as `outer`'s parts below that run and each is the [`same_name`] as its match.
-    /// Input: the outer walk. Output: true when this path may sit in `outer`.
-    fn folds_into(&self, outer: &Walk) -> bool {
+    /// Compares this path's new parts below its deepest existing run when that run is one of
+    /// `outer`'s: a part that is no plain name, or with `fold` folds to no ASCII name, counts
+    /// as inside; else they sit in `outer` when at least as many as its parts below and each
+    /// matches, the [`same_name`] with `fold` and the same text without. Inputs: the outer
+    /// walk and whether the volume folds names. Output: true when this path may sit in it.
+    fn new_parts_in(&self, outer: &Walk, fold: bool) -> bool {
         let Some(deepest) = self.ids.iter().rposition(Option::is_some) else {
             return false;
         };
@@ -411,18 +442,77 @@ impl<'a> Walk<'a> {
         };
         let Some(new) = self.parts[deepest + 1..]
             .iter()
-            .map(|part| plain_name(*part).filter(|name| ascii_fold(name).is_some()))
+            .map(|part| plain_name(*part).filter(|name| !fold || ascii_fold(name).is_some()))
             .collect::<Option<Vec<&str>>>()
         else {
             return true;
         };
         let below = &outer.parts[level + 1..];
+        let named = |part: &str, step: &str| {
+            if fold {
+                same_name(part, step)
+            } else {
+                part == step
+            }
+        };
         new.len() >= below.len()
             && new
                 .iter()
                 .zip(below)
-                .all(|(part, step)| plain_name(*step).is_some_and(|step| same_name(part, step)))
+                .all(|(part, step)| plain_name(*step).is_some_and(|step| named(part, step)))
     }
+}
+
+/// Where a run that does not exist leads when it is a link whose target does not exist yet:
+/// the target, read against the link's own folder, with the parts after the run, walked top
+/// down again, and on through each further such link it meets, at most
+/// [`DANGLING_LINK_HOPS`] of them. Inputs: the missing run and the parts after it. Output:
+/// the canonical deepest existing folder of where it leads, None when the run is no link,
+/// or `Invalid` with [`SECRET_ROOT_REFUSED`] past the bound or when a read fails.
+fn dangling_reach(run: &Path, rest: &[Component<'_>]) -> Result<Option<PathBuf>, SandboxError> {
+    let refused = |_| invalid(SECRET_ROOT_REFUSED);
+    let mut link = run.to_path_buf();
+    let mut after: PathBuf = rest.iter().collect();
+    let mut deepest = None;
+    for hop in 0..=DANGLING_LINK_HOPS {
+        let linked = match std::fs::symlink_metadata(&link) {
+            Ok(found) => found.file_type().is_symlink(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(refused(error)),
+        };
+        if !linked {
+            break;
+        }
+        if hop == DANGLING_LINK_HOPS {
+            return Err(invalid(SECRET_ROOT_REFUSED));
+        }
+        let target = std::fs::read_link(&link).map_err(refused)?;
+        let folder = link.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        let led = folder.join(target).join(&after);
+        let parts: Vec<Component<'_>> = led.components().collect();
+        let mut walked = PathBuf::new();
+        let mut next = None;
+        deepest = None;
+        for (at, part) in parts.iter().enumerate() {
+            walked.push(part);
+            if matches!(part, Component::Prefix(_)) {
+                continue;
+            }
+            if identity(&walked).map_err(refused)?.is_none() {
+                next = Some(at);
+                break;
+            }
+            deepest = Some(walked.clone());
+        }
+        let Some(at) = next else {
+            break;
+        };
+        after = parts[at + 1..].iter().collect();
+        link = walked;
+    }
+    deepest
+        .map(|found| found.canonicalize().map_err(refused))
+        .transpose()
 }
 
 /// The text of a plain folder or file name part. Input: the part. Output: its text, or
@@ -444,6 +534,58 @@ pub fn granted_root(
     secrets: &[PathBuf],
     harnesses: &[&'static str],
 ) -> Result<(), SandboxError> {
+    let homes = harness_homes(owner, harnesses);
+    granted_walked(root, &Walked::of(owner, &homes, secrets)?)
+}
+
+/// The owner's harness homes: each harness folder name joined to the owner home. Inputs:
+/// the owner home and the folder names. Output: the folders, in the names' order.
+pub(crate) fn harness_homes(owner: &Path, harnesses: &[&'static str]) -> Vec<PathBuf> {
+    harnesses
+        .iter()
+        .map(|private| owner.join(private))
+        .collect()
+}
+
+/// The walks of the owner home, of its harness homes and of the secret paths, taken once for
+/// the roots one check or one sandbox build compares against them, and dropped with it, so
+/// no walk outlives the moment its answer is used. Built by [`Walked::of`].
+pub(crate) struct Walked<'a> {
+    owner: Walk<'a>,
+    harnesses: Vec<Walk<'a>>,
+    secrets: Vec<Walk<'a>>,
+}
+
+impl<'a> Walked<'a> {
+    /// Walks the owner home, each harness home and each secret path once. Inputs: the owner
+    /// home, the harness homes ([`harness_homes`]) and the secret paths. Output: the walks,
+    /// or `Invalid` with [`SECRET_ROOT_REFUSED`] when a read fails other than not found.
+    pub(crate) fn of(
+        owner: &'a Path,
+        harnesses: &'a [PathBuf],
+        secrets: &'a [PathBuf],
+    ) -> Result<Walked<'a>, SandboxError> {
+        let walked = Walked {
+            owner: Walk::of(owner)?,
+            harnesses: harnesses
+                .iter()
+                .map(|home| Walk::of(home.as_path()))
+                .collect::<Result<_, _>>()?,
+            secrets: secrets
+                .iter()
+                .map(|secret| Walk::of(secret.as_path()))
+                .collect::<Result<_, _>>()?,
+        };
+        assert_eq!(walked.harnesses.len(), harnesses.len());
+        assert_eq!(walked.secrets.len(), secrets.len());
+        Ok(walked)
+    }
+}
+
+/// Checks a root as [`granted_root`] does, against the owner home, harness homes and secrets
+/// one [`Walked`] holds, walking only the root itself, once. Inputs: the root and the walks.
+/// Output: unit, or `Invalid` naming the rule.
+pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), SandboxError> {
     let depth = root
         .components()
         .filter(|component| matches!(component, Component::Normal(_)))
@@ -452,16 +594,15 @@ pub fn granted_root(
         return Err(invalid("sandbox roots must be absolute, deep and plain"));
     }
     let walk = Walk::of(root)?;
-    if Walk::of(owner)?.sits_in(&walk) {
+    if walked.owner.sits_in(&walk) {
         return Err(invalid("sandbox roots must not contain the owner home"));
     }
-    for private in harnesses {
-        let folder = owner.join(private);
-        if walk.sits_in(&Walk::of(&folder)?) {
+    for home in &walked.harnesses {
+        if walk.sits_in(home) {
             return Err(invalid("sandbox roots must not be owner harness homes"));
         }
     }
-    clear_of_secrets(root, secrets)?;
+    clear_of_walked(&walk, &walked.secrets)?;
     if !root.is_dir() || canonical(root)? != root {
         return Err(invalid(
             "sandbox roots must be existing canonical directories",
@@ -470,9 +611,21 @@ pub fn granted_root(
     Ok(())
 }
 
+/// Refuses a walked root that equals, holds or sits inside one of the walked secrets, as
+/// [`clear_of_secrets`] does. Inputs: the root's walk and the secrets' walks. Output: unit,
+/// or `Invalid` with [`SECRET_ROOT_REFUSED`].
+fn clear_of_walked(root: &Walk, secrets: &[Walk]) -> Result<(), SandboxError> {
+    for secret in secrets {
+        if root.sits_in(secret) || secret.sits_in(root) {
+            return Err(invalid(SECRET_ROOT_REFUSED));
+        }
+    }
+    Ok(())
+}
+
 /// The code points a case-insensitive HFS+ volume ignores in names (git's
 /// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
-/// compare that must match such a volume leaves out (RV-DS241-148).
+/// compare that must match such a volume leaves out.
 pub const HFS_IGNORED: [char; 16] = [
     '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
     '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
@@ -481,7 +634,7 @@ pub const HFS_IGNORED: [char; 16] = [
 /// Folds one path part the way the volume compares names, when the result is ASCII.
 /// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
 /// the code points HFS+ ignores in names left out
-/// ([`HFS_IGNORED`], RV-DS241-148), or None when a code point
+/// ([`HFS_IGNORED`]), or None when a code point
 /// stays outside ASCII.
 pub fn ascii_fold(part: &str) -> Option<String> {
     let mut folded = String::with_capacity(part.len());
@@ -516,7 +669,7 @@ pub fn same_name(one: &str, other: &str) -> bool {
 /// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
 /// finds under it: each letter in both cases with every code point that folds onto it or
 /// onto a run of two or three letters ([`spelled`]), so the rule never leans on how Seatbelt
-/// folds names itself (SA vid 202). A stretch with more than [`SPELLINGS_MAX`] spellings, a
+/// folds names itself. A stretch with more than [`SPELLINGS_MAX`] spellings, a
 /// long run of `s` or `f` in path text, is spelled as the [`superset`], which matches more,
 /// so the result holds in a deny. Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
@@ -535,7 +688,7 @@ pub fn fold_case(pattern: &str) -> String {
 }
 
 /// The most spellings one stretch of letters between two places no fold spans lists one by
-/// one; past it path text takes the [`superset`] (B5 r2).
+/// one; past it path text takes the [`superset`].
 const SPELLINGS_MAX: usize = 8;
 
 /// Spells text run by run from [`ASCII_FOLDS`]: each run of ASCII
@@ -588,7 +741,7 @@ fn joins_fold(characters: &[char], at: usize) -> bool {
 
 /// Spells one character as a case-insensitive volume finds it: an ASCII letter in both
 /// cases, with every code point that folds onto it alone, the non-ASCII ones in a group so
-/// each matches its whole UTF-8 sequence (LL2S-2). Input: the character. Output: the pattern.
+/// each matches its whole UTF-8 sequence. Input: the character. Output: the pattern.
 fn spelled_char(character: char) -> String {
     let lower = character.to_ascii_lowercase();
     let mut alternatives = vec![lower.to_string()];
@@ -764,8 +917,8 @@ pub fn regex_escape(text: &str) -> String {
 }
 
 /// Tells whether a name opens one of `names` on a case-insensitive volume, compared as
-/// [`folded`] compares names, so `.GIT`, `\u{feff}.git` and `.g\u{131}t` all open `.git`
-/// (DS-148 F1). Inputs: the name and the plain names. Output: true for one.
+/// [`folded`] compares names, so `.GIT`, `\u{feff}.git` and `.g\u{131}t` all open `.git`.
+/// Inputs: the name and the plain names. Output: true for one.
 pub fn names_one_of(name: &str, names: &[&str]) -> bool {
     let name = folded(name);
     names.iter().any(|known| folded(known) == name)

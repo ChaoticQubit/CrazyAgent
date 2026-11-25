@@ -385,13 +385,15 @@ pub(crate) fn grants(
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
 
-/// Runs the plugin store's start sweeps: what a crash left staged, then each folder a
-/// removal moved aside, settled by the plugin's rows, then every entered plugin key file in
+/// Runs the plugin store's start sweeps: what a crash left staged, then each older folder a
+/// replace left beside the live one, settled by the trust row, then each folder a removal
+/// moved aside, settled by the plugin's rows, then every entered plugin key file in
 /// `plugin-keys` that no binding row names, as a committed removal or a crash between a
 /// binding change and its file delete leaves it. Inputs: the engine connection and root.
 /// Output: none.
 pub(crate) fn sweep_at_start(db: &Connection, root: &Path) {
     sweep_staged(root);
+    let _ = registry::sweep_replaced(db, root);
     let _ = registry::sweep_removals(db, &engine(root));
     sweep_unnamed_keys(db, root);
 }
@@ -415,7 +417,9 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
             if bound(name) {
                 return Ok(true);
             }
-            match replaced.get_or_init(|| crate::storage::migrations::replaced_key_names(root)) {
+            match replaced.get_or_init(|| {
+                crate::storage::migrations::replaced_key_names(root, copy_key_names)
+            }) {
                 Ok(names) => Ok(names.contains(name)),
                 Err(cause) => Err(cause.clone()),
             }
@@ -424,6 +428,15 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
     }
     #[cfg(windows)]
     let _ = accounts::remove_unkept_in(root, PLUGIN_KEYS, |name: &str| Ok(bound(name)));
+}
+
+/// The key names the binding rows of a kept replaced copy name, read by the plugin store.
+/// Input: the copy's database. Output: the names, or the store's refusal.
+#[cfg(unix)]
+pub(crate) fn copy_key_names(
+    copy: &Connection,
+) -> Result<std::collections::BTreeSet<String>, EngineError> {
+    kernel_plugin_host::store::named_keys(copy).map_err(error)
 }
 
 #[cfg(all(test, unix))]

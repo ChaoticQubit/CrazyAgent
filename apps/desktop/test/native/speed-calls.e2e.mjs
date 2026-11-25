@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { withPage } from "../browser.mjs";
-import { INTERNALS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop } from "./e2e-harness.mjs";
+import { INTERNALS, STEP_MS, closedPort, endTerminals, homeRoot, owner, removeHomeRoot, required, serveApp, start as launch, stop } from "./e2e-harness.mjs";
 import { callBudgets, cpuMs } from "./speed-absolute.mjs";
 import { countFindings } from "./speed-budget.mjs";
 import { seedSide, speedSettings } from "./speed-seed.mjs";
@@ -40,10 +40,15 @@ function artifacts(name) {
 /** Makes one side's run record and its private folders before anything starts, so the caller
  * can stop whatever a failed boot did start. Input: the label. Output: the run. */
 function newRun(label) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), `ca-sc-${label}-`)));
+  const root = homeRoot(`ca-sc-${label}-`);
   const run = { label, root, runtime: join(root, "engine"), home: join(root, "home"),
     log: { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false } };
-  for (const folder of [run.runtime, run.home, join(run.home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  try {
+    for (const folder of [run.runtime, run.home, join(run.home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    removeHomeRoot(root);
+    throw error;
+  }
   return run;
 }
 
@@ -178,7 +183,7 @@ test("one walk of each side for C1 (DEC-169) and the candidate's absolute call b
         idle_engine_cpu_ms: idle[label], calls: run.log.calls, timed: timed[label] }, null, 1));
     } finally {
       await halt(run);
-      if (!kept) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      if (!kept) removeHomeRoot(run.root);
     }
   }
   for (const cmd of ["desktop_ide_focus", "desktop_team_events"]) {

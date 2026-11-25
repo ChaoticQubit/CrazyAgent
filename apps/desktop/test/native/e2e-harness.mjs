@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createWriteStream, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
+import { homedir, tmpdir } from "node:os";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -15,6 +16,44 @@ export const AGENTS_VIEW = '[role=radiogroup][aria-label="Agents view"] [role=ra
 const BODY_BYTES_MAX = 4 * 1024 * 1024;
 const TMUX_FOLDERS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
+
+/** The folder test roots that hold a stand-in HOME are made in: a user cache folder, which the
+ * engine never counts as temp, so it trusts the harnesses a test installs under that HOME. */
+export const HOME_ROOTS = join(homedir(), "Library", "Caches", "crazyagent-e2e");
+
+/** The folders the engine counts as temp and refuses a harness folder in, besides this
+ * process's own temp folder. */
+const ENGINE_TEMP_FOLDERS = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders", "/dev/shm"];
+
+/** Makes a fresh private test root for a stand-in HOME under HOME_ROOTS, never one reused.
+ * HOME_ROOTS is checked before the root is made: private to this user, in no folder the engine
+ * counts as temp and under no folder every user can write, so a refused check leaves nothing.
+ * Input: the root's name prefix. Output: the root's real path, a direct child of HOME_ROOTS. */
+export function homeRoot(prefix) {
+  assert.match(prefix, /^[a-z0-9-]+-$/, "a plain root prefix");
+  mkdirSync(HOME_ROOTS, { recursive: true, mode: 0o700 });
+  const base = realpathSync(HOME_ROOTS);
+  assert.equal(statSync(base).mode & 0o777, 0o700, `${base} is private to this user`);
+  const temps = [...ENGINE_TEMP_FOLDERS, tmpdir(), realpathSync(tmpdir())];
+  for (const temp of temps) {
+    assert.ok(base !== temp && !base.startsWith(temp + sep), `${base} lies in ${temp}, a folder the engine counts as temp, so it would refuse the test's harnesses`);
+  }
+  for (let at = base; at !== dirname(at); at = dirname(at)) {
+    assert.equal(statSync(at).mode & 0o002, 0, `${at} is writable by every user, so the engine refuses a harness under it`);
+  }
+  const root = realpathSync(mkdtempSync(join(base, prefix)));
+  assert.equal(dirname(root), base, `${root} lies directly in ${base}`);
+  return root;
+}
+
+/** Removes one test root homeRoot made and nothing else: HOME_ROOTS stays, since files running
+ * alongside make their roots in it. Input: the root. Output: none. */
+export function removeHomeRoot(root) {
+  const base = realpathSync(HOME_ROOTS);
+  assert.equal(dirname(root), base, `${root} is a root homeRoot made`);
+  rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  assert.ok(!existsSync(root), `${root} is removed`);
+}
 
 /** Reads an absolute path from the environment or stops the run with what to set.
  * Input: the variable name and what it names. Output: the existing path. */

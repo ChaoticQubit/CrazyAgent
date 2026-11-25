@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { LIB, ROUTES, render } from "./bridge-routes.mjs";
+import { ROUTES, nativeSources, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, freeLowPort, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
 import { BUILD_MS, FOLDER, GIT, IDE_FAILED, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, SETUP_MS, WORKBENCH_MS, coldLoad, git, ideAnswers, input, onboard, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
 
@@ -109,7 +109,7 @@ function agentHosts(runtime) {
 test("the owner edits, reviews an agent change in Source Control, accepts, commits and pushes in the real IDE, with no AI UI", { timeout: 2400000, skip: MAC_SKIP }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
-  assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
+  assert.equal(readFileSync(ROUTES, "utf8"), render(nativeSources()), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ca-ide-")));
   const runtime = join(root, "engine");

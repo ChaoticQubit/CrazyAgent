@@ -28,6 +28,7 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "app_plugin_key_invalid",
     "app_plugin_key_store_unavailable",
     "app_plugin_name_taken",
+    "app_plugin_name_used",
     "app_plugin_needs_review",
     "app_plugin_not_found",
     "app_plugin_outcome_unknown",

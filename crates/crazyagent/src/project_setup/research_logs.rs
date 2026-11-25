@@ -19,7 +19,7 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
     ) else {
         return Ok(Vec::new());
     };
-    let Some(run) = latest_run(&agents, job)? else {
+    let Some(run) = latest_run(&directory, job)? else {
         return Ok(Vec::new());
     };
     let Ok(run) = open_directory(&directory, &run) else {
@@ -44,7 +44,13 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
         if start > 0 {
             rows.next();
         }
-        lines.extend(rows.filter_map(plain_log_line));
+        let plain: Vec<String> = rows.filter_map(plain_text).collect();
+        if plain.is_empty() {
+            continue;
+        }
+        let before = lines.len();
+        lines.extend(redact(&plain.join("\n")).split('\n').map(clipped));
+        assert_eq!(lines.len() - before, plain.len());
     }
     let mut kept = 0;
     let mut bytes = 0;
@@ -70,45 +76,35 @@ pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineEr
 }
 
 /// Names the newest run folder of a research job in the runner's agent state.
-/// Takes the agents folder and the job id; run folders are named job-<id>-<attempt> with an
-/// optional -<launch>. Returns the highest attempt and launch, or none before any run.
+/// Takes the open agents folder and the job id; run folders are named job-<id>-<attempt> with
+/// an optional -<launch>, both bounded by the runner, so each name is probed newest first and
+/// no other entry can hide it. Returns the highest attempt and launch, or none before any run.
 #[cfg(unix)]
-fn latest_run(agents: &Path, job: i64) -> Result<Option<String>, EngineError> {
-    let prefix = format!("job-{job}-");
-    let mut latest: Option<((u32, u32), String)> = None;
-    for entry in std::fs::read_dir(agents)
-        .map_err(error)?
-        .take(RESEARCH_RUNS_SCANNED_MAX)
-    {
-        let Ok(name) = entry.map_err(error)?.file_name().into_string() else {
-            continue;
-        };
-        let Some(rest) = name.strip_prefix(prefix.as_str()) else {
-            continue;
-        };
-        let mut parts = rest.split('-');
-        let attempt = parts.next().and_then(|part| part.parse::<u32>().ok());
-        let launch = parts
-            .next()
-            .map_or(Some(0), |part| part.parse::<u32>().ok());
-        let (Some(attempt), Some(launch), None) = (attempt, launch, parts.next()) else {
-            continue;
-        };
-        if latest
-            .as_ref()
-            .is_none_or(|(order, _)| (attempt, launch) > *order)
-        {
-            latest = Some(((attempt, launch), name));
+fn latest_run(agents: &Directory, job: i64) -> Result<Option<String>, EngineError> {
+    for attempt in (1..=crate::research::jobs::ATTEMPTS_MAX).rev() {
+        for launch in (0..crate::research::runner::RUNS_PER_ATTEMPT_MAX).rev() {
+            let suffix = if launch == 0 {
+                String::new()
+            } else {
+                format!("-{launch}")
+            };
+            let name = format!("job-{job}-{attempt}{suffix}");
+            match rustix::fs::statat(agents, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => return Ok(Some(name)),
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(problem) => return Err(error(problem)),
+            }
         }
     }
-    Ok(latest.map(|(_, name)| name))
+    Ok(None)
 }
 
-/// Turns one raw agent log line into plain text with likely secrets hidden.
-/// Takes the raw line; a JSON event gives its message text and textless events are skipped.
-/// Returns the bounded plain line, or none for an empty or textless line.
+/// Turns one raw agent log line into one plain line, secrets not yet hidden: control
+/// characters, line breaks among them, become spaces. Takes the raw line; a JSON event gives
+/// its message text and textless events are skipped. Returns the line, or none for an empty
+/// or textless line.
 #[cfg(unix)]
-fn plain_log_line(raw: &str) -> Option<String> {
+fn plain_text(raw: &str) -> Option<String> {
     let text = match serde_json::from_str::<serde_json::Value>(raw.trim()) {
         Ok(event) if event.is_object() => event_text(&event)?,
         _ => raw.to_owned(),
@@ -121,13 +117,20 @@ fn plain_log_line(raw: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    let line = redact(text);
+    assert!(!text.contains('\n'));
+    Some(text.to_owned())
+}
+
+/// Bounds one redacted log line to RESEARCH_LOG_LINE_CHARS_MAX characters, marking a cut
+/// with "...". Takes the line. Returns it whole when it fits, else its head and the mark.
+#[cfg(unix)]
+fn clipped(line: &str) -> String {
     if line.chars().count() <= RESEARCH_LOG_LINE_CHARS_MAX {
-        return Some(line);
+        return line.to_owned();
     }
     let mut cut: String = line.chars().take(RESEARCH_LOG_LINE_CHARS_MAX).collect();
     cut.push_str("...");
-    Some(cut)
+    cut
 }
 
 #[cfg(unix)]
@@ -141,3 +144,6 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
                 .find_map(|key| scope.get(key)?.as_str().map(str::to_owned))
         })
 }
+
+#[cfg(all(test, unix))]
+mod tests;

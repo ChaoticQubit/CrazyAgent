@@ -33,13 +33,16 @@ pub struct FinishedAgent {
     pub kept: Option<String>,
 }
 
-/// What one removal did: the agents whose worktree is gone, in the
-/// order asked, and the plain code of the agent it kept when it stopped before the end.
+/// What one removal did: the agents whose worktree is gone, in the order asked, the plain
+/// code of the agent it kept when it stopped before the end, and for a folder too deep to
+/// remove the absolute folder the owner must delete first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Removal {
     pub agents: Vec<i64>,
     pub kept: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 impl Removal {
@@ -47,6 +50,7 @@ impl Removal {
         Self {
             agents: Vec::new(),
             kept: Some(code.into()),
+            folder: None,
         }
     }
 }
@@ -747,7 +751,16 @@ pub fn remove(
         Err(code) => return Ok(Removal::refused(code)),
     };
     let mut removed = Vec::new();
-    let kept = match retire_claimed(db, runtime, project, &claimed, now, &mut removed) {
+    let mut folder = None;
+    let kept = match retire_claimed(
+        db,
+        runtime,
+        project,
+        &claimed,
+        now,
+        &mut removed,
+        &mut folder,
+    ) {
         Ok(None) => None,
         Ok(Some(code)) => Some(code.to_owned()),
         Err(problem) => Some(problem.0),
@@ -762,9 +775,11 @@ pub fn remove(
     }
     assert!(removed.len() <= claimed.len());
     assert_eq!(kept.is_none(), removed.len() == claimed.len());
+    assert_eq!(folder.is_some(), kept.as_deref() == Some(FOLDER_TOO_DEEP));
     Ok(Removal {
         agents: removed,
         kept,
+        folder,
     })
 }
 
@@ -775,7 +790,7 @@ pub fn remove(
 /// waiting record, so a later removal deletes the leftover without asking git again
 /// (RVD-C-N1). Inputs: the store, the project, the claims, the time now and the list each
 /// removed agent joins. Output: None once all are removed, or the plain code of the first
-/// one kept.
+/// one kept, with `folder` set to the absolute tool cache folder too deep to remove.
 fn retire_claimed(
     db: &Connection,
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] runtime: &Path,
@@ -783,6 +798,7 @@ fn retire_claimed(
     claimed: &[Target],
     now: u64,
     removed: &mut Vec<i64>,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] folder: &mut Option<String>,
 ) -> Result<Option<&'static str>, EngineError> {
     for target in claimed {
         if !placed(db, project, &target.place)? {
@@ -836,15 +852,18 @@ fn retire_claimed(
         }
         #[cfg(target_os = "macos")]
         if let Some(project_root) = place.repository.to_str()
-            && kernel_sandbox::tool_cache::remove_agent(
+            && let Err(problem) = kernel_sandbox::tool_cache::remove_agent(
                 &crate::sandbox::TOOL_CACHE_HOOKS,
                 runtime,
                 project_root,
                 &target.id.to_string(),
             )
-            .is_err()
         {
-            return Ok(Some("cleanup_folder_failed"));
+            let Some(deep) = crate::sandbox::too_deep_folder(&problem) else {
+                return Ok(Some("cleanup_folder_failed"));
+            };
+            *folder = Some(deep);
+            return Ok(Some(FOLDER_TOO_DEEP));
         }
         db.execute(
             "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
@@ -1025,8 +1044,8 @@ pub(crate) const HOME_WALK_NAMES: usize = HOME_NAMES_CHUNK * HOME_WALK_CHUNKS_MA
 /// ([`open_home_folder`], [`unlink_home_entry`]), so a reset never stops on one (code r1
 /// F2, r2 F3), and no folder's size stops it (code r1 F1 ds137-reset-walk). Inputs: the
 /// parent handle and the name, one plain name. Output: Ok once nothing has the name,
-/// `cleanup_folder_failed`, also past [`HOME_DEPTH_MAX`] folders deep or for a folder that
-/// keeps gaining entries while it is emptied ([`empty_home_folder`]), or
+/// [`FOLDER_TOO_DEEP`] past [`HOME_DEPTH_MAX`] folders deep, `cleanup_folder_failed`, also
+/// for a folder that keeps gaining entries while it is emptied ([`empty_home_folder`]), or
 /// `cleanup_walk_too_long` once the walk's listings return more than
 /// [`HOME_WALK_CHUNKS_MAX`] listings' worth of names (RESET-WALK-F1).
 #[cfg(unix)]
@@ -1066,7 +1085,7 @@ fn remove_home_below(
     use rustix::fs::{AtFlags, FileType};
     assert!(plain_name(name));
     if depth > HOME_DEPTH_MAX {
-        return Err(folder_failed());
+        return Err(EngineError(FOLDER_TOO_DEEP.into()));
     }
     let found = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => return Ok(()),
@@ -1289,6 +1308,11 @@ fn folder_failed() -> EngineError {
     EngineError("cleanup_folder_failed".into())
 }
 
+/// The code a removal of an agent home entry reports for a folder more than
+/// [`HOME_DEPTH_MAX`] folders below it, which only Clean up of a tool cache passes on with
+/// that folder; the callers that reset an agent's home give their own code ([`home_code`]).
+pub(crate) const FOLDER_TOO_DEEP: &str = "cleanup_folder_too_deep";
+
 /// The code a removal of an agent home entry reports once its walk's listings returned more
 /// names than its budget holds (RESET-WALK-F1), which the callers that reset an agent's home
 /// pass on to the owner ([`home_code`], RESET-WALK-CODE).
@@ -1437,83 +1461,6 @@ impl AclClears {
     ) -> bool {
         false
     }
-}
-
-/// Clears the extended ACL of each entry without following a link in its last part, through
-/// `/bin/chmod -f -h -N` on its path, as [`release_acls`] does. A deny entry an agent set
-/// binds the owner too, so it would keep an entry from going or being written (RV-DS241-137
-/// sec r1 F2). Only a folder or an entry with one link is cleared, so
-/// a file with a second link, which may be the owner's file an agent linked in, never
-/// changes (V231-ACL, sec r2 F1). Input: the entries. An entry that is gone or skipped, a
-/// pinned one or a spawn that fails leaves things as they were, and the step that needs the
-/// entry then reports it.
-#[cfg(target_os = "macos")]
-pub(crate) fn clear_acls<'a>(entries: impl IntoIterator<Item = &'a Path>) {
-    use std::os::unix::fs::MetadataExt;
-    let cleared = |entry: &&Path| {
-        std::fs::symlink_metadata(entry).is_ok_and(|found| found.is_dir() || found.nlink() == 1)
-    };
-    let cleared: Vec<&Path> = entries.into_iter().filter(cleared).collect();
-    chmod_acls(&["-f", "-h", "-N", "--"], &cleared);
-}
-
-/// Leaves ACLs alone where no deny entry an agent may set keeps an entry from going. Input:
-/// unused.
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn clear_acls<'a>(_entries: impl IntoIterator<Item = &'a Path>) {}
-
-/// Clears the extended ACL of each entry itself for a step that stopped on it, as a launch
-/// context's release clears what a tree holds: a folder and a one-link file by their paths,
-/// so a folder whose ACL denies listing or searching and a file whose ACL denies reading
-/// lose it too, where [`clear_acls`] opens them and fails, and a one-link link on the link
-/// itself. A file with a second link, which may be the owner's file an agent linked in,
-/// never changes (V231-ACL, RV-DS241-137 code r2 F3). A name a process swaps for a link
-/// between the check and the clear is followed, as in that release. Input: the entries.
-/// What stays is reported by the step that needs the entry.
-#[cfg(target_os = "macos")]
-pub(crate) fn release_acls<'a>(entries: impl IntoIterator<Item = &'a Path>) {
-    use std::os::unix::fs::MetadataExt;
-    let mut by_path = Vec::new();
-    let mut links = Vec::new();
-    for entry in entries {
-        let Ok(found) = std::fs::symlink_metadata(entry) else {
-            continue;
-        };
-        if found.is_symlink() {
-            if found.nlink() == 1 {
-                links.push(entry);
-            }
-        } else if found.is_dir() || found.nlink() == 1 {
-            by_path.push(entry);
-        }
-    }
-    chmod_acls(&["-f", "-N", "--"], &by_path);
-    chmod_acls(&["-f", "-h", "-N", "--"], &links);
-}
-
-/// Leaves ACLs alone where no deny entry an agent may set keeps an entry from going. Input:
-/// unused.
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn release_acls<'a>(_entries: impl IntoIterator<Item = &'a Path>) {}
-
-/// Runs `/bin/chmod` with `flags`, which end in `--`, on the entries, its output dropped,
-/// and nothing when there are none. Inputs: the flags and the entries. A spawn that fails
-/// changes nothing.
-#[cfg(target_os = "macos")]
-fn chmod_acls(flags: &[&str], entries: &[&Path]) {
-    use std::process::Stdio;
-    assert_eq!(flags.last(), Some(&"--"));
-    if entries.is_empty() {
-        return;
-    }
-    let _ = kernel_processes::spawn_gate::status(
-        std::process::Command::new("/bin/chmod")
-            .args(flags)
-            .args(entries)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-    );
 }
 
 /// Lets the owner delete inside every real folder under `folder`, visiting at most
@@ -1971,6 +1918,11 @@ fn allocated(metadata: &std::fs::Metadata) -> u64 {
 fn allocated(metadata: &std::fs::Metadata) -> u64 {
     metadata.len()
 }
+
+mod acls;
+pub(crate) use acls::clear_acls;
+#[cfg(unix)]
+pub(crate) use acls::release_acls;
 
 #[cfg(all(test, unix))]
 mod tests;

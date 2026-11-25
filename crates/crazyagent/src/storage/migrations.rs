@@ -447,7 +447,9 @@ fn sweep_unbound_keys(
         if plugin_key_bound(&replaced, name)? {
             return Ok(false);
         }
-        match older_names.get_or_init(|| replaced_key_names(root)) {
+        match older_names
+            .get_or_init(|| replaced_key_names(root, crate::app_plugins::copy_key_names))
+        {
             Ok(names) => Ok(names.contains(name)),
             Err(cause) => Err(cause.clone()),
         }
@@ -574,19 +576,18 @@ pub(crate) fn replaced_copies(root: &Path) -> Result<Vec<std::path::PathBuf>, En
 /// Every key name the binding rows of each kept copy of replaced 2.5 data name
 /// ([`replaced_copies`]), for the start sweep to keep what a restore whose key settle
 /// stopped early left in place. A copy whose database does not open or read, or a failed
-/// listing, is a failure, on which the sweep keeps every key. Input: the engine root.
-/// Output: the names.
+/// listing, is a failure, on which the sweep keeps every key. Inputs: the engine root and
+/// the plugin store's reader of a copy's key names. Output: the names.
 #[cfg(unix)]
 pub(crate) fn replaced_key_names(
     root: &Path,
+    named: fn(&Connection) -> Result<std::collections::BTreeSet<String>, EngineError>,
 ) -> Result<std::collections::BTreeSet<String>, EngineError> {
     let mut names = std::collections::BTreeSet::new();
     for copy in replaced_copies(root)? {
         let replaced = replaced_database(&copy)?;
         if has_table(&replaced, "app_plugin_secrets")? {
-            let named = kernel_plugin_host::store::named_keys(&replaced)
-                .map_err(|refused| error(refused.code))?;
-            names.extend(named);
+            names.extend(named(&replaced)?);
         }
     }
     Ok(names)

@@ -102,10 +102,10 @@ pub fn policy(
     .allow_read(&root)
 }
 
-/// True when a folder holds Git for Windows' markers, as every installer and MinGit lay them
-/// out: `cmd\git.exe` and a platform's `bin\git.exe` such as `ucrt64\bin\git.exe`, so a
-/// `git.exe` in any folder's `cmd` or `bin`, or a bare platform folder, never makes that whole
-/// folder readable (rv-sec3 #628 F1). Input: the folder above the program. Output: the answer.
+/// True when a folder holds Git for Windows' markers, as every installer and MinGit lay them out:
+/// `cmd\git.exe` and a platform's `bin\git.exe` such as `ucrt64\bin\git.exe`, so a `git.exe` in any
+/// folder's `cmd` or `bin`, or a bare platform folder, never makes that whole folder readable.
+/// Input: the folder above the program. Output: the answer.
 pub fn marked(root: &Path) -> bool {
     root.join("cmd").join("git.exe").is_file()
         && PLATFORM_FOLDERS
@@ -136,9 +136,9 @@ fn plain_program(git: &Path) -> Result<PathBuf, SandboxError> {
     Ok(plain)
 }
 
-/// The owner's git for one project, run inside an AppContainer of its own with no capability
-/// (owner option 1, V244-WIN-GIT-UNC-SIBLINGS), so a `.git` that points git at a share or a
-/// folder outside the project reaches nothing. Every command reuses the profile written once.
+/// The owner's git for one project, run inside an AppContainer of its own with no capability (owner
+/// option 1), so a `.git` that points git at a share or a folder outside the project reaches
+/// nothing. Every command reuses the profile written once.
 #[derive(Debug)]
 pub struct OwnerGit {
     boundary: WindowsSandbox,

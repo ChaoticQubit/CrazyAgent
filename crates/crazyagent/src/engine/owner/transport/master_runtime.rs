@@ -290,6 +290,10 @@ impl Capture {
 #[cfg(all(test, unix))]
 mod routing_tests;
 
+/// The hidden folders a master turn's sandbox keeps it out of.
+mod hidden;
+use hidden::master_turn_hides;
+
 /// Runs one master turn step again while another engine connection holds the database
 /// write lock past the storage wait, which rolls the step's write back (LB-28). Input: the
 /// step. Output: its result, or `storage_busy` when the lock never freed.
@@ -403,18 +407,19 @@ impl OwnerRuntimeHandle {
         }
     }
 
-    /// Tells whether the policy the owner saved now no longer covers what a running master
-    /// turn's sandbox profile granted. Inputs: the prepared turn, its id, and the level and
-    /// toolchains it runs with. Output: why it must stop, none while covered, or the storage
-    /// refusal.
+    /// Tells whether a running master turn must stop: the policy the owner saved now no longer
+    /// covers what its sandbox profile granted, or its project saves a folder hidden that its
+    /// sandbox did not hide ([`hidden::unhid`]). Inputs: the prepared turn, its id, and the
+    /// level and toolchains it runs with. Output: the plain code it stops with, none while
+    /// covered, or the storage refusal.
     pub(super) async fn master_turn_narrowed(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         access: kernel_sandbox::policy::AgentAccess,
         toolchains: &[kernel_sandbox::toolchains::Toolchain],
-    ) -> Result<Option<kernel_sandbox::policy::Narrowing>, EngineError> {
-        let saved = match self
+    ) -> Result<Option<&'static str>, EngineError> {
+        let (saved, saved_hidden) = match self
             .master_runtime_command(MasterRuntimeCommand::Policy {
                 host: self.identity(),
                 project_id: prepared.session.project_id.clone(),
@@ -426,13 +431,18 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Policy(saved) => *saved,
             _ => return Err(failure("master_runtime_result")),
         };
-        Ok(kernel_sandbox::policy::narrowing(
+        let narrowed = kernel_sandbox::policy::narrowing(
             saved.as_ref(),
             Some(prepared.repository.as_path()),
             Some(access),
             None,
             toolchains,
-        ))
+        );
+        Ok(narrowed
+            .map(kernel_sandbox::policy::Narrowing::code)
+            .or_else(|| {
+                hidden::unhid(prepared, saved_hidden.as_deref()).then_some("agent_folder_hidden")
+            }))
     }
 
     /// Answers the memory calls a running console master turn with its tools on left in its
@@ -1205,11 +1215,11 @@ impl OwnerRuntimeHandle {
                     }
                     if policy_checked.elapsed() >= POLICY_CHECK_EVERY {
                         policy_checked = std::time::Instant::now();
-                        if let Some(narrowed) = self
+                        if let Some(code) = self
                             .master_turn_narrowed(prepared, turn_id, active.access, &active.toolchains)
                             .await?
                         {
-                            return Err(failure(narrowed.code()));
+                            return Err(failure(code));
                         }
                     }
                     if let Some(mailbox) = mailbox
@@ -1481,18 +1491,6 @@ fn listed_master_turn(
     .ok_or_else(|| failure("master_sandbox_unavailable"))
 }
 
-/// The folders a headless master turn's sandbox keeps it out of, as the hidden folders list
-/// records them: the native and the RCLI sandbox hide `hidden_paths`, and under Full access
-/// the turn runs unconfined and hides none (SA-VID14 r1 sec F3). Input: the prepared turn.
-/// Output: the folders.
-fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
-    if prepared.agent_policy.access == kernel_sandbox::policy::AgentAccess::Full {
-        &[]
-    } else {
-        &prepared.hidden_paths
-    }
-}
-
 /// Keeps an RCLI or listed master turn on the hidden folders list after it returns when its
 /// retirement was uncertain or its stop left processes held as leftovers, since they may
 /// still run, until the engine starts again (SA-VID14 r1, r2 F1); a native turn asks its
@@ -1553,7 +1551,8 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "agent_access_lowered"
         | "agent_toolchain_lowered"
         | "agent_policy_unreadable"
-        | "agent_project_unreadable" => MasterReason::ConnectionChanged,
+        | "agent_project_unreadable"
+        | "agent_folder_hidden" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
         "gateway_rate_limited" => MasterReason::RateLimited,

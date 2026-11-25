@@ -2,6 +2,8 @@ use super::*;
 use crate::harnesses::manifest::parse;
 use crate::plugins::SecretValue;
 
+#[path = "listed_lock_tests.rs"]
+mod lock_tests;
 #[path = "listed_walk_tests.rs"]
 mod walk_tests;
 

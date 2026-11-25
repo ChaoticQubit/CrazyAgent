@@ -29,9 +29,8 @@ fn no_network_grants_a_model_only_on_loopback_and_never_a_host_port() {
     assert_eq!(AgentNetwork::Open.sandbox(None), SandboxNetwork::Open);
 }
 
-/// T8: a policy saved before the tool cache setting reads Shared, a pinned policy keeps
-/// the owner's choice, a save names it, and the view lists every choice, the default
-/// first.
+/// A policy saved before the tool cache setting reads Shared, a pinned policy keeps the owner's
+/// choice, a save names it, and the view lists every choice, the default first.
 #[test]
 fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_every_choice() {
     let old: AgentPolicy =
@@ -72,9 +71,9 @@ fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_
     );
 }
 
-/// F08: a policy saved before the access change settings reads When the agent is idle
-/// and no grants, a pinned policy keeps both, the view lists every Apply choice, the
-/// default first, and the saved grants with their words.
+/// A policy saved before the access change settings reads When the agent is idle and no grants, a
+/// pinned policy keeps both, the view lists every Apply choice, the default first, and the saved
+/// grants with their words.
 #[test]
 fn a_policy_saved_before_the_access_change_settings_reads_when_idle_and_no_grants() {
     let old: AgentPolicy =
@@ -122,8 +121,8 @@ fn a_policy_saved_before_the_access_change_settings_reads_when_idle_and_no_grant
     assert!(view.temp_folder.path.is_some() != view.temp_folder.unavailable.is_some());
 }
 
-/// F08: at most two sockets, four ports and one temp folder, each plain and named once.
-/// A socket grant is a Unix socket path, so off Unix every socket is refused.
+/// At most two sockets, four ports and one temp folder, each plain and named once. A socket grant
+/// is a Unix socket path, so off Unix every socket is refused.
 #[test]
 fn grants_are_bounded_per_kind_plain_and_named_once() {
     let with = |grants: Vec<AccessGrant>| AgentPolicy {
@@ -171,9 +170,9 @@ fn grants_are_bounded_per_kind_plain_and_named_once() {
     }
 }
 
-/// F08: a running agent is widened by a wider level or network, a toolchain its profile
-/// lacks or a grant it does not hold, and revoked by a grant the saved policy dropped; a
-/// record that kept no level, network or toolchains never asks for a restart.
+/// A running agent is widened by a wider level or network, a toolchain its profile lacks or a grant
+/// it does not hold, and revoked by a grant the saved policy dropped; a record that kept no level,
+/// network or toolchains never asks for a restart.
 #[test]
 fn a_saved_policy_widens_or_revokes_a_running_agent_only_by_what_it_holds() {
     let folder = tempfile::tempdir().unwrap();
@@ -215,9 +214,9 @@ fn a_saved_policy_widens_or_revokes_a_running_agent_only_by_what_it_holds() {
     assert!(!AgentPolicy::default().revokes(&[]));
 }
 
-/// F26: a new project records every family it uses or the owner has installed, so an
-/// empty project still gets the owner's toolchains later; a family neither used nor
-/// installed keeps following the project.
+/// A new project records every family it uses or the owner has installed, so an empty project still
+/// gets the owner's toolchains later; a family neither used nor installed keeps following the
+/// project.
 #[test]
 fn a_new_project_records_the_toolchains_it_uses_or_the_owner_has_installed() {
     let project = tempfile::tempdir().unwrap();
@@ -544,10 +543,9 @@ fn a_running_process_is_narrowed_only_by_what_the_saved_policy_no_longer_allows(
     assert_eq!(narrowing(Some(&pinned), None, None, None, &rust), None);
 }
 
-/// DEC-124: Allow all changes adds no rule. No delete or rename denies every unlink and
-/// Read only every write at and below each agent folder, in any letter case, and both
-/// keep the agents root from being removed or moved aside. The older root is named only
-/// while agents stay there.
+/// Allow all changes adds no rule. No delete or rename denies every unlink and Read only every
+/// write at and below each agent folder, in any letter case, and both keep the agents root from
+/// being removed or moved aside. The older root is named only while agents stay there.
 #[cfg(unix)]
 #[test]
 fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
@@ -796,11 +794,10 @@ fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
     assert!(old.gaps.is_empty(), "a view an older engine stored");
 }
 
-/// A Linux where AppArmor keeps unprivileged programs out of user namespaces and agents
-/// get no process space of their own says AppArmor is why, just before the process or
-/// signals line it explains, at every limited level and never under Full; a Linux
-/// without the restriction, or one where CrazyAgent runs as root, whom the restriction
-/// does not cover, says nothing of AppArmor (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
+/// A Linux where AppArmor keeps unprivileged programs out of user namespaces and agents get no
+/// process space of their own says AppArmor is why, just before the process or signals line it
+/// explains, at every limited level and never under Full; a Linux without the restriction, or one
+/// where CrazyAgent runs as root, whom the restriction does not cover, says nothing of AppArmor.
 #[test]
 fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
     use crate::host::LinuxHost;

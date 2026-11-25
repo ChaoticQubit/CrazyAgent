@@ -2,9 +2,8 @@ use crate::error::SandboxError;
 use std::path::Path;
 use std::process::Command;
 
-/// Owner git's own container, which only Windows has (V244-WIN-GIT-UNC-SIBLINGS): elsewhere
-/// this type has no value, so a publish or `@` list there never routes its git anywhere and
-/// runs it as the owner, as before.
+/// Owner git's own container, which only Windows has: elsewhere this type has no value, so a
+/// publish or `@` list there never routes its git anywhere and runs it as the owner, as before.
 #[derive(Debug)]
 pub enum OwnerGit {}
 

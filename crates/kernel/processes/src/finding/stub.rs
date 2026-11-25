@@ -24,6 +24,7 @@ pub(crate) const STUB_HOOKS: FindingHooks = FindingHooks {
     in_agent_tmp: |_| false,
     harness_prefix: |root| root.join("setup").join("stub-harnesses"),
     gate_root: || None,
+    folder_probes: false,
 };
 
 /// The seed the kernel's rows build places on: [`STUB_HOOKS`], no layout data folder and no

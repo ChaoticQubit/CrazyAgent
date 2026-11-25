@@ -315,9 +315,19 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
             (
                 OsStr::new("CRAZYAGENT_PATH_KEY"),
                 Some(OsStr::new(r"HKCU:\Environment"))
+            ),
+            (
+                OsStr::new("CRAZYAGENT_PATH_LOCK"),
+                Some(OsStr::new(r"Local\CrazyAgent-path-HKCU__Environment"))
             )
         ]
     );
+    let waits = args[3].find("$m.WaitOne(").unwrap();
+    assert!(
+        waits < args[3].find("Get-Item").unwrap(),
+        "the lock comes before the read"
+    );
+    assert!(args[3].contains("finally { $m.ReleaseMutex() }"));
 }
 
 /// The user's PATH is read as written, with its %VAR% references unexpanded, and stored back
@@ -1318,6 +1328,12 @@ mod access_list;
 /// engine and how it escapes paths. Inputs: the macOS service from [`service`]. Output:
 /// none; each row asserts on the written text.
 mod launchd;
+
+/// The CLI link publish rows: an absent name gets the link, a link there is replaced, and a
+/// regular file another installer writes after the name is checked keeps its bytes while
+/// the publish is refused. Inputs: real bin folders and the step between check and publish.
+/// Output: none.
+mod cli_link_publish;
 
 /// The Windows link rows: a junction chain through a folder others can change is
 /// changeable though both its ends are private, and a link's target walks from a drive root

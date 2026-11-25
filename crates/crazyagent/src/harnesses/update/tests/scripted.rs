@@ -1,7 +1,5 @@
-#![cfg(unix)]
-
-use crazyagent::harnesses::update::{self, Fixed, Roots, Updates, VERSION_TIME};
-use crazyagent::harnesses::{HarnessEntry, ProbeCache, Search};
+use crate::harnesses::update::{self, Fixed, Roots, Updates, VERSION_TIME};
+use crate::harnesses::{HarnessEntry, ProbeCache, Search};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -99,7 +97,7 @@ impl FakeNative {
             brew_prefixes: Vec::new(),
             casks: true,
             npm: None,
-            places: crazyagent::tools::tools_new(Vec::new(), Some(self.home())),
+            places: crate::tools::tools_new(Vec::new(), Some(self.home())),
         }
     }
 
@@ -108,8 +106,8 @@ impl FakeNative {
     }
 
     fn engine_entry(&self) -> PathBuf {
-        crazyagent::paths::resolve_harnesses(
-            crazyagent::paths::Harnesses::default(),
+        crate::paths::resolve_harnesses(
+            crate::paths::Harnesses::default(),
             &self.search(),
             Some(&self.path_value()),
             None,
@@ -152,11 +150,11 @@ fn an_updated_harness_is_launched_from_its_new_install_without_an_engine_restart
     let path = machine.path_value();
     let entry = machine.engine_entry();
     assert_eq!(entry, machine.launcher());
-    let first = crazyagent::paths::launch_executable(&entry, Some(&path)).unwrap();
+    let first = crate::paths::launch_executable(&entry, Some(&path)).unwrap();
     assert!(first.ends_with("versions/A/claude"));
     machine.run_update_through_the_engine();
     assert_eq!(machine.engine_entry(), entry);
-    let second = crazyagent::paths::launch_executable(&entry, Some(&path)).unwrap();
+    let second = crate::paths::launch_executable(&entry, Some(&path)).unwrap();
     assert_ne!(first, second);
     assert!(second.ends_with("versions/B/claude"));
     assert_eq!(version_at(&second, &machine.home()), "2.0.0");
@@ -211,10 +209,7 @@ impl FakeBrew {
             brew_prefixes: vec![self.prefix()],
             casks: true,
             npm: None,
-            places: crazyagent::tools::tools_new(
-                vec![self.prefix().join("bin")],
-                Some(self.home()),
-            ),
+            places: crate::tools::tools_new(vec![self.prefix().join("bin")], Some(self.home())),
         }
     }
 
@@ -236,7 +231,7 @@ impl FakeBrew {
         let entry = self.catalog_entry(&ProbeCache::new(Duration::ZERO), true, id);
         let (search, wanted) = (self.search(), id.to_owned());
         let after = move || {
-            crazyagent::harnesses::catalog(&search)
+            crate::harnesses::catalog(&search)
                 .into_iter()
                 .find(|entry| entry.id == wanted)
                 .and_then(|entry| entry.executable)
