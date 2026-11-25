@@ -173,6 +173,19 @@ fn a_key_end_after_a_separator_still_hides_the_lines_above_it() {
     assert_eq!(joined, [HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n"));
 }
 
+/// A key block's END line whose label holds a hyphen, as RFC 7468 labels may, met before any
+/// BEGIN still hides every line above it.
+#[test]
+fn an_end_with_a_hyphenated_label_hides_the_lines_above_it() {
+    let shown = redact(&format!(
+        "{BODY_NO_DIGIT}\n{BODY_SHORT}\n-----END RSA-PSS PRIVATE KEY-----\nafter"
+    ));
+    assert_eq!(
+        shown,
+        [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
+    );
+}
+
 #[test]
 fn a_run_listed_after_many_unrelated_entries_is_still_found() {
     let root = runtime();
