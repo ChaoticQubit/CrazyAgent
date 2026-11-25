@@ -785,3 +785,58 @@ fn a_retired_folder_is_kept_when_the_live_one_does_not_read() {
 
     both_kept(&folder, &two);
 }
+
+/// A plugin removed while a retired folder of its name was kept beside it stays removed
+/// through the next start: the removal takes the plugin name off the retired folder, so the
+/// start sweep has nothing to put back.
+#[test]
+fn a_removed_plugin_with_a_kept_retired_folder_stays_removed_through_a_start() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let three = ACME.replace("Acme embeddings", "Acme embeddings three");
+    let folder = cut_after_renames(&case, &two);
+    trust_row_holds(&case, &three);
+    start_sweep(&case).unwrap();
+    both_kept(&folder, &two);
+
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    start_sweep(&case).unwrap();
+
+    let names = names_in(&folder);
+    assert!(
+        names.iter().all(|name| name != "acme" && !name.starts_with(".old-acme.")),
+        "{names:?}"
+    );
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().all(|plugin| plugin.name != "acme"));
+}
+
+/// A removal whose retired folder of the same name cannot lose the plugin name is refused
+/// before the live folder or any row changes, so the plugin stays as it was.
+#[test]
+fn a_removal_whose_retired_folder_cannot_lose_the_name_is_refused_with_nothing_moved() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let folder = cut_after_renames(&case, &two);
+    take_nameless(&folder);
+
+    let removed = remove(&case.db, &case.engine(), "acme");
+
+    assert_eq!(code(removed), "app_plugin_folder_unavailable");
+    let retired = format!(".old-acme.{STUCK_ID}");
+    let nameless = format!(".old-{STUCK_ID}");
+    let mut names = names_in(&folder);
+    names.sort();
+    assert_eq!(names, [nameless.as_str(), retired.as_str(), "acme"]);
+    assert_eq!(
+        fixture(
+            &folder.join("acme").join(MANIFEST_FILE),
+            std::fs::read_to_string
+        ),
+        two
+    );
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").name, "acme");
+}
