@@ -52,10 +52,10 @@ pub const RELAY_PORTS: std::ops::RangeInclusive<u16> = 29_428..=29_555;
 /// Where the ports the system hands out by itself start unless an administrator moved
 /// them: 49152 on macOS and Windows, 32768 on Linux.
 #[cfg(not(target_os = "linux"))]
-pub const PICKED_PORTS_START: u16 = 49_152;
+pub(crate) const PICKED_PORTS_START: u16 = 49_152;
 /// Where the ports Linux hands out by itself start unless an administrator moved them.
 #[cfg(target_os = "linux")]
-pub const PICKED_PORTS_START: u16 = 32_768;
+pub(crate) const PICKED_PORTS_START: u16 = 32_768;
 const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < PICKED_PORTS_START);
 const _: () = assert!(
     *RELAY_PORTS.start() == *PROXY_PORTS.end() + 1 && *RELAY_PORTS.end() < PICKED_PORTS_START

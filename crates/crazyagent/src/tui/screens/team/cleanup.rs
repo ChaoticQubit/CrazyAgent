@@ -82,6 +82,18 @@ pub(super) fn kept_reason(code: &str) -> String {
     .to_owned()
 }
 
+/// The sentence for the agent a removal kept: for a folder too deep to remove it names that
+/// folder for the owner to delete, else as [`words`]. Inputs: the code and the folder the
+/// removal named. Output: the sentence.
+pub(super) fn kept_words(code: &str, folder: Option<&str>) -> String {
+    match folder {
+        Some(folder) if code == crate::team::cleanup::FOLDER_TOO_DEEP => format!(
+            "An agent's folder has folders nested more than 64 deep, which CrazyAgent does not remove: {folder}. Delete it yourself, then try again."
+        ),
+        _ => words(code).to_owned(),
+    }
+}
+
 /// One plain sentence for a refused cleanup. Input: the code. Output: the sentence.
 pub(super) fn words(code: &str) -> &'static str {
     match code {
@@ -224,9 +236,13 @@ impl Cleanup {
                     &format!("Removed the worktrees of {}.", agents_word(gone.len())),
                     &format!("Freed {}. {STAYS_TEXT}", space(&gone)),
                 )),
+                Some(code) if removal.agents.is_empty() => ctx.say(Message::warning(
+                    "Cleanup kept an agent and stopped there.",
+                    &kept_words(code, removal.folder.as_deref()),
+                )),
                 Some(code) => ctx.say(Message::warning(
                     &format!("Removed {} {worktrees}, kept {kept}:", gone.len()),
-                    words(code),
+                    &kept_words(code, removal.folder.as_deref()),
                 )),
             },
             Ok(CleanupReply::Finished(_)) => {}

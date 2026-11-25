@@ -528,27 +528,30 @@ fn the_page_reads_then_lists_each_plugin_with_one_label_and_code_plugins_last() 
     ));
     assert!(bar(&mut shell).contains("r Try again"));
     shell.key(Key::Char('r'));
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(shows(&mut shell, "Reading built-in code plugins..."));
     serve(&mut shell, &mut fake);
     assert_eq!(fake.seen, ["AppPlugins", "PluginGrants"]);
 
-    assert!(line(&mut shell, "OpenAI embeddings").contains("Bundled  Off"));
-    assert!(line(&mut shell, "Ollama embeddings").contains("Bundled  On"));
+    assert!(line(&mut shell, "OpenAI embeddings").contains("Built in  Off"));
+    assert!(line(&mut shell, "Ollama embeddings").contains("Built in  On"));
     assert!(line(&mut shell, "Dock embeddings").contains("Approved  On"));
     assert!(line(&mut shell, "Harbor embeddings").contains("Not approved"));
     assert!(line(&mut shell, "Cove embeddings").contains("Changed - review"));
     assert!(line(&mut shell, "Broken plugin").contains("Refused"));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
-    assert!(line(&mut shell, "  service-kit").contains("Bundled  On"));
+    assert!(line(&mut shell, "  service-kit").contains("Built in  On"));
     assert!(shows(
         &mut shell,
-        "agent-quit, bundled code plugin. 1 permission."
+        "agent-quit, built-in code plugin. 1 permission."
     ));
     assert!(shows(
         &mut shell,
-        "service-kit, bundled code plugin. 2 permissions."
+        "service-kit, built-in code plugin. 2 permissions."
     ));
     assert!(shows(&mut shell, "Essential, stays on."));
-    assert!(shows(&mut shell, "openai, version 1. Bundled."));
+    assert!(shows(&mut shell, "openai, version 1. Built in."));
     assert!(shows(&mut shell, "dock-embed, version 1. Added by you."));
     assert!(shows(
         &mut shell,
@@ -584,12 +587,15 @@ fn a_failed_grants_read_marks_only_the_code_rows_and_r_reads_them_again() {
     fake.refuse_grants = Some("owner_busy".into());
     let mut shell = page(&mut fake);
     assert!(line(&mut shell, "Dock embeddings").contains("Approved  On"));
-    assert!(shows(&mut shell, "Bundled code plugins couldn't be read."));
+    assert!(shows(&mut shell, "Built-in code plugins couldn't be read."));
     assert!(!shows(&mut shell, "agent-quit"));
     assert!(!shows(&mut shell, "App plugins aren't available"));
     shell.key(Key::Char('r'));
     serve(&mut shell, &mut fake);
-    assert!(!shows(&mut shell, "Bundled code plugins couldn't be read."));
+    assert!(!shows(
+        &mut shell,
+        "Built-in code plugins couldn't be read."
+    ));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
 }
 
@@ -719,12 +725,12 @@ fn a_bundled_review_is_read_only_and_space_switches_it() {
     let job = one(&mut shell);
     assert!(matches!(job, AppPluginsJob::Review { ref name } if name == "ollama"));
     answer(&mut shell, &mut fake, job);
-    assert!(shows(&mut shell, "Ollama embeddings (bundled)"));
+    assert!(shows(&mut shell, "Ollama embeddings (built in)"));
     assert!(!bar(&mut shell).contains("Approve"));
     shell.key(Key::Char('y'));
     assert!(requests(&mut shell).is_empty(), "a bundled review has no y");
     shell.key(Key::Esc);
-    assert!(!shows(&mut shell, "Ollama embeddings (bundled)"));
+    assert!(!shows(&mut shell, "Ollama embeddings (built in)"));
     shell.key(Key::Char(' '));
     assert!(matches!(
         one(&mut shell),
@@ -891,7 +897,7 @@ fn remove_confirms_naming_the_entered_key_and_bundled_rows_offer_no_x() {
         shell.key(Key::Char('x'));
         assert!(requests(&mut shell).is_empty());
         assert!(!shows(&mut shell, "Remove "));
-        assert!(said(&shell).contains("Bundled plugins can be turned off but not removed"));
+        assert!(said(&shell).contains("Built-in plugins can be turned off but not removed"));
     }
     select(&mut shell, 3);
     shell.key(Key::Char('x'));
@@ -1018,9 +1024,22 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
         checked += 1;
     }
     assert!(checked >= 20, "{checked}");
+    assert!(APP_PLUGINS_CODES.contains(&"app_plugin_name_used"));
+    assert_eq!(
+        sentence("app_plugin_name_used"),
+        "A plugin with that name was added after you reviewed this one. Review it again to replace it."
+    );
     assert_eq!(
         sentence("app_plugin_key_store_unavailable"),
         "CrazyAgent couldn't reach its saved keys. Nothing was changed; try again."
+    );
+    assert_eq!(
+        sentence("app_plugin_name_taken"),
+        "A built-in plugin already has that name. Give your plugin another name."
+    );
+    assert_eq!(
+        sentence("app_plugin_bundled"),
+        "Built-in plugins can be turned off but not removed or replaced."
     );
 }
 
@@ -1411,4 +1430,17 @@ fn a_lost_owner_answer_reads_as_an_unknown_plugin_outcome() {
         sentence("owner_outcome_unknown_reconcile_same_identity"),
         sentence("app_plugin_outcome_unknown")
     );
+}
+
+/// Settings, Plugins and skills lists App plugins as its last row, with the help bar as it
+/// was, and Enter on that row opens the App plugins page.
+#[test]
+fn the_plugins_and_skills_page_lists_app_plugins_and_enter_opens_it() {
+    let page = crate::tui::screens::settings_plugins::Plugins::with(Vec::new(), Vec::new());
+    let mut shell = Shell::with(ctx(80, 24), Box::new(page));
+    assert!(shows(&mut shell, "App plugins"));
+    assert!(!bar(&mut shell).contains("App plugins"));
+    shell.key(Key::End);
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::AppPlugins));
 }

@@ -56,7 +56,7 @@ impl SecretString {
                 .iter()
                 .any(|byte| !(0x21..=0x7e).contains(byte))
         {
-            wipe(&mut bytes);
+            wipe_owned(&mut bytes);
             return Err(StoreError::code("credential_secret_invalid"));
         }
         Ok(Self(bytes))
@@ -71,7 +71,7 @@ impl SecretString {
 
 impl Drop for SecretString {
     fn drop(&mut self) {
-        wipe(&mut self.0);
+        wipe_owned(&mut self.0);
     }
 }
 
@@ -86,6 +86,14 @@ impl fmt::Debug for SecretString {
 /// wiped here. Input: the buffer, of bytes or of wider units. Output: none; its length stays.
 pub fn wipe<Unit: zeroize::DefaultIsZeroes>(buffer: &mut [Unit]) {
     zeroize::Zeroize::zeroize(buffer);
+}
+
+/// Overwrites an owned secret buffer with zeros over its whole capacity, so bytes a caller
+/// cut off past its length are wiped too, and empties it while keeping its allocation.
+/// Input: the buffer. Output: none; its length is zero.
+pub fn wipe_owned(buffer: &mut Vec<u8>) {
+    zeroize::Zeroize::zeroize(buffer);
+    assert!(buffer.is_empty());
 }
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -163,11 +171,21 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
 pub fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
     let mut counted = Counted(0);
     serde_json::to_writer(&mut counted, value)?;
-    let mut buffer = Vec::with_capacity(counted.0);
-    let capacity = buffer.capacity();
-    if let Err(problem) = serde_json::to_writer(&mut buffer, value) {
-        wipe(&mut buffer);
+    let mut bounded = Bounded {
+        bytes: Vec::with_capacity(counted.0),
+        limit: counted.0,
+    };
+    let capacity = bounded.bytes.capacity();
+    let written = serde_json::to_writer(&mut bounded, value);
+    let mut buffer = bounded.bytes;
+    if let Err(problem) = written {
+        wipe_owned(&mut buffer);
         return Err(problem);
+    }
+    if buffer.len() != counted.0 {
+        wipe_owned(&mut buffer);
+        let changed = std::io::Error::other("the value changed between the two passes");
+        return Err(serde_json::Error::io(changed));
     }
     assert_eq!(buffer.len(), counted.0);
     assert_eq!(buffer.capacity(), capacity);
@@ -182,6 +200,33 @@ struct Counted(usize);
 impl std::io::Write for Counted {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A writer into a buffer that refuses any write past `limit` bytes, for [`sized_json`]'s
+/// second pass, so a value that grew since the first pass never makes the buffer grow and
+/// free a partial copy. Nothing of a refused write is kept.
+#[cfg(unix)]
+struct Bounded {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+#[cfg(unix)]
+impl std::io::Write for Bounded {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit - self.bytes.len() {
+            return Err(std::io::Error::other(
+                "the value grew between the two passes",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        assert!(self.bytes.len() <= self.limit);
         Ok(bytes.len())
     }
 

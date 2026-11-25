@@ -53,6 +53,21 @@ fn shell(cwd: &Path) -> PaneCommand {
 /// stalled write ends once the pane takes its input again.
 #[test]
 fn a_write_stalled_on_one_pane_leaves_every_other_call_answering() {
+    others_answer_while_stalled(|host, agent| host.input(agent, STALLED));
+}
+
+/// A paste into an app that stops reading its input blocks the same way, and the host still
+/// answers every other call while it does, since a paste writes outside the panes lock too.
+#[test]
+fn a_paste_stalled_on_one_pane_leaves_every_other_call_answering() {
+    others_answer_while_stalled(|host, agent| host.paste(agent, STALLED));
+}
+
+/// Starts two cmd.exe panes, holds the first pane's writer on the stalled bytes, runs the
+/// given write of those bytes to it, and asserts that listing, resizing and typing into the
+/// second pane answer within `ANSWER_MAX` before the stall is released. Input: the write.
+/// Output: none; panics on a call that did not answer or answered wrong.
+fn others_answer_while_stalled(write: fn(&ConptyHost, &AgentId) -> Result<(), HostError>) {
     let temp = tempfile::tempdir().unwrap();
     let host = ConptyHost::new(|_, _| true);
     let stalled = AgentId::team(1).unwrap();
@@ -76,7 +91,7 @@ fn a_write_stalled_on_one_pane_leaves_every_other_call_answering() {
     want.sort();
     let (host, stalled, other) = (&host, &stalled, &other);
     std::thread::scope(|scope| {
-        let writing = scope.spawn(move || host.input(stalled, STALLED));
+        let writing = scope.spawn(move || write(host, stalled));
         began
             .recv_timeout(ANSWER_MAX)
             .expect("the stalled write began");

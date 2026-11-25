@@ -142,6 +142,17 @@ test("the end-to-end bridge routes match the app's commands", () => {
   assert.equal(readFileSync(ROUTES, "utf8"), render(lib, impls), "routes.rs is stale: run node test/native/bridge-routes.mjs");
 });
 
+test("the native terminal read answers false through the bridge, whose page has no native view", () => {
+  assert.match(render(lib, impls), /^ {8}"desktop_native_terminal_enabled" => \{\n {12}let result: Result<_, BridgeError> = async \{ Ok\(false\) \}\.await;\n {12}routed\(result\)\n {8}\}$/m);
+});
+
+test("a route body that names a lib item the bridge binary cannot reach is refused", () => {
+  const source = (body) => `mod inner;\nfn helper() -> bool {\n    true\n}\n#[tauri::command]\nasync fn desktop_probe(webview: Webview) -> Result<bool, BridgeError> {\n    main_window(&webview)?;\n    ${body}\n}\n`;
+  assert.throws(() => render(source("Ok(helper())"), impls), /routes: desktop_probe names helper, which the bridge binary cannot reach/);
+  assert.throws(() => render(source("Ok(inner::go())"), impls), /routes: desktop_probe names inner, which the bridge binary cannot reach/);
+  assert.match(render(source('Ok(crazyagent::inner::go("helper"))'), impls), /"desktop_probe" =>/, "a crate path or a string is not a lib item");
+});
+
 test("a std type an arm names is imported from lib.rs's own use, and std types no arm names are not", () => {
   const routes = render(lib, impls);
   assert.match(routes, /rules: BTreeSet<GitHubRule>,/);

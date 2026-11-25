@@ -66,12 +66,13 @@ fn a_full_access_launch_on_linux_is_refused_and_builds_nothing() {
 /// confinement and not for the folder, since neither backend holds a confined agent yet:
 /// team and research launches stay refused as they were (leader 12:25).
 #[test]
-fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_folder() {
+fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_folder()
+-> Result<(), Box<dyn std::error::Error>> {
     let checkouts = checkouts();
     let folder = checkouts.project.join("private");
-    fs::create_dir(&folder).unwrap();
+    fs::create_dir(&folder)?;
     let profiles = checkouts.project.parent().unwrap().join("profiles");
-    fs::create_dir_all(&profiles).unwrap();
+    fs::create_dir_all(&profiles)?;
     let refused = InstalledSandbox::install(
         confined(&checkouts).hide(&folder).unwrap(),
         &profiles.join("agent.sb"),
@@ -84,6 +85,7 @@ fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_fold
             if reason.contains("confined") && !reason.contains("hidden")),
         "{refused:?}"
     );
+    Ok(())
 }
 
 #[test]
@@ -97,3 +99,6 @@ fn landlock_holds_the_project_boundary_on_this_kernel() {
     );
     assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
 }
+
+#[path = "root_swap.rs"]
+mod root_swap;

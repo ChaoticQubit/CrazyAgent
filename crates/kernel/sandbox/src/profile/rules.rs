@@ -346,18 +346,17 @@ impl ProjectSandbox {
         text
     }
 
-    /// The Seatbelt rule that keeps the files the engine and the owner's git read in the
-    /// project folder out of agent hands: both `context/` folders, the git hooks and the
-    /// rebase, sequencer, remotes and branches state, each with everything below it, and the
-    /// entries `.git`, `.crazyagent`, the project instructions file `.crazyagent/instructions.md`
-    /// (SA vid 11), the git config and its lock, the index and its lock, `commondir`,
-    /// `config.worktree`, `objects` and `objects/info`, none of which an agent may write or
-    /// hard link under another name it could write through (SA vid 11 r2). Each name below the
-    /// project folder matches in any letter case, so the rule does not depend on how Seatbelt
-    /// folds case on the case-insensitive volume, where git finds a name however it is typed
-    /// (RV-DS241-15). `.git/info`, `.git/shallow`, the alternates files and `.git/modules`
-    /// are kept the same way by [`Self::ancestry_denies`] and [`Self::submodule_denies`].
-    /// Input: the policy. Output: the rule text.
+    /// The Seatbelt rule that keeps the files the engine and the owner's git read in the project
+    /// folder out of agent hands: both `context/` folders, the git hooks and the rebase, sequencer,
+    /// remotes and branches state, each with everything below it, and the entries `.git`,
+    /// `.crazyagent`, the project instructions file `.crazyagent/instructions.md`, the git config
+    /// and its lock, the index and its lock, `commondir`, `config.worktree`, `objects` and
+    /// `objects/info`, none of which an agent may write or hard link under another name it could
+    /// write through. Each name below the project folder matches in any letter case, so the rule
+    /// does not depend on how Seatbelt folds case on the case-insensitive volume, where git finds a
+    /// name however it is typed. `.git/info`, `.git/shallow`, the alternates files and
+    /// `.git/modules` are kept the same way by [`Self::ancestry_denies`] and
+    /// [`Self::submodule_denies`]. Input: the policy. Output: the rule text.
     fn project_denies(&self) -> String {
         let project = seatbelt_pattern(&self.project_root);
         let git = any_case(".git");
@@ -390,25 +389,22 @@ impl ProjectSandbox {
         text
     }
 
-    /// The Seatbelt rules that keep the owner's git reading the metadata the engine made.
-    /// No agent may move the project folder, the git worktrees folders or a worktree, which
-    /// would carry protected files out of their denied paths and back. A worktree's `.git`
-    /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
-    /// does, only by a profile that adds worktrees ([`Self::adding_worktrees`] or a lead's
-    /// teammates' setup), since the owner's `git worktree repair` would point a real
-    /// checkout at an admin folder planted with them; they are never rewritten, removed,
-    /// re-permissioned, flagged, given an ACL or a time, or hard linked under a name an agent
-    /// could change them through, so the owner's git keeps reading them (RV-DS241-185, rv-sa241
-    /// NV-1, LINUX-TEAM-TIME-CALLS: a profile adding none denies every write, since Apple's
-    /// `utimensat` sets times past `file-write-times`), and no `config.worktree` may be
-    /// written. No link may be made anywhere in the git folder, in any letter case: git's
-    /// `worktree prune`, which the owner's next commit runs as maintenance, empties whatever
-    /// folder a link at `.git/worktrees` or `.git/worktrees/<name>` names
-    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
-    /// name below the project root, and each extra worktree's `.git` link, matches in any
-    /// letter case, as in `clone_store_denies`, since the case-insensitive disk finds it
-    /// however it is typed (DEC-123 rv-secreview L2, RV-DS241-15).
-    /// Input: the policy. Output: the rule text.
+    /// The Seatbelt rules that keep the owner's git reading the metadata the engine made. No agent
+    /// may move the project folder, the git worktrees folders or a worktree, which would carry
+    /// protected files out of their denied paths and back. A worktree's `.git` file and its
+    /// `commondir` and `gitdir` files may be created once, as `git worktree add` does, only by a
+    /// profile that adds worktrees ([`Self::adding_worktrees`] or a lead's teammates' setup), since
+    /// the owner's `git worktree repair` would point a real checkout at an admin folder planted
+    /// with them; they are never rewritten, removed, re-permissioned, flagged, given an ACL or a
+    /// time, or hard linked under a name an agent could change them through, so the owner's git
+    /// keeps reading them (LINUX-TEAM-TIME-CALLS: a profile adding none denies every write, since
+    /// Apple's `utimensat` sets times past `file-write-times`), and no `config.worktree` may be
+    /// written. No link may be made anywhere in the git folder, in any letter case: git's `worktree
+    /// prune`, which the owner's next commit runs as maintenance, empties whatever folder a link at
+    /// `.git/worktrees` or `.git/worktrees/<name>` names. Each name below the project root, and
+    /// each extra worktree's `.git` link, matches in any letter case, as in `clone_store_denies`,
+    /// since the case-insensitive disk finds it however it is typed. Input: the policy. Output: the
+    /// rule text.
     fn git_link_denies(&self) -> String {
         let project = self.project_root.display();
         let pattern = seatbelt_pattern(&self.project_root);
@@ -473,23 +469,22 @@ impl ProjectSandbox {
     }
 
     /// The Seatbelt rule that keeps an agent from planting a nested git repository inside a
-    /// writable working tree, which the owner's own unsandboxed git (its terminal or the
-    /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
-    /// No entry named `.git`, in every spelling a case-insensitive volume finds ([`any_case`]),
-    /// as a folder, file or link, may be created below a writable working tree, except that
-    /// tree's own top-level `.git` and, only in a profile built by [`Self::adding_worktrees`],
-    /// the engine's worktree links, given back by their exact name in either case, which any
-    /// other process could point at git data of its own (SECAUDIT-WORKTREE-ADMIN-PLANT).
-    /// The project's own `.git` and each worktree's own `.git` sit
-    /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
-    /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
-    /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
-    /// included, in every writable root that is not a working tree ([`Self::git_deny_roots`],
-    /// the owner's temp folder and shared writable folders included), so no agent can create
-    /// a repository anywhere to rename from (SM1-R, RV-DS241-16). The only `.git` entries in agent roots are engine-made links to exactly
-    /// `/dev/null`: the uv markers in a tool cache's buckets (T8 C1), which an agent cannot
-    /// make, remove or point elsewhere, and which, moved with their bucket into a tree, git
-    /// never enters or stages. Input: the policy. Output: the rule text.
+    /// writable working tree, which the owner's own unsandboxed git (its terminal or the V2 IDE)
+    /// would later enter as a submodule and run under the agent's own config. No entry named
+    /// `.git`, in every spelling a case-insensitive volume finds ([`any_case`]), as a folder, file
+    /// or link, may be created below a writable working tree, except that tree's own top-level
+    /// `.git` and, only in a profile built by [`Self::adding_worktrees`], the engine's worktree
+    /// links, given back by their exact name in either case, which any other process could point at
+    /// git data of its own. The project's own `.git` and each worktree's own `.git` sit at a tree's
+    /// root, not below it, so the `.+/` guard never matches them. A whole folder already holding a
+    /// `.git` could once be renamed in as a path-blind move Seatbelt cannot inspect; that source is
+    /// removed by also denying `.git` at any depth, top level included, in every writable root that
+    /// is not a working tree ([`Self::git_deny_roots`], the owner's temp folder and shared writable
+    /// folders included), so no agent can create a repository anywhere to rename from. The only
+    /// `.git` entries in agent roots are engine-made links to exactly `/dev/null`: the uv markers
+    /// in a tool cache's buckets, which an agent cannot make, remove or point elsewhere, and which,
+    /// moved with their bucket into a tree, git never enters or stages. Input: the policy. Output:
+    /// the rule text.
     fn nested_git_denies(&self) -> String {
         let dot_git = any_case(".git");
         let own_git = "\\.[gG][iI][tT]";
@@ -545,17 +540,16 @@ impl ProjectSandbox {
         text
     }
 
-    /// The Seatbelt rule that keeps an agent from writing what git reads ancestry or objects
-    /// from beside the commits, in every letter case the volume folds together (`any_case`,
-    /// the Kelvin sign and long s included): a commit-graph file, single or split, and an
-    /// `alternates` or `http-alternates` file in the project's object store or the one its
-    /// checkout shares (land-19 r1 M1, r2 L1), and the project's `.git/info` (which holds
-    /// `grafts`) and `.git/shallow` (land-19 r2 M1). A forged graph or graft could claim an
-    /// agent commit is on the landing tip. This is the only rule on those names, and it holds
-    /// a case variant made where the name does not exist yet, as after a clone or
-    /// `init --template=`, which git then reads through the case-insensitive volume. Engine
-    /// git reads no graph or graft; this also keeps the owner's own git from being handed one.
-    /// Input: the policy. Output: the rule text.
+    /// The Seatbelt rule that keeps an agent from writing what git reads ancestry or objects from
+    /// beside the commits, in every letter case the volume folds together (`any_case`, the Kelvin
+    /// sign and long s included): a commit-graph file, single or split, and an `alternates` or
+    /// `http-alternates` file in the project's object store or the one its checkout shares, and the
+    /// project's `.git/info` (which holds `grafts`) and `.git/shallow`. A forged graph or graft
+    /// could claim an agent commit is on the landing tip. This is the only rule on those names, and
+    /// it holds a case variant made where the name does not exist yet, as after a clone or `init
+    /// --template=`, which git then reads through the case-insensitive volume. Engine git reads no
+    /// graph or graft; this also keeps the owner's own git from being handed one. Input: the
+    /// policy. Output: the rule text.
     fn ancestry_denies(&self) -> String {
         let git = format!(
             "{}/{}",
@@ -584,18 +578,17 @@ impl ProjectSandbox {
     }
 
     /// Splits the agent's writable roots into the working-tree roots, where the root's own
-    /// top-level `.git` is a legitimate repository link the engine adds, and every other
-    /// writable root, where no `.git` may ever appear. The working trees are the project
-    /// folder, worktree, clone or setup folder the agent works in and its extra worktrees;
-    /// every other root comes from [`Self::writable_roots`] itself, so a root granted there
-    /// is under the rule at once: an admin folder, object store or setup records, home, temp
-    /// or scratch, a team folder a native lead shares with its teammates, the tool cache (T8,
-    /// whose only `.git` entries are the engine's `/dev/null` links), the owner's temp folder
-    /// and every shared writable folder (RV-DS241-16). A `.git` anywhere below a working
-    /// tree, and a `.git` at any depth (top level included) in every other root, is denied so
-    /// no agent can create a repository the owner's git enters there or rename one whole
-    /// into a worktree (OP-9 r2, SM1-R). Output: the working roots and the other roots.
-    pub fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
+    /// top-level `.git` is a legitimate repository link the engine adds, and every other writable
+    /// root, where no `.git` may ever appear. The working trees are the project folder, worktree,
+    /// clone or setup folder the agent works in and its extra worktrees; every other root comes
+    /// from [`Self::writable_roots`] itself, so a root granted there is under the rule at once: an
+    /// admin folder, object store or setup records, home, temp or scratch, a team folder a native
+    /// lead shares with its teammates, the tool cache (whose only `.git` entries are the engine's
+    /// `/dev/null` links), the owner's temp folder and every shared writable folder. A `.git`
+    /// anywhere below a working tree, and a `.git` at any depth (top level included) in every other
+    /// root, is denied so no agent can create a repository the owner's git enters there or rename
+    /// one whole into a worktree. Output: the working roots and the other roots.
+    pub(crate) fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         assert!(self.confinements() <= 1);
         let mut working: Vec<&Path> = vec![match (&self.checkout, &self.clone, &self.setup) {
             (Some(checkout), _, _) => checkout.worktree.as_path(),
@@ -705,7 +698,7 @@ impl ProjectSandbox {
     /// any [`Self::allow_node_for`] folder, the C locale and [`crate::toolchains::agent_env`]. Only a
     /// harness's PATH starts with the agent's own `getconf` and `git`
     /// ([`crate::toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
-    pub fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
+    pub(crate) fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = crate::toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self
             .owner_tmp
@@ -760,10 +753,9 @@ impl ProjectSandbox {
         Ok(command)
     }
 
-    /// Rebuilds a harness launch command for a Full access agent (DEC-102) as [`Self::wrap`]
-    /// does, with the same checks and environment, but started by [`unconfined_command`]
-    /// with no Seatbelt profile. Input: the harness command. Output: the command, or
-    /// `Invalid` for an unsafe command.
+    /// Rebuilds a harness launch command for a Full access agent as [`Self::wrap`] does, with the
+    /// same checks and environment, but started by [`unconfined_command`] with no Seatbelt profile.
+    /// Input: the harness command. Output: the command, or `Invalid` for an unsafe command.
     #[cfg(unix)]
     pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
         let (program, cwd) = self.harness_start(harness)?;

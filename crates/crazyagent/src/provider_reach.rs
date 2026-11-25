@@ -153,23 +153,37 @@ impl ProviderReach {
 fn bounded(
     lookup: impl FnOnce() -> io::Result<Vec<SocketAddr>> + Send + 'static,
 ) -> io::Result<Vec<SocketAddr>> {
+    bounded_on(&LOOKUPS_OUT, lookup)
+}
+
+/// [`bounded`] counting its thread on the given counter, which the engine keeps as
+/// [`LOOKUPS_OUT`] and a test row keeps as its own. A lookup is admitted only by raising a
+/// count below the cap, so a refusal never writes the counter. Inputs: the counter and the
+/// lookup. Output: its answer, or TimedOut.
+fn bounded_on(
+    lookups: &'static AtomicUsize,
+    lookup: impl FnOnce() -> io::Result<Vec<SocketAddr>> + Send + 'static,
+) -> io::Result<Vec<SocketAddr>> {
     let timed_out = || io::Error::from(io::ErrorKind::TimedOut);
-    let out = LOOKUPS_OUT.fetch_add(1, Ordering::SeqCst);
-    if out >= LOOKUPS_OUT_MAX {
-        LOOKUPS_OUT.fetch_sub(1, Ordering::SeqCst);
+    let admitted = lookups.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |out| {
+        (out < LOOKUPS_OUT_MAX).then_some(out + 1)
+    });
+    let Ok(out) = admitted else {
         return Err(timed_out());
-    }
+    };
     assert!(out < LOOKUPS_OUT_MAX);
     let (answer, answered) = std::sync::mpsc::sync_channel(1);
     let started = std::thread::Builder::new()
         .name("provider-lookup".into())
         .spawn(move || {
             let found = lookup();
-            LOOKUPS_OUT.fetch_sub(1, Ordering::SeqCst);
+            let before = lookups.fetch_sub(1, Ordering::SeqCst);
+            assert!(before > 0 && before <= LOOKUPS_OUT_MAX);
             let _ = answer.send(found);
         });
     if started.is_err() {
-        LOOKUPS_OUT.fetch_sub(1, Ordering::SeqCst);
+        let before = lookups.fetch_sub(1, Ordering::SeqCst);
+        assert!(before > 0 && before <= LOOKUPS_OUT_MAX);
         return Err(timed_out());
     }
     answered

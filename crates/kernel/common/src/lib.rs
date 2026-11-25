@@ -16,6 +16,12 @@ mod names_tests;
 #[cfg(test)]
 mod net_tests;
 #[cfg(test)]
+mod perf_kit;
+#[cfg(test)]
+mod perf_kit_tests;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
 mod relay_names_tests;
 
 /// The three desktop platforms the data root and services are defined for.
@@ -55,28 +61,43 @@ const SUPERSCRIPT_DIGITS: [char; 3] = ['\u{b9}', '\u{b2}', '\u{b3}'];
 
 /// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
 /// CONIN$, CONOUT$, or COM or LPT followed by one ASCII digit or a superscript one, two or
-/// three. Case is compared on the Unicode upper case, so a dotless i counts as an I. The
-/// name may stand alone, before an extension or before one trailing colon, with or without
-/// spaces before the dot. Input: one path component. Output: whether it is reserved on
-/// Windows.
+/// three. Case is compared on the Unicode upper case without a new String: an ASCII stem
+/// by its ASCII upper case, which is the same, any other char by char after expansion, so
+/// a dotless i counts as an I and a sharp s as SS. The name may stand alone, before an
+/// extension or before one trailing colon, with or without spaces before the dot.
+/// Input: one path component. Output: whether it is reserved on Windows.
 pub fn windows_device(name: &str) -> bool {
     let name = name.strip_suffix(':').unwrap_or(name);
     let stem = name
         .split_once('.')
         .map_or(name, |(stem, _)| stem)
-        .trim_end_matches(' ')
-        .to_uppercase();
+        .trim_end_matches(' ');
+    if stem.is_ascii() {
+        let bytes = stem.as_bytes();
+        let numbered = WINDOWS_NUMBERED_DEVICES.iter().any(|prefix| {
+            bytes.len() == prefix.len() + 1
+                && bytes[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+                && bytes[prefix.len()].is_ascii_digit()
+        });
+        return numbered
+            || WINDOWS_DEVICE_NAMES
+                .iter()
+                .any(|device| stem.eq_ignore_ascii_case(device));
+    }
+    let upper = || stem.chars().flat_map(char::to_uppercase);
     let numbered = WINDOWS_NUMBERED_DEVICES.iter().any(|prefix| {
-        stem.strip_prefix(prefix).is_some_and(|tail| {
-            let mut tail = tail.chars();
-            matches!(
-                (tail.next(), tail.next()),
+        let mut chars = upper();
+        prefix.chars().all(|want| chars.next() == Some(want))
+            && matches!(
+                (chars.next(), chars.next()),
                 (Some(digit), None)
                     if digit.is_ascii_digit() || SUPERSCRIPT_DIGITS.contains(&digit)
             )
-        })
     });
-    numbered || WINDOWS_DEVICE_NAMES.contains(&stem.as_str())
+    numbered
+        || WINDOWS_DEVICE_NAMES
+            .iter()
+            .any(|device| upper().eq(device.chars()))
 }
 
 #[cfg(test)]
@@ -231,6 +252,107 @@ mod tests {
             "a.b",
         ] {
             assert!(!super::windows_device(name), "{name:?}");
+        }
+    }
+
+    /// The device rule as it read when it upper-cased the stem into a new String: the
+    /// oracle the allocation-free compare must agree with. Input: one path component.
+    /// Output: whether that rule called it a device.
+    fn windows_device_by_string(name: &str) -> bool {
+        let name = name.strip_suffix(':').unwrap_or(name);
+        let stem = name
+            .split_once('.')
+            .map_or(name, |(stem, _)| stem)
+            .trim_end_matches(' ')
+            .to_uppercase();
+        let numbered = super::WINDOWS_NUMBERED_DEVICES.iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|tail| {
+                let mut tail = tail.chars();
+                matches!(
+                    (tail.next(), tail.next()),
+                    (Some(digit), None)
+                        if digit.is_ascii_digit() || super::SUPERSCRIPT_DIGITS.contains(&digit)
+                )
+            })
+        });
+        numbered || super::WINDOWS_DEVICE_NAMES.contains(&stem.as_str())
+    }
+
+    #[test]
+    fn the_device_rule_answers_as_the_string_upper_case_on_every_row_input() {
+        let mut names: Vec<String> = [
+            "CON",
+            "con",
+            "Prn",
+            "AUX",
+            "nul",
+            "CON .txt",
+            "con.txt",
+            "AUX.json",
+            "a.con",
+            "CONIN$",
+            "conin$",
+            "ConOut$",
+            "conout$.txt",
+            "CONIN$ .log",
+            "conout$:",
+            "conin",
+            "conout",
+            "conin$$",
+            "xconin$",
+            "con\u{131}n$",
+            "CON\u{131}N$",
+            "CON\u{131}N$.txt",
+            "con\u{131}n$:",
+            "con\u{130}n$",
+            "con\u{131}n",
+            "console",
+            "connie",
+            "nuly",
+            "v1.2",
+            "owner:abc",
+            "console:",
+            "nul-free",
+            "a b",
+            "a.b",
+            "skill-\u{fc}.md",
+            "com\u{df}",
+            "lpt\u{fb01}",
+            "n\u{149}l",
+            "aux ",
+            "nul:",
+            "COM\u{b9}.txt",
+            "com\u{2074}",
+            "",
+            "\u{1e9a}ux",
+            "\u{1e9a}ux.txt",
+            "co\u{149}",
+            "\u{df}",
+        ]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+        for prefix in ["COM", "com", "LPT", "lpt", "Com", "lPt"] {
+            for tail in [
+                "0", "1", "9", "00", "01", "10", "\u{b9}", "\u{b2}", "\u{b3}", "\u{b4}",
+                "\u{2070}", "\u{2074}", "\u{2079}", "\u{df}", "\u{fb01}", "\u{149}", "",
+            ] {
+                for suffix in ["", ".txt", " .txt", ":"] {
+                    names.push(format!("{prefix}{tail}{suffix}"));
+                }
+            }
+        }
+        let devices = names
+            .iter()
+            .filter(|name| windows_device_by_string(name))
+            .count();
+        assert!(devices > 0 && devices < names.len());
+        for name in &names {
+            assert_eq!(
+                super::windows_device(name),
+                windows_device_by_string(name),
+                "{name:?}"
+            );
         }
     }
 }

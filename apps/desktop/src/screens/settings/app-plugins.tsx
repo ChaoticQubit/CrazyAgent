@@ -45,6 +45,7 @@ export interface AppPluginActions {
   onSaveKey: () => void;
   onUnbind: (name: string, secret: string) => void;
   onRetry: () => void;
+  onRetryGrants: () => void;
 }
 
 /** How a plugin runs, in one line the row and the trust screen share. Input: how it runs.
@@ -201,6 +202,23 @@ function PluginDialogs({ dialog, accounts, busy, failure, failureCode, keyRef, a
   return null;
 }
 
+/** The built-in code plugins section: their rows once read, a placeholder while read, not
+ * ready in a build without the list, and a failed read with its reason and Try again; an
+ * empty list shows no section. Inputs: the grants read, the permission words, the busy flag
+ * and the actions. Output: the section, or nothing. */
+function CodePluginsSection({ grants, words, busy, actions }: {
+  grants: Loaded<readonly PluginGrants[]>; words: readonly PermissionWords[]; busy: boolean; actions: AppPluginActions;
+}) {
+  if (grants.kind === "ok" && grants.value.length === 0) return null;
+  const body = grants.kind === "loading" ? <Skeleton shape="row" count={2} />
+    : grants.kind === "not_ready" ? <NotReady what="The built-in code plugin list" compact />
+    : grants.kind === "error" ? <LoadError message={`Built-in code plugins couldn't be read. ${appPluginRefusal(grants)}`} onRetry={actions.onRetryGrants} />
+    : <ul className="pj-rows" aria-label="Built-in code plugins">{grants.value.map((row) => <CodePluginRow key={row.plugin} grants={row} words={words} busy={busy} actions={actions} />)}</ul>;
+  return <SettingSection title="Built-in code plugins" about="Plugins that ship with CrazyAgent and run parts of the app itself.">
+    <div className="set-body">{body}</div>
+  </SettingSection>;
+}
+
 /** Settings, App plugins as a pure view: the title in every state, the "When a plugin is
  * turned off" setting, the built-in code plugins with what each may do, then every plugin
  * with its one status label, where it came from, how it runs, where each secret's key comes
@@ -209,7 +227,7 @@ function PluginDialogs({ dialog, accounts, busy, failure, failureCode, keyRef, a
  * and its code, the key field and the actions. Output: the tab. */
 export function AppPluginsView({ page, grants, dialog, accounts, busy, failure, failureCode = "", keyRef, actions }: {
   page: Loaded<AppPluginsPage>;
-  grants: readonly PluginGrants[];
+  grants: Loaded<readonly PluginGrants[]>;
   dialog: PluginDialog;
   accounts: readonly AccountView[];
   busy: boolean;
@@ -236,11 +254,7 @@ export function AppPluginsView({ page, grants, dialog, accounts, busy, failure, 
           {whenOff.project_override && <p className="muted small">{PROJECT_OVERRIDE_LINE}</p>}
         </div>
       </SettingSection>
-      {grants.length > 0 && <SettingSection title="Built-in code plugins" about="Plugins that ship with CrazyAgent and run parts of the app itself.">
-        <div className="set-body">
-          <ul className="pj-rows" aria-label="Built-in code plugins">{grants.map((row) => <CodePluginRow key={row.plugin} grants={row} words={words} busy={busy} actions={actions} />)}</ul>
-        </div>
-      </SettingSection>}
+      <CodePluginsSection grants={grants} words={words} busy={busy} actions={actions} />
       <SettingSection title="Plugins" about="Built-in plugins ship with CrazyAgent. Yours are copied into your plugins folder when you approve them, and run only while their files match what you trusted."
         actions={<Button variant="primary" disabled={busy} onClick={actions.onAdd}>Add plugin</Button>}>
         <div className="set-body">
@@ -268,7 +282,6 @@ export function AppPluginsSettings() {
   const [failureCode, setFailureCode] = useState("");
   const keyRef = useRef<HTMLInputElement | null>(null);
   const accounts = keyAccounts(accountList.kind === "ok" ? accountList.value : []);
-  const grants = grantList.kind === "ok" ? grantList.value : [];
 
   function shown(next: AppPluginsPage) {
     setPage({ kind: "ok", value: next });
@@ -396,9 +409,10 @@ export function AppPluginsSettings() {
     onSaveKey: () => { if (!busy) void saveKey(); },
     onUnbind: (name, secret) => { if (!busy) void changed(() => unbindAppPlugin(name, secret), `${secret} no longer has a key.`); },
     onRetry: () => { void reload(); },
+    onRetryGrants: reloadGrants,
   };
 
   return <div className="stack">
-    <AppPluginsView page={page} grants={grants} dialog={dialog} accounts={accounts} busy={busy} failure={failure} failureCode={failureCode} keyRef={keyRef} actions={actions} />
+    <AppPluginsView page={page} grants={grantList} dialog={dialog} accounts={accounts} busy={busy} failure={failure} failureCode={failureCode} keyRef={keyRef} actions={actions} />
   </div>;
 }

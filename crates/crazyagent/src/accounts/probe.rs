@@ -80,19 +80,19 @@ pub(crate) async fn get(
     }
     let address = authority(url).ok_or_else(|| failure("account_url_invalid"))?;
     tokio::time::timeout(timeout, async {
-        let mut stream = connect(&address).await.map_err(|_| failure("account_url_unreachable"))?;
-        let mut request = format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n").into_bytes();
-        if let Some(key) = bearer {
-            request.extend_from_slice(b"Authorization: Bearer ");
-            request.extend_from_slice(key);
-            request.extend_from_slice(b"\r\n");
-        }
-        request.extend_from_slice(b"\r\n");
+        let mut stream = connect(&address)
+            .await
+            .map_err(|_| failure("account_url_unreachable"))?;
+        let mut request = request(path, &address, bearer);
         let sent = stream.write_all(&request).await;
         kernel_security::secret::wipe(&mut request);
         sent.map_err(|_| failure("account_url_unreachable"))?;
         let mut reply = Vec::new();
-        (&mut stream).take(RESPONSE_MAX as u64 + 1).read_to_end(&mut reply).await.map_err(|_| failure("account_url_unreachable"))?;
+        (&mut stream)
+            .take(RESPONSE_MAX as u64 + 1)
+            .read_to_end(&mut reply)
+            .await
+            .map_err(|_| failure("account_url_unreachable"))?;
         if reply.len() > RESPONSE_MAX {
             return Err(failure("account_reply_too_large"));
         }
@@ -100,6 +100,30 @@ pub(crate) async fn get(
     })
     .await
     .map_err(|_| failure("account_url_unreachable"))?
+}
+
+/// Writes one plain-HTTP GET request, with the bearer key in its Authorization header when
+/// one is given, into one buffer of exactly its size, so no growth frees a copy of the key;
+/// the caller wipes the bytes once they are sent. Inputs: the request path, the host and
+/// port, and the key. Output: the request bytes.
+pub fn request(path: &str, address: &str, bearer: Option<&[u8]>) -> Vec<u8> {
+    const BEARER: &[u8] = b"Authorization: Bearer ";
+    let head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n"
+    );
+    let size = head.len() + bearer.map_or(0, |key| BEARER.len() + key.len() + 2) + 2;
+    let mut request = Vec::with_capacity(size);
+    let capacity = request.capacity();
+    request.extend_from_slice(head.as_bytes());
+    if let Some(key) = bearer {
+        request.extend_from_slice(BEARER);
+        request.extend_from_slice(key);
+        request.extend_from_slice(b"\r\n");
+    }
+    request.extend_from_slice(b"\r\n");
+    assert_eq!(request.len(), size);
+    assert_eq!(request.capacity(), capacity);
+    request
 }
 
 fn parse(reply: &[u8]) -> Result<Response, EngineError> {

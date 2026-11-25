@@ -55,6 +55,10 @@ pub(super) enum Pending {
 /// started again lacks it, so it is emptied again.
 const EMPTIED: &str = "@crazyagent-environment-emptied";
 
+/// The lines tmux writes for a command's error before its `%error` guard: the one message
+/// line, so a counted capture takes its error guard only after exactly this many rows.
+const ERROR_LINES: usize = 1;
+
 /// Empties the environment of a server no connect emptied yet, as [`clear_environment`]
 /// does, then marks it emptied; a reattach to a marked server keeps what a lead's
 /// environment set there. Either way no attaching client's variables are copied.
@@ -630,9 +634,12 @@ fn drop_spent(state: &mut State) {
     assert!(matches!(spent, Some(Pending::Spent)));
 }
 
-/// Answers an attach whose counted capture met its error guard with that error, then drains
-/// to the attach's marker: the guard may be pane text, so no row after it is read as a
-/// control line, and a real error leaves only the marker block to drop. Takes the state, the
+/// Answers an attach whose counted capture met its error guard right after one row with that
+/// error, then drains to the attach's marker. tmux writes a command's error as one message
+/// line before the guard, so only the second line can be a real error; the guard there may
+/// still be pane text, so no row after it is read as a control line, and a real error leaves
+/// only the marker block to drop. A pane whose second row is the exact guard of its own
+/// capture still ends that capture with an error, one guess per attach. Takes the state, the
 /// rows read and the capture's guard. Returns the drain.
 fn capture_failed(state: &mut State, lines: &[Vec<u8>], opened: Vec<u8>) -> Drain {
     let marker = match state.pending.front() {
@@ -781,7 +788,11 @@ pub(super) fn read(output: ChildStdout, state: &Mutex<State>) {
             let closing = !counted && dropped == 0;
             let ended = closing && guard(&line, b"%end") == Some(open.opened.as_slice());
             let failed = closing && guard(&line, b"%error") == Some(open.opened.as_slice());
-            if counted && dropped == 0 && guard(&line, b"%error") == Some(open.opened.as_slice()) {
+            if counted
+                && open.seen == ERROR_LINES
+                && dropped == 0
+                && guard(&line, b"%error") == Some(open.opened.as_slice())
+            {
                 let opened = std::mem::take(&mut open.opened);
                 drain = Some(capture_failed(&mut state, &open.lines, opened));
                 block = None;

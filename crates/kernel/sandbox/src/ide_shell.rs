@@ -67,19 +67,17 @@ pub struct Launch<'a> {
     pub agent_files: AgentFilesRule,
 }
 
-/// Builds an engine-hosted terminal's command: the shell under the project's agent sandbox
-/// with the network its level allows, the engine runtime guarded (its IDE folder with each capability and
-/// server token lies outside every allowed root), the project's toolchains and extra
-/// folders readable, its own home and temp folders, the home cleared of every shell startup
-/// file first (SA vid 12), and only the [`TERMINAL_VARIABLES`] given. The engine runs it
-/// outside every sandbox, since macOS refuses a second Seatbelt profile inside a sandboxed
-/// process such as the IDE server.
-/// Its listeners stay off the owner's local model ports, and it keeps to the project's IDE
-/// agent folders choice (DEC-124).
-/// Inputs: the engine's profile hooks, which also remove the home's shell startup files, and
-/// the launch. Output: the command, or a refusal for a project that is not a project id
-/// (one plain folder name), an unlisted shell, a start outside the project folder, an unsafe
-/// root or Full access, which only the IDE server's own shell runs.
+/// Builds an engine-hosted terminal's command: the shell under the project's agent sandbox with the
+/// network its level allows, the engine runtime guarded (its IDE folder with each capability and
+/// server token lies outside every allowed root), the project's toolchains and extra folders
+/// readable, its own home and temp folders, the home cleared of every shell startup file first, and
+/// only the [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since macOS
+/// refuses a second Seatbelt profile inside a sandboxed process such as the IDE server. Its
+/// listeners stay off the owner's local model ports, and it keeps to the project's IDE agent
+/// folders choice. Inputs: the engine's profile hooks, which also remove the home's shell startup
+/// files, and the launch. Output: the command, or a refusal for a project that is not a project id
+/// (one plain folder name), an unlisted shell, a start outside the project folder, an unsafe root
+/// or Full access, which only the IDE server's own shell runs.
 #[cfg(target_os = "macos")]
 pub fn command(hooks: &'static ProfileHooks, launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use crate::error::invalid;

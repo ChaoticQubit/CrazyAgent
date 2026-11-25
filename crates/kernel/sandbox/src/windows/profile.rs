@@ -4,7 +4,7 @@ use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{canonical, clean_absolute};
 use crate::profile::ProjectSandbox;
 use crate::profile::command::Sandbox;
-use crate::profile::env::agent_process_env;
+use crate::profile::env::{Handed, agent_process_env, agent_process_env_handing};
 use crate::windows::{container_for, existing_helper, helper_beside_engine};
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
@@ -21,8 +21,8 @@ pub const ACTIVE_PROCESSES: u32 = 512;
 /// boundary leaves it out of the protected paths: Windows cannot refuse creating one name, so
 /// guarding a lock that is normally missing would keep `.git` from taking new entries, git's
 /// own `index.lock` among them. A lock an agent makes never becomes the config: `config` is
-/// read only, so no agent replaces or deletes it (DEC-193 D6, step 0c).
-pub const GIT_CONFIG_LOCK: &str = "config.lock";
+/// read only, so no agent replaces or deletes it.
+pub(crate) const GIT_CONFIG_LOCK: &str = "config.lock";
 
 const PROFILE_NAME_MAX: usize = 128;
 const SYSTEM_ROOT_DEFAULT: &str = r"C:\Windows";
@@ -45,7 +45,7 @@ const PINNED_VARIABLES: &[&str] = &[
 /// The Windows boundary for one project agent. The helper runs the agent in an AppContainer
 /// of its own with read and execute on its read roots, modify on its writable roots, read and
 /// execute only on the protected paths and nothing on secret paths inside a granted root,
-/// inside a job that kills the agent's whole tree when the helper ends (DEC-193).
+/// inside a job that kills the agent's whole tree when the helper ends.
 #[derive(Debug)]
 pub struct WindowsSandbox {
     sandbox: ProjectSandbox,
@@ -161,8 +161,28 @@ impl WindowsSandbox {
     }
 }
 
-impl Sandbox for WindowsSandbox {
-    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+impl WindowsSandbox {
+    /// Rebuilds a harness command as [`Sandbox::wrap`] does for a launch that hands its
+    /// account over: its environment lets the names the exception lists hold its one value.
+    /// Inputs: the harness command and the launch's exception. Output: the command, or the
+    /// refusal.
+    pub fn wrap_handing(
+        &self,
+        harness: &Command,
+        handed: Handed<'_>,
+    ) -> Result<Command, SandboxError> {
+        self.wrapped(harness, Some(handed))
+    }
+
+    /// Rebuilds a harness command to start through the helper in this boundary, its
+    /// environment built with the launch's exception to the variable guard when it has one.
+    /// Inputs: the harness command and the exception, if any. Output: the command, or the
+    /// refusal.
+    fn wrapped(
+        &self,
+        harness: &Command,
+        handed: Option<Handed<'_>>,
+    ) -> Result<Command, SandboxError> {
         let program = Path::new(harness.get_program());
         if !clean_absolute(program) {
             return Err(invalid("harness program must be an absolute plain path"));
@@ -189,12 +209,22 @@ impl Sandbox for WindowsSandbox {
                 .iter()
                 .any(|pinned| name.eq_ignore_ascii_case(pinned))
         };
-        let env = agent_process_env(&base, harness.get_envs().filter(|&(name, _)| !pinned(name)))?;
+        let variables = harness.get_envs().filter(|&(name, _)| !pinned(name));
+        let env = match handed {
+            Some(handed) => agent_process_env_handing(&base, variables, handed)?,
+            None => agent_process_env(&base, variables)?,
+        };
         let mut command = boundary_command(&self.helper, &self.profile, program, &env);
         command.args(harness.get_args()).current_dir(cwd);
         assert_eq!(command.get_program(), self.helper.as_os_str());
         assert_eq!(command.get_args().nth(1), Some(self.profile.as_os_str()));
         Ok(command)
+    }
+}
+
+impl Sandbox for WindowsSandbox {
+    fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+        self.wrapped(harness, None)
     }
 }
 
@@ -221,10 +251,10 @@ pub fn agent_command<'a>(
     Ok(command)
 }
 
-/// The AppContainer capabilities for a network reach (DESIGN-0256 O2a): the internet client
+/// The AppContainer capabilities for a network reach: the internet client
 /// when open or limited to ports on any host, a limit the AppContainer cannot hold and so
 /// widens; none when no endpoint is allowed; and [`MODEL_LOOPBACK_WINDOWS_LINE`] for any
-/// loopback port, which it cannot reach (P6). Input: the network. Output: the list or refusal.
+/// loopback port, which it cannot reach. Input: the network. Output: the list or refusal.
 pub fn capabilities(network: &SandboxNetwork) -> Result<Vec<Capability>, SandboxError> {
     match network {
         SandboxNetwork::Open => Ok(vec![Capability::InternetClient]),
@@ -317,7 +347,7 @@ pub fn boundary_profile(
 
 /// Makes `.git\hooks`, `.git\modules` and `.crazyagent\context` when missing, empty, in a parent
 /// that is a real folder, never replacing an entry and never making `.git` or `.crazyagent`,
-/// which would move a legacy project's state folder (DEC-193 F2): the helper keeps the entries
+/// which would move a legacy project's state folder: the helper keeps the entries
 /// of the folder above a missing guarded path, which would stop git's `index.lock`. A job
 /// folder holds no guards, so none is made there. Input: the policy. Output: how many were
 /// made, or the failure.
@@ -355,7 +385,7 @@ fn make_guarded_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError>
     Ok(made)
 }
 
-pub fn drive_path(path: &Path) -> Result<String, SandboxError> {
+pub(crate) fn drive_path(path: &Path) -> Result<String, SandboxError> {
     path.to_str()
         .filter(|text| check_path(text).is_ok())
         .map(str::to_owned)
@@ -379,7 +409,7 @@ fn boundary_command(
     command
 }
 
-pub fn system_root() -> String {
+pub(crate) fn system_root() -> String {
     std::env::var("SystemRoot")
         .ok()
         .filter(|root| check_path(root).is_ok())

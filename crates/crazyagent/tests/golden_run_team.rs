@@ -135,7 +135,7 @@ async fn the_owner_hands_a_task_to_a_codex_agent_and_hears_it_done() {
         .worktree
         .as_deref()
         .expect("the agent works in its own checkout");
-    let written = fs::read_to_string(Path::new(worktree).join(FILE)).ok();
+    let written = fs::read_to_string(repo.join(worktree).join(FILE)).ok();
     assert_eq!(
         written.as_deref(),
         Some(LINE),

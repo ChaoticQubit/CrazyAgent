@@ -951,6 +951,10 @@ mod tests {
         .unwrap();
         let (_stop, stopped) = tokio::sync::watch::channel(false);
         let mut service = started(root, &stopped).await;
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
         let gone = root.join("gone");
         let db = landing::open(root).unwrap();
         db.execute(
@@ -965,10 +969,6 @@ mod tests {
         )
         .unwrap();
         drop(db);
-        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
-            .await
-            .unwrap()
-            .unwrap();
         let mut service = started(root, &stopped).await;
         tokio::time::timeout(Duration::from_secs(60), service.shutdown())
             .await

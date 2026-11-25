@@ -23,9 +23,8 @@ fn with(
     }
 }
 
-/// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 6): a listed master's launch hands
-/// its harness its own relay token only in the names its manifest lists. Another
-/// launch's token, any other relay value, an unlisted key name and a launch with no
+/// A listed master's launch hands its harness its own relay token only in the names its manifest
+/// lists. Another launch's token, any other relay value, an unlisted key name and a launch with no
 /// exception, such as a teammate's, are refused.
 #[test]
 fn a_launch_hands_its_own_relay_token_only_in_the_names_its_manifest_lists() {
@@ -48,9 +47,8 @@ fn a_launch_hands_its_own_relay_token_only_in_the_names_its_manifest_lists() {
     assert!(with(None, "OPENAI_API_KEY", &own).is_err());
 }
 
-/// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 3): a keyless launch hands only
-/// the placeholder, and no exception is ever built for a saved key or a relay value that
-/// is no token.
+/// A keyless launch hands only the placeholder, and no exception is ever built for a saved key or a
+/// relay value that is no token.
 #[test]
 fn a_keyless_launch_hands_only_the_placeholder_and_never_a_saved_key() {
     let keyless = Handed::new(&NAMES, LOCAL_PLACEHOLDER);
@@ -63,9 +61,9 @@ fn a_keyless_launch_hands_only_the_placeholder_and_never_a_saved_key() {
     }
 }
 
-/// rv-sa241 M8 host guard N1: a launch hands its value only under key-shaped names; a
-/// name the variable guard refuses for another reason, a credential setting, a perl
-/// setting, a GitHub prefix or an engine variable, is refused when the exception is made.
+/// A launch hands its value only under key-shaped names; a name the variable guard refuses for
+/// another reason, a credential setting, a perl setting, a GitHub prefix or an engine variable, is
+/// refused when the exception is made.
 #[test]
 fn a_launch_never_hands_its_value_under_a_name_refused_for_another_reason() {
     let others = ["PERL5OPT", "GIT_ASKPASS", "GH_HOST", "CRAZYAGENT_LINEAGE"];

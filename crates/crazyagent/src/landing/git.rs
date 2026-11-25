@@ -814,10 +814,11 @@ impl Repo {
             return Err(invalid());
         }
         let (confinement, index_steps) = match writes {
-            Writes::Objects => (
-                wrapped(&read, &[common.join("objects"), step.clone()]),
-                Vec::new(),
-            ),
+            Writes::Objects => {
+                let objects =
+                    std::fs::canonicalize(common.join("objects")).map_err(|_| invalid())?;
+                (wrapped(&read, &[objects, step.clone()]), Vec::new())
+            }
             Writes::Index => (wrapped(&read, std::slice::from_ref(&step)), Vec::new()),
             Writes::WorkTree => (
                 wrapped(&read, &[work]),

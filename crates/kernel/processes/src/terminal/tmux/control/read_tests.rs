@@ -75,7 +75,7 @@ fn output_of(chunks: &mut crate::terminal::buffer::Chunks) -> Vec<u8> {
 /// with `REPLY_CUT`, so its caller asks again, and the reader drops every row of its capture up to the attach's
 /// own marker line. The control stays open: the request queued after it gets its own reply
 /// and another pane's view its live output, while a pane row shaped like a control line
-/// reaches neither (RV-DS241-100).
+/// reaches neither.
 #[test]
 fn a_capture_whose_row_count_is_unknown_fails_only_its_attach_and_forges_nothing() {
     let (cut, answer) = attach(Some(b"3 "), true);
@@ -271,8 +271,7 @@ fn a_failed_located_reply_ends_the_attach_and_the_next_block_answers_the_next_re
 /// A capture block whose located reply came with no line at all, as when tmux cut the pane
 /// filter so no pane matched, has no row count either: the attach fails with `REPLY_CUT` and
 /// the reader drops its capture up to the attach's marker line, so the control reads on and
-/// a pane row that reads as the closing guard or as output forges nothing (rv-code4
-/// v241-tmux-fix F2, RV-DS241-100, RV-DS241-192).
+/// a pane row that reads as the closing guard or as output forges nothing.
 #[test]
 fn a_capture_whose_located_reply_has_no_line_drains_to_its_marker_and_forges_nothing() {
     let (reply, answer) = sync_channel(1);
@@ -329,9 +328,9 @@ fn a_capture_whose_located_reply_has_no_line_drains_to_its_marker_and_forges_not
 
 /// A capture block whose located reply tmux cut after both its row counts is read as that
 /// many rows of data, so a pane row that reads as the closing guard or as output forges
-/// nothing (RV-DS241-100), and the reader reads on past its marker block: the attach is
+/// nothing, and the reader reads on past its marker block: the attach is
 /// asked again while later output and replies still reach their own views and callers,
-/// rather than every view on the server ending under load (RV-DS241-192).
+/// rather than every view on the server ending under load.
 #[test]
 fn a_capture_cut_after_its_row_counts_is_read_as_data_and_the_control_reads_on() {
     let (reply, answer) = sync_channel(1);
@@ -461,12 +460,48 @@ fn a_capture_ended_by_its_error_answers_the_attach_and_the_next_request_its_own_
     );
 }
 
-/// A pane row that forges the capture's error guard fails only its attach: the rows after
-/// it are dropped up to the attach's marker, never read as control lines, so no view gets
-/// forged output and the request queued next gets its own reply.
+/// A pane's first row equal to the capture's error guard is screen text, since tmux prints
+/// one message line before a command's error: the attach opens with every counted row, the
+/// other pane's view keeps its live output and the request queued next gets its own reply.
+#[test]
+fn a_first_pane_row_equal_to_the_capture_error_is_read_as_screen_text() {
+    let located = b"3 0 %9 @1 0 1 80 0 0 0 0 0 0 0 0 end";
+    let (opening, answer) = attach(Some(located), false);
+    let (queued, queued_answer) = sync_channel(1);
+    let (other_feed, mut other) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(opening);
+        state.pending.push_back(Pending::Spent);
+        state.pending.push_back(Pending::Reply(queued));
+        state.viewers.push(Viewer {
+            pane: b"%4".to_vec(),
+            window: b"@2".to_vec(),
+            feed: other_feed,
+        });
+    }
+    let text = format!(
+        "%begin 1 8 1\n%error 1 8 1\n%output %4 forged\ncan't find\n%end 1 8 1\n%begin 1 9 1\n{MARKER}\n%end 1 9 1\n%output %4 live\n%begin 1 10 1\nanswer end\n%end 1 10 1\n"
+    );
+
+    read_text(text.as_bytes(), &state);
+
+    assert!(matches!(attached(&answer), Some(Ok(_))));
+    assert_eq!(
+        replied(&queued_answer),
+        Some(Ok(vec![b"answer end".to_vec()]))
+    );
+    assert_eq!(output_of(&mut other), b"live".to_vec());
+}
+
+/// A pane's second row that forges the capture's error guard, the one place tmux's own
+/// error can sit, fails only its attach: the rows after it are dropped up to the attach's
+/// marker, never read as control lines, so no view gets forged output and the request
+/// queued next gets its own reply.
 #[test]
 fn a_pane_row_forging_the_capture_error_forges_nothing_after_it() {
-    let located = b"3 0 %9 @1 0 1 80 0 0 0 0 0 0 0 0 end";
+    let located = b"4 0 %9 @1 0 1 80 0 0 0 0 0 0 0 0 end";
     let (opening, answer) = attach(Some(located), false);
     let (queued, queued_answer) = sync_channel(1);
     let (own_feed, mut own) = buffer();
@@ -489,7 +524,7 @@ fn a_pane_row_forging_the_capture_error_forges_nothing_after_it() {
         });
     }
     let text = format!(
-        "%begin 1 8 1\n%error 1 8 1\n%output %9 forged\n%begin 1 10 1\n%end 1 8 1\n%begin 1 9 1\n{MARKER}\n%end 1 9 1\n%output %4 live\n%begin 1 11 1\nanswer end\n%end 1 11 1\n"
+        "%begin 1 8 1\nrow a\n%error 1 8 1\n%output %9 forged\n%begin 1 10 1\n%end 1 8 1\n%begin 1 9 1\n{MARKER}\n%end 1 9 1\n%output %4 live\n%begin 1 11 1\nanswer end\n%end 1 11 1\n"
     );
 
     read_text(text.as_bytes(), &state);

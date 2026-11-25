@@ -20,9 +20,9 @@ pub const SECRET_PATH_BYTES_MAX: usize = 512;
 /// The refusal code for a policy whose shared folders choice is out of shape.
 pub const INVALID: &str = "agent_policy_invalid";
 
-/// Which of the project folder's local folders a project's agents see (DEC-147.9): All, the
-/// default, shares every one, gitignored ones included; Chosen folders shares only the
-/// top-level folders the owner named; None shares none, so an agent works in its worktree.
+/// Which of the project folder's local folders a project's agents see: All, the default, shares
+/// every one, gitignored ones included; Chosen folders shares only the top-level folders the owner
+/// named; None shares none, so an agent works in its worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SharedScope {
@@ -66,8 +66,8 @@ impl SharedScope {
     }
 }
 
-/// Whether a project's agents may change its shared local folders (DEC-147.9): Read-only, the
-/// default, or Read-write for the shared top-level folders git does not track.
+/// Whether a project's agents may change its shared local folders: Read-only, the default, or
+/// Read-write for the shared top-level folders git does not track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SharedAccess {
@@ -107,9 +107,9 @@ impl SharedAccess {
     }
 }
 
-/// One project's shared local folders choice (DEC-147.9): which folders, how, the top-level
-/// folders picked for Chosen folders and the secret files or folders the owner shared back.
-/// A policy saved before the setting existed reads All and Read-only with nothing picked.
+/// One project's shared local folders choice: which folders, how, the top-level folders picked for
+/// Chosen folders and the secret files or folders the owner shared back. A policy saved before the
+/// setting existed reads All and Read-only with nothing picked.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedFolders {
@@ -146,10 +146,9 @@ impl SharedFolders {
         self.scope == SharedScope::All && self.access == SharedAccess::ReadOnly
     }
 
-    /// The shared-back secrets this choice cannot reach (L4 r1 L3): under None each one, and
-    /// under Chosen folders each one whose top-level folder is not picked, since the folder
-    /// kept out around it wins over the share. Takes the choice. Returns the paths, in the
-    /// owner's order.
+    /// The shared-back secrets this choice cannot reach: under None each one, and under Chosen
+    /// folders each one whose top-level folder is not picked, since the folder kept out around it
+    /// wins over the share. Takes the choice. Returns the paths, in the owner's order.
     pub fn unreachable_secrets(&self) -> Vec<&str> {
         self.secrets
             .iter()
@@ -234,19 +233,17 @@ pub const REFUSED: &str = "shared_folders_refused";
 /// can keep folders out or open them for writing.
 pub const NEEDS_MACOS: &str = "shared_folders_need_macos";
 
-/// The line before the shared-back secrets a choice cannot reach, the same in the desktop
-/// app (L4 r1 L3).
+/// The line before the shared-back secrets a choice cannot reach, the same in the desktop app.
 pub const UNREACHABLE_SECRETS_LINE: &str =
     "Still closed unless git tracks them, since this choice does not share their folder:";
 
 /// What the owner sees about the Linux and Windows gap, the same in the desktop app.
 pub const OFF_MACOS_LINE: &str = "On Linux and Windows agents read the whole project folder, secret files included, and only All with Read-only can start them.";
 
-/// Secret file and folder names a project's agents never read in the project folder unless
-/// the owner shares them back (DEC-147.9), as Seatbelt regex fragments in lower case, matched
-/// in any letter case on any path part: `.env*`, credential stores, key and certificate files,
-/// key stores, cloud and cluster credentials, Terraform state and variables, age keys and
-/// `secrets.*`.
+/// Secret file and folder names a project's agents never read in the project folder unless the
+/// owner shares them back, as Seatbelt regex fragments in lower case, matched in any letter case on
+/// any path part: `.env*`, credential stores, key and certificate files, key stores, cloud and
+/// cluster credentials, Terraform state and variables, age keys and `secrets.*`.
 pub const SECRET_NAMES: &[&str] = &[
     r"\.env.*",
     r"\.git-credentials",
@@ -395,11 +392,10 @@ fn top_names(root: &Path) -> Result<Vec<String>, &'static str> {
     Ok(names)
 }
 
-/// The top-level names a Chosen folders or None launch keeps open in `root` (L4 r1 L1): the
-/// engine's, the picked ones and each present one git tracks something in, so any other
-/// entry stays closed, one made later included. Takes the hooks, the folder, the choice, the present
-/// names and git's untracked paths. Returns the names, sorted, each
-/// [`crate::paths::plain_top`].
+/// The top-level names a Chosen folders or None launch keeps open in `root`: the engine's, the
+/// picked ones and each present one git tracks something in, so any other entry stays closed, one
+/// made later included. Takes the hooks, the folder, the choice, the present names and git's
+/// untracked paths. Returns the names, sorted, each [`crate::paths::plain_top`].
 fn open_tops(
     hooks: &AccessHooks,
     root: &Path,
@@ -455,11 +451,11 @@ pub fn local_folders(hooks: &AccessHooks, root: &Path) -> Vec<String> {
     names
 }
 
-/// The "Shared project folders" section every harness's agents get in their project context
-/// (DEC-141, DEC-147.9): where the project folder is, which of its local folders they may
-/// read or change, that secret files stay closed, and that toolchains are the owner's,
-/// read-only and never installed (F26). Takes the project folder, none when unknown, the
-/// access level and the choice. Returns at most [`SECTION_BYTES_MAX`] bytes of markdown.
+/// The "Shared project folders" section every harness's agents get in their project context: where
+/// the project folder is, which of its local folders they may read or change, that secret files
+/// stay closed, and that toolchains are the owner's, read-only and never installed. Takes the
+/// project folder, none when unknown, the access level and the choice. Returns at most
+/// [`SECTION_BYTES_MAX`] bytes of markdown.
 pub fn context_section(
     folder: Option<&Path>,
     level: crate::policy::AgentAccess,
@@ -521,10 +517,10 @@ pub const SECTION_BYTES_MAX: usize = 3072;
 const CHOSEN_LIST_BYTES_MAX: usize = 512;
 
 /// Whether the top-level folder `name` of the project folder `root` stays read-only under
-/// Read-write (L4 r1 M1): a hidden folder, which the owner's own tools load and run unconfined
-/// (`.venv`, `.vscode`, `.claude`, `.codex`), the engine's `context` and every engine name,
-/// each in any spelling a case-insensitive volume opens as it (DS-148 F1).
-/// Takes the hooks, the project folder and the name. Returns true when agents never write it.
+/// Read-write: a hidden folder, which the owner's own tools load and run unconfined (`.venv`,
+/// `.vscode`, `.claude`, `.codex`), the engine's `context` and every engine name, each in any
+/// spelling a case-insensitive volume opens as it. Takes the hooks, the project folder and the
+/// name. Returns true when agents never write it.
 pub fn never_written(hooks: &AccessHooks, root: &Path, name: &str) -> bool {
     name.starts_with('.')
         || crate::paths::names_one_of(name, &[CONTEXT_NAME])

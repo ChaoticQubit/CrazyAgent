@@ -65,7 +65,7 @@ fn a_failed_remove_write_keeps_the_plugin_and_its_key() {
     case.db.execute_batch("DROP TRIGGER refuse_remove").unwrap();
     assert!(case.db.is_autocommit());
     assert_eq!(plugin_keys(&case), keys);
-    assert_eq!(std::fs::read(&keys[0]).unwrap(), b"sk-kept-on-fail-01");
+    assert_eq!(fixture(&keys[0], std::fs::read), b"sk-kept-on-fail-01");
     assert!(
         case.root
             .join(FOLDER)
@@ -94,7 +94,7 @@ fn a_replace_over_an_old_folder_it_cannot_delete_still_succeeds() {
 
     add_text(&case, &text, true, 2).unwrap();
 
-    assert_eq!(std::fs::read_to_string(&old).unwrap(), text);
+    assert_eq!(fixture(&old, std::fs::read_to_string), text);
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").sha256, sha(&text));
     let left = left_over(&case);
@@ -881,4 +881,31 @@ fn two_retired_folders_beside_an_untrusted_live_plugin_are_kept() {
     let mut names = names_in(&folder);
     names.sort();
     assert_eq!(names, [TWO_RETIRED[0], TWO_RETIRED[1], "acme"]);
+}
+
+/// A removal whose rows fail to commit keeps a retired folder kept beside the live one of
+/// its name: after the failed removal both folders are still there, the trusted original
+/// under its retired name, so nothing the owner trusted is lost.
+#[test]
+fn a_failed_removal_keeps_the_retired_folder_kept_beside_the_live_one() {
+    let case = case();
+    trusted(&case, ACME);
+    let two = ACME.replace("Acme embeddings", "Acme embeddings two");
+    let three = ACME.replace("Acme embeddings", "Acme embeddings three");
+    let folder = cut_after_renames(&case, &two);
+    trust_row_holds(&case, &three);
+    start_sweep(&case).unwrap();
+    both_kept(&folder, &two);
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_remove BEFORE DELETE ON app_plugin_trust
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+
+    case.db.execute_batch("DROP TRIGGER refuse_remove").unwrap();
+    assert!(case.db.is_autocommit());
+    both_kept(&folder, &two);
 }
