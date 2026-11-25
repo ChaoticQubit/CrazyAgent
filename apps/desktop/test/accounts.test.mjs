@@ -59,7 +59,7 @@ test("step 2 lists catalog methods in order with Recommended first, and no subsc
   assert.equal(single[0].recommended, false);
   for (const tile of ["openai", "anthropic", "gemini", "openrouter", "openai_compatible", "local"]) assert.ok(TILE_LINES[tile], tile);
   assert.match(TILE_LINES.openai_compatible, /OpenAI API/);
-  assert.match(TILE_LINES.local, /Ollama/);
+  assert.equal(TILE_LINES.local, "Ollama, LM Studio or a server on this computer.");
   const claudeKey = methodOptions(catalog[1]).find((option) => option.entry.method === "api_key");
   assert.deepEqual([claudeKey.recommended, claudeKey.native], [false, undefined]);
 });
@@ -246,7 +246,7 @@ test("the start panel offers each managed method with the design copy", () => {
   assert.match(idle, />Sign in in this browser instead<\/button>/);
   for (const [provider, method] of [["chatgpt", "codex_existing"], ["claude", "claude_existing"]]) {
     const check = panel(undefined, { idle: true, provider, method });
-    assert.match(check, /Checking the sign-in this account already has in CrazyAgent\. Nothing else on this Mac is read\./);
+    assert.match(check, /Checking the sign-in this account already has in CrazyAgent\. Nothing else on this computer is read\./);
     assert.match(check, />Check this account&#x27;s sign-in<\/button>/);
     assert.doesNotMatch(check, /copies this sign-in|Use this sign-in/);
   }

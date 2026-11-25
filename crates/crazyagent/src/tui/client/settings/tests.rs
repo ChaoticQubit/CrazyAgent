@@ -318,7 +318,7 @@ async fn add_account_offers_one_entry_per_company_and_adds_the_same_engine_accou
         ),
         (
             "Local model",
-            "Ollama, LM Studio or another server on this Mac",
+            "Ollama, LM Studio or a server on this computer",
         ),
     ]) {
         assert!(
