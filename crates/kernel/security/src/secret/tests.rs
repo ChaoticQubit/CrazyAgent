@@ -77,3 +77,46 @@ fn sized_refuses_a_control_byte_in_an_escaped_piece() {
         assert!(super::sized(&[super::Piece::Plain("ok"), super::Piece::Escaped(bad)]).is_none());
     }
 }
+
+/// A value whose JSON changes length between two serializations: a counter written as
+/// `first` on the first pass and `then` after it, next to a secret.
+#[cfg(unix)]
+struct Changing {
+    first: u32,
+    then: u32,
+    passes: std::cell::Cell<u32>,
+}
+
+#[cfg(unix)]
+impl serde::Serialize for Changing {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let pass = self.passes.get();
+        self.passes.set(pass + 1);
+        let counter = if pass == 0 { self.first } else { self.then };
+        (counter, "secret-bytes").serialize(serializer)
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn sized_json_refuses_a_value_that_grows_between_passes() {
+    let value = Changing {
+        first: 9,
+        then: 10,
+        passes: std::cell::Cell::new(0),
+    };
+    assert!(super::sized_json(&value).is_err());
+    assert_eq!(value.passes.get(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn sized_json_refuses_a_value_that_shrinks_between_passes() {
+    let value = Changing {
+        first: 10,
+        then: 9,
+        passes: std::cell::Cell::new(0),
+    };
+    assert!(super::sized_json(&value).is_err());
+    assert_eq!(value.passes.get(), 2);
+}
