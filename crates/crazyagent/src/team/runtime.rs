@@ -6,7 +6,7 @@ use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, CancelBy, CancelPath,
     DELEGATIONS_PER_REPLY_MAX, Delegation, MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy,
     TaskSource, TaskStatus, TeamAccount, TeamReach, admit, agent_row, append_message, bound_text,
-    eligible_accounts, launch_harness, names, now_ms, pick_account_held, tool,
+    eligible_accounts, launch_harness, master, names, now_ms, pick_account_held, tool,
 };
 use crate::agent_git::Layout;
 use crate::agents::{
@@ -41,9 +41,9 @@ use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-use kernel_sandbox::policy::{
-    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
-};
+#[cfg(all(test, unix))]
+use kernel_sandbox::policy::AccessApply;
+use kernel_sandbox::policy::{AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing};
 use kernel_sandbox::profile::installed::InstalledSandbox;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use kernel_sandbox::{host::linux_unbridged_notice, toolchains};
@@ -135,6 +135,9 @@ const MOVE_DWELL: Duration = Duration::from_secs(crate::scheduling::MOVE_DWELL_S
 /// desktop master area shows.
 const ACCESS_WIDER_WHEN_IDLE: &str = "The owner widened the project's agent access. Each running agent stops when it is next idle so its next start has it; the live master starts again in its own conversation. Teammates keep their old access until their next start.";
 const ACCESS_WIDER_NEXT_START: &str = "The owner widened the project's agent access. Running agents keep their old access until their next start (Apply access changes: At its next start).";
+/// Why the engine stopped an agent that could still open a folder the owner hid after it
+/// started, as the owner worded it.
+const FOLDER_HIDDEN_STOPPED: &str = "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it.";
 const ACCESS_MASTER_RESTARTED: &str = "The live master stopped while idle and starts again in its own conversation with the owner's wider access.";
 const LIVE_MASTER_MOVED: &str = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
 const SWEEP_EVERY: Duration = Duration::from_secs(2);
@@ -685,12 +688,14 @@ enum Busy {
 
 /// Why the engine stopped an agent whose running process holds more than the owner saved:
 /// what the saved policy no longer allows, toolchains a pane from before the engine kept
-/// them may hold, or an allowed extra the owner removed (F08).
+/// them may hold, an allowed extra the owner removed (F08), or a folder the owner hid after
+/// the agent started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Narrowed {
     Saved(Narrowing),
     Unrecorded,
     Revoked,
+    Hidden,
 }
 
 impl Narrowed {
@@ -730,6 +735,7 @@ impl Narrowed {
                 "the owner removed an allowed extra (socket, port or temp folder) the agent held, so the agent was stopped; its next start goes without it",
                 "agent_grant_revoked",
             ),
+            Self::Hidden => (FOLDER_HIDDEN_STOPPED, "agent_folder_hidden_held"),
         };
         with_code(text, Some(code))
     }
@@ -931,6 +937,7 @@ pub struct TeamRuntime {
     instructions_next: BTreeMap<ProjectId, Instant>,
     restarts: BTreeMap<i64, (ProjectId, Restart)>,
     hidden_next: BTreeMap<ProjectId, Instant>,
+    hidden_held: BTreeMap<i64, (ProjectId, AgentRole, bool)>,
     followed: Option<(i64, u64)>,
     access_restarts: BTreeMap<i64, ProjectId>,
     access_widened: BTreeSet<ProjectId>,
@@ -1289,6 +1296,7 @@ impl TeamRuntime {
             instructions_next: BTreeMap::new(),
             restarts: BTreeMap::new(),
             hidden_next: BTreeMap::new(),
+            hidden_held: BTreeMap::new(),
             followed: None,
             access_restarts: BTreeMap::new(),
             access_widened: BTreeSet::new(),
@@ -4220,207 +4228,6 @@ impl TeamRuntime {
             worker.stop_for("engine_stop:rejected");
             let _ = worker.orders.send(Order::Stop);
         }
-    }
-
-    /// Stops the project's agents whose running process holds more than the owner saved now.
-    /// At a wider access level (AL-2) a kept or live agent stops at once and a per-turn agent
-    /// while its turn runs, since an idle one reads the level again in its next grant. An
-    /// agent with tools whose profile was made for a wider network than the saved one (CS-2)
-    /// stops whether it runs or idles, since its next turn would run in the same profile. With
-    /// a toolchain the saved policy no longer allows any agent stops, since its sandbox
-    /// profile was built once at its start; a pane whose record kept no toolchains counts as
-    /// holding every family. A stopped agent is held, so its task or message waits again
-    /// without a spent attempt, and every next start reads the policy again, so it starts
-    /// with the new level and network and without that toolchain. Each agent is checked once
-    /// per saved policy. An unreadable policy stops every agent holding more than Sandboxed
-    /// with no toolchain and, with tools, the None network, and a project folder that
-    /// toolchain detection cannot read stops every agent holding a toolchain the owner made no
-    /// choice for, each under its own reason. Takes the project's stored setup.
-    fn retire_narrowed(&mut self, stored: &StoredSetup) {
-        let project = &stored.project_id;
-        let saved = crate::sandbox::policy_store::load(&self.connection, project.as_str()).ok();
-        let stale: Vec<i64> = self
-            .workers
-            .iter()
-            .filter(|(_, w)| &w.project == project && !w.stopping)
-            .filter(|(_, w)| saved.is_none() || w.checked != saved)
-            .map(|(id, _)| *id)
-            .collect();
-        if stale.is_empty() {
-            return;
-        }
-        let root = stored
-            .project_folder()
-            .canonicalize()
-            .ok()
-            .map(kernel_sandbox::paths::one_spelling);
-        for id in stale {
-            let worker = self.workers.get_mut(&id).expect("worker exists");
-            let running =
-                !worker.managed || worker.live || worker.kept_session || worker.busy.is_some();
-            let narrowed = kernel_sandbox::policy::narrowing(
-                saved.as_ref(),
-                root.as_deref(),
-                running.then_some(worker.access),
-                worker.tools.then_some(worker.network),
-                worker.toolchains.as_deref().unwrap_or(&Toolchain::ALL),
-            )
-            .map(|cause| match cause {
-                Narrowing::TurnedOff | Narrowing::NotAllowed if worker.toolchains.is_none() => {
-                    Narrowed::Unrecorded
-                }
-                cause => Narrowed::Saved(cause),
-            });
-            let revoked = saved
-                .as_ref()
-                .is_some_and(|saved| saved.revokes(&worker.access_grants));
-            let narrowed = narrowed.or(revoked.then_some(Narrowed::Revoked));
-            let Some(narrowed) = narrowed else {
-                let widened = saved.as_ref().is_some_and(|saved| {
-                    saved.widens(
-                        root.as_deref(),
-                        running.then_some(worker.access),
-                        worker.tools.then_some(worker.network),
-                        worker.toolchains.as_deref(),
-                        &worker.access_grants,
-                    )
-                });
-                if widened && worker.role != AgentRole::Teammate {
-                    self.access_restarts.insert(id, project.clone());
-                }
-                if widened {
-                    self.access_widened.insert(project.clone());
-                }
-                worker.checked = saved.clone();
-                continue;
-            };
-            self.access_restarts.remove(&id);
-            worker.stop_for("engine_stop:narrowed");
-            worker.held = true;
-            worker.narrowed = Some(narrowed);
-            worker.cancel.store(true, Ordering::SeqCst);
-            let _ = worker.orders.send(Order::Stop);
-        }
-    }
-
-    /// Applies a wider saved access to running agents under the owner's Apply access changes
-    /// choice (F08): one team note per saved widening; under When idle each agent stops at its
-    /// next idle point, the live master as a planned restart that resumes its own session,
-    /// and under At its next start none stops. Takes the project's stored setup. Returns any
-    /// SQLite failure.
-    fn restart_widened(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
-        let project = &stored.project_id;
-        let announce = self.access_widened.remove(project);
-        let ids: Vec<i64> = self
-            .access_restarts
-            .iter()
-            .filter(|(_, owner)| *owner == project)
-            .map(|(id, _)| *id)
-            .collect();
-        if !announce && ids.is_empty() {
-            return Ok(());
-        }
-        assert!(ids.len() <= self.access_restarts.len());
-        let apply = crate::sandbox::policy_store::load(&self.connection, project.as_str())
-            .map(|policy| policy.apply_changes)
-            .unwrap_or_default();
-        if announce {
-            let text = match apply {
-                AccessApply::WhenIdle => ACCESS_WIDER_WHEN_IDLE,
-                AccessApply::NextStart => ACCESS_WIDER_NEXT_START,
-            };
-            self.note(project, text)?;
-        }
-        for id in ids {
-            let gone = self.workers.get(&id).is_none_or(|worker| worker.stopping);
-            if gone || apply == AccessApply::NextStart {
-                self.access_restarts.remove(&id);
-                continue;
-            }
-            let waits = self.workers[&id].kept_session && self.lead_waits(id)?;
-            let quiet = self.workers[&id].live
-                && super::master::quiet(
-                    &self.connection,
-                    self.agents.as_deref().map(Agents::typing),
-                    project,
-                    now_ms(),
-                );
-            let worker = self.workers.get_mut(&id).expect("worker exists");
-            let idle = worker.busy.is_none() && worker.own_turn.is_none() && !waits;
-            let stops = match (worker.role, worker.live) {
-                (AgentRole::Master, true) => idle && quiet && worker.turn_started.is_none(),
-                (AgentRole::Teammate, _) => false,
-                _ => idle,
-            };
-            if !stops {
-                continue;
-            }
-            let live = worker.live;
-            worker.stop_for("engine_stop:widened");
-            let _ = worker.orders.send(Order::Stop);
-            self.access_restarts.remove(&id);
-            if live {
-                self.master_restarts.insert(project.clone());
-                self.note(project, ACCESS_MASTER_RESTARTED)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Lists the project's running agents that can still open a folder the owner hid after
-    /// they started, for the team status and the owner's Restart them (SA-VID14-A): each not
-    /// stopping, in the sandbox and not a teammate, whose start hid neither the folder nor
-    /// one above it, a pane from before the engine kept that list counting as hiding none.
-    /// Takes the project's stored setup. Returns any SQLite failure.
-    fn mark_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
-        let project = &stored.project_id;
-        let saved = crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
-            .map_err(error)?;
-        let seers: BTreeSet<i64> = self
-            .workers
-            .iter()
-            .filter(|(_, w)| &w.project == project && !w.stopping)
-            .filter(|(_, w)| w.access != AgentAccess::Full && w.role != AgentRole::Teammate)
-            .filter(|(_, w)| !kernel_sandbox::hidden_paths::covers(w.hidden.as_deref(), &saved))
-            .map(|(id, _)| *id)
-            .collect();
-        assert!(seers.len() <= self.workers.len());
-        crate::sandbox::access_store::hidden::set_seers(&self.connection, project.as_str(), &seers)
-            .map_err(error)
-    }
-
-    /// Serves the owner's Restart them (SA-VID14-A): each listed agent stops at once with its
-    /// work held for it, a sub-agent to start again in its own worktree and conversation once
-    /// its process ended and the live master as a planned restart, so its next start hides
-    /// every saved folder. Takes the project's stored setup. Returns any SQLite failure.
-    fn restart_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
-        let project = &stored.project_id;
-        let asked =
-            crate::sandbox::access_store::hidden::restarts(&self.connection, project.as_str())
-                .map_err(error)?;
-        for id in asked {
-            let Some(worker) = self.workers.get_mut(&id) else {
-                continue;
-            };
-            if &worker.project != project || worker.stopping || worker.role == AgentRole::Teammate {
-                continue;
-            }
-            worker.stop_for("engine_stop:hidden");
-            worker.held = true;
-            worker.cancel.store(true, Ordering::SeqCst);
-            let _ = worker.orders.send(Order::Stop);
-            match (worker.role, worker.live) {
-                (AgentRole::Sub, _) => {
-                    worker.restarting = true;
-                    self.restarts.insert(id, (project.clone(), Restart::Hidden));
-                }
-                (AgentRole::Master, true) => {
-                    self.master_restarts.insert(project.clone());
-                }
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     /// Proves a managed pool account is signed in for this engine run, and that the
@@ -14885,6 +14692,9 @@ mod delivery;
 
 #[path = "runtime/resume.rs"]
 mod resume;
+
+#[path = "runtime/narrowing.rs"]
+mod narrowing;
 
 #[path = "runtime/spawn_ledger.rs"]
 mod spawn_ledger;

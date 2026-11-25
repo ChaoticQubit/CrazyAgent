@@ -860,6 +860,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "agent_folder_hidden" => {
             "A folder was hidden from this project's agents, so the agent was stopped. Its next start cannot see it."
         }
+        "agent_folder_hidden_held" => {
+            "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it."
+        }
         "shared_folders_unlisted" => {
             "CrazyAgent couldn't list the project folder's files with git, so the agent didn't start. Choose All local folders with Read-only in Agent access, or check the project's git."
         }
