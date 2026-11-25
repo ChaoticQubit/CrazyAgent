@@ -427,7 +427,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> crate::host::LinuxHost {
 /// an entry of any kind that is `.git` to some filesystem below the top, or one at the top
 /// not spelled `.git`. A folder it cannot read, or more entries than it reads, answers yes.
 /// Links are not followed. Input: the project folder. Output: true when one may be there.
-pub fn holds_other_git(project: &Path) -> bool {
+pub(crate) fn holds_other_git(project: &Path) -> bool {
     let mut folders = vec![project.to_path_buf()];
     let mut seen: usize = 0;
     while let Some(folder) = folders.pop() {
@@ -524,14 +524,14 @@ pub fn forget_supervisor(kept: &KeptHost) {
 /// What this machine holds, read again once what is kept is older than [`HOST_AGE_MAX`]:
 /// it may start the helper and bubblewrap, so it is not for a database transaction. No
 /// input. Output: the facts as [`read_host`] gives them.
-pub fn host_now() -> crate::host::LinuxHost {
+pub(crate) fn host_now() -> crate::host::LinuxHost {
     host_within(Some(HOST_AGE_MAX))
 }
 
 /// What this machine holds as it was last read, however long ago, read now only when it
 /// never was: after [`host_now`] it starts nothing. No input. Output: the facts as
 /// [`read_host`] gives them.
-pub fn host_kept() -> crate::host::LinuxHost {
+pub(crate) fn host_kept() -> crate::host::LinuxHost {
     host_within(None)
 }
 

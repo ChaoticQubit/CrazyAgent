@@ -1118,7 +1118,7 @@ pub fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
     ports
 }
 
-pub fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
+pub(crate) fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
     let mut ports: Vec<u16> = remotes
         .iter()
         .map(|remote| match remote {

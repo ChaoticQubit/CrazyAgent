@@ -312,7 +312,8 @@ pub struct TeammatesSetup {
 
 impl TeammatesSetup {
     /// The folder the teammates' clones sit in.
-    pub fn folder(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn folder(&self) -> &PathBuf {
         &self.folder
     }
 }
@@ -924,17 +925,20 @@ impl ProjectSandbox {
 
 impl Checkout {
     /// The worktree the agent is confined to.
-    pub fn worktree(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn worktree(&self) -> &PathBuf {
         &self.worktree
     }
 
     /// The worktree's admin folder in the project's `.git/worktrees`.
-    pub fn admin(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn admin(&self) -> &PathBuf {
         &self.admin
     }
 
     /// The object store the worktree's commits land in.
-    pub fn objects(&self) -> &PathBuf {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn objects(&self) -> &PathBuf {
         &self.objects
     }
 
