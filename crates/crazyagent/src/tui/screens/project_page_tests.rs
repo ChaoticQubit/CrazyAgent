@@ -3518,7 +3518,13 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     assert!(shown.contains("Main"), "{shown}");
     shell.key(Key::Enter);
     let sent = pump_job(&mut shell, &mut connection).await;
-    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    assert_eq!(
+        sent.first(),
+        Some(&"job start"),
+        "{sent:?}\n{}\n{:?}",
+        render(&mut shell, 80, 24),
+        shell.ctx.store.intake
+    );
     assert!(sent.contains(&"projects"), "{sent:?}");
     assert!(sent.contains(&"edit pool"), "{sent:?}");
     assert_eq!(
@@ -5245,7 +5251,13 @@ async fn the_team_settings_screen_reads_the_harness_catalog_and_saves_the_picked
     shell.key(Key::Down);
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    assert_eq!(
+        sent.first(),
+        Some(&"change"),
+        "{sent:?}\n{}\n{:?}",
+        render(&mut shell, 80, 24),
+        shell.ctx.store.intake
+    );
     let after = engine
         .controller
         .project_setup(notes)
