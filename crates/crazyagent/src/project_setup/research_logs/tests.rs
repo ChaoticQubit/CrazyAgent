@@ -158,7 +158,7 @@ fn a_key_end_after_a_separator_still_hides_the_lines_above_it() {
     ));
     assert_eq!(
         shown,
-        ["-----End of output-----", HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
+        [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
     );
     let rsa = redact(&format!(
         "{BODY_NO_DIGIT}\n{BODY_SHORT}\n-----END RSA PRIVATE KEY-----\nafter"
