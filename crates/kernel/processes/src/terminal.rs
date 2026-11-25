@@ -336,7 +336,6 @@ pub struct TerminalStream {
     pub history: Vec<u8>,
     pub screen: Vec<u8>,
     pub chunks: buffer::Chunks,
-    #[cfg(unix)]
     pub at: Option<PaneAt>,
 }
 
@@ -353,7 +352,6 @@ pub struct PaneAt {
 /// still use it, else by the agent's name as `input` does. Takes the host the view was
 /// attached through, the view's pane, the agent and at most `INPUT_BYTES_MAX` bytes.
 /// Returns as `input`.
-#[cfg(unix)]
 pub fn type_into(
     host: &dyn Host,
     at: Option<&PaneAt>,
@@ -916,7 +914,6 @@ pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool,
 /// host, the terminal name, the pane and the text. Returns as `type_prompt`, or
 /// `terminal_agent_unknown` once that pane is no longer one the host can type into, which ends
 /// the view so it opens again with a fresh pin, as its other pinned sends do.
-#[cfg(unix)]
 pub fn type_prompt_at(
     host: &dyn Host,
     agent: &AgentId,
