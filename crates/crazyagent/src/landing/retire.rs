@@ -716,3 +716,6 @@ pub(super) fn remove(
     }
     Ok(Ok(()))
 }
+
+#[path = "ignored.rs"]
+pub(crate) mod ignored;
