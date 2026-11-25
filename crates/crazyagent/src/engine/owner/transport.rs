@@ -68,6 +68,7 @@ mod narrowing;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
+mod owner_stream;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
@@ -3786,16 +3787,7 @@ impl OwnerClient {
     pub async fn request(&self, request: OwnerRequest) -> Result<OwnerReply, EngineError> {
         request.validate()?;
         tokio::time::timeout(self.timeout, async {
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
-            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
-                .await
-                .map_err(io_error)?;
-            verify_server(&stream)?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
+            let mut stream = self.connect_checked(io_error).await?;
             let mut auth = [0; 37];
             auth[..4].copy_from_slice(b"CAO1");
             auth[4] = match self.kind {
