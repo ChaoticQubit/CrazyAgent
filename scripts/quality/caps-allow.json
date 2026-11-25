@@ -39,7 +39,7 @@
   "crates/crazyagent/src/agent_home.rs": 2214,
   "crates/crazyagent/src/agent_home/tests.rs": 3110,
   "crates/crazyagent/src/agents.rs": 1893,
-  "crates/crazyagent/src/coord/delivery/tests.rs": 1830,
+  "crates/crazyagent/src/coord/delivery/tests.rs": 1819,
   "crates/crazyagent/src/coord/relay.rs": 1559,
   "crates/crazyagent/src/coord/tests.rs": 3716,
   "crates/crazyagent/src/engine/bootstrap.rs": 2376,
