@@ -914,6 +914,46 @@ mod tests {
         );
     }
 
+    /// An entry whose list denies this user `readsecurity` gives no list rather than an empty
+    /// one: the read fails with permission denied, while an entry with the same allow and no
+    /// deny reads its one entry. Input: none. Output: none; it panics on a list read through
+    /// the deny.
+    #[test]
+    fn an_entry_that_denies_reading_its_list_fails_closed() {
+        let user = std::process::Command::new("/usr/bin/id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        assert!(user.status.success());
+        let user = String::from_utf8(user.stdout).unwrap();
+        let user = user.trim();
+        assert!(!user.is_empty());
+        let folder = scratch("acl-deny");
+        let control = folder.join("control");
+        let case = folder.join("case");
+        std::fs::write(&control, "x").unwrap();
+        std::fs::write(&case, "x").unwrap();
+        chmod(&["+a", "group:everyone allow write"], &control);
+        chmod(&["+a", "group:everyone allow write"], &case);
+        chmod(&["+a", &format!("user:{user} deny readsecurity")], &case);
+        let read = super::access_list(&c_path(&control));
+        let denied = super::access_list(&c_path(&case));
+        chmod(&["-N"], &case);
+        chmod(&["-N"], &control);
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert_eq!(
+            read.unwrap().entries,
+            vec![super::AccessEntry {
+                principal: guid("ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C"),
+                flags: 1,
+                rights: 1 << 2,
+            }]
+        );
+        let denied = denied.unwrap_err();
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
+    }
+
     /// A link's own list is read, with the link's own file id, and never its target's: a
     /// target with a list behind a link without one reads empty, and a link given its own list
     /// with `chmod -h` reads that list.
