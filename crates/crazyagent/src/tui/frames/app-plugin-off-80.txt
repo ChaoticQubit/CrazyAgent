@@ -4,8 +4,8 @@
   with. Each one shows what it reaches before you approve it.                   
   When turned off: Refuse new calls                                             
                                                                                 
-    OpenAI embeddings                                             Bundled  Off  
-      openai, version 1. Bundled.                                               
+    OpenAI embeddings                                            Built in  Off  
+      openai, version 1. Built in.                                              
       R┌─ Turn off Dock embeddings? ────────────────────────────────────┐       
       S│ In use by:                                                     │       
       a│ - Fix the login page                                           │       
