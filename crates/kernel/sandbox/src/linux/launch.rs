@@ -109,7 +109,7 @@ const HARNESS_UNCHECKED: &str = "this harness starts through a script CrazyAgent
      the Linux limited-network sockets setting 'TCP only'; start it from a program, or a script \
      whose first line names a program by its full path, or choose 'TCP ports only' in Settings, \
      which lets UDP and other sockets reach any host";
-const SYSTEM_READ_ROOTS: &[&str] = &[
+pub(crate) const SYSTEM_READ_ROOTS: &[&str] = &[
     "/usr",
     "/bin",
     "/sbin",
@@ -165,7 +165,7 @@ pub const HIDDEN_MOUNTED_AGAIN: &str = "a hidden folder's disk is mounted a seco
 const HIDDEN_MOUNTS_UNREAD: &str = "hidden folders on Linux need this computer's mount list, \
      and it could not be read";
 
-const LANDLOCK_DEVICES: &[&str] = &[
+pub(crate) const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
     "/dev/full",

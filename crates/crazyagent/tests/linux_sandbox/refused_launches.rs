@@ -99,3 +99,6 @@ fn landlock_holds_the_project_boundary_on_this_kernel() {
     );
     assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
 }
+
+#[path = "root_swap.rs"]
+mod root_swap;
