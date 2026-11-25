@@ -83,7 +83,7 @@ fn broken_record(root: &Path) -> Option<Broken> {
 
 /// Whether a word is a kept copy's folder name: `replaced-` and a time of letters and
 /// digits. Input: the word. Output: the answer.
-pub(crate) fn copy_name(word: &str) -> bool {
+pub fn copy_name(word: &str) -> bool {
     word.strip_prefix(REPLACED)
         .and_then(|rest| rest.strip_prefix('-'))
         .is_some_and(|time| !time.is_empty() && time.bytes().all(|b| b.is_ascii_alphanumeric()))
