@@ -420,9 +420,9 @@ fn with_hooks<T>(
 /// the live settings name, as the start sweep judges ([`super::trash::referenced`]). One a
 /// row of the dated copy of the replaced 2.5 data names moves into the same folder of that
 /// copy (DEC-192), where it stays with the data that names it; one no row of it names, left
-/// by a removal, is deleted as removals delete it. A plugin key no row of it names but an
-/// older kept copy names ([`replaced_copies`]) stays in place, and a failed read of those
-/// copies keeps every plugin key. No settings, settings that cannot be read,
+/// by a removal, is deleted as removals delete it. A key no row of it names but an older
+/// kept copy names ([`replaced_copies`]) stays in place, and a failed read of those copies
+/// keeps every key of that folder. No settings, settings that cannot be read,
 /// or a copy that cannot be opened keep every account's files in place. A failure is logged
 /// by what it swept and its code and never fails the checked restore. Inputs: the restored
 /// connection, still held alone, the engine root, the settings sources and the copy's folder.
@@ -462,13 +462,31 @@ fn sweep_unbound_keys(
         Some(Ok(config)) => {
             let catalog = config.settings.model_access.as_ref();
             let named = |kind: &str, name: &str| referenced(db, catalog, kind, name);
-            let keys = settle_unkept_in(
-                root,
-                ACCOUNT_KEYS,
-                copy,
-                |name| named(ACCOUNT_KEY, name),
-                |name| referenced(&replaced, None, ACCOUNT_KEY, name),
-            );
+            let older_copies = std::cell::OnceCell::new();
+            let account_kept = |name: &str| {
+                if named(ACCOUNT_KEY, name)? {
+                    return Ok(true);
+                }
+                if referenced(&replaced, None, ACCOUNT_KEY, name)? {
+                    return Ok(false);
+                }
+                let opened = older_copies.get_or_init(|| {
+                    replaced_copies(root)?
+                        .into_iter()
+                        .map(|older| replaced_database(&older))
+                        .collect::<Result<Vec<_>, _>>()
+                });
+                let older = opened.as_ref().map_err(Clone::clone)?;
+                for kept_copy in older {
+                    if referenced(kept_copy, None, ACCOUNT_KEY, name)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
+            let keys = settle_unkept_in(root, ACCOUNT_KEYS, copy, account_kept, |name| {
+                referenced(&replaced, None, ACCOUNT_KEY, name)
+            });
             swept.push((ACCOUNT_KEYS, keys));
             let profiles = sweep_replaced_profiles(root, copy, &replaced, named);
             swept.push((PROFILES, profiles));
