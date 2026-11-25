@@ -642,6 +642,10 @@ fn second_restore(older_is_link: bool) -> (Root, PathBuf) {
     crate::app_plugins::initialize(&live).unwrap();
     drop(live);
     let backups = root.path().join(BACKUPS);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&backups)
+        .unwrap();
     let older = backups.join(format!("{REPLACED}-20261101T000000000Z"));
     if older_is_link {
         let elsewhere = root.path().join("elsewhere");
