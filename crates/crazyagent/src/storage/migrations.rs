@@ -420,7 +420,9 @@ fn with_hooks<T>(
 /// the live settings name, as the start sweep judges ([`super::trash::referenced`]). One a
 /// row of the dated copy of the replaced 2.5 data names moves into the same folder of that
 /// copy (DEC-192), where it stays with the data that names it; one no row of it names, left
-/// by a removal, is deleted as removals delete it. No settings, settings that cannot be read,
+/// by a removal, is deleted as removals delete it. A plugin key no row of it names but an
+/// older kept copy names ([`replaced_copies`]) stays in place, and a failed read of those
+/// copies keeps every plugin key. No settings, settings that cannot be read,
 /// or a copy that cannot be opened keep every account's files in place. A failure is logged
 /// by what it swept and its code and never fails the checked restore. Inputs: the restored
 /// connection, still held alone, the engine root, the settings sources and the copy's folder.
@@ -437,15 +439,24 @@ fn sweep_unbound_keys(
         Ok(replaced) => replaced,
         Err(cause) => return sweep_failed(REPLACED_DATABASE, &cause),
     };
+    let older_names = std::cell::OnceCell::new();
+    let plugin_kept = |name: &str| {
+        if plugin_key_bound(db, name)? {
+            return Ok(true);
+        }
+        if plugin_key_bound(&replaced, name)? {
+            return Ok(false);
+        }
+        match older_names.get_or_init(|| replaced_key_names(root)) {
+            Ok(names) => Ok(names.contains(name)),
+            Err(cause) => Err(cause.clone()),
+        }
+    };
     let mut swept = vec![(
         PLUGIN_KEYS,
-        settle_unkept_in(
-            root,
-            PLUGIN_KEYS,
-            copy,
-            |name| plugin_key_bound(db, name),
-            |name| plugin_key_bound(&replaced, name),
-        ),
+        settle_unkept_in(root, PLUGIN_KEYS, copy, plugin_kept, |name| {
+            plugin_key_bound(&replaced, name)
+        }),
     )];
     match settings.map(SettingsSources::config) {
         Some(Ok(config)) => {
