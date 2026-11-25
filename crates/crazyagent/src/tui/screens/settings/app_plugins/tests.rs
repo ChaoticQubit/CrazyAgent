@@ -592,7 +592,10 @@ fn a_failed_grants_read_marks_only_the_code_rows_and_r_reads_them_again() {
     assert!(!shows(&mut shell, "App plugins aren't available"));
     shell.key(Key::Char('r'));
     serve(&mut shell, &mut fake);
-    assert!(!shows(&mut shell, "Built-in code plugins couldn't be read."));
+    assert!(!shows(
+        &mut shell,
+        "Built-in code plugins couldn't be read."
+    ));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
 }
 
