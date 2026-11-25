@@ -1,28 +1,47 @@
 use super::*;
 
-/// Reads the last plain lines of one research job's agent output, with secrets hidden.
-/// Takes the engine database path, whose folder holds the research runner's agent state,
-/// and the job id. Returns the newest lines within RESEARCH_LOG_LINES_MAX and
-/// RESEARCH_LOG_BYTES_MAX, so the reply fits one owner frame; none before the first run.
+/// Reads the last plain lines of one research job's agent output, with secrets hidden, from
+/// its newest run by folder name: the legacy read for a job whose record names no run, as one
+/// last run before the engine kept the name. Takes the engine database path, whose folder
+/// holds the research runner's agent state, and the job id. Returns the newest lines within
+/// RESEARCH_LOG_LINES_MAX and RESEARCH_LOG_BYTES_MAX; none before the first run.
 #[cfg(unix)]
 pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineError> {
     assert!(job > 0);
-    let agents = database
-        .parent()
-        .ok_or_else(|| failure("runtime_parent_missing"))?
-        .join("research")
-        .join("agents");
-    let Ok(directory) = rustix::fs::open(
-        agents.as_path(),
-        open_flags() | OFlags::DIRECTORY,
-        Mode::empty(),
-    ) else {
+    let Some(directory) = agents_folder(database)? else {
         return Ok(Vec::new());
     };
     let Some(run) = latest_run(&directory, job)? else {
         return Ok(Vec::new());
     };
-    let Ok(run) = open_directory(&directory, &run) else {
+    run_lines(&directory, &run)
+}
+
+/// Opens the research runner's agent state folder beside the engine database, without
+/// following a link. Takes the database path. Returns the folder, none when it is not there,
+/// or `runtime_parent_missing` for a path with no folder.
+#[cfg(unix)]
+fn agents_folder(database: &Path) -> Result<Option<Directory>, EngineError> {
+    let agents = database
+        .parent()
+        .ok_or_else(|| failure("runtime_parent_missing"))?
+        .join("research")
+        .join("agents");
+    Ok(rustix::fs::open(
+        agents.as_path(),
+        open_flags() | OFlags::DIRECTORY,
+        Mode::empty(),
+    )
+    .ok())
+}
+
+/// Reads the last plain lines of one run folder's logs, with secrets hidden. Takes the open
+/// agents folder and the run folder name. Returns the newest lines within
+/// RESEARCH_LOG_LINES_MAX and RESEARCH_LOG_BYTES_MAX, so the reply fits one owner frame;
+/// none for a run folder that is not there.
+#[cfg(unix)]
+fn run_lines(directory: &Directory, run: &str) -> Result<Vec<String>, EngineError> {
+    let Ok(run) = open_directory(directory, run) else {
         return Ok(Vec::new());
     };
     let mut lines = Vec::new();
@@ -76,15 +95,68 @@ pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineEr
 }
 
 /// Reads the last plain lines of the run a research job's own record names, as
-/// [`research_log`] reads a run. Takes the transaction that read the job, the engine database
-/// path and the job id. Returns the lines, or none when the job has no run to read.
+/// [`research_log`] reads a run: a name the runner gives this job is read, an empty name (a
+/// start over) or any other value reads none, and no name at all, a record from before the
+/// engine kept it, takes the legacy read by folder name. Takes the transaction that read the
+/// job, the engine database path and the job id. Returns the lines.
 #[cfg(unix)]
 pub fn research_job_log(
-    _tx: &Transaction<'_>,
+    tx: &Transaction<'_>,
     database: &Path,
     job: i64,
 ) -> Result<Vec<String>, EngineError> {
-    research_log(database, job)
+    assert!(job > 0);
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT run_name FROM research_jobs WHERE id=?1",
+            [job],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?
+        .flatten();
+    let Some(run) = stored else {
+        return research_log(database, job);
+    };
+    if !named_run(job, &run) {
+        return Ok(Vec::new());
+    }
+    let Some(directory) = agents_folder(database)? else {
+        return Ok(Vec::new());
+    };
+    run_lines(&directory, &run)
+}
+
+/// Whether a stored run name is one the runner gives this job: `job-<id>-<attempt>` with an
+/// optional `-<launch>`, each in plain decimal within the runner's bounds, so the read stays
+/// on one entry of the agents folder. Inputs: the job id and the name. Output: the answer,
+/// false for the empty name a start over leaves.
+#[cfg(unix)]
+fn named_run(job: i64, name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(&format!("job-{job}-")) else {
+        return false;
+    };
+    let mut parts = rest.split('-');
+    let attempt = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let launch = parts.next().map(|part| part.parse::<u32>().ok());
+    if parts.next().is_some() {
+        return false;
+    }
+    let Some(attempt) =
+        attempt.filter(|attempt| (1..=crate::research::jobs::ATTEMPTS_MAX).contains(attempt))
+    else {
+        return false;
+    };
+    let suffix = match launch {
+        None => String::new(),
+        Some(Some(launch))
+            if (1..crate::research::runner::RUNS_PER_ATTEMPT_MAX).contains(&launch) =>
+        {
+            format!("-{launch}")
+        }
+        Some(_) => return false,
+    };
+    name == format!("job-{job}-{attempt}{suffix}")
 }
 
 /// Refuses research job output where no directory-relative no-follow read exists.
@@ -169,5 +241,7 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
         })
 }
 
+#[cfg(all(test, unix))]
+mod job_log_tests;
 #[cfg(all(test, unix))]
 mod tests;

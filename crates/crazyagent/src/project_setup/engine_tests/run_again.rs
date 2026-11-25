@@ -110,6 +110,18 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     for run in [&older, &newest] {
         std::fs::create_dir_all(run).unwrap();
     }
+    assert_eq!(
+        owner.research_log(project.clone(), first).await.unwrap(),
+        Vec::<String>::new(),
+        "the retried job names no run until one is placed"
+    );
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "UPDATE research_jobs SET run_name=?2 WHERE id=?1",
+            rusqlite::params![first, format!("job-{first}-1-1")],
+        )
+        .unwrap();
     std::fs::write(older.join("stderr.log"), "old run\n").unwrap();
     std::fs::write(
         newest.join("events.jsonl"),

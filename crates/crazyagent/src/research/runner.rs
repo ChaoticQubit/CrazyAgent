@@ -1159,14 +1159,14 @@ impl ResearchRunner {
         let id = ProjectId::new(project.id).map_err(|_| RunError::Invalid("project id".into()))?;
         let context = jobs.project_context(&id).map_err(RunError::Context)?;
         let (name, worktree) = self.free_run(&root, job)?;
-        let agent = self.state.join("agents").join(&name);
+        jobs.placed(job, &name)?;
         Ok(JobPlace {
             root,
             project: id,
             context,
+            agent: self.state.join("agents").join(&name),
             name,
             worktree,
-            agent,
         })
     }
 

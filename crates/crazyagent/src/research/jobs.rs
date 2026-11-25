@@ -13,6 +13,9 @@ const ERROR_BYTES_MAX: usize = 512;
 const REPORT_PATH_BYTES_MAX: usize = 512;
 const RUNNING_MAX: u32 = 64;
 pub(crate) const ATTEMPTS_MAX: u32 = 10;
+/// The longest agent state folder name a job's record keeps: `job-`, the id, the attempt
+/// and a launch, each in decimal.
+pub(crate) const RUN_NAME_BYTES_MAX: usize = 64;
 const STALE_ERROR: &str = "Agent stopped responding";
 /// How many rate-limited ends in a row a job takes before it ends failed, since its agent
 /// can write the limit its harness reports (DEC-170 addendum 6, RV-DS241-26).
@@ -26,15 +29,17 @@ const REFUSED_WAIT_MAX_MS: i64 = 600_000;
 const REFUSED_DOUBLINGS_MAX: i64 = 5;
 /// The columns DEC-170 addendum 6 added to the queue: rate-limited ends in a row, refused
 /// launches in a row and the time before which a refused job is not claimed.
-const ADDED_COLUMNS: [(&str, &str); 3] = [
+const ADDED_COLUMNS: [(&str, &str); 4] = [
     ("limited", "INTEGER NOT NULL DEFAULT 0"),
     ("refused", "INTEGER NOT NULL DEFAULT 0"),
     ("not_before_ms", "INTEGER"),
+    ("run_name", "TEXT"),
 ];
 /// The assignments that start a job over: no rate-limited ends in a row, no refused launches
-/// in a row and no wait left by a refusal. Every statement that queues a stopped or finished
-/// job again for the owner sets them, so the job runs as a new one does (RV-DS241-159).
-pub(crate) const RUN_AGAIN: &str = "limited = 0, refused = 0, not_before_ms = NULL";
+/// in a row, no wait left by a refusal, and an empty run name, so its log shows no earlier
+/// run until a new one is placed. Every statement that queues a stopped or finished job again
+/// for the owner sets them, so the job runs as a new one does (RV-DS241-159).
+pub(crate) const RUN_AGAIN: &str = "limited = 0, refused = 0, not_before_ms = NULL, run_name = ''";
 
 const COLUMNS: &str = "id, project, kind, harness, tools, status, attempts, claimer, report_path, error, cancel_requested, output_bytes, created_ms, started_ms, heartbeat_ms, finished_ms";
 
@@ -279,6 +284,18 @@ impl ResearchJobs {
             assert!(job.attempts >= 1);
         }
         Ok(job)
+    }
+
+    /// Records the agent state folder name the claim `held` runs in, so the job's log reads
+    /// that run and no other. Takes the claim and the name, `job-<id>-<attempt>` with an
+    /// optional `-<launch>`. Returns Ok, or `NotHeld` once the claim was lost.
+    pub fn placed(&self, held: &ResearchJob, name: &str) -> Result<(), JobError> {
+        assert!(
+            name.starts_with(&format!("job-{}-{}", held.id, held.attempts)),
+            "{name}"
+        );
+        assert!(name.len() <= RUN_NAME_BYTES_MAX, "{name}");
+        self.transition(held, "run_name = ?4", &[&name])
     }
 
     /// Records that the harness of the claim `held` really started: the project's activity
