@@ -131,18 +131,23 @@ fn only_an_end_before_any_marker_hides_the_lines_before_it() {
 }
 
 #[test]
-fn a_run_listed_after_many_unrelated_entries_is_still_found() {
+fn a_run_listed_after_many_unrelated_entries_is_still_found() -> std::io::Result<()> {
     let root = runtime();
     let agents = root.path().join("research/agents");
-    let unrelated = |from: usize, count: usize| {
+    let unrelated = |from: usize, count: usize| -> std::io::Result<()> {
         for at in from..from + count {
-            std::fs::File::create(agents.join(format!("job-{}-1", 1000 + at))).unwrap();
+            let path = agents.join(format!("job-{}-1", 1000 + at));
+            std::fs::File::create(&path).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            })?;
         }
+        Ok(())
     };
-    unrelated(0, SCANNED_BEFORE);
+    unrelated(0, SCANNED_BEFORE)?;
     write_run(&root, "job-42-1", "found it");
-    unrelated(SCANNED_BEFORE, UNRELATED_AFTER);
+    unrelated(SCANNED_BEFORE, UNRELATED_AFTER)?;
     assert_eq!(read_job(&root, 42), ["found it"]);
+    Ok(())
 }
 
 #[test]
