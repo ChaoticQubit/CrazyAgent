@@ -72,7 +72,8 @@ impl NodeKind {
 /// counts and flags come from its transcript like any other agent's (OQ-8). `message_note`
 /// is its agent row's sentence when the Delivery setting leaves it no way to get messages.
 /// `started_ms` is when the earliest of its running tasks started, none while no task runs on it.
-/// `sees_hidden` marks a running agent that can still open a folder hidden after it started.
+/// `sees_hidden` marks an agent that can still open a folder hidden after it started, running
+/// or stopped with its work held until the owner restarts it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
