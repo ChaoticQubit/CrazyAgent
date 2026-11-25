@@ -7,8 +7,8 @@ use crate::paths::{
     owner_secrets, plain_top, regex_escape, same_entry, same_name, settled_home,
     windows_clean_text, windows_plain,
 };
+use crate::perf_kit::{SAMPLES, time};
 use crate::test_hooks::ACCESS;
-use kernel_common::perf_kit::{SAMPLES, time};
 use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};

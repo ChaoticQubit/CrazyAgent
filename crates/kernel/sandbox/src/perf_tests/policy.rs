@@ -4,6 +4,7 @@ use crate::lines::{
     MODEL_LOOPBACK_WINDOWS_LINE, linux_unbridged_line, model_loopback_windows, refusal_code,
 };
 use crate::net::SandboxRemote;
+use crate::perf_kit::{SAMPLES, time};
 use crate::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, HomeCaches,
     IdeAgentFiles, LevelView, Narrowing, PolicyHooks, ToolCacheScope, ToolchainChoice, ide_network,
@@ -11,7 +12,6 @@ use crate::policy::{
 };
 use crate::settings::SandboxSettings;
 use crate::toolchains::{ToolHomes, Toolchain};
-use kernel_common::perf_kit::{SAMPLES, time};
 use std::hint::black_box;
 use std::path::PathBuf;
 

@@ -1,7 +1,7 @@
 use super::row;
 use crate::elf::test_support::executable;
 use crate::elf::{Lookup, glibc_program, lookup};
-use kernel_common::perf_kit::{SAMPLES, time};
+use crate::perf_kit::{SAMPLES, time};
 use std::fs;
 use std::hint::black_box;
 

@@ -84,6 +84,9 @@ pub mod windows;
 
 #[cfg(test)]
 mod low_ports_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../../common/src/perf_kit.rs"]
+mod perf_kit;
 /// The layer 1 timing rows of this crate's calls on macOS, run through the perf kit.
 #[cfg(all(test, target_os = "macos"))]
 mod perf_tests;

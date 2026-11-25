@@ -1,4 +1,4 @@
-use kernel_common::perf_kit::Row;
+use crate::perf_kit::Row;
 use std::fs;
 use std::path::PathBuf;
 
