@@ -515,3 +515,117 @@ fn a_research_job_finishing_right_after_a_folder_is_saved_hidden_publishes_no_re
             .exists()
     );
 }
+
+/// A confined research job on a piped harness whose agent exits 0 right after a folder it
+/// did not hide at its start is saved hidden, before a heartbeat reads the saved folders,
+/// publishes no report: the job is queued again with the hidden reason. The stand-in Codex
+/// waits for the row's signal, which the row sends straight after a heartbeat and the save.
+#[test]
+fn a_piped_research_job_exiting_right_after_a_folder_is_saved_hidden_publishes_no_report() {
+    let root = engine_root();
+    let token = format!(
+        "piped-hide-{}",
+        root.base
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .trim_start_matches('.')
+    );
+    let folder = root.base.join("repo");
+    fs::create_dir(&folder).unwrap();
+    repository_git(&folder, &["init", "-q"]);
+    repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+    register_project(&root.database, "alpha", &folder);
+    fs::create_dir(folder.join("vault")).unwrap();
+    let connection = rusqlite::Connection::open(&root.database).unwrap();
+    let confined = kernel_sandbox::policy::AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        ..Default::default()
+    };
+    crate::sandbox::policy_store::save(&connection, "alpha", &confined).unwrap();
+    let bin = root.base.join("piped-bin");
+    fs::create_dir(&bin).unwrap();
+    let standin = bin.join("codex");
+    fs::write(
+        &standin,
+        format!("#!/bin/sh\n{}", held_until_released(&token)),
+    )
+    .unwrap();
+    fs::set_permissions(&standin, fs::Permissions::from_mode(0o700)).unwrap();
+    let runner = ResearchRunner::new(
+        &root.database,
+        &root.state,
+        &standin,
+        ResearchLimits {
+            wall_time: Duration::from_secs(60),
+            ..ResearchLimits::default()
+        },
+    )
+    .unwrap();
+    let jobs = ResearchJobs::open(&root.database).unwrap();
+    let id = jobs
+        .enqueue("alpha", "market_research", "codex", false)
+        .unwrap();
+    let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let project = ResearchProject {
+        id: "alpha",
+        root: &folder,
+        account: Some(ResearchAccount::Endpoint {
+            base_url: format!(
+                "http://127.0.0.1:{}/v1",
+                provider.local_addr().unwrap().port()
+            ),
+            model: "local-model".into(),
+            key: None,
+        }),
+    };
+    let beat = || {
+        connection
+            .query_row(
+                "SELECT heartbeat_ms FROM research_jobs WHERE id=?1",
+                [id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap()
+    };
+    let run = std::thread::scope(|scope| {
+        let run = scope.spawn(|| runner.run_once(&project));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !held(&token) {
+            assert!(
+                !run.is_finished(),
+                "the run ended before the stand-in started: {:?}",
+                jobs.get(id)
+            );
+            assert!(Instant::now() < deadline, "the stand-in never started");
+        }
+        let mut seen = vec![beat()];
+        while seen.len() < 3 {
+            assert!(Instant::now() < deadline, "the run never beat twice");
+            let now = beat();
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+        }
+        crate::sandbox::access_store::hidden::save(&connection, "alpha", &[folder.join("vault")])
+            .unwrap();
+        release(&token);
+        run.join().unwrap()
+    });
+    let run = run.unwrap().unwrap();
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(
+        (run.job, run.status),
+        (id, ResearchStatus::Queued),
+        "{:?}",
+        job.error
+    );
+    assert!(run.report.is_none(), "{:?}", run.report);
+    assert_eq!(job.error.as_deref(), Some(HIDDEN_REQUEUED));
+    assert!(
+        !folder
+            .join(ResearchKind::MarketResearch.report_path())
+            .exists()
+    );
+    drop(provider);
+}
