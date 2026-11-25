@@ -406,14 +406,16 @@ fn read_record(owned: &OwnedFd, record: &str) -> Option<(String, Vec<String>)> {
 
 /// Writes a priming record in place of the last one, through a staging file of this writer
 /// alone, named by this process and a count of its writes, so launches priming one cache at
-/// once never share one. Inputs: the open project folder, the record's name, the uv
-/// identity and the buckets. Output: Ok, or `tool_cache_record_unwritten`.
+/// once never share one; staging files of the record another process left go first
+/// ([`sweep_staging`]). Inputs: the open project folder, the record's name, the uv identity
+/// and the buckets. Output: Ok, or `tool_cache_record_unwritten`.
 fn write_record(
     owned: &OwnedFd,
     record: &str,
     identity: &str,
     buckets: &[String],
 ) -> Result<(), &'static str> {
+    sweep_staging(owned, record);
     let count = STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let side = format!("{record}.{}.{count}.new", std::process::id());
     let mut text = format!("{identity}\n");
@@ -422,6 +424,42 @@ fn write_record(
         text.push('\n');
     }
     publish(owned, record, &side, text.as_bytes())
+}
+
+/// Unlinks, never follows, each staging file of a record whose pid is not this process's, as
+/// a writer that died between its create and its rename leaves. It holds only while one
+/// process writes this folder, as the engine's database lock keeps one engine per data root,
+/// so every live writer has this pid. A name it cannot read or unlink stays. Inputs: the open
+/// project folder and the record's name.
+fn sweep_staging(owned: &OwnedFd, record: &str) {
+    let own = std::process::id();
+    let Ok(listed) = rustix::fs::Dir::read_from(owned) else {
+        return;
+    };
+    let left: Vec<String> = listed
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_owned))
+        .filter(|name| staging_pid(name, record).is_some_and(|pid| pid != own))
+        .collect();
+    for name in &left {
+        let _ = rustix::fs::unlinkat(owned, name.as_str(), AtFlags::empty());
+    }
+}
+
+/// The pid in a staging name of a record, exactly `{record}.{pid}.{count}.new` with both
+/// parts plain decimal digits. Inputs: the name and the record's name. Output: the pid, or
+/// none for any other name.
+fn staging_pid(name: &str, record: &str) -> Option<u32> {
+    let rest = name
+        .strip_prefix(record)?
+        .strip_prefix('.')?
+        .strip_suffix(".new")?;
+    let (pid, count) = rest.split_once('.')?;
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    if !digits(pid) || !digits(count) {
+        return None;
+    }
+    pid.parse().ok()
 }
 
 /// Puts a record in place through a staging file made with exclusive creation, so no other
