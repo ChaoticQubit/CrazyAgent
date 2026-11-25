@@ -9,7 +9,7 @@ use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
     HeavyLane, LISTED_NATIVE_UNAVAILABLE, NativeSubAgents, Nudges, Overlaps, QuestionsTo,
     RESOURCE_NAME_BYTES_MAX, ROLE_SKILLS_MAX, SHARED_RESOURCES_MAX, SharedResource, SkillRole,
-    SubagentMode, TaskStart, TerminalDisplay, native_scope, native_sub_agents,
+    SubagentMode, TaskStart, TerminalDisplay, UncommittedReminder, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -192,9 +192,10 @@ pub(in crate::tui) enum CoordRow {
     LandingMode,
     HeavyLane,
     Resources,
+    UncommittedReminder,
 }
 
-const COORD_ROWS: [CoordRow; 20] = [
+const COORD_ROWS: [CoordRow; 21] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::Mode(HarnessKind::Codex),
@@ -215,6 +216,7 @@ const COORD_ROWS: [CoordRow; 20] = [
     CoordRow::LandingMode,
     CoordRow::HeavyLane,
     CoordRow::Resources,
+    CoordRow::UncommittedReminder,
 ];
 const RESOURCES_TEXT_BYTES_MAX: usize = SHARED_RESOURCES_MAX * (RESOURCE_NAME_BYTES_MAX + 6);
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
