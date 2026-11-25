@@ -313,6 +313,24 @@ impl TeamView {
                     done,
                 )
             }
+            CoordRow::UncommittedReminder => {
+                settings.uncommitted_reminder = cycle(
+                    &UncommittedReminder::ALL,
+                    settings.uncommitted_reminder,
+                    forward,
+                );
+                let done = format!(
+                    "Uncommitted edits reminder: {}.",
+                    settings.uncommitted_reminder.words().to_lowercase()
+                );
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done,
+                )
+            }
             CoordRow::HeavyLane => {
                 settings.heavy_lane = cycle(&HeavyLane::ALL, settings.heavy_lane, forward);
                 let done = format!(
@@ -620,6 +638,11 @@ impl TeamView {
                     view.settings.task_start.words().to_owned(),
                     "",
                 ),
+                CoordRow::UncommittedReminder => (
+                    "Uncommitted edits reminder".to_owned(),
+                    view.settings.uncommitted_reminder.words().to_owned(),
+                    "",
+                ),
                 CoordRow::Counted => (
                     "Counted tools".to_owned(),
                     view.settings.counted_tools.join(", "),
@@ -696,3 +719,7 @@ impl TeamView {
         (rows, Some(cursor))
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "uncommitted_reminder_tests.rs"]
+mod uncommitted_reminder_tests;

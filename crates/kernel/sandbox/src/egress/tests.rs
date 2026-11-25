@@ -250,7 +250,7 @@ fn a_refused_lookup_never_raises_the_count_past_the_cap() {
             })
         })
         .collect();
-    let mut highest = 0;
+    let mut highest = COUNTED.load(Ordering::SeqCst);
     while !callers.iter().all(|caller| caller.is_finished()) {
         highest = highest.max(COUNTED.load(Ordering::SeqCst));
     }

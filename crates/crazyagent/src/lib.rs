@@ -143,5 +143,16 @@ pub mod worktrees;
 #[path = "../tests/poll_support/mod.rs"]
 mod poll_support;
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/keychain_support/mod.rs"]
+mod keychain_support;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../../kernel/common/src/perf_kit.rs"]
+mod perf_kit;
+
+#[cfg(all(test, target_os = "macos"))]
+mod perf_tests;
+
 #[cfg(all(test, unix))]
 mod budget_processes_tests;

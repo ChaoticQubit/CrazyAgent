@@ -780,8 +780,12 @@ async fn engine(
     root: &std::path::Path,
 ) -> Result<(EngineService, tokio::sync::watch::Sender<bool>), Failure> {
     let global = root.join("global.toml");
-    std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n")?;
-    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))?;
+    let written = global.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::write(&written, "version = 1\ntimeout_ms = 10000\n")?;
+        std::fs::set_permissions(&written, std::fs::Permissions::from_mode(0o600))
+    })
+    .await??;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let service = EngineService::start_with_settings_sources(
         root,

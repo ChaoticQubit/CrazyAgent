@@ -15,14 +15,17 @@ const KEPT: u8 = 2;
 
 static WATCHED: AtomicUsize = AtomicUsize::new(0);
 static FREED: AtomicU8 = AtomicU8::new(UNSEEN);
+/// Held by each row for its whole run, since all of them share the one watched block.
+static ONE_ROW: Mutex<()> = Mutex::new(());
 
-/// The system allocator, which also records whether the one watched block held only zeros
-/// when it was freed.
+/// The system allocator, handing out zeroed blocks, which also records whether the one
+/// watched block held only zeros when it was freed. Zeroed blocks leave no byte of it
+/// unwritten, capacity past what was asked for included.
 struct FreeWatch;
 
 unsafe impl GlobalAlloc for FreeWatch {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { System.alloc(layout) }
+        unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
@@ -72,7 +75,7 @@ impl Store for MemoryStore {
         let bytes = self.items.lock().unwrap().get(found).cloned();
         bytes.map_or_else(
             || Err(StoreError::code("credential_missing")),
-            SecretString::new,
+            SecretString::stored,
         )
     }
 
@@ -121,6 +124,10 @@ impl Egress for DroppingEgress {
 
 #[test]
 fn the_sealed_config_is_wiped_on_drop() {
+    let _row = ONE_ROW
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    FREED.store(UNSEEN, Ordering::SeqCst);
     let store = MemoryStore::default();
     let scopes = Scopes::new(&[("github", "github")]).unwrap();
     let handles = Mutex::new(Handles::new());
@@ -155,5 +162,23 @@ fn the_sealed_config_is_wiped_on_drop() {
     };
     requests.request("github", request).unwrap();
     assert!(*egress.held_token.lock().unwrap());
+    assert_eq!(FREED.load(Ordering::SeqCst), WIPED);
+}
+
+/// A secret handed over in a buffer a caller shortened still holds the cut bytes past its
+/// length; dropping the secret frees a block that holds none of them.
+#[test]
+fn a_dropped_secret_frees_no_byte_a_truncate_left_past_its_length() {
+    let _row = ONE_ROW
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    FREED.store(UNSEEN, Ordering::SeqCst);
+    let mut bytes = b"newold-secret".to_vec();
+    bytes.truncate(3);
+    assert!(bytes.capacity() >= 13);
+    WATCHED.store(bytes.as_ptr() as usize, Ordering::SeqCst);
+    let secret = SecretString::new(bytes).unwrap();
+    assert_eq!(secret.expose(), "new");
+    drop(secret);
     assert_eq!(FREED.load(Ordering::SeqCst), WIPED);
 }

@@ -5,6 +5,7 @@ import { thisComputer } from "./ui/keys";
 import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, HarnessSubAgents, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 import type { AccountCheck, AccountDraft, AccountView, ProviderEntry } from "./api-account-types";
+import { CHANGE, MODEL_ACCESS_CHANGE } from "./api-change-copy";
 
 export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
@@ -40,6 +41,7 @@ const COPY: Record<string, string> = {
   ...RESTORE_COPY,
   git_safe_unavailable: "CrazyAgent's engine didn't start: Windows is installed in a folder whose name CrazyAgent can't use to keep git from running other programs, so it runs no git on this computer.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
+  owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
   engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
@@ -182,6 +184,8 @@ const COPY: Record<string, string> = {
   agent_network_narrowed: "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
   agent_toolchain_lowered: "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
   agent_project_unreadable: "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+  agent_folder_hidden: "A folder was hidden from this project's agents, so the agent was stopped. Its next start cannot see it.",
+  agent_folder_hidden_held: "A folder was hidden from agents after this agent started, so the agent was stopped; Restart them starts it again without access to it.",
   agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
   project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
   temp_folder_shared: "Your temp folder is shared with other users on this computer, so it is never given to agents.",
@@ -371,76 +375,6 @@ export function dropUnconfirmed(): Promise<Result<ConnectionStatus>> {
 
 /** Pauses before each automatic check of an unconfirmed change, in milliseconds. */
 export const UNCONFIRMED_CHECKS_MS: readonly number[] = [2000, 4000, 8000, 16000, 30000];
-
-const MODEL_ACCESS_CHANGE: Record<ModelAccessEdit["kind"], string> = {
-  add_account: "adding an account",
-  remove_account: "deleting an account",
-  create_connection: "adding a connection",
-  replace_connection: "changing a connection",
-  remove_connection: "removing a connection",
-  create_pool: "creating a pool",
-  replace_pool: "changing a pool",
-  remove_pool: "deleting a pool",
-  assign_project_pool: "changing a project's pool",
-};
-
-const CHANGE: Record<PendingIntent["kind"], string> = {
-  message: "sending your message",
-  brief: "changing the project brief",
-  approve_baseline: "approving a baseline",
-  revoke_baseline: "revoking a baseline",
-  model_access: "changing accounts and pools",
-  create_project: "creating the project",
-  setup_project: "saving the project setup",
-  research_memory: "saving research to memory",
-  project_documents: "adding project documents",
-  project_context_delete: "removing a project file",
-  project_read_paths: "saving extra folders agents can read",
-  project_hidden_paths: "saving folders agents can't open",
-  project_agent_policy: "saving agent access",
-  account_schedule: "saving the account order",
-  memory_review: "reviewing a memory",
-  memory_add: "adding a memory",
-  memory_promote: "promoting a memory",
-  memory_delete: "deleting a memory",
-  memory_approve: "approving a memory",
-  memory_agent_writes: "saving agent memory writes",
-  memory_agent_scope: "saving where agents save memories",
-  memory_move: "moving a memory",
-  memory_forget: "forgetting a memory",
-  memory_remember: "saving a memory",
-  memory_selection: "changing the memory selection",
-  master: "changing the master conversation",
-  owner_profile: "saving your profile",
-  sandbox_settings: "changing the sandbox setting",
-  cleanup_settings: "changing when finished agents' worktrees go",
-  quit_settings: "changing what quitting does to team agents",
-  provider_retry: "changing what harnesses do when a model provider can't be reached",
-  master_step_settings: "changing the master step limit",
-  master_time_settings: "changing the master time limit",
-  master_frame_settings: "changing the master frame size limit",
-  learning_mark: "saving your learning progress",
-  projects_home: "changing the projects folder",
-  move_projects_home: "moving your projects",
-  add_existing_folder: "adding a folder",
-  project_move_home: "moving the project into your projects folder",
-  start_onboarding: "starting project setup",
-  run_setup: "running project setup",
-  install_dependency: "installing a tool",
-  fix_tool_permissions: "fixing a tool's permissions",
-  refused_tool: "saving what setup offers for unused tools",
-  restore_pinned: "bringing back your data from before the update",
-  pack_set: "changing the default pack",
-  pack_remove: "removing a pack",
-  team: "changing the team",
-  project_setup_update: "updating the project setup",
-  project_remove: "removing the project",
-  project_delete: "deleting the project",
-  create_demo: "creating the demo project",
-  research_cancel: "cancelling the research",
-  research_retry: "retrying the research",
-  plan_roadmap: "planning the roadmap",
-};
 
 /** Names a kept change in plain words. Input: the change. Output: a lower-case phrase, the
  * broader phrase for an access edit the window has no name for, and "your change" for a kind
@@ -923,12 +857,7 @@ export function setAccountSchedule(scheduleChange: ScheduleChange, version: numb
   return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
-/** Makes the id of a new pool, so the page can select the pool it creates. Output: the id. */
-export function newPoolId(): string {
-  const bytes = new Uint8Array(10);
-  crypto.getRandomValues(bytes);
-  return "pool-" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
+export { newPoolId } from "./pool-id";
 
 /** Validates a pool before saving. Inputs: name and member ids. Output: the trimmed name
  * and members, or a plain error. */

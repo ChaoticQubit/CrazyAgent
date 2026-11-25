@@ -19,7 +19,7 @@ pub(super) fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
             facts.push(TranscriptEvent::TurnFinished { success: false });
             facts
         }
-        (Some("event_msg"), Some("error" | "stream_error")) => vec![TranscriptEvent::TurnError {
+        (Some("event_msg"), Some("error")) => vec![TranscriptEvent::TurnError {
             rate_limited: rate_limited(payload["message"].as_str().unwrap_or_default()),
         }],
         (Some("response_item"), Some("message")) if payload["role"] == "assistant" => {

@@ -45,10 +45,10 @@ fn the_launch_denies_keep_writes_off_the_lock_the_hooks_name() {
     );
 }
 
-/// V243-FARM2-PRODUCT-SMALL: the agent home's config and kept-entry denies and the
+/// The agent home's config and kept-entry denies and the
 /// regranted flag and `.git` denies match a path and everything below it as one `X(/|$)`
 /// regex, never with a `(/.*)` tail, which libsandbox fails to compile again in lower case
-/// after a fold group with no bracket class before it (V243-PROFILE-CAP-ROW).
+/// after a fold group with no bracket class before it.
 #[test]
 fn home_denies_match_at_or_below_without_an_optional_tail() {
     let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
@@ -74,12 +74,11 @@ fn home_denies_match_at_or_below_without_an_optional_tail() {
     }
 }
 
-/// V243-FARM2-PRODUCT-SMALL: no regex of a closed-tops agent's profile, a clone's store
-/// denies or a home's config denies holds a `(/.*)` tail. libsandbox fails its second,
-/// lower-case compile of one after a fold group with no bracket class or wildcard before
-/// it, as `^/x/(s|S)(/.*)?$` (probed 11-17), so each is one `X(/|$)` regex instead
-/// (V243-PROFILE-CAP-ROW). The HFS rule alone keeps a tail, after its leading `(.*/)?`,
-/// which compiles.
+/// No regex of a closed-tops agent's profile, a clone's store denies or a home's config denies
+/// holds a `(/.*)` tail. libsandbox fails its second, lower-case compile of one after a fold group
+/// with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$` (probed 11-17), so each is
+/// one `X(/|$)` regex instead. The HFS rule alone keeps a tail, after its leading `(.*/)?`, which
+/// compiles.
 #[test]
 fn no_profile_regex_has_a_slash_tail() {
     let temp = tempfile::tempdir().unwrap();

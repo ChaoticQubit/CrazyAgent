@@ -1571,7 +1571,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
         })
     };
     let saved = |result: MasterRuntimeResult| match result {
-        MasterRuntimeResult::Policy(policy) => *policy,
+        MasterRuntimeResult::Policy(policy) => policy.0,
         _ => panic!("the policy read returns the saved policy"),
     };
     assert_eq!(saved(read().await.unwrap()), Some(AgentPolicy::default()));

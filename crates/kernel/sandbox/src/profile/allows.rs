@@ -192,7 +192,7 @@ impl ProjectSandbox {
 
     /// Lets the agent start one exact program the engine itself launches, such as its
     /// harness or the engine executable, from an app bundle's `Contents/MacOS`, which no
-    /// agent may start otherwise (OP-24). One inside a folder the agent can write stays
+    /// agent may start otherwise. One inside a folder the agent can write stays
     /// denied, since the agent could replace it. Input: a canonical existing regular file
     /// clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid`.
     pub fn allow_exec(mut self, program: &Path) -> Result<Self, SandboxError> {
@@ -215,7 +215,7 @@ impl ProjectSandbox {
     /// Lets the agent run the engine executable that serves its team tools, relay hooks and
     /// monitor: the engine's folder read-only and, by [`Self::allow_exec`], the file itself
     /// startable by exact path, even from `CrazyAgent.app/Contents/MacOS` where the macOS
-    /// service runs it (OP24R2-1). Input: the engine's canonical path. Output: the widened
+    /// service runs it. Input: the engine's canonical path. Output: the widened
     /// sandbox, or `Invalid`.
     pub fn allow_engine(self, engine: &Path) -> Result<Self, SandboxError> {
         let folder = engine
@@ -300,9 +300,9 @@ impl ProjectSandbox {
     }
 
     /// Grants the agent's tool cache, made by `tool_cache::prepare`, as one more writable
-    /// root: a non-working-tree root under the SM1-R rule, so no `.git` entry can be made,
+    /// root: a non-working-tree root, so no `.git` entry can be made,
     /// moved or written there, and the root of `pnpm_config_store_dir`, and of `UV_CACHE_DIR`
-    /// when its uv markers are in place (T8). Inputs: the cache root, a canonical existing
+    /// when its uv markers are in place. Inputs: the cache root, a canonical existing
     /// folder clear of [`Self::secret_paths`] and of every other root, and whether its uv
     /// markers are in place. Output: the widened sandbox, or `Invalid` for an unsafe or second
     /// cache.
@@ -332,7 +332,7 @@ impl ProjectSandbox {
     }
 
     /// The program `name` the agent's PATH finds first, if the engine may run it for the
-    /// agent (T8 C3), as [`Self::trusted_program`] decides. Input: a plain program name.
+    /// agent, as [`Self::trusted_program`] decides. Input: a plain program name.
     /// Output: the canonical path, or None.
     pub fn tool_program(&self, name: &str) -> Option<PathBuf> {
         assert!(!name.is_empty() && !name.contains('/'));
@@ -344,7 +344,7 @@ impl ProjectSandbox {
         self.trusted_program(&found)
     }
 
-    /// A found program the engine may run for the agent (T8 C3): its canonical path when
+    /// A found program the engine may run for the agent: its canonical path when
     /// that lies in a read-only system or granted tool root and in no root the agent can
     /// write, so the agent cannot swap the program the engine runs. Input: the path found.
     /// Output: the canonical path, or None.
@@ -411,8 +411,8 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Keeps the secret files and folders of the project folder `root` closed to the agent
-    /// (DEC-147.9): contents, attribute values, writes, runs, links and clones of every path
+    /// Keeps the secret files and folders of the project folder `root` closed to the agent:
+    /// contents, attribute values, writes, runs, links and clones of every path
     /// there with a name in [`crate::shared_folders::SECRET_NAMES`], in any letter case, are denied,
     /// names and sizes stay visible, except under `root/.git` and inside the agent's own
     /// writable roots below it, its worktree or clone, never `root` itself. Each of `revealed`, the secrets the owner
@@ -456,7 +456,7 @@ impl ProjectSandbox {
     }
 
     /// Keeps every top-level entry of the [`Self::keep_project_secrets`] folder closed as
-    /// [`Self::keep_out`] does but `open`, so one made after launch stays closed (L4 r1 L1);
+    /// [`Self::keep_out`] does but `open`, so one made after launch stays closed;
     /// own writable roots below it stay open, never the folder itself. Input: at most
     /// [`OPEN_TOPS_MAX`] names, each [`plain_top`]. Output: the narrowed sandbox, or `Invalid`
     /// without that folder, for a second call or for a name out of shape.
@@ -474,7 +474,7 @@ impl ProjectSandbox {
     }
 
     /// Lets the agent write one shared top-level folder of the project folder that git does
-    /// not track (DEC-147.9 Read-write) as one more writable root, pinned in place; the secret
+    /// not track (its Read-write choice) as one more writable root, pinned in place; the secret
     /// names inside it stay closed, and every older deny still wins. Never a hidden folder, an
     /// engine folder or one named `context` ([`crate::shared_folders::never_written`]). Input: a canonical existing folder
     /// directly inside the folder [`Self::keep_project_secrets`] named, clear of
@@ -553,7 +553,7 @@ impl ProjectSandbox {
     /// project folder outside `.git` and the agent's own writable roots there (never the
     /// shared writable folders); no clone of any folder, and no move or removal of a folder
     /// inside a shared writable folder, so no folder that holds a secret leaves the name rule
-    /// by a plain-named parent (L4 r1 H2); then the read allow of env templates
+    /// by a plain-named parent; then the read allow of env templates
     /// ([`crate::shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
     /// rules, empty when no folder was named.
     pub(super) fn project_secret_rules(&self) -> String {
@@ -627,7 +627,7 @@ impl ProjectSandbox {
         &self.shared_writes
     }
 
-    /// Holds the project's agent folders choice in this sandbox (DEC-124): a Sandboxed IDE
+    /// Holds the project's agent folders choice in this sandbox: a Sandboxed IDE
     /// terminal keeps to what the owner chose for the IDE. Only Seatbelt holds it, so the
     /// Linux and Windows boundaries refuse a sandbox with a choice other than Allow all
     /// changes. Input: the rule. Output: the sandbox.
@@ -639,7 +639,7 @@ impl ProjectSandbox {
     /// Marks the home as one the owner keeps for their own tools, which no launch resets, as
     /// the IDE terminal's and the IDE server's are: the profile leaves out
     /// [`agent_config_denies`], so `npm login`, `git config --global` and `cargo install`
-    /// write there and copies keep their flags (RV-DS241-188, -187), and [`Self::install`]
+    /// write there and copies keep their flags, and [`Self::install`]
     /// makes no folder there, as [`owner_terminal_env`] leaves out [`AGENT_HOME_ENV`].
     /// Output: the sandbox.
     pub fn keep_owner_config(mut self) -> Self {
@@ -651,8 +651,8 @@ impl ProjectSandbox {
     /// be a configured RCLI home the owner chose in one of their own folders (never HOME
     /// itself or a folder holding it, which [`Self::new`] refuses): [`Self::install`] makes
     /// and removes nothing in a home not strictly below the root, so a link a dotfile manager
-    /// made there stays, and clears what holds a config folder's name in one that is
-    /// (rv-code2 b8 F1). The profile keeps every deny either way. Input: the canonical data
+    /// made there stays, and clears what holds a config folder's name in one that is.
+    /// The profile keeps every deny either way. Input: the canonical data
     /// root. Output: the sandbox.
     #[cfg(unix)]
     pub fn anchor_home(mut self, engine_root: &Path) -> Self {
@@ -665,7 +665,7 @@ impl ProjectSandbox {
     /// Keeps one file or folder inside a granted root from being read, written or run: its
     /// name, size and dates stay visible, its contents, folder listing and attribute values
     /// do not, so a tool that stats an import does not fail; the graph step keeps the
-    /// project's secret-like and git-ignored paths from graphify (MAP-2). Input: a clean
+    /// project's secret-like and git-ignored paths from graphify. Input: a clean
     /// absolute path below a root, of any kind or absent. Output: the narrowed sandbox, or
     /// `Invalid` past [`KEPT_OUT_MAX`]. Only Seatbelt holds it, so the Linux and Windows
     /// boundaries refuse such a sandbox.
@@ -693,10 +693,10 @@ impl ProjectSandbox {
         clean_absolute(path)
     }
 
-    /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
+    /// Lets a native-mode lead run its own tmux server: an exact socket grant, as
     /// `allow_unix_socket` gives, for its own socket in its short temp folder, and the tmux
     /// program itself, readable and startable as one file, never its folder: the bundled one
-    /// sits in the app's `Contents/MacOS` beside the engine (DEC-157). No other Unix
+    /// sits in the app's `Contents/MacOS` beside the engine. No other Unix
     /// socket becomes reachable, the engine's own tmux server included, and the server and
     /// every engine client on it stay inside this profile; its teammates run in a server of
     /// their own (see [`Self::serve_tmux_server`]). Only Seatbelt holds it. Input: the socket
@@ -706,7 +706,7 @@ impl ProjectSandbox {
         self.tmux_server(socket, tmux, false)
     }
 
-    /// Lets a native lead's teammates run their own tmux server (rv-audit S1 F1): as
+    /// Lets a native lead's teammates run their own tmux server: as
     /// [`Self::allow_tmux_server`], but the socket is served only, as
     /// [`Self::serve_unix_socket`] gives, so no teammate pane the server forks connects to
     /// it, unlinks it or binds a server of its own there. Input: the socket
@@ -716,26 +716,26 @@ impl ProjectSandbox {
         self.tmux_server(socket, tmux, true)
     }
 
-    /// Splits a native-mode lead's sandbox into the lead's and its teammates' (DEC-104,
-    /// rv-audit S1 F1, TTDL F1). The lead runs its own tmux server at `own` and only reaches
+    /// Splits a native-mode lead's sandbox into the lead's and its teammates'.
+    /// The lead runs its own tmux server at `own` and only reaches
     /// the engine's caller socket at `callers` and its teammates' server at `mates`. The
     /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no agent
-    /// binds, blocks or replaces the caller socket the engine answers on (DEC-111 Q18,
-    /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
+    /// binds, blocks or replaces the caller socket the engine answers on
+    /// and no teammate holds a listener or places a node where the lead
     /// connects. They read but never write the launch folders the engine installs in the
-    /// lead's home, its hooks, skills and relay plugin, which the lead's Claude Code runs
-    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1), nor the
-    /// shell snapshot and session scripts its Bash commands run first (TPH-2). The teammates
+    /// lead's home, its hooks, skills and relay plugin, which the lead's Claude Code runs,
+    /// nor move, replace or re-permission that home itself, nor the
+    /// shell snapshot and session scripts its Bash commands run first. The teammates
     /// run in their own home and only read the lead's, except the team folders Claude Code
     /// shares, where they make no link or folder but a lock, and never write the `git` on the
-    /// lead's path (TPH-2 C). They neither read nor write the lead's own temp folder in the
-    /// short temp folder they share ([`crate::toolchains::native_lead_tmp`], TPH-2 residual), so no
+    /// lead's path. They neither read nor write the lead's own temp folder in the
+    /// short temp folder they share ([`crate::toolchains::native_lead_tmp`]), so no
     /// teammate reads, races or plants a file the lead stages there. Both are shut out of the
     /// name the engine binds the caller socket at before it moves it over `callers`, so
-    /// neither swaps its own listener in there (rv-secreview RH2R2-1). The lead's part of the
+    /// neither swaps its own listener in there. The lead's part of the
     /// relay mailbox is hidden from the teammates but for its `relay.json`, which they only
-    /// read, and they never move or re-permission the mailbox or the temp folder holding it
-    /// (relay mailbox forgery C1). Neither the lead nor a teammate moves the tool mailbox, so
+    /// read, and they never move or re-permission the mailbox or the temp folder holding it.
+    /// Neither the lead nor a teammate moves the tool mailbox, so
     /// no answer is written outside the rule that keeps answers the engine's. Inputs: the
     /// three sockets, the canonical tmux program and
     /// the teammates' home beside the lead's, its team folders already made, with the
@@ -844,13 +844,13 @@ impl ProjectSandbox {
         format!("(deny file-write* {rule})\n(allow file-write-unlink {rule})\n")
     }
 
-    /// The writes a native lead's teammates may not make in the lead's worktree (OP-9,
-    /// OP-9b), none for any other profile: in the lead's own clone, those
+    /// The writes a native lead's teammates may not make in the lead's worktree,
+    /// none for any other profile: in the lead's own clone, those
     /// [`teammates_clone_denies`] names; in a linked worktree, anything but the teammates'
     /// folder, and the lead's worktree record and the object store, since the engine
     /// commits the teammates' turns, nor the teammates' folder entry, nor make, move or
     /// remove anything directly in it, such as a teammate's folder, where the engine's
-    /// setup git adds each teammate worktree (OP-9 r2, OP9B-C1). Output: the rule text,
+    /// setup git adds each teammate worktree. Output: the rule text,
     /// empty when none applies.
     pub(super) fn teammates_denies(&self) -> String {
         if !self.teammates {
@@ -931,7 +931,7 @@ impl ProjectSandbox {
     /// Marks the project folder as one only the engine's own process works in under this sandbox:
     /// a folder it made for one job, a plugin server's check, a context-mode install, or a project
     /// owner git runs in, which must write `.git` and which plain owner git writes in full anyway.
-    /// On Windows it gets no project guards, its top writable (DEC-193); Seatbelt and Landlock are
+    /// On Windows it gets no project guards, its top writable; Seatbelt and Landlock are
     /// unchanged. Input: a sandbox confined to no worktree, clone or setup. Output: it, marked.
     pub fn as_job_folder(mut self) -> Self {
         assert_eq!(self.confinements(), 0);
@@ -942,7 +942,8 @@ impl ProjectSandbox {
 
     /// Whether the project folder holds the project guards of [`Self::protected_paths`]:
     /// true but for a folder marked by [`Self::as_job_folder`]. Output: the answer.
-    pub fn holds_project_guards(&self) -> bool {
+    #[cfg(windows)]
+    pub(crate) fn holds_project_guards(&self) -> bool {
         !self.job_folder
     }
 
@@ -984,64 +985,74 @@ impl ProjectSandbox {
     }
 
     /// The extra worktrees, beside the project folder, the agent writes in and may start in.
-    pub fn worktrees(&self) -> &[PathBuf] {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn worktrees(&self) -> &[PathBuf] {
         &self.worktrees
     }
 
     /// The paths the agent can neither read nor list: secrets inside the project and the
     /// folders [`Self::hide`] took.
-    pub fn hidden(&self) -> &[PathBuf] {
+    pub(crate) fn hidden(&self) -> &[PathBuf] {
         &self.hidden
     }
 
     /// The project folders [`Self::keep_out`] keeps the agent out of.
-    pub fn kept_out(&self) -> &[PathBuf] {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn kept_out(&self) -> &[PathBuf] {
         &self.kept_out
     }
 
     /// The top-level project folders the agent alone may open, when [`Self::open_only_tops`]
     /// set them. Output: the names, or none when every top is open.
-    pub fn open_tops(&self) -> Option<&[String]> {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn open_tops(&self) -> Option<&[String]> {
         self.open_tops.as_deref()
     }
 
     /// The loopback ports [`Self::keep_ports`] keeps free of the agent's own servers.
-    pub fn kept_ports(&self) -> &[u16] {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn kept_ports(&self) -> &[u16] {
         &self.kept_ports
     }
 
     /// The carved home and the real home it stands in for, when the agent's home is carved
     /// out of the owner's. Output: the two folders, or none.
-    pub fn carved_home(&self) -> Option<&(PathBuf, PathBuf)> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn carved_home(&self) -> Option<&(PathBuf, PathBuf)> {
         self.carved_home.as_ref()
     }
 
     /// The worktree [`Self::confine_to_worktree`] confines the agent to, with its admin folder
     /// and object store. Output: the checkout, or none.
-    pub fn checkout(&self) -> Option<&Checkout> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn checkout(&self) -> Option<&Checkout> {
         self.checkout.as_ref()
     }
 
     /// The clone [`Self::confine_to_clone`] confines the agent to. Output: its root, or none.
-    pub fn clone_root(&self) -> Option<&PathBuf> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clone_root(&self) -> Option<&PathBuf> {
         self.clone.as_ref()
     }
 
     /// The teammates' folder and records [`Self::confine_to_teammates_setup`] grants. Output:
     /// the setup, or none.
-    pub fn teammates_setup(&self) -> Option<&TeammatesSetup> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn teammates_setup(&self) -> Option<&TeammatesSetup> {
         self.setup.as_ref()
     }
 
     /// Tells whether [`Self::adding_worktrees`] lets the engine's worktree-add step write the
     /// project's worktree folders. Output: the answer.
-    pub fn adds_worktrees(&self) -> bool {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adds_worktrees(&self) -> bool {
         self.adds_worktrees
     }
 
     /// The project's agent folders choice this sandbox holds, if any. Output: a copy of the
     /// rule, or none.
-    pub fn agent_files(&self) -> Option<crate::policy::AgentFilesRule> {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) fn agent_files(&self) -> Option<crate::policy::AgentFilesRule> {
         self.agent_files
     }
 
@@ -1050,7 +1061,7 @@ impl ProjectSandbox {
     /// and the limited network names loopback ports only, each [`BRIDGE_PORT_MIN`] or
     /// higher. Output: the ports in rising order, or none when the agent keeps the shared
     /// network.
-    pub fn bridged_ports(&self) -> Option<Vec<u16>> {
+    pub(crate) fn bridged_ports(&self) -> Option<Vec<u16>> {
         let SandboxNetwork::Only(remotes) = &self.network else {
             return None;
         };
@@ -1110,7 +1121,7 @@ impl ProjectSandbox {
     /// nests agents: the sockets setting is `TcpOnly` and the limited network names
     /// loopback ports only, but one lies below [`BRIDGE_PORT_MIN`]. Output: the lowest such
     /// port, or none when the agent is bridged or shares the network for another reason.
-    pub fn unbridged_port(&self) -> Option<u16> {
+    pub(crate) fn unbridged_port(&self) -> Option<u16> {
         let SandboxNetwork::Only(remotes) = &self.network else {
             return None;
         };
@@ -1161,7 +1172,7 @@ impl ProjectSandbox {
 
     /// Paths no agent may write although they sit in a writable root: both `context/`
     /// folders, the project instructions file every later agent and the master get as the
-    /// owner's text (SA vid 11), the git hooks, config and its lock, `.git/modules` and, for
+    /// owner's text, the git hooks, config and its lock, `.git/modules` and, for
     /// an agent confined to a worktree, its admin folder's `modules`, where git keeps
     /// submodule repositories.
     /// Every platform boundary keeps these read-only, except that Windows guards the config
@@ -1187,7 +1198,7 @@ impl ProjectSandbox {
 
     /// How many confinements the sandbox holds: its own worktree, its own clone or the
     /// teammates' setup, at most one. Output: the count.
-    pub fn confinements(&self) -> usize {
+    pub(crate) fn confinements(&self) -> usize {
         usize::from(self.checkout.is_some())
             + usize::from(self.clone.is_some())
             + usize::from(self.setup.is_some())
@@ -1200,7 +1211,10 @@ impl ProjectSandbox {
     /// teammates the team folders they share in the lead's home, then its tool cache, the
     /// owner's temp folder when granted and each shared writable folder.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        self.project_writes().into_iter().chain(self.other_writes())
+        self.project_writes()
+            .into_iter()
+            .chain(self.other_writes())
+            .chain(self.shared_writes.iter())
     }
 
     /// The writable roots in the project: the project folder, or a confinement's own roots.
@@ -1217,9 +1231,9 @@ impl ProjectSandbox {
 
     /// Refuses a confined sandbox whose writable roots outside its confinement reach the
     /// project: one that holds the project folder or lies in it outside the confinement's
-    /// own roots would leave the project writable beside the confinement. Roots disjoint
-    /// from the project pass, as does any sandbox that is not confined. Output: Ok, or
-    /// `Invalid`.
+    /// own roots would leave the project writable beside the confinement. Shared writable
+    /// folders pass: each is a top-level project folder the owner chose to share, which
+    /// [`Self::allow_shared_write`] already checked. Output: Ok, or `Invalid`.
     pub(crate) fn confinement_kept(&self) -> Result<(), SandboxError> {
         if self.confinements() == 0 {
             return Ok(());
@@ -1238,9 +1252,9 @@ impl ProjectSandbox {
         Ok(())
     }
 
-    /// The writable roots besides the project's: the agent's home and temp folders, its short
-    /// temp folder, extra worktrees, team folders, tool cache, the owner's temp folder when
-    /// granted and each shared writable folder. Output: the roots.
+    /// The writable roots besides the project's and the shared writable folders: the agent's
+    /// home and temp folders, its short temp folder, extra worktrees, team folders, tool cache
+    /// and the owner's temp folder when granted. Output: the roots.
     fn other_writes(&self) -> impl Iterator<Item = &PathBuf> {
         [&self.agent_home, &self.agent_tmp]
             .into_iter()
@@ -1249,7 +1263,6 @@ impl ProjectSandbox {
             .chain(self.shared.iter())
             .chain(self.tool_cache.iter().map(|(root, _)| root))
             .chain(self.owner_tmp.iter())
-            .chain(self.shared_writes.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.

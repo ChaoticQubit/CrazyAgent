@@ -71,6 +71,50 @@ export function onChanged(topics: readonly WatchTopic[], listener: Listener): ()
   };
 }
 
+/** Reads on the engine's watch: subscribes to `topics`, awaits the page's watch, then reads
+ * once and after each change to them or of unknown subject, one read at a time; a change heard
+ * during a read runs it once more. A failed read applies nothing and reads again on the next
+ * change. Inputs: the topics, at least one, the read, and what to do with each reply, which
+ * returns false to stop. Output: the function that stops it and drops a reply in flight. */
+export function readOnChanges<T>(topics: readonly WatchTopic[], read: () => Promise<T>, apply: (value: T) => boolean): () => void {
+  if (topics.length === 0) throw new Error("readOnChanges needs a topic");
+  let live = true;
+  let watching = false;
+  let reading = false;
+  let again = false;
+  const next = (): void => {
+    if (!live || !watching) return;
+    if (reading) {
+      again = true;
+      return;
+    }
+    reading = true;
+    again = false;
+    void read().then(
+      (value) => {
+        reading = false;
+        if (!live) return;
+        if (!apply(value)) stop();
+        else if (again) next();
+      },
+      () => {
+        reading = false;
+        if (live && again) next();
+      },
+    );
+  };
+  const stopHearing = onChanged(topics, next);
+  const stop = (): void => {
+    live = false;
+    stopHearing();
+  };
+  void startWatch().then(() => {
+    watching = true;
+    next();
+  });
+  return stop;
+}
+
 /** Starts following the engine's changes for this page, once. A consumer subscribes, awaits
  * this, then reads, so no change falls between its read and the watch. A page that cannot
  * watch hears "unknown" every `UNWATCHED_MS` instead. Output: resolves once the page hears

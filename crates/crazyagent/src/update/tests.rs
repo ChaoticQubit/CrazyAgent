@@ -1,5 +1,5 @@
 use super::*;
-use kernel_processes::update::test_support::{code, response, said, serve};
+use kernel_processes::update::test_support::{TestResult, code, joined, response, said, serve};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -61,14 +61,14 @@ fn saving_the_channel_creates_a_missing_data_folder_the_engine_accepts() {
 }
 
 #[test]
-fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
+fn a_channel_with_no_release_says_so_in_one_plain_sentence() -> TestResult {
     let missing = || {
         response(
             "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\n",
             b"Not Found",
         )
     };
-    let (url, server) = serve(vec![missing(), missing()]);
+    let (url, server) = serve(vec![missing(), missing()])?;
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -83,11 +83,12 @@ fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
             "No dev release is published yet.".to_owned()
         )
     );
-    server.join().unwrap();
+    joined(server)?;
+    Ok(())
 }
 
 #[test]
-fn download_and_manifest_failures_never_quote_curl_or_the_server() {
+fn download_and_manifest_failures_never_quote_curl_or_the_server() -> TestResult {
     let answered = |head: &str, body: &[u8]| {
         response(
             &format!(
@@ -105,7 +106,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         answered("500 Internal Server Error", b"curl: (22) oops"),
         answered("200 OK", b"<html>no</html>"),
         answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
-    ]);
+    ])?;
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -121,7 +122,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         said(fetch_manifest(Channel::Dev, &url).unwrap_err()),
         unreadable
     );
-    server.join().unwrap();
+    joined(server)?;
 
     let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let address = format!("127.0.0.1:{port}");
@@ -141,6 +142,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
             "Couldn't reach the update server. Check your connection and try again.".to_owned()
         )
     );
+    Ok(())
 }
 
 #[test]
@@ -206,8 +208,12 @@ fn function_holding<'a>(path: &Path, text: &'a str, at: usize) -> &'a str {
     &text[start..at]
 }
 
+/// Says whether a source is test code the install scan skips: a file under a `tests` or
+/// `perf_tests` folder, or one whose name ends in `tests.rs`. Input: the source's path.
+/// Output: true for test code.
 fn test_source(path: &Path) -> bool {
-    path.components().any(|part| part.as_os_str() == "tests")
+    path.components()
+        .any(|part| part.as_os_str() == "tests" || part.as_os_str() == "perf_tests")
         || path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().ends_with("tests.rs"))
@@ -229,10 +235,43 @@ fn calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
 }
 
 /// The plain or `update::` calls of one swap step in a non-test source, by the function
-/// holding each. Inputs: the source's path, its text and the step's name. Output: the
-/// holding functions' text up to each call.
+/// holding each, then each line that names the step without calling it ([`hides_swap`]).
+/// Inputs: the source's path, its text and the step's name. Output: the holding functions'
+/// text up to each call, then those lines.
 fn swap_calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
-    calls(path, text, name)
+    let mut found = calls(path, text, name);
+    found.extend(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && hides_swap(line, name)),
+    );
+    found
+}
+
+/// Whether a source line names a swap step without calling it: an import under another
+/// name (`swap as put`), or the step taken as a value through the update path
+/// (`let f = update::swap;`), outside an import. Inputs: the trimmed line and the step's
+/// name. Output: the answer.
+fn hides_swap(line: &str, name: &str) -> bool {
+    assert!(!name.is_empty());
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let alias = format!("{name} as ");
+    let aliased = line.match_indices(&alias).any(|(at, _)| {
+        line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !ident(c) && c != '.')
+    });
+    let import = line.starts_with("use ") || (line.starts_with("pub") && line.contains(" use "));
+    let named = format!("update::{name}");
+    let valued = !import
+        && line.match_indices(&named).any(|(at, _)| {
+            line[at + named.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !ident(c) && c != '(')
+        });
+    aliased || valued
 }
 
 /// A folder that holds a link to a sibling folder gives each `.rs` file once, at its real
@@ -257,6 +296,34 @@ fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
     let text = "use kernel_processes::{update, process};\n\nfn sneak() {\n    swap(&a, &b);\n}\n";
     let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
     assert_eq!(found, vec!["\nfn sneak() {\n    swap("]);
+}
+
+/// A file in a `perf_tests` folder is test code to the install scan, and a plain source
+/// beside it is not, so a timing row never reads as an install path.
+#[test]
+fn a_perf_tests_folder_is_test_code_to_the_install_scan() {
+    let timing = Path::new("/repo/crates/kernel/processes/src/perf_tests/update.rs");
+    let shipped = Path::new("/repo/crates/kernel/processes/src/update.rs");
+    assert!(test_source(timing));
+    assert!(!test_source(shipped));
+}
+
+/// A swap imported under another name is looked at where it is imported, so an alias never
+/// hides a swap from the install guard.
+#[test]
+fn an_aliased_swap_import_is_looked_at() {
+    let text = "use kernel_processes::update::swap as put;\n\nfn sneak() {\n    put(&a, &b);\n}\n";
+    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
+    assert_eq!(found, vec!["use kernel_processes::update::swap as put;"]);
+}
+
+/// A swap taken as a value through the update path is looked at where it is taken, so a
+/// function pointer never hides a swap from the install guard.
+#[test]
+fn a_swap_taken_as_a_value_is_looked_at() {
+    let text = "fn sneak() {\n    let f = update::swap;\n    f(&a, &b);\n}\n";
+    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
+    assert_eq!(found, vec!["let f = update::swap;"]);
 }
 
 /// Every install step that writes a release over the running app is reached only after its

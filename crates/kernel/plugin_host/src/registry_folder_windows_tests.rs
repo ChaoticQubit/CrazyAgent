@@ -168,16 +168,20 @@ fn names(folder: &Path) -> Vec<String> {
     names
 }
 
-/// Runs `mklink` through cmd.exe with each path as its own quoted argument. A path with a
-/// forward slash, which mklink reads as a switch, a quote or a character cmd.exe acts on is
-/// refused before cmd.exe starts, so a path is never read as a command. Inputs: the switch,
-/// if any, the link and the target. Output: whether mklink made the link.
+/// Runs `mklink` through cmd.exe with each path as its own quoted argument. A path with `%`
+/// or `!` is refused before cmd.exe starts, because cmd.exe expands them inside quotes; one
+/// with a forward slash, which mklink reads as a switch, the quote itself or `&`, `|`, `^`,
+/// `<`, `>` is refused as well, so a path is never read as a command; `(` and `)` pass.
+/// Inputs: the switch, if any, the link and the target. Output: whether mklink made the
+/// link; a path that is not UTF-8 or a cmd.exe that cannot start stops the row naming it.
 fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
     use std::os::windows::process::CommandExt;
     let quoted = |path: &Path| {
-        let text = path.to_str().unwrap();
+        let text = path
+            .to_str()
+            .unwrap_or_else(|| panic!("{} is not UTF-8", path.display()));
         assert!(
-            !text.contains(['/', '"', '&', '|', '^', '<', '>', '%', '!', '(', ')']),
+            !text.contains(['/', '"', '&', '|', '^', '<', '>', '%', '!']),
             "{text}"
         );
         format!("\"{text}\"")
@@ -191,8 +195,26 @@ fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
         .raw_arg(quoted(link))
         .raw_arg(quoted(target))
         .status()
-        .unwrap()
+        .unwrap_or_else(|error| panic!("mklink {} {}: {error}", link.display(), target.display()))
         .success()
+}
+
+/// A junction under a folder whose name holds parentheses is made by `mklink` and leads to
+/// its target: inside the quotes cmd.exe reads `(` and `)` as part of the path.
+#[test]
+fn windows_mklink_takes_a_path_with_parentheses() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let parent = temp.path().join("a (1)");
+    let target = parent.join("target");
+    fixture(&target, std::fs::create_dir_all);
+    let marker = target.join("marker");
+    fixture(&marker, |path| std::fs::write(path, b"marker"));
+    let link = parent.join("link");
+
+    let made = mklink(Some("/J"), &link, &target);
+
+    assert!(made, "junction {}", link.display());
+    assert_eq!(fixture(&link.join("marker"), std::fs::read), b"marker");
 }
 
 /// Makes a junction at `link` to the folder `target` with `mklink /J`.
@@ -242,7 +264,7 @@ fn windows_lists_reads_and_writes_a_user_plugin() {
     private::check(&private::open_dir(&plugins.join("near")).unwrap()).unwrap();
     let manifest = plugins.join("near").join(MANIFEST_FILE);
     private::check(&private::read_only(&manifest).unwrap()).unwrap();
-    assert_eq!(std::fs::read_to_string(manifest).unwrap(), NEAR);
+    assert_eq!(fixture(&manifest, std::fs::read_to_string), NEAR);
 }
 
 /// A plugins folder that is a junction or a directory link is refused as unsafe on the
@@ -464,6 +486,12 @@ fn windows_the_sweep_restores_a_retired_folder_cut_between_renames() {
     );
 }
 
+/// Reads a fixture a row checks. Inputs: its path and the read. Output: what the read
+/// returned; a failed read stops the row naming the path and the I/O error.
+fn fixture<'p, T>(path: &'p Path, read: impl FnOnce(&'p Path) -> std::io::Result<T>) -> T {
+    read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
 /// Leaves read-only as the one attribute of a file or folder, as an unzipped or copied
 /// plugin can carry it, with `attrib`, the path with backslashes only.
 fn read_only(path: &Path) {
@@ -597,5 +625,5 @@ fn windows_a_read_only_file_hard_linked_from_outside_keeps_its_attribute() {
             .readonly(),
         "the outside file keeps its read-only attribute"
     );
-    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    assert_eq!(fixture(&outside, std::fs::read), b"outside");
 }

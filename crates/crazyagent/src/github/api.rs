@@ -6,7 +6,6 @@ use super::{
 use crate::engine::EngineError;
 use kernel_security::secret::SecretString;
 use serde::Deserialize;
-use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -713,6 +712,9 @@ pub fn find_cli() -> Option<&'static Path> {
         .find(|path| path.is_file())
 }
 
+/// The most bytes `gh auth token` may print, its newline included; more is refused.
+const GH_TOKEN_OUTPUT_MAX: usize = 2048;
+
 /// Takes the token of a signed-in GitHub CLI with `gh auth token`. The output goes straight
 /// into memory and is never logged. Inputs: the `gh` path and the environment it needs
 /// (at least `HOME`). Output: the token, or `github_cli_not_signed_in`.
@@ -732,9 +734,7 @@ pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretSt
     .map_err(|_| failure("github_cli_missing"))?;
     let stdout = child.stdout.take().expect("gh stdout is piped");
     let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout.take(2048).read_to_end(&mut bytes);
-        (read, bytes)
+        kernel_security::read_limited::read_limited(stdout, GH_TOKEN_OUTPUT_MAX)
     });
     let deadline = Instant::now() + GH_TIME;
     let status = loop {
@@ -744,13 +744,15 @@ pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretSt
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            if let Ok((_, mut bytes)) = reader.join() {
+                kernel_security::secret::wipe(&mut bytes);
+            }
             return Err(unavailable());
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     let (read, mut bytes) = reader.join().map_err(|_| unavailable())?;
-    if read.is_err() || !status.success() {
+    if read.is_err() || !status.success() || bytes.len() > GH_TOKEN_OUTPUT_MAX {
         kernel_security::secret::wipe(&mut bytes);
         return Err(unavailable());
     }

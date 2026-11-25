@@ -12,7 +12,7 @@ const CLAIMER_BYTES_MAX: usize = 128;
 const ERROR_BYTES_MAX: usize = 512;
 const REPORT_PATH_BYTES_MAX: usize = 512;
 const RUNNING_MAX: u32 = 64;
-const ATTEMPTS_MAX: u32 = 10;
+pub(crate) const ATTEMPTS_MAX: u32 = 10;
 const STALE_ERROR: &str = "Agent stopped responding";
 /// How many rate-limited ends in a row a job takes before it ends failed, since its agent
 /// can write the limit its harness reports (DEC-170 addendum 6, RV-DS241-26).
@@ -699,6 +699,12 @@ impl ResearchJobs {
         project: &crate::protocol::ProjectId,
     ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
         crate::sandbox::access_store::read::load(&self.connection, project.as_str())
+    }
+
+    /// The queue database's open connection, for a read the queue keeps no method for.
+    /// Takes nothing. Returns the connection.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
     }
 
     /// Reads the folders the owner keeps a project's agents out of, see

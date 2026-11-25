@@ -1,5 +1,6 @@
 use crate::hidden_paths::HIDDEN_MAX;
 use crate::lines::HELD_NOT_PUT_BACK_EXIT;
+use crate::linux::places::{BOUND, Bound, bound_entry};
 use crate::paths::clean_absolute;
 use crate::ports::{
     KEPT_PORTS_MAX, OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
@@ -32,72 +33,71 @@ use landlock::*;
 /// Fixed places a distribution installs bubblewrap. It is never looked up through `PATH`.
 pub const BWRAP_PATHS: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 
-pub const GRANTS_MAX: usize = 1024;
+pub(crate) const GRANTS_MAX: usize = 1024;
 
-pub const HELPER_PATHS_MAX: usize = GRANTS_MAX + 64;
+pub(crate) const HELPER_PATHS_MAX: usize = GRANTS_MAX + 64;
 
 const READ: &str = "--read";
 
 const WRITE: &str = "--write";
 
-pub const GIT_WRITE: &str = "--git-write";
+pub(crate) const GIT_WRITE: &str = "--git-write";
 
-pub const CONNECT: &str = "--connect";
+pub(crate) const CONNECT: &str = "--connect";
 
-pub const LIMIT_NETWORK: &str = "--limit-network";
+pub(crate) const LIMIT_NETWORK: &str = "--limit-network";
 
-pub const OPEN_SOCKETS: &str = "--open-sockets";
+pub(crate) const OPEN_SOCKETS: &str = "--open-sockets";
 
-pub const KEEP_FREE: &str = "--keep-free";
+pub(crate) const KEEP_FREE: &str = "--keep-free";
 
-pub const PROBE: &str = "--probe";
+pub(crate) const PROBE: &str = "--probe";
 
-pub const FILTER_SOCKETS: &str = "--filter-sockets";
+pub(crate) const FILTER_SOCKETS: &str = "--filter-sockets";
 
-pub const DIE_WITH: &str = "--die-with";
+pub(crate) const DIE_WITH: &str = "--die-with";
 
-pub const NEST: &str = "--nest";
+pub(crate) const NEST: &str = "--nest";
 
-pub const NESTED: &str = "--nested";
+pub(crate) const NESTED: &str = "--nested";
 
-pub const PRIVATE_MOUNTS: &str = "--private-mounts";
+pub(crate) const PRIVATE_MOUNTS: &str = "--private-mounts";
 
-pub const COVER: &str = "--cover";
+pub(crate) const COVER: &str = "--cover";
 
-pub const SCOPED: &str = "--scoped";
+pub(crate) const SCOPED: &str = "--scoped";
 
-pub const GUARD_LOOPBACK: &str = "--guard-loopback";
+pub(crate) const GUARD_LOOPBACK: &str = "--guard-loopback";
 
-pub const GUARD_GIT: &str = "--guard-git";
+pub(crate) const GUARD_GIT: &str = "--guard-git";
 
-pub const OWN_TREE: &str = "--own-tree";
+pub(crate) const OWN_TREE: &str = "--own-tree";
 
-pub const OWN_KIDS: &str = "--own-kids";
+pub(crate) const OWN_KIDS: &str = "--own-kids";
 
-pub const OWN_GIT: &str = "--own-git";
+pub(crate) const OWN_GIT: &str = "--own-git";
 
-pub const GUARD_SIGNALS: &str = "--guard-signals";
+pub(crate) const GUARD_SIGNALS: &str = "--guard-signals";
 
-pub const GUARD_HELD: &str = "--guard-held";
+pub(crate) const GUARD_HELD: &str = "--guard-held";
 
-pub const GUARD_HELD_TREE: &str = "--guard-held-tree";
+pub(crate) const GUARD_HELD_TREE: &str = "--guard-held-tree";
 
-pub const GUARD_HELD_STORE: &str = "--guard-held-store";
+pub(crate) const GUARD_HELD_STORE: &str = "--guard-held-store";
 
-pub const PROBE_SUPERVISOR: &str = "--probe-supervisor";
+pub(crate) const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 
 const PROBE_SUPERVISED: &str = "--probe-supervised";
 
-/// Why the helper runs no mode while its environment holds a variable that makes glibc
-/// load code ([`loader_variable`]): every mode, and the bubblewrap a nest starts, runs in
-/// the helper's own AppArmor profile, which may make user namespaces, so the variable would
-/// load a caller's code there (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2). The engine
-/// never sets one.
+/// Why the helper runs no mode while its environment holds a variable that makes glibc load code
+/// ([`loader_variable`]): every mode, and the bubblewrap a nest starts, runs in the helper's own
+/// AppArmor profile, which may make user namespaces, so the variable would load a caller's code
+/// there. The engine never sets one.
 pub const LOADER_REFUSED: &str = "the helper refuses variables that load code";
 
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
 /// other than the engine's user, so [`trusted`] refuses it.
-pub const SET_ID_BITS: u32 = 0o6000;
+pub(crate) const SET_ID_BITS: u32 = 0o6000;
 
 /// The group and other write bits: a program anyone but its owner may change is never run.
 const OTHERS_WRITE_BITS: u32 = 0o022;
@@ -122,11 +122,17 @@ pub const NEST_ARGS: [&str; 10] = [
 
 /// How the helper says the kernel holds the ruleset only in part or not at all, the one probe
 /// failure a kernel refusal names ([`probe_refusal`]).
-pub const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
+pub(crate) const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
+
+/// How the helper refuses a policy one of whose granted folders, or a folder above it, became
+/// a link after the engine checked it, so no rule follows the link to its target
+/// ([`landlock::enforce`]).
+pub(crate) const GRANT_BECAME_LINK: &str =
+    "a granted folder became a link after the engine checked it";
 
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
 /// ports and every model proxy and model relay port.
-pub const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
+pub(crate) const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
     + KEPT_PORTS_MAX
     + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize
     + 1
@@ -137,7 +143,7 @@ const PICKED_PORTS_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 
 const PICKED_PORTS_BYTES_MAX: u64 = 64;
 
-pub const PICKED_PORTS_UNREADABLE: &str = "CrazyAgent cannot read which ports this Linux hands out \
+pub(crate) const PICKED_PORTS_UNREADABLE: &str = "CrazyAgent cannot read which ports this Linux hands out \
      by itself (net.ipv4.ip_local_port_range), so it cannot keep the owner's ports free of an \
      agent";
 
@@ -149,10 +155,9 @@ const _: () = {
     }
 };
 
-/// Why an agent whose project hides a folder does not start where the sandbox helper cannot
-/// give it a mount tree of its own that no later mount on this computer reaches: a second
-/// mount of the folder's disk made during the turn would lead past the cover
-/// (V24x-LINUX-NEST-MOUNT-PROPAGATION, leader 19:09 Q5).
+/// Why an agent whose project hides a folder does not start where the sandbox helper cannot give it
+/// a mount tree of its own that no later mount on this computer reaches: a second mount of the
+/// folder's disk made during the turn would lead past the cover.
 pub const HIDDEN_MOUNTS_NOT_PRIVATE: &str = "hidden folders on Linux need an agent's mounts \
      cut off from this computer's, and this computer does not let the sandbox helper do it: \
      allow user namespaces for the programs bubblewrap starts, or stop hiding the folders, \
@@ -182,6 +187,7 @@ pub enum HelperRequest {
         program: PathBuf,
         args: Vec<OsString>,
         cut: Option<Vec<PathBuf>>,
+        bound: Vec<Bound>,
     },
     Nest {
         bwrap: PathBuf,
@@ -247,6 +253,7 @@ impl HelperRequest {
         let mut probe = false;
         let mut filter = false;
         let mut nest = false;
+        let mut bound = Vec::new();
         let mut rest = args.into_iter();
         while let Some(flag) = rest.next() {
             if guard_flag(&mut policy.guard, &flag, &mut rest)? {
@@ -255,6 +262,13 @@ impl HelperRequest {
             match flag.to_str() {
                 Some(PROBE) => probe = true,
                 Some(FILTER_SOCKETS) => filter = true,
+                Some(BOUND) if filter => {
+                    if bound.len() == HELPER_PATHS_MAX {
+                        return Err(format!("more than {HELPER_PATHS_MAX} bound roots"));
+                    }
+                    let root = absolute(rest.next())?;
+                    bound.push(bound_entry(root, &mut rest)?);
+                }
                 Some(NEST) => nest = true,
                 Some(NESTED) => policy.nested = true,
                 Some(LIMIT_NETWORK) => policy.limit_network = true,
@@ -283,6 +297,7 @@ impl HelperRequest {
                         program,
                         args: rest.collect(),
                         cut,
+                        bound,
                     });
                 }
                 Some("--") if !probe => return run_request(policy, rest),
@@ -313,7 +328,7 @@ impl HelperRequest {
 /// The helper words that ask for a private mount tree with these covers, or none.
 /// Input: the covers, when the tree is asked for. Output: [`PRIVATE_MOUNTS`], then
 /// [`COVER`] and the path for each cover.
-pub fn cut_args(covers: Option<&[PathBuf]>) -> Vec<OsString> {
+pub(crate) fn cut_args(covers: Option<&[PathBuf]>) -> Vec<OsString> {
     let Some(covers) = covers else {
         return Vec::new();
     };
@@ -402,11 +417,11 @@ fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> 
     }
 }
 
-/// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
-/// optional `--unshare-net`, at most [`HIDDEN_MAX`] `--tmpfs P --remount-ro P`
-/// covers (P clean, absolute, below the root), an optional clean absolute `--chdir`, then `--`
-/// and the command, so no caller adds another bubblewrap option (rv-sa241 SBX-2-R2 N2,
-/// rv-code2 N5). Input: the words after the fixed arguments. Output: true when they are.
+/// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an optional
+/// `--unshare-net`, at most [`HIDDEN_MAX`] `--tmpfs P --remount-ro P` covers (P clean, absolute,
+/// below the root), an optional clean absolute `--chdir`, then `--` and the command, so no caller
+/// adds another bubblewrap option. Input: the words after the fixed arguments. Output: true when
+/// they are.
 fn own_options(words: &[OsString]) -> bool {
     let mut words = match words {
         [unshare, rest @ ..] if unshare == bridge::UNSHARE_NET => rest,
@@ -552,7 +567,7 @@ pub fn read_picked_ports() -> Option<RangeInclusive<u16>> {
 /// kept port must lie outside that range, or no Landlock agent starts. Inputs: the kept
 /// ports and the range, none when it cannot be read. Output: Ok, or the plain reason
 /// naming the first kept port inside the range.
-pub fn kept_outside_picked(
+pub(crate) fn kept_outside_picked(
     kept: &[u16],
     picked: Option<&RangeInclusive<u16>>,
 ) -> Result<(), String> {
@@ -575,7 +590,7 @@ pub fn kept_outside_picked(
 /// so the helper allows every other one, port 0 among them, which asks Linux for a free
 /// port: [`kept_outside_picked`] holds that such a port is never a kept one. Input: the
 /// kept ports, none of them 0. Output: every port that is not kept, in rising order.
-pub fn bindable(keep_free: &[u16]) -> Vec<u16> {
+pub(crate) fn bindable(keep_free: &[u16]) -> Vec<u16> {
     assert!(!keep_free.contains(&0));
     let mut kept = vec![false; usize::from(u16::MAX) + 1];
     for port in keep_free {
@@ -677,8 +692,13 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         return ExitCode::from(3);
     }
     let (policy, launch) = match request {
-        HelperRequest::Filter { program, args, cut } => {
-            return filtered(&program, args, cut.as_deref());
+        HelperRequest::Filter {
+            program,
+            args,
+            cut,
+            bound,
+        } => {
+            return filtered(&program, args, cut.as_deref(), &bound);
         }
         HelperRequest::Nest { bwrap, args } => {
             return nest(&bwrap, &args, bridge.as_ref(), &routes);
@@ -720,7 +740,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
 /// routes alone, so the bridge's check is left to the route's. Input: the helper
 /// arguments. Output: the route ports, empty for none, the bridge, the go descriptor and
 /// the request; or the reason.
-pub fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
+pub(crate) fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
     let (routes, args) = egress::leading(args)?;
     let (bridge, args) = Bridge::leading(args)?;
     let (started, args) = egress::handed(args)?;
@@ -756,11 +776,11 @@ fn named_descriptor(request: &HelperRequest) -> Option<RawFd> {
     }
 }
 
-/// Closes every descriptor above the standard three that this process holds and `named`
-/// leaves out, before any mode runs. One the engine's own parent left open, not closed on
-/// exec, would otherwise reach bubblewrap, slirp4netns and the harness, or stay readable
-/// through `/proc` in a helper that stays a parent (V243-LINUX-HARNESS-FD-LEAK). Input: the
-/// named descriptors. Output: Ok, or the reason one cannot be listed or closed.
+/// Closes every descriptor above the standard three that this process holds and `named` leaves out,
+/// before any mode runs. One the engine's own parent left open, not closed on exec, would otherwise
+/// reach bubblewrap, slirp4netns and the harness, or stay readable through `/proc` in a helper that
+/// stays a parent. Input: the named descriptors. Output: Ok, or the reason one cannot be listed or
+/// closed.
 fn close_inherited(named: &[RawFd]) -> Result<(), String> {
     assert!(named.iter().all(|fd| *fd > 2));
     let failed = |error: std::io::Error| format!("inherited descriptors: {error}");
@@ -920,10 +940,10 @@ fn probe_supervisor(folder: &Path) -> ExitCode {
     }
 }
 
-/// Tells whether a folder is the private probe folder the engine made ([`private_folder`]):
-/// a real folder, not a link, that this user owns with mode 0700 and that holds nothing
-/// (rv-secreview linux-t4c F1). Input: the absolute folder. Output: true only then.
-pub fn private_empty(folder: &Path) -> bool {
+/// Tells whether a folder is the private probe folder the engine made ([`private_folder`]): a real
+/// folder, not a link, that this user owns with mode 0700 and that holds nothing. Input: the
+/// absolute folder. Output: true only then.
+pub(crate) fn private_empty(folder: &Path) -> bool {
     assert!(folder.is_absolute());
     let Ok(held) = fs::symlink_metadata(folder) else {
         return false;
@@ -933,11 +953,10 @@ pub fn private_empty(folder: &Path) -> bool {
     private && fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_none())
 }
 
-/// The call supervisor's check, run as its harness: the guarded port is reached on this
-/// machine and refused on another address, a new file is made and written, a `.git` is
-/// refused, and so are a signal to the supervisor, an open of its memory for writing and a
-/// take of its descriptor (rv-sec3 linux-t4b F1). Inputs: the guarded port and an empty
-/// folder. Output: 0 when all seven hold, else 1.
+/// The call supervisor's check, run as its harness: the guarded port is reached on this machine and
+/// refused on another address, a new file is made and written, a `.git` is refused, and so are a
+/// signal to the supervisor, an open of its memory for writing and a take of its descriptor.
+/// Inputs: the guarded port and an empty folder. Output: 0 when all seven hold, else 1.
 fn probe_supervised(port: u16, folder: &Path) -> ExitCode {
     let refused = |error: std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
     let elsewhere = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port));
@@ -1094,7 +1113,7 @@ fn placed(nested: bool) -> Result<(), String> {
 /// [`OTHERS_WRITE_BITS`], so it runs with this user's privileges and only root or this user
 /// put it there or may change it. It opens without reading, so a program that can only be
 /// run still opens. Input: its path. Output: the open file, which [`nest`] starts, or none.
-pub fn trusted_file(bwrap: &Path) -> Option<fs::File> {
+pub(crate) fn trusted_file(bwrap: &Path) -> Option<fs::File> {
     let own = rustix::process::geteuid().as_raw();
     let file = fs::OpenOptions::new()
         .read(true)
@@ -1108,16 +1127,16 @@ pub fn trusted_file(bwrap: &Path) -> Option<fs::File> {
 
 /// One line of the mount list: the mount's id, its disk's device number, the folder of
 /// that disk it shows and the folder it is mounted on.
-pub struct Mount {
-    pub id: u64,
-    pub device: String,
-    pub root: PathBuf,
-    pub point: PathBuf,
+pub(crate) struct Mount {
+    pub(crate) id: u64,
+    pub(crate) device: String,
+    pub(crate) root: PathBuf,
+    pub(crate) point: PathBuf,
 }
 
 /// Reads the mount list text, one mount per line as `/proc/self/mountinfo` writes it.
 /// Input: the text. Output: the mounts, or none when a line does not read plainly.
-pub fn mounts(text: &str) -> Option<Vec<Mount>> {
+pub(crate) fn mounts(text: &str) -> Option<Vec<Mount>> {
     text.lines()
         .map(|line| {
             let mut fields = line.split(' ');
@@ -1165,11 +1184,10 @@ fn unescaped(field: &str) -> Option<PathBuf> {
     Some(PathBuf::from(OsStr::from_bytes(&path)))
 }
 
-/// Gives the helper a mount tree of its own that no later mount on this computer reaches,
-/// before Landlock, and proves it (V24x-LINUX-NEST-MOUNT-PROPAGATION): one thread, a user
-/// and a mount namespace of its own mapped to the same ids, every mount private, each cover
-/// and `/proc` a mount that `umount2` refuses as locked, then no capability, bounding set
-/// included. Input: the covers. Output: Ok, or the reason.
+/// Gives the helper a mount tree of its own that no later mount on this computer reaches, before
+/// Landlock, and proves it: one thread, a user and a mount namespace of its own mapped to the same
+/// ids, every mount private, each cover and `/proc` a mount that `umount2` refuses as locked, then
+/// no capability, bounding set included. Input: the covers. Output: Ok, or the reason.
 fn cut(covers: &[PathBuf]) -> Result<(), String> {
     let read = |path: &str| fs::read_to_string(path).map_err(|error| format!("{path}: {error}"));
     let write = |path: &str, text: String| {

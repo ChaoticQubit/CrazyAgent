@@ -135,8 +135,8 @@ pub const DONT_ALLOW: &str = "Don't allow";
 /// The asker name prefix of the questions access requests raise.
 pub const ASKER_PREFIX: &str = "engine:access:";
 
-/// The one refusal code an agent's access request gets for every failed check of a socket
-/// path it wrote plainly (RV-DS241-87).
+/// The one refusal code an agent's access request gets for every failed check of a socket path it
+/// wrote plainly.
 pub const SOCKET_REFUSED: &str = "grant_socket_refused";
 
 const LAUNCHD_LISTENERS: &str = "/private/tmp/com.apple.launchd.";
@@ -365,6 +365,9 @@ fn socket_fit(real: &Path) -> Result<(), &'static str> {
     if links != 1 {
         return Err("grant_socket_owner");
     }
+    if kernel_processes::service::changeable_above_socket(real).is_some() {
+        return Err("grant_socket_owner");
+    }
     Ok(())
 }
 
@@ -375,8 +378,9 @@ fn socket_fit(_real: &Path) -> Result<(), &'static str> {
 
 /// Judges who holds a socket: it must exist as a socket owned by the user, in a folder the
 /// user owns that no group or other user can write, or in a sticky folder of the user or
-/// root, where no other user can replace it. Inputs: the socket's kind and owner when it
-/// exists, its folder's owner and mode, and the user. Output: done or the refusal code.
+/// root; `socket_fit` also reads the folders above and access lists. Inputs: the socket's
+/// kind and owner when it exists, its folder's owner and mode, and the user. Output: done
+/// or the refusal code.
 #[cfg(unix)]
 fn ownership(socket: Option<(bool, u32)>, parent: (u32, u32), me: u32) -> Result<(), &'static str> {
     let Some((true, owner)) = socket else {

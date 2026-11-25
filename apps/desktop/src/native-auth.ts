@@ -1,3 +1,4 @@
+import { knownError, namedFailure } from "./api";
 import { STORAGE_COPY, type ModelAccessDetail } from "./engine-client";
 import { displayText } from "./screens/conversation";
 
@@ -330,7 +331,7 @@ export function nativeAuthError(code: string): string {
     case "native_auth_claude_input_invalid":
       return "Paste the complete code and state shown by the official Claude sign-in page.";
     case "owner_busy":
-      return "CrazyAgent is busy with other requests. Try again in a moment.";
+      return namedFailure(knownError(code), code);
     default:
       return "The native authentication action is unavailable. " +
         "Refresh Settings and inspect its reason.";

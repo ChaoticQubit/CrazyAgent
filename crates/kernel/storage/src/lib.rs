@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+/// The watch's event log in the engine store: the bodies after a cursor, read in bounded
+/// pages, and the write that logs one revision's body and prunes the old ones.
+pub mod events;
 pub mod migrations;
 /// One private key-value namespace per plugin on the state log, rebuilt by replay. A
 /// namespace is not secret custody: its values sit in the log, snapshots and backups, so
@@ -27,5 +30,10 @@ impl std::fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
+#[cfg(test)]
+#[path = "../../common/src/perf_kit.rs"]
+mod perf_kit;
+#[cfg(test)]
+mod perf_tests;
 #[cfg(test)]
 mod tests;

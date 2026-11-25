@@ -22,6 +22,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use version::{supported, version_needed};
 
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
@@ -249,17 +250,17 @@ static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 /// terminal supports (3.7 or later, the first with the bracketed-paste flag the attach
 /// reads). A read that runs out of time counts as running, since a new file can wait behind
 /// the system's first-run checks; the version read setup does next reports it. Takes the
-/// tmux. Returns the answer.
-pub fn runs(tmux: &crate::finding::Resolved) -> bool {
+/// tmux. Returns Ok when it runs, else its version when that is a release too old, else none.
+pub fn runs(tmux: &crate::finding::Resolved) -> Result<(), Option<String>> {
     runs_within(tmux, VERSION_READ_TIME)
 }
 
 /// Answers [`runs`] with the version read bounded by the given time, so a test can let a
 /// read run out of time quickly. Takes the tmux and the bound. Returns the answer.
-fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
+fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> Result<(), Option<String>> {
     assert!(!time.is_zero() && time <= VERSION_READ_TIME);
     let Ok(metadata) = std::fs::metadata(&tmux.program) else {
-        return false;
+        return Err(None);
     };
     let file: RanFile = (
         tmux.program.clone(),
@@ -274,11 +275,11 @@ fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
     if last().contains(&file) {
-        return true;
+        return Ok(());
     }
     let words = tmux.argv();
     let Some((program, rest)) = words.split_first() else {
-        return false;
+        return Err(None);
     };
     let mut arguments = rest.to_vec();
     arguments.push("-V".into());
@@ -290,12 +291,18 @@ fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
         time,
     );
     let running = match version {
-        Err(crate::run::InstallError(code)) => code == "setup_timeout",
-        Ok((false, _)) => false,
-        Ok((true, output)) => crate::run::version_from(&output)
-            .is_ok_and(|found| supported(found.as_str()) == Some(true)),
+        Err(crate::run::InstallError("setup_timeout")) => Ok(()),
+        Err(_) | Ok((false, _)) => Err(None),
+        Ok((true, output)) => match crate::run::version_from(&output) {
+            Ok(found) => match supported(found.as_str()) {
+                Some(true) => Ok(()),
+                Some(false) => Err(Some(found.as_str().to_owned())),
+                None => Err(None),
+            },
+            Err(_) => Err(None),
+        },
     };
-    if running {
+    if running.is_ok() {
         let mut kept = last();
         kept.retain(|(path, ..)| *path != file.0);
         if kept.len() == RAN_MAX {
@@ -366,7 +373,7 @@ impl Tmux {
     }
 
     /// Opens the host on a native lead's teammates' own tmux server (see
-    /// `super::teammates_socket`, rv-audit S1 F1): the server runs inside the teammates'
+    /// `super::teammates_socket`): the server runs inside the teammates'
     /// profile, which cannot reach its socket, started under its keeper by `Servers`
     /// (FBTMUX-P1-R1-L1), and each engine client connects inside the lead's profile and never
     /// starts a server, so no server runs in the lead's profile with teammate panes. Each
@@ -439,7 +446,7 @@ impl Tmux {
 
     /// Removes the socket file an ended server left behind. A teammates' socket stays: once
     /// it is gone a teammate still running could bind a server of its own there, which the
-    /// lead's tmux clients would then obey (rv-audit S1 F1), and the lead's next start names
+    /// lead's tmux clients would then obey, and the lead's next start names
     /// a new one. Output: Ok once it is gone or kept, or `terminal_folder_unsafe` when it
     /// cannot be removed.
     fn remove_socket(&self) -> Result<(), HostError> {
@@ -785,7 +792,7 @@ impl Tmux {
             .ok_or_else(|| failure("terminal_agent_unknown"))
     }
 
-    /// Readies a native lead's teammates' server for the lead's start (rv-audit S1 F1): the
+    /// Readies a native lead's teammates' server for the lead's start: the
     /// server starts if none listens, the holder pane of a fresh one is tagged as the lead's
     /// anchor, and its environment becomes the lead's, which every teammate pane gets. Takes
     /// the lead and its command. Returns the variables the lead's pane starts with, so its
@@ -1007,27 +1014,6 @@ fn private_folder(folder: &Path) -> Result<(), HostError> {
         return Err(unsafe_folder());
     }
     Ok(())
-}
-
-fn release(version: &str) -> Option<(u32, u32)> {
-    let version = version.trim();
-    let version = version.strip_prefix("next-").unwrap_or(version);
-    let (major, rest) = version.split_once('.')?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    Some((major.parse::<u32>().ok()?, digits.parse::<u32>().ok()?))
-}
-
-/// Whether agent terminals support a tmux version, the second word of `tmux -V`: 3.7 or
-/// later ([`VERSION_MIN`]). Input: the version. Output: the answer, or none when it is not
-/// a release number.
-pub fn supported(version: &str) -> Option<bool> {
-    release(version).map(|found| found >= VERSION_MIN)
-}
-
-/// The oldest tmux version agent terminals support, as setup names it. Output: the
-/// version, such as "3.7".
-pub fn version_needed() -> String {
-    format!("{}.{}", VERSION_MIN.0, VERSION_MIN.1)
 }
 
 impl Tmux {
@@ -1473,6 +1459,8 @@ mod lines;
 #[path = "tmux/placement_tests.rs"]
 mod placement_tests;
 mod servers;
+/// Which tmux releases agent terminals support, and the oldest one setup names.
+mod version;
 
 /// The tmux program a row runs, found through the resolver with the stub seed. Input: the
 /// engine root. Output: the program, or none when tmux is not installed.

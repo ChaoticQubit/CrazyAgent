@@ -1185,7 +1185,7 @@ fn a_refused_bundled_tmux_says_it_cannot_run() {
     let (places, sidecar, brew) = bundled_layout(&home);
     for mode in [0o757, 0o644] {
         std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(mode)).unwrap();
-        let (found, note) = resolve_tmux(&places, false, |_| true).unwrap();
+        let (found, note) = resolve_tmux(&places, false, |_| Ok(())).unwrap();
         assert_eq!(found.entry, brew, "mode {mode:o}");
         assert_eq!(note, Some(BundleNote::CannotRun), "mode {mode:o}");
     }
@@ -1198,13 +1198,13 @@ fn with_no_other_tmux_a_bundled_one_that_cannot_run_ends_in_the_install_offer() 
     let (_folder, home) = scratch();
     let (places, sidecar, brew) = bundled_layout(&home);
     std::fs::remove_file(&brew).unwrap();
-    let missing = resolve_tmux(&places, true, |_| false).unwrap_err();
+    let missing = resolve_tmux(&places, true, |_| Err(None)).unwrap_err();
     assert_eq!(
         (missing.reason, missing.line()),
         (Reason::NotFound, TMUX_MISSING.to_owned())
     );
     std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
-    let missing = resolve_tmux(&places, true, |_| true).unwrap_err();
+    let missing = resolve_tmux(&places, true, |_| Ok(())).unwrap_err();
     assert_eq!(
         (missing.reason, missing.line()),
         (Reason::NotFound, TMUX_MISSING.to_owned())

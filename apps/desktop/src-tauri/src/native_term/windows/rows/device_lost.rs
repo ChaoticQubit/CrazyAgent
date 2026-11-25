@@ -67,6 +67,63 @@ fn the_render_thread_answers_a_view_placed_after_a_removal_inside_present() {
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes last");
 }
 
+/// Draws a view once, then removes the D3D12 device at the top of its next hand back, after
+/// that frame was acquired and encoded: the frame goes back through the lost branch on the
+/// removed device and is released, not forgotten, the view faults, the render thread lives,
+/// and a later view presents on a replacement device, every release under the bound.
+#[test]
+#[ignore = "needs a Windows desktop and a process of its own, since a removed D3D12 device \
+            stays removed for the process: the farm runs it alone"]
+fn a_frame_acquired_before_a_removal_is_released_on_the_removed_device() {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
+    let before = presents();
+    assert!(view.feed(fed_frame(&Theme::default(), b"before the removal\r\n")));
+    view.place(Some(PAGE)).expect("a box");
+    await_present("the present before the removal", before);
+    assert_eq!(
+        draw::trial_removals(),
+        0,
+        "no removal before the seam is armed"
+    );
+    let (_, frames_before, _) = draw::trial_releases();
+    draw::trial_remove_before_hand_back(1);
+    assert!(view.feed(fed_frame(&Theme::default(), b"after the removal\r\n")));
+    pump_until("the seam removed the device", FARM_WAIT, || {
+        draw::trial_removals() == 1
+    });
+    pump_until("the removal faults the view", FARM_WAIT, || view.faulted());
+    let (_, frames_after, _) = draw::trial_releases();
+    assert_eq!(
+        frames_after,
+        frames_before + 1,
+        "the frame acquired before the removal was released on the removed device"
+    );
+    let shown = presents();
+    let later = View::new(parent, webview, 2, sink, &style()).expect("a later view");
+    assert!(later.feed(fed_frame(&Theme::default(), b"a later view\r\n")));
+    later
+        .place(Some((420.0, 40.0, 200.0, 100.0)))
+        .expect("a second box");
+    pump_until(
+        "the render thread answers the later view",
+        FARM_WAIT,
+        || later.faulted() || presents() > shown,
+    );
+    assert!(
+        !later.faulted() && presents() > shown,
+        "a replacement device comes up after the removal: the later view presents"
+    );
+    released_within_the_bound(1);
+    println!(
+        "device-lost row: the frame on the removed device was released, presents {}",
+        presents()
+    );
+    dropped_within_the_bound(later, "the later view");
+    dropped_within_the_bound(view, "the removed view");
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes last");
+}
+
 /// Checks the render thread released a lost device, and at least `frames` frames acquired on
 /// one, rather than forgetting them, and that no release held it past `RELEASE_STALL_MAX`.
 /// Read once a view made after the loss drew, since making that view's surface retires the

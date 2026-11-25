@@ -14,14 +14,14 @@ use crate::tui::screens::project::Tab;
 use crossterm::event::KeyModifiers;
 use std::os::unix::fs::PermissionsExt;
 
-const NOW: i64 = 1_793_000_000_000;
+pub(super) const NOW: i64 = 1_793_000_000_000;
 const MINUTE: i64 = 60_000;
 
-fn project() -> ProjectId {
+pub(super) fn project() -> ProjectId {
     ProjectId::new("tidepool").unwrap()
 }
 
-fn press(code: KeyCode) -> KeyEvent {
+pub(super) fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
@@ -113,7 +113,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
     }
 }
 
-fn team() -> TeamStatus {
+pub(super) fn team() -> TeamStatus {
     let mut charts = task(
         11,
         TaskSource::Master,
@@ -238,7 +238,7 @@ fn loaded() -> TeamView {
     view
 }
 
-fn frame(view: &TeamView, width: u16, height: u16) -> Vec<String> {
+pub(super) fn frame(view: &TeamView, width: u16, height: u16) -> Vec<String> {
     let look = Look::plain();
     let columns = usize::from(width);
     let items = crate::tui::screens::project_view::tab_items(0, columns, &look);

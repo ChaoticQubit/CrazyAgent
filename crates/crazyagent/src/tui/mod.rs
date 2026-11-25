@@ -6,6 +6,9 @@ mod ctx;
 mod dispatch;
 mod frame;
 mod glyphs;
+#[cfg(any(test, feature = "test-support"))]
+pub mod keys;
+#[cfg(not(any(test, feature = "test-support")))]
 mod keys;
 mod master_session;
 mod prefs;
@@ -16,6 +19,9 @@ mod shell;
 mod terminal_pane;
 mod text;
 mod theme;
+#[cfg(any(test, feature = "test-support"))]
+pub mod widgets;
+#[cfg(not(any(test, feature = "test-support")))]
 mod widgets;
 pub use master_session::default_master_open;
 pub use screens::settings::restore::plain as restore_words;

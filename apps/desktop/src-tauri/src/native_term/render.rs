@@ -28,7 +28,8 @@ pub const GPU_FAULT: &str = "native_terminal_gpu";
 /// The longest releasing a lost device may hold the Windows render thread: wgpu-core 25's
 /// queue drop waits on the last submission for 100, 200, 400, 800, 1600 and 3200 ms, then
 /// panics. A removed D3D12 device's fence reads complete, so its release returns at once.
-#[cfg(windows)]
+/// Only the rows hold a release to it.
+#[cfg(all(windows, test))]
 pub const RELEASE_STALL_MAX: Duration = Duration::from_millis(6300);
 
 /// The fallback font files loaded beside the style's family, a fixed set instead of every
@@ -989,6 +990,15 @@ impl Shared {
         assert!(!armed, "one removal armed at a time");
     }
 
+    /// Test builds only: removes the D3D12 device at the top of this state's next hand back,
+    /// after its frame was acquired and encoded, so the frame goes back on a removed device.
+    #[cfg(all(windows, test))]
+    pub fn trial_remove_before_hand_back(&self) {
+        assert!(self.device.is_some(), "a device to remove");
+        let armed = REMOVE_BEFORE_HAND_BACK.swap(true, Ordering::SeqCst);
+        assert!(!armed, "one removal armed at a time");
+    }
+
     /// Gives back a texture acquired for a frame that is not drawn: dropped, which discards
     /// it, or on a lost device, where the drop panics in wgpu 25, forgotten as in `hand_back`
     /// on macOS and Linux and released on Windows. Input: the texture. Output: ok, or
@@ -1117,6 +1127,7 @@ fn hand_back(
 ) -> Result<(), String> {
     assert!(output.texture.width() <= set.side_max);
     assert!(output.texture.height() <= set.side_max);
+    at_hand_back(set);
     if set.is_lost() {
         #[cfg(windows)]
         release(output, Released::Frame);
@@ -1203,7 +1214,7 @@ static REMOVE_AT_PRESENT: AtomicBool = AtomicBool::new(false);
 #[cfg(all(windows, test))]
 static REMOVALS: AtomicU64 = AtomicU64::new(0);
 
-/// Test builds only: how many D3D12 devices the present seam removed. Output: the count.
+/// Test builds only: how many D3D12 devices the removal seams removed. Output: the count.
 #[cfg(all(windows, test))]
 pub fn trial_removals() -> u64 {
     REMOVALS.load(Ordering::SeqCst)
@@ -1218,6 +1229,31 @@ fn at_present(set: &Device) {
 
 #[cfg(not(all(windows, test)))]
 fn at_present(_: &Device) {}
+
+#[cfg(all(windows, test))]
+static REMOVE_BEFORE_HAND_BACK: AtomicBool = AtomicBool::new(false);
+
+/// Test builds only: when armed, removes the D3D12 device, then waits on it so wgpu can
+/// report the loss. If wgpu does not mark it lost, the lost flag is set here, so the frame
+/// still goes back on the removed device; the printed line says which ran. Input: the device.
+#[cfg(all(windows, test))]
+fn at_hand_back(set: &Device) {
+    if !REMOVE_BEFORE_HAND_BACK.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    remove_device(set);
+    let polled = guarded(&set.lost, || set.device.poll(wgpu::PollType::Wait).is_ok());
+    let reported = set.is_lost();
+    println!("trial removal before hand back: poll {polled:?}, wgpu reported the loss {reported}");
+    if !reported {
+        set.lost.store(true, Ordering::Release);
+        println!("trial removal before hand back: the seam set the lost flag");
+    }
+    assert!(set.is_lost());
+}
+
+#[cfg(not(all(windows, test)))]
+fn at_hand_back(_: &Device) {}
 
 /// Test builds only: puts the D3D12 device in the removed state through
 /// `ID3D12Device5::RemoveDevice`, Microsoft's call for testing removal, and prints what

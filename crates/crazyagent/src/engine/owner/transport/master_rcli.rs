@@ -483,7 +483,7 @@ impl OwnerRuntimeHandle {
             .master_turn_narrowed(prepared, turn_id, access, granted)
             .await?
         {
-            Some(narrowed) => Err(failure(narrowed.code())),
+            Some(code) => Err(failure(code)),
             None => Ok(()),
         }
     }

@@ -322,7 +322,7 @@ fn remove_level(directory: &Dir, name: &OsStr, depth: usize) -> Result<(), Refus
 /// the commit or puts it back after a rollback. Inputs: the engine root, a valid name, the
 /// bytes, whether it may replace and the random id source. Output: the step for an older
 /// folder, none when there was none, with the folder synced, or the folder's refusal or
-/// `app_plugin_name_taken` with nothing staged left.
+/// `app_plugin_name_used` with nothing staged left.
 pub(super) fn write(
     root: &Path,
     name: &str,
@@ -333,7 +333,7 @@ pub(super) fn write(
     let directory = open(root, true)?.ok_or_else(unavailable)?;
     settle_owed(&directory, name)?;
     if !replace && exists(&directory, name)? {
-        return Err(refused("app_plugin_name_taken"));
+        return Err(refused("app_plugin_name_used"));
     }
     let id = new_ref().map_err(refused)?;
     let staged = format!("{STAGED}{id}");
@@ -355,6 +355,7 @@ pub(super) fn write(
             root: root.to_path_buf(),
             name: name.to_owned(),
             aside: Some(retired),
+            stripped: Vec::new(),
             replaced: true,
             new_ref,
         }))
@@ -413,8 +414,8 @@ pub(super) fn sweep_within(root: &Path, cap: usize) -> Result<(), Refused> {
 /// and when it cannot lose the name both stay; when more than one folder is owed to the
 /// name, none is touched, since which one is the original is not known. A retired folder
 /// goes back under its plugin name when that name is missing; one beside a live plugin of
-/// its name first loses that name, so a folder it cannot delete is never restored later;
-/// any other folder is deleted, and a file or link is unlinked. Inputs: the plugins folder,
+/// its name is left for [`sweep_replaced`], which reads the trust rows; any other folder
+/// is deleted, and a file or link is unlinked. Inputs: the plugins folder,
 /// the entry and whether another folder is owed to the same name. Output: Ok, or the
 /// refusal.
 fn sweep(directory: &Dir, file: &OsStr, shared: bool) -> Result<(), Refused> {
@@ -432,23 +433,188 @@ fn sweep(directory: &Dir, file: &OsStr, shared: bool) -> Result<(), Refused> {
             if let Some(text) = file.to_str()
                 && let Some(name) = retired_name(text)
             {
-                if !exists(directory, name)? {
-                    return os::rename(directory, file, name.as_ref()).map_err(|()| unavailable());
+                if exists(directory, name)? {
+                    return Ok(());
                 }
-                let (_, id) = text
-                    .rsplit_once('.')
-                    .expect("a retired name ends in its id");
-                let nameless = format!("{RETIRED}{id}");
-                assert!(retired_name(&nameless).is_none());
-                if os::rename(directory, file, nameless.as_ref()).is_ok() {
-                    return remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
-                }
+                return os::rename(directory, file, name.as_ref()).map_err(|()| unavailable());
             }
             remove_level(directory, file, TREE_DEPTH_MAX)
         }
         Some(Kind::Other) => os::unlink(directory, file)
             .map(|_| ())
             .map_err(|()| unavailable()),
+    }
+}
+
+/// Settles each retired folder a replace left beside the live folder of its plugin name, by
+/// the SHA-256 the trust rows hold: while the live plugin.toml is the trusted text the
+/// retired one is a committed leftover and is deleted; while only the retired one is
+/// trusted the replace never committed, so it goes back in place of the live folder;
+/// otherwise both stay. A name with more than one retired folder or a folder owed back to
+/// it is left as it is, and nothing moves when the plugins folder cannot be counted.
+/// Inputs: the engine root and the trusted SHA-256 per name. Output: Ok, or the first
+/// refusal after every name was tried.
+pub(super) fn sweep_replaced(
+    root: &Path,
+    trusted: impl Fn(&str) -> Result<Option<String>, Refused>,
+) -> Result<(), Refused> {
+    let Some(directory) = open(root, false)? else {
+        return Ok(());
+    };
+    let mut read = 0_usize;
+    let mut cut = false;
+    let mut retired: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    os::each(&directory, |file| {
+        read += 1;
+        if read > OWED_SCAN_ENTRIES_MAX {
+            cut = true;
+            return false;
+        }
+        if let Some(text) = file.to_str()
+            && let Some(name) = retired_name(text)
+        {
+            retired
+                .entry(name.to_owned())
+                .or_default()
+                .push(text.to_owned());
+        }
+        true
+    })
+    .map_err(|()| unavailable())?;
+    if cut {
+        return Err(unavailable());
+    }
+    let owed = owed_entries(&directory).ok_or_else(unavailable)?;
+    assert!(retired.values().map(Vec::len).sum::<usize>() <= OWED_SCAN_ENTRIES_MAX);
+    let mut first = None;
+    for (name, files) in &retired {
+        let [only] = files.as_slice() else {
+            continue;
+        };
+        if owed.contains_key(name) {
+            continue;
+        }
+        if let Err(refusal) = settle_replaced(&directory, only, name, &trusted) {
+            first.get_or_insert(refusal);
+        }
+    }
+    os::sync(&directory).map_err(|()| unavailable())?;
+    first.map_or(Ok(()), Err)
+}
+
+/// Settles one retired folder beside the live folder of its plugin name by the trusted
+/// SHA-256, each plugin.toml read without following a link and hashed as the trust row
+/// is: deleted while the live text is trusted, put back in place of the live folder while
+/// only its own text is trusted and the live one reads, else kept. Inputs: the plugins
+/// folder, the retired entry, its plugin name and the trust check. Output: Ok, or the
+/// refusal with both folders kept.
+fn settle_replaced(
+    directory: &Dir,
+    file: &str,
+    name: &str,
+    trusted: &impl Fn(&str) -> Result<Option<String>, Refused>,
+) -> Result<(), Refused> {
+    assert_eq!(retired_name(file), Some(name));
+    if os::kind(directory, file.as_ref()).map_err(|()| unavailable())? != Some(Kind::Folder)
+        || !exists(directory, name)?
+    {
+        return Ok(());
+    }
+    let Some(sha256) = trusted(name)? else {
+        return Ok(());
+    };
+    let hashed = |entry: &str| {
+        let bytes = read_in(directory, entry).ok()?;
+        Some(kernel_common::hash(&bytes))
+    };
+    let (_, id) = file
+        .rsplit_once('.')
+        .expect("a retired name ends in its id");
+    let nameless = format!("{RETIRED}{id}");
+    assert!(retired_name(&nameless).is_none());
+    let Some(live) = hashed(name) else {
+        return Ok(());
+    };
+    if live == sha256 {
+        if os::rename(directory, file.as_ref(), nameless.as_ref()).is_ok() {
+            return remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
+        }
+        return remove_level(directory, file.as_ref(), TREE_DEPTH_MAX);
+    }
+    if hashed(file).as_deref() != Some(sha256.as_str()) {
+        return Ok(());
+    }
+    os::rename(directory, name.as_ref(), nameless.as_ref()).map_err(|()| unavailable())?;
+    let _ = remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
+    os::rename(directory, file.as_ref(), name.as_ref()).map_err(|()| unavailable())
+}
+
+/// Takes the plugin name off every retired folder of a plugin before a removal moves its
+/// live folder, so no later start puts an older folder back under a removed name: each is
+/// renamed by its own id to a name with no plugin name in it, and kept until the caller
+/// deletes it; a file or link of that name is left to the start sweep. Inputs: the plugins
+/// folder and a valid name. Output: each folder's retired and nameless names, or
+/// `app_plugin_folder_unavailable` when the folder cannot be counted or a rename fails, with
+/// the live folder untouched and every folder renamed so far back under its retired name.
+fn strip_retired(directory: &Dir, name: &str) -> Result<Vec<(OsString, String)>, Refused> {
+    let mut read = 0_usize;
+    let mut cut = false;
+    let mut retired: Vec<OsString> = Vec::new();
+    os::each(directory, |file| {
+        read += 1;
+        if read > OWED_SCAN_ENTRIES_MAX {
+            cut = true;
+            return false;
+        }
+        if file.to_str().and_then(retired_name) == Some(name) {
+            retired.push(file.to_os_string());
+        }
+        true
+    })
+    .map_err(|()| unavailable())?;
+    if cut {
+        return Err(unavailable());
+    }
+    assert!(retired.len() <= OWED_SCAN_ENTRIES_MAX);
+    let mut stripped: Vec<(OsString, String)> = Vec::new();
+    let moved = retired.iter().try_for_each(|file| {
+        if os::kind(directory, file).map_err(|()| unavailable())? != Some(Kind::Folder) {
+            return Ok(());
+        }
+        let text = file.to_str().expect("a retired entry name is text");
+        let (_, id) = text
+            .rsplit_once('.')
+            .expect("a retired name ends in its id");
+        let nameless = format!("{RETIRED}{id}");
+        assert!(retired_name(&nameless).is_none());
+        os::rename(directory, file, nameless.as_ref()).map_err(|()| unavailable())?;
+        stripped.push((file.clone(), nameless));
+        Ok(())
+    });
+    if let Err(refusal) = moved.and_then(|()| os::sync(directory).map_err(|()| unavailable())) {
+        restore_stripped(directory, &stripped);
+        return Err(refusal);
+    }
+    assert!(stripped.len() <= retired.len());
+    Ok(stripped)
+}
+
+/// Puts each retired folder a removal took the plugin name off back under its retired name,
+/// best effort, as a removal that does not commit leaves them. Inputs: the plugins folder
+/// and each folder's retired and nameless names. Output: none.
+fn restore_stripped(directory: &Dir, stripped: &[(OsString, String)]) {
+    for (retired, nameless) in stripped {
+        let _ = os::rename(directory, nameless.as_ref(), retired);
+    }
+    let _ = os::sync(directory);
+}
+
+/// Deletes the retired folders a committed removal took the plugin name off, best effort;
+/// one it cannot delete stays nameless for the staged sweep. Inputs: the plugins folder and
+/// each folder's retired and nameless names. Output: none.
+fn delete_stripped(directory: &Dir, stripped: &[(OsString, String)]) {
+    for (_, nameless) in stripped {
+        let _ = remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
     }
 }
 
@@ -519,20 +685,23 @@ fn settle_removal(
     }
 }
 
-/// A user plugin's folder moved aside under a removal name that still names it. Dropped
-/// before it is finished, it goes back under the plugin name, as the start sweep puts it
-/// back after a crash while the plugin's rows remain.
+/// A user plugin's folder moved aside under a removal name that still names it, and the
+/// retired folders of its name taken off it. Dropped before it is finished, the folder goes
+/// back under the plugin name, as the start sweep puts it back after a crash while the
+/// plugin's rows remain, and each retired folder goes back under its retired name.
 pub(super) struct Retired<'a> {
     root: &'a Path,
     name: &'a str,
     aside: Option<String>,
+    stripped: Vec<(OsString, String)>,
 }
 
 /// Moves a user plugin's folder aside under a removal name that still names it, so a
 /// removal whose rows do not commit puts it back; a folder owed back to the name is settled
-/// first. Inputs: the engine root, a valid name and
-/// the random id source. Output: the retired folder, holding none when no folder has that
-/// name, or the folder's refusal with the folder left in place.
+/// first and every retired folder of the name loses it until the removal commits. Inputs:
+/// the engine root, a valid name and the random id source. Output: the retired folder,
+/// holding none when no folder has that name, or the folder's refusal with the folder left
+/// in place.
 pub(super) fn retire<'a>(
     root: &'a Path,
     name: &'a str,
@@ -542,11 +711,13 @@ pub(super) fn retire<'a>(
         root,
         name,
         aside: None,
+        stripped: Vec::new(),
     };
     let Some(directory) = open(root, false)? else {
         return Ok(held);
     };
     settle_owed(&directory, name)?;
+    held.stripped = strip_retired(&directory, name)?;
     if os::kind(&directory, name.as_ref()).map_err(|()| unavailable())? != Some(Kind::Folder) {
         return Ok(held);
     }
@@ -566,6 +737,7 @@ impl Retired<'_> {
             root: self.root.to_path_buf(),
             name: self.name.to_owned(),
             aside: self.aside.take(),
+            stripped: std::mem::take(&mut self.stripped),
             replaced: false,
             new_ref,
         }
@@ -584,6 +756,7 @@ pub(super) fn removal(
         root: root.to_path_buf(),
         name: name.to_owned(),
         aside: None,
+        stripped: Vec::new(),
         replaced: false,
         new_ref,
     }
@@ -591,28 +764,33 @@ pub(super) fn removal(
 
 /// A plugin folder change that waits for the end of the transaction its rows are written
 /// in: a removal's folder moved aside under its removal name, or a replace's older folder
-/// moved aside under its retired name. After the commit [`FolderStep::commit`] deletes
-/// what went; after a rollback [`FolderStep::roll_back`] puts the folder back under its
-/// name. A step dropped with neither, as when the work unwinds, puts the folder back as a
-/// rollback does, since the transaction it waited for never commits.
+/// moved aside under its retired name, with the retired folders a removal took the name
+/// off. After the commit [`FolderStep::commit`] deletes what went; after a rollback
+/// [`FolderStep::roll_back`] puts each folder back under its name. A step dropped with
+/// neither, as when the work unwinds, puts the folders back as a rollback does, since the
+/// transaction it waited for never commits.
 #[derive(Debug)]
 pub struct FolderStep {
     root: PathBuf,
     name: String,
     aside: Option<String>,
+    stripped: Vec<(OsString, String)>,
     replaced: bool,
     new_ref: fn() -> Result<String, &'static str>,
 }
 
 impl FolderStep {
     /// Deletes what the committed change let go. A removal deletes its folder moved aside,
-    /// first renamed without the plugin name so one it cannot delete is never put back, then
-    /// any entry left under the plugin name; a replace deletes the older folder the same
+    /// first renamed without the plugin name so one it cannot delete is never put back, the
+    /// retired folders it took the name off, then any entry left under the plugin name; a
+    /// replace deletes the older folder the same
     /// way, best effort, as the start sweep finishes one it cannot. Once it starts, the
     /// folder is never put back. Output: Ok, or the removal folder's refusal when it keeps
     /// the plugin name.
     pub fn commit(mut self) -> Result<(), Refused> {
         assert!(valid_name(&self.name));
+        let stripped = std::mem::take(&mut self.stripped);
+        assert!(!self.replaced || stripped.is_empty());
         if let Some(aside) = self.aside.take() {
             let directory = open(&self.root, false)?.ok_or_else(unavailable)?;
             let (_, id) = aside
@@ -631,6 +809,11 @@ impl FolderStep {
             }
         }
         assert!(!self.replaced);
+        if !stripped.is_empty()
+            && let Some(directory) = open(&self.root, false)?
+        {
+            delete_stripped(&directory, &stripped);
+        }
         remove(&self.root, &self.name, self.new_ref).map(drop)
     }
 
@@ -640,12 +823,18 @@ impl FolderStep {
         self.put_back();
     }
 
-    /// Puts the folder moved aside back under the plugin name, once. A replace first moves
-    /// the new folder off the name, renamed without it by the aside's own id and deleted;
-    /// if that move fails, the original is renamed as owed back to the name, which the start
+    /// Puts the folder moved aside back under the plugin name, once, and each retired folder
+    /// a removal took the name off back under its retired name. A replace first moves the
+    /// new folder off the name, renamed without it by the aside's own id and deleted; if
+    /// that move fails, the original is renamed as owed back to the name, which the start
     /// sweep puts back in place of the new folder. Output: none.
     fn put_back(&mut self) {
+        let stripped = std::mem::take(&mut self.stripped);
+        assert!(!self.replaced || stripped.is_empty());
         let Some(aside) = self.aside.take() else {
+            if let Ok(Some(directory)) = open(&self.root, false) {
+                restore_stripped(&directory, &stripped);
+            }
             return;
         };
         let Ok(Some(directory)) = open(&self.root, false) else {
@@ -665,7 +854,7 @@ impl FolderStep {
             let _ = remove_tree(&directory, &nameless);
         }
         let _ = os::rename(&directory, aside.as_ref(), self.name.as_ref());
-        let _ = os::sync(&directory);
+        restore_stripped(&directory, &stripped);
     }
 }
 
@@ -677,12 +866,16 @@ impl Drop for FolderStep {
 
 impl Drop for Retired<'_> {
     fn drop(&mut self) {
-        let Some(aside) = self.aside.take() else {
+        let aside = self.aside.take();
+        let stripped = std::mem::take(&mut self.stripped);
+        if aside.is_none() && stripped.is_empty() {
             return;
-        };
+        }
         if let Ok(Some(directory)) = open(self.root, false) {
-            let _ = os::rename(&directory, aside.as_ref(), self.name.as_ref());
-            let _ = os::sync(&directory);
+            if let Some(aside) = aside {
+                let _ = os::rename(&directory, aside.as_ref(), self.name.as_ref());
+            }
+            restore_stripped(&directory, &stripped);
         }
     }
 }
@@ -691,7 +884,8 @@ impl Drop for Retired<'_> {
 /// name. The folder first moves to a retired name with no plugin name in it, so one it
 /// cannot delete is never listed or restored again and stays for the start sweep; an
 /// entry that is not a folder, such as a link, is unlinked itself without following it. A
-/// folder owed back to the name is settled first. Inputs: the engine root, a valid name and
+/// folder owed back to the name is settled first, and every retired folder of the name
+/// loses it. Inputs: the engine root, a valid name and
 /// the random id source. Output: whether anything was deleted, or the folder's refusal.
 pub(super) fn remove(
     root: &Path,
@@ -702,6 +896,8 @@ pub(super) fn remove(
         return Ok(false);
     };
     settle_owed(&directory, name)?;
+    let stripped = strip_retired(&directory, name)?;
+    delete_stripped(&directory, &stripped);
     let kind = os::kind(&directory, name.as_ref()).map_err(|()| unavailable())?;
     match kind {
         Some(Kind::Folder) => {

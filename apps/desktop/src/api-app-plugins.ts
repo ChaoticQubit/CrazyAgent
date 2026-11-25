@@ -72,6 +72,7 @@ export const APP_PLUGIN_REFUSALS: Record<string, string> = {
   app_plugins_readonly: "CrazyAgent's data is read-only right now, so plugins can't change. Nothing was changed.",
   app_plugin_not_found: "That plugin is gone. Open App plugins again to see the current ones.",
   app_plugin_name_taken: "A built-in plugin already has that name. Give your plugin another name.",
+  app_plugin_name_used: "A plugin with that name was added after you reviewed this one. Review it again to replace it.",
   app_plugin_bundled: "Built-in plugins can be turned off but not removed or replaced.",
   app_plugin_essential: "This built-in plugin stays on. CrazyAgent needs it to work.",
   app_plugin_changed: "The plugin folder changed after you checked it. Check it again before you trust it.",

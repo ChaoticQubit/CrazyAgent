@@ -174,9 +174,9 @@ pub(crate) enum Part {
     },
 }
 
-/// Reads the parts of a path without following a link, every access list in one listing
-/// ([`super::acl::shared_all`]). A link's own access list is never read, as its mode is not. Input:
-/// the parts. Output: the reads, in order.
+/// Reads the parts of a path without following a link, each part's access list read for the
+/// object `lstat` found ([`super::acl::shared_all`]). A link's own access list is never read,
+/// as its mode is not. Input: the parts. Output: the reads, in order.
 #[cfg(target_os = "macos")]
 fn read_parts(entries: &[&Path]) -> Vec<Part> {
     use std::os::unix::fs::MetadataExt;
@@ -314,4 +314,25 @@ pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
 #[cfg(windows)]
 pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
     changeable_by_others(path)
+}
+
+/// The first part of a socket's path, the socket first, that someone other than this user
+/// or root can change, read as [`changeable_past_sticky`] reads a path but with the group and
+/// world write bits of the socket and its folder set aside: a socket's write bit only lets a
+/// caller connect, and the caller judges the folder's mode itself. Owners, sticky bits,
+/// access lists and every folder above still count. Input: the canonical socket path.
+#[cfg(unix)]
+pub fn changeable_above_socket(socket: &Path) -> Option<PathBuf> {
+    assert!(socket.is_absolute());
+    let entries: Vec<&Path> = socket.ancestors().collect();
+    let mut parts = read_parts(&entries);
+    assert_eq!(parts.len(), entries.len());
+    for part in parts.iter_mut().take(2) {
+        if let Part::Found { mode, .. } = part {
+            *mode &= !0o022;
+        }
+    }
+    first_changeable_part(&parts, current_uid(), true)
+        .and_then(|depth| socket.ancestors().nth(depth))
+        .map(Path::to_path_buf)
 }
