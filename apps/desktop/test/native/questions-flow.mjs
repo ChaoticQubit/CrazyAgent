@@ -27,7 +27,6 @@ const SETUP_MS = 180000;
 const LAUNCH_MS = 120000;
 const CALL_MS = 150000;
 const ASK_SHOWN_MS = 10000;
-const TOAST_MS = 30000;
 const VIEW_MS = 30000;
 const DELIVERY_MS = 90000;
 const QUIET_MS = 20000;
@@ -37,6 +36,8 @@ const JOB_MS = 30000;
 const PLAN_REAL_MS = 30 * 60 * 1000;
 const CONTROL_DEPTH_MAX = 10;
 const TABS_MAX = 12;
+const HOME_BADGE = /\b[1-9]\d* new team notifications?\./;
+const OPEN_HINT = /\bEnter Open(?= {2}|\s*$)/m;
 const OPEN_POINTS_MAX = 8;
 const TMUX_SEARCH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const SHIFT_RIGHT = ["1b", "5b", "31", "3b", "32", "43"];
@@ -562,11 +563,8 @@ async function main() {
         await me.waitFor("Home with the project", (text) => text.includes(REPO) && !/No projects yet/.test(text));
         await me.capture("home");
       }
-      let toast = null;
 
       await step("1", "an agent's ask is logged at once: the engine log, an owner notification and .crazyagent/questions.md", ["QL-1"], async () => {
-        const toastText = `The master: ${ASKS.view.question}`;
-        toast = me ? me.waitFor("the question toast", (text) => text.includes(toastText), TOAST_MS).then(() => null, (error) => error) : null;
         const began = Date.now();
         const id = await ask("view");
         const page = join(repo, ".crazyagent", "questions.md");
@@ -585,15 +583,15 @@ async function main() {
         return `question ${id} logged, notified and on questions.md in ${Date.now() - began} ms`;
       });
 
-      await step("2", "the desktop shows it: the bridge list and counts, a toast, and the Questions tab card with the recommendation", ["QL-1", "QL-2"], async () => {
+      await step("2", "the desktop shows it: the bridge list and counts, the Home badge, and the Questions tab card with the recommendation", ["QL-1", "QL-2"], async () => {
         const id = needs(state.asked.view, "1");
         const listed = (await value("desktop_questions", { projectId: state.project, after: null })).items.find((item) => item.id === id);
         if (!listed || listed.status !== "pending" || listed.version !== 0 || listed.recommended !== "Postgres") throw new Refused("desktop_questions_mismatch", JSON.stringify(listed ?? null));
         const counted = (await value("desktop_question_counts")).find((item) => item.project_id === state.project);
         if (!counted || counted.pending < 1) throw new Refused("desktop_question_counts_without_project", JSON.stringify(counted ?? null));
         const view = onPage();
-        const missed = await toast;
-        if (missed) throw new Refused("no_question_toast", missed.message.slice(0, 300));
+        const missed = await view.waitFor("the question badge on Home", (text) => HOME_BADGE.test(text), VIEW_MS).then(() => null, (error) => error);
+        if (missed) throw new Refused("no_question_badge", missed.message.slice(0, 300));
         await view.follow(`.cards a[href*="/projects/"]`);
         await view.waitFor("the project page", (text) => text.includes(REPO) && /Questions/.test(text));
         await view.click("Questions", "a, button, [role=tab]");
@@ -602,7 +600,7 @@ async function main() {
         for (const word of ["Waiting for you", "Recommended", "Postgres", "SQLite", "MySQL", "Answer", "Dismiss"]) {
           if (!card.includes(word)) throw new Refused("question_card_without", word);
         }
-        return `listed version ${listed.version}; ${counted.pending} pending; toast and card shown`;
+        return `listed version ${listed.version}; ${counted.pending} pending; badge and card shown`;
       });
 
       await step("3", "answer once in the Questions view: the master gets the answer once and a second answer is stale", ["QL-1", "QL-2"], async () => {
@@ -846,7 +844,7 @@ async function main() {
         const atHome = await pty.until("badge_on_home", (screen) => badge(screen) === pending).catch(() => {
           throw new Refused("tui_home_without_badge", `wanted ${pending} questions: ${pty.screen().split("\n").slice(-3).join(" | ")}`);
         });
-        for (let pressed = 0; pressed < TABS_MAX && !pty.screen().includes("Open"); pressed += 1) {
+        for (let pressed = 0; pressed < TABS_MAX && !OPEN_HINT.test(pty.screen()); pressed += 1) {
           pty.keys("Tab");
           await pause(POLL_MS);
         }
