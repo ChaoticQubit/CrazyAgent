@@ -163,3 +163,155 @@ fn the_owner_read_lists_plugin_grants() {
     assert_eq!(ids, ["agent-quit", "ollama", "openai", "voyage"]);
     assert_eq!(plugins[0].capabilities[0].name, "settings.save_quit");
 }
+
+/// A private engine root for one sweep row: the scratch guard and its canonical 0700
+/// path. Output: both; a failure stops the row naming what failed.
+fn sweep_root() -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("scratch folder: {error}"));
+    let root = temp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("{}: {error}", temp.path().display()));
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("{}: {error}", root.display()));
+    (temp, root)
+}
+
+/// Saves one plugin key file under the engine root. Inputs: the root and the key name.
+fn save_plugin_key(root: &std::path::Path, name: &str) {
+    let reference = KeyRef::new(name).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    (KEYS.replace)(root, KeyFolder::Plugin, &reference, b"sk-sweep-key-02".to_vec())
+        .unwrap_or_else(|error| panic!("save {name}: {error:?}"));
+}
+
+/// Whether one plugin key file is still saved. Inputs: the root and the key name.
+/// Output: the answer.
+fn plugin_key_saved(root: &std::path::Path, name: &str) -> bool {
+    let reference = KeyRef::new(name).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    (KEYS.saved)(root, KeyFolder::Plugin, &reference)
+        .unwrap_or_else(|error| panic!("read {name}: {error:?}"))
+}
+
+/// Makes a folder as this user's 0700 folder. Input: the path.
+fn private_folder(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+}
+
+/// Writes a database whose binding rows name the given keys, as a kept copy of replaced
+/// 2.5 data holds them. Inputs: the copy's folder, made here, and the key names. Output:
+/// the database path.
+fn copy_naming(folder: &std::path::Path, keys: &[&str]) -> std::path::PathBuf {
+    private_folder(folder);
+    let path = folder.join("engine.db");
+    let db = rusqlite::Connection::open(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    kernel_plugin_host::store::initialize(&db)
+        .unwrap_or_else(|error| panic!("{}: {error:?}", path.display()));
+    for (index, key) in keys.iter().enumerate() {
+        db.execute(
+            "INSERT INTO app_plugin_secrets (plugin, secret, source, reference)
+             VALUES (?1, 'api_key', 'key', ?2)",
+            [format!("acme{index}"), (*key).to_owned()],
+        )
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    }
+    path
+}
+
+/// A live engine database with the plugin store's tables and no binding row, as 2.4 rows
+/// restored and upgraded hold it. Output: the connection.
+fn restored_engine() -> rusqlite::Connection {
+    let db = rusqlite::Connection::open_in_memory()
+        .unwrap_or_else(|error| panic!("in-memory database: {error}"));
+    initialize(&db).unwrap_or_else(|error| panic!("plugin store tables: {error:?}"));
+    db
+}
+
+/// The names in a folder, sorted. Input: the folder. Output: the names.
+fn names_in(folder: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .unwrap_or_else(|error| panic!("{}: {error}", folder.display()))
+        .map(|entry| {
+            let entry = entry.unwrap_or_else(|error| panic!("{}: {error}", folder.display()));
+            entry.file_name().to_string_lossy().into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A plugin key a kept copy of replaced 2.5 data names stays through the start sweep, as a
+/// restore whose key settle stopped early leaves it in `plugin-keys`: an older copy naming
+/// it keeps it though the newest copy names nothing, a key no copy and no row names is
+/// still deleted, and the copies are read only, their database bytes and names unchanged.
+#[test]
+fn a_key_a_kept_replaced_copy_names_survives_the_start_sweep() {
+    let (_temp, root) = sweep_root();
+    let backups = root.join("backups");
+    private_folder(&backups);
+    let older = copy_naming(&backups.join("replaced-20261101T000000Z"), &["plugin-key-kept"]);
+    let newer = copy_naming(&backups.join("replaced-20261120T000000Z"), &[]);
+    let read = |path: &std::path::Path| fixture_bytes(path);
+    let (older_bytes, newer_bytes) = (read(&older), read(&newer));
+    save_plugin_key(&root, "plugin-key-kept");
+    save_plugin_key(&root, "plugin-key-orphan");
+
+    sweep_at_start(&restored_engine(), &root);
+
+    assert!(plugin_key_saved(&root, "plugin-key-kept"));
+    assert!(!plugin_key_saved(&root, "plugin-key-orphan"));
+    assert_eq!(read(&older), older_bytes);
+    assert_eq!(read(&newer), newer_bytes);
+    for copy in [&older, &newer] {
+        let folder = copy.parent().unwrap_or_else(|| panic!("{} has no folder", copy.display()));
+        assert_eq!(names_in(folder), ["engine.db"], "{}", folder.display());
+    }
+}
+
+/// A kept copy of replaced data the sweep cannot read keeps every plugin key, as one a
+/// failed settle could not open: its own `replaced-` folder whose database is not one, or
+/// more copies than the sweep reads. A link named as a copy, or a folder with another
+/// name, is not read and keeps nothing.
+#[test]
+fn an_unreadable_replaced_copy_keeps_every_plugin_key() {
+    let (_temp, root) = sweep_root();
+    let backups = root.join("backups");
+    private_folder(&backups);
+    let outside = root.join("outside");
+    copy_naming(&outside, &["plugin-key-orphan"]);
+    std::os::unix::fs::symlink(&outside, backups.join("replaced-20261102T000000Z"))
+        .unwrap_or_else(|error| panic!("{}: {error}", backups.display()));
+    copy_naming(&backups.join("11-to-12-20261103T000000Z"), &["plugin-key-orphan"]);
+    save_plugin_key(&root, "plugin-key-orphan");
+    sweep_at_start(&restored_engine(), &root);
+    assert!(!plugin_key_saved(&root, "plugin-key-orphan"));
+
+    let unreadable = backups.join("replaced-20261104T000000Z");
+    private_folder(&unreadable);
+    let database = unreadable.join("engine.db");
+    std::fs::write(&database, b"not a database, as a cut copy reads")
+        .unwrap_or_else(|error| panic!("{}: {error}", database.display()));
+    save_plugin_key(&root, "plugin-key-orphan");
+    sweep_at_start(&restored_engine(), &root);
+    assert!(plugin_key_saved(&root, "plugin-key-orphan"));
+
+    std::fs::remove_dir_all(&unreadable)
+        .unwrap_or_else(|error| panic!("{}: {error}", unreadable.display()));
+    let template = copy_naming(&root.join("template"), &[]);
+    for index in 0..=crate::storage::migrations::REPLACED_SCAN_MAX {
+        let copy = backups.join(format!("replaced-20261105T{index:06}Z"));
+        private_folder(&copy);
+        std::fs::copy(&template, copy.join("engine.db"))
+            .unwrap_or_else(|error| panic!("{}: {error}", copy.display()));
+    }
+    sweep_at_start(&restored_engine(), &root);
+    assert!(plugin_key_saved(&root, "plugin-key-orphan"));
+}
+
+/// Reads a fixture's bytes. Input: the path. Output: the bytes; a failed read stops the
+/// row naming the path and the I/O error.
+fn fixture_bytes(path: &std::path::Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}

@@ -484,6 +484,11 @@ fn sweep_failed(folder: &str, cause: &EngineError) {
 #[cfg(unix)]
 const REPLACED_DATABASE: &str = "replaced-database";
 
+/// The most kept copies of replaced 2.5 data the start sweep reads for the plugin key
+/// names they hold; with more, every plugin key stays.
+#[cfg(unix)]
+pub(crate) const REPLACED_SCAN_MAX: usize = 64;
+
 /// Opens the database of the dated copy of the replaced 2.5 data without following a link:
 /// read-write like `shape`, so a WAL copy with no -wal or -shm file opens on Apple's SQLite,
 /// then `query_only`, so the sweep can never write the kept copy. Input: the copy's folder.
