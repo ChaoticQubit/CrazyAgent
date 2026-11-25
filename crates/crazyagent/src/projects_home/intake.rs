@@ -849,6 +849,15 @@ fn copy_into(
     result
 }
 
+/// The owner line for `home_permission_denied` on macOS, where privacy settings or the
+/// folder's permissions refuse CrazyAgent.
+#[cfg(target_os = "macos")]
+pub(super) const PERMISSION_DENIED: &str = "macOS did not let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed.";
+/// The owner line for `home_permission_denied` on Linux and Windows, where the folder's
+/// permissions refuse CrazyAgent.
+#[cfg(not(target_os = "macos"))]
+pub(super) const PERMISSION_DENIED: &str = "CrazyAgent couldn't read or move this folder: its permissions don't allow it. Check the folder's owner and permissions, then try again. Nothing was removed.";
+
 /// The refusal for one failed step of an add, logged by step and errno, never by path: a
 /// file still only in iCloud (EDEADLK, what macOS answers a launchd agent that may not
 /// download it), a folder macOS privacy or its permissions keep CrazyAgent from (EPERM,
