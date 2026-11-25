@@ -3692,7 +3692,7 @@ pub fn read_context(
 mod redaction;
 mod research_logs;
 pub(crate) use redaction::redact;
-pub use research_logs::research_log;
+pub use research_logs::{research_job_log, research_log};
 
 /// Where the value of a key named like a credential sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

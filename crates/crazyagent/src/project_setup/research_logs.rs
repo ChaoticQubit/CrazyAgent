@@ -75,6 +75,30 @@ pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineEr
     Err(failure("research_log_unavailable"))
 }
 
+/// Reads the last plain lines of the run a research job's own record names, as
+/// [`research_log`] reads a run. Takes the transaction that read the job, the engine database
+/// path and the job id. Returns the lines, or none when the job has no run to read.
+#[cfg(unix)]
+pub fn research_job_log(
+    _tx: &Transaction<'_>,
+    database: &Path,
+    job: i64,
+) -> Result<Vec<String>, EngineError> {
+    research_log(database, job)
+}
+
+/// Refuses research job output where no directory-relative no-follow read exists.
+/// Takes the transaction, engine database path and job id, all unused.
+/// Returns `research_log_unavailable`.
+#[cfg(not(unix))]
+pub fn research_job_log(
+    _tx: &Transaction<'_>,
+    _database: &Path,
+    _job: i64,
+) -> Result<Vec<String>, EngineError> {
+    Err(failure("research_log_unavailable"))
+}
+
 /// Names the newest run folder of a research job in the runner's agent state.
 /// Takes the open agents folder and the job id; run folders are named job-<id>-<attempt> with
 /// an optional -<launch>, both bounded by the runner, so each name is probed newest first and

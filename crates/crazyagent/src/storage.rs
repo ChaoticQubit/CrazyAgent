@@ -3920,7 +3920,7 @@ fn owner_read(
             OwnerData::ResearchLog {
                 project_id: project_id.clone(),
                 job: *job,
-                lines: crate::project_setup::research_log(path, *job)?,
+                lines: crate::project_setup::research_job_log(&tx, path, *job)?,
             }
         }
         OwnerRead::ProjectContextItem {
