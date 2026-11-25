@@ -230,7 +230,7 @@ mod profile_rows {
         }
     }
 
-    /// V244-WIN-NPM: install refuses a read root no app container reads and this standard
+    /// Install refuses a read root no app container reads and this standard
     /// user cannot change, made by an administrator and named in
     /// `CRAZYAGENT_TEST_UNCHANGEABLE_ROOT`, by that folder and before any profile is written,
     /// and installs the same policy reading a folder this user owns.
@@ -335,7 +335,7 @@ mod profile_rows {
         }
     }
 
-    /// V243-WIN-CONFINED-ASSERTS: a harness wrapped with a boundary profile, as the research
+    /// A harness wrapped with a boundary profile, as the research
     /// runner wraps its agent, starts at the boundary helper beside the engine with the
     /// profile after `--profile`, inside the project. It needs the helper copied beside the
     /// test binary, where the wrap looks, so it never passes without reaching the assert.

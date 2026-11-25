@@ -21,7 +21,7 @@ pub const ACTIVE_PROCESSES: u32 = 512;
 /// boundary leaves it out of the protected paths: Windows cannot refuse creating one name, so
 /// guarding a lock that is normally missing would keep `.git` from taking new entries, git's
 /// own `index.lock` among them. A lock an agent makes never becomes the config: `config` is
-/// read only, so no agent replaces or deletes it (DEC-193 D6, step 0c).
+/// read only, so no agent replaces or deletes it.
 pub(crate) const GIT_CONFIG_LOCK: &str = "config.lock";
 
 const PROFILE_NAME_MAX: usize = 128;
@@ -45,7 +45,7 @@ const PINNED_VARIABLES: &[&str] = &[
 /// The Windows boundary for one project agent. The helper runs the agent in an AppContainer
 /// of its own with read and execute on its read roots, modify on its writable roots, read and
 /// execute only on the protected paths and nothing on secret paths inside a granted root,
-/// inside a job that kills the agent's whole tree when the helper ends (DEC-193).
+/// inside a job that kills the agent's whole tree when the helper ends.
 #[derive(Debug)]
 pub struct WindowsSandbox {
     sandbox: ProjectSandbox,
@@ -221,10 +221,10 @@ pub fn agent_command<'a>(
     Ok(command)
 }
 
-/// The AppContainer capabilities for a network reach (DESIGN-0256 O2a): the internet client
+/// The AppContainer capabilities for a network reach: the internet client
 /// when open or limited to ports on any host, a limit the AppContainer cannot hold and so
 /// widens; none when no endpoint is allowed; and [`MODEL_LOOPBACK_WINDOWS_LINE`] for any
-/// loopback port, which it cannot reach (P6). Input: the network. Output: the list or refusal.
+/// loopback port, which it cannot reach. Input: the network. Output: the list or refusal.
 pub fn capabilities(network: &SandboxNetwork) -> Result<Vec<Capability>, SandboxError> {
     match network {
         SandboxNetwork::Open => Ok(vec![Capability::InternetClient]),
@@ -317,7 +317,7 @@ pub fn boundary_profile(
 
 /// Makes `.git\hooks`, `.git\modules` and `.crazyagent\context` when missing, empty, in a parent
 /// that is a real folder, never replacing an entry and never making `.git` or `.crazyagent`,
-/// which would move a legacy project's state folder (DEC-193 F2): the helper keeps the entries
+/// which would move a legacy project's state folder: the helper keeps the entries
 /// of the folder above a missing guarded path, which would stop git's `index.lock`. A job
 /// folder holds no guards, so none is made there. Input: the policy. Output: how many were
 /// made, or the failure.
