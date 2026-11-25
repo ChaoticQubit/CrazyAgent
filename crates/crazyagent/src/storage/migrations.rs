@@ -505,28 +505,21 @@ fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
     Ok(opened)
 }
 
-/// Every key name the binding rows of each kept copy of replaced 2.5 data name, for the
-/// start sweep to keep what a restore whose key settle stopped early left in place. A copy
-/// is a `backups/replaced-<time>` folder this user owns, read as itself; a link, another
-/// account's folder or any other name is not read. A copy whose database does not open or
-/// read, a folder that does not list, or more than [`REPLACED_SCAN_MAX`] copies is a
-/// failure, on which the sweep keeps every key. Input: the engine root. Output: the names.
+/// Every kept copy of replaced 2.5 data under the engine root's backups: each
+/// `backups/replaced-<time>` folder this user owns, read as itself; a link, another
+/// account's folder or any other name is skipped. A folder that does not list or more than
+/// [`REPLACED_SCAN_MAX`] copies is a failure. Input: the engine root. Output: the folders.
 #[cfg(unix)]
-pub(crate) fn replaced_key_names(
-    root: &Path,
-) -> Result<std::collections::BTreeSet<String>, EngineError> {
+pub(crate) fn replaced_copies(root: &Path) -> Result<Vec<std::path::PathBuf>, EngineError> {
     use std::os::unix::fs::MetadataExt;
     let folder = root.join(kernel_storage::migrations::BACKUPS);
     let entries = match std::fs::read_dir(&folder) {
         Ok(entries) => entries,
-        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(std::collections::BTreeSet::new());
-        }
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(cause) => return Err(error(cause)),
     };
     let user = rustix::process::geteuid().as_raw();
-    let mut names = std::collections::BTreeSet::new();
-    let mut read = 0;
+    let mut copies = Vec::new();
     for entry in entries {
         let entry = entry.map_err(error)?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -540,10 +533,26 @@ pub(crate) fn replaced_key_names(
         if !found.is_dir() || found.uid() != user {
             continue;
         }
-        if read == REPLACED_SCAN_MAX {
+        if copies.len() == REPLACED_SCAN_MAX {
             return Err(error("app_plugins_replaced_copies_over_cap"));
         }
-        read += 1;
+        copies.push(copy);
+    }
+    assert!(copies.len() <= REPLACED_SCAN_MAX);
+    Ok(copies)
+}
+
+/// Every key name the binding rows of each kept copy of replaced 2.5 data name
+/// ([`replaced_copies`]), for the start sweep to keep what a restore whose key settle
+/// stopped early left in place. A copy whose database does not open or read, or a failed
+/// listing, is a failure, on which the sweep keeps every key. Input: the engine root.
+/// Output: the names.
+#[cfg(unix)]
+pub(crate) fn replaced_key_names(
+    root: &Path,
+) -> Result<std::collections::BTreeSet<String>, EngineError> {
+    let mut names = std::collections::BTreeSet::new();
+    for copy in replaced_copies(root)? {
         let replaced = replaced_database(&copy)?;
         if has_table(&replaced, "app_plugin_secrets")? {
             let named = kernel_plugin_host::store::named_keys(&replaced)
@@ -551,7 +560,6 @@ pub(crate) fn replaced_key_names(
             names.extend(named);
         }
     }
-    assert!(read <= REPLACED_SCAN_MAX);
     Ok(names)
 }
 
