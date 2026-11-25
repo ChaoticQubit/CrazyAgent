@@ -403,10 +403,15 @@ fn a_dropped_key_file_is_deleted_after_the_commit() {
     case.run(set_key(b"sk-row-eight-key-03")).unwrap();
     assert_eq!(case.key_file().unwrap(), second);
     assert!(second.exists(), "a key entered again keeps its file");
-    let moved = ACME.replace(
-        "hosts = [\"api.acme.example\"]",
-        "hosts = [\"api.acme.example\", \"eu.acme.example\"]",
-    );
+    let moved = ACME
+        .replace(
+            "https://api.acme.example/v1/embed",
+            "https://eu.acme.example/v1/embed",
+        )
+        .replace(
+            "hosts = [\"api.acme.example\"]",
+            "hosts = [\"eu.acme.example\"]",
+        );
     assert_ne!(moved, ACME);
     case.add("acme-moved", &moved, true).unwrap();
     assert!(case.key_file().is_none());
