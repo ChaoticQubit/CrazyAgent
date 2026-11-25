@@ -37,16 +37,16 @@ use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
 
 mod cleanup;
+/// Rows for the words a closed or refused terminal shows, apart from the long row file.
+/// Input: none. Output: the rows.
+#[cfg(test)]
+mod closed_words_tests;
 mod finished;
 mod questions;
 mod screen;
 mod state;
 #[cfg(test)]
 mod tests;
-/// Rows for the words a closed or refused terminal shows, apart from the long row file.
-/// Input: none. Output: the rows.
-#[cfg(test)]
-mod closed_words_tests;
 
 const MARGIN: u16 = 2;
 const CHROME_ROWS: u16 = 4;
