@@ -805,7 +805,9 @@ fn a_removed_plugin_with_a_kept_retired_folder_stays_removed_through_a_start() {
 
     let names = names_in(&folder);
     assert!(
-        names.iter().all(|name| name != "acme" && !name.starts_with(".old-acme.")),
+        names
+            .iter()
+            .all(|name| name != "acme" && !name.starts_with(".old-acme.")),
         "{names:?}"
     );
     let listing = list(&case.db, &case.engine()).unwrap();
