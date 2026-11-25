@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Result } from "../../api";
-import { cleanupNotReady, cleanupRefusal, keptReason, loadFinishedAgents, removeFinishedAgents, type FinishedAgent, type Removal } from "../../api-cleanup";
+import { cleanupNotReady, cleanupRefusal, keptReason, keptSentence, loadFinishedAgents, removeFinishedAgents, type FinishedAgent, type Removal } from "../../api-cleanup";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog } from "../../ui";
 import { displayText } from "../conversation";
@@ -51,8 +51,10 @@ export function cleanupRequest(asked: FinishedAgent[] | null, list: Loaded<Finis
  * owner confirmed and the engine's answer. Output: the line. */
 export function removalNote(asked: FinishedAgent[], result: Result<Removal>): string {
   if (result.kind !== "ok") return `Couldn't remove every worktree. ${cleanupRefusal(result.kind === "error" ? result : { code: "cleanup_unavailable" })}`;
-  const gone = asked.filter((agent) => result.value.agents.includes(agent.id));
-  if (result.value.kept !== null) return `Removed ${gone.length} ${gone.length === 1 ? "worktree" : "worktrees"}, kept ${asked.length - gone.length}: ${cleanupRefusal({ code: result.value.kept })}`;
+  const { agents, kept, folder } = result.value;
+  const gone = asked.filter((agent) => agents.includes(agent.id));
+  if (kept !== null && agents.length === 0) return `Couldn't remove every worktree. ${keptSentence(kept, folder)}`;
+  if (kept !== null) return `Removed ${gone.length} ${gone.length === 1 ? "worktree" : "worktrees"}, kept ${asked.length - gone.length}: ${keptSentence(kept, folder)}`;
   return `Removed the worktrees of ${finishedWord(gone.length)} and freed ${cleanupSize(gone)}.`;
 }
 

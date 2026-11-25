@@ -412,6 +412,7 @@ fn removed(agents: &[i64]) -> Removal {
     Removal {
         agents: agents.to_vec(),
         kept: None,
+        folder: None,
     }
 }
 
@@ -1031,6 +1032,7 @@ fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again(
         Removal {
             agents: vec![1],
             kept: Some("cleanup_worktree_leftover".into()),
+            folder: None,
         }
     );
     assert!(!case.worktree(1).exists() && case.history_kept(1));
@@ -2529,77 +2531,6 @@ fn a_removal_preview_names_each_agent_s_unlanded_work_without_running_git_in_a_c
     }
 }
 
-/// T8 design 9: Clean up takes the tool caches One per agent gave the agent whose worktree
-/// it removes, at each level, with its native teammates' and their priming records, and
-/// keeps another agent's and the shared caches, since a removed agent never runs again.
-#[cfg(target_os = "macos")]
-#[test]
-fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_ones() {
-    use kernel_sandbox::policy::{AgentAccess, ToolCacheScope};
-    use kernel_sandbox::tool_cache::{CacheShape, key, prepare, project_folder};
-    let case = Case::new();
-    case.agent(1, "sub", "stopped");
-    case.agent(2, "sub", "stopped");
-    let runtime = case.team.parent().unwrap();
-    let project = case.repo.to_str().unwrap();
-    let names: Vec<String> = [
-        (
-            ToolCacheScope::PerAgent,
-            AgentAccess::Sandboxed,
-            CacheShape::Worktree,
-            "1",
-        ),
-        (
-            ToolCacheScope::PerAgent,
-            AgentAccess::OwnBranch,
-            CacheShape::Clone,
-            "1",
-        ),
-        (
-            ToolCacheScope::PerAgent,
-            AgentAccess::Sandboxed,
-            CacheShape::Teammate,
-            "1-teammates",
-        ),
-        (
-            ToolCacheScope::PerAgent,
-            AgentAccess::Sandboxed,
-            CacheShape::Worktree,
-            "2",
-        ),
-        (
-            ToolCacheScope::Shared,
-            AgentAccess::Sandboxed,
-            CacheShape::Worktree,
-            "1",
-        ),
-    ]
-    .into_iter()
-    .map(|(scope, access, shape, agent)| key(scope, access, shape, agent).unwrap())
-    .collect();
-    let folder = project_folder(runtime, project);
-    for name in &names {
-        prepare(
-            &crate::sandbox::TOOL_CACHE_HOOKS,
-            runtime,
-            project,
-            name,
-            None,
-        )
-        .unwrap();
-        write(&folder.join(format!("{name}.primed")), b"record\n");
-    }
-    assert_eq!(case.remove(&[1]), removed(&[1]));
-    let left = |name: &str| std::fs::symlink_metadata(folder.join(name)).is_ok();
-    for name in &names[..3] {
-        assert!(!left(name) && !left(&format!("{name}.primed")), "{name}");
-    }
-    for name in &names[3..] {
-        assert!(left(name) && left(&format!("{name}.primed")), "{name}");
-    }
-    assert!(case.history_kept(1) && case.kept(2));
-}
-
 /// Plants `tree` in a test home: folders `a` and `b` of three files each, so one reset walk
 /// of it lists eight names. Input: the home.
 #[cfg(unix)]
@@ -2893,5 +2824,6 @@ fn removing_a_deleted_agent_s_files_removes_what_it_shut_and_pinned_in_its_home(
     assert!(!left, "the agent folder stayed");
 }
 
+mod deep_tests;
 #[cfg(target_os = "macos")]
 mod run_folder_tests;
