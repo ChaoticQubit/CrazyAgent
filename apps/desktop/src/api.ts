@@ -40,6 +40,7 @@ const COPY: Record<string, string> = {
   ...RESTORE_COPY,
   git_safe_unavailable: "CrazyAgent's engine didn't start: Windows is installed in a folder whose name CrazyAgent can't use to keep git from running other programs, so it runs no git on this computer.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
+  owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
   engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
@@ -855,12 +856,7 @@ export function setAccountSchedule(scheduleChange: ScheduleChange, version: numb
   return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
-/** Makes the id of a new pool, so the page can select the pool it creates. Output: the id. */
-export function newPoolId(): string {
-  const bytes = new Uint8Array(10);
-  crypto.getRandomValues(bytes);
-  return "pool-" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
+export { newPoolId } from "./pool-id";
 
 /** Validates a pool before saving. Inputs: name and member ids. Output: the trimmed name
  * and members, or a plain error. */

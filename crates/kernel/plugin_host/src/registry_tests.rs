@@ -516,6 +516,31 @@ fn add_saves_a_private_file_trusts_it_and_turns_it_on() {
     assert_eq!(listing.plugins.last().unwrap().name, "acme");
 }
 
+/// A trust screen read before another add put a folder under the same name still says it
+/// adds a new plugin; the add it leads to is refused as a used name, not as a built-in's,
+/// so the owner reviews it again and is offered the replace.
+#[test]
+fn a_trust_screen_gone_stale_by_a_new_folder_is_refused_as_name_used() {
+    let case = case();
+    let source = picked(&case, "acme", ACME);
+    let Preview::Ready { trust } = preview(&case.db, &case.engine(), &source).unwrap() else {
+        panic!("ready");
+    };
+    assert!(!trust.replaces);
+    add_text(&case, ACME, false, 1).unwrap();
+
+    let stale = add(
+        &case.db,
+        &case.engine(),
+        &source,
+        &trust.sha256,
+        trust.replaces,
+        2,
+    );
+
+    assert_eq!(code(stale), "app_plugin_name_used");
+}
+
 #[test]
 fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     let case = case();
@@ -527,7 +552,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     add_text(&case, ACME, false, 1).unwrap();
     assert_eq!(
         code(add_text(&case, ACME, false, 2)),
-        "app_plugin_name_taken"
+        "app_plugin_name_used"
     );
     let newer = ACME.replace("release = \"1.0.0\"", "release = \"1.1.0\"");
     let Preview::Ready { trust } =
@@ -1379,6 +1404,7 @@ fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
     std::fs::create_dir_all(retired.join("a/b/c/d/e/f")).unwrap();
     std::fs::write(retired.join(MANIFEST_FILE), ACME).unwrap();
     let _ = crate::registry::remove_staged(&case.root);
+    let _ = crate::registry::sweep_replaced(&case.db, &case.root);
     let left = names_in(&folder);
     assert!(
         !left.iter().any(|name| name.starts_with(".old-acme.")),

@@ -6,8 +6,9 @@ type RouteRow = (&'static str, fn(EngineError) -> BridgeError);
 
 #[test]
 fn every_route_names_each_storage_answer_instead_of_its_unknown_outcome() {
-    let routes: [RouteRow; 17] = [
+    let routes: [RouteRow; 18] = [
         ("accounts", accounts::account_error),
+        ("app_plugins", app_plugins::app_plugin_error),
         ("account_profile", account_profile::profile_error),
         ("native_auth", native_auth::auth_error),
         ("plugins", plugins::plugin_failure),

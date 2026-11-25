@@ -225,7 +225,9 @@ test("the Task-start reminder row follows Workflow nudges with On as the default
     const reminder = markup.indexOf('aria-label="Task-start reminder"');
     const counted = markup.indexOf('aria-label="Counted tools"');
     assert.ok(nudges >= 0 && nudges < reminder && reminder < counted, `the reminder row sits between Workflow nudges and Counted tools: ${option}`);
-    const row = markup.slice(reminder, counted);
+    const next = markup.indexOf('aria-label="Uncommitted edits reminder"');
+    assert.ok(reminder < next && next < counted, `the Uncommitted edits reminder follows it: ${option}`);
+    const row = markup.slice(reminder, next);
     assert.deepEqual([...row.matchAll(/role="radio" aria-checked="(true|false)"[^>]*>([^<]+)</gu)].map((match) => [match[2], match[1]]),
       [["On", String(checked === "On")], ["Off", String(checked === "Off")]], option);
     assert.match(row, /ToolSearch/, option);
@@ -348,4 +350,13 @@ test("the coordination settings name each harness as the catalog the page hands 
   assert.equal(coord.modeOptions("codex", false, name)[0].disabledReason, "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.");
   assert.equal(coord.modeHelper("codex", false, name), "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.");
   assert.equal(coord.HARNESS_NAMES, undefined, "no list of harness names of its own is left in the desktop");
+});
+
+test("the Uncommitted edits reminder is On by default and shows under the Task-start reminder", () => {
+  assert.equal(coord.COORD_DEFAULTS.uncommitted_reminder, "on");
+  const markup = renderToStaticMarkup(createElement(coord.ToolsControls, { projectId: "p", status: { coordination: undefined }, reload: forbidden }));
+  const reminder = markup.indexOf("Uncommitted edits reminder");
+  assert.ok(reminder > markup.indexOf("Task-start reminder"), markup);
+  assert.match(markup.slice(reminder), /aria-checked="true"[^>]*>On</u);
+  assert.match(markup, /Off only tells you/u);
 });

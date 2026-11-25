@@ -522,9 +522,9 @@ async fn serve_client(mut stream: Stream, engine: std::sync::Arc<Engine>, timeou
 }
 
 /// The terminal host the engine serves agent terminals through, once one is made: the tmux
-/// program it was made for, none when tmux was not found, the host, and the newest look
-/// that found that program, so an older look still running never replaces it.
-#[cfg(unix)]
+/// program it was made for, none when tmux was not found or on Windows, the host, and the
+/// newest look that found that program, so an older look still running never replaces it
+/// (always 0 on Windows, whose ConPTY host is made once).
 type TerminalHost = (
     Option<std::path::PathBuf>,
     std::sync::Arc<dyn kernel_processes::terminal::Host>,
@@ -541,7 +541,6 @@ pub struct Engine {
     owner_egress: std::sync::Arc<tokio::sync::RwLock<()>>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
-    #[cfg(unix)]
     terminal: Mutex<Option<TerminalHost>>,
     #[cfg(unix)]
     terminal_looks: std::sync::atomic::AtomicU64,
@@ -707,7 +706,6 @@ impl Engine {
                 owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
                 dispatch_drive: tokio::sync::Mutex::new(()),
                 agents: Mutex::default(),
-                #[cfg(unix)]
                 terminal: Mutex::default(),
                 #[cfg(unix)]
                 terminal_looks: Default::default(),
@@ -731,7 +729,6 @@ impl Engine {
             owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
-            #[cfg(unix)]
             terminal: Mutex::default(),
             #[cfg(unix)]
             terminal_looks: Default::default(),
@@ -753,7 +750,6 @@ impl Engine {
             owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
-            #[cfg(unix)]
             terminal: Mutex::default(),
             #[cfg(unix)]
             terminal_looks: Default::default(),

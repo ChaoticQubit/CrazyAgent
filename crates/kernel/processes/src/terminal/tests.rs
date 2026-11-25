@@ -66,6 +66,15 @@ fn a_prompt_is_typed_as_one_submission_whatever_the_pane_mode() {
         "a prompt cannot end the paste or press keys"
     );
     assert_eq!(
+        keys("a\u{9b}201~b\u{9b}c", true).as_deref(),
+        Some("\x1b[200~a201~bc\x1b[201~"),
+        "a C1 CSI, which ConPTY input reads as ESC [, cannot end the paste either"
+    );
+    assert_eq!(
+        keys("a\u{9b}201~b\u{9b}c", false).as_deref(),
+        Some("a201~bc")
+    );
+    assert_eq!(
         keys("\u{e9}t\u{e9}", false).as_deref(),
         Some("\u{e9}t\u{e9}")
     );

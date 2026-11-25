@@ -454,11 +454,13 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// so what runs is what was reviewed. Keys bound to an older version stay only while its
 /// hosts are unchanged. Inputs: database, engine facts, the picked folder, the SHA-256 the
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
-/// or `app_plugin_changed`, `_refused`, `_name_taken`, `_past_cap` (the listing would not
-/// show it, or would drop a listed plugin for it), `_port_handed_out` (its loopback port
-/// is in the range the engine reads now), or the folder's refusal; outside the capture of
-/// its own transaction, `app_plugins_unavailable` before anything is written. A replaced
-/// folder is deleted only after the capture's commit and put back after its rollback.
+/// or `app_plugin_changed`, `_refused`, `_name_taken` (a built-in's name), `_name_used` (a
+/// user plugin holds the name and this add does not replace it), `_past_cap` (the listing
+/// would not show it, or would drop a listed plugin for it), `_port_handed_out` (its
+/// loopback port is in the range the engine reads now), or the folder's refusal; outside the
+/// capture of its own transaction, `app_plugins_unavailable` before anything is written. A
+/// replaced folder is deleted only after the capture's commit and put back after its
+/// rollback.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -479,7 +481,7 @@ pub fn add(
         return Err(refused("app_plugin_name_taken"));
     }
     if !replace && folder::read(engine.root, &manifest.name)?.is_some() {
-        return Err(refused("app_plugin_name_taken"));
+        return Err(refused("app_plugin_name_used"));
     }
     if !folder::fits(engine.root, &manifest.name)? {
         return Err(refused("app_plugin_past_cap"));
@@ -738,9 +740,10 @@ pub fn hold(
 }
 
 /// Sweeps what a crash between a staged copy and its rename left in the plugins folder: a
-/// retired folder whose plugin name is missing is moved back under that name, and every
-/// other staged or retired entry is deleted. Input: the engine root. Output: Ok, or the
-/// first refusal after every entry was tried.
+/// retired folder whose plugin name is missing is moved back under that name, one beside
+/// the live plugin of its name is left for [`sweep_replaced`], and every other staged or
+/// retired entry is deleted. Input: the engine root. Output: Ok, or the first refusal
+/// after every entry was tried.
 pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
     folder::sweep_within(root, USER_PLUGINS_MAX)
 }
@@ -774,6 +777,15 @@ fn known(db: &Connection, name: &str) -> Result<bool, Refused> {
 /// was tried.
 pub fn sweep_removals(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
     folder::sweep_removals(engine.root, |name| known(db, name))
+}
+
+/// Settles at start each retired folder a replace left beside the live plugin of its name,
+/// by the SHA-256 the trust row holds: deleted while the live text is trusted, put back in
+/// place of the live folder while only its own text is trusted, since that replace never
+/// committed, and otherwise kept. Inputs: the database and the engine root. Output: Ok, or
+/// the first refusal after every name was tried.
+pub fn sweep_replaced(db: &Connection, root: &Path) -> Result<(), Refused> {
+    folder::sweep_replaced(root, |name| trust::trusted_sha256(db, name))
 }
 
 const STAGED: &str = ".add-";

@@ -186,6 +186,97 @@ fn an_agent_that_ended_before_a_folder_was_hidden_is_not_listed() {
     team.workers.clear();
 }
 
+/// A seer the engine stopped and held, whose process ended, stays listed after the engine
+/// starts again, and the owner's Restart them then starts it again: a sub-agent in its own
+/// worktree and conversation, the live master as a planned restart.
+#[test]
+fn a_seer_held_before_an_engine_restart_stays_listed_and_restarts() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let keys = fixture.setup.project_folder().join("secrets").join("keys");
+    let before = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    crate::team::master::set_live(&fixture.connection, &project, true).unwrap();
+    assert!(crate::team::master::live(&fixture.connection, &project).unwrap());
+    let mut team = fixture.runtime();
+    let (mut worker, _orders) = held_worker(&project, AgentRole::Sub);
+    worker.hidden = Some(Vec::new());
+    team.workers.insert(before, worker);
+    let (mut worker, _master_orders) = held_worker(&project, AgentRole::Master);
+    worker.live = true;
+    team.workers.insert(master, worker);
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    team.workers.clear();
+    drop(team);
+    for id in [before, master] {
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET error=?2 WHERE id=?1",
+                params![id, FOLDER_HIDDEN],
+            )
+            .unwrap();
+    }
+
+    let mut team = fixture.runtime();
+    team.restart_seers(&fixture.setup).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert_eq!(
+        listed(&fixture),
+        vec![before, master],
+        "listed after a restart"
+    );
+    assert_eq!(restart_them(&fixture), crate::protocol::Outcome::Applied);
+    team.restart_seers(&fixture.setup).unwrap();
+    assert_eq!(
+        team.restarts.get(&before),
+        Some(&(project.clone(), Restart::Hidden))
+    );
+    assert!(team.master_restarts.contains(&project));
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(
+        listed(&fixture).is_empty(),
+        "a restarted seer is not listed"
+    );
+    team.restarts.clear();
+}
+
+/// After the engine starts again, an agent its list still names is listed again only while
+/// its row says the engine stopped it for a hidden folder: one started again, one whose row
+/// is gone, one that ended for another reason and a teammate are dropped from the list.
+#[test]
+fn a_listed_agent_started_again_gone_or_ended_otherwise_is_not_listed_after_a_restart() {
+    let fixture = Fixture::new(1);
+    let started = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let ended = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let teammate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Stopped);
+    let gone = teammate + 1_000;
+    for id in [started, teammate] {
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET error=?2 WHERE id=?1",
+                params![id, FOLDER_HIDDEN],
+            )
+            .unwrap();
+    }
+    let named = BTreeSet::from([started, ended, teammate, gone]);
+    crate::sandbox::access_store::hidden::set_seers(&fixture.connection, PROJECT, &named).unwrap();
+
+    let mut team = fixture.runtime();
+    team.restart_seers(&fixture.setup).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(listed(&fixture).is_empty(), "none is listed again");
+    assert!(
+        crate::sandbox::access_store::hidden::seers(&fixture.connection, PROJECT)
+            .unwrap()
+            .is_empty(),
+        "the list is emptied"
+    );
+    assert!(team.hidden_held.is_empty());
+}
+
 /// macOS only, as team panes run only there (DEC-094): a pane a later engine takes over is
 /// judged by what its record says its sandbox hid, a pane from before the engine kept that
 /// list counting as hiding none. A pane that can still see the hidden folder is stopped,
