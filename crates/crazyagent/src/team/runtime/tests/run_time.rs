@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use super::*;
 
 /// 7 days, the default before the owner picks (F01).
