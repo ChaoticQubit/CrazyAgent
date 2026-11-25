@@ -253,8 +253,7 @@ fn a_key_a_kept_replaced_copy_names_survives_the_start_sweep() {
     private_folder(&backups);
     let older = copy_naming(&backups.join("replaced-20261101T000000Z"), &["plugin-key-kept"]);
     let newer = copy_naming(&backups.join("replaced-20261120T000000Z"), &[]);
-    let read = |path: &std::path::Path| fixture_bytes(path);
-    let (older_bytes, newer_bytes) = (read(&older), read(&newer));
+    let (older_bytes, newer_bytes) = (fixture_bytes(&older), fixture_bytes(&newer));
     save_plugin_key(&root, "plugin-key-kept");
     save_plugin_key(&root, "plugin-key-orphan");
 
@@ -262,8 +261,8 @@ fn a_key_a_kept_replaced_copy_names_survives_the_start_sweep() {
 
     assert!(plugin_key_saved(&root, "plugin-key-kept"));
     assert!(!plugin_key_saved(&root, "plugin-key-orphan"));
-    assert_eq!(read(&older), older_bytes);
-    assert_eq!(read(&newer), newer_bytes);
+    assert_eq!(fixture_bytes(&older), older_bytes);
+    assert_eq!(fixture_bytes(&newer), newer_bytes);
     for copy in [&older, &newer] {
         let folder = copy.parent().unwrap_or_else(|| panic!("{} has no folder", copy.display()));
         assert_eq!(names_in(folder), ["engine.db"], "{}", folder.display());

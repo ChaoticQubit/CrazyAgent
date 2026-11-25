@@ -398,18 +398,32 @@ pub(crate) fn sweep_at_start(db: &Connection, root: &Path) {
 
 /// Deletes every entered plugin key file in `plugin-keys` that no binding row names. A name
 /// that is no entered plugin key and the account key folder are never touched, and when the
-/// binding rows do not read, no key is deleted. Inputs: the engine connection and root.
-/// Output: none.
+/// binding rows do not read, no key is deleted. On unix a key a kept copy of replaced 2.5
+/// data names also stays, as a restore whose key settle stopped early leaves it; those
+/// copies are read only when some key is unnamed, and when they do not read, no key is
+/// deleted. Inputs: the engine connection and root. Output: none.
 fn sweep_unnamed_keys(db: &Connection, root: &Path) {
     let Ok(named) = kernel_plugin_host::store::named_keys(db) else {
         return;
     };
-    let kept =
-        |name: &str| Ok(!kernel_plugin_host::store::is_entered_key(name) || named.contains(name));
+    let bound =
+        |name: &str| !kernel_plugin_host::store::is_entered_key(name) || named.contains(name);
     #[cfg(unix)]
-    let _ = accounts::settle_unkept_in(root, PLUGIN_KEYS, root, kept, |_| Ok(false));
+    {
+        let replaced = std::cell::OnceCell::new();
+        let kept = |name: &str| {
+            if bound(name) {
+                return Ok(true);
+            }
+            match replaced.get_or_init(|| crate::storage::migrations::replaced_key_names(root)) {
+                Ok(names) => Ok(names.contains(name)),
+                Err(cause) => Err(cause.clone()),
+            }
+        };
+        let _ = accounts::settle_unkept_in(root, PLUGIN_KEYS, root, kept, |_| Ok(false));
+    }
     #[cfg(windows)]
-    let _ = accounts::remove_unkept_in(root, PLUGIN_KEYS, kept);
+    let _ = accounts::remove_unkept_in(root, PLUGIN_KEYS, |name: &str| Ok(bound(name)));
 }
 
 #[cfg(all(test, unix))]
