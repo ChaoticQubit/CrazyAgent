@@ -48,7 +48,7 @@ pub(crate) const LIMIT_NETWORK: &str = "--limit-network";
 
 pub(crate) const OPEN_SOCKETS: &str = "--open-sockets";
 
-pub const KEEP_FREE: &str = "--keep-free";
+pub(crate) const KEEP_FREE: &str = "--keep-free";
 
 pub const PROBE: &str = "--probe";
 
@@ -66,23 +66,23 @@ pub(crate) const COVER: &str = "--cover";
 
 pub(crate) const SCOPED: &str = "--scoped";
 
-pub const GUARD_LOOPBACK: &str = "--guard-loopback";
+pub(crate) const GUARD_LOOPBACK: &str = "--guard-loopback";
 
-pub const GUARD_GIT: &str = "--guard-git";
+pub(crate) const GUARD_GIT: &str = "--guard-git";
 
-pub const OWN_TREE: &str = "--own-tree";
+pub(crate) const OWN_TREE: &str = "--own-tree";
 
 pub(crate) const OWN_KIDS: &str = "--own-kids";
 
-pub const OWN_GIT: &str = "--own-git";
+pub(crate) const OWN_GIT: &str = "--own-git";
 
-pub const GUARD_SIGNALS: &str = "--guard-signals";
+pub(crate) const GUARD_SIGNALS: &str = "--guard-signals";
 
-pub const GUARD_HELD: &str = "--guard-held";
+pub(crate) const GUARD_HELD: &str = "--guard-held";
 
-pub const GUARD_HELD_TREE: &str = "--guard-held-tree";
+pub(crate) const GUARD_HELD_TREE: &str = "--guard-held-tree";
 
-pub const GUARD_HELD_STORE: &str = "--guard-held-store";
+pub(crate) const GUARD_HELD_STORE: &str = "--guard-held-store";
 
 pub(crate) const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 
@@ -137,7 +137,7 @@ const PICKED_PORTS_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 
 const PICKED_PORTS_BYTES_MAX: u64 = 64;
 
-pub const PICKED_PORTS_UNREADABLE: &str = "CrazyAgent cannot read which ports this Linux hands out \
+pub(crate) const PICKED_PORTS_UNREADABLE: &str = "CrazyAgent cannot read which ports this Linux hands out \
      by itself (net.ipv4.ip_local_port_range), so it cannot keep the owner's ports free of an \
      agent";
 
@@ -552,7 +552,7 @@ pub fn read_picked_ports() -> Option<RangeInclusive<u16>> {
 /// kept port must lie outside that range, or no Landlock agent starts. Inputs: the kept
 /// ports and the range, none when it cannot be read. Output: Ok, or the plain reason
 /// naming the first kept port inside the range.
-pub fn kept_outside_picked(
+pub(crate) fn kept_outside_picked(
     kept: &[u16],
     picked: Option<&RangeInclusive<u16>>,
 ) -> Result<(), String> {
