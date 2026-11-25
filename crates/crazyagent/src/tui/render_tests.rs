@@ -838,7 +838,7 @@ fn settings_frames_match_the_design() {
 
     for (width, height) in [(120, 36), (80, 24)] {
         let mut ctx = ready(width, height);
-        ctx.colors = Colors::FollowMacos;
+        ctx.colors = Colors::FollowSystem;
         ctx.store.profile = Load::Ready(Some(profile()));
         ctx.store.pools = Load::Ready(pools());
         if width == 80 {
@@ -1245,7 +1245,7 @@ fn every_cell_uses_only_theme_colors_at_every_depth() {
         (Depth::TrueColor, Colors::Light, Appearance::Dark),
         (Depth::TrueColor, Colors::Terminal, Appearance::Dark),
         (Depth::Ansi256, Colors::Dark, Appearance::Dark),
-        (Depth::Ansi256, Colors::FollowMacos, Appearance::Light),
+        (Depth::Ansi256, Colors::FollowSystem, Appearance::Light),
         (Depth::Ansi16, Colors::Dark, Appearance::Dark),
         (Depth::NoColor, Colors::Light, Appearance::Light),
     ];

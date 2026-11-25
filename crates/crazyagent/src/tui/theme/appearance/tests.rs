@@ -231,19 +231,19 @@ fn a_program_that_is_not_an_absolute_path_is_never_started() {
 #[cfg(target_os = "macos")]
 #[test]
 fn this_build_reads_the_macos_setting() {
-    assert_eq!(THIS_OS, Os::Macos);
+    assert_eq!(this_os(), Os::Macos);
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn this_build_reads_the_linux_desktop_setting() {
-    assert_eq!(THIS_OS, Os::Linux);
+    assert_eq!(this_os(), Os::Linux);
 }
 
 #[cfg(not(unix))]
 #[test]
 fn this_build_reads_the_windows_setting() {
-    assert_eq!(THIS_OS, Os::Windows);
+    assert_eq!(this_os(), Os::Windows);
 }
 
 #[test]
@@ -252,8 +252,9 @@ fn a_real_read_answers_within_five_seconds() {
     let appearance = system_appearance();
     let elapsed = start.elapsed();
     println!(
-        "system_appearance ms {} appearance {appearance:?} os {THIS_OS:?}",
-        elapsed.as_millis()
+        "system_appearance ms {} appearance {appearance:?} os {:?}",
+        elapsed.as_millis(),
+        this_os()
     );
     assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
 }
