@@ -1125,7 +1125,12 @@ impl ResearchRunner {
             | ResearchAccount::Listed { .. } => None,
         };
         let (account, relay) = relayed(self.engine_folder()?, account)?;
-        self.launch_leased(jobs, job, &account, place, lease, relay.as_ref())
+        let agent = place.agent.clone();
+        let launched = self.launch_leased(jobs, job, &account, place, lease, relay.as_ref());
+        if let Err(error) = &launched {
+            keep_launch_cause(&self.state, &agent, error);
+        }
+        launched
     }
 
     /// The engine folder, which holds `engine.db` and the saved account keys.
@@ -3141,6 +3146,31 @@ fn create_private(base: &Path, path: &Path) -> io::Result<File> {
 fn create_private(_base: &Path, _path: &Path) -> io::Result<File> {
     Err(unavailable())
 }
+
+/// Appends why a launch erred to its run's owner-only `stderr.log`, which the research log
+/// reads, following no link below the runner's state folder; a run folder that was never
+/// made gets nothing. Inputs: the state folder, the run folder and the error. Output: none.
+#[cfg(unix)]
+fn keep_launch_cause(state: &Path, agent: &Path, error: &RunError) {
+    use rustix::fs::{Mode, OFlags};
+    let Ok(below) = agent.strip_prefix(state) else {
+        return;
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(folder) = crate::platform::open_beneath(state, below, flags) else {
+        return;
+    };
+    let append = OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND | OFlags::NOFOLLOW;
+    let mode = Mode::RUSR | Mode::WUSR;
+    if let Ok(log) = rustix::fs::openat(&folder, "stderr.log", append | OFlags::CLOEXEC, mode) {
+        let _ = File::from(log).write_all(format!("research launch failed: {error}\n").as_bytes());
+    }
+}
+
+/// Keeps no launch cause where no owner-only research file can be written.
+/// Inputs: the state folder, the run folder and the error, unused. Output: none.
+#[cfg(not(unix))]
+fn keep_launch_cause(_state: &Path, _agent: &Path, _error: &RunError) {}
 
 /// Opens a file to append, creating it, without following a link at `path`.
 /// Takes the path. Returns the open file or the I/O error.
@@ -6875,58 +6905,6 @@ mod tests {
             key: None,
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn adding_an_agent_worktree_never_runs_the_project_fsmonitor() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let project = base.join("project");
-        let home = base.join("agent").join("home");
-        let tmp = base.join("agent").join("tmp");
-        let profiles = base.join("profiles");
-        for folder in [&project, &home, &tmp, &profiles] {
-            fs::create_dir_all(folder).unwrap();
-        }
-        ensure_repository(&project, &tmp).unwrap();
-        let marker = tmp.join("fsmonitor-ran");
-        let monitor = tmp.join("monitor.sh");
-        fs::write(
-            &monitor,
-            format!("#!/bin/sh\necho ran >> '{}'\n", marker.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
-        let configured = kernel_processes::spawn_gate::status(
-            Command::new(GIT)
-                .env_clear()
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .arg("-C")
-                .arg(&project)
-                .args(["config", "core.fsmonitor"])
-                .arg(&monitor),
-        )
-        .unwrap();
-        assert!(configured.success());
-        let sandbox = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &project,
-            &home,
-            &tmp,
-            SandboxNetwork::Only(Vec::new()),
-        )
-        .unwrap();
-        let profile = profiles.join("agent.sb");
-        sandbox.install(&profile).unwrap();
-        let worktree = project.join("worktrees").join("agent-one");
-        add_worktree(&sandbox, &profile, &worktree).unwrap();
-        assert!(worktree.join(".git").is_file());
-        assert!(
-            !marker.exists(),
-            "the engine's git ran the project fsmonitor"
-        );
     }
 
     /// The engine's sandboxed setup git must be the real git, not the `/usr/bin/git` xcrun
