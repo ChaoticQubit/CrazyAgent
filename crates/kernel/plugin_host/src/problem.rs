@@ -238,7 +238,7 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
     ("app_plugin_not_found", "no plugin has that name."),
     (
         "app_plugin_name_taken",
-        "a plugin with this name already exists; remove it or choose replace.",
+        "a built-in plugin already has this name; give this plugin another name.",
     ),
     (
         "app_plugin_name_used",
