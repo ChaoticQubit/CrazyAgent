@@ -18,7 +18,6 @@ pub mod coordination;
 pub mod credentials;
 pub mod demo;
 pub mod engine;
-pub use kernel_common::file_identity;
 #[cfg(unix)]
 pub mod file_lock;
 pub mod github;

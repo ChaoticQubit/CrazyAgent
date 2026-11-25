@@ -131,7 +131,6 @@ fn act(
                 asset_bytes_max: policy.settings.knowledge.asset_bytes_max,
                 records_max: policy.settings.knowledge.records_max,
                 frame_bytes_max: FRAME_BYTES_MAX,
-                same_files: crate::file_identity::same_files,
             };
             applied(kernel::snapshot(tx, &facts, snapshot_id.as_str()))
         }
