@@ -403,10 +403,15 @@ fn a_dropped_key_file_is_deleted_after_the_commit() {
     case.run(set_key(b"sk-row-eight-key-03")).unwrap();
     assert_eq!(case.key_file().unwrap(), second);
     assert!(second.exists(), "a key entered again keeps its file");
-    let moved = ACME.replace(
-        "hosts = [\"api.acme.example\"]",
-        "hosts = [\"api.acme.example\", \"eu.acme.example\"]",
-    );
+    let moved = ACME
+        .replace(
+            "https://api.acme.example/v1/embed",
+            "https://eu.acme.example/v1/embed",
+        )
+        .replace(
+            "hosts = [\"api.acme.example\"]",
+            "hosts = [\"eu.acme.example\"]",
+        );
     assert_ne!(moved, ACME);
     case.add("acme-moved", &moved, true).unwrap();
     assert!(case.key_file().is_none());
@@ -654,14 +659,82 @@ fn a_key_replaced_in_a_rolled_back_capture_keeps_the_old_key() {
     assert_eq!(swapped[0].1, b"sk-row-swap-key-03");
 }
 
-/// The plugin host modules that write the plugin store, or reach a write through their
-/// start pass, as engine code names them.
-const STORE_WRITERS: [&str; 4] = [
-    "kernel_plugin_host::registry",
-    "kernel_plugin_host::trust",
-    "kernel_plugin_host::store",
-    "grants::list",
-];
+/// The plugin host modules whose functions write the plugin store, or reach a write
+/// through their start pass.
+const STORE_WRITERS: [&str; 3] = ["registry", "trust", "store"];
+
+/// Whether one path below `kernel_plugin_host::` reaches a store writer: a writer module
+/// itself, a glob of it, or a function in it, alone or inside a `{..}` group; a type from
+/// it alone does not count. Input: the path text after `kernel_plugin_host::`. Output: the
+/// answer.
+fn writer_path(path: &str) -> bool {
+    let function = |item: &str| {
+        item.trim()
+            .starts_with(|c: char| c.is_ascii_lowercase() || c == '*')
+    };
+    STORE_WRITERS.iter().any(|module| {
+        path.strip_prefix(module).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.starts_with([';', ',', '}'])
+                || rest.strip_prefix("::").is_some_and(|tail| {
+                    function(tail)
+                        || tail.strip_prefix('{').is_some_and(|group| {
+                            group
+                                .split('}')
+                                .next()
+                                .unwrap_or("")
+                                .split(',')
+                                .any(function)
+                        })
+                })
+        })
+    })
+}
+
+/// Whether engine code reaches the plugin store's writers: it names a writer module's
+/// function or the module itself, directly or in a `kernel_plugin_host::{..}` group, or
+/// `grants::list`. Input: the source. Output: the answer.
+fn reaches_store_writer(code: &str) -> bool {
+    const HOST: &str = "kernel_plugin_host::";
+    code.contains("grants::list")
+        || code.match_indices(HOST).any(|(at, _)| {
+            let rest = &code[at + HOST.len()..];
+            match rest.strip_prefix('{') {
+                Some(group) => group
+                    .split('}')
+                    .next()
+                    .unwrap_or("")
+                    .split(',')
+                    .any(|item| writer_path(item.trim())),
+                None => writer_path(rest),
+            }
+        })
+}
+
+/// The store-writer scan counts a writer function or the writer module itself, and not a
+/// type imported from it nor the store log module.
+#[test]
+fn the_store_writer_scan_counts_functions_and_modules_not_types() {
+    for reaching in [
+        "kernel_plugin_host::store::set_key(db, &engine, name, secret, key)",
+        "use kernel_plugin_host::store;",
+        "use kernel_plugin_host::store::{self, KeyFolder};",
+        "use kernel_plugin_host::trust::*;",
+        "use kernel_plugin_host::{registry, usage::Usage};",
+        "use kernel_plugin_host::{registry::add, usage::Usage};",
+        "kernel_plugin_host::grants::list(db, &engine)",
+    ] {
+        assert!(reaches_store_writer(reaching), "{reaching}");
+    }
+    for quiet in [
+        "use kernel_plugin_host::store::{KeyFolder, KeyRef};",
+        "use kernel_plugin_host::registry::Switch;",
+        "kernel_plugin_host::store_log::KINDS",
+        "use kernel_plugin_host::{grants::PluginGrants, usage::TurnOff};",
+    ] {
+        assert!(!reaches_store_writer(quiet), "{quiet}");
+    }
+}
 
 /// Every Rust source under a folder, with its path. Input: the folder. Output: the files.
 fn sources(folder: &std::path::Path) -> Vec<(PathBuf, String)> {
@@ -688,7 +761,7 @@ fn only_app_plugins_code_reaches_the_plugin_store_writers() {
     assert!(files.len() > 100, "the engine sources are found");
     let reaching: Vec<&PathBuf> = files
         .iter()
-        .filter(|(_, code)| STORE_WRITERS.iter().any(|writer| code.contains(writer)))
+        .filter(|(_, code)| reaches_store_writer(code))
         .map(|(path, _)| path)
         .collect();
     assert!(
