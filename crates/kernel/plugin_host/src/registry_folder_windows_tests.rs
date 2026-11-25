@@ -195,9 +195,7 @@ fn mklink(switch: Option<&str>, link: &Path, target: &Path) -> bool {
         .raw_arg(quoted(link))
         .raw_arg(quoted(target))
         .status()
-        .unwrap_or_else(|error| {
-            panic!("mklink {} {}: {error}", link.display(), target.display())
-        })
+        .unwrap_or_else(|error| panic!("mklink {} {}: {error}", link.display(), target.display()))
         .success()
 }
 

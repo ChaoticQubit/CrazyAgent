@@ -397,8 +397,8 @@ fn two_sources(tx: &Transaction<'_>, base: &Path, pairs: [((u64, u64), (u64, u64
         let path = file(base, &format!("{name}.md"), "text");
         let admitted = source(&name, &name, Scope::Global, Kind::Skill, path.clone());
         assert_eq!(admit(tx, &ADMIT, &admitted), Ok(()));
-        let real = std::fs::metadata(&path)
-            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let real =
+            std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         LIVE.with_borrow_mut(|map| map.insert((real.dev(), real.ino()), live));
         let body = serde_json::to_string(&Admitted {
             source: admitted,
