@@ -24,7 +24,7 @@ const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
 const PASTE_OPEN: &[u8] = b"\x1b[200~";
 /// Keeps a shell in a terminal from running a program of the same name planted in its
-/// folder ahead of `PATH`, such as a project's `git.bat` when the owner types `git` (C4).
+/// folder ahead of `PATH`, such as a project's `git.bat` when the owner types `git`.
 const NO_FOLDER_SEARCH: (&str, &str) = ("NoDefaultCurrentDirectoryInExePath", "1");
 const BASE_ENV: &[&str] = &[
     "SystemRoot",

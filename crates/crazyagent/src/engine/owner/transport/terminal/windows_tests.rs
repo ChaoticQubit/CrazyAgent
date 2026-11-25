@@ -169,7 +169,7 @@ async fn closed_within(output: &mut TerminalOutput, wait: Duration) -> String {
     .unwrap_or_else(|_| "no close in time".into())
 }
 
-/// T1: an owner terminal attach of an owner shell over the owner pipe gives a session with
+/// An owner terminal attach of an owner shell over the owner pipe gives a session with
 /// the ConPTY size, where the client used to refuse with `terminal_owner_unavailable`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_shell_attaches_over_the_owner_pipe_with_its_size() {
@@ -185,7 +185,7 @@ async fn an_owner_shell_attaches_over_the_owner_pipe_with_its_size() {
     shell.end().await;
 }
 
-/// T1: a pane attach of a pane the ConPTY host does not have gets the engine's own refusal,
+/// A pane attach of a pane the ConPTY host does not have gets the engine's own refusal,
 /// not the client's `terminal_owner_unavailable`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pane_attach_of_an_unknown_pane_gets_the_engines_refusal() {
@@ -207,7 +207,7 @@ async fn a_pane_attach_of_an_unknown_pane_gets_the_engines_refusal() {
     shell.end().await;
 }
 
-/// T-R1: once the engine stops and a rogue publishes its own pipe for the owner endpoint, an
+/// Once the engine stops and a rogue publishes its own pipe for the owner endpoint, an
 /// admitted client's terminal attach refuses before any byte, so the rogue never reads the
 /// 37-byte packet with the capability.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -239,7 +239,7 @@ async fn a_rogue_owner_instance_gets_no_terminal_packet() {
     shell.end().await;
 }
 
-/// T2: a view of an owner shell types into it and sees the echo, resizes it, takes wheel
+/// A view of an owner shell types into it and sees the echo, resizes it, takes wheel
 /// keys, and ends as `terminal_detached` on a detach; a later attach reports the new size.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_shell_view_types_resizes_scrolls_and_detaches() {
@@ -275,7 +275,7 @@ async fn an_owner_shell_view_types_resizes_scrolls_and_detaches() {
     shell.end().await;
 }
 
-/// T-R2: a view whose desktop capability changes on disk mid-view ends as
+/// A view whose desktop capability changes on disk mid-view ends as
 /// `owner_grant_stale_or_revoked` at its next grant check, with no further output.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_changed_grant_ends_an_owner_shell_view() {
@@ -299,7 +299,7 @@ async fn a_changed_grant_ends_an_owner_shell_view() {
     shell.end().await;
 }
 
-/// T-R3: an input-only view of an owner shell that exited ends as `terminal_ended` at its
+/// An input-only view of an owner shell that exited ends as `terminal_ended` at its
 /// next grant check, with no key typed, since the host tells the pane is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_input_only_view_of_an_exited_shell_ends_as_terminal_ended() {
@@ -323,7 +323,7 @@ async fn an_input_only_view_of_an_exited_shell_ends_as_terminal_ended() {
     shell.end().await;
 }
 
-/// T-R4 (C4): a `git.bat` planted in the folder the owner shell starts in does not run when
+/// A `git.bat` planted in the folder the owner shell starts in does not run when
 /// the owner types `git`, since the shell's environment carries
 /// `NoDefaultCurrentDirectoryInExePath=1`; the shell still runs what the owner types next.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -358,7 +358,7 @@ async fn a_planted_git_bat_in_the_project_folder_does_not_run() {
     shell.end().await;
 }
 
-/// T-R5: an owner paste into a shell that has not turned bracketed paste on reaches it as
+/// An owner paste into a shell that has not turned bracketed paste on reaches it as
 /// typed keys, with no bracket, so the shell runs the pasted line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paste_without_bracketed_paste_reaches_the_shell_as_typed_keys() {
@@ -390,7 +390,7 @@ async fn a_paste_without_bracketed_paste_reaches_the_shell_as_typed_keys() {
     shell.end().await;
 }
 
-/// T-R5: the host reads bracketed paste as off until the shell's app turns it on with
+/// The host reads bracketed paste as off until the shell's app turns it on with
 /// DECSET 2004 through ConPTY, and as on after, which decides whether a paste is bracketed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_host_reads_bracketed_paste_on_only_after_the_app_turns_it_on() {
