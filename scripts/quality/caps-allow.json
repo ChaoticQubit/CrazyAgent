@@ -160,7 +160,7 @@
   "crates/crazyagent/tests/projects_home_engine.rs": 2920,
   "crates/crazyagent/tests/sandbox_toolchains.rs": 2774,
   "crates/crazyagent/tests/sub_agent_landing.rs": 1677,
-  "crates/crazyagent/tests/terminal_tmux.rs": 2519,
+  "crates/crazyagent/tests/terminal_tmux.rs": 1966,
   "crates/kernel/processes/src/terminal/tmux/tests.rs": 3853,
   "scripts/release/workflows.test.mjs": 1713,
   "scripts/smoke/owner-flow.mjs": 966,
