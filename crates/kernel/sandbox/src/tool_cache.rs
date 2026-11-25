@@ -160,7 +160,6 @@ pub fn remove_agent(
     else {
         return Ok(());
     };
-    let folder = project_folder(runtime, project);
     for own in [agent.to_owned(), format!("{agent}-teammates")] {
         for access in AgentAccess::ALL {
             let Some(key) = key(ToolCacheScope::PerAgent, access, CacheShape::Worktree, &own)
@@ -172,7 +171,12 @@ pub fn remove_agent(
                     Err(Errno::NOENT) => {}
                     Err(problem) => return Err(problem.into()),
                     Ok(found) if FileType::from_raw_mode(found.st_mode) == FileType::Directory => {
-                        (hooks.remove_agent_tree)(&folder.join(&name))?
+                        (hooks.remove_agent_entry)(
+                            owned.as_fd(),
+                            name.as_str(),
+                            "cleanup_folder_failed",
+                        )
+                        .map_err(std::io::Error::other)?
                     }
                     Ok(_) => rustix::fs::unlinkat(&owned, name.as_str(), AtFlags::empty())?,
                 }
@@ -551,9 +555,12 @@ pub struct ToolCacheHooks {
     /// Clears the immutable and append-only flags an agent may set on an entry, never
     /// following a link. Inputs: the open parent and the entry's name. Output: none.
     pub unpin: fn(std::os::fd::BorrowedFd<'_>, &str),
-    /// Removes a folder an agent wrote with all it holds. Input: the folder. Output: done
-    /// once nothing has its name, or the error naming why it stays.
-    pub remove_agent_tree: fn(&std::path::Path) -> std::io::Result<()>,
+    /// Removes the entry `name` of an open folder with all it holds, each step relative to an
+    /// open folder handle and none following a link, also a folder an agent shut. Inputs:
+    /// the open parent, the entry name and the code for a refusal the engine has no own code
+    /// for. Output: done once nothing has the name, or the refusal code.
+    pub remove_agent_entry:
+        fn(std::os::fd::BorrowedFd<'_>, &str, &'static str) -> Result<(), &'static str>,
     /// Builds the unspawned priming process. Inputs: the priming folder and the canonical uv
     /// binary. Output: the command.
     pub priming_command: fn(&std::path::Path, &std::path::Path) -> std::process::Command,
