@@ -102,3 +102,10 @@ test("the outcome says whose worktrees went, and how many stayed and why when th
     "Removed 1 worktree, kept 1: An agent's working copy has changes that aren't saved anywhere else. CrazyAgent kept it and stopped there.");
   assert.match(view.removalNote(finished, { kind: "error", code: "cleanup_agent_running", message: "" }), /^Couldn't remove every worktree\. An agent started again\./);
 });
+
+test("a folder too deep to remove is named for the owner to delete, also when nothing was removed", () => {
+  const folder = "/Users/ada/Library/Application Support/CrazyAgent/tool-cache/ab12/agent-1";
+  const sentence = `An agent's folder has folders nested more than 64 deep, which CrazyAgent does not remove: ${folder}. Delete it yourself, then try again.`;
+  assert.equal(view.removalNote(finished, { kind: "ok", value: { agents: [], kept: "cleanup_folder_too_deep", folder } }), `Couldn't remove every worktree. ${sentence}`);
+  assert.equal(view.removalNote(finished, { kind: "ok", value: { agents: [3], kept: "cleanup_folder_too_deep", folder } }), `Removed 1 worktree, kept 1: ${sentence}`);
+});

@@ -18,14 +18,16 @@ const NAME_BYTES_MAX: usize = 64;
 const RECORD_BYTES_MAX: u64 = 4096;
 const PRIMING_TIME: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
+
+/// The count of priming records this process has written, which names each staging file.
+static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const OPEN_FOLDER: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
-/// The names the priming process's environment holds, and no other (T8 C3): its own home
-/// and cache in the priming folder, no uv config file, no network, the system PATH and the
-/// C locale.
+/// The names the priming process's environment holds, and no other: its own home and cache in the
+/// priming folder, no uv config file, no network, the system PATH and the C locale.
 pub const PRIMING_ENV: [&str; 6] = [
     "HOME",
     "UV_CACHE_DIR",
@@ -35,10 +37,10 @@ pub const PRIMING_ENV: [&str; 6] = [
     "LC_ALL",
 ];
 
-/// Where a confined agent writes, which decides who may share its tool cache (T8 C2): the
-/// project folder, which is the owner's checkout, a linked worktree, an own clone or a clone
-/// teammate. A tool can link a cache file into the tree it installs into, so no cache is
-/// shared between a profile that can write the owner's checkout and one that cannot.
+/// Where a confined agent writes, which decides who may share its tool cache: the project folder,
+/// which is the owner's checkout, a linked worktree, an own clone or a clone teammate. A tool can
+/// link a cache file into the tree it installs into, so no cache is shared between a profile that
+/// can write the owner's checkout and one that cannot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheShape {
     ProjectRoot,
@@ -105,6 +107,23 @@ pub fn project_folder(runtime: &Path, project: &str) -> PathBuf {
     runtime.join(FOLDER).join(digest(project, 32))
 }
 
+/// An agent's tool cache folder the hooks' removal refused: the hooks' code and the folder
+/// that stays, `<project folder>/<name>`, so the engine can name it to the owner. It shows
+/// as the code alone, as the io error [`remove_agent`] fails with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryRefused {
+    pub code: &'static str,
+    pub folder: PathBuf,
+}
+
+impl std::fmt::Display for EntryRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl std::error::Error for EntryRefused {}
+
 /// The first `length` hex digits of the SHA-256 of `text`, a plain folder name for an id of
 /// any form. Inputs: the text and the length. Output: the digits.
 fn digest(text: &str, length: usize) -> String {
@@ -127,17 +146,17 @@ fn plain_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-/// Removes the tool caches One per agent gave an agent and its native teammates in one
-/// project, at every level, with their priming records (T8), when Clean up removes the
-/// agent's worktree, since a removed agent never runs again. A shared cache stays, since
-/// other agents of its level use it. No link is followed: a link in a cache's place is
-/// unlinked, the `/dev/null` markers are unlinked, and a folder the agent closed or a file
-/// it pinned in its cache is opened and unpinned first (T8 r1 L3). The folders from the
-/// runtime down to the project's are opened one part at a time with no link followed and
-/// accepted only as the engine's own, as [`prepare`] opens them, so a link or another
-/// user's folder above the caches fails with its plain code and removes nothing. Inputs:
-/// the hooks, the engine runtime, the project as [`project_folder`] names it and the
-/// agent's id. Output: Ok once none is left, also when the folders were never made.
+/// Removes the tool caches One per agent gave an agent and its native teammates in one project, at
+/// every level, with their priming records, when Clean up removes the agent's worktree, since a
+/// removed agent never runs again. A shared cache stays, since other agents of its level use it. No
+/// link is followed: a link in a cache's place is unlinked, the `/dev/null` markers are unlinked,
+/// and a folder the agent closed or a file it pinned in its cache is opened and unpinned first. The
+/// folders from the runtime down to the project's are opened one part at a time with no link
+/// followed and accepted only as the engine's own, as [`prepare`] opens them, so a link or another
+/// user's folder above the caches fails with its plain code and removes nothing. Inputs: the hooks,
+/// the engine runtime, the project as [`project_folder`] names it and the agent's id. Output: Ok
+/// once none is left, also when the folders were never made; a folder the hooks' removal refused
+/// fails with an [`EntryRefused`] naming it.
 pub fn remove_agent(
     hooks: &ToolCacheHooks,
     runtime: &Path,
@@ -157,7 +176,6 @@ pub fn remove_agent(
     else {
         return Ok(());
     };
-    let folder = project_folder(runtime, project);
     for own in [agent.to_owned(), format!("{agent}-teammates")] {
         for access in AgentAccess::ALL {
             let Some(key) = key(ToolCacheScope::PerAgent, access, CacheShape::Worktree, &own)
@@ -169,7 +187,17 @@ pub fn remove_agent(
                     Err(Errno::NOENT) => {}
                     Err(problem) => return Err(problem.into()),
                     Ok(found) if FileType::from_raw_mode(found.st_mode) == FileType::Directory => {
-                        (hooks.remove_agent_tree)(&folder.join(&name))?
+                        (hooks.remove_agent_entry)(
+                            owned.as_fd(),
+                            name.as_str(),
+                            "cleanup_folder_failed",
+                        )
+                        .map_err(|code| {
+                            std::io::Error::other(EntryRefused {
+                                code,
+                                folder: project_folder(runtime, project).join(&name),
+                            })
+                        })?
                     }
                     Ok(_) => rustix::fs::unlinkat(&owned, name.as_str(), AtFlags::empty())?,
                 }
@@ -184,15 +212,14 @@ pub fn remove_agent(
 
 /// Makes, or finds, the tool cache `<project folder>/<key>` for one launch, with `uv` and
 /// `pnpm-store` folders inside, and, when a uv binary is given, a `.git` link to exactly
-/// `/dev/null` in each cache bucket uv makes a `.git` file in, so uv runs under the SM1-R
-/// rule with no `.git` exemption (T8). Every folder is made and opened one part at a time
-/// with no link followed, the engine's own as plain 0700 folders of this user (C3); a link
-/// or someone else's folder anywhere fails closed. The buckets come from a record kept per
-/// cache and uv binary (C4); with none, or after uv changed, [`prime`] finds them. A launch
-/// with a record only checks each marker and makes one an agent's move of its bucket took
-/// away. Inputs: the hooks, the engine runtime folder, the project as [`project_folder`] names it, the
-/// key and the canonical uv binary, if any. Output: the prepared cache, or the plain code
-/// that refused it.
+/// `/dev/null` in each cache bucket uv makes a `.git` file in, so uv runs under the deny of `.git`
+/// in every writable root that is not a working tree, with no exemption. Every folder is made and
+/// opened one part at a time with no link followed, the engine's own as plain 0700 folders of this
+/// user; a link or someone else's folder anywhere fails closed. The buckets come from a record kept
+/// per cache and uv binary; with none, or after uv changed, [`prime`] finds them. A launch with a
+/// record only checks each marker and makes one an agent's move of its bucket took away. Inputs:
+/// the hooks, the engine runtime folder, the project as [`project_folder`] names it, the key and
+/// the canonical uv binary, if any. Output: the prepared cache, or the plain code that refused it.
 pub fn prepare(
     hooks: &ToolCacheHooks,
     runtime: &Path,
@@ -279,13 +306,12 @@ fn open_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
     rustix::fs::openat(parent, name, OPEN_FOLDER, Mode::empty()).map_err(|_| "tool_cache_link")
 }
 
-/// Makes or opens a folder in the agent's cache, which the agent may have moved, emptied or
-/// remade. A link or a file an agent left under the folder's name is unlinked, never
-/// followed, and a folder of this user it closed gets owner rwx again, once, so no agent at
-/// a Shared key keeps every later launch there from a cache (T8 r1 L2). A file it pinned
-/// there is unpinned before the unlink, and the open folder goes through [`reopened`]
-/// (T8-R2-N1). Inputs: the open parent and the name. Output: the open folder, or the plain
-/// code that refused it.
+/// Makes or opens a folder in the agent's cache, which the agent may have moved, emptied or remade.
+/// A link or a file an agent left under the folder's name is unlinked, never followed, and a folder
+/// of this user it closed gets owner rwx again, once, so no agent at a Shared key keeps every later
+/// launch there from a cache. A file it pinned there is unpinned before the unlink, and the open
+/// folder goes through [`reopened`]. Inputs: the open parent and the name. Output: the open folder,
+/// or the plain code that refused it.
 fn agent_folder(
     hooks: &ToolCacheHooks,
     parent: &OwnedFd,
@@ -311,12 +337,12 @@ fn agent_folder(
     reopened(hooks, open_folder(parent, name)?)
 }
 
-/// Gives an open folder of the cache agents write back to its owner: clears the immutable
-/// and append-only flags an agent may set on it and owner rwx it took away, so no agent at a
-/// Shared key keeps every later launch there from making what it needs inside (T8-R2-N1).
-/// A folder of another user keeps its mode. A link pinned in a folder's place, or an entry
-/// pinned at mode 000, cannot be unpinned safely and still refuses the cache (T8-R2-F1).
-/// Input: the open folder. Output: the folder, or `tool_cache_unmade`.
+/// Gives an open folder of the cache agents write back to its owner: clears the immutable and
+/// append-only flags an agent may set on it and owner rwx it took away, so no agent at a Shared key
+/// keeps every later launch there from making what it needs inside. A folder of another user keeps
+/// its mode. A link pinned in a folder's place, or an entry pinned at mode 000, cannot be unpinned
+/// safely and still refuses the cache. Input: the open folder. Output: the folder, or
+/// `tool_cache_unmade`.
 fn reopened(hooks: &ToolCacheHooks, folder: OwnedFd) -> Result<OwnedFd, &'static str> {
     (hooks.unpin)(folder.as_fd(), ".");
     let stat = rustix::fs::fstat(&folder).map_err(|_| "tool_cache_unmade")?;
@@ -328,11 +354,11 @@ fn reopened(hooks: &ToolCacheHooks, folder: OwnedFd) -> Result<OwnedFd, &'static
     Ok(folder)
 }
 
-/// Puts the uv marker in one cache bucket: makes `.git` as a link to exactly `/dev/null`,
-/// or finds one an earlier or a parallel launch made, and then accepts what is there only
-/// as that link, so launches racing on one Shared key all get the marker (T8 r1 L1). A
-/// file, a folder or a link to anything else there fails closed. Input: the open bucket.
-/// Output: Ok, else `tool_cache_marker_unexpected` or `tool_cache_marker_unmade`.
+/// Puts the uv marker in one cache bucket: makes `.git` as a link to exactly `/dev/null`, or finds
+/// one an earlier or a parallel launch made, and then accepts what is there only as that link, so
+/// launches racing on one Shared key all get the marker. A file, a folder or a link to anything
+/// else there fails closed. Input: the open bucket. Output: Ok, else `tool_cache_marker_unexpected`
+/// or `tool_cache_marker_unmade`.
 fn marker(bucket: &OwnedFd) -> Result<(), &'static str> {
     match rustix::fs::symlinkat(MARKER_TARGET, bucket, MARKER) {
         Ok(()) | Err(Errno::EXIST) => {}
@@ -347,11 +373,10 @@ fn marker(bucket: &OwnedFd) -> Result<(), &'static str> {
     }
 }
 
-/// The identity of a uv binary a priming record holds: its device, inode, size,
-/// modification time and change time, so a replaced or upgraded uv primes again (C4), even
-/// one rewritten in place or given a freed inode with its old size and modification time
-/// (V243-INODE-STAMPS). Input: the canonical binary. Output: the identity line, or
-/// `tool_cache_uv_unread`.
+/// The identity of a uv binary a priming record holds: its device, inode, size, modification time
+/// and change time, so a replaced or upgraded uv primes again, even one rewritten in place or given
+/// a freed inode with its old size and modification time. Input: the canonical binary. Output: the
+/// identity line, or `tool_cache_uv_unread`.
 fn identity(uv: &Path) -> Result<String, &'static str> {
     let metadata = std::fs::metadata(uv).map_err(|_| "tool_cache_uv_unread")?;
     Ok(format!(
@@ -397,46 +422,117 @@ fn read_record(owned: &OwnedFd, record: &str) -> Option<(String, Vec<String>)> {
         .then_some((identity, buckets))
 }
 
-/// Writes a priming record in place of the last one, through a side file renamed over it.
-/// Inputs: the open project folder, the record's name, the uv identity and the buckets.
-/// Output: Ok, or `tool_cache_record_unwritten`.
+/// Writes a priming record in place of the last one, through a staging file of this writer
+/// alone, named by this process and a count of its writes, so launches priming one cache at
+/// once never share one; staging files of the record another process left go first
+/// ([`sweep_staging`]). Inputs: the open project folder, the record's name, the uv identity
+/// and the buckets. Output: Ok, or `tool_cache_record_unwritten`.
 fn write_record(
     owned: &OwnedFd,
     record: &str,
     identity: &str,
     buckets: &[String],
 ) -> Result<(), &'static str> {
-    let unwritten = |_| "tool_cache_record_unwritten";
-    let side = format!("{record}.new");
+    sweep_staging(owned, record);
+    let count = STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let side = format!("{record}.{}.{count}.new", std::process::id());
     let mut text = format!("{identity}\n");
     for bucket in buckets {
         text.push_str(bucket);
         text.push('\n');
     }
-    let file = rustix::fs::openat(
-        owned,
-        side.as_str(),
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(0o600),
-    )
-    .map_err(unwritten)?;
-    std::fs::File::from(file)
-        .write_all(text.as_bytes())
-        .map_err(|_| "tool_cache_record_unwritten")?;
-    rustix::fs::renameat(owned, side.as_str(), owned, record).map_err(unwritten)
+    publish(owned, record, &side, text.as_bytes())
 }
 
-/// Finds the cache buckets this uv makes a `.git` file in by running it once in a fresh
-/// folder under the priming profile ([`ToolCacheHooks::priming_command`]), then removes the folder. Nothing
-/// an agent wrote is read, and no regular `.git` file is ever made anywhere else (C3).
-/// Inputs: the engine's open tool cache folder, its path and the canonical uv binary.
-/// Output: the bucket names, sorted, or the plain code that refused them.
+/// Unlinks, never follows, each staging file of a record whose pid is not this process's, as
+/// a writer that died between its create and its rename leaves. It holds only while one
+/// process writes this folder, as the engine's database lock keeps one engine per data root,
+/// so every live writer has this pid. A name it cannot read or unlink stays. Inputs: the open
+/// project folder and the record's name.
+fn sweep_staging(owned: &OwnedFd, record: &str) {
+    let own = std::process::id();
+    let Ok(listed) = rustix::fs::Dir::read_from(owned) else {
+        return;
+    };
+    let left: Vec<String> = listed
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_owned))
+        .filter(|name| staging_pid(name, record).is_some_and(|pid| pid != own))
+        .collect();
+    for name in &left {
+        let _ = rustix::fs::unlinkat(owned, name.as_str(), AtFlags::empty());
+    }
+}
+
+/// The pid in a staging name of a record, exactly `{record}.{pid}.{count}.new` with both
+/// parts plain decimal digits. Inputs: the name and the record's name. Output: the pid, or
+/// none for any other name.
+fn staging_pid(name: &str, record: &str) -> Option<u32> {
+    let rest = name
+        .strip_prefix(record)?
+        .strip_prefix('.')?
+        .strip_suffix(".new")?;
+    let (pid, count) = rest.split_once('.')?;
+    named_pid(pid, count)
+}
+
+/// The pid in a priming folder's name, exactly `.priming-{pid}-{nanos}` with both parts
+/// plain decimal digits. Input: the name. Output: the pid, or none for any other name.
+fn priming_pid(name: &str) -> Option<u32> {
+    let (pid, nanos) = name.strip_prefix(".priming-")?.split_once('-')?;
+    named_pid(pid, nanos)
+}
+
+/// The pid of a name's pid part when it and the part after it are plain decimal digits.
+/// Inputs: the two parts. Output: the pid, or none.
+fn named_pid(pid: &str, after: &str) -> Option<u32> {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    if !digits(pid) || !digits(after) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Puts a record in place through a staging file made with exclusive creation, so no other
+/// writer opens it; one already there can only be left by a dead process with this pid and
+/// is removed once. The rename comes after the whole text, and any failure removes the
+/// staging file. Inputs: the folder, the record, the staging name and the text. Output: Ok,
+/// or `tool_cache_record_unwritten`.
+fn publish(owned: &OwnedFd, record: &str, side: &str, text: &[u8]) -> Result<(), &'static str> {
+    assert!(side.ends_with(".new") && side != record);
+    let unwritten = |_| "tool_cache_record_unwritten";
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mode = Mode::from_raw_mode(0o600);
+    let file = match rustix::fs::openat(owned, side, flags, mode) {
+        Err(Errno::EXIST) => {
+            rustix::fs::unlinkat(owned, side, AtFlags::empty()).map_err(unwritten)?;
+            rustix::fs::openat(owned, side, flags, mode)
+        }
+        opened => opened,
+    }
+    .map_err(unwritten)?;
+    let published = std::fs::File::from(file)
+        .write_all(text)
+        .map_err(|_| "tool_cache_record_unwritten")
+        .and_then(|()| rustix::fs::renameat(owned, side, owned, record).map_err(unwritten));
+    if published.is_err() {
+        let _ = rustix::fs::unlinkat(owned, side, AtFlags::empty());
+    }
+    published
+}
+
+/// Finds the cache buckets this uv makes a `.git` file in by running it once in a fresh folder
+/// under the priming profile ([`ToolCacheHooks::priming_command`]), then removes the folder.
+/// Nothing an agent wrote is read, and no regular `.git` file is ever made anywhere else. Inputs:
+/// the engine's open tool cache folder, its path and the canonical uv binary. Output: the bucket
+/// names, sorted, or the plain code that refused them.
 fn prime(
     hooks: &ToolCacheHooks,
     tools: &OwnedFd,
     folder: &Path,
     uv: &Path,
 ) -> Result<Vec<String>, &'static str> {
+    sweep_priming(hooks, tools);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.subsec_nanos());
@@ -445,10 +541,30 @@ fn prime(
         .map_err(|_| "tool_cache_priming_failed")?;
     let priming = folder.join(&name);
     let found = run_priming(hooks, &priming, uv).and_then(|()| buckets_in(&priming.join("cache")));
-    let removed = std::fs::remove_dir_all(&priming);
+    let removed = (hooks.remove_agent_entry)(tools.as_fd(), &name, "tool_cache_priming_failed");
     let found = found?;
     removed.map_err(|_| "tool_cache_priming_failed")?;
     Ok(found)
+}
+
+/// Removes, through the hooks' entry removal, each priming folder in the tool cache folder
+/// whose pid is not this process's, as an engine that died while priming leaves. It holds
+/// only while one engine uses this data root, as its database lock keeps it, so every live
+/// priming has this pid; a folder the removal refuses stays for the next priming. Inputs:
+/// the hooks and the open tool cache folder.
+fn sweep_priming(hooks: &ToolCacheHooks, tools: &OwnedFd) {
+    let own = std::process::id();
+    let Ok(listed) = rustix::fs::Dir::read_from(tools) else {
+        return;
+    };
+    let left: Vec<String> = listed
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_owned))
+        .filter(|name| priming_pid(name).is_some_and(|pid| pid != own))
+        .collect();
+    for name in &left {
+        let _ = (hooks.remove_agent_entry)(tools.as_fd(), name, "tool_cache_priming_failed");
+    }
 }
 
 /// Runs the priming process until it ends or [`PRIMING_TIME`] passes, then ends its whole
@@ -478,10 +594,10 @@ fn run_priming(hooks: &ToolCacheHooks, folder: &Path, uv: &Path) -> Result<(), &
     }
 }
 
-/// Reads the buckets uv made in a fresh cache: each folder holding an empty regular `.git`
-/// file. Every name must pass [`plain_name`] and there may be at most [`BUCKETS_MAX`], else
-/// the whole cache is refused, so a swapped uv cannot name a bucket `.git` or `..` (C3).
-/// Input: the fresh cache. Output: the names, sorted, or `tool_cache_bucket_refused`.
+/// Reads the buckets uv made in a fresh cache: each folder holding an empty regular `.git` file.
+/// Every name must pass [`plain_name`] and there may be at most [`BUCKETS_MAX`], else the whole
+/// cache is refused, so a swapped uv cannot name a bucket `.git` or `..`. Input: the fresh cache.
+/// Output: the names, sorted, or `tool_cache_bucket_refused`.
 fn buckets_in(cache: &Path) -> Result<Vec<String>, &'static str> {
     let refused = |_| "tool_cache_bucket_refused";
     let mut found = Vec::new();
@@ -529,9 +645,12 @@ pub struct ToolCacheHooks {
     /// Clears the immutable and append-only flags an agent may set on an entry, never
     /// following a link. Inputs: the open parent and the entry's name. Output: none.
     pub unpin: fn(std::os::fd::BorrowedFd<'_>, &str),
-    /// Removes a folder an agent wrote with all it holds. Input: the folder. Output: done
-    /// once nothing has its name, or the error naming why it stays.
-    pub remove_agent_tree: fn(&std::path::Path) -> std::io::Result<()>,
+    /// Removes the entry `name` of an open folder with all it holds, each step relative to an
+    /// open folder handle and none following a link, also a folder an agent shut. Inputs:
+    /// the open parent, the entry name and the code for a refusal the engine has no own code
+    /// for. Output: done once nothing has the name, or the refusal code.
+    pub remove_agent_entry:
+        fn(std::os::fd::BorrowedFd<'_>, &str, &'static str) -> Result<(), &'static str>,
     /// Builds the unspawned priming process. Inputs: the priming folder and the canonical uv
     /// binary. Output: the command.
     pub priming_command: fn(&std::path::Path, &std::path::Path) -> std::process::Command,

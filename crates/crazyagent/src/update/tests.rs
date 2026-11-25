@@ -208,8 +208,12 @@ fn function_holding<'a>(path: &Path, text: &'a str, at: usize) -> &'a str {
     &text[start..at]
 }
 
+/// Says whether a source is test code the install scan skips: a file under a `tests` or
+/// `perf_tests` folder, or one whose name ends in `tests.rs`. Input: the source's path.
+/// Output: true for test code.
 fn test_source(path: &Path) -> bool {
-    path.components().any(|part| part.as_os_str() == "tests")
+    path.components()
+        .any(|part| part.as_os_str() == "tests" || part.as_os_str() == "perf_tests")
         || path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().ends_with("tests.rs"))
@@ -228,6 +232,16 @@ fn rust_sources_skips_folder_links_and_finds_each_file_once() {
     let mut found = Vec::new();
     rust_sources(&real, &mut found);
     assert_eq!(found, vec![real.join("held").join("one.rs")]);
+}
+
+/// A file in a `perf_tests` folder is test code to the install scan, and a plain source
+/// beside it is not, so a timing row never reads as an install path.
+#[test]
+fn a_perf_tests_folder_is_test_code_to_the_install_scan() {
+    let timing = Path::new("/repo/crates/kernel/processes/src/perf_tests/update.rs");
+    let shipped = Path::new("/repo/crates/kernel/processes/src/update.rs");
+    assert!(test_source(timing));
+    assert!(!test_source(shipped));
 }
 
 /// The desktop's one install step that writes a release over the running app is reached

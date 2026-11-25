@@ -619,15 +619,21 @@ fn graph_step(
     } else {
         None
     };
-    match graph::update(
+    let ending = graph::update(
         &graphify,
         &claimed.repo,
         work.runner.state(),
         &run_name(claimed, None),
         &hidden,
         work.limits.graph_time,
-        beat,
-    ) {
+        &crate::sandbox::access_store::hidden::hide_stops(
+            database,
+            &claimed.project,
+            Some(&listed),
+            beat,
+        ),
+    );
+    match ending {
         #[cfg(unix)]
         Ok(GraphEnding::Built) => {
             if let Some(tip) = tip {
@@ -911,8 +917,10 @@ enum Refreshed {
 /// Rebuilds one project's main graph in place through the confined graph build and
 /// publishes it at `tip` with the folders it hid ([`publish_main`]), then removes the
 /// build's run folder and profile unless its processes may still run. The build stops as
-/// soon as an onboarding step waits or a project move holds the folder ([`gives_way`]), and
-/// a build a move holds by its end is not published. Takes the work, the worker's database,
+/// soon as an onboarding step waits or a project move holds the folder ([`gives_way`]), or a
+/// folder is saved hidden that it did not hide
+/// ([`crate::sandbox::access_store::hidden::hide_stops`]), and a build a move holds by its
+/// end is not published. Takes the work, the worker's database,
 /// the project, its run's hidden folders guard, kept when the build's processes may still
 /// run, its folder, the tip read before the build, its hidden folders and `halted`. Returns
 /// how the refresh ended.
@@ -939,7 +947,12 @@ fn refresh_build(
         &name,
         hidden,
         work.limits.graph_time,
-        &gives_way(database, repo, halted),
+        &crate::sandbox::access_store::hidden::hide_stops(
+            database,
+            project,
+            Some(&listed),
+            &gives_way(database, repo, halted),
+        ),
     );
     if matches!(ending, Err(RunError::Uncertain(_))) {
         std::mem::forget(listed);

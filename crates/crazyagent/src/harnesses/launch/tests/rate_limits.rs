@@ -190,3 +190,50 @@ fn claude_assistant_errors_other_than_rate_limits_are_not_rate_limited() {
         .unwrap();
     assert_eq!(turn_errors(&events), [false]);
 }
+
+/// A Claude rejection whose overage still lets requests through is no turn error: the
+/// account goes on in its usage credits, so the turn that then succeeds stays a success.
+#[test]
+fn a_claude_rejection_with_overage_allowed_is_no_turn_error() {
+    for overage in ["allowed_warning", "allowed"] {
+        let mut driver = claude_driver();
+        let (events, _) = driver
+            .receive(&line(json!({
+                "type":"rate_limit_event", "uuid":"rate-1", "session_id":"native-session",
+                "rate_limit_info":{"status":"rejected","overageStatus":overage}
+            })))
+            .unwrap();
+        assert!(turn_errors(&events).is_empty(), "{overage}: {events:?}");
+        let (events, _) = driver
+            .receive(&line(json!({
+                "type":"result", "subtype":"success", "uuid":"result-1",
+                "session_id":"native-session", "is_error":false, "result":"done"
+            })))
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LaunchEvent::TurnFinished { success: true })),
+            "{overage}: {events:?}"
+        );
+    }
+}
+
+/// A Claude rejection whose overage is rejected too, or not named, is a rate-limited turn
+/// error.
+#[test]
+fn a_claude_rejection_with_overage_rejected_or_absent_is_rate_limited() {
+    for info in [
+        json!({"status":"rejected","overageStatus":"rejected"}),
+        json!({"status":"rejected"}),
+    ] {
+        let mut driver = claude_driver();
+        let (events, _) = driver
+            .receive(&line(json!({
+                "type":"rate_limit_event", "uuid":"rate-1", "session_id":"native-session",
+                "rate_limit_info":info
+            })))
+            .unwrap();
+        assert_eq!(turn_errors(&events), [true], "{info}");
+    }
+}

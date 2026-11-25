@@ -925,29 +925,6 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
 }
 
 #[test]
-fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
-    let case = case();
-    let profiles = case.outside.join("profiles");
-    fs::create_dir_all(&profiles).unwrap();
-    let installed = InstalledSandbox::install(
-        policy(&case, SandboxNetwork::Open),
-        &profiles.join("agent.sb"),
-        LinuxSupervisor::On,
-        LinuxStrict::Off,
-    )
-    .unwrap();
-    let launcher = installed.launcher().to_path_buf();
-    assert!(
-        launcher.ends_with("crazyagent-landlock")
-            || BWRAP_PATHS.iter().any(|path| launcher == Path::new(path)),
-        "{}",
-        launcher.display()
-    );
-    let output = run(&installed, &case, &boundary_script(&case));
-    assert_boundary(&case, &output);
-}
-
-#[test]
 fn the_strict_setting_refuses_a_launch_without_the_call_supervisor_and_off_starts_it() {
     let case = case();
     let profiles = case.outside.join("profiles");
@@ -4748,5 +4725,7 @@ fn a_linux_launch_starts_at_its_installed_boundary_with_the_agent_environment() 
     );
 }
 
+#[path = "linux_sandbox/installed_launches.rs"]
+mod installed_launches;
 #[path = "linux_sandbox/refused_launches.rs"]
 mod refused_launches;

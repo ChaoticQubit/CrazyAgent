@@ -19,11 +19,11 @@ pub const FULL_WINDOWS_UNAVAILABLE: &str =
 /// The code a level that cannot run here is refused with.
 pub const AGENT_ACCESS_UNAVAILABLE: &str = "agent_access_unavailable";
 
-/// The code Full access is refused with on Windows (DESIGN-0256 O3a).
+/// The code Full access is refused with on Windows.
 pub const SANDBOX_FULL_UNAVAILABLE_WINDOWS: &str = "sandbox_full_unavailable_windows";
 
-/// What a limited network cannot hold on Windows (DESIGN-0256 O2a): the AppContainer limits
-/// no host or port, and it cannot reach this computer's own network.
+/// What a limited network cannot hold on Windows: the AppContainer limits no host or port, and it
+/// cannot reach this computer's own network.
 pub const WINDOWS_NETWORK_WIDE_LINE: &str = "On Windows, network limits can't hold hosts or ports in this version: with Port 443 only or None, agents reach the whole internet, and a model on this computer, such as a local server or the relay, can't be reached.";
 
 /// What the agent policy reads from the engine, which the engine passes in: the top-level
@@ -33,10 +33,9 @@ pub struct PolicyHooks {
     pub local_folders: fn(&Path) -> Vec<String>,
 }
 
-/// How free one project's agents are (DEC-102): Sandboxed writes only the agent's own
-/// worktree and never git; Own branch adds full git in the agent's own git folder and
-/// lands its commits only on Accept; Full access runs agents with the owner's user
-/// permissions and no Seatbelt profile.
+/// How free one project's agents are: Sandboxed writes only the agent's own worktree and never git;
+/// Own branch adds full git in the agent's own git folder and lands its commits only on Accept;
+/// Full access runs agents with the owner's user permissions and no Seatbelt profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentAccess {
@@ -80,9 +79,8 @@ impl AgentAccess {
         }
     }
 
-    /// Why this level cannot run agents on this computer and the code it is refused with,
-    /// or None when it can: Full access on Windows has its own (DESIGN-0256 O3a). Output:
-    /// the reason and the code, or none.
+    /// Why this level cannot run agents on this computer and the code it is refused with, or None
+    /// when it can: Full access on Windows has its own. Output: the reason and the code, or none.
     pub fn refusal(self) -> Option<(&'static str, &'static str)> {
         #[cfg(target_os = "windows")]
         {
@@ -109,13 +107,12 @@ impl AgentAccess {
     }
 }
 
-/// How far one project's tools-on agents and the plugin "Check again" server may reach on
-/// the network (DEC-111 Q17): Open is the whole network, Https is port 443 only, None is
-/// the model alone: a hosted model's own hosts through the engine's model proxy, or only a
-/// local model's port on loopback. The same choice applies to the agents, research jobs
-/// and the check. A master never reaches more than the model's port; under None a master
-/// with tools reaches a model off loopback only through its model proxy in its live
-/// terminal, and a master turn with tools is refused (S4B-M1).
+/// How far one project's tools-on agents and the plugin "Check again" server may reach on the
+/// network: Open is the whole network, Https is port 443 only, None is the model alone: a hosted
+/// model's own hosts through the engine's model proxy, or only a local model's port on loopback.
+/// The same choice applies to the agents, research jobs and the check. A master never reaches more
+/// than the model's port; under None a master with tools reaches a model off loopback only through
+/// its model proxy in its live terminal, and a master turn with tools is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNetwork {
@@ -147,18 +144,18 @@ impl AgentNetwork {
         }
     }
 
-    /// Tells whether this choice lets agents reach more than `other`: Open more than Port
-    /// 443 only, Port 443 only more than None (CS-2). Input: the choice to compare with.
-    /// Output: true when this one is wider.
+    /// Tells whether this choice lets agents reach more than `other`: Open more than Port 443 only,
+    /// Port 443 only more than None. Input: the choice to compare with. Output: true when this one
+    /// is wider.
     pub fn wider_than(self, other: Self) -> bool {
         let rank = |choice: Self| Self::ALL.iter().position(|each| *each == choice);
         rank(self) < rank(other)
     }
 
-    /// Whether a tools-on agent under this choice reaches a hosted model through the engine's
-    /// model proxy: under None for a model off loopback, except on Windows, whose AppContainer
-    /// cannot reach loopback (P6), so the agent reaches the model's port on any host instead
-    /// (DEC-203 O2a). Inputs: the OS, whether tools are on, the model. Output: the answer.
+    /// Whether a tools-on agent under this choice reaches a hosted model through the engine's model
+    /// proxy: under None for a model off loopback, except on Windows, whose AppContainer cannot
+    /// reach loopback, so the agent reaches the model's port on any host instead. Inputs: the OS,
+    /// whether tools are on, the model. Output: the answer.
     pub fn proxied(self, os: &str, tools: bool, model: crate::net::SandboxRemote) -> bool {
         tools
             && self == Self::None
@@ -166,11 +163,11 @@ impl AgentNetwork {
             && os != "windows"
     }
 
-    /// The network an agent launches with: its proxy's loopback port when it has one, the
-    /// model alone with tools off or under None on Windows, else what [`Self::sandbox`]
-    /// grants. Inputs: the OS, whether tools are on, the model and the proxy's port, given
-    /// exactly when [`Self::proxied`] says so. Output: the network, or the refusal of a
-    /// loopback model on Windows under any choice (#519 F2).
+    /// The network an agent launches with: its proxy's loopback port when it has one, the model
+    /// alone with tools off or under None on Windows, else what [`Self::sandbox`] grants. Inputs:
+    /// the OS, whether tools are on, the model and the proxy's port, given exactly when
+    /// [`Self::proxied`] says so. Output: the network, or the refusal of a loopback model on
+    /// Windows under any choice.
     pub fn reach(
         self,
         os: &str,
@@ -199,11 +196,11 @@ impl AgentNetwork {
         })
     }
 
-    /// The sandbox reach this choice grants. Input: the model endpoint the agent still
-    /// needs, or None for the plugin check, which needs no model. Output: Open for Open,
-    /// port 443 plus the model's port for Https, and for None the model only on loopback:
-    /// a model on any host is reached under None only through a model proxy's loopback
-    /// port, so no None path grants a host port or DNS (S4B-M1).
+    /// The sandbox reach this choice grants. Input: the model endpoint the agent still needs, or
+    /// None for the plugin check, which needs no model. Output: Open for Open, port 443 plus the
+    /// model's port for Https, and for None the model only on loopback: a model on any host is
+    /// reached under None only through a model proxy's loopback port, so no None path grants a host
+    /// port or DNS.
     pub fn sandbox(self, model: Option<crate::net::SandboxRemote>) -> crate::net::SandboxNetwork {
         match self {
             Self::Open => crate::net::SandboxNetwork::Open,
@@ -222,11 +219,11 @@ impl AgentNetwork {
     }
 }
 
-/// Who shares one project's tool cache, the uv cache and pnpm store a confined agent's
-/// tools write (T8): Shared, the default, gives one cache to the project's agents at the
-/// same access level that write the same kind of tree (the project folder, a linked
-/// worktree, an own clone or a clone teammate); One per agent gives each agent its own. A
-/// Full access agent gets none and uses its tools' own defaults.
+/// Who shares one project's tool cache, the uv cache and pnpm store a confined agent's tools write:
+/// Shared, the default, gives one cache to the project's agents at the same access level that write
+/// the same kind of tree (the project folder, a linked worktree, an own clone or a clone teammate);
+/// One per agent gives each agent its own. A Full access agent gets none and uses its tools' own
+/// defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCacheScope {
@@ -256,11 +253,10 @@ impl ToolCacheScope {
     }
 }
 
-/// What a launch does with the download caches an earlier run left in an agent home, its
-/// `.cache` and npm's `_cacache` (DEC-173 add.1): Keep leaves them; Clear when access is
-/// raised, the default, removes them when the launch runs at a wider level than the home's
-/// last launch, so nothing a narrower run wrote reaches a wider one; Clear every launch
-/// removes them each time.
+/// What a launch does with the download caches an earlier run left in an agent home, its `.cache`
+/// and npm's `_cacache`: Keep leaves them; Clear when access is raised, the default, removes them
+/// when the launch runs at a wider level than the home's last launch, so nothing a narrower run
+/// wrote reaches a wider one; Clear every launch removes them each time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HomeCaches {
@@ -305,10 +301,10 @@ pub fn ide_network(level: AgentAccess, choice: AgentNetwork) -> crate::net::Sand
     }
 }
 
-/// What the IDE may do to the files inside agent checkouts at Sandboxed and Own branch
-/// (DEC-124): Allow all changes is today's reach; No delete or rename refuses every removal
-/// and every rename there and keeps edits; Read only refuses every write there, Edit anyway
-/// included. Full access runs the IDE with no profile, so no choice reaches it.
+/// What the IDE may do to the files inside agent checkouts at Sandboxed and Own branch: Allow all
+/// changes is today's reach; No delete or rename refuses every removal and every rename there and
+/// keeps edits; Read only refuses every write there, Edit anyway included. Full access runs the IDE
+/// with no profile, so no choice reaches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdeAgentFiles {
@@ -332,10 +328,9 @@ impl IdeAgentFiles {
     }
 }
 
-/// One project's agent folders choice as a Seatbelt profile holds it (DEC-124), with whether
-/// the older agents root `<project>/worktrees` still holds engine-made worktrees
-/// (read by the engine, which made them). While it holds none, that folder may be the
-/// owner's own, so the rule leaves it alone.
+/// One project's agent folders choice as a Seatbelt profile holds it, with whether the older agents
+/// root `<project>/worktrees` still holds engine-made worktrees (read by the engine, which made
+/// them). While it holds none, that folder may be the owner's own, so the rule leaves it alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AgentFilesRule {
     pub choice: IdeAgentFiles,
@@ -343,15 +338,14 @@ pub struct AgentFilesRule {
 }
 
 impl AgentFilesRule {
-    /// The Seatbelt rules that hold the choice under the project's agents root, in any
-    /// letter case: none for Allow all changes; for No delete or rename, no removal and no
-    /// rename of an agent folder or of anything in it, so edits in place still land; for
-    /// Read only, no write of any kind there. Either way neither the agents root nor the
-    /// `.crazyagent` folder above it is removed or moved aside, in any letter case, so no
-    /// agent folder leaves the rule's reach, not even through a `.CRAZYAGENT` folder made
-    /// before the first agent and then holding it on a case-insensitive volume (DEC-124 r1
-    /// rv-code L1); under Read only that folder is not made or changed either. Input: the
-    /// project folder, a clean absolute path. Output: the rule text.
+    /// The Seatbelt rules that hold the choice under the project's agents root, in any letter case:
+    /// none for Allow all changes; for No delete or rename, no removal and no rename of an agent
+    /// folder or of anything in it, so edits in place still land; for Read only, no write of any
+    /// kind there. Either way neither the agents root nor the `.crazyagent` folder above it is
+    /// removed or moved aside, in any letter case, so no agent folder leaves the rule's reach, not
+    /// even through a `.CRAZYAGENT` folder made before the first agent and then holding it on a
+    /// case-insensitive volume; under Read only that folder is not made or changed either. Input:
+    /// the project folder, a clean absolute path. Output: the rule text.
     pub fn seatbelt(self, root: &Path) -> String {
         let operation = match self.choice {
             IdeAgentFiles::AllowAll => return String::new(),
@@ -374,10 +368,10 @@ impl AgentFilesRule {
     }
 }
 
-/// When a running agent picks up a saved policy that gives it more than it started with
-/// (F08): When the agent is idle, the default, stops it at its next idle point so its next
-/// start uses the new policy, the live master as a planned restart that resumes its own
-/// conversation; At its next start leaves it running until it next starts.
+/// When a running agent picks up a saved policy that gives it more than it started with: When the
+/// agent is idle, the default, stops it at its next idle point so its next start uses the new
+/// policy, the live master as a planned restart that resumes its own conversation; At its next
+/// start leaves it running until it next starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessApply {
@@ -417,10 +411,10 @@ pub const GRANTS_MAX: usize = GRANT_SOCKETS_MAX + GRANT_PORTS_MAX + 1;
 /// The longest socket path a grant names, macOS `sun_path` less its closing NUL.
 pub const GRANT_SOCKET_BYTES_MAX: usize = 103;
 
-/// One narrow extra the owner allowed a project's agents beside their access level (F08):
-/// connecting to one exact Unix socket, connecting to one TCP port on this computer, or
-/// using the owner's own temp folder as their TMPDIR. A grant is added in Agent access or by
-/// the owner's Allow on an agent's request, and removed there.
+/// One narrow extra the owner allowed a project's agents beside their access level: connecting to
+/// one exact Unix socket, connecting to one TCP port on this computer, or using the owner's own
+/// temp folder as their TMPDIR. A grant is added in Agent access or by the owner's Allow on an
+/// agent's request, and removed there.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AccessGrant {
@@ -475,18 +469,16 @@ pub struct ToolchainChoice {
     pub allowed: bool,
 }
 
-/// One project's agent policy as the owner saved it: the access level and the toolchain
-/// choices the owner made, which apply to the master, sub-agents and research jobs alike,
-/// and whether git in the IDE runs the project's own hooks in the Project section (Off
-/// unless the owner turned it on; a policy saved before the setting existed reads Off), what
-/// the IDE may do to agent files (Allow all changes when none was saved) and who shares the
-/// agents' tool cache (T8; a policy saved before that setting reads Shared), what a launch
-/// does with the download caches in an agent home (DEC-173 add.1; a policy saved before that
-/// setting reads Clear when access is raised), when running
-/// agents pick up a wider policy and the narrow grants the owner allowed (F08; a policy saved
-/// before those settings reads When the agent is idle and no grants), and which of the
-/// project folder's local folders agents see and how (DEC-147.9; a policy saved before that
-/// setting reads All and Read-only).
+/// One project's agent policy as the owner saved it: the access level and the toolchain choices the
+/// owner made, which apply to the master, sub-agents and research jobs alike, and whether git in
+/// the IDE runs the project's own hooks in the Project section (Off unless the owner turned it on;
+/// a policy saved before the setting existed reads Off), what the IDE may do to agent files (Allow
+/// all changes when none was saved) and who shares the agents' tool cache (a policy saved before
+/// that setting reads Shared), what a launch does with the download caches in an agent home (a
+/// policy saved before that setting reads Clear when access is raised), when running agents pick up
+/// a wider policy and the narrow grants the owner allowed (a policy saved before those settings
+/// reads When the agent is idle and no grants), and which of the project folder's local folders
+/// agents see and how (a policy saved before that setting reads All and Read-only).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -732,12 +724,12 @@ impl AgentPolicy {
     }
 }
 
-/// Why a process that started under a project's agent policy holds more than the policy
-/// the owner saved now allows: a wider access level; a profile with tools made for a wider
-/// network (CS-2); a toolchain the owner turned off; a toolchain with no owner choice that
-/// the project no longer uses, which is also how
-/// turning off a family the project does not use is saved; or a policy, or a project folder
-/// that toolchain detection needs, that cannot be read, so nothing held can be confirmed.
+/// Why a process that started under a project's agent policy holds more than the policy the owner
+/// saved now allows: a wider access level; a profile with tools made for a wider network; a
+/// toolchain the owner turned off; a toolchain with no owner choice that the project no longer
+/// uses, which is also how turning off a family the project does not use is saved; or a policy, or
+/// a project folder that toolchain detection needs, that cannot be read, so nothing held can be
+/// confirmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Narrowing {
     Access,
@@ -848,7 +840,7 @@ pub struct PolicyView {
     pub local_folders: Vec<String>,
 }
 
-/// One Apply access changes choice with the name shown to the owner (F08).
+/// One Apply access changes choice with the name shown to the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyView {
@@ -856,7 +848,7 @@ pub struct ApplyView {
     pub label: String,
 }
 
-/// One saved grant with the words the owner reads (F08).
+/// One saved grant with the words the owner reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantView {
@@ -864,8 +856,8 @@ pub struct GrantView {
     pub label: String,
 }
 
-/// The owner's temp folder a temp folder grant would hand to agents, or why this computer
-/// cannot grant it (F08).
+/// The owner's temp folder a temp folder grant would hand to agents, or why this computer cannot
+/// grant it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TempFolderView {
@@ -873,7 +865,7 @@ pub struct TempFolderView {
     pub unavailable: Option<String>,
 }
 
-/// One tool cache choice with the name shown to the owner (T8).
+/// One tool cache choice with the name shown to the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCacheView {
@@ -881,7 +873,7 @@ pub struct ToolCacheView {
     pub label: String,
 }
 
-/// One agent home caches choice with the name shown to the owner (DEC-173 add.1).
+/// One agent home caches choice with the name shown to the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HomeCachesView {
@@ -900,12 +892,12 @@ pub struct NetworkView {
     pub gap: Option<String>,
 }
 
-/// What a network choice cannot hold on this Linux, for the Agent access page: a port agents
-/// may reach on this computer is open on every host. Under `TcpOnly` the call supervisor
-/// keeps those ports to this computer, though Https reaches port 53 on any host; without it
-/// a nesting host's bridge does under None, unless a granted port is below its lowest; a
-/// host that routes keeps Https to its ports in a network of its own (DEC-179 SBX-2).
-/// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
+/// What a network choice cannot hold on this Linux, for the Agent access page: a port agents may
+/// reach on this computer is open on every host. Under `TcpOnly` the call supervisor keeps those
+/// ports to this computer, though Https reaches port 53 on any host; without it a nesting host's
+/// bridge does under None, unless a granted port is below its lowest; a host that routes keeps
+/// Https to its ports in a network of its own. Inputs: the choice, the host under the setting,
+/// sockets, grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
     host: Option<LinuxHost>,
@@ -939,9 +931,9 @@ pub fn linux_network_gap(
         .map(crate::lines::linux_unbridged_line)
 }
 
-/// What a network choice cannot hold on Windows, for the Agent access page: Port 443 only and
-/// None reach the whole internet there, and a model on this computer is refused (DESIGN-0256
-/// O2a). Inputs: the OS and the choice. Output: the line, or none elsewhere and for Open.
+/// What a network choice cannot hold on Windows, for the Agent access page: Port 443 only and None
+/// reach the whole internet there, and a model on this computer is refused. Inputs: the OS and the
+/// choice. Output: the line, or none elsewhere and for Open.
 pub fn windows_network_gap(os: &str, network: AgentNetwork) -> Option<&'static str> {
     (os == "windows" && network != AgentNetwork::Open).then_some(WINDOWS_NETWORK_WIDE_LINE)
 }
@@ -1056,12 +1048,11 @@ pub struct ToolchainView {
     pub allowed: bool,
 }
 
-/// The toolchain choices a project records when it is made (F26): every family the project
-/// uses now or the owner has installed, allowed, so a project that starts empty still gets
-/// the owner's Rust, Node.js and Python once its code lands; a family neither used nor
-/// installed keeps following the project. The owner can turn each one off later. Inputs:
-/// the project folder and the owner's tool homes, none when unknown. Output: the choices in
-/// display order.
+/// The toolchain choices a project records when it is made: every family the project uses now or
+/// the owner has installed, allowed, so a project that starts empty still gets the owner's Rust,
+/// Node.js and Python once its code lands; a family neither used nor installed keeps following the
+/// project. The owner can turn each one off later. Inputs: the project folder and the owner's tool
+/// homes, none when unknown. Output: the choices in display order.
 pub fn recorded_toolchains(project: &Path, homes: Option<&ToolHomes>) -> Vec<ToolchainChoice> {
     let recorded: Vec<ToolchainChoice> = Toolchain::ALL
         .into_iter()

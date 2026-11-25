@@ -46,8 +46,7 @@ impl Drop for TextField {
 
 fn wipe(text: &mut String) {
     let mut bytes = std::mem::take(text).into_bytes();
-    kernel_security::secret::wipe(&mut bytes);
-    std::hint::black_box(&bytes);
+    kernel_security::secret::wipe_owned(&mut bytes);
 }
 
 impl TextField {
@@ -172,18 +171,39 @@ impl TextField {
 
     fn insert(&mut self, text: &str) {
         for character in text.chars() {
-            let accepted = match character {
-                '\n' => self.multiline,
-                '\r' | '\t' => false,
-                other => !other.is_control(),
-            };
-            if !accepted || self.len() >= self.max_chars {
-                continue;
-            }
-            let at = self.byte_at(self.cursor);
-            self.value.insert(at, character);
-            self.cursor += 1;
+            self.insert_char(character);
         }
+    }
+
+    fn insert_char(&mut self, character: char) {
+        let accepted = match character {
+            '\n' => self.multiline,
+            '\r' | '\t' => false,
+            other => !other.is_control(),
+        };
+        if !accepted || self.len() >= self.max_chars {
+            return;
+        }
+        let at = self.byte_at(self.cursor);
+        self.value.insert(at, character);
+        self.cursor += 1;
+    }
+
+    /// Removes the text between two byte offsets on character boundaries, zeroing the bytes
+    /// the removal leaves past the new end, so no removed or moved byte stays in the buffer.
+    /// Inputs: the start and end offsets. Output: none; the buffer keeps its capacity.
+    fn cut(&mut self, from: usize, to: usize) {
+        assert!(from <= to && to <= self.value.len());
+        let capacity = self.value.capacity();
+        let mut bytes = std::mem::take(&mut self.value).into_bytes();
+        let before = bytes.len();
+        bytes.drain(from..to);
+        let after = bytes.len();
+        bytes.resize(before, 0);
+        kernel_security::secret::wipe(&mut bytes[after..]);
+        bytes.truncate(after);
+        self.value = String::from_utf8(bytes).expect("a cut on character boundaries is UTF-8");
+        assert_eq!(self.value.capacity(), capacity);
     }
 
     /// Applies one editing key.
@@ -192,25 +212,16 @@ impl TextField {
     pub fn key(&mut self, key: &Key) -> bool {
         let count = self.len();
         match key {
-            Key::Char(character) => self.insert(&character.to_string()),
-            Key::Paste(text) => {
-                let text = if self.multiline {
-                    text.replace("\r\n", "\n")
-                } else {
-                    text.replace(['\r', '\n'], "")
-                };
-                self.insert(&text);
-            }
+            Key::Char(character) => self.insert_char(*character),
+            Key::Paste(text) => self.insert(text),
             Key::Ctrl('j') if self.multiline => self.insert("\n"),
             Key::Backspace if self.cursor > 0 => {
                 self.cursor -= 1;
-                let at = self.byte_at(self.cursor);
-                self.value.remove(at);
+                self.cut(self.byte_at(self.cursor), self.byte_at(self.cursor + 1));
             }
             Key::Backspace => {}
             Key::Delete if self.cursor < count => {
-                let at = self.byte_at(self.cursor);
-                self.value.remove(at);
+                self.cut(self.byte_at(self.cursor), self.byte_at(self.cursor + 1));
             }
             Key::Delete => {}
             Key::Left => self.cursor = self.cursor.saturating_sub(1),
@@ -219,17 +230,13 @@ impl TextField {
             Key::End | Key::Ctrl('e') => self.cursor = count,
             Key::Ctrl('u') => self.clear(),
             Key::Ctrl('w') => {
-                let characters: Vec<char> = self.value.chars().collect();
-                let mut start = self.cursor;
-                while start > 0 && characters[start - 1] == ' ' {
-                    start -= 1;
-                }
-                while start > 0 && characters[start - 1] != ' ' && characters[start - 1] != '\n' {
-                    start -= 1;
-                }
-                let from = self.byte_at(start);
                 let to = self.byte_at(self.cursor);
-                self.value.replace_range(from..to, "");
+                let from = self.value[..to]
+                    .trim_end_matches(' ')
+                    .rfind([' ', '\n'])
+                    .map_or(0, |at| at + 1);
+                let start = self.value[..from].chars().count();
+                self.cut(from, to);
                 self.cursor = start;
             }
             _ => return false,

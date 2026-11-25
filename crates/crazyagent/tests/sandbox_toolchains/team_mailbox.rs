@@ -77,13 +77,12 @@ fn native_team_agents_still_send_a_call_and_remove_the_answer_they_read() {
     }
 }
 
-/// A native lead's teammates neither read nor change the lead's part of the relay mailbox,
-/// where the engine keeps the lead's letters, reports, asks and answers: reading a letter,
-/// listing the part, taking a letter by rename, planting an entry, and removing or moving
-/// the part are all refused, and only the roster the engine keeps there is readable. The
-/// same reads, plants and moves spelled in another letter case, and a hard link of a
-/// letter out of the part, are refused too (relay RC-1). The lead reads and takes its own
-/// letters (DEC-111 relay mailbox forgery, C1).
+/// A native lead's teammates neither read nor change the lead's part of the relay mailbox, where
+/// the engine keeps the lead's letters, reports, asks and answers: reading a letter, listing the
+/// part, taking a letter by rename, planting an entry, and removing or moving the part are all
+/// refused, and only the roster the engine keeps there is readable. The same reads, plants and
+/// moves spelled in another letter case, and a hard link of a letter out of the part, are refused
+/// too (relay RC-1). The lead reads and takes its own letters.
 #[test]
 fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox() {
     let team = LiveTeam::start();

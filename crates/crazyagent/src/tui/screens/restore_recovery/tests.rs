@@ -98,18 +98,18 @@ fn a_finished_restore_shows_it_running_and_a_refusal_shows_its_code() {
 
 #[cfg(unix)]
 #[test]
-fn a_job_reads_the_engine_the_screen_was_started_with() {
-    let home = tempfile::tempdir().unwrap();
+fn a_job_reads_the_engine_the_screen_was_started_with() -> std::io::Result<()> {
+    let home = tempfile::tempdir()?;
     let layout = crate::paths::Layout::new(home.path().to_path_buf()).unwrap();
-    std::fs::create_dir_all(layout.root()).unwrap();
+    std::fs::create_dir_all(layout.root())?;
     std::fs::write(
         layout.root().join(kernel_storage::migrations::DATABASE),
         b"",
-    )
-    .unwrap();
+    )?;
     let Done::Read(Ok(read)) = run(Step::Read, &layout, false) else {
         panic!("an engine with no restore record reads as nothing to recover");
     };
     assert_eq!(read.offer, None);
     assert_eq!(read.folder, crate::restore::backups(layout.root()));
+    Ok(())
 }

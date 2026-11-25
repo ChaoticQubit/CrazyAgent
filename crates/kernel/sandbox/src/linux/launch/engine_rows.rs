@@ -1,21 +1,18 @@
-use crazyagent_linux_supervisor::rules::{GitOwn, Held};
-use kernel_sandbox::error::SandboxError;
-use kernel_sandbox::host::LinuxHost;
-use kernel_sandbox::lines::{
+use crate::error::SandboxError;
+use crate::host::LinuxHost;
+use crate::lines::{
     LINUX_PORTS_ANY_HOST_LINE, LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE,
     linux_unbridged_line,
 };
-use kernel_sandbox::linux::helper::bridge::Bridge;
-use kernel_sandbox::linux::helper::landlock::*;
-use kernel_sandbox::linux::helper::*;
-use kernel_sandbox::linux::launch::host::*;
-use kernel_sandbox::linux::launch::*;
-use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
-use kernel_sandbox::ports::PICKED_PORTS_START;
-use kernel_sandbox::ports::PROXY_PORTS;
-use kernel_sandbox::profile::consts::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK;
-use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox, linux_unbridged_notice_on};
-use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
+use crate::linux::helper::bridge::Bridge;
+use crate::linux::launch::*;
+use crate::net::{SandboxNetwork, SandboxRemote};
+use crate::ports::PICKED_PORTS_START;
+use crate::ports::PROXY_PORTS;
+use crate::profile::consts::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK;
+use crate::profile::{ProjectSandbox, command::Sandbox, linux_unbridged_notice_on};
+use crate::settings::{LinuxSockets, LinuxSupervisor};
+use crazyagent_linux_supervisor::rules::{GitOwn, Held};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,7 +32,7 @@ fn project(network: SandboxNetwork) -> (tempfile::TempDir, ProjectSandbox) {
         fs::create_dir(folder).unwrap();
     }
     let sandbox = ProjectSandbox::new(
-        &crate::sandbox::PROFILE_HOOKS,
+        &crate::test_hooks::STAND_IN,
         &folders[0],
         &folders[1],
         &folders[2],
@@ -63,6 +60,15 @@ fn git(folder: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
+/// The folder an agent's worktree or clone takes in the project's worktrees folder, as the
+/// stand-in hooks place it, made ready for it. Inputs: the project and the folder name.
+/// Output: the folder's path, not yet made.
+fn agent_folder(project: &Path, name: &str) -> PathBuf {
+    let worktrees = (crate::test_hooks::STAND_IN.access.state_folder)(project).join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    worktrees.join(name)
+}
+
 /// A project with one commit and a linked worktree in its worktrees folder, then the
 /// sandbox over it with the agent's home and temp folders. No input. Output: the temp
 /// folder, the project, the sandbox and the worktree.
@@ -78,15 +84,14 @@ fn linked() -> (tempfile::TempDir, PathBuf, ProjectSandbox, PathBuf) {
     git(&project, &["init", "-q"]);
     git(&project, &["add", "owner.txt"]);
     git(&project, &["commit", "-q", "-m", "start"]);
-    fs::create_dir(project.join("worktrees")).unwrap();
-    let worktree = project.join("worktrees").join("agent-1");
+    let worktree = agent_folder(&project, "agent-1");
     let path = worktree.to_str().unwrap();
     git(
         &project,
         &["worktree", "add", "-q", "--detach", path, "HEAD"],
     );
     let sandbox = ProjectSandbox::new(
-        &crate::sandbox::PROFILE_HOOKS,
+        &crate::test_hooks::STAND_IN,
         &project,
         &folders[1],
         &folders[2],
@@ -183,9 +188,9 @@ fn a_launch_whose_git_grant_covers_a_protected_path_nothing_holds_is_refused() {
     );
 }
 
-/// LINUX-KILL-GROUP: only the plain Landlock backend leaves a process in a session of its
-/// own running after a stop's group kill, so only its runs have their lineage checked;
-/// both bubblewrap backends end every process with their process namespace.
+/// Only the plain Landlock backend leaves a process in a session of its own running after a stop's
+/// group kill, so only its runs have their lineage checked; both bubblewrap backends end every
+/// process with their process namespace.
 #[test]
 fn only_the_plain_landlock_backend_leaves_a_session_of_its_own_running() {
     let (_temp, _project, sandbox, _worktree) = linked();
@@ -274,7 +279,7 @@ fn a_linked_worktree_agent_makes_entries_in_its_admin_folder_and_no_other_git() 
 #[test]
 fn a_supervised_clone_launches_with_its_store_held() {
     let (_temp, project, sandbox, _) = linked();
-    let clone = project.join("worktrees").join("agent-2");
+    let clone = agent_folder(&project, "agent-2");
     fs::create_dir(&clone).unwrap();
     git(&clone, &["init", "-q"]);
     let confined = sandbox.confine_to_clone(&clone).unwrap();
@@ -320,7 +325,7 @@ fn a_supervised_clone_launches_with_its_store_held() {
 #[test]
 fn a_clone_writes_its_whole_clone_and_has_no_git_folder_grant() {
     let (_temp, project, sandbox, _) = linked();
-    let clone = project.join("worktrees").join("agent-2");
+    let clone = agent_folder(&project, "agent-2");
     fs::create_dir(&clone).unwrap();
     git(&clone, &["init", "-q"]);
     let confined = sandbox.confine_to_clone(&clone).unwrap();
@@ -361,7 +366,7 @@ fn a_clone_writes_its_whole_clone_and_has_no_git_folder_grant() {
 #[test]
 fn a_clone_on_the_bubblewrap_backend_is_refused_with_the_landlock_line() {
     let (_temp, project, sandbox, _) = linked();
-    let clone = project.join("worktrees").join("agent-2");
+    let clone = agent_folder(&project, "agent-2");
     fs::create_dir(&clone).unwrap();
     git(&clone, &["init", "-q"]);
     let launch = LinuxSandbox::assembled(
@@ -398,7 +403,7 @@ fn an_open_network_policy_keeps_the_owner_model_and_proxy_ports_free() {
     assert!(!policy.limit_network);
     let mut expected = vec![1234, 1455, 8080, 11434];
     expected.extend(PROXY_PORTS);
-    expected.extend(kernel_sandbox::ports::RELAY_PORTS);
+    expected.extend(crate::ports::RELAY_PORTS);
     assert_eq!(policy.keep_free, expected);
     assert_eq!(policy.keep_free.len(), 4 + 256);
     assert_eq!(
@@ -492,7 +497,7 @@ fn a_limited_network_policy_names_the_kept_ports_for_the_helper_to_check() {
     assert!(policy.limit_network);
     let mut expected = vec![1455, 8080, 11434];
     expected.extend(PROXY_PORTS);
-    expected.extend(kernel_sandbox::ports::RELAY_PORTS);
+    expected.extend(crate::ports::RELAY_PORTS);
     assert_eq!(policy.keep_free, expected);
     assert_eq!(
         HelperRequest::parse(
@@ -537,10 +542,10 @@ fn refusal(detected: Result<LinuxSandbox, SandboxError>) -> String {
     }
 }
 
-/// V243-LINUX-KEEP-FREE-REFUSAL-NAME: a probe that says the kernel cannot hold the
-/// boundary keeps the kernel refusals; any other failure is named, its first line cut to
-/// 200 bytes with no control characters. A network with ports never widens to open; a
-/// closed network keeps its bubblewrap fallback, and without bubblewrap names the reason.
+/// A probe that says the kernel cannot hold the boundary keeps the kernel refusals; any other
+/// failure is named, its first line cut to 200 bytes with no control characters. A network with
+/// ports never widens to open; a closed network keeps its bubblewrap fallback, and without
+/// bubblewrap names the reason.
 #[test]
 fn a_failed_probe_names_its_own_reason_and_only_an_enforcement_answer_names_the_kernel() {
     use std::os::unix::fs::PermissionsExt;
@@ -798,10 +803,10 @@ fn a_set_user_or_set_group_id_bubblewrap_is_never_nested_under() {
     }
 }
 
-/// rv-sa241 SBX-2-R2 LOW-1: where this computer's nest check passes, a launch whose own
-/// nest probe fails is refused with words to try again or restart, instead of running on
-/// the shared network with Landlock rules only while the Agent access page says it is
-/// nested; where the nest check fails too, the launch is a Landlock one, as the page says.
+/// Where this computer's nest check passes, a launch whose own nest probe fails is refused with
+/// words to try again or restart, instead of running on the shared network with Landlock rules only
+/// while the Agent access page says it is nested; where the nest check fails too, the launch is a
+/// Landlock one, as the page says.
 #[test]
 fn a_launch_whose_own_nest_probe_fails_where_this_computer_nests_is_refused() {
     use std::os::unix::fs::PermissionsExt;
@@ -886,8 +891,8 @@ fn an_agent_kept_on_this_network_by_a_low_port_names_the_lowest_one() {
 
 #[test]
 fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
+    use crate::policy::AgentNetwork;
     use SandboxRemote::{AnyHost, Loopback};
-    use kernel_sandbox::policy::AgentNetwork;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -948,8 +953,8 @@ fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
 
 #[test]
 fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
+    use crate::policy::AgentNetwork;
     use SandboxRemote::{AnyHost, Loopback};
-    use kernel_sandbox::policy::AgentNetwork;
     let host = |routed, supervised| {
         Some(LinuxHost {
             nested: true,
@@ -1016,8 +1021,8 @@ fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself()
 
 #[test]
 fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
+    use crate::policy::AgentNetwork;
     use SandboxRemote::{AnyHost, Loopback};
-    use kernel_sandbox::policy::AgentNetwork;
     let host = |nested, routed| {
         Some(LinuxHost {
             nested,
@@ -1126,9 +1131,9 @@ fn a_nested_agent_may_have_an_open_network_and_keeps_the_kept_port_check() {
     }
 }
 
-/// A launch whose own probe fails with the setting On runs without the supervisor and
-/// marks the kept host as running none, so the next Agent access page read shows the
-/// wider lines; nothing kept stays nothing (rv-secreview linux-t4c F2).
+/// A launch whose own probe fails with the setting On runs without the supervisor and marks the
+/// kept host as running none, so the next Agent access page read shows the wider lines; nothing
+/// kept stays nothing.
 #[test]
 fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
     let host = LinuxHost {
@@ -1162,9 +1167,9 @@ fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
     assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
 }
 
-/// A supervised launch guards the loopback ports of a limited network under TCP only,
-/// but a port it may also reach on any host or look names up on, always its own git
-/// folders, and signals only where the host holds nothing else (DEC-179 T4c).
+/// A supervised launch guards the loopback ports of a limited network under TCP only, but a port it
+/// may also reach on any host or look names up on, always its own git folders, and signals only
+/// where the host holds nothing else.
 #[test]
 fn a_supervised_launch_carries_each_guard_its_policy_and_host_need() {
     use SandboxRemote::{AnyHost, Loopback};
@@ -1203,9 +1208,9 @@ fn a_supervised_launch_carries_each_guard_its_policy_and_host_need() {
     );
 }
 
-/// The git folders a supervised agent owns are the ones the macOS boundary leaves it:
-/// the top of each tree it works in and, for the engine's worktree step, each folder in
-/// the two worktree folders (DEC-179 T4c, RV-DS241-85b).
+/// The git folders a supervised agent owns are the ones the macOS boundary leaves it: the top of
+/// each tree it works in and, for the engine's worktree step, each folder in the two worktree
+/// folders.
 #[test]
 fn a_supervised_agent_owns_the_git_of_each_tree_it_works_in_and_of_each_engine_worktree() {
     let (temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));

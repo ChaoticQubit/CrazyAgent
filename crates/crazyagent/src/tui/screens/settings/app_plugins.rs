@@ -9,7 +9,7 @@ use crate::tui::screens::new_project_view::printable;
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::Arrival;
-use crate::tui::text::{coded, cut, indent, list_row, row, styled, wrap};
+use crate::tui::text::{cut, indent, list_row, row, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::TextField;
 use kernel_plugin_host::grants::{GrantState, PluginGrants};
@@ -26,6 +26,12 @@ use std::path::PathBuf;
 #[cfg(all(test, unix))]
 mod tests;
 
+#[cfg(all(test, windows))]
+mod path_hint_tests;
+
+mod sentence;
+pub(in crate::tui) use sentence::sentence;
+
 const MODAL_WIDTH: u16 = 66;
 const TEXT_CHARS_MAX: usize = 300;
 const KEY_CHARS_MAX: usize = 1024;
@@ -33,74 +39,15 @@ const PATH_CHARS_MAX: usize = 1024;
 const USERS_SHOWN_MAX: usize = 8;
 const NOTICES_MAX: usize = 64;
 const INTRO: &str = "Plugins CrazyAgent itself runs, such as the embedding models search ranks with. Each one shows what it reaches before you approve it.";
+#[cfg(not(windows))]
 const ABSOLUTE: &str = "Type the full path of the plugin folder, starting with /.";
+#[cfg(windows)]
+const ABSOLUTE: &str =
+    "Type the full path of the plugin folder, starting with its drive, such as C:\\.";
 const PATH_LONG: &str = "A folder path can be at most 1024 characters.";
-
-/// One plain sentence for a refused App plugins request. Input: the code. Output: the
-/// sentence, or the plain fallback naming the code.
-pub(in crate::tui) fn sentence(code: &str) -> String {
-    let known = match code {
-        "app_plugin_outcome_unknown" => {
-            "CrazyAgent couldn't confirm what happened. Check the list before you try again."
-        }
-        "app_plugin_request_bounds" => "This plugin request was too large to send.",
-        "app_plugin_request_invalid" => {
-            "The engine didn't accept this plugin request. Read the page again and try again."
-        }
-        "app_plugins_unavailable" => "App plugins aren't available in this engine yet.",
-        "app_plugins_readonly" => "App plugins can't be changed while the engine is read-only.",
-        "app_plugin_not_found" => "That plugin is gone. The list now shows the current ones.",
-        "app_plugin_name_taken" => {
-            "A bundled plugin already has that name. Give your plugin another name."
-        }
-        "app_plugin_bundled" => "Bundled plugins can be turned off but not removed or replaced.",
-        "app_plugin_essential" => "The app relies on this plugin, so it stays on.",
-        "app_plugin_changed" => {
-            "The plugin.toml changed after you checked it. Check it again before you approve it."
-        }
-        "app_plugin_needs_review" => {
-            "This plugin's file changed or is new. Review it before it runs."
-        }
-        "app_plugin_refused" => "CrazyAgent refused this plugin. Its reason is shown with it.",
-        "app_plugin_past_cap" => {
-            "The app reads only the first 64 plugins by name, old plugin files included. Remove one of them to use this plugin."
-        }
-        "app_plugin_port_handed_out" => {
-            "This plugin calls a port the app gave to something else on this computer, so it can't be added."
-        }
-        "app_plugin_folder_unsafe" => {
-            "Your plugins folder isn't private to you, so CrazyAgent won't read it. Make it yours alone and try again."
-        }
-        "app_plugin_folder_unavailable" => {
-            "CrazyAgent couldn't open your plugins folder. Try again."
-        }
-        "app_plugin_secret_not_declared" => "This plugin doesn't declare that secret.",
-        "app_plugin_account_not_found" => "That account is gone. Pick another one or enter a key.",
-        "app_plugin_account_has_no_key" => {
-            "That account has no saved API key to share. Pick another one or enter a key."
-        }
-        "app_plugin_key_invalid" => {
-            "That key can't be used: it is empty, too long or has spaces or control characters."
-        }
-        "app_plugin_key_store_unavailable" => {
-            "CrazyAgent couldn't reach its saved keys. Nothing was changed; try again."
-        }
-        "app_plugin_setting_unavailable" => {
-            "This setting can't be saved while the app has no settings file or is applying a change. Try again."
-        }
-        "app_plugin_setting_unreadable" => {
-            "Your settings file couldn't be read, so CrazyAgent didn't change it. Fix the file and try again."
-        }
-        "app_plugin_setting_unsafe" => {
-            "Your settings file is a link or shared with another name, so CrazyAgent won't write it."
-        }
-        "owner_entropy_unavailable" => {
-            "This computer couldn't make a random value for the request. Nothing changed; try again."
-        }
-        _ => return coded("CrazyAgent couldn't do that.", code),
-    };
-    known.to_owned()
-}
+const TURNING_OFF: &str = "Turning it off...";
+const PATH_CHANGED: &str =
+    "The path changed while it was being checked. Press Enter to check it again.";
 
 /// Plugin text made safe for one terminal row and bounded. Input: the text. Output: the text
 /// without control or hidden characters, at most `TEXT_CHARS_MAX` characters.
@@ -340,8 +287,9 @@ enum Open {
 /// Settings, App plugins: the plugins the listing carries, then each bundled code plugin
 /// the grants read names, with one label each, how it runs, where each secret's key comes
 /// from and, for a code plugin, its permissions in plain words. `a` adds a plugin folder
-/// by path only after its review is approved with `y`; Enter reviews an unapproved or
-/// changed plugin, shows a bundled one read-only, or switches an approved or code plugin;
+/// by path only after its review is approved with `y`, and only the path that review
+/// checked; Enter reviews an unapproved or changed plugin, shows a bundled one read-only,
+/// or switches an approved or code plugin;
 /// turning off always confirms, listing the runs holding it; `w` switches the stored
 /// choice for runs holding a plugin turned off. One request runs at a time.
 pub(in crate::tui) struct AppPluginsPage {
@@ -352,6 +300,7 @@ pub(in crate::tui) struct AppPluginsPage {
     pending: Option<Pending>,
     regrant: bool,
     reviewing: Option<bool>,
+    checking: Option<PathBuf>,
     failure: Option<String>,
     notices: Vec<String>,
 }
@@ -367,6 +316,7 @@ impl AppPluginsPage {
             pending: None,
             regrant: false,
             reviewing: None,
+            checking: None,
             failure: None,
             notices: Vec::new(),
         }
@@ -563,6 +513,7 @@ impl AppPluginsPage {
             self.failure = Some(ABSOLUTE.into());
             return;
         }
+        self.checking = Some(folder.clone());
         self.ask(AppPluginsJob::Preview { folder }, Pending::Check, ctx);
     }
 
@@ -687,8 +638,13 @@ impl AppPluginsPage {
                 self.failure = None;
             }
             (Open::Trust { scroll, .. }, Key::Up) => *scroll = scroll.saturating_sub(1),
-            (Open::Trust { scroll, .. }, Key::Down) => *scroll += 1,
-            (Open::TurnOff(form), Key::Tab | Key::BackTab) => form.choice = other(form.choice),
+            (Open::Trust { scroll, trust, .. }, Key::Down) => {
+                let last = trust_lines(trust, usize::from(MODAL_WIDTH) - 4).len();
+                *scroll = (*scroll + 1).min(last.saturating_sub(1));
+            }
+            (Open::TurnOff(form), Key::Tab | Key::BackTab) if idle => {
+                form.choice = other(form.choice);
+            }
             (Open::Trust { approve: true, .. }, Key::Char('y')) if idle => self.confirm(ctx),
             (Open::Remove { .. } | Open::TurnOff(_), Key::Char('y')) if idle => {
                 self.confirm(ctx);
@@ -736,7 +692,9 @@ impl AppPluginsPage {
                 if let Open::Remove { .. } | Open::Trust { .. } | Open::TurnOff(_) = self.open {
                     self.open = Open::None;
                 }
-                if matches!(self.open, Open::None) {
+                if matches!(self.open, Open::None) && code == "access_change_pending" {
+                    ctx.say(Message::warning("Waiting.", &sentence(code)));
+                } else if matches!(self.open, Open::None) {
                     ctx.say(Message::error("Not saved.", &sentence(code)));
                 } else {
                     self.failure = Some(sentence(code));
@@ -772,8 +730,17 @@ impl AppPluginsPage {
     }
 
     fn previewed(&mut self, result: &Result<Preview, String>, ctx: &mut Ctx) {
+        let checked = self.checking.take();
         let (folder, approve) = match (&self.open, self.reviewing.take()) {
-            (Open::Add(field), _) => (Some(PathBuf::from(field.value().trim())), true),
+            (Open::Add(field), _) => match checked {
+                Some(sent) if sent.as_path() == std::path::Path::new(field.value().trim()) => {
+                    (Some(sent), true)
+                }
+                _ => {
+                    self.failure = Some(PATH_CHANGED.into());
+                    return;
+                }
+            },
             (_, Some(approve)) => (None, approve),
             _ => return,
         };
@@ -967,7 +934,7 @@ impl AppPluginsPage {
                 let cursor = at.map(|at| Position::new(at.x, at.y + top as u16));
                 return (lines, cursor);
             }
-            Open::Key(form) => return self.key_body(form, lines, limit, ctx),
+            Open::Key(form) => return self.key_body(form, lines, (limit, height), ctx),
             _ => {}
         }
         for notice in &self.notices {
@@ -1037,11 +1004,15 @@ impl AppPluginsPage {
         (lines, None)
     }
 
+    /// The key dialog under the page's lines. When it overflows, the sources above the chosen
+    /// one are dropped first, so its heading, the key's hosts, any failure, the chosen source
+    /// and the typed key's input stay in view. Inputs: the dialog, the lines above it, the
+    /// width and height, and the context. Output: the lines and the cursor.
     fn key_body(
         &self,
         form: &KeyForm,
         mut lines: Vec<Line<'static>>,
-        limit: usize,
+        (limit, height): (usize, usize),
         ctx: &Ctx,
     ) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
@@ -1064,6 +1035,8 @@ impl AppPluginsPage {
             lines.push(styled("Reading API-key accounts...", Role::Muted, theme));
             return (lines, None);
         };
+        let rows_top = lines.len();
+        let mut shown_to = rows_top + form.choice + 1;
         for (index, (_, name)) in accounts.iter().enumerate() {
             lines.push(list_row(
                 Line::raw(format!("Key from {name}")),
@@ -1093,6 +1066,14 @@ impl AppPluginsPage {
                 Role::Muted,
                 theme,
             ));
+            shown_to = lines.len();
+        }
+        if shown_to > height {
+            let skip = shown_to - height;
+            let above = skip.min(form.choice);
+            lines.drain(rows_top..rows_top + above);
+            lines.drain(..skip - above);
+            cursor = cursor.map(|at| Position::new(at.x, at.y.saturating_sub(skip as u16)));
         }
         (lines, cursor)
     }
@@ -1419,6 +1400,11 @@ impl Screen for AppPluginsPage {
                     vec![hint("y", "Remove"), hint("Esc", "Cancel")],
                 )
             }
+            Open::TurnOff(form) if self.pending.is_some() => (
+                format!("Turn off {}?", form.title),
+                [vec![TURNING_OFF.to_owned()], turn_off_lines(form, room)].concat(),
+                vec![hint("Esc", "Close")],
+            ),
             Open::TurnOff(form) => (
                 format!("Turn off {}?", form.title),
                 turn_off_lines(form, room),

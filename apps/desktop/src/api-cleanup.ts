@@ -15,12 +15,17 @@ export interface FinishedAgent {
   kept: string | null;
 }
 
-/** What one removal did: the agents it removed, in the order asked, and the code of the agent
- * it kept when it stopped part way, or null when it removed every one. */
+/** What one removal did: the agents it removed, in the order asked, the code of the agent it
+ * kept when it stopped part way, or null when it removed every one, and for a folder too deep
+ * to remove the absolute folder the owner must delete first. */
 export interface Removal {
   agents: number[];
   kept: string | null;
+  folder?: string;
 }
+
+/** The code of an agent kept for a folder nested too deep to remove, which names that folder. */
+const FOLDER_TOO_DEEP = "cleanup_folder_too_deep";
 
 const REFUSALS: Record<string, string> = {
   cleanup_agent_has_task: "An agent has a task waiting for it again. CrazyAgent kept it and stopped there.",
@@ -67,7 +72,17 @@ export function keptReason(code: string): string {
 }
 
 /** The refusal codes of the cleanup protocol that have their own sentence. */
-export const CLEANUP_REFUSALS = Object.keys(REFUSALS);
+export const CLEANUP_REFUSALS = [...Object.keys(REFUSALS), FOLDER_TOO_DEEP];
+
+/** The sentence for the agent a removal kept: for a folder too deep to remove it names that
+ * folder for the owner to delete, else as {@link cleanupRefusal}. Inputs: the kept code and the
+ * folder the removal named. Output: the sentence. */
+export function keptSentence(code: string, folder?: string): string {
+  if (code === FOLDER_TOO_DEEP && folder) {
+    return `An agent's folder has folders nested more than 64 deep, which CrazyAgent does not remove: ${folder}. Delete it yourself, then try again.`;
+  }
+  return cleanupRefusal({ code });
+}
 
 /** One plain sentence for a refused cleanup request. Input: the refusal code and its engine
  * cause. Output: the sentence, or the plain fallback naming the code. */

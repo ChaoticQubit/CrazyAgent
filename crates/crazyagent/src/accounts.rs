@@ -3,6 +3,9 @@ use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod probe;
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) mod probe;
 
 pub const ACCOUNT_NAME_MAX: usize = 96;

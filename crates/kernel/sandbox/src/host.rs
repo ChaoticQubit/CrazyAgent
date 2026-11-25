@@ -4,13 +4,12 @@ use crate::profile::{ProjectSandbox, linux_unbridged_notice_on};
 use crate::settings::LinuxSupervisor;
 use std::path::Path;
 
-/// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
-/// when it starts agents in a process namespace of their own, `scoped` when the kernel
-/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
-/// `supervised` when the call supervisor holds every guard here, as launches start it,
-/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1),
-/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3), and
-/// `routed` when it gives an agent limited to ports on any host a network of its own (SBX-2).
+/// What this Linux holds for an agent beyond its Landlock file and network rules: `nested` when it
+/// starts agents in a process namespace of their own, `scoped` when the kernel keeps their signals
+/// inside their own Landlock domain (Linux 6.12 or newer), `supervised` when the call supervisor
+/// holds every guard here, as launches start it, `root` when CrazyAgent runs as root, where it
+/// starts no supervisor, `armored` when AppArmor's user namespace restriction is why it nests none,
+/// and `routed` when it gives an agent limited to ports on any host a network of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxHost {
     pub nested: bool,

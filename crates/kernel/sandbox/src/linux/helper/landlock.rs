@@ -1,16 +1,19 @@
 use super::*;
+use crate::linux::places::{fixed_place, granted_place, held_roots};
 use ::landlock::{
-    ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, Scope, make_bitflags, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, RestrictionStatus, Ruleset,
+    RulesetAttr, RulesetCreatedAttr, RulesetError, Scope, make_bitflags,
 };
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach};
 use crazyagent_linux_supervisor::serve::Supervised;
+use rustix::fs::{FileType, Mode, OFlags};
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
     SeccompRule, TargetArch,
 };
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -58,12 +61,12 @@ pub struct LandlockPolicy {
     pub cut: Option<Vec<PathBuf>>,
 }
 
-/// What the helper's call supervisor holds for an agent on a host with no namespaces to
-/// nest it in (DEC-179): `loopback` names the connect ports it reaches on this machine
-/// only, `git` its own git folders, the only `.git` entries it may make, and `signals`
-/// keeps its signals inside the programs it started, and `held` names the entries it may
-/// not write, move, link or remove (DEC-185 S2). With none of them the helper becomes the
-/// harness; with any it stays as the harness's parent and answers its guarded calls.
+/// What the helper's call supervisor holds for an agent on a host with no namespaces to nest it in:
+/// `loopback` names the connect ports it reaches on this machine only, `git` its own git folders,
+/// the only `.git` entries it may make, and `signals` keeps its signals inside the programs it
+/// started, and `held` names the entries it may not write, move, link or remove. With none of them
+/// the helper becomes the harness; with any it stays as the harness's parent and answers its
+/// guarded calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Guard {
     pub loopback: Vec<u16>,
@@ -74,7 +77,7 @@ pub struct Guard {
 
 impl Guard {
     /// The helper arguments for this guard, in the order the helper reads them back.
-    pub fn args(&self) -> Vec<OsString> {
+    pub(crate) fn args(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = Vec::new();
         for port in &self.loopback {
             args.push(GUARD_LOOPBACK.into());
@@ -114,7 +117,7 @@ impl Guard {
 
     /// What the supervisor holds for this guard. Input: the policy's connect ports.
     /// Output: the guarded ports reached on this machine only and the others anywhere.
-    pub fn supervised(&self, connect: &[u16]) -> Supervised {
+    pub(crate) fn supervised(&self, connect: &[u16]) -> Supervised {
         assert!(self.loopback.iter().all(|port| connect.contains(port)));
         let any = connect
             .iter()
@@ -216,7 +219,7 @@ pub(super) fn guard_flag(
 /// connect to, under the network limit with TCP sockets alone, where every connect is one
 /// the supervisor can judge; no guard goes with `--die-with`; the own git places are
 /// bounded. Input: the parsed policy. Output: Ok, or the reason.
-pub fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
+pub(crate) fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     let guard = &policy.guard;
     if *guard == Guard::default() {
         return Ok(());
@@ -248,25 +251,68 @@ pub fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
     Ok(())
 }
 
-/// The rights a git folder grant ([`LandlockPolicy::git_write`]) adds: read, write,
-/// truncate, make and remove files and folders, and no symlink, no move from or to another
-/// folder, no device, fifo or socket and no execute. Landlock unions a folder's rights with
-/// its ancestors', so a read grant above the folder still gives execute (DEC-185 S1).
-/// No input. Output: the rights.
+/// The rights a git folder grant ([`LandlockPolicy::git_write`]) adds: read, write, truncate, make
+/// and remove files and folders, and no symlink, no move from or to another folder, no device, fifo
+/// or socket and no execute. Landlock unions a folder's rights with its ancestors', so a read grant
+/// above the folder still gives execute. No input. Output: the rights.
 pub fn git_folder_rights() -> BitFlags<AccessFs> {
     make_bitflags!(AccessFs::{
         ReadFile | ReadDir | WriteFile | Truncate | MakeReg | MakeDir | RemoveFile | RemoveDir
     })
 }
 
+/// The rules for one list of policy paths: a fixed place opens as the crate opens it, a
+/// granted place through [`granted_place`]; a place that does not open gets no rule, and
+/// one that is not a folder gets only the file rights of `access`. Inputs: the paths and
+/// the rights. Output: the rules, or the refusal of a granted place that became a link.
+fn place_rules(
+    paths: &[PathBuf],
+    access: BitFlags<AccessFs>,
+) -> Result<Vec<PathBeneath<OwnedFd>>, String> {
+    let flags = OFlags::PATH | OFlags::CLOEXEC;
+    let mut rules = Vec::with_capacity(paths.len());
+    for path in paths {
+        let opened = if fixed_place(path) {
+            rustix::fs::open(path.as_path(), flags, Mode::empty()).ok()
+        } else {
+            granted_place(path)?
+        };
+        let Some(place) = opened else {
+            continue;
+        };
+        let folder = rustix::fs::fstat(&place)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory);
+        let rights = if folder {
+            access
+        } else {
+            access & AccessFs::from_file(FS_ABI)
+        };
+        rules.push(PathBeneath::new(place, rights));
+    }
+    assert!(rules.len() <= paths.len());
+    Ok(rules)
+}
+
 /// Applies the policy's Landlock rules to this process. A limited network handles every
 /// network right and allows only its `connect` ports. An open network with kept ports
 /// handles TCP bind alone and, with `rules`, allows every [`bindable`] port; without `rules`,
-/// as in a probe, it only proves this kernel handles the right. Inputs: the policy, and
-/// whether to add the bind rules. Output: what the kernel enforced, or the ruleset error.
-pub(super) fn enforce(
+/// as in a probe, it only proves this kernel handles the right. A granted folder that became
+/// a link is refused ([`granted_place`]). Inputs: the policy, and whether to add the bind
+/// rules. Output: what the kernel enforced, or the refusal or ruleset error as text.
+pub(super) fn enforce(policy: &LandlockPolicy, rules: bool) -> Result<RestrictionStatus, String> {
+    let read = place_rules(&policy.read, AccessFs::from_read(FS_ABI))?;
+    let write = place_rules(&policy.write, AccessFs::from_all(FS_ABI))?;
+    let git_write = place_rules(&policy.git_write, git_folder_rights())?;
+    held_ruleset(policy, rules, [read, write, git_write]).map_err(|error| error.to_string())
+}
+
+/// Builds and applies the ruleset [`enforce`] describes from the path rules already opened.
+/// Inputs: the policy, whether to add the bind rules and the read, write and git write
+/// rules. Output: what the kernel enforced, or the ruleset error.
+fn held_ruleset(
     policy: &LandlockPolicy,
     rules: bool,
+    places: [Vec<PathBeneath<OwnedFd>>; 3],
 ) -> Result<RestrictionStatus, RulesetError> {
     let keeps = !policy.limit_network && !policy.keep_free.is_empty();
     let mut ruleset = Ruleset::default().handle_access(AccessFs::from_all(FS_ABI))?;
@@ -275,17 +321,10 @@ pub(super) fn enforce(
     } else if keeps {
         ruleset = ruleset.handle_access(AccessNet::BindTcp)?;
     }
-    let mut created = ruleset
-        .create()?
-        .add_rules(path_beneath_rules(
-            &policy.read,
-            AccessFs::from_read(FS_ABI),
-        ))?
-        .add_rules(path_beneath_rules(
-            &policy.write,
-            AccessFs::from_all(FS_ABI),
-        ))?
-        .add_rules(path_beneath_rules(&policy.git_write, git_folder_rights()))?;
+    let mut created = ruleset.create()?;
+    for list in places {
+        created = created.add_rules(list.into_iter().map(Ok::<_, RulesetError>))?;
+    }
     for port in &policy.connect {
         created = created.add_rule(NetPort::new(*port, AccessNet::ConnectTcp))?;
     }
@@ -408,17 +447,24 @@ pub(super) fn refused_sockets(tcp_only: bool, plain_tcp: bool) -> Result<Vec<Sec
 /// Starts a harness bubblewrap launched, after a private mount tree if it hides folders ([`cut`]),
 /// behind the socket filter a Landlock agent with a network limit gets ([`refuse_sockets`] with
 /// `tcp_only`): no Unix-domain socket, no io_uring ring, no family but TCP and routing netlink, so
-/// no AF_VSOCK leaves the closed network (RV-DS241-84 r2). Inputs: the harness and the covers.
-/// Output: 3 when the cut or the filter fails, 126 when the harness cannot start.
+/// no AF_VSOCK leaves the closed network. Each bound grant root is checked first to be the place
+/// the engine opened at wrap ([`held_roots`]). Inputs: the harness, the covers and the bound
+/// roots. Output: 3 when the cut, the check or the filter fails, 126 when the harness cannot
+/// start.
 pub(super) fn filtered(
     program: &Path,
     args: Vec<OsString>,
     covers: Option<&[PathBuf]>,
+    bound: &[Bound],
 ) -> ExitCode {
     if let Some(covers) = covers
         && let Err(reason) = cut(covers)
     {
         eprintln!("crazyagent-landlock: {HIDDEN_MOUNTS_NOT_PRIVATE}: {reason}");
+        return ExitCode::from(3);
+    }
+    if let Err(reason) = held_roots(bound) {
+        eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
     if let Err(reason) = refuse_sockets(true, false) {

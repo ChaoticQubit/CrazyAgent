@@ -31,8 +31,9 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 /// Reads a path as written, with its links resolved, and every link, `..` folder and first
 /// missing part its resolution passes through ([`link_chain`]), and names the first
 /// changeable part of any of them ([`first_changeable_part`]). A link that cannot be read,
-/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. Inputs: the path and whether
-/// world-writable stores pass. Output: the entry, or none.
+/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. A call that finds a changeable
+/// part keeps no access answer it read. Inputs: the path and whether world-writable stores
+/// pass. Output: the entry, or none.
 #[cfg(unix)]
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
@@ -61,6 +62,8 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
         if let Some(entry) = first_changeable_part(&parts, me, open_stores)
             .and_then(|depth| path.ancestors().nth(depth))
         {
+            #[cfg(target_os = "macos")]
+            super::acl::forget(&entries);
             return Some(entry.to_path_buf());
         }
     }
@@ -311,4 +314,25 @@ pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
 #[cfg(windows)]
 pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
     changeable_by_others(path)
+}
+
+/// The first part of a socket's path, the socket first, that someone other than this user
+/// or root can change, read as [`changeable_past_sticky`] reads a path but with the group and
+/// world write bits of the socket and its folder set aside: a socket's write bit only lets a
+/// caller connect, and the caller judges the folder's mode itself. Owners, sticky bits,
+/// access lists and every folder above still count. Input: the canonical socket path.
+#[cfg(unix)]
+pub fn changeable_above_socket(socket: &Path) -> Option<PathBuf> {
+    assert!(socket.is_absolute());
+    let entries: Vec<&Path> = socket.ancestors().collect();
+    let mut parts = read_parts(&entries);
+    assert_eq!(parts.len(), entries.len());
+    for part in parts.iter_mut().take(2) {
+        if let Part::Found { mode, .. } = part {
+            *mode &= !0o022;
+        }
+    }
+    first_changeable_part(&parts, current_uid(), true)
+        .and_then(|depth| socket.ancestors().nth(depth))
+        .map(Path::to_path_buf)
 }

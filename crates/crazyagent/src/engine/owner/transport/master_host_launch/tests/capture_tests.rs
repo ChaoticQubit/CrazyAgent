@@ -69,14 +69,16 @@ fn capture_refuses_owner_root_permission_drift() {
 /// folder around its owner generation, as the real layout has it; the generation holds
 /// no database and none is made there. Linux reads them before every master boundary.
 #[test]
-fn a_master_reads_its_sandbox_settings_from_the_engine_root_around_its_generation() {
+fn a_master_reads_its_sandbox_settings_from_the_engine_root_around_its_generation()
+-> Result<(), Box<dyn std::error::Error>> {
     let temporary = private_root();
     let base = owner_generation(&temporary);
-    let root = Root::open(&base).unwrap();
-    let settings = stored_sandbox_settings(&root).unwrap();
+    let root = Root::open(&base)?;
+    let settings = stored_sandbox_settings(&root)?;
     assert_eq!(
         settings.linux_sockets,
         kernel_sandbox::settings::LinuxSockets::TcpPorts
     );
     assert!(!base.join("engine.db").exists());
+    Ok(())
 }

@@ -42,36 +42,32 @@ pub struct Grants<'a> {
 }
 
 /// Says whether the IDE server can run sandboxed here: Seatbelt on macOS only. Linux and
-/// Windows qualify in IDE-12a and IDE-12b; until then no IDE server starts there.
+/// Windows qualify later; until then no IDE server starts there.
 pub fn qualified() -> bool {
     cfg!(target_os = "macos") && Path::new(SANDBOX_EXEC).is_file()
 }
 
-/// Builds the Seatbelt profile an IDE server process tree runs under. The base is the agent
-/// profile for the project folder, with `home` kept as the owner's own
-/// ([`ProjectSandbox::keep_owner_config`]): deny by default, system reads, the project
-/// writable except its git hooks, git config and context, the owner's secrets and keychain
-/// denied, the project's toolchains readable, `home` and `tmp` writable and the build
-/// readable. On top, the whole engine data root is denied, then only the grants are given
-/// back, with the base
-/// write denies in `home` and the writable folders given again after them
-/// ([`regranted_denies`]), then every key
-/// file directly in a folder of the data root (the owner keys) and the engine database are
-/// denied again, then every locked folder is denied for writing, case-insensitively as APFS
-/// matches names, with its folders up to its grant kept from being moved, then agent IDE
-/// config and agent git folders in the project are denied for reading ([`agent_config`]),
-/// then the project's `.git/worktrees`, its agents' admin folders, for writing
-/// ([`agent_admin`]), then the owner's agent folders choice is held
-/// ([`AgentFilesRule::seatbelt`], DEC-124), then every path with a name HFS+ opens past a
-/// name deny ([`hfs_ignored_deny`]). The project's own git index and its
-/// lock stay denied: the IDE stages on a private index
-/// the engine carries across (the engine's git shim, SECAUDIT-IDE-SERVER-INDEX). Network:
-/// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
-/// reach what `network` allows ([`crate::policy::ide_network`]).
-/// On the open network it never binds or listens on `kept_ports`, the owner's local model
-/// ports. The tool homes are the owner's. Inputs: the engine's hooks, the grants, the server
-/// port, the network, the ports kept and the agent folders rule. Output: the profile text,
-/// or `ide_sandbox_invalid` for an unsafe place or unreadable owner tool homes.
+/// Builds the Seatbelt profile an IDE server process tree runs under. The base is the agent profile
+/// for the project folder, with `home` kept as the owner's own
+/// ([`ProjectSandbox::keep_owner_config`]): deny by default, system reads, the project writable
+/// except its git hooks, git config and context, the owner's secrets and keychain denied, the
+/// project's toolchains readable, `home` and `tmp` writable and the build readable. On top, the
+/// whole engine data root is denied, then only the grants are given back, with the base write
+/// denies in `home` and the writable folders given again after them ([`regranted_denies`]), then
+/// every key file directly in a folder of the data root (the owner keys) and the engine database
+/// are denied again, then every locked folder is denied for writing, case-insensitively as APFS
+/// matches names, with its folders up to its grant kept from being moved, then agent IDE config and
+/// agent git folders in the project are denied for reading ([`agent_config`]), then the project's
+/// `.git/worktrees`, its agents' admin folders, for writing ([`agent_admin`]), then the owner's
+/// agent folders choice is held ([`AgentFilesRule::seatbelt`]), then every path with a name HFS+
+/// opens past a name deny ([`hfs_ignored_deny`]). The project's own git index and its lock stay
+/// denied: the IDE stages on a private index the engine carries across (the engine's git shim).
+/// Network: listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
+/// reach what `network` allows ([`crate::policy::ide_network`]). On the open network it never binds
+/// or listens on `kept_ports`, the owner's local model ports. The tool homes are the owner's.
+/// Inputs: the engine's hooks, the grants, the server port, the network, the ports kept and the
+/// agent folders rule. Output: the profile text, or `ide_sandbox_invalid` for an unsafe place or
+/// unreadable owner tool homes.
 pub fn profile(
     hooks: &'static ProfileHooks,
     grants: &Grants,
@@ -291,17 +287,17 @@ pub fn locks(held: &[(&Path, &Path)]) -> String {
     format!("{writes})\n{moves})\n")
 }
 
-/// The rule that keeps agents from setting the owner's IDE (DEC-098 addendum 9, INT-1): the
-/// server reads no `.vscode` folder anywhere in an agent worktree, no `.code-workspace` file
-/// in one, and nothing at or under the `.git` at an agent folder's top, under either agents
-/// root a project uses (`.crazyagent/worktrees` or `worktrees`), in any letter case. With
-/// the layout's agents root, and the older one while engine-made worktrees stay there, as
-/// git's search ceiling (the engine's `GIT_CEILING_DIRECTORIES`), git in an agent folder then finds no
-/// repository, whether its `.git` is an agent's own clone, a linked
-/// worktree's `gitdir:` file or a planted one, neither runs a program its config or hooks
-/// name nor walks up to the project's repository. Seatbelt checks a followed link's own path as well as where it leads, so a
-/// link named so is refused too. The engine's workspace file and Remote settings stay the
-/// only settings source for agent folders. Input: the project folder. Output: the rule text.
+/// The rule that keeps agents from setting the owner's IDE: the server reads no `.vscode` folder
+/// anywhere in an agent worktree, no `.code-workspace` file in one, and nothing at or under the
+/// `.git` at an agent folder's top, under either agents root a project uses
+/// (`.crazyagent/worktrees` or `worktrees`), in any letter case. With the layout's agents root, and
+/// the older one while engine-made worktrees stay there, as git's search ceiling (the engine's
+/// `GIT_CEILING_DIRECTORIES`), git in an agent folder then finds no repository, whether its `.git`
+/// is an agent's own clone, a linked worktree's `gitdir:` file or a planted one, neither runs a
+/// program its config or hooks name nor walks up to the project's repository. Seatbelt checks a
+/// followed link's own path as well as where it leads, so a link named so is refused too. The
+/// engine's workspace file and Remote settings stay the only settings source for agent folders.
+/// Input: the project folder. Output: the rule text.
 pub fn agent_config(root: &Path) -> String {
     let agents = format!(
         "{}({})?/{}/[^/]+/",
@@ -335,10 +331,10 @@ pub fn agent_admin(root: &Path) -> String {
     format!("(deny file-write*\n  {admins})\n")
 }
 
-/// A Seatbelt regex matching `path` in any letter case, as APFS matches names, the Kelvin
-/// sign for `k` and the long s for `s` included ([`any_case`], LL2S-2), so a case variant of
-/// a locked or denied name cannot be created or written. Input: a plain absolute path.
-/// Output: the pattern text, without anchors.
+/// A Seatbelt regex matching `path` in any letter case, as APFS matches names, the Kelvin sign for
+/// `k` and the long s for `s` included ([`any_case`]), so a case variant of a locked or denied name
+/// cannot be created or written. Input: a plain absolute path. Output: the pattern text, without
+/// anchors.
 fn caseless(path: &Path) -> String {
     let text = path.display().to_string();
     assert!(text.starts_with('/'));
