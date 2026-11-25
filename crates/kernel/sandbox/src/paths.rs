@@ -412,9 +412,10 @@ impl<'a> Walk<'a> {
     }
 
     /// Tells whether this path equals or lies under `outer`: by text; or by entry, when
-    /// `outer` exists and one of this path's existing runs is that entry; or, on a volume
-    /// that folds names, when this path's new parts start under the same folder as
-    /// `outer`'s ([`Walk::folds_into`]). Input: the outer walk. Output: true when it does.
+    /// `outer` exists and one of this path's existing runs is that entry; or when this path's
+    /// new parts start under the same folder as `outer`'s and name it, folded on a volume
+    /// that folds names and exactly elsewhere ([`Walk::new_parts_in`]). Input: the outer
+    /// walk. Output: true when it does.
     fn sits_in(&self, outer: &Walk) -> bool {
         if self.path.starts_with(outer.path) {
             return true;
@@ -424,16 +425,15 @@ impl<'a> Walk<'a> {
         {
             return true;
         }
-        cfg!(any(target_os = "macos", windows)) && self.folds_into(outer)
+        self.new_parts_in(outer, cfg!(any(target_os = "macos", windows)))
     }
 
-    /// Compares the parts of this path that do not exist yet, on a volume that folds names.
-    /// When this path's deepest existing run is `outer` or one of `outer`'s existing runs,
-    /// a new part that folds to no ASCII name, or is not a plain name, may name anything
-    /// there and counts as inside; else the new parts sit in `outer` when they are at least
-    /// as many as `outer`'s parts below that run and each is the [`same_name`] as its match.
-    /// Input: the outer walk. Output: true when this path may sit in `outer`.
-    fn folds_into(&self, outer: &Walk) -> bool {
+    /// Compares this path's new parts below its deepest existing run when that run is one of
+    /// `outer`'s: a part that is no plain name, or with `fold` folds to no ASCII name, counts
+    /// as inside; else they sit in `outer` when at least as many as its parts below and each
+    /// matches, the [`same_name`] with `fold` and the same text without. Inputs: the outer
+    /// walk and whether the volume folds names. Output: true when this path may sit in it.
+    fn new_parts_in(&self, outer: &Walk, fold: bool) -> bool {
         let Some(deepest) = self.ids.iter().rposition(Option::is_some) else {
             return false;
         };
@@ -442,17 +442,24 @@ impl<'a> Walk<'a> {
         };
         let Some(new) = self.parts[deepest + 1..]
             .iter()
-            .map(|part| plain_name(*part).filter(|name| ascii_fold(name).is_some()))
+            .map(|part| plain_name(*part).filter(|name| !fold || ascii_fold(name).is_some()))
             .collect::<Option<Vec<&str>>>()
         else {
             return true;
         };
         let below = &outer.parts[level + 1..];
+        let named = |part: &str, step: &str| {
+            if fold {
+                same_name(part, step)
+            } else {
+                part == step
+            }
+        };
         new.len() >= below.len()
             && new
                 .iter()
                 .zip(below)
-                .all(|(part, step)| plain_name(*step).is_some_and(|step| same_name(part, step)))
+                .all(|(part, step)| plain_name(*step).is_some_and(|step| named(part, step)))
     }
 }
 
