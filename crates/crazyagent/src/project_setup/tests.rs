@@ -762,7 +762,7 @@ fn job_table_matches_the_research_runner_queue_columns() {
     assert_eq!(columns(&runner_first), columns(&ours));
     assert_eq!(
         columns(&ours)[16..],
-        ["limited", "refused", "not_before_ms"],
+        ["limited", "refused", "not_before_ms", "run_name"],
         "the engine adds the queue's later columns itself, so the owner's statements can name them"
     );
     queued(&ours, "assigned-project", &[ResearchKind::FrontEndDesign]);

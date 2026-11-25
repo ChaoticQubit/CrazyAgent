@@ -2419,5 +2419,42 @@
       "          \"CREATE INDEX team_tasks_undelivered ON team_tasks(source, status, project)\",",
       "          \"                WHERE delivered=0\""
     ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 2101,
+    "commit": "55de9e7f9d",
+    "reason": "the research queue keeps the run name it placed, so a job's log reads that run after a Retry",
+    "security": false,
+    "golden": [
+      "        \"            , limited INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, not_before_ms INTEGER)\""
+    ],
+    "capture": [
+      "        \"            , limited INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, not_before_ms INTEGER, run_name TEXT)\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 3291,
+    "commit": "55de9e7f9d",
+    "reason": "the research queue keeps the run name it placed, so a job's log reads that run after a Retry",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "          \"run_name\": null,"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 3314,
+    "commit": "55de9e7f9d",
+    "reason": "the research queue keeps the run name it placed, so a job's log reads that run after a Retry",
+    "security": false,
+    "golden": [
+      "        \"            , limited INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, not_before_ms INTEGER)\""
+    ],
+    "capture": [
+      "        \"            , limited INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0, not_before_ms INTEGER, run_name TEXT)\""
+    ]
   }
 ]
