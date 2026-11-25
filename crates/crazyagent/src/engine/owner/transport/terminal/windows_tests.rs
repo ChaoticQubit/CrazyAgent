@@ -136,21 +136,34 @@ async fn shown(output: &mut TerminalOutput, text: &str) -> Option<String> {
     .flatten()
 }
 
-/// Asks the host whether the shell's app turned bracketed paste on, until the answer is
-/// `want` or `WAIT` ends. Takes the shell and the wanted answer. Output: the last answer.
-async fn bracketed(shell: &Shell, want: bool) -> Result<bool, String> {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
+/// Asks the host whether the shell's app turned bracketed paste on, once now and again after
+/// each output frame the view reads, until the answer is `want`, the view ends or `WAIT`
+/// ends. Takes the shell, the view's output and the wanted answer. Output: the last answer.
+async fn bracketed(
+    shell: &Shell,
+    output: &mut TerminalOutput,
+    want: bool,
+) -> Result<bool, String> {
+    let ask = || {
         let (host, agent) = (shell.host.clone(), shell.agent.clone());
-        let answer = tokio::task::spawn_blocking(move || host.input_live(&agent))
-            .await
-            .unwrap()
-            .map_err(|error| error.0);
-        if answer == Ok(want) || tokio::time::Instant::now() >= deadline {
-            return answer;
+        async move {
+            tokio::task::spawn_blocking(move || host.input_live(&agent))
+                .await
+                .unwrap()
+                .map_err(|error| error.0)
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    };
+    let mut answer = ask().await;
+    let _ = tokio::time::timeout(WAIT, async {
+        while answer != Ok(want) {
+            match output.next().await {
+                Ok(TerminalFrame::Output { .. }) => answer = ask().await,
+                _ => break,
+            }
+        }
+    })
+    .await;
+    answer
 }
 
 /// Reads frames until the view closes. Takes the output and how long to wait. Output: the
@@ -373,7 +386,7 @@ async fn a_paste_without_bracketed_paste_reaches_the_shell_as_typed_keys() {
         .await
         .map_err(|error| error.0)
         .unwrap();
-    assert_eq!(bracketed(&shell, false).await, Ok(false));
+    assert_eq!(bracketed(&shell, &mut output, false).await, Ok(false));
     control
         .paste(b"echo w4-pasted-%COMSPEC:~0,1%\r\n".to_vec(), true)
         .await
@@ -395,15 +408,23 @@ async fn a_paste_without_bracketed_paste_reaches_the_shell_as_typed_keys() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_host_reads_bracketed_paste_on_only_after_the_app_turns_it_on() {
     let shell = Shell::start_with(&[("on.bat", &b"@echo \x1b[?2004h\r\n"[..])]).await;
-    let TerminalSession { mut control, .. } = shell
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = shell
         .client
         .terminal_attach(shell.agent.clone())
         .await
         .map_err(|error| error.0)
         .unwrap();
-    assert_eq!(bracketed(&shell, false).await, Ok(false), "off at start");
+    assert_eq!(
+        bracketed(&shell, &mut output, false).await,
+        Ok(false),
+        "off at start"
+    );
     control.input(b".\\on.bat\r".to_vec()).await.unwrap();
-    let on = bracketed(&shell, true).await;
+    let on = bracketed(&shell, &mut output, true).await;
     println!("w4 row: bracketed paste after DECSET 2004: {on:?}");
     assert_eq!(on, Ok(true), "on after the app's DECSET 2004");
     drop(control);
