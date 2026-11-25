@@ -1291,6 +1291,8 @@ mod acl;
 /// owners, modes, groups and access lists on Unix, access lists on Windows. Input: a path.
 /// Output: the first such entry, or none.
 mod changeable;
+#[cfg(unix)]
+pub use changeable::changeable_above_socket;
 /// Undoing a registration that failed after its definition was written. Inputs: the
 /// service and the error. Output: the error to report.
 mod register;

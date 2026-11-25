@@ -315,3 +315,24 @@ pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
 pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
     changeable_by_others(path)
 }
+
+/// The first part of a socket's path, the socket first, that someone other than this user
+/// or root can change, read as [`changeable_past_sticky`] reads a path but with the group and
+/// world write bits of the socket and its folder set aside: a socket's write bit only lets a
+/// caller connect, and the caller judges the folder's mode itself. Owners, sticky bits,
+/// access lists and every folder above still count. Input: the canonical socket path.
+#[cfg(unix)]
+pub fn changeable_above_socket(socket: &Path) -> Option<PathBuf> {
+    assert!(socket.is_absolute());
+    let entries: Vec<&Path> = socket.ancestors().collect();
+    let mut parts = read_parts(&entries);
+    assert_eq!(parts.len(), entries.len());
+    for part in parts.iter_mut().take(2) {
+        if let Part::Found { mode, .. } = part {
+            *mode &= !0o022;
+        }
+    }
+    first_changeable_part(&parts, current_uid(), true)
+        .and_then(|depth| socket.ancestors().nth(depth))
+        .map(Path::to_path_buf)
+}
