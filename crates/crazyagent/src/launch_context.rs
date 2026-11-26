@@ -3543,7 +3543,7 @@ mod tests;
 
 #[cfg(all(test, windows))]
 #[path = "launch_context/windows_tests.rs"]
-mod windows_tests;
+pub(crate) mod windows_tests;
 
 #[cfg(all(test, unix))]
 #[path = "launch_context/listed_tests.rs"]

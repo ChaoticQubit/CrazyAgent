@@ -15,11 +15,11 @@ const HOME_ENTRIES_MAX: usize = 4096;
 /// Prepares an agent home on Windows as [`super::prepare`] does, with every home change made
 /// through the held root: entries the harness does not keep go as themselves, never through
 /// a link, and the instruction file is made create-only, only readable by another handle
-/// while it is written. Inputs: the held home, its path, the harness, the project, what
-/// `text` built and the caches choice and level. Output: unit, or the same plain codes.
+/// while it is written; every record is keyed by the place read from the held handle.
+/// Inputs: the held home, the harness, the project, what `text` built and the caches choice
+/// and level. Output: unit, or the same plain codes.
 pub(crate) fn prepare_held(
     root: &Folder,
-    home: &Path,
     harness: Harness,
     project: &AgentProject,
     given: &Given,
@@ -28,9 +28,8 @@ pub(crate) fn prepare_held(
     assert!(project.data.is_absolute());
     assert!(project.folder.as_deref().is_none_or(Path::is_absolute));
     assert!(given.text.len() <= PROCESS_BYTES_MAX);
-    if !home.is_absolute() {
-        return Err(failure("agent_home_invalid"));
-    }
+    let home = root.place();
+    assert!(home.is_absolute());
     let clear = clears_caches(&project.data, home, caches)?;
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;

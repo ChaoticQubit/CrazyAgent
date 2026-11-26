@@ -86,7 +86,7 @@ fn assert_held(home: &Path) {
 }
 
 /// A launch context with nothing to install, as the Unix rows build one. Output: it.
-fn context() -> AgentContext {
+pub(crate) fn context() -> AgentContext {
     AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -296,7 +296,7 @@ fn a_windows_launch_lock_its_path_reached_outside_the_held_home_is_refused() {
 }
 
 /// Makes a junction at `link` that names `target`. Inputs: both absolute paths.
-fn junction(link: &Path, target: &Path) {
+pub(crate) fn junction(link: &Path, target: &Path) {
     run(
         "cmd.exe",
         &[
@@ -1030,4 +1030,172 @@ fn a_windows_codex_skills_removal_after_the_hold_takes_the_held_home() {
     assert!(skills_empty(&home));
     assert_untouched(&target, "target");
     drop(held);
+}
+
+/// A junction above the home repointed after a Claude Code install leaves the launch's
+/// arguments naming the files in the home it held, by its final path, never the folder the
+/// junction names now, whose own launch folder keeps every byte.
+#[test]
+fn a_windows_install_names_its_files_in_the_held_home_after_a_junction_above_is_repointed() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(&base, "second");
+    let other = private_home(&second, "home");
+    std::fs::create_dir(other.join(STATE)).unwrap();
+    std::fs::write(other.join(STATE).join("mcp.json"), "other").unwrap();
+    let link = base.join("link");
+    junction(&link, &first);
+    let installed = context()
+        .install("claude-code", &link.join("home"), false)
+        .unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    let state = held_home.join(STATE);
+    assert_eq!(
+        installed.arguments(),
+        [
+            OsString::from("--mcp-config"),
+            state.join("mcp.json").into_os_string(),
+            OsString::from("--append-system-prompt-file"),
+            state.join("instructions.md").into_os_string(),
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("mcp.json")).unwrap(),
+        claude_config(&[]).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join(STATE).join("mcp.json")).unwrap(),
+        "other"
+    );
+    drop(installed);
+}
+
+/// A folder above the home's parent cannot be moved while its launch holds the home, so no
+/// junction can take its place to name another home in the held one's spelling; once the
+/// launch drops, it moves.
+#[test]
+fn a_windows_folder_above_the_homes_parent_cannot_be_moved_while_its_launch_holds_it() {
+    let (_temp, base) = base();
+    let grand = private_home(&base, "grand");
+    let parent = private_home(&grand, "parent");
+    let home = private_home(&parent, "home");
+    let installed = context().install("claude-code", &home, false).unwrap();
+    assert!(std::fs::rename(&grand, base.join("moved")).is_err());
+    drop(installed);
+    std::fs::rename(&grand, base.join("moved")).unwrap();
+}
+
+/// Holds `first/home` through a junction `link`, after a plain launch of `second/home`
+/// recorded its own given text, and repoints the junction at `second`, so the caller's
+/// spelling names that other home while the held one stays. Inputs: the temp base and the
+/// data root. Output: the held root, the held home and the other home.
+fn held_through_a_repointed_link(
+    base: &Path,
+    data: &Path,
+) -> (crate::engine::bootstrap::held::Folder, PathBuf, PathBuf) {
+    use crate::engine::bootstrap::held::Folder;
+    let first = private_home(base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(base, "second");
+    let other = private_home(&second, "home");
+    let seeded = process_context(data, "Other rows.", HomeCaches::Keep);
+    drop(seeded.install("claude-code", &other, false).unwrap());
+    let link = base.join("link");
+    junction(&link, &first);
+    let root = Folder::root_judged_by(&link.join("home"), |_| true).unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    (root, held_home, other)
+}
+
+/// The texts of every record one record folder of the data root holds, sorted. Inputs: the
+/// data root and the folder name. Output: the texts.
+fn record_texts(data: &Path, folder: &str) -> Vec<String> {
+    let mut texts: Vec<String> = std::fs::read_dir(data.join(folder))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    texts.sort();
+    texts
+}
+
+/// A process launch whose home was held before a junction above it was repointed keys its
+/// given, level and instruction-file records by the held home's place: the other home's
+/// records keep their bytes beside them, and only the held home gets the instruction file.
+#[test]
+fn a_windows_process_keys_its_records_by_the_held_home_after_a_junction_above_is_repointed() {
+    let (_temp, base) = base();
+    let data = private_home(&base, "data");
+    let (root, held_home, other) = held_through_a_repointed_link(&base, &data);
+    let context = process_context(&data, "Check every row.", HomeCaches::Keep);
+    let other_given = given(&process_context(&data, "Other rows.", HomeCaches::Keep));
+    let held_given = windows::prepare_process(&root, context.process.as_ref().unwrap())
+        .unwrap()
+        .text;
+    assert_eq!(held_given, given(&context));
+    let mut both = vec![other_given.clone(), held_given.clone()];
+    both.sort();
+    assert_eq!(record_texts(&data, "agent-instructions-given"), both);
+    for folder in ["agent-home-levels", "agent-instruction-files"] {
+        assert_eq!(record_texts(&data, folder).len(), 2, "{folder}");
+    }
+    let claude = |home: &Path| std::fs::read_to_string(home.join("CLAUDE.md")).unwrap();
+    assert_eq!(claude(&held_home), held_given);
+    assert_eq!(claude(&other), other_given);
+}
+
+/// The same launch keys its skills record by the held home's place too, beside the other
+/// home's record, never in its place.
+#[test]
+fn a_windows_process_keys_its_skills_record_by_the_held_home_after_a_junction_above_is_repointed() {
+    let (_temp, base) = base();
+    let data = private_home(&base, "data");
+    let (root, _held_home, _other) = held_through_a_repointed_link(&base, &data);
+    assert_eq!(record_texts(&data, "agent-skills").len(), 1);
+    let context = process_context(&data, "Check every row.", HomeCaches::Keep);
+    windows::prepare_process(&root, context.process.as_ref().unwrap()).unwrap();
+    assert_eq!(record_texts(&data, "agent-skills").len(), 2);
+}
+
+/// A pane record a Windows install leaves names the home it held, by its final path: after
+/// a junction above the home is repointed, an adopt holds and locks that home, so a second
+/// launch through the junction pointed back is busy and the pane's launch folder stays.
+#[test]
+fn a_windows_pane_record_names_the_held_home_so_adopt_locks_it_after_a_junction_is_repointed() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(&base, "second");
+    let other = private_home(&second, "home");
+    let link = base.join("link");
+    junction(&link, &first);
+    let installed = context()
+        .install("claude-code", &link.join("home"), false)
+        .unwrap();
+    let files = installed.files().unwrap().clone();
+    installed.keep();
+    assert_eq!(files.home, held_home);
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    let adopted = Installed::adopt(&files).unwrap();
+    assert_held(&held_home);
+    drop(lock_only(&other, "claude-code").unwrap());
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &first);
+    assert_eq!(
+        context()
+            .install("claude-code", &link.join("home"), false)
+            .unwrap_err()
+            .0,
+        "launch_home_busy"
+    );
+    let mcp = held_home.join(STATE).join("mcp.json");
+    assert_eq!(
+        std::fs::read_to_string(&mcp).unwrap(),
+        claude_config(&[]).unwrap()
+    );
+    drop(adopted);
+    drop(lock_only(&held_home, "claude-code").unwrap());
 }

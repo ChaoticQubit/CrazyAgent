@@ -74,18 +74,7 @@ pub(super) fn install(
     let folder = root.make_dir_inherited(&state).map_err(held_failure)?;
     let mut text = context.instructions.clone();
     if let Some(process) = &context.process {
-        let given = process_text(process)?;
-        let harness = crate::agent_home::Harness::Claude;
-        crate::agent_home::held_home::prepare_held(
-            &root,
-            home,
-            harness,
-            &process.project,
-            &given,
-            process.caches,
-        )
-        .and_then(|()| crate::agent_home::record_skills(&process.project.data, home, &[]))
-        .map_err(|problem| LaunchError(problem.0, None))?;
+        let given = prepare_process(&root, process)?;
         if !given.text.is_empty() {
             text.push('\n');
             text.push_str(&given.text);
@@ -93,7 +82,10 @@ pub(super) fn install(
     }
     write_inherited(&folder, "mcp.json", claude_config(&[])?.into_bytes())?;
     write_inherited(&folder, "instructions.md", text.into_bytes())?;
-    let path = home.join(STATE);
+    let place = root
+        .place_now()
+        .map_err(|_| failure("launch_context_unsafe"))?;
+    let path = place.join(STATE);
     let installed = Installed {
         arguments: vec![
             OsString::from("--mcp-config"),
@@ -102,7 +94,7 @@ pub(super) fn install(
             path.join("instructions.md").into_os_string(),
         ],
         files: Some(InstalledFiles {
-            home: home.to_path_buf(),
+            home: place.to_path_buf(),
             codex: false,
             rendered: Vec::new(),
             listed: false,
@@ -165,6 +157,28 @@ fn write_inherited(
         Ok(_) => Err(failure("launch_context_unsafe")),
         Err(_) => Err(failure("launch_context_unwritable")),
     }
+}
+
+/// Prepares a process launch's held Claude Code home and records what it was given and its
+/// empty skill list, every record keyed by the held home's place read from its handle,
+/// never a spelling a link above the home could repoint. Inputs: the held home and the
+/// process. Output: what the home was given, or the launch's refusal.
+pub(super) fn prepare_process(
+    root: &crate::engine::bootstrap::held::Folder,
+    process: &Process,
+) -> Result<crate::agent_home::Given, LaunchError> {
+    let given = process_text(process)?;
+    let harness = crate::agent_home::Harness::Claude;
+    crate::agent_home::held_home::prepare_held(
+        root,
+        harness,
+        &process.project,
+        &given,
+        process.caches,
+    )
+    .and_then(|()| crate::agent_home::record_skills(&process.project.data, root.place(), &[]))
+    .map_err(|problem| LaunchError(problem.0, None))?;
+    Ok(given)
 }
 
 /// Maps a held-folder refusal to the launch's code: a system failure is

@@ -442,3 +442,113 @@ fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
         );
     }
 }
+
+/// Moves the case's agent folder aside, after its boundary is installed, and puts a
+/// junction to it at its old name, so the case's home is reached through the junction.
+/// Input: the case. Output: the home's final path.
+fn linked_agent(case: &Case) -> PathBuf {
+    let moved = case.base.join("first");
+    std::fs::rename(case.base.join("agent"), &moved).unwrap();
+    crate::launch_context::windows_tests::junction(&case.base.join("agent"), &moved);
+    moved.join("home")
+}
+
+/// Points the case's agent junction at a second folder holding its own private home and
+/// temp folder. Input: the case.
+fn repoint_agent(case: &Case) {
+    let second = case.base.join("second");
+    std::fs::create_dir(&second).unwrap();
+    drop(private::dir(&second.join("home")).unwrap());
+    drop(private::dir(&second.join("tmp")).unwrap());
+    std::fs::remove_dir(case.base.join("agent")).unwrap();
+    crate::launch_context::windows_tests::junction(&case.base.join("agent"), &second);
+}
+
+/// A junction above the home repointed after a Claude Code install leaves the Claude
+/// variables naming the home the install held, by its final path, never the folder the
+/// junction names now.
+#[test]
+fn a_windows_claude_launch_names_its_held_home_in_its_variables_after_a_repoint() {
+    let case = case();
+    let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+    let moved = linked_agent(&case);
+    let context = crate::launch_context::windows_tests::context();
+    let held = context.install("claude-code", &case.home, false).unwrap();
+    repoint_agent(&case);
+    let launch = LaunchBoundary::Installed(boundary);
+    let request = request(&case, "claude-code", launch, &case.home, false);
+    let (_, environment) = claude_invocation(&request, Some(&held), None);
+    for name in [
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "CLAUDE_CODE_TMPDIR",
+    ] {
+        let value = environment
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.clone());
+        assert_eq!(value, Some(moved.clone().into_os_string()), "{name}");
+    }
+    drop(held);
+}
+
+/// A launch whose home is reached through a junction moved in after its boundary was
+/// installed is refused at the boundary once the junction is repointed: the held home is
+/// not the folder the sandbox grants, so the grant never names another home. The same
+/// launch on a home with no junction builds.
+#[test]
+fn a_windows_launch_refuses_a_boundary_that_grants_another_home_than_the_held_one() {
+    let plain = case();
+    let boundary = installed(&plain, &plain.project, &plain.home, "agent.sb");
+    let context = crate::launch_context::windows_tests::context();
+    let held = context.install("claude-code", &plain.home, false).unwrap();
+    let launch = LaunchBoundary::Installed(boundary);
+    let plain_request = request(&plain, "claude-code", launch, &plain.home, false);
+    assert!(build(&plain_request, Some(&held)).is_ok());
+    drop(held);
+    let case = case();
+    let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+    linked_agent(&case);
+    let held = context.install("claude-code", &case.home, false).unwrap();
+    repoint_agent(&case);
+    let launch = LaunchBoundary::Installed(boundary);
+    let linked_request = request(&case, "claude-code", launch, &case.home, false);
+    assert_eq!(
+        build(&linked_request, Some(&held)).unwrap_err().0,
+        "launch_environment_refused"
+    );
+    drop(held);
+}
+
+/// A legit home handed in another spelling, its case changed or through the temp folder's
+/// 8.3 short name where the runner has one, is held at the place its canonical spelling
+/// names: the boundary installed on that spelling builds, and the Claude variables name the
+/// held place.
+#[test]
+fn a_windows_launch_through_another_spelling_of_a_legit_home_builds_on_its_held_place() {
+    let case = case();
+    let raw = case._temp.path().join("agent").join("home");
+    let upper = PathBuf::from(case.home.to_str().unwrap().to_uppercase());
+    println!("short name spelling differs: {}", raw != case.home);
+    assert_ne!(upper, case.home);
+    let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+    let context = crate::launch_context::windows_tests::context();
+    for spelled in [&upper, &raw] {
+        let held = context.install("claude-code", spelled, false).unwrap();
+        assert_eq!(held.home_place(), Some(case.home.as_path()));
+        let launch = LaunchBoundary::Installed(boundary.clone());
+        let request = request(&case, "claude-code", launch, spelled, false);
+        assert!(
+            build(&request, Some(&held)).is_ok(),
+            "{}",
+            spelled.display()
+        );
+        let (_, environment) = claude_invocation(&request, Some(&held), None);
+        let config = environment
+            .iter()
+            .find(|(key, _)| *key == "CLAUDE_CONFIG_DIR")
+            .map(|(_, value)| value.clone());
+        assert_eq!(config, Some(case.home.clone().into_os_string()));
+        drop(held);
+    }
+}
