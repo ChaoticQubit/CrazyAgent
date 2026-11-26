@@ -806,3 +806,55 @@ fn a_trailing_slash_never_makes_the_read_follow_a_link() {
     let slashed_link = PathBuf::from(format!("{}/", link.display()));
     assert_eq!(read_alone(&slashed_link), None);
 }
+
+/// An access-list grant made between two calls of the same check reads as changeable on the
+/// second call, for the engine service and for the tools the resolver runs alike, though
+/// every part of the path settled before the first call.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_list_grant_between_two_calls_reads_changeable_on_the_second() {
+    let temp = durable_folder();
+    let folder = temp.path().join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&tool, &folder, temp.path()]);
+    assert_eq!(changeable_by_others(&tool), None);
+    assert_eq!(changeable_past_sticky(&tool), None);
+    chmod_entry(&["+a", "user:nobody allow add_file,write"], &folder);
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(changeable_past_sticky(&tool), Some(folder.clone()));
+}
+
+/// A second call of the same check on a path whose parts all settled reads every part's
+/// access list again, so no answer an earlier call read is used in place of a fresh read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_second_check_of_a_settled_path_reads_every_access_list_again() {
+    let temp = durable_folder();
+    let kit = temp.path().join("kit");
+    let folder = kit.join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&tool, &folder, &kit, temp.path()]);
+    let ours = |listings: Vec<Vec<PathBuf>>| -> Vec<PathBuf> {
+        let mut read: Vec<PathBuf> = listings
+            .into_iter()
+            .flatten()
+            .filter(|listed| listed.starts_with(temp.path()))
+            .collect();
+        read.sort();
+        read
+    };
+    acl::take_listings();
+    assert_eq!(changeable_by_others(&tool), None);
+    let first = ours(acl::take_listings());
+    for part in [&tool, &folder, &kit] {
+        assert!(
+            first.contains(part),
+            "{part:?} in the first call: {first:?}"
+        );
+    }
+    assert_eq!(changeable_by_others(&tool), None);
+    let second = ours(acl::take_listings());
+    assert_eq!(second, first, "the second call reads every part again");
+}
