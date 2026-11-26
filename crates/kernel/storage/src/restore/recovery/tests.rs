@@ -415,3 +415,30 @@ fn a_put_back_makes_one_full_flush() {
     assert_eq!(crate::migrations::take_flushes().0, 1);
     assert_eq!(read(&path), (vec!["two".to_owned()], 12));
 }
+
+#[test]
+fn put_back_keeps_the_writes_still_in_the_wal_in_its_copy_of_engine_db() {
+    let (_root, path, _kept) = broken(true);
+    let db = Connection::open(&path).unwrap();
+    let mode: String = db
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    db.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )
+    .unwrap();
+    db.execute_batch(
+        "PRAGMA wal_autocheckpoint = 0; DELETE FROM kept; INSERT INTO kept VALUES ('four');",
+    )
+    .unwrap();
+    drop(db);
+    let wal = path.with_file_name(format!("{DATABASE}-wal"));
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+
+    let saved = put_back(&path).unwrap();
+
+    assert_eq!(read(&saved.join(DATABASE)), (vec!["four".to_owned()], 12));
+    assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+}
