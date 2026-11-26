@@ -1,9 +1,13 @@
 use super::*;
 
-/// Reads the last plain lines of one research job's agent output, with secrets hidden.
-/// Takes the engine database path, whose folder holds the research runner's agent state,
-/// and the job id. Returns the newest lines within RESEARCH_LOG_LINES_MAX and
-/// RESEARCH_LOG_BYTES_MAX, so the reply fits one owner frame; none before the first run.
+#[cfg(unix)]
+const OPENED_BLOCK: &str = "-----BEGIN PRIVATE KEY-----";
+
+/// Reads the last plain lines of one research job's agent output, with secrets hidden, also
+/// the rows of a key block opened in the RESEARCH_LOG_TAIL_BYTES before them. Takes the
+/// engine database path, whose folder holds the research runner's agent state, and the job
+/// id. Returns the newest lines within RESEARCH_LOG_LINES_MAX and RESEARCH_LOG_BYTES_MAX, so
+/// the reply fits one owner frame; none before the first run.
 #[cfg(unix)]
 pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineError> {
     assert!(job > 0);
@@ -34,11 +38,23 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
             continue;
         };
         let start = bytes.saturating_sub(RESEARCH_LOG_TAIL_BYTES);
-        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start)).map_err(error)?;
+        let read_from = start.saturating_sub(RESEARCH_LOG_TAIL_BYTES);
+        let before = read_from.saturating_sub(1);
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(before)).map_err(error)?;
+        let mut earlier = Vec::new();
+        std::io::Read::by_ref(&mut file)
+            .take(start - before)
+            .read_to_end(&mut earlier)
+            .map_err(error)?;
         let mut tail = Vec::new();
         file.take(RESEARCH_LOG_TAIL_BYTES)
             .read_to_end(&mut tail)
             .map_err(error)?;
+        let (cut, earlier) = match earlier.split_first() {
+            Some((byte, rest)) if read_from > 0 => (*byte != b'\n', rest),
+            _ => (false, earlier.as_slice()),
+        };
+        let opened = start > 0 && opens_block(earlier, &tail, cut);
         let text = String::from_utf8_lossy(&tail);
         let mut rows = text.lines();
         if start > 0 {
@@ -48,8 +64,14 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
         if plain.is_empty() {
             continue;
         }
+        let joined = plain.join("\n");
+        let shown = if opened {
+            redact(&format!("{OPENED_BLOCK}\n{joined}"))
+        } else {
+            redact(&joined)
+        };
         let before = lines.len();
-        lines.extend(redact(&plain.join("\n")).split('\n').map(clipped));
+        lines.extend(shown.split('\n').skip(usize::from(opened)).map(clipped));
         assert_eq!(lines.len() - before, plain.len());
     }
     let mut kept = 0;
@@ -65,6 +87,29 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
     assert!(lines.len() <= RESEARCH_LOG_LINES_MAX);
     assert!(lines.iter().map(String::len).sum::<usize>() <= RESEARCH_LOG_BYTES_MAX);
     Ok(lines)
+}
+
+/// Whether the rows before a tail window end inside a key block, tracked as redact tracks
+/// one but opened only by a PEM-shaped BEGIN line. Inputs: the bytes before the window, the
+/// window, whose first row they complete, and whether their own first row is cut. Output:
+/// the answer.
+#[cfg(unix)]
+fn opens_block(earlier: &[u8], tail: &[u8], cut: bool) -> bool {
+    let completed = tail
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(tail.len());
+    let mut bytes = earlier.to_vec();
+    bytes.extend_from_slice(&tail[..completed]);
+    let text = String::from_utf8_lossy(&bytes);
+    let mut rows = text.lines();
+    if cut {
+        rows.next();
+    }
+    rows.filter_map(plain_text).fold(false, |open, row| {
+        (open || super::redaction::block_begin(&row))
+            && !row.to_ascii_lowercase().contains(KEY_BLOCK_END)
+    })
 }
 
 /// Refuses research job output where no directory-relative no-follow read exists.

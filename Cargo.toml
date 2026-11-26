@@ -35,12 +35,6 @@ opt-level = 3
 [profile.test.package.sha2]
 opt-level = 3
 
-[profile.dev.package.crazyagent]
-opt-level = 3
-
-[profile.test.package.crazyagent]
-opt-level = 3
-
 [profile.dev.package.crazyagent-kernel-storage]
 opt-level = 3
 

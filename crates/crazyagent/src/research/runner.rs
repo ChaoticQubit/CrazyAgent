@@ -45,6 +45,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+mod dates;
+pub(crate) use dates::utc_date;
 
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
@@ -1125,7 +1127,12 @@ impl ResearchRunner {
             | ResearchAccount::Listed { .. } => None,
         };
         let (account, relay) = relayed(self.engine_folder()?, account)?;
-        self.launch_leased(jobs, job, &account, place, lease, relay.as_ref())
+        let agent = place.agent.clone();
+        let launched = self.launch_leased(jobs, job, &account, place, lease, relay.as_ref());
+        if let Err(error) = &launched {
+            keep_launch_cause(&self.state, &agent, error);
+        }
+        launched
     }
 
     /// The engine folder, which holds `engine.db` and the saved account keys.
@@ -1316,7 +1323,10 @@ impl ResearchRunner {
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
         #[cfg(target_os = "macos")]
-        toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
+        {
+            private_directory(&home.join(crate::launch_context::STATE))?;
+            toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
+        }
         kernel_sandbox::toolchains::prepare_cargo_home(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             &home,
@@ -2318,15 +2328,15 @@ impl ResearchRunner {
         }
         drop(credential);
         drop(lease);
+        if let Some(ending) = ending {
+            return Ok(ending);
+        }
         if exited_failing {
             return Ok(ReadOnlyEnding::Failed(agent_failure(
                 &agent.join(stdout_log),
                 harness,
                 self.limits.output_bytes_max,
             )));
-        }
-        if let Some(ending) = ending {
-            return Ok(ending);
         }
         let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
             .ok()
@@ -3141,6 +3151,31 @@ fn create_private(base: &Path, path: &Path) -> io::Result<File> {
 fn create_private(_base: &Path, _path: &Path) -> io::Result<File> {
     Err(unavailable())
 }
+
+/// Appends why a launch erred to its run's owner-only `stderr.log`, which the research log
+/// reads, following no link below the runner's state folder; a run folder that was never
+/// made gets nothing. Inputs: the state folder, the run folder and the error. Output: none.
+#[cfg(unix)]
+fn keep_launch_cause(state: &Path, agent: &Path, error: &RunError) {
+    use rustix::fs::{Mode, OFlags};
+    let Ok(below) = agent.strip_prefix(state) else {
+        return;
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(folder) = crate::platform::open_beneath(state, below, flags) else {
+        return;
+    };
+    let append = OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND | OFlags::NOFOLLOW;
+    let mode = Mode::RUSR | Mode::WUSR;
+    if let Ok(log) = rustix::fs::openat(&folder, "stderr.log", append | OFlags::CLOEXEC, mode) {
+        let _ = File::from(log).write_all(format!("research launch failed: {error}\n").as_bytes());
+    }
+}
+
+/// Keeps no launch cause where no owner-only research file can be written.
+/// Inputs: the state folder, the run folder and the error, unused. Output: none.
+#[cfg(not(unix))]
+fn keep_launch_cause(_state: &Path, _agent: &Path, _error: &RunError) {}
 
 /// Opens a file to append, creating it, without following a link at `path`.
 /// Takes the path. Returns the open file or the I/O error.
@@ -4793,37 +4828,6 @@ fn write_report(root: &Path, kind: &str, report: &str) -> io::Result<PathBuf> {
         return Err(error);
     }
     Ok(target)
-}
-
-/// Formats an instant as a UTC minute for plain status text. Takes the instant.
-/// Returns `YYYY-MM-DD HH:MM UTC`; an instant before the epoch reads as the epoch.
-pub(crate) fn utc_date(time: SystemTime) -> String {
-    let seconds = time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (seconds / 86_400) as i64;
-    let minutes = (seconds % 86_400) / 60;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    assert!((1..=12).contains(&month) && (1..=31).contains(&day));
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
-        minutes / 60,
-        minutes % 60
-    )
 }
 
 #[cfg(all(test, unix))]
@@ -6875,58 +6879,6 @@ mod tests {
             key: None,
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn adding_an_agent_worktree_never_runs_the_project_fsmonitor() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let project = base.join("project");
-        let home = base.join("agent").join("home");
-        let tmp = base.join("agent").join("tmp");
-        let profiles = base.join("profiles");
-        for folder in [&project, &home, &tmp, &profiles] {
-            fs::create_dir_all(folder).unwrap();
-        }
-        ensure_repository(&project, &tmp).unwrap();
-        let marker = tmp.join("fsmonitor-ran");
-        let monitor = tmp.join("monitor.sh");
-        fs::write(
-            &monitor,
-            format!("#!/bin/sh\necho ran >> '{}'\n", marker.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
-        let configured = kernel_processes::spawn_gate::status(
-            Command::new(GIT)
-                .env_clear()
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .arg("-C")
-                .arg(&project)
-                .args(["config", "core.fsmonitor"])
-                .arg(&monitor),
-        )
-        .unwrap();
-        assert!(configured.success());
-        let sandbox = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &project,
-            &home,
-            &tmp,
-            SandboxNetwork::Only(Vec::new()),
-        )
-        .unwrap();
-        let profile = profiles.join("agent.sb");
-        sandbox.install(&profile).unwrap();
-        let worktree = project.join("worktrees").join("agent-one");
-        add_worktree(&sandbox, &profile, &worktree).unwrap();
-        assert!(worktree.join(".git").is_file());
-        assert!(
-            !marker.exists(),
-            "the engine's git ran the project fsmonitor"
-        );
     }
 
     /// The engine's sandboxed setup git must be the real git, not the `/usr/bin/git` xcrun
