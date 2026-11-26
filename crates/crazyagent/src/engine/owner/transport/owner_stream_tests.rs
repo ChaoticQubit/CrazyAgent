@@ -140,6 +140,22 @@ fn the_production_cut_starts_at_the_first_inline_test_module() {
     assert_eq!(production("fn real() {}\n"), ("fn real() {}\n", false));
 }
 
+/// A production function placed after an inline test module stays in the production text,
+/// so its owner connect is counted.
+#[test]
+fn production_code_after_an_inline_test_module_is_counted() {
+    let text = "fn real() {}\n#[cfg(test)]\nmod tests {\n    owner_connect(b)\n}\n\nfn late() { owner_connect(c) }\n";
+    assert_eq!(connects_in(&production(text).0), 1, "{text}");
+}
+
+/// A module that builds only outside tests is production code, so its owner connect is
+/// counted; only cfg(test) and cfg(all(test, ..)) mark test code.
+#[test]
+fn a_module_built_outside_tests_is_counted() {
+    let text = "#[cfg(not(test))]\nmod real {\n    owner_connect(a)\n}\n";
+    assert_eq!(connects_in(&production(text).0), 1, "{text}");
+}
+
 /// The two guarded files that carry an inline test module are cut on a test cfg line followed
 /// by that module, so a moved module shows here instead of leaving its connects in the count.
 #[test]
