@@ -1,5 +1,5 @@
 use super::intake::known;
-use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
+use super::{BridgeError, BridgeQueue, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead, OwnerResponse, OwnerResult};
 use crazyagent::learning::{LearningProgress, MarkStep};
@@ -12,6 +12,15 @@ use crazyagent::pools::PoolSummary;
 use crazyagent::provider_retry::{ProviderRetry, ProviderRetryView};
 use crazyagent::quit_settings::QuitSettings;
 use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
+
+impl BridgeQueue {
+    /// Reads the event log compaction switch through the queue, for the window's command
+    /// and the e2e bridge alike. Input: none. Output: the view, or `busy` past the queue's
+    /// bounds.
+    pub async fn log_compaction(&self) -> Result<LogCompactionView, BridgeError> {
+        self.enter().await?.log_compaction().await
+    }
+}
 
 fn profile_code(code: &str) -> &'static str {
     match code {
