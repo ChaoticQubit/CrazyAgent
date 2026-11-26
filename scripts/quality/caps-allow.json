@@ -21,7 +21,7 @@
   "apps/desktop/src/screens/team/controls.tsx": 874,
   "apps/desktop/src/screens/team/graph.ts": 688,
   "apps/desktop/src/screens/team/terminal-panel.tsx": 1190,
-  "apps/desktop/src/state.ts": 713,
+  "apps/desktop/src/state.ts": 689,
   "apps/desktop/test/intake.test.mjs": 1338,
   "apps/desktop/test/live-master.test.mjs": 881,
   "apps/desktop/test/native-panel.test.mjs": 672,

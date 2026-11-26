@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { chooseTheme, readQuestionsShown, readTheme, saveQuestionsShown, useAppSession, type ThemeChoice } from "../../state";
-import type { QuestionsShown } from "../../api-questions";
+import { chooseTheme, readTheme, useAppSession, type ThemeChoice } from "../../state";
+import { saveQuestionsShown, useQuestionsShown } from "../../questions-shown";
 import { QuestionsShownSetting } from "../project/question-popup";
 import { TerminalLines } from "./terminal";
 import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
@@ -10,7 +10,7 @@ import { themeHelp } from "../../ui/keys";
 
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
-  const [questions, setQuestions] = useState<QuestionsShown>(readQuestionsShown);
+  const questions = useQuestionsShown();
   return <SettingSection title="Appearance">
     <SettingLine label="Theme" help={themeHelp()}>
       <Segmented label="Theme" value={theme} onValue={(value) => { setTheme(value); chooseTheme(value); }} options={[
@@ -18,7 +18,7 @@ function Appearance() {
       ]} />
     </SettingLine>
     <TerminalLines />
-    <QuestionsShownSetting value={questions} onValue={(value) => { setQuestions(value); saveQuestionsShown(value); }} />
+    <QuestionsShownSetting value={questions} onValue={saveQuestionsShown} />
   </SettingSection>;
 }
 
