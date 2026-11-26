@@ -219,7 +219,10 @@ test("the page lists the install setting with both options, and changing it keep
   for (const word of ["Install from the app", "Offer Install for harnesses that are not installed", "Don't offer Install"]) assert.match(html, new RegExp(word));
   await eachComputer("../src/screens/settings/harnesses.tsx", (settings, { os, computer }) => {
     const shown = markup(createElement(settings.UpdateSettingsView, { settings: { mode: "check_and_update", when: "on_button", online: "on", install: "on" }, save: () => Promise.resolve({ kind: "ok", value: undefined }) }));
-    assert.ok(shown.includes(`Install runs Homebrew when it is on ${computer}, else npm. It never uses sudo or a script from a website.`), `${os}: ${shown}`);
+    const help = os === "windows"
+      ? "Install runs npm with the Node CrazyAgent sets up. It never runs as an administrator or a script from a website."
+      : `Install runs Homebrew when it is on ${computer}, else npm. It never uses sudo or a script from a website.`;
+    assert.ok(shown.includes(help), `${os}: ${shown}`);
   });
   const sent = [];
   await view.chooseInstall({ mode: "check_only", when: "on_open", online: "off", install: "on" }, "off", (settings) => { sent.push(settings); return Promise.resolve({ kind: "ok", value: undefined }); });
@@ -470,11 +473,11 @@ test("update and first-run words name this Mac on macOS and this computer on Win
   });
 });
 
-test("the page's purpose line says to install and update harnesses outside CrazyAgent on Windows, and keeps its words elsewhere", async () => {
+test("the page's purpose line offers install with npm and update on Windows, and keeps its words elsewhere", async () => {
   await eachComputer("../src/screens/settings/harnesses.tsx", (settings, { os, computer }) => {
     const shown = markup(createElement(settings.HarnessesView, { catalog: { kind: "loading" }, onCheck: quiet }));
     const purpose = os === "windows"
-      ? "Agents run inside these tools. CrazyAgent finds them on this computer. Install and update them outside CrazyAgent."
+      ? "Agents run inside these tools. CrazyAgent finds them on this computer. It can install one with npm and update one with that harness's own updater, each only when you choose it."
       : `CrazyAgent finds harnesses installed on ${computer}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
     assert.ok(shown.includes(`<p>${purpose}</p>`), `${os}: ${shown.slice(0, 400)}`);
   });
