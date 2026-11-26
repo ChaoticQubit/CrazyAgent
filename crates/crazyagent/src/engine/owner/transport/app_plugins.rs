@@ -354,7 +354,7 @@ impl OwnerClient {
             let mut stream = self
                 .connect_checked(|_| failure("app_plugins_unavailable"))
                 .await?;
-            let mut packet = [0; 37];
+            let mut packet = kernel_security::secret::Zeroizing::new([0u8; 37]);
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
                 OwnerClientKind::Tui => 0,
@@ -362,7 +362,7 @@ impl OwnerClient {
             };
             packet[5..].copy_from_slice(&self.token);
             stream
-                .write_all(&packet)
+                .write_all(&*packet)
                 .await
                 .map_err(|_| failure("app_plugins_unavailable"))?;
             stream

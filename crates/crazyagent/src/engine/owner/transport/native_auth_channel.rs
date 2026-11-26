@@ -2368,12 +2368,11 @@ impl NativeAuthCustodyChannel {
         if root.socket_identity()? != socket {
             return Err(failure("owner_socket_replaced"));
         }
-        let mut packet = [0; 37];
+        let mut packet = kernel_security::secret::Zeroizing::new([0u8; 37]);
         packet[..4].copy_from_slice(b"CAN1");
         packet[5..].copy_from_slice(&token);
         kernel_security::secret::wipe(&mut token);
-        stream.write_all(&packet).await.map_err(io_error)?;
-        kernel_security::secret::wipe(&mut packet);
+        stream.write_all(&*packet).await.map_err(io_error)?;
         let frame = encode_frame(&Attach {
             protocol_version: PROTOCOL_VERSION,
             kind: AttachKind::Attach,

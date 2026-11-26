@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use crate::engine::owner::AccountSecret;
+use kernel_security::secret::Zeroizing;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const PROFILE_SECRET_MAX: usize = 8192;
@@ -11,13 +12,12 @@ pub async fn write_secret_frame<S: AsyncWrite + Unpin>(
     stream: &mut S,
     secret: Option<AccountSecret>,
 ) -> std::io::Result<()> {
-    let mut bytes = secret.map(AccountSecret::into_bytes).unwrap_or_default();
-    let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
+    let bytes = Zeroizing::new(secret.map(AccountSecret::into_bytes).unwrap_or_default());
+    let mut framed = Zeroizing::new(Vec::with_capacity(4 + bytes.len()));
+    framed.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     framed.extend_from_slice(&bytes);
-    kernel_security::secret::wipe(&mut bytes);
-    let sent = stream.write_all(&framed).await;
-    kernel_security::secret::wipe(&mut framed);
-    sent
+    drop(bytes);
+    stream.write_all(&framed).await
 }
 
 /// Reads one secret sent as its 4-byte big-endian length and its bytes, of at most `max`
@@ -31,12 +31,9 @@ pub async fn read_secret_frame<S: AsyncRead + Unpin>(
     if size > max {
         return None;
     }
-    let mut bytes = vec![0; size];
-    if stream.read_exact(&mut bytes).await.is_err() {
-        kernel_security::secret::wipe(&mut bytes);
-        return None;
-    }
-    Some(bytes)
+    let mut bytes = Zeroizing::new(vec![0; size]);
+    stream.read_exact(&mut bytes).await.ok()?;
+    Some(std::mem::take(&mut *bytes))
 }
 
 /// Reads the secret frame of an account profile request, which must be the last bytes the
@@ -48,11 +45,12 @@ pub async fn read_profile_secret<S: AsyncRead + Unpin>(
     present: bool,
 ) -> Result<Option<AccountSecret>, EngineError> {
     let invalid = || EngineError("account_profile_secret_frame_invalid".into());
-    let mut bytes = read_secret_frame(stream, PROFILE_SECRET_MAX)
-        .await
-        .ok_or_else(invalid)?;
+    let mut bytes = Zeroizing::new(
+        read_secret_frame(stream, PROFILE_SECRET_MAX)
+            .await
+            .ok_or_else(invalid)?,
+    );
     if present == bytes.is_empty() {
-        kernel_security::secret::wipe(&mut bytes);
         return Err(invalid());
     }
     let mut extra = [0; 1];
@@ -60,7 +58,7 @@ pub async fn read_profile_secret<S: AsyncRead + Unpin>(
         return Err(invalid());
     }
     if present {
-        AccountSecret::new(bytes).map(Some)
+        AccountSecret::new(std::mem::take(&mut *bytes)).map(Some)
     } else {
         Ok(None)
     }
@@ -108,14 +106,13 @@ pub fn drain_errors(
     count: &mut usize,
     eof: &mut bool,
 ) -> Result<(), EngineError> {
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::with_capacity(4096usize.saturating_sub(*count)));
     drain(
         descriptor,
-        &mut bytes,
+        &mut *bytes,
         eof,
         4096usize.saturating_sub(*count),
     )?;
     *count += bytes.len();
-    kernel_security::secret::wipe(&mut bytes);
     Ok(())
 }
