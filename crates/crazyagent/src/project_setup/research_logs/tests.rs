@@ -313,3 +313,107 @@ fn a_separator_starting_like_a_begin_line_before_the_tail_window_hides_nothing()
     assert!(!lines.iter().any(|line| line == HIDDEN_LINE), "{lines:?}");
     assert_eq!(lines.last().map(String::as_str), rows.lines().next_back());
 }
+
+const OPENVPN_STATIC_END: &str = "-----END OpenVPN Static key V1-----";
+const TLS_CRYPT_CLIENT_BEGIN: &str = "-----BEGIN OpenVPN tls-crypt-v2 client key-----";
+const TLS_CRYPT_CLIENT_END: &str = "-----END OpenVPN tls-crypt-v2 client key-----";
+const TLS_CRYPT_SERVER_END: &str = "-----END OpenVPN tls-crypt-v2 server key-----";
+const CHUNK_SEPARATOR: &str = "-----End of chunk-----";
+
+/// An OpenVPN static key's END line, whose label mixes cases, met before any BEGIN hides
+/// every line above it and itself, as a PEM key's END does.
+#[test]
+fn an_openvpn_static_key_end_with_no_begin_hides_every_line_before_it() {
+    let shown = redact(&format!(
+        "{BODY_SHORT}\n{BODY_NO_DIGIT}\n{OPENVPN_STATIC_END}\nafter"
+    ));
+    assert_eq!(
+        shown,
+        [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
+    );
+}
+
+/// An OpenVPN tls-crypt-v2 server key's END line met before any BEGIN hides every line
+/// above it and itself.
+#[test]
+fn a_tls_crypt_v2_server_key_end_with_no_begin_hides_every_line_before_it() {
+    let shown = redact(&format!(
+        "{BODY_NO_DIGIT}\n{BODY_SHORT}\n{TLS_CRYPT_SERVER_END}\nafter"
+    ));
+    assert_eq!(
+        shown,
+        [HIDDEN_LINE, HIDDEN_LINE, HIDDEN_LINE, "after"].join("\n")
+    );
+}
+
+/// An OpenVPN tls-crypt-v2 client key whose BEGIN row lies in the 64 KiB before the tail
+/// window and whose END row lies inside it hides every body row the window shows.
+#[test]
+fn a_tls_crypt_v2_client_key_opened_before_the_tail_window_hides_its_body_rows() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let rows = tail * 3 / 2 / (BODY_NO_DIGIT.len() + 1);
+    let log = format!(
+        "starting\n{TLS_CRYPT_CLIENT_BEGIN}\n{}{TLS_CRYPT_CLIENT_END}\nafter\n",
+        body_rows(rows, 40)
+    );
+    let start = window_start(log.len());
+    assert!(log.find(TLS_CRYPT_CLIENT_BEGIN).unwrap() + TLS_CRYPT_CLIENT_BEGIN.len() < start);
+    assert!(log.find(TLS_CRYPT_CLIENT_END).unwrap() > start && start < tail);
+    let (_root, lines) = reply_of(&log);
+    assert_no_body(&lines, &[BODY_NO_DIGIT, &BODY_NO_DIGIT[..40]]);
+    assert_eq!(lines.last().map(String::as_str), Some("after"));
+    let body = &lines[..lines.len() - 1];
+    assert!(!body.is_empty());
+    assert!(body.iter().all(|line| line == HIDDEN_LINE), "{lines:?}");
+}
+
+/// A separator that only starts like an END line inside an open PEM key block leaves the
+/// block open, so every row through the block's real END is hidden.
+#[test]
+fn a_separator_inside_a_key_block_leaves_it_open_to_its_end() {
+    let shown = redact(&format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{BODY_NO_DIGIT}\n{CHUNK_SEPARATOR}\n{BODY_SHORT}\n{BODY_NO_DIGIT}\n-----END RSA PRIVATE KEY-----\nafter"
+    ));
+    let hidden = vec![HIDDEN_LINE; 6];
+    assert_eq!(shown, [&hidden[..], &["after"]].concat().join("\n"));
+}
+
+/// A PEM key block opened before the tail window, with a separator that only starts like an
+/// END line also before the window, still hides every body row the window shows.
+#[test]
+fn a_separator_before_the_tail_window_leaves_an_opened_block_open() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let rows = tail * 3 / 2 / (BODY_NO_DIGIT.len() + 1);
+    let log = format!(
+        "starting\n{BEGIN}\n{BODY_NO_DIGIT}\n{CHUNK_SEPARATOR}\n{}",
+        body_rows(rows, 40)
+    );
+    let start = window_start(log.len());
+    assert!(log.find(CHUNK_SEPARATOR).unwrap() + CHUNK_SEPARATOR.len() < start && start < tail);
+    assert!(!log.contains(END));
+    let (_root, lines) = reply_of(&log);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| line == HIDDEN_LINE), "{lines:?}");
+}
+
+/// A chunk separator that only starts like an END line, met before any BEGIN, hides nothing
+/// above it and is shown itself.
+#[test]
+fn a_chunk_separator_before_any_begin_keeps_the_lines_above_it() {
+    let text = format!("Read buoywatch.io/pricing\n{CHUNK_SEPARATOR}\nafter");
+    assert_eq!(redact(&text), text);
+}
+
+/// A separator whose label holds `key` only inside a longer word, before the tail window and
+/// with no END after it, opens no key block, so the window's rows stay shown.
+#[test]
+fn a_begin_label_holding_key_inside_a_word_before_the_tail_window_hides_nothing() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let rows = plain_rows(tail * 3 / 2 / 40);
+    let log = format!("starting\n-----BEGIN monkey notes-----\n{rows}");
+    let start = window_start(log.len());
+    assert!(log.find("-----BEGIN monkey").unwrap() < start && start < tail);
+    let (_root, lines) = reply_of(&log);
+    assert!(!lines.iter().any(|line| line == HIDDEN_LINE), "{lines:?}");
+    assert_eq!(lines.last().map(String::as_str), rows.lines().next_back());
+}
