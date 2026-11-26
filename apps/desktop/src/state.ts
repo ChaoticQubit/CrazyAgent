@@ -13,8 +13,6 @@ import { foundPollMs, intakePollMs, jobEnds, jobLine } from "./screens/intake/in
 import { carryFollowUps } from "./screens/new-project/carry";
 import { INPUT_DEFAULT, inputChoice, type InputChoice } from "./screens/team/terminal-io";
 import { rendererChoice, rendererDefault, type RendererChoice } from "./screens/team/terminal-renderer";
-import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
-import type { QuestionsShown } from "./api-questions";
 export type Loaded<T> = { kind: "loading" } | Result<T>;
 export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
@@ -22,28 +20,6 @@ export type ProjectRow = ProjectPage["items"][number];
 const THEME_KEY = "crazyagent.theme";
 const TERMINAL_INPUT_KEY = "crazyagent.terminal-input";
 const TERMINAL_RENDERER_KEY = "crazyagent.terminal-renderer";
-const QUESTIONS_SHOWN_KEY = "crazyagent.questions-shown";
-
-/** Reads where a waiting question shows on a project page, as kept in this app (not in the
- * engine). Output: the choice; the default when storage is unavailable or holds something
- * else. */
-export function readQuestionsShown(): QuestionsShown {
-  try {
-    return questionsShown(window.localStorage.getItem(QUESTIONS_SHOWN_KEY));
-  } catch {
-    return QUESTIONS_SHOWN_DEFAULT;
-  }
-}
-
-/** Remembers where a waiting question shows on a project page. Input: the choice. Output:
- * none. */
-export function saveQuestionsShown(choice: QuestionsShown): void {
-  try {
-    window.localStorage.setItem(QUESTIONS_SHOWN_KEY, choice);
-  } catch {
-    return;
-  }
-}
 
 const LAST_PROJECT_KEY = "crazyagent.last-project";
 const PROJECT_ID_MAX = 256;
@@ -98,7 +74,7 @@ export function readTerminalInput(): InputChoice {
 /** The listeners of one choice kept in this app: a save in this window tells them at once,
  * and the storage event tells them of a save in another window. Input: the stored key.
  * Output: `tell`, called after a save, and `listen`, which returns the call that stops it. */
-function choiceListeners(key: string): { tell: () => void; listen: (listener: () => void) => () => void } {
+export function choiceListeners(key: string): { tell: () => void; listen: (listener: () => void) => () => void } {
   const heard = new Set<() => void>();
   let watched = false;
   const tell = () => {

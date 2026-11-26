@@ -18,7 +18,8 @@ pub use images::image_runs_under;
 pub use listeners::listener_beside;
 pub use name::final_name;
 pub use owner::{
-    changeable_part, owner_only, unreadable_drive_root, unreadable_read_root, unreadable_root,
+    changeable_part, elevated, owner_only, program_trusted, unreadable_drive_root,
+    unreadable_read_root, unreadable_root,
 };
 pub use system::system_folder;
 pub use tree::ProcessTree;

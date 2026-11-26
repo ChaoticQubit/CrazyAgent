@@ -487,3 +487,14 @@ fn last_good_read(
     assert!(kept.len() <= LAST_GOOD_ROOTS_MAX);
     (Some(roots), Vec::new())
 }
+
+/// The folder an npm prefix keeps the entries of the packages installed into it: `bin` on
+/// macOS and Linux, the prefix itself on Windows, where npm writes their `.cmd` shims at the
+/// root. Input: the prefix. Output: the folder.
+pub fn npm_shims(prefix: &Path) -> PathBuf {
+    if cfg!(windows) {
+        prefix.to_path_buf()
+    } else {
+        prefix.join("bin")
+    }
+}

@@ -141,6 +141,8 @@ fn found_entry(id: &str) -> (tempfile::TempDir, HarnessEntry, Roots) {
         casks: false,
         npm: None,
         places: crate::tools::tools_new(Vec::new(), None),
+        #[cfg(windows)]
+        elevated: false,
     };
     (folder, entry, roots)
 }
