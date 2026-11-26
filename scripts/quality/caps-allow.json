@@ -27,7 +27,7 @@
   "apps/desktop/test/native-panel.test.mjs": 672,
   "apps/desktop/test/native/ide-window.e2e.mjs": 668,
   "apps/desktop/test/native/pools-screen.e2e.mjs": 618,
-  "apps/desktop/test/native/questions-flow.mjs": 1015,
+  "apps/desktop/test/native/questions-flow.mjs": 1005,
   "apps/desktop/test/native/recovery-flow.mjs": 797,
   "apps/desktop/test/native/remove-project.e2e.mjs": 711,
   "apps/desktop/test/overview-tabs.test.mjs": 853,
