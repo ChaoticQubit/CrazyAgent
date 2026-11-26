@@ -307,8 +307,7 @@ impl ChannelCase {
     }
 
     fn packet(&self) -> crate::engine::secret_frame::OwnerPacket {
-        let packet = crate::engine::secret_frame::owner_packet(b"CAN1", 0, &self.token());
-        packet
+        crate::engine::secret_frame::owner_packet(b"CAN1", 0, &self.token())
     }
 
     fn snapshot(&self) -> Snapshot {

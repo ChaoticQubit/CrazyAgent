@@ -82,8 +82,7 @@ impl Running {
 
     /// The handshake packet the owner client sends. Output: the packet.
     fn packet(&self) -> crate::engine::secret_frame::OwnerPacket {
-        let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &self.client.token);
-        packet
+        crate::engine::secret_frame::owner_packet(b"CAO1", 0, &self.client.token)
     }
 
     async fn stop(mut self) {
