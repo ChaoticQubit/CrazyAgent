@@ -133,13 +133,40 @@ fn refused_places(
 }
 
 /// The manifests the test-support guard reads under a workspace root: every Cargo.toml
-/// under `crates` and `apps`, and the root's own. Input: the root. Output: the paths.
+/// under `crates` and `apps`, the root's own and each member's the root lists. A glob member
+/// panics naming it, so no member drops out unread. Input: the root. Output: the paths,
+/// sorted and without repeats.
 fn manifests(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    files(&root.join("crates"), "Cargo.toml")
+    let path = root.join("Cargo.toml");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+    let manifest: toml::Table = toml::from_str(&text)
+        .unwrap_or_else(|error| panic!("{path:?} does not parse as a manifest: {error}"));
+    let members = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|member| {
+            let member = member
+                .as_str()
+                .unwrap_or_else(|| panic!("a member that is not text: {member}"));
+            assert!(
+                !member.contains(['*', '?', '[']),
+                "a glob member the guard cannot list: {member}"
+            );
+            root.join(member).join("Cargo.toml")
+        });
+    let mut found: Vec<_> = files(&root.join("crates"), "Cargo.toml")
         .into_iter()
         .chain(files(&root.join("apps"), "Cargo.toml"))
-        .chain([root.join("Cargo.toml")])
-        .collect()
+        .chain([path.clone()])
+        .chain(members)
+        .collect();
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// A workspace root with empty `crates` and `apps` folders and the given root manifest.
