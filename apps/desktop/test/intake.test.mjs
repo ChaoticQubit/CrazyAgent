@@ -57,9 +57,9 @@ test("Home lists found, then setting up, then missing folders by name; ready one
   assert.deepEqual(list.map((item) => item.name), ["a", "b", "z", "c", "d"]);
 });
 
-test("the projects folder line says whether new folders show up live", () => {
+test("the projects folder line says whether new folders show up live", async () => {
   assert.equal(intake.homeLine({ path: null, watching: false }), null);
-  assert.equal(intake.homeLine({ path: "/Users/mira/Projects", watching: true }), "Watching ~/Projects. Drop a project folder into it with Finder and it shows up here.");
+  await eachComputer("../src/screens/intake/intake.ts", (each, { os }) => assert.equal(each.homeLine({ path: "/Users/mira/Projects", watching: true }), `Watching ~/Projects. Drop a project folder into it with ${os === "mac" ? "Finder" : "your file manager"} and it shows up here.`, os));
   assert.equal(intake.homeLine({ path: "/Users/mira/Projects", watching: false }), "~/Projects is checked when CrazyAgent starts. Live updates are off right now.");
 });
 
@@ -481,7 +481,7 @@ test("the projects folder chooser shows each state", () => {
   assert.match(picked, /~\/Projects/);
   assert.match(picked, />Use this folder<\/button>/);
   const set = html(HomeFolderView, { home: ok({ path: "/Users/mira/Projects", watching: true }), picked: null, busy: false, problem: "", onChoose: noop, onSave: noop, onContinue: noop });
-  assert.match(set, /Your projects folder is/);
+  assert.ok(set.includes("Your projects folder is") && set.includes(`with ${HOST.os === "mac" ? "Finder" : "your file manager"} and it shows up on Home.`), set);
   assert.match(set, />Continue<\/button>/);
   const moved = html(HomeFolderView, { home: ok({ path: "/Users/mira/Projects", watching: true }), picked: "/Users/mira/Work", busy: false, problem: "Nope.", onChoose: noop, onSave: noop });
   assert.match(moved, /Projects already in the old folder stay there\./);
