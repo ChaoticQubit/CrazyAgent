@@ -57,6 +57,13 @@ export function CompactionRowView({ compaction, saving, problem, onSwitch }: {
   </SettingSection>;
 }
 
+/** Waits for a submitted save to finish, then hands its result to the page. The save always
+ * runs to its end. Inputs: the pending save, the page's alive flag and what the page does with
+ * the result. Output: done once the save has ended. */
+export async function settleAfter<T>(pending: Promise<T>, _alive: { readonly current: boolean }, settle: (result: T) => void): Promise<void> {
+  settle(await pending);
+}
+
 /** Settings, the compaction row: reads the switch, and on a change saves it once, then reads
  * it again. */
 function CompactionRow() {
