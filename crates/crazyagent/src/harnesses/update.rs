@@ -1147,16 +1147,17 @@ mod windows_tests {
         }
     }
     /// With the engine's home the profile folder on Windows, a harness that installed itself
-    /// under it is named as self-updating; an empty file there passes the trust check but no
-    /// lookup would run it, so its update is refused as unsafe.
+    /// under it is named as self-updating, and its update is refused as unsafe once the users
+    /// group may write the file, whatever the resolver would say about it.
     #[test]
-    fn a_windows_self_updating_install_is_named_and_an_unrunnable_one_is_refused() {
+    fn a_windows_self_updating_install_is_named_and_one_others_may_write_is_refused() {
         let folder = tempfile::tempdir().unwrap();
         let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let installed = home.join(".codex").join("packages").join("standalone");
         std::fs::create_dir_all(&installed).unwrap();
         let entry = installed.join("codex.exe");
         std::fs::write(&entry, "").unwrap();
+        icacls(&entry, &["/grant", "*S-1-5-32-545:(W)"]);
         let roots = Roots {
             home,
             brew_prefixes: Vec::new(),
