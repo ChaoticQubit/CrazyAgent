@@ -430,7 +430,7 @@ impl Folder {
     /// child to this folder. Input: its name. Output: the held child, or the error.
     pub(crate) fn make_dir(&self, name: &Name) -> Result<Self, HeldError> {
         let path = self.path.join(name.as_os_str());
-        let file = private::new_dir(&path).map_err(cause)?;
+        let file = private::new_dir(&path).map_err(|error| self.made_cause(name, error))?;
         private::sync_folder(&self.path).map_err(cause)?;
         self.bind(name, &file)?;
         let pin = pin_of(&file)?;
@@ -547,7 +547,13 @@ impl Folder {
     /// name and whether to create it. Output: the file and its identity, or the error.
     fn private_file(&self, name: &Name, create: bool) -> Result<(File, Pin), HeldError> {
         let path = self.path.join(name.as_os_str());
-        let file = private::file(&path, create).map_err(cause)?;
+        let file = private::file(&path, create).map_err(|error| {
+            if create {
+                self.made_cause(name, error)
+            } else {
+                cause(error)
+            }
+        })?;
         if create {
             private::sync_folder(&self.path).map_err(cause)?;
         }
@@ -579,6 +585,33 @@ impl Folder {
             return Err(HeldError::Unsafe);
         }
         Ok(())
+    }
+
+    /// Classifies a failed create-only make: Windows reports a name already taken by a folder
+    /// or a link with a code that is no collision, so an `Unavailable` failure is `Unsafe` when
+    /// the name's kind reads through this folder, as itself and only read. Nothing is written,
+    /// and a lookup that fails keeps `Unavailable`. Inputs: the name and the error. Output: the kind.
+    fn made_cause(&self, name: &Name, error: std::io::Error) -> HeldError {
+        match cause(error) {
+            HeldError::Unavailable if self.kind_unjudged(name).is_ok() => HeldError::Unsafe,
+            kind => kind,
+        }
+    }
+
+    /// Reads what one entry of this folder is, opened as itself, only read and bound to this
+    /// folder: any reparse point is a link. Input: its name. Output: its kind, or the error.
+    fn kind_unjudged(&self, name: &Name) -> Result<Kind, HeldError> {
+        let entry = open_as_itself(&self.path.join(name.as_os_str()), None)?;
+        self.bind(name, &entry)?;
+        let facts = private::facts(&entry).map_err(cause)?;
+        let folder = entry.metadata().map_err(cause)?.is_dir();
+        Ok(if facts.reparse {
+            Kind::Link
+        } else if folder {
+            Kind::Folder
+        } else {
+            Kind::File
+        })
     }
 }
 
@@ -748,6 +781,306 @@ pub(crate) fn unlock(file: &File) {
     let _ = rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock);
     #[cfg(windows)]
     let _ = private::unlock(file);
+}
+
+/// The most entries one folder of a tree removal may list, past which the removal is `Full`.
+#[cfg(test)]
+const TREE_ENTRIES_MAX: usize = 4096;
+
+/// The deepest a tree removal may be asked to go below the folder it removes.
+#[cfg(test)]
+const TREE_DEPTH_MAX: usize = 16;
+
+/// How many times a tree removal empties a folder that fills again before it gives up with
+/// `InUse`.
+#[cfg(test)]
+const REFILL_TRIES: usize = 3;
+
+#[cfg(test)]
+impl Folder {
+    /// Removes one entry of a caller-judged tree, a folder with all it holds, bottom up
+    /// through held folders, never following a link: a link anywhere goes as itself, and a
+    /// folder that fills again is emptied again a fixed number of times. Inputs: the name and
+    /// the folders deep below it the removal may go. Output: Ok, `Missing`, `Full` past the
+    /// depth or an entry bound, `InUse`, or the error.
+    pub(crate) fn remove_tree_unjudged(&self, name: &Name, depth: usize) -> Result<(), HeldError> {
+        self.assert_caller_judged();
+        assert!(depth <= TREE_DEPTH_MAX, "{depth}");
+        let kind = self.kind_unjudged(name)?;
+        self.remove_child_unjudged(name, kind, depth)
+    }
+
+    /// Removes one listed entry of a caller-judged tree: a file or a link at once, a folder
+    /// once emptied, again while it fills meanwhile. Inputs: the name, its kind and the depth
+    /// left below it. Output: Ok, or the error.
+    fn remove_child_unjudged(
+        &self,
+        name: &Name,
+        kind: Kind,
+        depth: usize,
+    ) -> Result<(), HeldError> {
+        if kind != Kind::Folder {
+            return self.remove_entry_unjudged(name, kind);
+        }
+        for _ in 0..REFILL_TRIES {
+            let child = self.open_dir_unjudged(name)?;
+            child.empty_unjudged(depth)?;
+            drop(child);
+            match self.remove_entry_unjudged(name, Kind::Folder) {
+                Err(HeldError::Unavailable) if self.refilled_unjudged(name) => {}
+                removed => return removed,
+            }
+        }
+        Err(HeldError::InUse)
+    }
+
+    /// Removes everything in this caller-judged folder, each entry as its listed kind, a
+    /// folder only while depth is left. An entry gone meanwhile counts as removed. Input: the
+    /// depth left below this folder. Output: Ok, `Full`, or the error.
+    fn empty_unjudged(&self, depth: usize) -> Result<(), HeldError> {
+        for child in self.list(TREE_ENTRIES_MAX)? {
+            let name = Name::checked(&child.name)?;
+            if child.kind == Kind::Folder && depth == 0 {
+                return Err(HeldError::Full);
+            }
+            match self.remove_child_unjudged(&name, child.kind, depth.saturating_sub(1)) {
+                Ok(()) | Err(HeldError::Missing) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a folder whose removal failed holds entries again. Input: its name. Output:
+    /// true when it lists one or more entries.
+    fn refilled_unjudged(&self, name: &Name) -> bool {
+        match self.open_dir_unjudged(name).and_then(|child| child.list(1)) {
+            Ok(children) => !children.is_empty(),
+            Err(error) => error == HeldError::Full,
+        }
+    }
+}
+
+#[cfg(all(unix, test))]
+impl Folder {
+    /// Holds the first folder of a chain its caller judges, opened without following a link
+    /// and judged by `judge` on the held handle only, never by path. A link at the name is
+    /// `Unsafe` before the judge runs. Inputs: the absolute path and the judge. Output: the
+    /// held folder, carrying the caller's judgement, `Missing`, or `Unsafe`.
+    pub(crate) fn root_judged_by(path: &Path, judge: fn(&File) -> bool) -> Result<Self, HeldError> {
+        use rustix::fs::{Mode, OFlags};
+        assert!(path.is_absolute(), "{}", path.display());
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let file = File::from(rustix::fs::open(path, flags, Mode::empty()).map_err(errno_cause)?);
+        if !judge(&file) {
+            return Err(HeldError::Unsafe);
+        }
+        let pin = pin_of(&file)?;
+        Ok(Self {
+            file,
+            pin,
+            judged: Judged::Caller,
+        })
+    }
+
+    /// Opens and holds one child folder of a caller-judged tree through this folder, never
+    /// following a link, with no owner or mode judged. Input: its name. Output: the held
+    /// child, `Missing`, or `Unsafe` for a link or a file at the name.
+    pub(crate) fn open_dir_unjudged(&self, name: &Name) -> Result<Self, HeldError> {
+        use rustix::fs::{Mode, OFlags};
+        self.assert_caller_judged();
+        let file = self.open_at(name, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())?;
+        let pin = pin_of(&file)?;
+        Ok(Self {
+            file,
+            pin,
+            judged: self.judged,
+        })
+    }
+
+    /// Makes one child folder of a caller-judged tree with mode 0700, create-only, so an
+    /// entry or a link already at the name is `Unsafe`, then holds it. Input: its name.
+    /// Output: the held child, or the error.
+    pub(crate) fn make_dir_inherited(&self, name: &Name) -> Result<Self, HeldError> {
+        use rustix::fs::Mode;
+        self.assert_caller_judged();
+        rustix::fs::mkdirat(&self.file, name.as_os_str(), Mode::from_raw_mode(0o700))
+            .map_err(errno_cause)?;
+        self.file.sync_all().map_err(cause)?;
+        self.open_dir_unjudged(name)
+    }
+
+    /// Makes one child file of a caller-judged tree with mode 0600, create-only and never
+    /// through a link, then writes this folder's entries to disk. Input: its name. Output:
+    /// the file, open for reading and writing, and its identity, or the error.
+    pub(crate) fn make_file_inherited(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        use rustix::fs::{Mode, OFlags};
+        self.assert_caller_judged();
+        let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL;
+        let file = self.open_at(name, flags, Mode::from_raw_mode(0o600))?;
+        let pin = pin_of(&file)?;
+        self.file.sync_all().map_err(cause)?;
+        Ok((file, pin))
+    }
+
+    /// Reads what one entry of a caller-judged tree is without following it. Input: its
+    /// name. Output: its kind, `Missing`, or `Unsafe` for an entry that is none of a file, a
+    /// folder or a link.
+    fn kind_unjudged(&self, name: &Name) -> Result<Kind, HeldError> {
+        use rustix::fs::{AtFlags, FileType};
+        let stat = rustix::fs::statat(&self.file, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(errno_cause)?;
+        match FileType::from_raw_mode(stat.st_mode) {
+            FileType::RegularFile => Ok(Kind::File),
+            FileType::Directory => Ok(Kind::Folder),
+            FileType::Symlink => Ok(Kind::Link),
+            _ => Err(HeldError::Unsafe),
+        }
+    }
+
+    /// Unlinks one entry of a caller-judged tree by name through this folder, a folder only
+    /// when empty; a link goes as itself. Inputs: its name and its kind. Output: Ok, or the
+    /// error, `Unsafe` when the entry is no longer of that kind.
+    fn remove_entry_unjudged(&self, name: &Name, kind: Kind) -> Result<(), HeldError> {
+        use rustix::fs::AtFlags;
+        let flags = if kind == Kind::Folder {
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        rustix::fs::unlinkat(&self.file, name.as_os_str(), flags).map_err(errno_cause)
+    }
+}
+
+#[cfg(all(windows, test))]
+impl Folder {
+    /// Holds the first folder of a chain its caller judges: only the plain drive spelling,
+    /// opened as itself, never sharing delete, refused as `Unsafe` when it is a reparse point
+    /// or not a folder before `judge` runs on the held handle. The folder keeps the place
+    /// read from its handle. Inputs: the absolute path and the judge. Output: the held
+    /// folder, carrying the caller's judgement, `Missing`, or `Unsafe`.
+    pub(crate) fn root_judged_by(path: &Path, judge: fn(&File) -> bool) -> Result<Self, HeldError> {
+        if !plain_drive(path) {
+            return Err(HeldError::Unsafe);
+        }
+        let file = open_as_itself(path, None)?;
+        plain_folder(&file)?;
+        let place = place_of(&file)?;
+        if !judge(&file) {
+            return Err(HeldError::Unsafe);
+        }
+        let pin = pin_of(&file)?;
+        Ok(Self {
+            file,
+            pin,
+            judged: Judged::Caller,
+            path: place,
+        })
+    }
+
+    /// Opens and holds one child folder of a caller-judged tree at this folder's place, as
+    /// itself and never sharing delete, refused as `Unsafe` when it is a reparse point or not
+    /// a folder, then binds it to this folder. Input: its name. Output: the held child,
+    /// `Missing`, `InUse`, or `Unsafe`.
+    pub(crate) fn open_dir_unjudged(&self, name: &Name) -> Result<Self, HeldError> {
+        self.assert_caller_judged();
+        let path = self.path.join(name.as_os_str());
+        let file = open_as_itself(&path, None)?;
+        plain_folder(&file)?;
+        self.bind(name, &file)?;
+        let pin = pin_of(&file)?;
+        Ok(Self {
+            file,
+            pin,
+            judged: self.judged,
+            path,
+        })
+    }
+
+    /// Makes one child folder of a caller-judged tree, create-only, so an entry or a link
+    /// already at the name is `Unsafe`, taking this folder's inheritable list, writes this
+    /// folder's entries to disk, then holds and binds it. Input: its name. Output: the held
+    /// child, or the error.
+    pub(crate) fn make_dir_inherited(&self, name: &Name) -> Result<Self, HeldError> {
+        self.assert_caller_judged();
+        self.unmoved()?;
+        std::fs::create_dir(self.path.join(name.as_os_str()))
+            .map_err(|error| self.made_cause(name, error))?;
+        private::sync_folder(&self.path).map_err(cause)?;
+        self.open_dir_unjudged(name)
+    }
+
+    /// Makes one child file of a caller-judged tree, create-only and never through a link,
+    /// taking this folder's inheritable list, so an agent the folder lets read gets it; then
+    /// writes this folder's entries to disk and binds the file. Input: its name. Output: the
+    /// file, open for reading and writing, and its identity, or the error.
+    pub(crate) fn make_file_inherited(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        use crate::platform::FILE_FLAG_OPEN_REPARSE_POINT;
+        use std::os::windows::fs::OpenOptionsExt;
+        self.assert_caller_judged();
+        self.unmoved()?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name.as_os_str()))
+            .map_err(|error| self.made_cause(name, error))?;
+        private::sync_folder(&self.path).map_err(cause)?;
+        self.bind(name, &file)?;
+        let pin = pin_of(&file)?;
+        Ok((file, pin))
+    }
+
+    /// Deletes one entry of a caller-judged tree through a handle opened as itself with
+    /// delete access and bound to this folder, its read-only mark cleared first, with POSIX
+    /// semantics; a link goes as itself and a folder only when empty. Inputs: its name and
+    /// its kind, which the handle already tells. Output: Ok, `Missing`, `InUse`, or the
+    /// error.
+    fn remove_entry_unjudged(&self, name: &Name, _kind: Kind) -> Result<(), HeldError> {
+        let access = DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+        let entry = open_as_itself(&self.path.join(name.as_os_str()), Some(access))?;
+        self.bind(name, &entry)?;
+        private::clear_read_only(&entry).map_err(cause)?;
+        private::delete(&entry).map_err(cause)
+    }
+}
+
+/// The access right to write an object's attributes, `FILE_WRITE_ATTRIBUTES`.
+#[cfg(all(windows, test))]
+const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+
+/// Opens one entry as itself, never through a reparse point, a folder as well as a file,
+/// sharing read and write but never delete, so it cannot be renamed or deleted by another
+/// handle while held. Inputs: the path and the access, read when none. Output: the open
+/// entry, or the error by cause.
+#[cfg(windows)]
+fn open_as_itself(path: &Path, access: Option<u32>) -> Result<File, HeldError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    match access {
+        Some(access) => options.access_mode(access),
+        None => options.read(true),
+    };
+    options
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(cause)
+}
+
+/// Refuses an entry opened as itself that is a reparse point or not a folder. Input: the
+/// open entry. Output: Ok, or `Unsafe`.
+#[cfg(all(windows, test))]
+fn plain_folder(entry: &File) -> Result<(), HeldError> {
+    let facts = private::facts(entry).map_err(cause)?;
+    let folder = entry.metadata().map_err(cause)?.is_dir();
+    if facts.reparse || !folder {
+        return Err(HeldError::Unsafe);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
