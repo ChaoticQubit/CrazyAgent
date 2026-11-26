@@ -381,15 +381,21 @@ mod tests {
         let start = source.find("export const ADD_WARNINGS = {").unwrap();
         let body = &source[start..];
         let body = &body[..body.find("\n} as const;").unwrap()];
-        let mut desktop: std::collections::BTreeMap<&str, &str> = body
+        let mut desktop: std::collections::BTreeMap<&str, String> = body
             .lines()
             .skip(1)
             .map(|line| {
                 let (key, text) = line.trim().split_once(": ").unwrap();
                 let text = text.strip_suffix(',').unwrap_or(text);
+                let quoted = ['"', '`'].iter().find_map(|mark| {
+                    text.strip_prefix(*mark)
+                        .and_then(|inner| inner.strip_suffix(*mark))
+                });
                 (
                     key,
-                    text.strip_prefix('"').unwrap().strip_suffix('"').unwrap(),
+                    quoted
+                        .unwrap()
+                        .replace("${thisComputer()}", on_this_computer!("", "")),
                 )
             })
             .collect();
@@ -416,7 +422,7 @@ mod tests {
             AddWarning::LinkedCheckout => "linked_checkout",
             AddWarning::NoGit => "no_git",
         };
-        let tui: std::collections::BTreeMap<&str, &str> = [
+        let tui: std::collections::BTreeMap<&str, String> = [
             AddWarning::CloseApps,
             AddWarning::OldPlace,
             AddWarning::AcrossDisks,
@@ -435,7 +441,7 @@ mod tests {
             AddWarning::NoGit,
         ]
         .into_iter()
-        .map(|warning| (key(warning), warning.text()))
+        .map(|warning| (key(warning), warning.text().to_owned()))
         .collect();
         assert_eq!(tui, desktop);
     }
