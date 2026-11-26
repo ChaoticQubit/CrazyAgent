@@ -1164,21 +1164,44 @@ pub fn retire_old_copies_with(root: &Path, installed: &Path, cli: Option<&Path>,
 }
 
 /// Whether the command line link at `link` leads to the old copy `old`: it names `old`
-/// exactly, even when that file is already gone, or, when `old` is a regular file and not a
-/// link, it ends at that file once read through every link, as a path relative to the
-/// link's folder or a chain of links does. An `old` that is a link never counts, so a
-/// writer of its folder cannot make a link to any other file look like the old copy.
-/// Inputs: the link and the old copy. Output: the answer.
+/// exactly, even when that file is gone, or, when `old` is a regular file and not a link, it
+/// resolves to that same path through every link; a file id that differs answers no first
+/// ([`resolves_apart`]). An `old` that is a link never counts, so a writer of its folder
+/// cannot make a link to another file look like it. Inputs: the link, the old copy.
 fn names_old_copy(link: &Path, old: &Path) -> bool {
     let Ok(named) = std::fs::read_link(link) else {
         return false;
     };
-    named == old
-        || (std::fs::symlink_metadata(old).is_ok_and(|metadata| metadata.is_file())
-            && matches!(
-                (std::fs::canonicalize(link), std::fs::canonicalize(old)),
-                (Ok(led), Ok(copy)) if led == copy
-            ))
+    if named == old {
+        return true;
+    }
+    let Ok(read) = std::fs::symlink_metadata(old) else {
+        return false;
+    };
+    read.is_file()
+        && !resolves_apart(link, &read)
+        && matches!(
+            (std::fs::canonicalize(link), std::fs::canonicalize(old)),
+            (Ok(led), Ok(copy)) if led == copy
+        )
+}
+
+/// Whether `link`, read through every link, is another file than the one `copy` read: their
+/// device and file ids differ, so their resolved paths cannot be equal. A read that fails
+/// never tells them apart, and equal ids prove nothing. Inputs: the link and what `lstat`
+/// read of the old copy. Output: the answer.
+#[cfg(unix)]
+fn resolves_apart(link: &Path, copy: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(link).is_ok_and(|led| (led.dev(), led.ino()) != (copy.dev(), copy.ino()))
+}
+
+/// Without Unix device and file ids nothing tells two files apart before their resolved
+/// paths are compared. Inputs: the link and what `lstat` read of the old copy. Output:
+/// always false.
+#[cfg(not(unix))]
+fn resolves_apart(_link: &Path, _copy: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Whether `copy` is a regular file private to this user where Unix modes exist, so no other
