@@ -278,6 +278,33 @@ const GIT_HINT: &str = "Install git with your package manager.";
 #[cfg(not(unix))]
 const GIT_HINT: &str = "Install Git for Windows from git-scm.com.";
 
+/// How to install Node.js on macOS, from its site or with Homebrew in Terminal.
+#[cfg(target_os = "macos")]
+pub const NODE_HINT: &str =
+    "Install Node.js from nodejs.org, or run brew install node in Terminal.";
+/// How to install Node.js on Linux and the other Unix systems.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org or with your package manager.";
+/// How to install Node.js on Windows.
+#[cfg(not(unix))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org.";
+
+/// How to install Codex on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in Terminal.";
+/// How to install Codex on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in a terminal.";
+
+/// How to install Claude Code on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal.";
+/// How to install Claude Code on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in a terminal.";
+
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
@@ -1365,11 +1392,9 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
 /// sentence.
 fn install_hint(tool: &str) -> &'static str {
     match tool {
-        "node" | "npm" => "Install Node.js from nodejs.org, or run brew install node in Terminal.",
-        "codex" => "Install Codex: run npm install -g @openai/codex in Terminal.",
-        "claude" => {
-            "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal."
-        }
+        "node" | "npm" => NODE_HINT,
+        "codex" => CODEX_HINT,
+        "claude" => CLAUDE_HINT,
         "git" => GIT_HINT,
         _ => "Install it, or run setup again from Settings.",
     }
