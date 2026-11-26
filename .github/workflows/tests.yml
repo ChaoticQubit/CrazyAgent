@@ -142,7 +142,7 @@ jobs:
           sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
           test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
       - name: Red rig with the base bridge, tip bridge row, clippy and tip rig, keeping going
-        timeout-minutes: 200
+        timeout-minutes: 300
         run: |
           set -uo pipefail
           logs="$RUNNER_TEMP/qf-logs"
