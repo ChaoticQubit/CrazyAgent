@@ -93,62 +93,73 @@ fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
 /// so a caller that reads those places again in the same call can take these reads instead
 /// ([`read_parts_known`]).
 fn link_chain_read(path: &Path) -> Result<(Vec<PathBuf>, Known), PathBuf> {
+    use std::borrow::Cow;
+    use std::ffi::OsStr;
     use std::path::Component;
     let Some(mut at) = link_start(path, path).filter(|_| path.is_absolute()) else {
         return Err(path.to_path_buf());
     };
-    let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
-        for part in from.components().rev() {
-            match part {
-                Component::Normal(name) => pending.push(PathBuf::from(name)),
-                Component::ParentDir => pending.push(PathBuf::from("..")),
-                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-            }
+    fn name(part: Component<'_>) -> Option<&OsStr> {
+        match part {
+            Component::Normal(name) => Some(name),
+            Component::ParentDir => Some(OsStr::new("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
         }
-    };
-    let mut pending = Vec::new();
-    queue(&mut pending, path);
+    }
+    let mut pending: Vec<Cow<'_, OsStr>> = path
+        .components()
+        .rev()
+        .filter_map(name)
+        .map(Cow::Borrowed)
+        .collect();
     let mut hops = Vec::new();
     let mut known: Known = Vec::new();
     let mut links = 0;
     while let Some(part) = pending.pop() {
-        if part.as_os_str() == ".." {
+        if &*part == OsStr::new("..") {
             if at.parent().is_some() {
                 hops.push(at.clone());
             }
             at.pop();
             continue;
         }
-        let next = at.join(&part);
-        let kind = match std::fs::symlink_metadata(&next) {
+        at.push(&*part);
+        let kind = match std::fs::symlink_metadata(&at) {
             Ok(metadata) => {
                 let kind = metadata.file_type();
-                known.push((next.clone(), metadata));
+                known.push((at.clone(), metadata));
                 kind
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                hops.push(next);
+                hops.push(at);
                 break;
             }
-            Err(_) => return Err(next),
+            Err(_) => return Err(at),
         };
         if !kind.is_symlink() {
-            at = next;
             continue;
         }
         if links == LINK_HOPS_MAX {
-            return Err(next);
+            return Err(at);
         }
         links += 1;
-        let Ok(target) = std::fs::read_link(&next) else {
-            return Err(next);
+        let Ok(target) = std::fs::read_link(&at) else {
+            return Err(at);
         };
+        let link = at.clone();
+        at.pop();
         let Some(start) = link_start(&at, &target) else {
-            return Err(next);
+            return Err(link);
         };
-        hops.push(next);
+        hops.push(link);
         at = start;
-        queue(&mut pending, &target);
+        pending.extend(
+            target
+                .components()
+                .rev()
+                .filter_map(name)
+                .map(|part| Cow::Owned(part.to_os_string())),
+        );
     }
     assert!(links <= LINK_HOPS_MAX);
     assert!(hops.len() >= links);
