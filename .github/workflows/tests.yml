@@ -54,8 +54,8 @@ defaults:
     shell: bash
 
 jobs:
-  sitting-pod-c:
-    name: Pod C perf sitting on one macos-15 runner
+  sitting-pod-c-a:
+    name: Pod C perf sitting reading A on one macos-15 runner
     runs-on: macos-15
     timeout-minutes: 330
     steps:
@@ -78,14 +78,14 @@ jobs:
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Set up the five sides, the A/A links and the sitting folder
+      - name: Set up the sides, the A/A link and the sitting folder
         timeout-minutes: 10
         run: bash scripts/perf/sitting.sh setup
-      - name: Build reading A's 2.5 side (scratch merge)
+      - name: Build reading A's 2.5 side (a)
         if: ${{ !cancelled() }}
         timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build a crazyagent-kernel-processes
-      - name: Build reading A's 2.4.4 twin
+      - name: Build reading A's 2.4.4 side (twin)
         if: ${{ !cancelled() }}
         timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build twin crazyagent
@@ -105,22 +105,54 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/perf/sitting.sh load-stop
-      - name: Keep reading A's raw runs
+      - name: Print reading A's verdict per condition
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/perf/sitting.sh summary A
+      - name: Keep reading A's raw runs and summary
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: sitting-pod-c-reading-a
           path: ${{ runner.temp }}/sitting/logs
           retention-days: 7
-      - name: Free reading A's targets for reading B
+      - name: Fail on any step that did not succeed
         if: ${{ !cancelled() }}
         timeout-minutes: 5
-        run: bash scripts/perf/sitting.sh drop a twin
-      - name: Build reading B's after side 68721ffb41
+        run: bash scripts/perf/sitting.sh verdict
+
+  sitting-pod-c-b:
+    name: Pod C perf sitting reading B on one macos-15 runner
+    runs-on: macos-15
+    timeout-minutes: 330
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - name: Free disk on the macOS runner
+        run: |
+          set -euo pipefail
+          df -h /
+          case "${ANDROID_HOME:-}" in "$HOME"/?*) rm -rf "$ANDROID_HOME" ;; *) echo "no Android SDK under $HOME" ;; esac
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Set up the sides, the A/A link and the sitting folder
+        timeout-minutes: 10
+        run: bash scripts/perf/sitting.sh setup
+      - name: Build reading B's 2.5 side (b-after)
         if: ${{ !cancelled() }}
         timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build b-after crazyagent-kernel-processes
-      - name: Build reading B's before side c6f1398838
+      - name: Build reading B's 2.5-before side (b-before)
         if: ${{ !cancelled() }}
         timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build b-before crazyagent-kernel-processes
@@ -140,15 +172,15 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/perf/sitting.sh load-stop
-      - name: Print the verdict per reading and condition
+      - name: Print reading B's verdict per condition
         if: ${{ !cancelled() }}
         timeout-minutes: 5
-        run: bash scripts/perf/sitting.sh summary
-      - name: Keep every raw run and summary
+        run: bash scripts/perf/sitting.sh summary B
+      - name: Keep reading B's raw runs and summary
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: sitting-pod-c-all
+          name: sitting-pod-c-reading-b
           path: ${{ runner.temp }}/sitting/logs
           retention-days: 7
       - name: Fail on any step that did not succeed

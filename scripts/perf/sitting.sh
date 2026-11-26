@@ -135,7 +135,12 @@ case "$1" in
     echo "PERF-RUN lines: $(grep -c '^PERF-RUN ' "$log" || true)"
     ;;
   summary)
-    for spec in "A quiet 2.5 2.4.4" "A loaded 2.5 2.4.4" "B quiet 2.5 2.5-before" "B loaded 2.5 2.5-before"; do
+    case "$2" in
+      A) specs=("A quiet 2.5 2.4.4" "A loaded 2.5 2.4.4") ;;
+      B) specs=("B quiet 2.5 2.5-before" "B loaded 2.5 2.5-before") ;;
+      *) echo "sitting.sh: summary takes A or B" >&2; exit 2 ;;
+    esac
+    for spec in "${specs[@]}"; do
       set -- $spec
       log="$T/logs/raw-$1-$2.log"
       if [ -s "$log" ]; then
