@@ -404,3 +404,14 @@ fn a_finish_makes_one_full_flush() {
     let restored = format!("{RECORD_RESTORED} {}", name(&kept));
     assert_eq!(read_restore_record(root.path()), Some(restored));
 }
+
+#[test]
+fn a_put_back_makes_one_full_flush() {
+    let (_root, path, _kept) = broken(true);
+    crate::migrations::take_flushes();
+
+    put_back(&path).unwrap();
+
+    assert_eq!(crate::migrations::take_flushes().0, 1);
+    assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+}
