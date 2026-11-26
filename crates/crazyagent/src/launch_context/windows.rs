@@ -59,7 +59,7 @@ pub(super) fn install(
     tools: bool,
     codex: bool,
 ) -> Result<Installed, LaunchError> {
-    use crate::engine::bootstrap::held::{Folder, HeldError, Name, TREE_DEPTH_MAX};
+    use crate::engine::bootstrap::held::{Folder, HeldError, Name, TREE_NAMES_MAX};
     if tools || context.relay.is_some() {
         return Err(failure("launch_context_unavailable"));
     }
@@ -70,8 +70,9 @@ pub(super) fn install(
         remove_copies_held(&root)?;
     }
     let state = Name::constant(STATE);
-    match root.remove_tree_unjudged(&state, TREE_DEPTH_MAX) {
+    match root.remove_tree_unjudged(&state, TREE_NAMES_MAX) {
         Ok(()) | Err(HeldError::Missing) => {}
+        Err(HeldError::Full) => return Err(failure("launch_context_tree_too_large")),
         Err(error) => return Err(held_failure(error)),
     }
     let folder = root.make_dir_inherited(&state).map_err(held_failure)?;
@@ -89,8 +90,9 @@ pub(super) fn install(
         let config = codex_config(&text, &[], &context.off_tools, &[], &source, None)?;
         let keys = serde_json::to_vec(&codex_hook_keys(&[], &source))
             .map_err(|_| failure("launch_context_hook_unavailable"))?;
-        match root.remove_tree_unjudged(&Name::constant("config.toml"), TREE_DEPTH_MAX) {
+        match root.remove_tree_unjudged(&Name::constant("config.toml"), TREE_NAMES_MAX) {
             Ok(()) | Err(HeldError::Missing) => {}
+            Err(HeldError::Full) => return Err(failure("launch_context_tree_too_large")),
             Err(error) => return Err(held_failure(error)),
         }
         write_inherited(&root, "config.toml", config.into_bytes())?;
@@ -147,13 +149,13 @@ pub(super) fn install(
 /// held home, or one `keep` left to a running pane, removes nothing, since Windows never
 /// removes by path. A failure is left for the next Codex launch to refuse. Input: the launch.
 pub(super) fn remove_held(installed: &mut Installed) {
-    use crate::engine::bootstrap::held::{Name, TREE_DEPTH_MAX};
+    use crate::engine::bootstrap::held::{Name, TREE_NAMES_MAX};
     if let Some(files) = installed.files.take()
         && let Some(root) = &installed.held
     {
-        let _ = root.remove_tree_unjudged(&Name::constant(STATE), TREE_DEPTH_MAX);
+        let _ = root.remove_tree_unjudged(&Name::constant(STATE), TREE_NAMES_MAX);
         if files.codex {
-            let _ = root.remove_tree_unjudged(&Name::constant("config.toml"), TREE_DEPTH_MAX);
+            let _ = root.remove_tree_unjudged(&Name::constant("config.toml"), TREE_NAMES_MAX);
             let _ = remove_copies_held(root);
         }
     }
@@ -163,9 +165,9 @@ pub(super) fn remove_held(installed: &mut Installed) {
 /// as themselves, and makes an empty `skills` again with the home's inheritable list.
 /// Input: the held home. Output: Ok, or [`SKILLS_KEPT`] when anything stays.
 fn remove_copies_held(root: &crate::engine::bootstrap::held::Folder) -> Result<(), LaunchError> {
-    use crate::engine::bootstrap::held::{HeldError, Name, TREE_DEPTH_MAX};
+    use crate::engine::bootstrap::held::{HeldError, Name, TREE_NAMES_MAX};
     let skills = Name::constant("skills");
-    match root.remove_tree_unjudged(&skills, TREE_DEPTH_MAX) {
+    match root.remove_tree_unjudged(&skills, TREE_NAMES_MAX) {
         Ok(()) | Err(HeldError::Missing) => {}
         Err(_) => return Err(failure(SKILLS_KEPT)),
     }

@@ -3,7 +3,7 @@ use super::{
     Harness, KEPT_DEPTH_MAX, Kept, LEVELS_FOLDER, PROCESS_BYTES_MAX, clears_caches, failure,
     kept_in, record_files, write_record,
 };
-use crate::engine::bootstrap::held::{Folder, HeldError, Kind, Name, TREE_DEPTH_MAX};
+use crate::engine::bootstrap::held::{Folder, HeldError, Kind, Name, TREE_NAMES_MAX};
 use kernel_sandbox::policy::AgentAccess;
 use std::fs::File;
 use std::io::Write;
@@ -122,12 +122,13 @@ fn open_folder(folder: &Folder, name: &Name) -> Result<Folder, AgentHomeError> {
     folder.open_dir_unjudged(name).map_err(unwritable)
 }
 
-/// Removes one entry of a held folder with all it holds, links as themselves; an entry
-/// already gone counts as removed. Inputs: the folder and the name. Output: unit, or
-/// `agent_home_unwritable`.
+/// Removes one entry of a held folder with all it holds, links as themselves, at any depth;
+/// an entry already gone counts as removed. Inputs: the folder and the name. Output: unit,
+/// `agent_home_tree_too_large` past the removal's name budget, or `agent_home_unwritable`.
 fn remove_held(folder: &Folder, name: &Name) -> Result<(), AgentHomeError> {
-    match folder.remove_tree_unjudged(name, TREE_DEPTH_MAX) {
+    match folder.remove_tree_unjudged(name, TREE_NAMES_MAX) {
         Ok(()) | Err(HeldError::Missing) => Ok(()),
+        Err(HeldError::Full) => Err(failure("agent_home_tree_too_large")),
         Err(_) => Err(failure("agent_home_unwritable")),
     }
 }

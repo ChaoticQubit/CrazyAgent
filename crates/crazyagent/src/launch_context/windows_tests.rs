@@ -1216,3 +1216,42 @@ fn a_windows_codex_install_removes_deep_skills_and_a_deep_config_folder() {
     assert!(skills_empty(&home));
     assert!(home.join("config.toml").is_file());
 }
+
+/// Makes a chain of `depth` nested folders named `name` below `top`, with one file at its
+/// bottom. Inputs: the top folder, the depth and the folder name. Output: the bottom folder.
+fn deep_chain(top: &Path, depth: usize, name: &str) -> PathBuf {
+    let bottom = (0..depth).fold(top.to_path_buf(), |path, _| path.join(name));
+    std::fs::create_dir_all(&bottom).unwrap();
+    std::fs::write(bottom.join("deep.md"), "deep").unwrap();
+    bottom
+}
+
+/// A process launch removes unkept folder chains an earlier agent nested 17 and 70 deep, the
+/// deeper one past the 260-character path limit, so no depth blocks a later launch.
+#[test]
+fn a_windows_process_install_removes_unkept_chains_of_any_depth() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let data = private_home(&base, "data");
+    deep_chain(&home.join("junk"), 17, "d");
+    let long = deep_chain(&home.join("long"), 70, "folder01");
+    assert!(long.as_os_str().len() > 260);
+    let context = process_context(&data, "Rows.", HomeCaches::Keep);
+    let installed = context.install("claude-code", &home, false).unwrap();
+    assert!(gone(&home.join("junk")));
+    assert!(gone(&home.join("long")));
+    drop(installed);
+}
+
+/// A launch folder an earlier agent nested a 17-deep chain in is cleared at the next
+/// install, which then writes its files there.
+#[test]
+fn a_windows_install_clears_a_deep_chain_in_its_launch_folder() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    deep_chain(&home.join(STATE), 17, "d");
+    let installed = context().install("claude-code", &home, false).unwrap();
+    assert!(gone(&home.join(STATE).join("d")));
+    assert!(home.join(STATE).join("mcp.json").is_file());
+    drop(installed);
+}
