@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const RESPONSE_MAX: usize = 1 << 20;
 const MODELS_MAX: usize = 500;
 
-pub(crate) struct Response {
+pub struct Response {
     pub(crate) status: u16,
     pub(crate) body: Vec<u8>,
 }
@@ -69,7 +69,7 @@ fn joined(url: &url::Url, suffix: &str) -> String {
 /// Sends one bounded plain-HTTP GET and reads the whole reply. An optional bearer key is
 /// written only into the Authorization header of this request and wiped afterwards.
 /// Inputs: http URL, request path, key and timeout. Output: status and body, or an error.
-pub(crate) async fn get(
+pub async fn get(
     url: &url::Url,
     path: &str,
     bearer: Option<&[u8]>,
