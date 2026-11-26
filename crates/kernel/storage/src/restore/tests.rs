@@ -372,6 +372,23 @@ fn a_record_line_that_is_empty_too_long_or_not_one_line_is_refused_and_keeps_the
     assert_eq!(names, [RESTORE_RECORD_FILE]);
 }
 
+#[test]
+fn a_record_longer_than_one_record_is_refused_and_never_read_cut_short() {
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let file = root.path().join(RESTORE_RECORD_FILE);
+    std::fs::write(
+        &file,
+        format!("{RECORD_PENDING}{}", " x".repeat(RESTORE_RECORD_BYTES_MAX)),
+    )
+    .unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert_eq!(read_restore_record(root.path()), None);
+    assert!(refuse_broken(&root.path().join(DATABASE)).is_err());
+}
+
 /// The folder of the pinned backup [`upgraded`] took. Input: the engine root. Output: it.
 pub(super) fn pinned_folder(root: &Path) -> PathBuf {
     std::fs::read_dir(root.join(BACKUPS))
