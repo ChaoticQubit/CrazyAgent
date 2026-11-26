@@ -1,7 +1,7 @@
 /// Every source file outside tests, as its path under `src` with `/` between parts and its
 /// code ([`code_only`]). A file or folder whose name ends in `tests` or `tests.rs` is left
-/// out, and a link to a folder is not walked. Input: the source folder. Output: the files;
-/// a folder, entry or file it cannot read panics naming its path.
+/// out first; any other link panics naming it, since cargo compiles through links. Input: the
+/// source folder. Output: the files; a folder, entry or file it cannot read panics naming it.
 pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
     const ENTRIES_MAX: usize = 100_000;
     let mut folders = vec![src.to_path_buf()];
@@ -22,6 +22,7 @@ pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
             let kind = entry
                 .file_type()
                 .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
+            assert!(!kind.is_symlink(), "a link under the sources: {path:?}");
             if kind.is_dir() {
                 folders.push(path);
                 continue;
