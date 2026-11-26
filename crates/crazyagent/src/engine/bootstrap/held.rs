@@ -751,15 +751,19 @@ pub(crate) fn unlock(file: &File) {
 }
 
 /// The most entries one folder of a tree removal may list, past which the removal is `Full`.
+#[cfg(test)]
 const TREE_ENTRIES_MAX: usize = 4096;
 
 /// The deepest a tree removal may be asked to go below the folder it removes.
+#[cfg(test)]
 const TREE_DEPTH_MAX: usize = 16;
 
 /// How many times a tree removal empties a folder that fills again before it gives up with
 /// `InUse`.
+#[cfg(test)]
 const REFILL_TRIES: usize = 3;
 
+#[cfg(test)]
 impl Folder {
     /// Removes one entry of a caller-judged tree, a folder with all it holds, bottom up
     /// through held folders, never following a link: a link anywhere goes as itself, and a
@@ -824,7 +828,7 @@ impl Folder {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 impl Folder {
     /// Holds the first folder of a chain its caller judges, opened without following a link
     /// and judged by `judge` on the held handle only, never by path. A link at the name is
@@ -915,7 +919,7 @@ impl Folder {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 impl Folder {
     /// Holds the first folder of a chain its caller judges: only the plain drive spelling,
     /// opened as itself, never sharing delete, refused as `Unsafe` when it is a reparse point
@@ -1026,14 +1030,14 @@ impl Folder {
 }
 
 /// The access right to write an object's attributes, `FILE_WRITE_ATTRIBUTES`.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
 
 /// Opens one entry as itself, never through a reparse point, a folder as well as a file,
 /// sharing read and write but never delete, so it cannot be renamed or deleted by another
 /// handle while held. Inputs: the path and the access, read when none. Output: the open
 /// entry, or the error by cause.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn open_as_itself(path: &Path, access: Option<u32>) -> Result<File, HeldError> {
     use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     use std::os::windows::fs::OpenOptionsExt;
@@ -1051,7 +1055,7 @@ fn open_as_itself(path: &Path, access: Option<u32>) -> Result<File, HeldError> {
 
 /// Refuses an entry opened as itself that is a reparse point or not a folder. Input: the
 /// open entry. Output: Ok, or `Unsafe`.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn plain_folder(entry: &File) -> Result<(), HeldError> {
     let facts = private::facts(entry).map_err(cause)?;
     let folder = entry.metadata().map_err(cause)?.is_dir();
