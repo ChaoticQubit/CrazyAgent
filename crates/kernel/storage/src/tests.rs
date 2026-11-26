@@ -18,11 +18,11 @@ fn workspace() -> std::path::PathBuf {
     root
 }
 
-/// Every file under a folder whose name ends with the given suffix, leaving out build
-/// output, local state, dependencies and links, so a linked folder never adds a file twice.
-/// Panics naming every folder, entry or type it cannot read. Inputs: the folder and the
-/// suffix. Output: the paths, at most 100,000.
-fn files(folder: &std::path::Path, suffix: &str) -> Vec<std::path::PathBuf> {
+/// Every file under a folder whose name ends with the given suffix. Build output, local
+/// state and dependencies are left out by name first; any other link panics naming it, since
+/// cargo reads through links. Panics naming every folder, entry or type it cannot read.
+/// Inputs: the folder and the suffix. Output: the paths, at most 100,000.
+pub(crate) fn files(folder: &std::path::Path, suffix: &str) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![folder.to_path_buf()];
     while let Some(next) = pending.pop() {
@@ -35,15 +35,14 @@ fn files(folder: &std::path::Path, suffix: &str) -> Vec<std::path::PathBuf> {
             let kind = entry
                 .file_type()
                 .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
-            if kind.is_symlink() {
+            if matches!(
+                name.as_str(),
+                "target" | ".local-state" | "node_modules" | ".git" | ".worktrees"
+            ) {
                 continue;
             }
-            if kind.is_dir()
-                && !matches!(
-                    name.as_str(),
-                    "target" | ".local-state" | "node_modules" | ".git" | ".worktrees"
-                )
-            {
+            assert!(!kind.is_symlink(), "a link under the walk: {path:?}");
+            if kind.is_dir() {
                 pending.push(path);
             } else if kind.is_file() && name.ends_with(suffix) {
                 found.push(path);
