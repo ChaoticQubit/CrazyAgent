@@ -387,16 +387,9 @@ mod tests {
             .map(|line| {
                 let (key, text) = line.trim().split_once(": ").unwrap();
                 let text = text.strip_suffix(',').unwrap_or(text);
-                let quoted = ['"', '`'].iter().find_map(|mark| {
-                    text.strip_prefix(*mark)
-                        .and_then(|inner| inner.strip_suffix(*mark))
-                });
-                (
-                    key,
-                    quoted
-                        .unwrap()
-                        .replace("${thisComputer()}", on_this_computer!("", "")),
-                )
+                let shown = super::super::desktop_literal(text)
+                    .unwrap_or_else(|| panic!("{key}: not one quoted literal"));
+                (key, shown)
             })
             .collect();
         assert_eq!(desktop.len(), 17, "{desktop:#?}");
