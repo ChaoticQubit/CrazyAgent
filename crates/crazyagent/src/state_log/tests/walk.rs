@@ -168,6 +168,16 @@ pub(super) fn has_word(code: &str, word: &str) -> bool {
     word_starts(code, word).next().is_some()
 }
 
+/// Whether the guard reads the log drafts of the file `name` among `sources`: a file of the
+/// log module itself or one naming `state_log`. Inputs: the walked sources ([`sources`]) and
+/// the file's name. Output: the answer; a name the sources do not hold is not read.
+pub(super) fn log_scoped(sources: &[(String, String)], name: &str) -> bool {
+    let Some((_, code)) = sources.iter().find(|(file, _)| file == name) else {
+        return false;
+    };
+    name == "state_log.rs" || name.starts_with("state_log/") || has_word(code, "state_log")
+}
+
 /// The kinds of the log drafts `code` builds, in order: the code after `kind:` with its
 /// spaces removed, or None for a draft whose kind the scan cannot read, as with a `kind`
 /// shorthand, a draft taken from another by `..` or a pattern. A `struct`, `impl` or other
@@ -316,6 +326,74 @@ fn a_comma_inside_a_nested_value_does_not_end_the_kind() {
         draft_kinds(&code),
         [Some("OUTER".to_owned()), Some("pick(A,B)".to_owned())]
     );
+}
+
+/// The walked sources for a scope row: each name with its code ([`code_only`]). Input: the
+/// names and texts. Output: the sources.
+fn planted(files: &[(&str, &str)]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .map(|(name, text)| ((*name).to_owned(), code_only(text)))
+        .collect()
+}
+
+/// A file that names the kernel appender but not the log module is a log writer, so its
+/// drafts are read.
+#[test]
+fn a_file_naming_only_the_appender_is_scoped() {
+    let sources = planted(&[(
+        "notes/note.rs",
+        "fn note(log: &mut Appender<'_, '_>) { log.append(&Draft { kind: OTHER, body: &[] }); }",
+    )]);
+
+    assert!(log_scoped(&sources, "notes/note.rs"));
+    assert_eq!(draft_kinds(&sources[0].1), [Some("OTHER".to_owned())]);
+}
+
+/// A child module that takes its parent's names through `use super::*` sees the log's
+/// draft when its read parent names it, so its drafts are read, down every level.
+#[test]
+fn a_glob_child_of_a_writer_is_scoped() {
+    let sources = planted(&[
+        ("writer.rs", "use crate::state_log::Draft;\nmod child;\n"),
+        (
+            "writer/child.rs",
+            "use super::*;\nmod deep;\nfn f() { put(&Draft { kind: OTHER, body: &[] }); }\n",
+        ),
+        (
+            "writer/child/deep.rs",
+            "use super::*;\nfn g() { put(&Draft { kind: DEEP, body: &[] }); }\n",
+        ),
+    ]);
+
+    assert!(log_scoped(&sources, "writer/child.rs"));
+    assert!(log_scoped(&sources, "writer/child/deep.rs"));
+}
+
+/// A glob child of a file with its own `Draft` type, or of the crate root, is not read, as
+/// the parent never sees the log's draft.
+#[test]
+fn a_glob_child_of_a_file_with_its_own_draft_is_not_scoped() {
+    let sources = planted(&[
+        ("lib.rs", "mod state_log;\nmod sessions;\nmod top;\n"),
+        (
+            "top.rs",
+            "use super::*;\nfn t() { put(&Draft { kind: TOP }); }\n",
+        ),
+        (
+            "sessions.rs",
+            "struct Draft<'a> { kind: &'a str }\nmod child;\n",
+        ),
+        (
+            "sessions/child.rs",
+            "use super::*;\nfn f() { put(&Draft { kind: \"turn\" }); }\n",
+        ),
+    ]);
+
+    assert!(!log_scoped(&sources, "sessions.rs"));
+    assert!(!log_scoped(&sources, "sessions/child.rs"));
+    assert!(!log_scoped(&sources, "top.rs"));
+    assert!(log_scoped(&sources, "lib.rs"));
 }
 
 /// The panic text of a walk of `src`, which must panic. Input: the source folder. Output:
