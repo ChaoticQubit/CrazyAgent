@@ -456,6 +456,13 @@ export function SharedFoldersChoices({ prefix, value, secretsText, local, access
   </fieldset>;
 }
 
+/** The sentence saying which toolchains agents find on their own: Homebrew is named on macOS and
+ * Linux, not on Windows. Input: none, the window's computer. Output: the sentence. */
+export function toolchainsFound(): string {
+  const found = isWindows() ? "Rust, Node and Python" : "Rust, Node, Python and Homebrew";
+  return `Agents find the toolchains this project uses (${found}) on their own and can read them, never change them.`;
+}
+
 /** One switch per detected toolchain family. Inputs: the id prefix, the engine's view, the
  * switches and the change handler. Output: the fieldset. */
 export function ToolchainSwitches({ prefix, view, allowed, onChange }: {

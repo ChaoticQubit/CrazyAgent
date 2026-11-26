@@ -6,8 +6,8 @@ import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, load
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntakeJob, IntentReceipt, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
 import { intakeCopy } from "../../api-intake";
-import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
-import { Button, ConfirmDialog, Dialog, Segmented, Select, isWindows, navigate } from "../../ui";
+import { AccessLevels, toolchainsFound, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
+import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -428,13 +428,6 @@ export function addHiddenPath(paths: string[], typed: string): { paths: string[]
   if (paths.includes(path)) return { error: "That folder is already in the list." };
   if (paths.length >= HIDDEN_PATHS_MAX) return { error: `A project can hide at most ${HIDDEN_PATHS_MAX} folders.` };
   return { paths: [...paths, path] };
-}
-
-/** The sentence saying which toolchains agents find on their own: Homebrew is named on macOS and
- * Linux, not on Windows. Input: none, the window's computer. Output: the sentence. */
-export function toolchainsFound(): string {
-  const found = isWindows() ? "Rust, Node and Python" : "Rust, Node, Python and Homebrew";
-  return `Agents find the toolchains this project uses (${found}) on their own and can read them, never change them.`;
 }
 
 function SandboxSection({ data }: { data: ProjectData }) {

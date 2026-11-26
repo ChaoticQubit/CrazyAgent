@@ -567,7 +567,7 @@ test("the toolchain help names Homebrew on macOS and Linux, and leaves it out on
     for (const [platform, os] of computers) {
       Object.defineProperty(globalThis, "navigator", { value: { platform }, configurable: true });
       const found = os === "windows" ? "(Rust, Node and Python)" : "(Rust, Node, Python and Homebrew)";
-      assert.equal(settings.toolchainsFound(), `Agents find the toolchains this project uses ${found} on their own and can read them, never change them.`, os);
+      assert.equal(access.toolchainsFound(), `Agents find the toolchains this project uses ${found} on their own and can read them, never change them.`, os);
     }
   } finally {
     if (host) Object.defineProperty(globalThis, "navigator", host);
