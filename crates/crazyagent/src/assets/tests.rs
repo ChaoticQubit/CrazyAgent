@@ -160,18 +160,22 @@ fn hdiutil(arguments: &[&str], paths: &[&Path]) -> Result<String, String> {
 }
 
 /// The (device, inode) an admitted source was pinned at, from its stored body. Inputs:
-/// the database and the source id. Output: the pair.
+/// the database and the source id. Output: the pair; a row, body or field that does not
+/// read stops the row naming the source and what it held.
 fn admitted(db: &Connection, id: &str) -> (u64, u64) {
     let body: String = db
         .query_row("SELECT body FROM asset_sources WHERE id=?1", [id], |r| {
             r.get(0)
         })
-        .unwrap();
-    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-    (
-        body["device"].as_u64().unwrap(),
-        body["inode"].as_u64().unwrap(),
-    )
+        .unwrap_or_else(|error| panic!("asset source {id}: stored row: {error}"));
+    let body: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|error| panic!("asset source {id}: body {body:?}: {error}"));
+    let field = |name: &str| {
+        body[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("asset source {id}: {name} is {}", body[name]))
+    };
+    (field("device"), field("inode"))
 }
 
 /// Takes and reads one snapshot through the plugin host with the engine's file identity
@@ -258,7 +262,9 @@ fn an_admitted_asset_is_read_after_its_volume_is_renumbered_and_a_replaced_one_i
     std::fs::write(&other, "Use plain words.").unwrap();
     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::rename(&other, &file).unwrap();
-    assert_ne!(std::fs::metadata(&file).unwrap().ino(), inode);
+    let replaced =
+        std::fs::metadata(&file).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+    assert_ne!(replaced.ino(), inode);
     assert_eq!(
         snapshot_one(&mut db, &config, "s3"),
         Err(kernel::Failure::Refused("asset_source_replaced".into()))

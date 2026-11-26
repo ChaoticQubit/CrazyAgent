@@ -1,9 +1,9 @@
 use crate::perf_kit::{Row, SAMPLES, time};
-use crate::update::test_support::{response, serve};
+use crate::update::test_support::{joined, response, serve, unpacked, verified};
 use crate::update::{
-    Channel, data_root, data_root_from, download, fail, inside_app_bundle, io_failure, is_newer,
-    key_from_config, not_published, parse_manifest, public_key, read_channel, service_command,
-    service_step, swap, system_tool, target, unpack, verify_file, write_channel,
+    Channel, Unpacked, data_root, data_root_from, download, fail, inside_app_bundle, io_failure,
+    is_newer, key_from_config, not_published, parse_manifest, public_key, read_channel,
+    service_command, service_step, swap, system_tool, target, unpack, verify_file, write_channel,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -114,14 +114,14 @@ fn update_calls() {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     write_channel(&root, Channel::Dev).unwrap();
     let (archive, sha256, signature, key) = signed_archive(&home);
-    let tar = release_tar(&home);
+    let tar = verified(&release_tar(&home));
     let script = engine(&home.join("app"));
-    let pairs: Vec<(PathBuf, PathBuf)> = (0..ONE_SHOT)
+    let pairs: Vec<(PathBuf, Unpacked)> = (0..ONE_SHOT)
         .map(|at| {
             let folder = home.join("swaps").join(at.to_string());
             engine(&folder.join("install"));
             engine(&folder.join("staged"));
-            (folder.join("install"), folder.join("staged"))
+            (folder.join("install"), unpacked(&folder.join("staged")))
         })
         .collect();
     let unpacked: Vec<PathBuf> = (0..ONE_SHOT)
@@ -133,7 +133,7 @@ fn update_calls() {
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    let (url, server) = serve((0..ONE_SHOT + 1).map(|_| response(&head, &body)).collect());
+    let (url, server) = serve((0..ONE_SHOT + 1).map(|_| response(&head, &body)).collect()).unwrap();
     assert_eq!(read_channel(&root).unwrap(), Channel::Dev);
     assert!(parse_manifest(MANIFEST).is_ok() && is_newer("0.2.1", VERSION).unwrap());
     assert!(verify_file(&archive, &sha256, &signature, &key, VERSION).is_ok());
@@ -204,7 +204,7 @@ fn update_calls() {
         let mut fetched = Vec::with_capacity(body.len());
         black_box(download(&url, &mut fetched, DOWNLOAD_LIMIT, DOWNLOAD_TIME).unwrap());
     });
-    server.join().unwrap();
+    joined(server).unwrap();
     time(&row("update.verify_file", ONE), SAMPLES, || {
         verify_file(&archive, &sha256, &signature, &key, VERSION).unwrap();
     });
@@ -227,7 +227,7 @@ fn update_calls() {
         let (install, staged) = fresh.next().unwrap();
         swap(install, staged, VERSION).unwrap();
     });
-    assert!(fresh.next().is_none() && !pairs[0].1.join("crazyagent").exists());
+    assert!(fresh.next().is_none() && !pairs[0].1.path().join("crazyagent").exists());
     time(&row("update.service_command", ONE), SAMPLES, || {
         black_box(service_command(&script, "status").unwrap());
     });

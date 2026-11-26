@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const ALLOWED_PATH_CRATES: [&str; 7] = [
+const ALLOWED_PATH_CRATES: [&str; 8] = [
     "crazyagent-kernel-sandbox",
     "crazyagent-kernel-common",
     "crazyagent-kernel-processes",
@@ -9,6 +9,7 @@ const ALLOWED_PATH_CRATES: [&str; 7] = [
     "crazyagent-kernel-storage",
     "crazyagent-win-sandbox",
     "crazyagent-linux-supervisor",
+    "crazyagent-macos-fs",
 ];
 
 /// The Rust files under a folder, depth first, never through a link. Inputs: the folder and

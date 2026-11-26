@@ -22,6 +22,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use version::{supported, version_needed};
 
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
@@ -249,17 +250,17 @@ static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 /// terminal supports (3.7 or later, the first with the bracketed-paste flag the attach
 /// reads). A read that runs out of time counts as running, since a new file can wait behind
 /// the system's first-run checks; the version read setup does next reports it. Takes the
-/// tmux. Returns the answer.
-pub fn runs(tmux: &crate::finding::Resolved) -> bool {
+/// tmux. Returns Ok when it runs, else its version when that is a release too old, else none.
+pub fn runs(tmux: &crate::finding::Resolved) -> Result<(), Option<String>> {
     runs_within(tmux, VERSION_READ_TIME)
 }
 
 /// Answers [`runs`] with the version read bounded by the given time, so a test can let a
 /// read run out of time quickly. Takes the tmux and the bound. Returns the answer.
-fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
+fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> Result<(), Option<String>> {
     assert!(!time.is_zero() && time <= VERSION_READ_TIME);
     let Ok(metadata) = std::fs::metadata(&tmux.program) else {
-        return false;
+        return Err(None);
     };
     let file: RanFile = (
         tmux.program.clone(),
@@ -274,11 +275,11 @@ fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
     if last().contains(&file) {
-        return true;
+        return Ok(());
     }
     let words = tmux.argv();
     let Some((program, rest)) = words.split_first() else {
-        return false;
+        return Err(None);
     };
     let mut arguments = rest.to_vec();
     arguments.push("-V".into());
@@ -290,12 +291,18 @@ fn runs_within(tmux: &crate::finding::Resolved, time: Duration) -> bool {
         time,
     );
     let running = match version {
-        Err(crate::run::InstallError(code)) => code == "setup_timeout",
-        Ok((false, _)) => false,
-        Ok((true, output)) => crate::run::version_from(&output)
-            .is_ok_and(|found| supported(found.as_str()) == Some(true)),
+        Err(crate::run::InstallError("setup_timeout")) => Ok(()),
+        Err(_) | Ok((false, _)) => Err(None),
+        Ok((true, output)) => match crate::run::version_from(&output) {
+            Ok(found) => match supported(found.as_str()) {
+                Some(true) => Ok(()),
+                Some(false) => Err(Some(found.as_str().to_owned())),
+                None => Err(None),
+            },
+            Err(_) => Err(None),
+        },
     };
-    if running {
+    if running.is_ok() {
         let mut kept = last();
         kept.retain(|(path, ..)| *path != file.0);
         if kept.len() == RAN_MAX {
@@ -366,7 +373,7 @@ impl Tmux {
     }
 
     /// Opens the host on a native lead's teammates' own tmux server (see
-    /// `super::teammates_socket`, rv-audit S1 F1): the server runs inside the teammates'
+    /// `super::teammates_socket`): the server runs inside the teammates'
     /// profile, which cannot reach its socket, started under its keeper by `Servers`
     /// (FBTMUX-P1-R1-L1), and each engine client connects inside the lead's profile and never
     /// starts a server, so no server runs in the lead's profile with teammate panes. Each
@@ -439,7 +446,7 @@ impl Tmux {
 
     /// Removes the socket file an ended server left behind. A teammates' socket stays: once
     /// it is gone a teammate still running could bind a server of its own there, which the
-    /// lead's tmux clients would then obey (rv-audit S1 F1), and the lead's next start names
+    /// lead's tmux clients would then obey, and the lead's next start names
     /// a new one. Output: Ok once it is gone or kept, or `terminal_folder_unsafe` when it
     /// cannot be removed.
     fn remove_socket(&self) -> Result<(), HostError> {
@@ -684,7 +691,7 @@ impl Tmux {
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
         }
-        clear_environment(&control)?;
+        clear_unmarked_environment(&control)?;
         Ok(control)
     }
 
@@ -785,7 +792,7 @@ impl Tmux {
             .ok_or_else(|| failure("terminal_agent_unknown"))
     }
 
-    /// Readies a native lead's teammates' server for the lead's start (rv-audit S1 F1): the
+    /// Readies a native lead's teammates' server for the lead's start: the
     /// server starts if none listens, the holder pane of a fresh one is tagged as the lead's
     /// anchor, and its environment becomes the lead's, which every teammate pane gets. Takes
     /// the lead and its command. Returns the variables the lead's pane starts with, so its
@@ -1009,27 +1016,6 @@ fn private_folder(folder: &Path) -> Result<(), HostError> {
     Ok(())
 }
 
-fn release(version: &str) -> Option<(u32, u32)> {
-    let version = version.trim();
-    let version = version.strip_prefix("next-").unwrap_or(version);
-    let (major, rest) = version.split_once('.')?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    Some((major.parse::<u32>().ok()?, digits.parse::<u32>().ok()?))
-}
-
-/// Whether agent terminals support a tmux version, the second word of `tmux -V`: 3.7 or
-/// later ([`VERSION_MIN`]). Input: the version. Output: the answer, or none when it is not
-/// a release number.
-pub fn supported(version: &str) -> Option<bool> {
-    release(version).map(|found| found >= VERSION_MIN)
-}
-
-/// The oldest tmux version agent terminals support, as setup names it. Output: the
-/// version, such as "3.7".
-pub fn version_needed() -> String {
-    format!("{}.{}", VERSION_MIN.0, VERSION_MIN.1)
-}
-
 impl Tmux {
     /// Has a server that runs in the foreground, as a lead's own server under its keeper
     /// does, end once its last session ends, as a server a client started does (FBTMUX-P1),
@@ -1066,7 +1052,37 @@ impl Tmux {
         if self.confined.is_some() {
             Self::lead_environment(&control, command)?;
         }
-        let lines = control.run(&line)?;
+        self.settle(&control, agent, control.run(&line))
+    }
+
+    /// Settles the agent window a spawn asked for: on any error, from the reply that made it
+    /// on, it kills that window through an open control, reconnecting to the live server when
+    /// a timeout closed this one, so a failed spawn leaves none. Takes the control, the agent
+    /// and the reply. Returns the pane, or the code `placed` or the reply failed with.
+    fn settle(
+        &self,
+        control: &Control,
+        agent: &AgentId,
+        made: Result<Vec<Vec<u8>>, HostError>,
+    ) -> Result<PaneRef, HostError> {
+        let settled = made.and_then(|lines| self.placed(control, agent, &lines));
+        if settled.is_err() {
+            let kill = format!("kill-window -t {}", target(agent));
+            let _ = self.control_with(false).and_then(|open| open.run(&kill));
+        }
+        settled
+    }
+
+    /// Reads where a new agent window's pane runs from the reply that made it, or asks tmux
+    /// when the reply holds no whole line, then checks the pane is served and tags it as the
+    /// agent's app. Takes the control, the agent and the reply lines. Returns the pane, or
+    /// `terminal_command_failed` or the lookup's code.
+    fn placed(
+        &self,
+        control: &Control,
+        agent: &AgentId,
+        lines: &[Vec<u8>],
+    ) -> Result<PaneRef, HostError> {
         let placed = match lines.first().and_then(|line| whole(line)) {
             Some(placed) => placed.to_vec(),
             None => control
@@ -1092,13 +1108,8 @@ impl Tmux {
             pid,
             dead: false,
         };
-        if self.served(&[first]).is_empty() {
-            let _ = control.run(&format!("kill-window -t {}", target(agent)));
-            return Err(failure("terminal_command_failed"));
-        }
-        let tagged = pane_id_valid(pane) && Self::mark_app(&control, pane, agent).is_ok();
-        if !tagged {
-            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+        let untagged = || !pane_id_valid(pane) || Self::mark_app(control, pane, agent).is_err();
+        if self.served(&[first]).is_empty() || untagged() {
             return Err(failure("terminal_command_failed"));
         }
         Ok(PaneRef {
@@ -1444,7 +1455,12 @@ mod control;
 mod groups;
 /// The tmux command lines the host builds and the screen it renders from a pane.
 mod lines;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tmux/placement_tests.rs"]
+mod placement_tests;
 mod servers;
+/// Which tmux releases agent terminals support, and the oldest one setup names.
+mod version;
 
 /// The tmux program a row runs, found through the resolver with the stub seed. Input: the
 /// engine root. Output: the program, or none when tmux is not installed.
@@ -1461,6 +1477,9 @@ pub(crate) fn installed(engine_root: &Path) -> Option<PathBuf> {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_seams;
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tmux/reattach_tests.rs"]
+mod reattach_tests;
 #[cfg(test)]
 #[path = "tmux/tests.rs"]
 mod tests;

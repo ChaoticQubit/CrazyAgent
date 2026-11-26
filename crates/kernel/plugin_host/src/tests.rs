@@ -284,8 +284,9 @@ fn dependency_names(text: &str, root: &str) -> Vec<(String, String, String)> {
 
 /// The crates plugin_host may depend on, each in the one table it may sit in, sorted: no
 /// SDK crate and no engine crate. rustix is the unix no-follow open of manifests and assets;
-/// tempfile is for test rows.
-const ALLOWED: [(&str, &str); 9] = [
+/// crazyagent-win-sandbox is the Windows private open of the plugins folder; tempfile is for
+/// test rows.
+const ALLOWED: [(&str, &str); 10] = [
     ("dependencies", "crazyagent-kernel-common"),
     ("dependencies", "crazyagent-kernel-security"),
     ("dependencies", "rusqlite"),
@@ -295,6 +296,7 @@ const ALLOWED: [(&str, &str); 9] = [
     ("dependencies", "url"),
     ("dev-dependencies", "tempfile"),
     ("target.cfg(unix).dependencies", "rustix"),
+    ("target.cfg(windows).dependencies", "crazyagent-win-sandbox"),
 ];
 
 /// The entries of a `Cargo.toml` text whose crate is not on [`ALLOWED`] in its table,

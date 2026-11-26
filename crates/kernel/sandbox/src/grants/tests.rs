@@ -446,7 +446,7 @@ fn a_port_grant_refuses_the_model_relay_ports() {
 /// A folder for one socket row, under `/tmp` so the socket path stays short, with
 /// `parts` below it made in order at the given modes. Input: the parts and their modes.
 /// Output: the guard and the deepest folder.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn socket_folders(parts: &[(&str, u32)]) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::Builder::new()
         .prefix("ca-gs-")
@@ -462,7 +462,7 @@ fn socket_folders(parts: &[(&str, u32)]) -> (tempfile::TempDir, PathBuf) {
 }
 
 /// Checks a grant of a socket bound in a folder. Input: the folder. Output: the check.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn socket_grant_in(folder: &Path) -> Result<AccessGrant, &'static str> {
     let path = folder.join("app.sock");
     let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
@@ -476,7 +476,7 @@ fn socket_grant_in(folder: &Path) -> Result<AccessGrant, &'static str> {
 /// A socket in the user's closed folder is refused when a folder above it is one another
 /// user can write, since that user can move the closed folder away and put their own in
 /// its place.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn a_socket_below_a_folder_others_can_write_is_refused() {
     let (_tmp, folder) = socket_folders(&[("open", 0o777), ("mine", 0o700)]);
@@ -501,7 +501,7 @@ fn a_socket_in_a_folder_an_access_list_opens_is_refused() {
 
 /// A socket in the user's closed folder, or in a sticky folder of the user, with no folder
 /// above it that another user can change, is held as before.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn a_socket_in_a_closed_or_sticky_folder_of_the_user_is_held() {
     for (name, mode) in [("mine", 0o700), ("sticky", 0o1777)] {

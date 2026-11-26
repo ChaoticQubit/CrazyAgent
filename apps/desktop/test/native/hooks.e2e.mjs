@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
+import { LIB, ROUTES, commands, nativeSources, plan, render } from "./bridge-routes.mjs";
 import { INTERNALS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -33,7 +33,7 @@ function plugin(folder, name) {
 test("Settings, Plugins says where each skill came from, and Hooks lists the engine's hooks, refuses a folder without plugin.json, adds a plugin folder's hooks as one plugin row, turns the plugin off, one event on, then the plugin on", { timeout: 300000 }, async () => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
-  assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
+  assert.equal(readFileSync(ROUTES, "utf8"), render(nativeSources()), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ca-hk-")));
   const runtime = join(root, "engine");

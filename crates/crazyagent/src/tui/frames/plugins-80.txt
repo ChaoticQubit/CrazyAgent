@@ -7,10 +7,9 @@
   project can add its own in its settings.                                      
                                                                                 
   Skills  4                                                                     
-  > frontend-design         On     Added by you  ~/Skills/frontend-design       
-    tiger-style             On     Added by you  ~/Skills/tiger-style           
-    linear-method           Off    Imported from Claude Code  ~/.claude/skill…  
-    release-notes           On     Default pack: release-notes  ~/Library/App…  
+  > frontend-design         On     Added by you  ~/Skills/frontend-design    █  
+    tiger-style             On     Added by you  ~/Skills/tiger-style        █  
+    linear-method           Off    Imported from Claude Code  ~/.claude/skil…│  
                                                                                 
   MCP servers  3                                                                
     github                  ✓ Approved              npx @modelcontextprotocol…  
@@ -19,6 +18,7 @@
                                                                                 
   Hooks  0   Claude Code on a key or URL and RCLI run none                      
   No hooks yet. Press h to add a plugin folder's hooks.                         
+    App plugins                                                                 
                                                                                 
  a Add skill  m Add MCP server  h Add hooks  Space On or off  Enter Details     
  i Import  l Tools  d Remove  Shift-←→ Sections  Esc Home                ? Help 

@@ -1,5 +1,8 @@
 mod recipes;
 mod run;
+#[cfg(all(test, unix))]
+#[path = "update/tests/scripted.rs"]
+mod scripted;
 mod state;
 #[cfg(all(test, unix))]
 mod tests;

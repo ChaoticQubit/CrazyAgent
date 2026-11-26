@@ -5794,7 +5794,6 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
         mode: SubagentMode::Native,
     };
     assert!(codex.validate().is_ok());
-
     let chosen = CoordSettings {
         questions_to: QuestionsTo::Me,
         overlaps: Overlaps::Block,
@@ -5811,6 +5810,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
             name: "ollama".into(),
             slots: 1,
         }],
+        uncommitted_reminder: crate::coord::settings::UncommittedReminder::Off,
     };
     for action in [
         TeamAction::CoordSettings {

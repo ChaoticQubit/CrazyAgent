@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::Refused;
 use crate::embedding::Manifest;
@@ -130,13 +130,22 @@ pub(crate) fn settle(
             drop_binding(db, engine, &manifest.name, &secret, &source, &reference)?;
         }
     }
-    db.execute(
-        "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(name) DO UPDATE SET sha256=excluded.sha256, hosts=excluded.hosts,
-         trusted_ms=excluded.trusted_ms",
-        params![manifest.name, manifest.sha256, hosts, now_ms],
-    )
-    .map_err(sqlite)?;
+    let mut sorted = manifest.http.hosts.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted.join("\n"),
+        hosts,
+        "the event keeps the trust record's hosts"
+    );
+    crate::store_log::record(
+        db,
+        crate::store_log::Event::Trusted {
+            plugin: manifest.name.clone(),
+            sha256: manifest.sha256.clone(),
+            hosts: sorted,
+            trusted_ms: u64::try_from(now_ms).map_err(|_| refused("app_plugins_unavailable"))?,
+        },
+    )?;
     registry::set_flag(db, &manifest.name, true)
 }
 

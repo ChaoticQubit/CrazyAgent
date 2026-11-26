@@ -94,6 +94,34 @@ test("v2.5 S4: a stopped watched read applies no reply still in flight and reads
   assert.throws(() => readOnChanges([], async () => 0, () => true), /needs a topic/);
 });
 
+test("a watched read that fails applies nothing, reads again on the next change and applies that reply, with no unhandled rejection", async (t) => {
+  watched(t);
+  const unhandled = [];
+  const hear = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", hear);
+  t.after(() => process.off("unhandledRejection", hear));
+  let reads = 0;
+  const applied = [];
+  const stop = readOnChanges(["team"], () => {
+    reads += 1;
+    return reads === 1 ? Promise.reject(new Error("the read failed")) : Promise.resolve("second");
+  }, (value) => {
+    applied.push(value);
+    return true;
+  });
+  await settle();
+  assert.equal(reads, 1);
+  assert.deepEqual(applied, [], "a failed read applies nothing");
+  t.mock.timers.tick(COALESCE_MS);
+  changed({ topics: ["team"] });
+  await settle();
+  assert.equal(reads, 2, "the next change reads again");
+  assert.deepEqual(applied, ["second"]);
+  assert.deepEqual(unhandled, [], "the failed read leaves no unhandled rejection");
+  stop();
+  t.mock.timers.tick(COALESCE_MS);
+});
+
 test("v2.5 S4: the team, the question dock, the Questions tab, the Overview tabs and the waiting change sets read on the engine's watch, with no poll left", () => {
   const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
   const body = (text, start) => {

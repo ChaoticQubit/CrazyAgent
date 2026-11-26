@@ -315,6 +315,38 @@ fn on_linux_a_root_spelled_in_another_case_is_another_folder() {
     assert!(secret_refused(&home.join(".ssh"), &secrets));
 }
 
+/// A root not made yet, named through a link to the folder that holds a secret still to
+/// come, is refused as the secret itself, and so is a root below it; a secret named through
+/// such a link refuses the root it names.
+#[cfg(unix)]
+#[test]
+fn a_new_root_through_a_link_to_a_missing_secret_is_refused() {
+    let (folder, home, secrets) = secret_home();
+    assert!(!home.join(".aws").exists());
+    let alias = folder.path().join("alias");
+    std::os::unix::fs::symlink(&home, &alias).unwrap();
+    assert!(secret_refused(&alias.join(".aws"), &secrets));
+    assert!(secret_refused(&alias.join(".aws").join("new"), &secrets));
+    assert!(secret_refused(&home.join(".aws"), &[alias.join(".aws")]));
+}
+
+/// On Linux names do not fold: a root not made yet, named through a link to the folder that
+/// holds a secret still to come, is another folder when its name differs from the secret's,
+/// also only in case or outside ASCII.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_a_new_root_beside_a_missing_secret_is_not_refused() {
+    let (folder, home, secrets) = secret_home();
+    let alias = folder.path().join("alias");
+    std::os::unix::fs::symlink(&home, &alias).unwrap();
+    for name in ["project", ".AWS", "\u{65B0}"] {
+        assert!(
+            clear_of_secrets(&alias.join(name), &secrets).is_ok(),
+            "{name}"
+        );
+    }
+}
+
 /// A root that reaches a secret folder through a link is refused, and so is a root that
 /// holds the folder a linked secret leads to.
 #[cfg(unix)]
@@ -372,5 +404,184 @@ fn a_harness_home_that_is_a_link_refuses_the_folder_it_leads_to() {
             }
             other => panic!("{}: {other:?}", inside.display()),
         }
+    }
+}
+
+/// A secret home beside a `workspace` folder that holds `private` and `other`, with no
+/// `.ssh` folder yet. Output: the temp folder, the home, its secrets and the canonical
+/// workspace.
+#[cfg(any(unix, windows))]
+fn workspace_home() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>, PathBuf) {
+    let (folder, home, secrets) = secret_home();
+    let workspace = folder.path().join("workspace");
+    for made in ["private", "other"] {
+        std::fs::create_dir_all(workspace.join(made)).unwrap();
+    }
+    std::fs::remove_dir(home.join(".ssh")).unwrap();
+    let workspace = canonical(&workspace).unwrap();
+    (folder, home, secrets, workspace)
+}
+
+/// The reason a granted root is refused for, or None when it is granted. Inputs: the root,
+/// the owner home and the secret paths. Output: the reason.
+#[cfg(any(unix, windows))]
+fn granted_refusal(root: &Path, home: &Path, secrets: &[PathBuf]) -> Option<String> {
+    match granted_root(root, home, secrets, &[".claude"]) {
+        Ok(()) => None,
+        Err(SandboxError::Invalid(reason)) => Some(reason),
+        Err(other) => Some(format!("{other:?}")),
+    }
+}
+
+/// A secret link whose target does not exist yet refuses a root that holds where it leads,
+/// whether the target is absolute, relative with a `..` part, or another such link named
+/// relative to the home; a folder beside that root stays allowed.
+#[cfg(unix)]
+#[test]
+fn a_root_holding_where_a_dangling_secret_link_leads_is_refused() {
+    use std::os::unix::fs::symlink;
+    for case in ["absolute", "relative", "chained"] {
+        let (folder, home, secrets, workspace) = workspace_home();
+        let private = workspace.join("private");
+        let made = match case {
+            "absolute" => symlink(
+                folder.path().join("workspace").join("private").join("ssh"),
+                home.join(".ssh"),
+            ),
+            "relative" => {
+                std::fs::create_dir(workspace.join("x")).unwrap();
+                symlink("../workspace/x/../private/gnupg", home.join(".gnupg"))
+            }
+            "chained" => {
+                std::fs::create_dir(folder.path().join("links")).unwrap();
+                symlink(private.join("aws"), folder.path().join("links").join("aws")).unwrap();
+                symlink("../links/aws", home.join(".aws"))
+            }
+            _ => unreachable!(),
+        };
+        made.unwrap();
+        assert!(secret_refused(&private, &secrets), "{case}");
+        assert_eq!(
+            granted_refusal(&private, &home, &secrets).as_deref(),
+            Some(SECRET_ROOT_REFUSED),
+            "{case}"
+        );
+        let other = workspace.join("other");
+        assert!(clear_of_secrets(&other, &secrets).is_ok(), "{case}");
+        assert_eq!(granted_refusal(&other, &home, &secrets), None, "{case}");
+    }
+}
+
+/// A dangling secret link refuses only the folders at and above the deepest existing folder
+/// it leads into: a sibling of the parts still to be made below that folder stays allowed.
+#[cfg(unix)]
+#[test]
+fn a_dangling_secret_link_refuses_only_the_folders_above_where_it_leads() {
+    let (folder, home, secrets, workspace) = workspace_home();
+    let target = folder
+        .path()
+        .join("workspace")
+        .join("a")
+        .join("b")
+        .join("ssh");
+    std::os::unix::fs::symlink(target, home.join(".ssh")).unwrap();
+    let private = workspace.join("private");
+    assert!(clear_of_secrets(&private, &secrets).is_ok());
+    assert_eq!(granted_refusal(&private, &home, &secrets), None);
+    assert!(secret_refused(&workspace, &secrets));
+    assert_eq!(
+        granted_refusal(&workspace, &home, &secrets).as_deref(),
+        Some(SECRET_ROOT_REFUSED)
+    );
+}
+
+/// A cycle of dangling secret links, and a chain of twenty of them, which the system still
+/// follows, refuse every root rather than loop or stop partway.
+#[cfg(unix)]
+#[test]
+fn dangling_secret_links_in_a_cycle_or_a_long_chain_are_refused() {
+    use std::os::unix::fs::symlink;
+    let (folder, home, secrets, workspace) = workspace_home();
+    let ring = folder.path().join("ring");
+    std::fs::create_dir(&ring).unwrap();
+    symlink(ring.join("b"), ring.join("a")).unwrap();
+    symlink(ring.join("a"), ring.join("b")).unwrap();
+    symlink(ring.join("a"), home.join(".ssh")).unwrap();
+    let other = workspace.join("other");
+    assert_eq!(
+        granted_refusal(&other, &home, &secrets).as_deref(),
+        Some(SECRET_ROOT_REFUSED)
+    );
+    let (folder, home, secrets, workspace) = workspace_home();
+    let chain = canonical(folder.path()).unwrap().join("chain");
+    std::fs::create_dir(&chain).unwrap();
+    for step in 0..20 {
+        symlink(
+            chain.join(format!("l{}", step + 1)),
+            chain.join(format!("l{step}")),
+        )
+        .unwrap();
+    }
+    symlink(chain.join("l0"), home.join(".ssh")).unwrap();
+    const { assert!(DANGLING_LINK_HOPS < 20) };
+    assert!(
+        std::fs::metadata(home.join(".ssh"))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    );
+    let other = workspace.join("other");
+    assert_eq!(
+        granted_refusal(&other, &home, &secrets).as_deref(),
+        Some(SECRET_ROOT_REFUSED)
+    );
+}
+
+/// On Windows a secret folder that is a dangling directory link, or a dangling junction made
+/// by `mklink /J` whose target was then removed, refuses a root that holds where it leads,
+/// while a folder beside that root stays allowed. A link the row cannot make fails the row.
+#[cfg(windows)]
+#[test]
+fn on_windows_a_root_holding_where_a_dangling_secret_link_or_junction_leads_is_refused() {
+    for case in ["symlink", "junction"] {
+        let (_folder, home, secrets, workspace) = workspace_home();
+        let private = workspace.join("private");
+        let target = private.join("ssh");
+        let link = home.join(".ssh");
+        match case {
+            "symlink" => std::os::windows::fs::symlink_dir(&target, &link).unwrap(),
+            "junction" => {
+                std::fs::create_dir(&target).unwrap();
+                let made = kernel_processes::spawn_gate::status(
+                    std::process::Command::new("cmd")
+                        .args(["/C", "mklink", "/J"])
+                        .arg(&link)
+                        .arg(&target),
+                )
+                .unwrap();
+                assert!(made.success(), "mklink /J {}", link.display());
+                std::fs::remove_dir(&target).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{case}"
+        );
+        assert!(
+            std::fs::metadata(&link)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "{case}"
+        );
+        assert!(secret_refused(&private, &secrets), "{case}");
+        assert_eq!(
+            granted_refusal(&private, &home, &secrets).as_deref(),
+            Some(SECRET_ROOT_REFUSED),
+            "{case}"
+        );
+        let other = workspace.join("other");
+        assert!(clear_of_secrets(&other, &secrets).is_ok(), "{case}");
+        assert_eq!(granted_refusal(&other, &home, &secrets), None, "{case}");
     }
 }

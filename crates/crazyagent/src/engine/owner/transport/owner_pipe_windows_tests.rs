@@ -14,7 +14,7 @@ fn canonical_temp() -> (tempfile::TempDir, PathBuf) {
 /// An engine in a fresh temp folder and a private owner root below it, as bootstrap makes a
 /// generation. Output: the temp folder, kept alive by the caller, the engine, its settings
 /// and the owner root.
-async fn engine_and_owner_root() -> (
+pub(super) async fn engine_and_owner_root() -> (
     tempfile::TempDir,
     Arc<Engine>,
     crate::config::EffectiveConfig,

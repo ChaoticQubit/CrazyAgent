@@ -16,9 +16,9 @@
       t│ 5f2c0d8e9a7b6c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c │,      
       h│ 0d                                                             │       
     age└────────────────────────────────────────────────────────────────┘l  On  
-      agent-quit, bundled code plugin. 1 permission.                            
+      agent-quit, built-in code plugin. 1 permission.                           
       Essential, stays on.                                                      
-    service-kit                                                    Bundled  On  
-      service-kit, bundled code plugin. 2 permissions.                          
+    service-kit                                                   Built in  On  
+      service-kit, built-in code plugin. 2 permissions.                         
                                                                                 
  y Approve  ↑↓ Scroll  Esc Close                                         ? Help 

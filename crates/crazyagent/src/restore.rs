@@ -78,6 +78,14 @@ pub fn after_stop(root: &Path, global: &Path, project: &Path) -> Result<(), Stri
     after_stop_when(REQUESTED.load(Ordering::SeqCst), root, global, project)
 }
 
+/// The engine root's real path, the folder every path a restore or put-back returns lies
+/// under, whatever links its ancestors pass. Input: the root as given. Output: that path, or
+/// `storage_restore_failed` with the cause when it cannot be resolved.
+#[cfg(unix)]
+fn real_root(root: &Path) -> Result<std::path::PathBuf, String> {
+    std::fs::canonicalize(root).map_err(|cause| kernel_storage::restore::restore_failed(cause).0)
+}
+
 /// [`after_stop`] with the request given. Inputs: whether a restore was admitted, the engine
 /// root and the settings files. Output: Ok, or the failure.
 fn after_stop_when(
@@ -90,9 +98,12 @@ fn after_stop_when(
         return Ok(());
     }
     #[cfg(unix)]
-    return crate::storage::setup::restore_after_stop(root, global, project)
-        .map(|copy| assert!(copy.starts_with(root)))
-        .map_err(|cause| cause.0);
+    {
+        let real = real_root(root)?;
+        crate::storage::setup::restore_after_stop(root, global, project)
+            .map(|copy| assert!(copy.starts_with(&real)))
+            .map_err(|cause| cause.0)
+    }
     #[cfg(not(unix))]
     {
         let _ = (root, global, project);
@@ -298,11 +309,14 @@ pub fn recovery(root: &Path, running: bool) -> Result<Option<Recovery>, String> 
 pub fn put_back(root: &Path, running: bool) -> Result<(), String> {
     idle(running)?;
     #[cfg(unix)]
-    return kernel_storage::restore::recovery::put_back(
-        &root.join(kernel_storage::migrations::DATABASE),
-    )
-    .map(|saved| assert!(saved.starts_with(root)))
-    .map_err(|cause| cause.0);
+    {
+        let real = real_root(root)?;
+        kernel_storage::restore::recovery::put_back(
+            &root.join(kernel_storage::migrations::DATABASE),
+        )
+        .map(|saved| assert!(saved.starts_with(&real)))
+        .map_err(|cause| cause.0)
+    }
     #[cfg(not(unix))]
     {
         let _ = root;

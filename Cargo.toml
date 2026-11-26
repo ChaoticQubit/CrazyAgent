@@ -35,12 +35,6 @@ opt-level = 3
 [profile.test.package.sha2]
 opt-level = 3
 
-[profile.dev.package.crazyagent]
-opt-level = 3
-
-[profile.test.package.crazyagent]
-opt-level = 3
-
 [profile.dev.package.crazyagent-kernel-storage]
 opt-level = 3
 
@@ -57,4 +51,28 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.crazyagent-kernel-common]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-sandbox]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-sandbox]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-security]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-security]
+opt-level = 3
+
+[profile.dev.package.crazyagent-bus-gateway]
+opt-level = 3
+
+[profile.test.package.crazyagent-bus-gateway]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-plugin-host]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-plugin-host]
 opt-level = 3

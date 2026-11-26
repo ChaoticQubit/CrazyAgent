@@ -312,7 +312,6 @@ const REFUSALS: Record<string, string> = {
   usage_spend_off: "Spending free resets is off. Turn it on in Settings, Pools.",
   usage_spend_unconfirmed: "Spend confirmation now asks first. Use a free reset again and confirm it.",
   usage_unavailable: "Usage isn't available in this engine yet.",
-  owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
 };
 
 const POLL_FAILURES: Record<string, string> = {
