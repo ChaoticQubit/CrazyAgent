@@ -250,3 +250,32 @@ fn a_windows_program_started_outside_the_runtime_under_the_prefix_refuses_the_up
     child.wait().unwrap();
     assert_eq!(not_running(&held, IMAGES), Ok(()));
 }
+
+/// On Windows a runtime started from outside an update's folder whose command line names a
+/// script under it, as `node.exe` runs an npm harness, refuses the update as in use until it
+/// ends, so a session the database does not know is still seen.
+#[cfg(windows)]
+#[test]
+fn a_windows_runtime_whose_command_line_names_a_script_under_the_prefix_refuses_the_update() {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let made = tempfile::tempdir().unwrap();
+    let prefix = kernel_sandbox::paths::canonical(made.path()).unwrap();
+    let script = prefix.join("node_modules").join("fx").join("cli.js");
+    let mut child = kernel_processes::spawn_gate::spawn(
+        Command::new(system.join("PING.EXE"))
+            .args(["-n", "60"])
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0000_0004 | 0x0800_0000),
+    )
+    .unwrap();
+    let held = [prefix];
+    assert_eq!(not_running(&held, IMAGES), Err(IN_USE));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(not_running(&held, IMAGES), Ok(()));
+}

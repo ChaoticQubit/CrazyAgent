@@ -126,6 +126,67 @@ mod tests {
         assert_eq!(image_runs_under(&here), Ok(false));
     }
 
+    /// The short (8.3) spelling of a folder, or the folder itself where the volume keeps no
+    /// short names. Input: the folder. Output: the spelling.
+    fn short(folder: &std::path::Path) -> PathBuf {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let wide: Vec<u16> = folder.as_os_str().encode_wide().chain([0]).collect();
+        let mut units = vec![0u16; 32768];
+        let len = unsafe { GetShortPathNameW(wide.as_ptr(), units.as_mut_ptr(), 32768) };
+        assert!(
+            len > 0 && (len as usize) < units.len(),
+            "{}",
+            folder.display()
+        );
+        PathBuf::from(std::ffi::OsString::from_wide(&units[..len as usize]))
+    }
+
+    /// Starts the System32 ping held suspended with one more argument, so it never reads it.
+    /// Input: the argument. Output: the child.
+    fn naming(argument: &str) -> std::process::Child {
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        Command::new(system.join("PING.EXE"))
+            .args(["-n", "60", argument])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap()
+    }
+
+    /// A program whose file lies elsewhere runs under a folder while its command line names a
+    /// file there, as `node.exe` runs a script, in any case, with forward slashes or in the
+    /// folder's short spelling; a sibling folder whose name only starts the same does not.
+    #[test]
+    fn a_program_whose_command_line_names_a_file_under_a_folder_runs_under_it() {
+        let made = tempfile::tempdir().unwrap();
+        let folder = plain(made.path());
+        let script = folder.join("node_modules").join("tool").join("cli.js");
+        let text = script.to_str().unwrap().to_owned();
+        let shortened = short(&folder)
+            .join("node_modules")
+            .join("tool")
+            .join("cli.js");
+        let here = [folder.clone()];
+        for named in [
+            text.clone(),
+            text.to_uppercase(),
+            text.replace('\\', "/"),
+            shortened.to_str().unwrap().to_owned(),
+        ] {
+            let mut child = naming(&named);
+            assert_eq!(image_runs_under(&here), Ok(true), "{named}");
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        let mut sibling = naming(&format!("{}old\\cli.js", folder.display()));
+        assert_eq!(image_runs_under(&here), Ok(false));
+        sibling.kill().unwrap();
+        sibling.wait().unwrap();
+    }
+
     /// A folder named without its drive is a caller's mistake, never a folder no program
     /// runs from.
     #[test]
