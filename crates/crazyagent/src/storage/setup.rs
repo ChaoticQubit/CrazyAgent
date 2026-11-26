@@ -809,8 +809,9 @@ pub(crate) fn restore_after_stop(
 /// The record line a finished restore leaves: `restored <copy>`, followed by
 /// `unverified_pin` when the pinned copy had no digest, or `failed <code>` with the code alone
 /// so no path reaches the record. A failed rollback is recorded as its own code followed by
-/// the kept copy's name, which the put-back uses, and the next start refuses it. Inputs: how
-/// it ended and the copy the restoring record names. Output: the line.
+/// the kept copy's name, which the put-back uses, and the next start refuses it; a name read
+/// back that is no copy name or would not fit one record line is left out. Inputs: how it
+/// ended and the copy the restoring record names. Output: the line.
 #[cfg(unix)]
 fn restore_line(
     restored: &Result<kernel_storage::restore::Restored, EngineError>,
@@ -843,11 +844,15 @@ fn restore_line(
     .into_iter()
     .find(|code| cause.0.starts_with(code))
     .unwrap_or(kernel_storage::restore::RESTORE_FAILED);
-    let copy = named.filter(|_| code == kernel_storage::restore::RESTORE_ROLLBACK_FAILED);
-    match copy {
-        Some(copy) => format!("{} {code} {copy}", kernel_storage::restore::RECORD_FAILED),
-        None => format!("{} {code}", kernel_storage::restore::RECORD_FAILED),
-    }
+    let bare = format!("{} {code}", kernel_storage::restore::RECORD_FAILED);
+    named
+        .filter(|copy| {
+            code == kernel_storage::restore::RESTORE_ROLLBACK_FAILED
+                && kernel_storage::restore::recovery::copy_name(copy)
+        })
+        .map(|copy| format!("{bare} {copy}"))
+        .filter(|line| kernel_storage::restore::valid_record_line(line))
+        .unwrap_or(bare)
 }
 
 /// Finishes a restore that wrote the 2.4 data and stopped before it recorded so, with this

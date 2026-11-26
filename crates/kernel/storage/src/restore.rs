@@ -380,6 +380,12 @@ pub const RECORD_FAILED: &str = "failed";
 /// The most a restore record holds.
 const RESTORE_RECORD_BYTES_MAX: usize = 512;
 
+/// Whether a line can be a restore record: 1 to 512 bytes with no line break. Input: the
+/// line. Output: the answer.
+pub fn valid_record_line(line: &str) -> bool {
+    !line.is_empty() && line.len() <= RESTORE_RECORD_BYTES_MAX && !line.contains(['\n', '\r'])
+}
+
 /// Replaces the restore record of the engine at `root` with one line: the line goes to a private
 /// temp file beside it behind a barrier, which is then renamed over the record, and the folder
 /// is fully flushed, so a failure at any step leaves the old record whole. Inputs: the root
@@ -393,7 +399,8 @@ pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError>
 /// The temp file a record write fills before it renames it over the record.
 const RESTORE_RECORD_TEMP: &str = "restore-record.new";
 
-/// [`write_restore_record`] with the private file writer given, so a row can fail it. A temp
+/// [`write_restore_record`] with the private file writer given, so a row can fail it. A line
+/// [`valid_record_line`] refuses is `storage_restore_failed` before any file step. A temp
 /// file left by an earlier crash is removed first, and the temp file is removed after any
 /// failure before the rename. Inputs: the root, the line and the writer. Output: as
 /// [`write_restore_record`].
@@ -402,8 +409,9 @@ fn write_record_with(
     line: &str,
     write: fn(&Path, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    assert!(!line.is_empty());
-    assert!(line.len() <= RESTORE_RECORD_BYTES_MAX);
+    if !valid_record_line(line) {
+        return Err(restore_failed("a restore record is one line of 1 to 512 bytes"));
+    }
     let record = root.join(RESTORE_RECORD_FILE);
     let temp = root.join(RESTORE_RECORD_TEMP);
     match std::fs::remove_file(&temp) {
