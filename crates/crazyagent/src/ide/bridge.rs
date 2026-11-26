@@ -1411,6 +1411,8 @@ pub(crate) mod engine_step;
 mod extensions;
 #[cfg(unix)]
 pub(crate) mod remote_git;
+#[cfg(test)]
+mod residue_tests;
 #[cfg(unix)]
 mod terminal;
 #[cfg(all(test, unix))]

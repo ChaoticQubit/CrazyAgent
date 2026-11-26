@@ -1248,3 +1248,17 @@ async fn native_auth_channel_logout_no_child_retirement_preserves_real_action_an
     })
     .await;
 }
+
+/// Returns the size of the value an `Authority` field may hold. Input: a function that picks
+/// the field. Output: the held value's size in bytes.
+fn payload<T>(_: for<'a> fn(&'a Authority) -> &'a Mutex<Option<T>>) -> usize {
+    size_of::<T>()
+}
+
+/// The custody slot is held behind a pointer, so taking it moves only the pointer and leaves
+/// no copy of its owner token in the authority's memory.
+#[test]
+fn the_custody_slot_is_held_behind_a_pointer() {
+    let held = payload(|authority| &authority.native_auth);
+    assert_eq!(held, size_of::<usize>());
+}
