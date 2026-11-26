@@ -45,9 +45,14 @@ fn broken(named: bool) -> Result<(tempfile::TempDir, PathBuf, PathBuf), String> 
     Ok((root, path, kept[0].clone()))
 }
 
+/// The state a refused put-back must keep, in order: engine.db's bytes, the restore record
+/// line if one is there, and the paths of the kept copies.
+/// Built by `untouched` and compared before and after a refusal.
+type Untouched = (Vec<u8>, Option<String>, Vec<PathBuf>);
+
 /// What a refused put-back must leave as it found: engine.db's bytes, the record and the
 /// kept copies. Input: the root and the database path. Output: the three.
-fn untouched(root: &Path, path: &Path) -> Result<(Vec<u8>, Option<String>, Vec<PathBuf>), String> {
+fn untouched(root: &Path, path: &Path) -> Result<Untouched, String> {
     Ok((
         std::fs::read(path).unwrap(),
         read_restore_record(root),
