@@ -1012,12 +1012,12 @@ impl Updates {
 mod windows_tests {
     use super::*;
 
-    /// W1 (leader 01:25, DEC-194): on Windows, where the engine runs no Homebrew or npm and
-    /// no updater, a check of an install those tools made is not run and is no failure, and a
-    /// self-updating install with online lookups off reads as not checked, never as one that
-    /// Update asks to look.
+    /// On Windows a check of an install a tool made runs that tool, as on macOS and Linux, so
+    /// with no npm to run it fails as missing its tool instead of reading as not checked, and
+    /// a self-updating install with online lookups off has no check, never one Update asks
+    /// to look.
     #[test]
-    fn a_windows_install_is_not_checked_by_a_tool_and_never_offers_update_to_look() {
+    fn a_windows_install_is_checked_by_its_tool_as_on_macos_and_linux() {
         let updates = Updates::new();
         let roots = Roots {
             home: PathBuf::from(r"C:\Users\unit"),
@@ -1043,15 +1043,55 @@ mod windows_tests {
             Method::HomebrewFormula {
                 formula: "opencode".into(),
             },
-            Method::SelfUpdate,
         ] {
             assert_eq!(
                 updates.looked("codex", &method, real, &roots, settings, "0.164.0"),
-                Latest::NotChecked,
+                failed(super::super::TOOL_MISSING),
                 "{method:?}"
             );
         }
+        assert_eq!(
+            updates.looked(
+                "codex",
+                &Method::SelfUpdate,
+                real,
+                &roots,
+                settings,
+                "0.164.0"
+            ),
+            Latest::NoCheck
+        );
     }
+
+    /// On Windows the engine's npm is the `npm.cmd` beside the first `node.exe` the places
+    /// find, with npm's own `npm-cli.js` beside it, and npm installs into the engine prefix,
+    /// named in its plain drive spelling and searched second, where npm puts its shims.
+    #[test]
+    fn a_windows_engine_npm_is_the_npm_beside_the_node_the_places_find() {
+        let node_folder = tempfile::tempdir().unwrap();
+        let node_home = kernel_sandbox::paths::canonical(node_folder.path()).unwrap();
+        let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        std::fs::copy(&curl, node_home.join("node.exe")).unwrap();
+        let cli = node_home.join("node_modules").join("npm").join("bin");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::write(cli.join("npm-cli.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(node_home.join("npm.cmd"), "@ECHO off\r\n").unwrap();
+        let root_folder = tempfile::tempdir().unwrap();
+        let engine_root = kernel_sandbox::paths::canonical(root_folder.path()).unwrap();
+        let places = crate::tools::tools_new(vec![node_home.clone()], None);
+        let npm = engine_npm(&engine_root, &places).unwrap();
+        let prefix = crate::setup::harness_prefix(&engine_root);
+        assert_eq!(npm.node, node_home.join("node.exe"));
+        assert_eq!(npm.program, node_home.join("npm.cmd"));
+        assert_eq!(npm.search, vec![node_home.clone(), prefix.clone()]);
+        assert_eq!(npm.prefix, prefix);
+        assert!(!npm.prefix.to_str().unwrap().starts_with(r"\\?\"));
+        let empty = crate::tools::tools_new(Vec::new(), None);
+        assert_eq!(engine_npm(&engine_root, &empty), None);
+    }
+
     /// V243-W1-VERSION-READ: on Windows the engine's home is the profile folder in its plain
     /// drive spelling, and a program a session would start tells its version through a job
     /// of its own, here the curl Windows ships.

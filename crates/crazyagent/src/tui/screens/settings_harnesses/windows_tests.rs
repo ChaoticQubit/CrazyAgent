@@ -1,13 +1,11 @@
 use super::*;
 
-/// W1 (leader 01:25, DEC-194): Windows offers no Update in any update mode, so the key bar
-/// shows no `u`, and a press says CrazyAgent can't update it on this computer.
+/// Windows offers Update in Check and update mode as macOS and Linux do, so the key bar
+/// shows `u`; check only and off still say why not, and the not-here sentence stays for a
+/// system the engine runs no updater on.
 #[test]
-fn windows_offers_no_update_in_any_mode() {
-    assert_eq!(
-        update_blocked(UpdateMode::CheckAndUpdate),
-        Some(UNSUPPORTED_HERE)
-    );
+fn windows_offers_update_as_macos_and_linux_do() {
+    assert_eq!(update_blocked(UpdateMode::CheckAndUpdate), None);
     assert_eq!(
         update_blocked(UpdateMode::CheckOnly),
         Some("harness_update_check_only")

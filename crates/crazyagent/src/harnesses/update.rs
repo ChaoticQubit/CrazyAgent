@@ -1172,6 +1172,48 @@ mod windows_tests {
             );
         }
     }
+    /// On Windows an npm install outside the engine prefix, such as the owner's own
+    /// `%APPDATA%\npm`, is checked and updated in place by the engine's npm with its own prefix
+    /// pinned, since npm puts no npm of its own in a prefix there; the engine prefix keeps the
+    /// engine's search.
+    #[test]
+    fn a_windows_npm_install_outside_the_engine_prefix_runs_the_engine_npm_with_its_prefix() {
+        let node = PathBuf::from(r"C:\Program Files\nodejs");
+        let engine = NpmInstall {
+            node: node.join("node.exe"),
+            program: node.join("npm.cmd"),
+            search: vec![node.clone(), PathBuf::from(r"C:\engine\setup\harnesses")],
+            prefix: PathBuf::from(r"C:\engine\setup\harnesses"),
+        };
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: Some(engine.clone()),
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let owner = PathBuf::from(r"C:\Users\unit\AppData\Roaming\npm");
+        let args = vec!["view", "@openai/codex", "version"];
+        assert_eq!(
+            npm_for(&owner, &roots, args.clone()),
+            Fixed {
+                program: engine.program.clone(),
+                args: args.clone(),
+                search: vec![node.clone(), owner.clone()],
+                prefix: Some(owner.clone()),
+            }
+        );
+        assert_eq!(
+            npm_for(&engine.prefix, &roots, args.clone()),
+            Fixed {
+                program: engine.program.clone(),
+                args,
+                search: engine.search.clone(),
+                prefix: Some(engine.prefix.clone()),
+            }
+        );
+    }
     /// With the engine's home the profile folder on Windows, a harness that installed itself
     /// under it is named as self-updating, and its update is refused as unsafe once the users
     /// group may write the file, whatever the resolver would say about it.
