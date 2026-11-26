@@ -372,3 +372,58 @@ fn a_missing_git_names_git_for_windows_on_windows() {
     );
     assert!(!line.contains("xcode-select"), "{line}");
 }
+
+/// The owner line for a tool found nowhere the resolver looks, or for one whose interpreter
+/// is missing. Inputs: the tool and the program it needs. Output: the line.
+fn owner_line(tool: &str, needs: Option<&str>) -> String {
+    Missing {
+        tool: tool.into(),
+        reason: if needs.is_some() {
+            Reason::NeedsInterpreter
+        } else {
+            Reason::NotFound
+        },
+        needs: needs.map(Into::into),
+        found: None,
+        looked: Vec::new(),
+        refused: None,
+    }
+    .line()
+}
+
+#[test]
+fn a_missing_node_names_nodejs_org_on_windows() {
+    let hint = "Install Node.js from nodejs.org.";
+    assert_eq!(
+        owner_line("node", None),
+        format!("node is missing. {hint} Then try again.")
+    );
+    assert_eq!(
+        owner_line("npm", None),
+        format!("npm is missing. {hint} Then try again.")
+    );
+    let needs = owner_line("codex", Some("node"));
+    assert_eq!(
+        needs,
+        format!("codex needs node, which is missing. {hint} Then try again.")
+    );
+    assert!(
+        !needs.contains("brew") && !needs.contains("Terminal"),
+        "{needs}"
+    );
+}
+
+#[test]
+fn a_missing_codex_or_claude_names_a_terminal_on_windows() {
+    let codex = owner_line("codex", None);
+    assert_eq!(
+        codex,
+        "codex is missing. Install Codex: run npm install -g @openai/codex in a terminal. Then try again."
+    );
+    let claude = owner_line("claude", None);
+    assert_eq!(
+        claude,
+        "claude is missing. Install Claude Code: run npm install -g @anthropic-ai/claude-code in a terminal. Then try again."
+    );
+    assert!(!codex.contains("Terminal") && !claude.contains("Terminal"));
+}

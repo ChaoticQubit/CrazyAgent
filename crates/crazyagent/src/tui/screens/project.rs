@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 mod state;
 mod tabs;
+#[cfg(test)]
+mod words_tests;
 
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 pub(in crate::tui) const ACTIVITY_SHOWN: usize = 5;
@@ -816,6 +818,13 @@ const HIDDEN_NOT_PLAIN: &str = if cfg!(windows) {
     "A folder path can't hold quotes, backslashes or control characters."
 };
 
+/// The missing project folder line on macOS, naming Finder.
+#[cfg(target_os = "macos")]
+const FOLDER_MISSING: &str = "The project folder is missing. Check it in Finder.";
+/// The missing project folder line on Windows and Linux, naming the file manager.
+#[cfg(not(target_os = "macos"))]
+const FOLDER_MISSING: &str = "The project folder is missing. Check it in your file manager.";
+
 /// Turns an engine rejection code into a plain sentence.
 /// Takes the code.
 /// Returns what happened and what to do; a code with no sentence is named after a retry sentence.
@@ -909,7 +918,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
         }
         "context_item_missing" => "That file is already gone.",
-        "project_folder_missing" => "The project folder is missing. Check it in Finder.",
+        "project_folder_missing" => FOLDER_MISSING,
         "project_folder_unwritable" => {
             "CrazyAgent can't write in the project folder. Check its permissions."
         }
