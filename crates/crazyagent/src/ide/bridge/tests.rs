@@ -1288,7 +1288,7 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
     let server = Stream::from_std(server).unwrap();
     let serving = tokio::spawn(serve_within(
         server,
-        ide,
+        crate::engine::secret_frame::OwnerPacket::new(ide),
         case.runtime.clone(),
         Instant::now() + handshake,
         Duration::from_millis(300),
