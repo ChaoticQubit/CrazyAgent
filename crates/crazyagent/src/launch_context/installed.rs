@@ -16,6 +16,29 @@ impl InstalledFiles {
     }
 }
 
+impl Installed {
+    /// The home a launch's paths name: on Windows the place its install held, read from the
+    /// held handle, so a junction above the home repointed later changes nothing the agent is
+    /// handed; None off Windows and for a launch that holds no home. Output: the place.
+    pub fn home_place(&self) -> Option<&Path> {
+        #[cfg(windows)]
+        let place = self
+            .held
+            .as_ref()
+            .map(crate::engine::bootstrap::held::Folder::place);
+        #[cfg(not(windows))]
+        let place = None;
+        place
+    }
+
+    /// The home a launch's command names: the held place of its install when it has one, as
+    /// [`Installed::home_place`] gives it, else the account's home. Inputs: the launch, if
+    /// any, and the account's home. Output: the home.
+    pub fn home_or<'a>(installed: Option<&'a Self>, home: &'a Path) -> &'a Path {
+        installed.and_then(Self::home_place).unwrap_or(home)
+    }
+}
+
 impl Drop for Installed {
     /// Deletes the launch's files, then releases the home lock on its open file
     /// description, so a process that shares it, such as a child another thread is

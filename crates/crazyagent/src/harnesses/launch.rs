@@ -861,7 +861,7 @@ fn confined<'a>(
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
     handed: Option<Handed<'_>>,
 ) -> Result<Command, LaunchError> {
-    let home = request.account.home();
+    let home = Installed::home_or(installed, request.account.home());
     let tool_home = installed.and_then(Installed::tool_home).unwrap_or(home);
     if !cfg!(any(target_os = "macos", target_os = "linux", windows)) {
         return Err(failure("launch_sandbox_unavailable"));
@@ -882,19 +882,7 @@ fn confined<'a>(
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
     let words = super::interactive::launch_words(&request.executable)?;
-    let (program, script) = words
-        .split_first()
-        .ok_or_else(|| failure("launch_environment_refused"))?;
-    let program = Path::new(program);
-    let mut command = bounded(
-        request,
-        program,
-        script,
-        arguments,
-        &base,
-        harness_env,
-        handed,
-    )?;
+    let mut command = bounded(request, home, &words, arguments, &base, harness_env, handed)?;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -917,25 +905,25 @@ fn confined<'a>(
     Ok(command)
 }
 
-/// Builds the harness command inside the request's boundary, in its working folder: on
-/// macOS the confined profile through [`kernel_sandbox::profile::env::agent_command`], with
-/// the launch's exception to the variable guard through
-/// [`kernel_sandbox::profile::env::agent_command_handing`], or the Full access session shim,
-/// which carries no exception; on Linux and Windows an installed
-/// sandbox with the account's home, through [`InstalledSandbox::wrap`], or with the exception
-/// through `InstalledSandbox::wrap_handing`, on Windows once [`home_containers`] passes;
-/// anything else is `launch_sandbox_unavailable`. Inputs: the request, program, script
-/// words, arguments, base and harness variables and the exception, if any. Output: the
-/// command.
+/// Builds the harness command inside the request's boundary, in its working folder: on macOS
+/// the confined profile or the Full access shim, on Linux and Windows the installed sandbox
+/// whose home is `home`, the held place on Windows, once [`home_containers`] passes there;
+/// anything else is `launch_sandbox_unavailable`. Inputs: the request, the home, the program
+/// and script words, arguments, base and harness variables and the exception. Output: the command.
 fn bounded<'a>(
     request: &LaunchRequest,
-    program: &Path,
-    script: &[String],
+    home: &Path,
+    words: &[String],
     arguments: &[OsString],
     base: &[(&str, &OsStr)],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
     handed: Option<Handed<'_>>,
 ) -> Result<Command, LaunchError> {
+    assert!(home.is_absolute());
+    let (program, script) = words
+        .split_first()
+        .ok_or_else(|| failure("launch_environment_refused"))?;
+    let program = Path::new(program);
     #[cfg(target_os = "macos")]
     {
         use kernel_sandbox::profile::env::{
@@ -961,11 +949,11 @@ fn bounded<'a>(
         let LaunchBoundary::Installed(boundary) = &request.boundary else {
             return Err(failure("launch_sandbox_unavailable"));
         };
-        if request.account.home() != boundary.sandbox().agent_home() {
+        if home != boundary.sandbox().agent_home() {
             return Err(failure("launch_environment_refused"));
         }
         #[cfg(windows)]
-        home_containers(request.account.home(), boundary.sandbox())?;
+        home_containers(home, boundary.sandbox())?;
         let mut bare = Command::new(program);
         bare.args(script)
             .args(arguments)
@@ -1103,8 +1091,8 @@ fn codex_invocation(
     installed: Option<&Installed>,
     key_file: Option<&str>,
 ) -> Result<Invocation, LaunchError> {
-    let home = request.account.home().as_os_str().to_owned();
-    let environment = vec![("CODEX_HOME", home)];
+    let home = Installed::home_or(installed, request.account.home());
+    let environment = vec![("CODEX_HOME", home.into())];
     let folder = request
         .working_dir
         .canonicalize()
@@ -1282,7 +1270,7 @@ fn claude_invocation(
     key_file: Option<&str>,
 ) -> Invocation {
     assert_eq!(request.account.key().is_some(), key_file.is_some());
-    let home = request.account.home().as_os_str().to_owned();
+    let home = Installed::home_or(installed, request.account.home());
     let settings = claude_settings(key_file, installed.is_some_and(Installed::runs_hooks));
     let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
@@ -1322,9 +1310,9 @@ fn claude_invocation(
         arguments.extend(denied.into_iter().map(OsString::from));
     }
     let mut environment = vec![
-        ("CLAUDE_CONFIG_DIR", home.clone()),
-        ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.clone()),
-        ("CLAUDE_CODE_TMPDIR", home),
+        ("CLAUDE_CONFIG_DIR", home.into()),
+        ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.into()),
+        ("CLAUDE_CODE_TMPDIR", home.into()),
         ("TERM", OsString::from("dumb")),
         ("DISABLE_TELEMETRY", OsString::from("1")),
         (

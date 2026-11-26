@@ -93,7 +93,10 @@ pub(super) fn install(
     }
     write_inherited(&folder, "mcp.json", claude_config(&[])?.into_bytes())?;
     write_inherited(&folder, "instructions.md", text.into_bytes())?;
-    let path = home.join(STATE);
+    let place = root
+        .place_now()
+        .map_err(|_| failure("launch_context_unsafe"))?;
+    let path = place.join(STATE);
     let installed = Installed {
         arguments: vec![
             OsString::from("--mcp-config"),
