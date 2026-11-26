@@ -23,7 +23,7 @@ pub mod snapshot;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub use win::image_runs_under;
+pub use win::runs_under;
 
 #[cfg(windows)]
 pub use win::{

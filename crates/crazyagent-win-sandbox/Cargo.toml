@@ -22,6 +22,7 @@ crazyagent-kernel-common = { path = "../kernel/common" }
 tokio = { version = "=1.53.2", features = ["net"] }
 windows-sys = { version = "=0.61.2", features = [
     "Wdk_Storage_FileSystem",
+    "Wdk_System_Threading",
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",

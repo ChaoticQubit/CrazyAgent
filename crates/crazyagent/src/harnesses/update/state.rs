@@ -405,12 +405,13 @@ fn unused(db: &Connection, id: &str) -> Result<(), &'static str> {
 type Images = fn(&[PathBuf]) -> Result<bool, u32>;
 
 #[cfg(windows)]
-const IMAGES: Images = crazyagent_win_sandbox::image_runs_under;
+const IMAGES: Images = crazyagent_win_sandbox::runs_under;
 #[cfg(not(windows))]
 const IMAGES: Images = |_| Ok(false);
 
-/// Answers `harness_update_in_use` while a program runs from the folders an update changes,
-/// one CrazyAgent never started included, such as a harness run in a terminal pane. Inputs:
+/// Answers `harness_update_in_use` while a program runs from the folders an update changes or
+/// names a script there, as `node.exe` runs an npm harness, one CrazyAgent never started
+/// included, such as a harness run in a terminal pane. Inputs:
 /// the folders and the process reader. Output: Ok while none runs, else the code, or
 /// `harness_update_unavailable` when the processes cannot be read.
 fn not_running(watched: &[PathBuf], images: Images) -> Result<(), &'static str> {
