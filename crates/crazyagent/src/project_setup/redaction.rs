@@ -47,10 +47,26 @@ pub(crate) fn redact(text: &str) -> String {
 /// Output: true when one is found anywhere in it, also inside a joined key such as a JSON
 /// key file's value.
 fn block_end(line: &str) -> bool {
+    pem_line(line, "-----end ")
+}
+
+/// Whether a line holds a key block's BEGIN line as PEM writes it, with the label rule of
+/// [`block_end`]. A separator such as `-----Begin output-----` is not one. Input: the line.
+/// Output: true when one is found anywhere in it.
+#[cfg(unix)]
+pub(super) fn block_begin(line: &str) -> bool {
+    pem_line(line, "-----begin ")
+}
+
+/// Whether a line holds `marker`, in any case, then a label of capitals, digits, spaces and
+/// hyphens with at least one capital, then `-----`. Inputs: the line and the marker in lower
+/// case. Output: true when one is found anywhere in the line.
+fn pem_line(line: &str, marker: &str) -> bool {
+    assert_eq!(marker, marker.to_ascii_lowercase());
     let lower = line.to_ascii_lowercase();
     assert_eq!(lower.len(), line.len());
-    lower.match_indices("-----end ").any(|(at, marker)| {
-        let rest = &line[at + marker.len()..];
+    lower.match_indices(marker).any(|(at, found)| {
+        let rest = &line[at + found.len()..];
         rest.find("-----").is_some_and(|size| {
             let label = &rest.as_bytes()[..size];
             label.iter().any(u8::is_ascii_uppercase)

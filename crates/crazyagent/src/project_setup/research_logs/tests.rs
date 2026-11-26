@@ -202,3 +202,87 @@ fn the_newest_attempt_then_the_newest_launch_is_read() {
     assert_eq!(read_job(&root, 42), ["second attempt, fourth launch"]);
     assert_eq!(read_job(&root, 7), Vec::<String>::new());
 }
+
+/// Plain research rows no word check hides, each ending in a line break. Input: how many.
+/// Output: the rows.
+fn plain_rows(count: usize) -> String {
+    (0..count)
+        .map(|at| format!("read shop page {at} and noted the prices\n"))
+        .collect()
+}
+
+/// Key body rows of the shapes the word check misses: `rows` full rows, then one short row of
+/// `last` bytes, each ending in a line break. Inputs: the two counts. Output: the rows.
+fn body_rows(rows: usize, last: usize) -> String {
+    assert!((1..BODY_NO_DIGIT.len()).contains(&last));
+    let full = format!("{BODY_NO_DIGIT}\n").repeat(rows);
+    format!("{full}{}\n", &BODY_NO_DIGIT[..last])
+}
+
+/// Where the tail window of a log starts. Input: the log's length in bytes, past the window.
+/// Output: the window's first byte.
+fn window_start(length: usize) -> usize {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    assert!(length > tail);
+    length - tail
+}
+
+/// A key block whose BEGIN row lies in the 64 KiB before the tail window and whose body runs
+/// through the window to the log's end with no END hides every row the window shows.
+#[test]
+fn a_block_opened_before_the_tail_window_and_never_ended_hides_its_body_rows() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let rows = tail * 3 / 2 / (BODY_NO_DIGIT.len() + 1);
+    let log = format!("starting\n{BEGIN}\n{}", body_rows(rows, 40));
+    let start = window_start(log.len());
+    assert!(log.find(BEGIN).unwrap() + BEGIN.len() < start && start < tail);
+    assert!(!log.contains(END));
+    let (_root, lines) = reply_of(&log);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| line == HIDDEN_LINE), "{lines:?}");
+}
+
+/// A key block whose BEGIN row the tail window's start cuts, so the window drops it, and
+/// whose body runs to the log's end with no END hides every row the window shows.
+#[test]
+fn a_block_whose_begin_row_the_tail_window_cuts_hides_its_body_rows() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let row = BODY_NO_DIGIT.len() + 1;
+    let body = tail + 5 - (BEGIN.len() + 1);
+    let log = format!(
+        "starting\n{BEGIN}\n{}",
+        body_rows((body - 1) / row, (body - 1) % row)
+    );
+    assert_eq!(window_start(log.len()), log.find(BEGIN).unwrap() + 5);
+    let (_root, lines) = reply_of(&log);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| line == HIDDEN_LINE), "{lines:?}");
+}
+
+/// A key block that ends before the tail window leaves the window's plain rows shown, though
+/// the 64 KiB before the window holds the whole block.
+#[test]
+fn a_block_ended_before_the_tail_window_leaves_its_rows_shown() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let rows = plain_rows(tail * 3 / 2 / 40);
+    let log = format!("starting\n{BEGIN}\n{BODY_SHORT}\n{END}\n{rows}");
+    let start = window_start(log.len());
+    assert!(log.find(END).unwrap() + END.len() < start && start < tail);
+    let (_root, lines) = reply_of(&log);
+    assert!(!lines.iter().any(|line| line == HIDDEN_LINE), "{lines:?}");
+    assert_eq!(lines.last().map(String::as_str), rows.lines().next_back());
+}
+
+/// A separator that only starts like a BEGIN line, before the tail window and with no END
+/// after it, leaves the window's rows shown, since it opens no key block.
+#[test]
+fn a_separator_starting_like_a_begin_line_before_the_tail_window_hides_nothing() {
+    let tail = usize::try_from(RESEARCH_LOG_TAIL_BYTES).unwrap();
+    let rows = plain_rows(tail * 3 / 2 / 40);
+    let log = format!("starting\n-----Begin output-----\n{rows}");
+    let start = window_start(log.len());
+    assert!(log.find("-----Begin").unwrap() < start && start < tail);
+    let (_root, lines) = reply_of(&log);
+    assert!(!lines.iter().any(|line| line == HIDDEN_LINE), "{lines:?}");
+    assert_eq!(lines.last().map(String::as_str), rows.lines().next_back());
+}
