@@ -374,7 +374,7 @@ fn a_separator_inside_a_key_block_leaves_it_open_to_its_end() {
     let shown = redact(&format!(
         "-----BEGIN RSA PRIVATE KEY-----\n{BODY_NO_DIGIT}\n{CHUNK_SEPARATOR}\n{BODY_SHORT}\n{BODY_NO_DIGIT}\n-----END RSA PRIVATE KEY-----\nafter"
     ));
-    let hidden = vec![HIDDEN_LINE; 6];
+    let hidden = [HIDDEN_LINE; 6];
     assert_eq!(shown, [&hidden[..], &["after"]].concat().join("\n"));
 }
 
