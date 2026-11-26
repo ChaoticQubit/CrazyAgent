@@ -75,6 +75,39 @@ test("the choice is kept in this app and read back, and a missing storage reads 
   }
 });
 
+test("a Questions show choice reaches a reader that already holds one, in this window and from another window, and every reader follows it", () => {
+  const kept = new Map();
+  const heard = [];
+  globalThis.window = {
+    localStorage: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, String(value)), removeItem: (key) => kept.delete(key) },
+    addEventListener: (kind, listener) => heard.push([kind, listener]),
+  };
+  try {
+    let held = state.readQuestionsShown();
+    assert.equal(held, "conversation");
+    const stop = state.onQuestionsShown(() => { held = state.readQuestionsShown(); });
+    state.saveQuestionsShown("every");
+    assert.equal(held, "every", "a save in this window reaches the reader without a new mount");
+    kept.set("crazyagent.questions-shown", "tab");
+    const storageListeners = heard.filter(([kind]) => kind === "storage").map(([, listener]) => listener);
+    assert.equal(storageListeners.length, 1);
+    storageListeners[0]({ key: "crazyagent.terminal-input" });
+    assert.equal(held, "every", "another key's save leaves the choice as it was");
+    storageListeners[0]({ key: "crazyagent.questions-shown" });
+    assert.equal(held, "tab", "a save in another window reaches the reader");
+    stop();
+    state.saveQuestionsShown("conversation");
+    assert.equal(held, "tab", "a stopped reader hears nothing more");
+  } finally {
+    delete globalThis.window;
+  }
+  for (const reader of ["../src/screens/project/index.tsx", "../src/screens/settings/profile.tsx"]) {
+    const source = readFileSync(new URL(reader, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /readQuestionsShown/, `${reader} reads the choice once instead of following it`);
+    assert.match(source, /useQuestionsShown\(\)/, `${reader} follows the choice`);
+  }
+});
+
 test("the pop-up offers only waiting questions, the one waiting longest first", () => {
   const waiting = popup.popupQuestions([
     question({ id: 1, status: "answered", answer: "Yes", settled_ms: NOW - 5 }),
