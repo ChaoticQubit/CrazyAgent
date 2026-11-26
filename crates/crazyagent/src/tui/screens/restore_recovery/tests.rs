@@ -96,6 +96,87 @@ fn a_finished_restore_shows_it_running_and_a_refusal_shows_its_code() {
     );
 }
 
+/// Waits for the job in flight to end and hands its result back to the poll, with no
+/// sleep. Input: the screen. Output: none.
+fn settle(screen: &mut Recovering) {
+    let receive = screen.pending.take().expect("a job runs");
+    let done = receive.recv().expect("the job sends its end");
+    let (send, again) = channel();
+    send.send(done).expect("the poll's channel is open");
+    screen.pending = Some(again);
+}
+
+/// A refused put-back keeps its code and reads the offer again, so a record that went
+/// away under it is never offered once more.
+#[test]
+fn a_refused_put_back_reads_again_and_keeps_its_code() {
+    let offered = read(Some(Recovery::PutBack {
+        copy: "replaced-20261117T093000000Z".into(),
+    }));
+    let mut screen =
+        Recovering::acted(offered, Step::PutBack, Err("storage_restore_failed".into()));
+
+    assert_eq!(screen.poll(), Next::Stay);
+    assert!(screen.busy());
+    settle(&mut screen);
+    assert_eq!(screen.poll(), Next::Stay);
+
+    let lines = screen.lines();
+    assert!(
+        lines.iter().any(|line| line == "Code: not_configured"),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Code: storage_restore_failed"),
+        "{lines:?}"
+    );
+    assert!(screen.actions().is_empty());
+}
+
+/// A refused continue reads the offer again, as a refused put-back does.
+#[test]
+fn a_refused_continue_reads_again() {
+    let mut screen = Recovering::acted(
+        read(Some(Recovery::Continue)),
+        Step::Continue,
+        Err("storage_putback_check_failed".into()),
+    );
+
+    assert_eq!(screen.poll(), Next::Stay);
+    assert!(screen.busy());
+    settle(&mut screen);
+    assert_eq!(screen.poll(), Next::Stay);
+}
+
+/// A refused finish keeps its read and code and starts no read, since a read that still
+/// finds the finished restore would run the finish again on its own.
+#[test]
+fn a_refused_finish_does_not_read_again() {
+    let finished = read(Some(Recovery::Finished {
+        copy: "replaced-20261117T093000000Z".into(),
+    }));
+    let mut screen =
+        Recovering::acted(finished, Step::Finish, Err("storage_restore_failed".into()));
+
+    assert_eq!(screen.poll(), Next::Stay);
+    assert!(!screen.busy());
+    let lines = screen.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == crate::tui::screens::settings::restore::RESTORE_RUNNING),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "Code: storage_restore_failed"),
+        "{lines:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_job_reads_the_engine_the_screen_was_started_with() -> std::io::Result<()> {

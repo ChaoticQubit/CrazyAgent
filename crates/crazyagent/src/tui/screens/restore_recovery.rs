@@ -86,6 +86,19 @@ impl Recovering {
         }
     }
 
+    /// A screen showing `read` whose action has just ended, as the poll finds it. Inputs: the
+    /// read, the action and how it ended. Output: the screen.
+    #[cfg(test)]
+    fn acted(read: Result<Read, String>, step: Step, result: Result<(), String>) -> Self {
+        let (send, receive) = channel();
+        send.send(Done::Acted(step, result)).unwrap();
+        Self {
+            read: Some(read),
+            pending: Some(receive),
+            ..Self::default()
+        }
+    }
+
     /// Takes a finished job: a read that found a restore whose 2.4 data is written runs the
     /// finish, a read with nothing to recover reconnects to show how the engine stands, and
     /// a put-back or continue that ended well asks for the engine. Output: what the screen
