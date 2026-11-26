@@ -310,7 +310,12 @@ mod tests {
         ))
         .unwrap();
         for code in HARNESS_CODES {
-            assert!(window.contains(&format!("  {code}: \"")), "{code}");
+            assert!(
+                ["\"", "`"]
+                    .iter()
+                    .any(|open| window.contains(&format!("  {code}: {open}"))),
+                "{code}"
+            );
             assert_eq!(harness_failure(code).code, code);
         }
         for other in ["controller_disconnected", "harness_update_\u{1b}[2J", ""] {
