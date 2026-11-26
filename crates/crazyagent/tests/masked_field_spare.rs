@@ -1,4 +1,4 @@
-use crazyagent::tui::keys::Key;
+use crazyagent::tui::keys::{Key, PASTE_CHARS_MAX};
 use crazyagent::tui::widgets::TextField;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
@@ -216,11 +216,7 @@ fn a_masked_field_pasted_into_frees_no_copy_of_the_paste() {
         assert_eq!(field.len(), PASTE_MARK.len());
         drop(field);
     });
-    let Key::Paste(text) = paste else {
-        unreachable!("the row built a paste")
-    };
-    let mut bytes = text.into_bytes();
-    kernel_security::secret::wipe(&mut bytes);
+    drop(paste);
     assert_eq!(freed, CLEAN);
 }
 
@@ -233,6 +229,47 @@ fn typing_into_a_masked_field_frees_no_copy_of_a_typed_character() {
             press(&mut field, Key::Char(TYPED));
         }
         assert_eq!(field.len(), TYPED_COUNT);
+        drop(field);
+    });
+    assert_eq!(freed, CLEAN);
+}
+
+/// The text a terminal paste event carries, built as the terminal library builds it: one
+/// `String` of exactly the pasted length. Input: the pasted bytes. Output: the text.
+fn terminal_paste(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+/// A terminal paste made into a paste key and typed into a masked field leaves no copy of
+/// the pasted text in a freed block once the key and the field are dropped.
+#[test]
+fn a_terminal_paste_made_into_a_key_frees_no_copy_of_the_paste() {
+    let text = terminal_paste(PASTE_MARK);
+    let freed = watched(4, |mut field| {
+        let paste = Key::paste(text);
+        assert!(field.key(&paste), "the field refused the paste");
+        assert_eq!(field.len(), PASTE_MARK.len());
+        drop(paste);
+        drop(field);
+    });
+    assert_eq!(freed, CLEAN);
+}
+
+/// A paste longer than `PASTE_CHARS_MAX` characters keeps exactly that many, and the cut
+/// tail is freed in no block once the paste key is dropped.
+#[test]
+fn a_paste_cut_at_the_limit_frees_no_copy_of_the_cut_tail() {
+    let mut bytes = vec![b'x'; PASTE_CHARS_MAX];
+    bytes.extend_from_slice(PASTE_MARK);
+    let text = terminal_paste(&bytes);
+    drop(bytes);
+    let freed = watched(4, |field| {
+        let paste = Key::paste(text);
+        let Key::Paste(kept) = &paste else {
+            unreachable!("a paste key")
+        };
+        assert_eq!(kept.chars().count(), PASTE_CHARS_MAX);
+        drop(paste);
         drop(field);
     });
     assert_eq!(freed, CLEAN);
