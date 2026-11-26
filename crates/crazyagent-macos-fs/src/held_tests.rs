@@ -97,11 +97,9 @@ fn a_held_reply_reads_each_field_only_when_whole() {
 #[test]
 fn held_reads_match_lstat_for_a_folder_a_file_and_a_link() -> Result<(), Box<dyn std::error::Error>>
 {
-    let home =
-        std::fs::canonicalize(std::env::temp_dir())?.join(format!("held-{}", std::process::id()));
+    let guard = tempfile::tempdir()?;
+    let home = std::fs::canonicalize(guard.path())?;
     assert!(home.is_absolute());
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir(&home)?;
     std::fs::write(home.join("file"), b"x")?;
     std::os::unix::fs::symlink("file", home.join("link"))?;
     let path = std::ffi::CString::new(home.as_os_str().as_encoded_bytes())?;
@@ -152,6 +150,5 @@ fn held_reads_match_lstat_for_a_folder_a_file_and_a_link() -> Result<(), Box<dyn
         assert_eq!(by_path.link(), name == "link");
     }
     assert!(open_search(Some(folder.as_fd()), c"link", false).is_err());
-    std::fs::remove_dir_all(&home)?;
     Ok(())
 }
