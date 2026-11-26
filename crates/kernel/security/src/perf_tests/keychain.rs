@@ -38,37 +38,40 @@ struct Scratch {
 
 impl Scratch {
     /// Makes the keychain `name` with an empty password in `home`. Inputs: the home and the
-    /// file name. Output: the scratch keychain.
-    fn create(home: &Path, name: &str) -> Self {
+    /// file name. Output: the scratch keychain, or the folder or `security` step that failed.
+    fn create(home: &Path, name: &str) -> Result<Self, String> {
         let folder = home.join("Library/Keychains");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::create_dir_all(home.join("Library/Preferences")).unwrap();
         for private in [
             home.to_path_buf(),
             home.join("Library"),
             folder.clone(),
             home.join("Library/Preferences"),
         ] {
-            std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::create_dir_all(&private)
+                .and_then(|()| {
+                    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+                })
+                .map_err(|error| format!("{}: {error}", private.display()))?;
         }
         let scratch = Self {
             home: home.to_path_buf(),
             path: folder.join(name),
         };
         let path = scratch.text().to_owned();
-        scratch.security(&["create-keychain", "-p", "", &path]);
-        scratch.security(&["list-keychains", "-d", "user", "-s", &path]);
-        scratch.security(&["default-keychain", "-d", "user", "-s", &path]);
-        scratch
+        scratch.security(&["create-keychain", "-p", "", &path])?;
+        scratch.security(&["list-keychains", "-d", "user", "-s", &path])?;
+        scratch.security(&["default-keychain", "-d", "user", "-s", &path])?;
+        Ok(scratch)
     }
 
     fn text(&self) -> &str {
         self.path.to_str().unwrap()
     }
 
-    /// Runs `security` on this keychain with only `HOME` and `PATH` set and asserts it
-    /// succeeds. Input: the arguments, which name this keychain. Output: none.
-    fn security(&self, args: &[&str]) {
+    /// Runs `security` on this keychain with only `HOME` and `PATH` set. Input: the
+    /// arguments, which name this keychain. Output: Ok once it succeeds, else the step and
+    /// why it failed.
+    fn security(&self, args: &[&str]) -> Result<(), String> {
         assert!(args.contains(&self.text()));
         let ran = kernel_processes::spawn_gate::output(
             Command::new(SECURITY)
@@ -80,15 +83,30 @@ impl Scratch {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
         )
-        .unwrap();
-        assert!(ran.status.success(), "security {:?} failed", args.first());
+        .map_err(|error| format!("security {:?}: {error}", args.first()))?;
+        if ran.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "security {:?} failed: {}",
+                args.first(),
+                ran.status
+            ))
+        }
     }
 }
 
 impl Drop for Scratch {
+    /// Deletes the keychain if `create` made its file, and reports a failed delete instead of
+    /// panicking, so a row already failing is never aborted by a second panic.
     fn drop(&mut self) {
+        if !self.path.exists() {
+            return;
+        }
         let path = self.text().to_owned();
-        self.security(&["delete-keychain", &path]);
+        if let Err(error) = self.security(&["delete-keychain", &path]) {
+            eprintln!("scratch keychain {path} was not deleted: {error}");
+        }
     }
 }
 
@@ -105,8 +123,10 @@ fn keychain_calls() {
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let home = root.path().join("home");
-    let scratch = Scratch::create(&home, PROFILE_KEYCHAIN);
-    let agent = Scratch::create(&home.join("agent"), AGENT_KEYCHAIN);
+    let scratch =
+        Scratch::create(&home, PROFILE_KEYCHAIN).unwrap_or_else(|error| panic!("{error}"));
+    let agent = Scratch::create(&home.join("agent"), AGENT_KEYCHAIN)
+        .unwrap_or_else(|error| panic!("{error}"));
     let store = Keychain::at(NAMESPACE, &scratch.path).unwrap();
     let secret = SecretString::new(SECRET.to_vec()).unwrap();
     let found = store.put(SERVICE, "token", &secret).unwrap();
