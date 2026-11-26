@@ -157,7 +157,7 @@ fn manifests(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         .map(|member| {
             let member = member
                 .as_str()
-                .unwrap_or_else(|| panic!("a member that is not text: {member}"));
+                .unwrap_or_else(|| panic!("a member that is not text: {member:?}"));
             assert!(
                 !member.contains(['*', '?', '[']),
                 "a glob member the guard cannot list: {member}"
