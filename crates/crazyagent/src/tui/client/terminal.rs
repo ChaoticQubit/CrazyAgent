@@ -25,7 +25,7 @@ const DRAIN_TIME: Duration = Duration::from_secs(5);
 /// The most bytes one key event types into an agent terminal: a paste of
 /// `PASTE_CHARS_MAX` characters of up to four bytes each inside its bracketed paste markers.
 const TYPED_BYTES_MAX: usize =
-    4 * crate::tui::run::PASTE_CHARS_MAX + PASTE_OPEN.len() + PASTE_CLOSE.len();
+    4 * crate::tui::keys::PASTE_CHARS_MAX + PASTE_OPEN.len() + PASTE_CLOSE.len();
 const _: () = assert!(input_runs_max(TYPED_BYTES_MAX, INPUT_BYTES_MAX) <= COMMANDS_QUEUED);
 
 struct Session {
