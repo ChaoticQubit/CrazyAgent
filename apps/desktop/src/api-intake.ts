@@ -1,8 +1,8 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
 import { permissionRefusal } from "./api-intake-words";
-import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
-import type { GitHubPromptAnswer } from "./engine-client";
+import { thisComputer } from "./ui/keys";
+import { githubPublishPrompt, githubPublishPromptSet, type GitHubPromptAnswer } from "./engine-client";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
   githubUseCli, intakeDismiss, intakeStart, intakeStatus, intakeStop, reinstallDismiss, reinstallOffer, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
@@ -231,9 +231,9 @@ const COPY: Record<string, string> = {
 export const ADD_WARNINGS = {
   close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
   old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
-  across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
+  across_disks: `This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If ${thisComputer()} sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.`,
   same_disk: "This is a rename on the same disk; it is quick.",
-  copy_all: "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.",
+  copy_all: `This copies every file into your projects folder. It can take a long time and needs as much free space again. If ${thisComputer()} sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.`,
   large: "This folder is very large.",
   unmeasured: "CrazyAgent couldn't measure it.",
   too_many: "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time.",
