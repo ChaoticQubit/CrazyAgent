@@ -155,16 +155,9 @@ impl OwnerClient {
                 return Err(failure("account_profile_request_bounds"));
             }
             self.root.verify()?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
-            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
-                .await
-                .map_err(|_| failure("account_profile_owner_unavailable"))?;
-            verify_server(&stream)?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
+            let mut stream = self
+                .connect_checked(|_| failure("account_profile_owner_unavailable"))
+                .await?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {

@@ -192,13 +192,9 @@ impl OwnerClient {
             let frame = encode_frame(&Envelope { recovery: action })
                 .map_err(|_| failure("recovery_request_bounds"))?;
             self.root.verify()?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
-            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
-                .await
-                .map_err(|_| failure("recovery_unavailable"))?;
-            verify_server(&stream)?;
+            let mut stream = self
+                .connect_checked(|_| failure("recovery_unavailable"))
+                .await?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
