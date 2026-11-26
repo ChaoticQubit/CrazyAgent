@@ -248,10 +248,8 @@ pub(crate) enum Part {
 #[cfg(target_os = "macos")]
 pub(super) fn read_parts(entries: &[&Path]) -> Vec<Part> {
     use std::os::unix::fs::MetadataExt;
-    let read: Vec<std::io::Result<std::fs::Metadata>> = entries
-        .iter()
-        .map(|entry| std::fs::symlink_metadata(entry))
-        .collect();
+    let read: Vec<std::io::Result<std::fs::Metadata>> =
+        entries.iter().map(std::fs::symlink_metadata).collect();
     let listed: Vec<(&Path, &std::fs::Metadata)> = entries
         .iter()
         .zip(&read)

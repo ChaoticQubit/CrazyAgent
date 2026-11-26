@@ -120,6 +120,7 @@ fn shape(parts: Vec<Part>) -> Vec<Part> {
 /// and a folder this user cannot search.
 #[test]
 fn the_held_walk_reads_every_part_as_lstat_does() {
+    type Seen = (PathBuf, Vec<Part>, Vec<Part>, Vec<Part>);
     let (_guard, home) = home_through_var();
     folder(&home.join("open"), 0o777);
     folder(&home.join("open/shut"), 0o700);
@@ -140,7 +141,7 @@ fn the_held_walk_reads_every_part_as_lstat_does() {
         "loop/x/sock",
         "locked/in/sock",
     ];
-    let seen: Vec<(PathBuf, Vec<Part>, Vec<Part>, Vec<Part>)> = paths
+    let seen: Vec<Seen> = paths
         .iter()
         .map(|path| {
             let path = home.join(path);
