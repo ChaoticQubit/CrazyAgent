@@ -1778,7 +1778,7 @@ impl OwnerServer {
     fn accept_owner_handshake(
         &self,
         stream: Stream,
-        auth: [u8; 37],
+        auth: crate::engine::secret_frame::OwnerPacket,
         deadline: Instant,
         tasks: &mut Tasks,
     ) {
@@ -1823,11 +1823,12 @@ impl OwnerServer {
             let engine = self.engine.clone();
             let authority = Arc::downgrade(&self.authority);
             let timeout = self.timeout;
+            let tracked = auth.clone();
             let task = tasks.custody.spawn(async move {
                 native_auth_channel::serve(stream, auth, engine, authority, timeout, deadline)
                     .await;
             });
-            self.authority.track_native_auth(&auth, task);
+            self.authority.track_native_auth(&tracked, task);
         } else {
             while let Some(result) = tasks.clients.try_join_next() {
                 log_panic(&result, "owner_client_panicked");
@@ -1856,7 +1857,7 @@ impl OwnerServer {
     fn refuse_busy(
         &self,
         stream: Stream,
-        handshake: Option<([u8; 37], Instant)>,
+        handshake: Option<(crate::engine::secret_frame::OwnerPacket, Instant)>,
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
         while let Some(result) = refusals.try_join_next() {
@@ -1893,7 +1894,7 @@ impl OwnerServer {
     fn refuse_terminal(
         &self,
         stream: Stream,
-        auth: [u8; 37],
+        auth: crate::engine::secret_frame::OwnerPacket,
         deadline: Instant,
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
@@ -2476,12 +2477,12 @@ impl Engine {
 async fn read_owner_handshake(
     mut stream: Stream,
     timeout: Duration,
-) -> Option<(Stream, [u8; 37], Instant)> {
+) -> Option<(Stream, crate::engine::secret_frame::OwnerPacket, Instant)> {
     let deadline = Instant::now() + timeout;
     let exchange = async {
         verify_client(&stream)?;
-        let mut auth = [0; 37];
-        stream.read_exact(&mut auth).await.map_err(io_error)?;
+        let mut auth = crate::engine::secret_frame::owner_packet_buffer();
+        stream.read_exact(&mut *auth).await.map_err(io_error)?;
         Ok::<_, EngineError>(auth)
     };
     match tokio::time::timeout_at(deadline, exchange).await {
@@ -2510,7 +2511,7 @@ async fn serve_owner(
 /// the stream and the stream is closed.
 async fn serve_authenticated_owner(
     mut stream: Stream,
-    auth: [u8; 37],
+    auth: crate::engine::secret_frame::OwnerPacket,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     deadline: Instant,
@@ -3541,11 +3542,9 @@ impl RunnerClient {
             bootstrap.verify(&runtime)?;
             binding.verify()?;
             generation.verify_key(&name, &file, identity)?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAR1");
-            packet[4] = bootstrap.value.slot;
-            packet[5..].copy_from_slice(&token);
-            stream.write_all(&packet).await.map_err(io_error)?;
+            let packet =
+                crate::engine::secret_frame::owner_packet(b"CAR1", bootstrap.value.slot, &token);
+            stream.write_all(&*packet).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("runner_request_bounds"))?)
                 .await
@@ -3788,14 +3787,12 @@ impl OwnerClient {
         request.validate()?;
         tokio::time::timeout(self.timeout, async {
             let mut stream = self.connect_checked(io_error).await?;
-            let mut auth = [0; 37];
-            auth[..4].copy_from_slice(b"CAO1");
-            auth[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            auth[5..].copy_from_slice(&self.token);
-            stream.write_all(&auth).await.map_err(io_error)?;
+            let auth = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
+            stream.write_all(&*auth).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("owner_request_bounds"))?)
                 .await
@@ -4402,10 +4399,13 @@ fallback_allowed = false
             .unwrap();
         nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize)
             .unwrap();
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAO1");
-        packet[5..].copy_from_slice(&std::fs::read(root.path().join(KEYS[0])).unwrap());
-        client.write_all(&packet).await.unwrap();
+        let key = std::fs::read(root.path().join(KEYS[0])).unwrap();
+        let packet = crate::engine::secret_frame::owner_packet(
+            b"CAO1",
+            0,
+            &key.as_slice().try_into().unwrap(),
+        );
+        client.write_all(&*packet).await.unwrap();
         let req = OwnerRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new("large-read").unwrap(),

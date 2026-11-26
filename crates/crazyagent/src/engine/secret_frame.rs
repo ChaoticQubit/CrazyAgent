@@ -1,9 +1,41 @@
 use crate::engine::EngineError;
-use crate::engine::owner::AccountSecret;
+use crate::engine::owner::{AccountSecret, OwnerClientKind};
 use kernel_security::secret::Zeroizing;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const PROFILE_SECRET_MAX: usize = 8192;
+
+/// The bytes of an owner packet: four magic bytes, a tag byte and a 32-byte token.
+pub const OWNER_PACKET_BYTES: usize = 37;
+
+/// An owner packet in a buffer wiped when dropped, so no hop copies the token out of it.
+pub type OwnerPacket = Zeroizing<[u8; OWNER_PACKET_BYTES]>;
+
+/// Lays out one owner packet, the magic, the tag (a client kind, a runner slot or 0) and
+/// the token, in a buffer wiped when dropped, on a write error or a cancel too. Inputs: the
+/// magic, the tag and the token. Output: the packet.
+pub fn owner_packet(magic: &[u8; 4], tag: u8, token: &[u8; 32]) -> OwnerPacket {
+    let mut packet = owner_packet_buffer();
+    packet[..4].copy_from_slice(magic);
+    packet[4] = tag;
+    packet[5..].copy_from_slice(token);
+    packet
+}
+
+/// A zeroed owner packet buffer, wiped when dropped, for a server to read a client's packet
+/// into. Output: the buffer.
+pub fn owner_packet_buffer() -> OwnerPacket {
+    Zeroizing::new([0; OWNER_PACKET_BYTES])
+}
+
+/// The tag byte an owner client sends for its kind. Input: the kind. Output: 0 for the
+/// terminal client, 1 for the desktop app.
+pub fn client_tag(kind: OwnerClientKind) -> u8 {
+    match kind {
+        OwnerClientKind::Tui => 0,
+        OwnerClientKind::Desktop => 1,
+    }
+}
 
 /// Writes one secret to an owner stream as its 4-byte big-endian length and its bytes, or a
 /// zero length when there is none, and wipes the bytes. Inputs: the stream and the secret.

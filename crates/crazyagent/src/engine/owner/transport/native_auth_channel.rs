@@ -1911,7 +1911,7 @@ impl Drop for Session {
 
 pub(super) async fn serve(
     mut stream: Stream,
-    packet: [u8; 37],
+    packet: crate::engine::secret_frame::OwnerPacket,
     engine: Arc<Engine>,
     authority: Weak<Authority>,
     timeout: Duration,
@@ -2368,9 +2368,7 @@ impl NativeAuthCustodyChannel {
         if root.socket_identity()? != socket {
             return Err(failure("owner_socket_replaced"));
         }
-        let mut packet = kernel_security::secret::Zeroizing::new([0u8; 37]);
-        packet[..4].copy_from_slice(b"CAN1");
-        packet[5..].copy_from_slice(&token);
+        let packet = crate::engine::secret_frame::owner_packet(b"CAN1", 0, &token);
         kernel_security::secret::wipe(&mut token);
         stream.write_all(&*packet).await.map_err(io_error)?;
         let frame = encode_frame(&Attach {
@@ -2952,9 +2950,7 @@ fallback_allowed = false
             action: NativeAuthAction,
         ) -> Self {
             let host = service.owner_runtime().unwrap();
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[5..].copy_from_slice(&client.token);
+            let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &client.token);
             let admission = host.authority.authenticate(&packet).unwrap();
             let command = match action {
                 NativeAuthAction::SignIn { method } => Command::Start(NativeAuthStart {
@@ -3550,9 +3546,7 @@ fallback_allowed = false
                 operation: OwnerOperation::Apply { mutation },
             };
             request.validate().unwrap();
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[5..].copy_from_slice(&self.client.token);
+            let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &self.client.token);
             let admission = host.authority.authenticate(&packet).unwrap();
             let operation = host
                 .engine

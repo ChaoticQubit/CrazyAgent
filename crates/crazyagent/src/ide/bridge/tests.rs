@@ -91,11 +91,7 @@ impl Case {
 
 /// The 37-byte handshake: four magic bytes, a slot byte and a 32-byte token.
 pub(in crate::ide::bridge) fn packet(magic: &[u8; 4], slot: u8, token: &[u8; 32]) -> [u8; 37] {
-    let mut packet = [0; 37];
-    packet[..4].copy_from_slice(magic);
-    packet[4] = slot;
-    packet[5..].copy_from_slice(token);
-    packet
+    *crate::engine::secret_frame::owner_packet(magic, slot, token)
 }
 
 /// Decodes lowercase hexadecimal text.

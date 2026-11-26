@@ -92,10 +92,8 @@ impl Usage {
     }
 
     /// The handshake packet the owner client sends. Output: the packet.
-    pub(super) fn packet(&self) -> [u8; 37] {
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAO1");
-        packet[5..].copy_from_slice(&self.client.token);
+    pub(super) fn packet(&self) -> crate::engine::secret_frame::OwnerPacket {
+        let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &self.client.token);
         packet
     }
 

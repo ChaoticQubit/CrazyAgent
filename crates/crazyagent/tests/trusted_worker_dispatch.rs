@@ -330,11 +330,8 @@ async fn exchange<T: Serialize>(
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut stream = kernel_processes::spawn_gate::connect_unix(socket).await?;
         if let Some((principal, slot, token)) = auth {
-            let mut prelude = [0; 37];
-            prelude[..4].copy_from_slice(principal);
-            prelude[4] = slot;
-            prelude[5..].copy_from_slice(token);
-            if let Err(error) = stream.write_all(&prelude).await {
+            let prelude = crazyagent::engine::secret_frame::owner_packet(principal, slot, token);
+            if let Err(error) = stream.write_all(&*prelude).await {
                 return if closed(&error) { Ok(None) } else { Err(error) };
             }
         }
