@@ -22,6 +22,38 @@ fn folder(path: &Path, mode: u32) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
+/// Shuts a folder to mode 000. Input: the folder. Output: the error the mode change gave, if
+/// any.
+fn shut(path: &Path) -> std::io::Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o0))
+}
+
+/// A home whose setup fails after a folder in it is shut is gone once the failure unwinds.
+/// Input: none. Output: none; it panics when the home is left behind, after removing it
+/// itself.
+#[test]
+fn a_home_with_a_shut_folder_is_gone_after_a_failed_setup() {
+    let mut made = None;
+    let failed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> std::io::Result<()> {
+            let (_guard, home) = home_through_var()?;
+            made = Some(home.clone());
+            folder(&home.join("locked"), 0o700)?;
+            folder(&home.join("locked/in"), 0o700)?;
+            let _shut = shut(&home.join("locked"))?;
+            panic!("the setup fails");
+        }));
+    assert!(failed.is_err());
+    let home = made.expect("the setup made its home");
+    let left = home.exists();
+    if left {
+        let _ =
+            std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+    assert!(!left, "the failed setup left {} behind", home.display());
+}
+
 /// The socket check names, for sockets under the `/var` link: a folder others can write
 /// above the socket's own; nothing through a link to such a folder, whose target is never a
 /// part of the path as written; the socket itself past a file, a link loop or a folder this
