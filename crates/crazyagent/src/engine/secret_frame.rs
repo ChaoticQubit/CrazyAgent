@@ -109,7 +109,7 @@ pub fn drain_errors(
     let mut bytes = Zeroizing::new(Vec::with_capacity(4096usize.saturating_sub(*count)));
     drain(
         descriptor,
-        &mut *bytes,
+        &mut bytes,
         eof,
         4096usize.saturating_sub(*count),
     )?;
