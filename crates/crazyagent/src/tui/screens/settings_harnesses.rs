@@ -40,13 +40,12 @@ pub(super) const SUBTITLE: &str = on_this_computer!(
     "Agents run inside these tools. CrazyAgent finds them on ",
     ". It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it."
 );
-/// The page's subtitle on Windows: where CrazyAgent finds the harnesses and that it installs
-/// one with npm when the owner chooses it; the page offers no Update there
-/// ([`update_blocked`]), so updates stay outside CrazyAgent, and Windows has no Homebrew.
+/// The page's subtitle on Windows: where CrazyAgent finds the harnesses and how it installs
+/// one with npm and updates one when the owner chooses it; Windows has no Homebrew.
 #[cfg(windows)]
 pub(super) const SUBTITLE: &str = on_this_computer!(
     "Agents run inside these tools. CrazyAgent finds them on ",
-    ". It can install one with npm when you choose it. Update them outside CrazyAgent."
+    ". It can install one with npm and update one with that harness's own updater, each only when you choose it."
 );
 const MODAL_WIDTH: u16 = 72;
 const UPDATE_POLLS_MAX: usize = 240;
