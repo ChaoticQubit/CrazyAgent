@@ -9,6 +9,7 @@ pub mod linux;
 pub mod macos;
 #[cfg(unix)]
 pub mod node;
+pub mod node_usable;
 pub mod pack;
 #[cfg(unix)]
 pub mod pinned;

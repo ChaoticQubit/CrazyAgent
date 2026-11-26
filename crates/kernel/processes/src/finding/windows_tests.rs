@@ -18,6 +18,16 @@ fn copy_named(from: &Path, to: &Path) {
     }
 }
 
+/// On Windows the engine looks for the harnesses it installed with npm at its npm prefix's
+/// root, where npm writes their `.cmd` shims, since a Windows npm prefix has no `bin`.
+#[test]
+fn the_engine_looks_for_its_npm_harnesses_at_the_prefix_root() {
+    let root = PathBuf::from(r"C:\engine");
+    let [setup, harnesses] = engine_folders(&STUB_HOOKS, &root);
+    assert_eq!(setup, root.join("setup").join("bin"));
+    assert_eq!(harnesses, (STUB_HOOKS.harness_prefix)(&root));
+}
+
 /// A folder with a stand-in `node.exe` (a copy of the `where.exe` Windows ships, a real
 /// program) and places that look there. Input: none. Output: the folder guard, its real
 /// spelling and the places.
