@@ -652,9 +652,9 @@ fn taken_copy(
 }
 
 /// Refuses every harness command on Windows while the engine's token is elevated, the twin
-/// of the Unix refusal to run an updater as root ([`refused_user`]), ahead of every other
-/// answer, so an elevated owner never reads that an update needs an administrator. Input:
-/// the roots. Output: Ok, or `AS_ROOT`.
+/// of the Unix refusal to run an updater as root ([`refused_user`]): once the install is
+/// known and before any tool is checked, so an elevated owner never reads that an update
+/// needs an administrator. Input: the roots. Output: Ok, or `AS_ROOT`.
 fn refused_here(roots: &Roots) -> Result<(), &'static str> {
     #[cfg(windows)]
     if let Some(code) = run::refused_token(roots.elevated) {
@@ -677,8 +677,9 @@ pub fn update_command(
     real: &Path,
     roots: &Roots,
 ) -> Result<Fixed, &'static str> {
+    let found = found(id, real, roots)?;
     refused_here(roots)?;
-    match found(id, real, roots)? {
+    match found {
         Found::Own(own) => {
             let folder = entry.parent().ok_or(TOOL_MISSING)?;
             if kernel_sandbox::paths::canonical(entry).ok().as_deref() != Some(real) {
@@ -726,8 +727,11 @@ pub fn update_command(
 /// Inputs: the harness id, the real path and the roots. Output: the command, None for an
 /// install that updates itself (it has no check-only command), or the refusal code.
 pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixed>, &'static str> {
-    refused_here(roots)?;
-    match found(id, real, roots)? {
+    let found = found(id, real, roots)?;
+    if !matches!(found, Found::Own(_)) {
+        refused_here(roots)?;
+    }
+    match found {
         Found::Own(_) => Ok(None),
         Found::Brew { prefix, brew } => {
             let args = match brew.kind {
@@ -1195,9 +1199,10 @@ mod windows_tests {
         );
     }
 
-    /// An elevated engine is refused before anything else is decided: an update, a check and
-    /// an install all answer that the engine runs as an administrator, where the same roots
-    /// unelevated answer as before. The engine's own roots carry the token's real elevation.
+    /// An elevated engine is refused once the install is known and before any tool is
+    /// checked: an update, a check and an install all answer that the engine runs as an
+    /// administrator, where the same roots unelevated answer as before. The engine's own
+    /// roots carry the token's real elevation.
     #[test]
     fn an_elevated_engine_is_refused_before_every_other_answer() {
         let mut roots = Roots {
