@@ -725,9 +725,10 @@ fn plain_drive(path: &Path) -> bool {
 }
 
 /// Reads where an open entry really is from its handle with W1 `place`, in the plain
-/// spelling: checked to be a `\\?\` drive path first, its one prefix is then dropped, and any
-/// other form, a share or a device among them, is `Unsafe`. The local strip goes once W3-4a's `one_spelling` arm lands
-/// (DESIGN-0515 D6). Input: the handle. Output: the plain place, or the error.
+/// spelling: checked to be a `\\?\` drive path first, its one prefix is then dropped, and
+/// any other form, a share or a device among them, is `Unsafe`. The local strip goes once
+/// W3-4a's `one_spelling` arm lands (DESIGN-0515 D6). Input: the handle. Output: the plain
+/// place, or the error.
 #[cfg(windows)]
 fn place_of(file: &File) -> Result<PathBuf, HeldError> {
     use std::os::windows::ffi::OsStringExt;
@@ -974,6 +975,14 @@ impl Folder {
     /// with no link in it. Output: the place.
     pub(crate) fn place(&self) -> &Path {
         &self.path
+    }
+
+    /// Where the held folder is now, read again from its handle: its place, or `Unsafe` when
+    /// the handle no longer names it there or it became a reparse point. Output: the place,
+    /// or the error.
+    pub(crate) fn place_now(&self) -> Result<&Path, HeldError> {
+        self.unmoved()?;
+        Ok(&self.path)
     }
 
     /// Holds the first folder of a chain its caller judges: only the plain drive spelling,
