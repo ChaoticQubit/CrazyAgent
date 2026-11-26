@@ -198,7 +198,7 @@ pub(crate) enum Part {
 /// object `lstat` found ([`super::acl::shared_all`]). A link's own access list is never read,
 /// as its mode is not. Input: the parts. Output: the reads, in order.
 #[cfg(target_os = "macos")]
-fn read_parts(entries: &[&Path]) -> Vec<Part> {
+pub(super) fn read_parts(entries: &[&Path]) -> Vec<Part> {
     read_parts_known(entries, &[])
 }
 
@@ -347,6 +347,159 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
     None
 }
 
+/// The parts of a socket's path, the socket first, read in one walk down from `/` through
+/// held folder handles ([`held_parts`]), or with `lstat` per part ([`read_parts`]) where the
+/// path is not a plain chain of names or `/` cannot be opened. Inputs: the socket and its
+/// ancestors, the socket first. Output: one part per ancestor, in that order.
+#[cfg(target_os = "macos")]
+fn socket_parts(socket: &Path, entries: &[&Path]) -> Vec<Part> {
+    match held_parts(socket) {
+        Some(mut parts) => {
+            parts.reverse();
+            parts
+        }
+        None => read_parts(entries),
+    }
+}
+
+/// The parts of a socket's path, read with `lstat` per part ([`read_parts`]). Inputs: the
+/// socket and its ancestors, the socket first. Output: one part per ancestor, in that order.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn socket_parts(_socket: &Path, entries: &[&Path]) -> Vec<Part> {
+    read_parts(entries)
+}
+
+/// Reads every part of an absolute path from `/` down in one walk: each folder is opened for
+/// search with no link followed and read through that handle with one `getattrlist`, so the
+/// object judged is the object walked into and no name is looked up twice. A link mid-path
+/// is read itself and then followed, as `lstat` follows it for the parts below; the last part
+/// is read through its folder without following a link. A part that cannot be opened is read
+/// itself, and every part below it reads missing when the open found nothing there and
+/// unreadable otherwise, as `lstat` reads them. Input: the path. Output: one part per
+/// ancestor, `/` first, or none for a path with a part other than a name, or when `/` cannot
+/// be opened.
+#[cfg(target_os = "macos")]
+pub(super) fn held_parts(path: &Path) -> Option<Vec<Part>> {
+    use std::os::fd::AsFd;
+    use std::path::Component;
+    let mut names = Vec::new();
+    for (index, part) in path.components().enumerate() {
+        match part {
+            Component::RootDir if index == 0 => {}
+            Component::Normal(name) => {
+                names.push(std::ffi::CString::new(name.as_encoded_bytes()).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    let mut places: Vec<&Path> = path.ancestors().collect();
+    places.reverse();
+    if places.len() != names.len() + 1 {
+        return None;
+    }
+    let mut held = crazyagent_macos_fs::open_search(None, c"/", false).ok()?;
+    let mut parts = Vec::with_capacity(places.len());
+    let mut volumes: Volumes = Vec::new();
+    let read = crazyagent_macos_fs::held_entry(held.as_fd());
+    parts.push(held_part(read, &mut volumes, |device| {
+        crazyagent_macos_fs::held_volume_keeps_lists(held.as_fd(), device).unwrap_or(false)
+    }));
+    for (index, name) in names.iter().enumerate() {
+        let at = |held: &std::os::fd::OwnedFd, volumes: &mut Volumes| {
+            let read = crazyagent_macos_fs::held_entry_at(held.as_fd(), name);
+            held_part(read, volumes, |device| {
+                crazyagent_macos_fs::held_volume_keeps_lists_at(held.as_fd(), name, device)
+                    .unwrap_or(false)
+            })
+        };
+        if index + 1 == names.len() {
+            parts.push(at(&held, &mut volumes));
+            break;
+        }
+        let failed = match crazyagent_macos_fs::open_search(Some(held.as_fd()), name, false) {
+            Ok(child) => {
+                let read = crazyagent_macos_fs::held_entry(child.as_fd());
+                parts.push(held_part(read, &mut volumes, |device| {
+                    crazyagent_macos_fs::held_volume_keeps_lists(child.as_fd(), device)
+                        .unwrap_or(false)
+                }));
+                held = child;
+                continue;
+            }
+            Err(error) => error,
+        };
+        let part = at(&held, &mut volumes);
+        parts.push(part);
+        let below = if matches!(part, Part::Found { link: true, .. }) {
+            match crazyagent_macos_fs::open_search(Some(held.as_fd()), name, true) {
+                Ok(child) => {
+                    held = child;
+                    continue;
+                }
+                Err(error) => error,
+            }
+        } else {
+            failed
+        };
+        let rest = if below.kind() == std::io::ErrorKind::NotFound {
+            Part::Missing
+        } else {
+            Part::Unreadable
+        };
+        parts.resize(places.len(), rest);
+        break;
+    }
+    assert!(volumes.len() <= parts.len());
+    assert_eq!(parts.len(), places.len());
+    Some(parts)
+}
+
+/// The volumes one held walk has asked about, by device, each with whether it keeps access
+/// lists; it lives only for that walk.
+#[cfg(target_os = "macos")]
+type Volumes = Vec<(u64, bool)>;
+
+/// One part as a held read gives it: missing, unreadable, carrying an access list others can
+/// change it through ([`super::acl::held_shared`], never read for a link, as [`read_parts`]
+/// reads none), or its owner, group, permission bits and kind. The volume is asked once per
+/// device within the walk. Inputs: the read, the walk's volume answers and the volume
+/// question. Output: the part.
+#[cfg(target_os = "macos")]
+fn held_part(
+    read: std::io::Result<crazyagent_macos_fs::HeldEntry>,
+    volumes: &mut Volumes,
+    volume: impl FnOnce(u64) -> bool,
+) -> Part {
+    let read = match read {
+        Ok(read) => read,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Part::Missing,
+        Err(_) => return Part::Unreadable,
+    };
+    let link = read.link();
+    if !link {
+        let keeps = match volumes.iter().find(|(device, _)| *device == read.device) {
+            Some((_, keeps)) => *keeps,
+            None => {
+                let keeps = volume(read.device);
+                volumes.push((read.device, keeps));
+                keeps
+            }
+        };
+        match super::acl::held_shared(&read, keeps) {
+            None => return Part::Unreadable,
+            Some(true) => return Part::Shared,
+            Some(false) => {}
+        }
+    }
+    Part::Found {
+        owner: read.owner,
+        group: read.group,
+        mode: read.mode & 0o7777,
+        folder: read.folder(),
+        link,
+    }
+}
+
 /// The first entry on a path that an account other than SYSTEM, the administrators,
 /// TrustedInstaller and this user can change, read as written, with its links resolved, and
 /// every link, junction, `..` folder and first missing part its resolution passes through
@@ -382,7 +535,7 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 pub fn changeable_above_socket(socket: &Path) -> Option<PathBuf> {
     assert!(socket.is_absolute());
     let entries: Vec<&Path> = socket.ancestors().collect();
-    let mut parts = read_parts(&entries);
+    let mut parts = socket_parts(socket, &entries);
     assert_eq!(parts.len(), entries.len());
     for part in parts.iter_mut().take(2) {
         if let Part::Found { mode, .. } = part {

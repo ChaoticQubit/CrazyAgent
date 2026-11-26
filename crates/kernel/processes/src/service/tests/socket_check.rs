@@ -91,3 +91,70 @@ fn the_socket_check_sets_aside_only_the_socket_and_its_folder_write_bits() {
     assert_eq!(changeable_above_socket(&near), None);
     assert_eq!(changeable_above_socket(&far), Some(home.join("m2")));
 }
+
+/// The parts with only their permission bits kept in each mode, as the ownership rule reads
+/// them; `lstat` also carries the type bits. Input: the parts. Output: the parts.
+fn shape(parts: Vec<Part>) -> Vec<Part> {
+    parts
+        .into_iter()
+        .map(|part| match part {
+            Part::Found {
+                owner,
+                group,
+                mode,
+                folder,
+                link,
+            } => Part::Found {
+                owner,
+                group,
+                mode: mode & 0o7777,
+                folder,
+                link,
+            },
+            other => other,
+        })
+        .collect()
+}
+
+/// The held walk reads every part as `lstat` reads it, part for part: through the `/var`
+/// link and a link to a folder, past a file, a missing part, a dangling link, a link loop
+/// and a folder this user cannot search.
+#[test]
+fn the_held_walk_reads_every_part_as_lstat_does() {
+    let (_guard, home) = home_through_var();
+    folder(&home.join("open"), 0o777);
+    folder(&home.join("open/shut"), 0o700);
+    let _listener = UnixListener::bind(home.join("open/shut/sock")).unwrap();
+    std::fs::write(home.join("file"), b"x").unwrap();
+    symlink(home.join("open"), home.join("to-open")).unwrap();
+    symlink(home.join("gone"), home.join("dangling")).unwrap();
+    symlink("loop", home.join("loop")).unwrap();
+    folder(&home.join("locked"), 0o700);
+    folder(&home.join("locked/in"), 0o700);
+    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0)).unwrap();
+    let paths = [
+        "open/shut/sock",
+        "to-open/shut/sock",
+        "file/x/sock",
+        "gone/x/sock",
+        "dangling/x/sock",
+        "loop/x/sock",
+        "locked/in/sock",
+    ];
+    let seen: Vec<(PathBuf, Vec<Part>, Vec<Part>)> = paths
+        .iter()
+        .map(|path| {
+            let path = home.join(path);
+            let mut walked = changeable::held_parts(&path).expect("a plain chain of names");
+            walked.reverse();
+            let entries: Vec<&Path> = path.ancestors().collect();
+            let read = changeable::read_parts(&entries);
+            (path, shape(walked), shape(read))
+        })
+        .collect();
+    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(seen.len(), paths.len());
+    for (path, walked, read) in seen {
+        assert_eq!(walked, read, "{}", path.display());
+    }
+}
