@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { gitRepo } from "./questions-flow-repo.mjs";
-import { shownText } from "./shown-text.mjs";
+import { shownField, shownText, terminalSettled } from "./shown-text.mjs";
 import { INTERNALS, bridgeCall, owner, serveApp, start, stop } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -724,7 +724,7 @@ async function main() {
         const view = onPage();
         noneWaiting();
         await projectTab("conversation");
-        const field = await page.evaluate(`(() => { const field = document.querySelector("#pj-tab-panel .xterm-helper-textarea, #pj-tab-panel textarea"); field?.focus(); return field && document.activeElement === field ? field.className || field.tagName : null; })()`);
+        const field = await until("terminal_settled", VIEW_MS, () => page.evaluate(terminalSettled("#pj-tab-panel"))).then(() => page.evaluate(shownField("#pj-tab-panel .xterm-helper-textarea, #pj-tab-panel textarea")));
         const id = await ask("popup");
         await until("popup_shows_question", VIEW_MS, async () => (await popupText()).includes(ASKS.popup.question));
         await view.capture("questions-popup-conversation");
