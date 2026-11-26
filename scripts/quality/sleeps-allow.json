@@ -63,7 +63,7 @@
   "apps/desktop/test/native/codex-task-engine.mjs": 2,
   "apps/desktop/test/native/coord-settings.e2e.mjs": 3,
   "apps/desktop/test/native/desktop-flow.e2e.mjs": 2,
-  "apps/desktop/test/native/e2e-harness.mjs": 6,
+  "apps/desktop/test/native/e2e-harness.mjs": 7,
   "apps/desktop/test/native/e2e-harness.test.mjs": 1,
   "apps/desktop/test/native/engine-swap.wdio.conf.mjs": 1,
   "apps/desktop/test/native/first-run-skip-guide.e2e.mjs": 1,

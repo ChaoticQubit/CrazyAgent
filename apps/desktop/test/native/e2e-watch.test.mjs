@@ -31,55 +31,29 @@ test("v2.5 S3c: e2e_watch_next lives in the e2e bridge only and never builds int
   assert.match(readFileSync(join(DESKTOP, "src-tauri/e2e_bridge/main.rs"), "utf8"), /^mod watch;$/m);
 });
 
-test("v2.5 S3c: the harness page hands each e2e_watch_next change to the watch's channel in order, skips empty waits and stops once a newer page polls", async () => {
-  const answers = [
-    { value: null },
-    { value: { topics: ["team"] } },
-    { value: { topics: [] } },
-    { value: { topics: ["ide", "unknown"] } },
-    { failure: { code: "watch_superseded", message: "a newer page follows the engine watch" } },
-  ];
+const SUPERSEDED = { failure: { code: "watch_superseded", message: "a newer page follows the engine watch" } };
+
+/** Runs the harness page script on scripted bridge answers, with timers that fire on the next
+ * turn and keep each wait asked, then starts its watch and waits for every answer to be taken
+ * and a few more turns, so a loop that did not end asks once more and hangs on that ask.
+ * Input: the answers, the last one ending the loop. Output: what the page asked, what its
+ * channel got, the waits and its id. */
+async function watchPage(answers) {
   const asked = [];
+  const waits = [];
   let ended;
   const drained = new Promise((resolve) => (ended = resolve));
   const window = { addEventListener() {} };
   const fetch = async (_url, { body }) => {
     asked.push(JSON.parse(body));
+    if (answers.length === 0) return new Promise(() => {});
     const answer = answers.shift();
     if (answers.length === 0) ended();
     return { json: async () => answer };
   };
-  vm.runInNewContext(INTERNALS, { window, fetch });
-  const got = [];
-  const id = window.__TAURI_INTERNALS__.transformCallback((raw) => got.push(JSON.parse(JSON.stringify(raw))));
-  const channel = { id, toJSON: () => `__CHANNEL__:${id}` };
-  assert.equal(await window.__TAURI_INTERNALS__.invoke("desktop_watch", { changes: channel }), null);
-  await drained;
-  assert.deepEqual(got, [
-    { index: 0, message: { topics: ["team"] } },
-    { index: 1, message: { topics: ["ide", "unknown"] } },
-  ]);
-  assert.deepEqual(asked.map(({ cmd }) => cmd), ["desktop_watch", "e2e_watch_next", "e2e_watch_next", "e2e_watch_next", "e2e_watch_next"]);
-  assert.deepEqual(asked[0].args, { changes: `__CHANNEL__:${id}` });
-});
-
-test("the harness page keeps following the engine watch after a dropped long-poll, as the app's feed does, and asks the bridge to watch again", { timeout: 15000 }, async () => {
-  const answers = [
-    { value: null },
-    { dropped: "e2e_watch_next got no answer from the bridge: socket hang up" },
-    { value: null },
-    { value: { topics: ["team", "unknown"] } },
-    { failure: { code: "watch_superseded", message: "a newer page follows the engine watch" } },
-  ];
-  const asked = [];
-  let ended;
-  const drained = new Promise((resolve) => (ended = resolve));
-  const window = { addEventListener() {} };
-  const fetch = async (_url, { body }) => {
-    asked.push(JSON.parse(body));
-    const answer = answers.shift();
-    if (answers.length === 0) ended();
-    return { json: async () => answer };
+  const setTimeout = (done, ms) => {
+    waits.push(ms);
+    setImmediate(done);
   };
   vm.runInNewContext(INTERNALS, { window, fetch, setTimeout });
   const got = [];
@@ -87,7 +61,49 @@ test("the harness page keeps following the engine watch after a dropped long-pol
   const channel = { id, toJSON: () => `__CHANNEL__:${id}` };
   assert.equal(await window.__TAURI_INTERNALS__.invoke("desktop_watch", { changes: channel }), null);
   await drained;
+  for (let turn = 0; turn < 20; turn += 1) await new Promise((next) => setImmediate(next));
+  return { asked, got, waits, id };
+}
+
+test("v2.5 S3c: the harness page hands each e2e_watch_next change to the watch's channel in order, skips empty waits and stops once a newer page polls", async () => {
+  const { asked, got, waits, id } = await watchPage([
+    { value: null },
+    { value: { topics: ["team"] } },
+    { value: { topics: [] } },
+    { value: { topics: ["ide", "unknown"] } },
+    SUPERSEDED,
+  ]);
+  assert.deepEqual(got, [
+    { index: 0, message: { topics: ["team"] } },
+    { index: 1, message: { topics: ["ide", "unknown"] } },
+  ]);
+  assert.deepEqual(asked.map(({ cmd }) => cmd), ["desktop_watch", "e2e_watch_next", "e2e_watch_next", "e2e_watch_next", "e2e_watch_next"]);
+  assert.deepEqual(asked[0].args, { changes: `__CHANNEL__:${id}` });
+  assert.deepEqual(waits, []);
+});
+
+test("the harness page keeps following the engine watch after a dropped long-poll, as the app's feed does, asks the bridge to watch again and still stops once a newer page polls", async () => {
+  const dropped = { dropped: "e2e_watch_next got no answer from the bridge: socket hang up" };
+  const { asked, got, waits, id } = await watchPage([
+    { value: null },
+    dropped,
+    { value: null },
+    dropped,
+    { value: null },
+    dropped,
+    { value: null },
+    dropped,
+    { value: null },
+    { value: { topics: ["team", "unknown"] } },
+    SUPERSEDED,
+  ]);
   assert.deepEqual(got, [{ index: 0, message: { topics: ["team", "unknown"] } }]);
-  assert.deepEqual(asked.map(({ cmd }) => cmd), ["desktop_watch", "e2e_watch_next", "desktop_watch", "e2e_watch_next", "e2e_watch_next"]);
-  assert.deepEqual(asked[2].args, { changes: `__CHANNEL__:${id}` });
+  assert.deepEqual(asked.map(({ cmd }) => cmd), [
+    "desktop_watch",
+    ...Array(4).fill(["e2e_watch_next", "desktop_watch"]).flat(),
+    "e2e_watch_next",
+    "e2e_watch_next",
+  ]);
+  for (const resent of asked.filter(({ cmd }) => cmd === "desktop_watch")) assert.deepEqual(resent.args, { changes: `__CHANNEL__:${id}` });
+  assert.deepEqual(waits, [1000, 2000, 4000, 5000]);
 });
