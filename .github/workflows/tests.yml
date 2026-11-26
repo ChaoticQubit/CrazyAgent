@@ -165,7 +165,6 @@ jobs:
           path: ${{ runner.temp }}/archive
       - name: Run the model-server rows with no server and require them to fail as unavailable
         run: |
-          set +e
           set -uo pipefail
           archive="$RUNNER_TEMP/archive/farm-macos.tar.zst"
           [ -f "$archive" ] || { echo "::error::no test archive at $archive; the build job for this platform failed"; exit 1; }
@@ -173,9 +172,9 @@ jobs:
             [ -z "${!name:-}" ] || { echo "::error::$name is set in the control"; exit 1; }
           done
           log="$RUNNER_TEMP/absent.log"
+          rc=0
           cargo nextest run --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --no-tests=fail \
-            -E 'binary_id(=crazyagent::snapshot_v242) & test(=every_model_server_scenario_matches_its_2_4_2_capture)' > "$log" 2>&1
-          rc=$?
+            -E 'binary_id(=crazyagent::snapshot_v242) & test(=every_model_server_scenario_matches_its_2_4_2_capture)' > "$log" 2>&1 || rc=$?
           cat "$log"
           echo "control rc $rc"
           [ "$rc" -ne 0 ] || { echo "::error::the rows passed with no server"; exit 1; }
