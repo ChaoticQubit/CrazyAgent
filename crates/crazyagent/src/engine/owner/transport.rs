@@ -3331,7 +3331,7 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
         dispatch_directory(&repository.join(".git"))?,
         dispatch_directory(target)?,
     ];
-    if !crate::file_identity::same_files(&pinned[..live.len()], &live) {
+    if !kernel_common::file_identity::same_files(&pinned[..live.len()], &live) {
         return Err(failure("dispatch_filesystem_identity_changed"));
     }
     dispatch_config(repository)?;
@@ -3347,7 +3347,7 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
         return Err(failure("dispatch_git_metadata_escape"));
     }
     live.push(dispatch_directory(&metadata)?);
-    if !crate::file_identity::same_files(&pinned, &live) {
+    if !kernel_common::file_identity::same_files(&pinned, &live) {
         return Err(failure("dispatch_filesystem_identity_changed"));
     }
     crate::worktrees::validate_admin(repository, &metadata)?;

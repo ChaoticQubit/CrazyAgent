@@ -1159,7 +1159,7 @@ fn inspect(repository: &str) -> Result<Admission, EngineError> {
 /// `admitted_repository_replaced`.
 fn verify(admission: &Admission) -> Result<Admission, EngineError> {
     let current = inspect(&admission.repository)?;
-    if !crate::file_identity::same_files(
+    if !kernel_common::file_identity::same_files(
         &[admission.root.pair(), admission.metadata.pair()],
         &[current.root.pair(), current.metadata.pair()],
     ) {
@@ -2288,7 +2288,7 @@ fn same_lease_files(record: &LeaseRecord, live: [Identity; 4]) -> Result<(), Eng
         admin,
     ]
     .map(Identity::pair);
-    if !crate::file_identity::same_files(&pinned, &live.map(|identity| identity.pair())) {
+    if !kernel_common::file_identity::same_files(&pinned, &live.map(|identity| identity.pair())) {
         return Err(error("worktree_identity_changed"));
     }
     Ok(())

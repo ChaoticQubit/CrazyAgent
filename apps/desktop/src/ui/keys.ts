@@ -26,6 +26,14 @@ export function signInStore(mac: boolean = isMac(), windows: boolean = isWindows
   return windows ? "Windows Credential Manager" : "your system keyring";
 }
 
+/** The help under Profile's Theme choice, naming what System follows on this computer: the
+ * Mac on macOS, the computer's own light or dark setting on Windows and Linux. Input: whether
+ * this is macOS, by default the window's. Output: the help sentence. */
+export function themeHelp(mac: boolean = isMac()): string {
+  const follows = mac ? "System follows your Mac." : "System follows your computer's light or dark setting.";
+  return `${follows} This choice is kept in this app only.`;
+}
+
 /** Whether this window runs on Windows, where the engine takes drive paths such as
  * `C:\Program Files\nodejs\npx.cmd`. Input: the platform name, by default the window's.
  * Output: true on Windows. */

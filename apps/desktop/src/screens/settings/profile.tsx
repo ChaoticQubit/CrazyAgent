@@ -3,15 +3,16 @@ import { chooseTheme, readQuestionsShown, readTheme, saveQuestionsShown, useAppS
 import type { QuestionsShown } from "../../api-questions";
 import { QuestionsShownSetting } from "../project/question-popup";
 import { TerminalLines } from "./terminal";
-import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton, thisComputer } from "../../ui";
+import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { ProfileFields, draftFromProfile, emptyProfileDraft, submitProfile, type ProfileDraft, type ProfileErrors } from "../first-run";
 import { LearningReplay } from "../dashboard/learn";
+import { themeHelp } from "../../ui/keys";
 
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [questions, setQuestions] = useState<QuestionsShown>(readQuestionsShown);
   return <SettingSection title="Appearance">
-    <SettingLine label="Theme" help={`System follows ${thisComputer()}. This choice is kept in this app only.`}>
+    <SettingLine label="Theme" help={themeHelp()}>
       <Segmented label="Theme" value={theme} onValue={(value) => { setTheme(value); chooseTheme(value); }} options={[
         { value: "system", label: "System", icon: "monitor" }, { value: "light", label: "Light", icon: "sun" }, { value: "dark", label: "Dark", icon: "moon" },
       ]} />

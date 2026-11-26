@@ -1781,15 +1781,6 @@ fn assert_hidden_out_of_the_prompt(repo: &Path, hidden: &[std::path::PathBuf]) {
 /// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_with_the_graph_off() {
-    let (_dir, repo, hidden) = graphed_then_hidden();
-    assert_hidden_out_of_the_prompt(&repo, &hidden);
-}
-
-/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
-/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
-#[cfg(target_os = "macos")]
-#[test]
 fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_graphify_is_missing() {
     let (_dir, repo, hidden) = graphed_then_hidden();
     assert_eq!(

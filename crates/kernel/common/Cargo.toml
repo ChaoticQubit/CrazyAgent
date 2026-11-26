@@ -14,3 +14,7 @@ sha2 = "=0.10.9"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 sha2 = { version = "=0.10.9", features = ["asm"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+rusqlite = { version = "=0.40.2", default-features = false }
+tempfile = "=3.27.0"

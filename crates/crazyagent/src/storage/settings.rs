@@ -449,7 +449,7 @@ impl SettingsSources {
         ];
         if pinned == live
             || pins.iter().any(|(device, _)| *device != pinned)
-            || !crate::file_identity::same_files(
+            || !kernel_common::file_identity::same_files(
                 &folders,
                 &[self.global.identity, self.project.identity],
             )

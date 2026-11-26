@@ -38,7 +38,6 @@ pub mod coordination;
 pub mod credentials;
 pub mod demo;
 pub mod engine;
-pub mod file_identity;
 #[cfg(unix)]
 pub mod file_lock;
 pub mod github;

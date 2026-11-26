@@ -1,5 +1,9 @@
 use ratatui::style::{Color, Modifier, Style};
 
+mod appearance;
+
+pub use appearance::system_appearance;
+
 /// How many colors the terminal shows, read once at start.
 /// Input: environment variables through `depth`. Output: one of four depths;
 /// a dumb terminal has no depth and the TUI does not start.
@@ -11,13 +15,20 @@ pub enum Depth {
     NoColor,
 }
 
+/// The follow choice's label on macOS.
+#[cfg(target_os = "macos")]
+const FOLLOW_LABEL: &str = "Follow macOS";
+/// The follow choice's label on Windows and Linux.
+#[cfg(not(target_os = "macos"))]
+const FOLLOW_LABEL: &str = "Follow system";
+
 /// The owner's "Colors" choice in Profile.
-/// Input: the saved choice. Output: which palette the theme uses; Follow macOS
-/// takes the system appearance.
+/// Input: the saved choice. Output: which palette the theme uses; the follow
+/// choice takes this computer's light or dark setting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Colors {
     #[default]
-    FollowMacos,
+    FollowSystem,
     Dark,
     Light,
     Terminal,
@@ -27,14 +38,14 @@ impl Colors {
     /// Every choice in display order with its label, for the Profile radio row.
     /// Input: none. Output: the four choices and their plain labels.
     pub const ALL: [(Colors, &'static str); 4] = [
-        (Colors::FollowMacos, "Follow macOS"),
+        (Colors::FollowSystem, FOLLOW_LABEL),
         (Colors::Dark, "Dark"),
         (Colors::Light, "Light"),
         (Colors::Terminal, "Terminal colors"),
     ];
 }
 
-/// Light or dark appearance, from the choice or from macOS.
+/// Light or dark appearance, from the choice or from the system setting.
 /// Input: none. Output: which half of the Signal workshop palette applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Appearance {
@@ -74,25 +85,6 @@ pub fn depth(var: impl Fn(&str) -> Option<String>) -> Option<Depth> {
         return Some(Depth::Ansi256);
     }
     Some(Depth::Ansi16)
-}
-
-/// Reads the macOS appearance with `defaults read -g AppleInterfaceStyle`.
-/// Input: none. Output: Dark when macOS prints "Dark", otherwise Light,
-/// including when the command is missing or fails.
-pub fn system_appearance() -> Appearance {
-    let output = kernel_processes::spawn_gate::output(
-        std::process::Command::new("/usr/bin/defaults")
-            .args(["read", "-g", "AppleInterfaceStyle"])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped()),
-    );
-    match output {
-        Ok(output) if output.status.success() && output.stdout.trim_ascii() == b"Dark" => {
-            Appearance::Dark
-        }
-        _ => Appearance::Light,
-    }
 }
 
 /// The resolved palette: one style per role, plus the background to paint.
@@ -197,13 +189,13 @@ const LIGHT_256: Palette<u8> = Palette {
 impl Theme {
     /// Builds the theme for one terminal and one Colors choice.
     /// Inputs: color depth, the owner's choice and the system appearance used by
-    /// Follow macOS. Output: painted Signal workshop roles in truecolor and 256,
+    /// the follow choice. Output: painted Signal workshop roles in truecolor and 256,
     /// the terminal's own 16 colors, or modifiers only for NO_COLOR.
     pub fn new(depth: Depth, colors: Colors, system: Appearance) -> Self {
         let appearance = match colors {
             Colors::Dark => Appearance::Dark,
             Colors::Light => Appearance::Light,
-            Colors::FollowMacos | Colors::Terminal => system,
+            Colors::FollowSystem | Colors::Terminal => system,
         };
         match (depth, colors) {
             (Depth::NoColor, _) => Self::plain(),
@@ -355,11 +347,11 @@ mod tests {
 
     #[test]
     fn truecolor_paints_signal_workshop_for_each_appearance() {
-        let dark = Theme::new(Depth::TrueColor, Colors::FollowMacos, Appearance::Dark);
+        let dark = Theme::new(Depth::TrueColor, Colors::FollowSystem, Appearance::Dark);
         assert_eq!(dark.paint.unwrap().bg, Some(Color::Rgb(0x16, 0x15, 0x13)));
         assert_eq!(dark.accent.fg, Some(Color::Rgb(0xFF, 0x6A, 0x45)));
         assert_eq!(dark.selection.bg, Some(Color::Rgb(0xFF, 0x6A, 0x45)));
-        let light = Theme::new(Depth::TrueColor, Colors::FollowMacos, Appearance::Light);
+        let light = Theme::new(Depth::TrueColor, Colors::FollowSystem, Appearance::Light);
         assert_eq!(light.paint.unwrap().bg, Some(Color::Rgb(0xF2, 0xEE, 0xE6)));
         assert_eq!(light.accent.fg, Some(Color::Rgb(0xB9, 0x38, 0x1C)));
         assert_eq!(light.mark.fg, Some(Color::Rgb(0xE5, 0x48, 0x2D)));
@@ -379,7 +371,7 @@ mod tests {
         let dark = Theme::new(Depth::Ansi256, Colors::Dark, Appearance::Light);
         assert_eq!(dark.paint.unwrap().bg, Some(Color::Indexed(233)));
         assert_eq!(dark.error.fg, Some(Color::Indexed(204)));
-        let light = Theme::new(Depth::Ansi256, Colors::FollowMacos, Appearance::Light);
+        let light = Theme::new(Depth::Ansi256, Colors::FollowSystem, Appearance::Light);
         assert_eq!(light.paint.unwrap().bg, Some(Color::Indexed(255)));
         assert_eq!(light.mark.fg, Some(Color::Indexed(160)));
         assert_eq!(light.selection.fg, Some(Color::Indexed(231)));
@@ -430,5 +422,22 @@ mod tests {
         assert!(plain.selection.add_modifier.contains(Modifier::REVERSED));
         assert!(plain.muted.add_modifier.contains(Modifier::DIM));
         assert!(plain.error.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_follow_choice_names_macos_on_macos() {
+        assert_eq!(Colors::ALL[0], (Colors::default(), "Follow macOS"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_follow_choice_names_the_system_off_macos() {
+        assert_eq!(Colors::ALL[0], (Colors::default(), "Follow system"));
+        assert!(
+            Colors::ALL
+                .iter()
+                .all(|(_, label)| !label.contains("macOS"))
+        );
     }
 }

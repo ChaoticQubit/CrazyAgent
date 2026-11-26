@@ -1,8 +1,10 @@
+import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bundle } from "./browser.mjs";
 import { CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
 
+const { themeHelp } = await import("../src/ui/keys.ts");
 const fixture = await bundle(new URL("./fixtures/settings-access-layout.mjs", import.meta.url).pathname);
 const run = tabRunner(fixture);
 const onAccounts = (scene, check, ...rest) => run({ tab: "accounts", ...scene }, check, ...rest);
@@ -392,7 +394,7 @@ test("Profile then Appearance then Learn CrazyAgent, each field on its own line"
   const by = Object.fromEntries(sections.flatMap((section) => section.rows).map((row) => [row.label, row]));
   for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Terminal input", "Terminal renderer", "Questions show"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
   for (const label of ["Short bio", "Preferred stack"]) assert.ok(by[label].controlLeft < by[label].labelRight, `${label} stacks ${JSON.stringify(by[label])}`);
-  assert.equal(by.Theme.help, `System follows ${process.platform === "darwin" ? "this Mac" : "this computer"}. This choice is kept in this app only.`);
+  assert.equal(by.Theme.help, themeHelp(process.platform === "darwin"));
   assert.match(by["Terminal input"].help, /Where you type to the master and every agent, on every screen/);
   assert.match(by["Terminal renderer"].help, /^How every terminal draws its text\. GPU draws on the graphics card/);
 });
