@@ -4397,7 +4397,7 @@ fn a_failed_move_read_says_the_move_downloads_everything_and_sends_it() {
             shown.contains("CrazyAgent couldn't read this folder."),
             "{shown}"
         );
-        assert!(shown.contains("rebuildable folders too"), "{shown}");
+        assert_eq!(shown.contains("rebuildable folders too"), cfg!(target_os = "macos"), "{shown}");
         assert!(!shown.contains("Download everything (slow)"), "{shown}");
         assert!(!drawn.help.iter().any(|(key, _)| *key == "Space"));
         assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
