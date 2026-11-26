@@ -83,11 +83,11 @@ jobs:
         run: bash scripts/perf/sitting.sh setup
       - name: Build reading A's 2.5 side (scratch merge)
         if: ${{ !cancelled() }}
-        timeout-minutes: 50
+        timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build a crazyagent-kernel-processes
       - name: Build reading A's 2.4.4 twin
         if: ${{ !cancelled() }}
-        timeout-minutes: 50
+        timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build twin crazyagent
       - name: Reading A quiet, ABBA 2.5 2.4.4 2.5-aa x4
         if: ${{ !cancelled() }}
@@ -118,11 +118,11 @@ jobs:
         run: bash scripts/perf/sitting.sh drop a twin
       - name: Build reading B's after side 68721ffb41
         if: ${{ !cancelled() }}
-        timeout-minutes: 50
+        timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build b-after crazyagent-kernel-processes
       - name: Build reading B's before side c6f1398838
         if: ${{ !cancelled() }}
-        timeout-minutes: 50
+        timeout-minutes: 90
         run: bash scripts/perf/sitting.sh build b-before crazyagent-kernel-processes
       - name: Reading B quiet, ABBA 2.5 2.5-before 2.5-aa x4
         if: ${{ !cancelled() }}
