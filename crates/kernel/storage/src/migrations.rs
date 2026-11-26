@@ -546,7 +546,7 @@ fn barrier(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
 
 /// The full and barrier flushes this thread made since the last call, which resets them.
 /// Output: (full, barrier).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn take_flushes() -> (usize, usize) {
     FLUSHES.with(|counted| counted.replace((0, 0)))
 }

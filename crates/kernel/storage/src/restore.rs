@@ -2,8 +2,7 @@ use crate::StorageError;
 use crate::migrations::{
     BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
     V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, created, error,
-    file_digest, flush, mark_checked, pinned, private_file, schema, stamp, stamp_time,
-    write_texts,
+    file_digest, flush, mark_checked, pinned, private_file, schema, stamp, stamp_time, write_texts,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
