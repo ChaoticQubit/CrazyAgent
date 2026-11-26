@@ -378,6 +378,7 @@ fn a_windows_tools_off_claude_install_writes_its_two_files_and_holds_the_home() 
     );
     for file in [&mcp, &instructions] {
         let opened = std::fs::File::open(file).unwrap();
+        assert!(private::check(&opened).is_ok(), "{}", file.display());
         let list = private::facts(&opened).unwrap().list.unwrap();
         let entries = crazyagent_win_sandbox::dacl::entries(&list).unwrap();
         assert!(!entries.is_empty(), "{}", file.display());
