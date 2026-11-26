@@ -216,11 +216,7 @@ fn a_masked_field_pasted_into_frees_no_copy_of_the_paste() {
         assert_eq!(field.len(), PASTE_MARK.len());
         drop(field);
     });
-    let Key::Paste(text) = paste else {
-        unreachable!("the row built a paste")
-    };
-    let mut bytes = text.into_bytes();
-    kernel_security::secret::wipe(&mut bytes);
+    drop(paste);
     assert_eq!(freed, CLEAN);
 }
 

@@ -44,7 +44,9 @@ impl Drop for TextField {
     }
 }
 
-fn wipe(text: &mut String) {
+/// Zeroes a secret text over its whole allocation, the bytes past its length included,
+/// and leaves it empty. Input: the text. Output: none.
+pub(in crate::tui) fn wipe(text: &mut String) {
     let mut bytes = std::mem::take(text).into_bytes();
     kernel_security::secret::wipe_owned(&mut bytes);
 }
