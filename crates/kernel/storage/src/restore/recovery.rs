@@ -253,9 +253,10 @@ pub(super) fn put_back_with(
 }
 
 /// Keeps engine.db's bytes as they are in a new 0700 `replaced-<UTC time>` folder before a
-/// put-back writes, so it can be undone by hand. The copy is not checked, since the data
-/// may fail any check, so it gets no `checked` marker. Inputs: the database path, held
-/// alone, the root and the time. Output: the folder.
+/// put-back writes, so it can be undone by hand: a barrier orders the copy and its folder
+/// before the put-back's first write. The copy is not checked, since the data may fail any
+/// check, so it gets no `checked` marker. Inputs: the database path, held alone, the root
+/// and the time. Output: the folder.
 fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, StorageError> {
     let taken = stamp(now).map_err(|cause| restore_failed(cause.0))?;
     let target = root.join(BACKUPS).join(format!("{REPLACED}-{taken}"));
@@ -266,8 +267,8 @@ fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, Stora
     let copy = target.join(DATABASE);
     let made = std::fs::copy(path, &copy)
         .and_then(|_| std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600)))
-        .and_then(|()| flush(&std::fs::File::open(&copy)?, Flush::Full))
-        .and_then(|()| flush(&std::fs::File::open(&target)?, Flush::Full));
+        .and_then(|()| flush(&std::fs::File::open(&copy)?, Flush::Barrier))
+        .and_then(|()| flush(&std::fs::File::open(&target)?, Flush::Barrier));
     if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);
         return Err(restore_failed(cause));
@@ -275,7 +276,8 @@ fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, Stora
     Ok(target)
 }
 
-/// Removes the restore record and syncs its folder. Input: the root. Output: Ok once gone.
+/// Removes the restore record and fully flushes its folder. Input: the root. Output: Ok once
+/// gone.
 fn clear(root: &Path) -> Result<(), StorageError> {
     std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).map_err(restore_failed)?;
     std::fs::File::open(root)
