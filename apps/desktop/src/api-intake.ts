@@ -1,7 +1,7 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
 import { permissionRefusal } from "./api-intake-words";
-import { thisComputer } from "./ui/keys";
+import { isMac, signInStore, thisComputer } from "./ui/keys";
 import { githubPublishPrompt, githubPublishPromptSet, type GitHubPromptAnswer } from "./engine-client";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
@@ -125,8 +125,8 @@ const COPY: Record<string, string> = {
   github_config_invalid: "CrazyAgent's GitHub settings file can't be read safely. Sign in again.",
   github_state_invalid: "The saved GitHub sign-in can't be read. Sign in again.",
   github_state_unavailable: "The saved GitHub sign-in can't be read. Sign in again.",
-  credential_missing: "The saved GitHub sign-in is gone from your keychain. Sign in again.",
-  credential_store_unavailable: "Your system keychain can't be used right now.",
+  credential_missing: `The saved GitHub sign-in is gone from ${isMac() ? "your keychain" : signInStore()}. Sign in again.`,
+  credential_store_unavailable: `${isMac() ? "Your system keychain" : signInStore().replace(/^y/, "Y")} can't be used right now.`,
   github_repo_name_invalid: "That repository name isn't valid. Pick it from the list.",
   github_repo_name_unsupported: "CrazyAgent can't clone a repository whose name starts with a dot or dash, ends in .git or uses characters other than letters, digits, dots, dashes and underscores.",
   github_repo_page_invalid: "That page of repositories doesn't exist.",
