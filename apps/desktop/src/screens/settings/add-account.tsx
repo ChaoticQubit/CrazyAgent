@@ -247,7 +247,9 @@ export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
   const key = useRef<HTMLInputElement>(null);
   const [url, setUrl] = useState(entry.url_preset ?? "");
   const [model, setModel] = useState("");
-  const [models, setModels] = useState<Result<string[]>>();
+  const [found, setFound] = useState<{ url: string; models: Result<string[]> }>();
+  const lookup = useRef(0);
+  const models = found?.models;
   const [errors, setErrors] = useState<{ name?: string; url?: string; key?: string; model?: string; form?: string }>({});
   const [pending, setPending] = useState(false);
   const local = provider.provider === "local";
@@ -255,10 +257,14 @@ export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
   const findModels = async () => {
     const invalid = urlError(url);
     if (invalid) return setErrors({ url: invalid });
-    setModels(undefined);
-    const found = await localModels(url.trim());
-    setModels(found);
-    if (found.kind === "ok" && found.value.length > 0 && !model) setModel(found.value[0]!);
+    const queried = url.trim();
+    lookup.current += 1;
+    const asked = lookup.current;
+    setFound(undefined);
+    const result = await localModels(queried);
+    if (asked !== lookup.current) return;
+    setFound({ url: queried, models: result });
+    if (result.kind === "ok" && result.value.length > 0 && !model) setModel(result.value[0]!);
   };
 
   const save = async () => {
@@ -300,10 +306,10 @@ export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
         helper={entry.model === "optional" ? "Optional. Leave empty to use the provider's default." : undefined} spellCheck={false} />)}
     {local && <div className="row">
       <Button icon="search" onClick={() => void findModels()}>Find models</Button>
-      {models?.kind === "ok" && models.value.length === 0 && <span className="secondary">No models found. Pull one on the local server at {url.trim()}, then try again.</span>}
+      {models?.kind === "ok" && models.value.length === 0 && <span className="secondary">No models found. Pull one on the local server at {found?.url}, then try again.</span>}
     </div>}
     {models && models.kind !== "ok" && <Notice tone="danger" alert>{models.kind === "not_ready" ? "Finding models isn't ready yet in this build. Type the model name instead."
-      : models.code === "account_url_unreachable" ? `Can't reach the local server at ${url.trim()}. Start it, then try again.` : models.message}</Notice>}
+      : models.code === "account_url_unreachable" ? `Can't reach the local server at ${found?.url}. Start it, then try again.` : models.message}</Notice>}
     {errors.form && <Notice tone="danger" alert>{errors.form}</Notice>}
     <div className="row"><Button type="submit" variant="primary" pending={pending} pendingLabel="Saving...">{entry.method === "api_key" ? "Save key" : "Save"}</Button></div>
   </form>;
