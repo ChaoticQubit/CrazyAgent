@@ -430,7 +430,7 @@ impl Folder {
     /// child to this folder. Input: its name. Output: the held child, or the error.
     pub(crate) fn make_dir(&self, name: &Name) -> Result<Self, HeldError> {
         let path = self.path.join(name.as_os_str());
-        let file = private::new_dir(&path).map_err(cause)?;
+        let file = private::new_dir(&path).map_err(|error| self.made_cause(name, error))?;
         private::sync_folder(&self.path).map_err(cause)?;
         self.bind(name, &file)?;
         let pin = pin_of(&file)?;
@@ -547,7 +547,13 @@ impl Folder {
     /// name and whether to create it. Output: the file and its identity, or the error.
     fn private_file(&self, name: &Name, create: bool) -> Result<(File, Pin), HeldError> {
         let path = self.path.join(name.as_os_str());
-        let file = private::file(&path, create).map_err(cause)?;
+        let file = private::file(&path, create).map_err(|error| {
+            if create {
+                self.made_cause(name, error)
+            } else {
+                cause(error)
+            }
+        })?;
         if create {
             private::sync_folder(&self.path).map_err(cause)?;
         }
