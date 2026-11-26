@@ -806,7 +806,11 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
         Ok(Ok(0)) | Ok(Err(_))
     ));
     let token = std::fs::read(root.path().join("owner-tui.cap")).unwrap();
-    packet[5..].copy_from_slice(&token);
+    let packet = crazyagent::engine::secret_frame::owner_packet(
+        b"CAO1",
+        0,
+        &token.as_slice().try_into().unwrap(),
+    );
     for bytes in [
         vec![0, 0],
         ((FRAME_BYTES_MAX + 1) as u32).to_be_bytes().to_vec(),
