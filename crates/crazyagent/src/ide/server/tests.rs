@@ -2683,13 +2683,6 @@ fn full_access_git(
     kernel_processes::spawn_gate::output(&mut git).unwrap()
 }
 
-#[test]
-fn a_project_with_no_saved_policy_opens_sandboxed() {
-    let data = scratch();
-    let policy = ide_policy(data.path(), &project("none")).unwrap();
-    assert_eq!(policy.access, AgentAccess::Sandboxed);
-}
-
 /// A saved policy that cannot be read stops the open and records no launch. The checkout
 /// stands in for the build, since the policy is read before a build is looked at.
 #[tokio::test]
@@ -3374,3 +3367,4 @@ fn an_ide_token_write_cut_short_leaves_no_token_file() {
 }
 
 mod agent_folders;
+mod saved_policy;

@@ -262,19 +262,6 @@ fn render_keeps_every_line_when_the_setting_says_keep() {
 }
 
 #[test]
-fn a_project_text_made_only_of_repeats_adds_no_project_heading() {
-    let joined = render("- Use TDD.\n", "- Use TDD.\n\n", Repeated::LeaveOut);
-    assert!(!joined.contains("## Project instructions"));
-    let headed = render(
-        "## Rules\n\n- Use TDD.\n",
-        "## Rules\n\n- Use TDD.\n\n---\n",
-        Repeated::LeaveOut,
-    );
-    assert!(!headed.contains("## Project instructions"), "{headed}");
-    assert_eq!(headed.matches("- Use TDD.").count(), 1);
-}
-
-#[test]
 fn render_keeps_every_line_of_a_code_block_and_every_table_row() {
     let app = "## Tools\n\n- Use TDD.\n- Run it.\n\n```\nmake\n\n\nmake test\n```\n\n| Tool | Use |\n|---|---|\n| make | build |\n";
     let project = "## Tools\n\n- Run it.\n- Use TDD.\n- Own rule.\n\n\n\n~~~sh\nmake\n\n\nmake test\n~~~\n\n| Tool | Use |\n|---|---|\n| make | build |\n";
@@ -3118,3 +3105,6 @@ fn an_instruction_file_that_is_a_link_is_refused_and_never_read_through() {
         "agent_instructions_unsafe"
     );
 }
+
+#[path = "tests/project_text.rs"]
+mod project_text;
