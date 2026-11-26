@@ -28,8 +28,8 @@ pub fn owner_packet_buffer() -> OwnerPacket {
     Zeroizing::new([0; OWNER_PACKET_BYTES])
 }
 
-/// One 32-byte owner, runner, custody or IDE capability token, wiped when dropped, so no
-/// holder frees or leaves a plain copy of it.
+/// One 32-byte owner, runner, custody or IDE capability token, wiped when its holder
+/// drops it.
 pub type OwnerToken = Zeroizing<[u8; 32]>;
 
 /// A zeroed capability token, wiped when dropped, to generate or read a token into.
