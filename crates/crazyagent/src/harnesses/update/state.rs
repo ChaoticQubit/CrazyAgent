@@ -179,16 +179,16 @@ fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
     }
 }
 
-/// Makes the engine prefix and its `node_modules` private folders of this user before an npm
-/// install into it, refusing one that exists and is not, with no `node.exe` put in it: a shim
-/// there runs the engine's Node from the places. Inputs: the install command and the roots.
-/// Output: Ok, or `harness_install_failed` when a folder can't be made private.
+/// Makes the engine prefix and its `node_modules` private folders of this user, with any
+/// missing parent, before an npm install into it, refusing one that exists and is not, with
+/// no `node.exe` put in it: a shim there runs the engine's Node from the places. Inputs: the
+/// install command and the roots. Output: Ok, or `harness_install_failed`.
 #[cfg(windows)]
 fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
     match (&fixed.prefix, &roots.npm) {
         (Some(prefix), Some(engine)) if *prefix == engine.prefix => {
             for folder in [prefix.clone(), prefix.join("node_modules")] {
-                crazyagent_win_sandbox::private::dir(&folder).map_err(|_| INSTALL_FAILED)?;
+                crate::paths::private_folder(&folder).map_err(|_| INSTALL_FAILED)?;
             }
             Ok(())
         }
@@ -1086,6 +1086,47 @@ mod windows_tests {
         assert!(!npm.prefix.to_str().unwrap().starts_with(r"\\?\"));
         let empty = crate::tools::tools_new(Vec::new(), None);
         assert_eq!(engine_npm(&engine_root, &empty), None);
+    }
+
+    /// On Windows an install into the engine prefix first makes the prefix, its missing
+    /// parents and its `node_modules` private folders of this user, and does so again over the
+    /// ones it made; a command for any other prefix makes nothing.
+    #[test]
+    fn a_windows_install_into_the_engine_prefix_makes_it_private_first() {
+        let root_folder = tempfile::tempdir().unwrap();
+        let engine_root = kernel_sandbox::paths::canonical(root_folder.path()).unwrap();
+        let prefix = crate::setup::harness_prefix(&engine_root);
+        let node = PathBuf::from(r"C:\Program Files\nodejs");
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: Some(super::super::NpmInstall {
+                node: node.join("node.exe"),
+                program: node.join("npm.cmd"),
+                search: vec![node.clone(), prefix.clone()],
+                prefix: prefix.clone(),
+            }),
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let other = engine_root.join("other");
+        let fixed = |prefix: &Path| Fixed {
+            program: node.join("npm.cmd"),
+            args: vec!["install"],
+            search: vec![node.clone()],
+            prefix: Some(prefix.to_path_buf()),
+        };
+        assert_eq!(ready_prefix(&fixed(&other), &roots), Ok(()));
+        assert!(!other.exists());
+        assert!(!prefix.exists());
+        for _ in 0..2 {
+            assert_eq!(ready_prefix(&fixed(&prefix), &roots), Ok(()));
+            assert!(crate::paths::is_private_folder(&prefix));
+            assert!(crate::paths::is_private_folder(
+                &prefix.join("node_modules")
+            ));
+        }
     }
 
     /// V243-W1-VERSION-READ: on Windows the engine's home is the profile folder in its plain
