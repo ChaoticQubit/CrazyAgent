@@ -470,6 +470,13 @@ pub(crate) fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(
     drop(created(&file)?);
     db.backup(rusqlite::MAIN_DB, &file, None)
         .map_err(backup_failed)?;
+    write_texts(target, texts)
+}
+
+/// Writes each settings text beside the copy of engine.db, behind a barrier. Inputs: the
+/// backup folder and the texts. Output: Ok once written; a text name that is not one plain
+/// file name fails the assert.
+pub(crate) fn write_texts(target: &Path, texts: Texts<'_>) -> Result<(), StorageError> {
     for (name, text) in texts()? {
         assert!(
             plain_name(name),
@@ -546,7 +553,7 @@ pub(crate) fn take_flushes() -> (usize, usize) {
 
 /// Creates a new empty file readable only by this user. Input: the path, which must not
 /// exist. Output: the open file.
-fn created(path: &Path) -> Result<std::fs::File, StorageError> {
+pub(crate) fn created(path: &Path) -> Result<std::fs::File, StorageError> {
     #[cfg(unix)]
     let file = std::fs::OpenOptions::new()
         .write(true)
