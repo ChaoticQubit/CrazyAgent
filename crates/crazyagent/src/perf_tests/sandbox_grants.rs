@@ -4,7 +4,6 @@ use crate::sandbox::grants::{checked, socket_fit};
 use crate::sandbox::policy::AccessGrant;
 use std::fs;
 use std::hint::black_box;
-use std::os::unix::net::UnixListener;
 
 /// Times the socket grant checks on a real socket the user owns, with one link, in a temp
 /// folder only the user can change, beside a data folder: the socket fit alone and the
@@ -18,7 +17,7 @@ fn socket_grants() {
     let data = root.join("data");
     fs::create_dir_all(&data).unwrap();
     let real = root.join("perf-grant.sock");
-    let _listener = UnixListener::bind(&real).unwrap();
+    let _listener = crate::spawn_gate::bind_unix_std(&real).unwrap();
     let grant = AccessGrant::Socket { path: real.clone() };
     assert_eq!(socket_fit(&real), Ok(()));
     assert_eq!(checked(&grant, &data), Ok(grant.clone()));
