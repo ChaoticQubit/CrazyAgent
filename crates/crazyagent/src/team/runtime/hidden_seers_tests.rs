@@ -277,6 +277,113 @@ fn a_listed_agent_started_again_gone_or_ended_otherwise_is_not_listed_after_a_re
     assert!(team.hidden_held.is_empty());
 }
 
+/// A live master that can still open a folder hidden after it started is stopped and held
+/// as a planned restart, so its next start is not counted against the live master's start
+/// limit.
+#[test]
+fn a_held_live_master_starts_again_as_a_planned_restart() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let keys = fixture.setup.project_folder().join("secrets").join("keys");
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let (mut worker, _orders) = held_worker(&project, AgentRole::Master);
+    worker.live = true;
+    team.workers.insert(master, worker);
+
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(team.workers[&master].stopping, "the live master stops");
+    assert!(
+        team.master_restarts.contains(&project),
+        "its next start is planned"
+    );
+    assert_eq!(listed(&fixture), vec![master], "it stays listed");
+    team.workers.clear();
+}
+
+/// A sub-agent seer and a master that is not live are stopped, held and listed with no
+/// planned master restart.
+#[test]
+fn a_held_sub_agent_or_master_that_is_not_live_plans_no_master_restart() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    let keys = fixture.setup.project_folder().join("secrets").join("keys");
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let (mut worker, _orders) = held_worker(&project, AgentRole::Sub);
+    worker.hidden = Some(Vec::new());
+    team.workers.insert(sub, worker);
+    let (mut worker, _master_orders) = held_worker(&project, AgentRole::Master);
+    worker.live = false;
+    team.workers.insert(master, worker);
+
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    assert!(team.workers[&sub].stopping && team.workers[&master].stopping);
+    assert!(
+        team.master_restarts.is_empty(),
+        "no master restart is planned"
+    );
+    assert_eq!(listed(&fixture), vec![sub, master], "both stay listed");
+    team.workers.clear();
+}
+
+/// A live master the engine stopped and held for a folder hidden after it started stays
+/// down once its process ended, its live switch left on, until the owner's Restart them;
+/// then the next keep-live step starts it. Without a terminal that start turns the switch
+/// off, which shows the step tried.
+#[test]
+fn a_held_live_master_stays_down_until_restart_them() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let keys = fixture.setup.project_folder().join("secrets").join("keys");
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    crate::team::master::set_live(&fixture.connection, &project, true).unwrap();
+    let mut team = fixture.runtime().with_tools_refresh(|| {});
+    let (mut worker, _orders) = held_worker(&project, AgentRole::Master);
+    worker.live = true;
+    team.workers.insert(master, worker);
+    crate::sandbox::access_store::hidden::save(&fixture.connection, PROJECT, &[keys]).unwrap();
+    team.mark_seers(&fixture.setup).unwrap();
+    team.workers.clear();
+    let live =
+        |fixture: &Fixture| crate::team::master::live(&fixture.connection, &project).unwrap();
+
+    team.keep_live(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(live(&fixture), "the held live master is not started");
+    assert_eq!(listed(&fixture), vec![master], "it stays listed");
+
+    assert_eq!(restart_them(&fixture), crate::protocol::Outcome::Applied);
+    team.restart_seers(&fixture.setup).unwrap();
+    team.keep_live(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(!live(&fixture), "Restart them lets the next step start it");
+    assert!(
+        team.master_restarts.is_empty(),
+        "its planned start is taken"
+    );
+}
+
+/// A live master with nothing held is started by the next keep-live step as before; without
+/// a terminal that start turns the switch off.
+#[test]
+fn a_live_master_that_is_not_held_still_starts() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    crate::team::master::set_live(&fixture.connection, &project, true).unwrap();
+    let mut team = fixture.runtime().with_tools_refresh(|| {});
+
+    team.keep_live(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(
+        !crate::team::master::live(&fixture.connection, &project).unwrap(),
+        "the step tried to start it"
+    );
+}
+
 /// macOS only, as team panes run only there (DEC-094): a pane a later engine takes over is
 /// judged by what its record says its sandbox hid, a pane from before the engine kept that
 /// list counting as hiding none. A pane that can still see the hidden folder is stopped,
