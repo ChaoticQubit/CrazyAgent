@@ -1,5 +1,6 @@
 use super::{HELD_REPLY_FIXED, HELD_REQUIRED, held_entry, held_entry_at, held_reply, open_search};
 use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
 /// A `kauth_filesec` holding the entries. Input: the entries. Output: the bytes.
@@ -132,12 +133,19 @@ fn held_reads_match_lstat_for_a_folder_a_file_and_a_link() {
     let held = held_entry(folder.as_fd()).unwrap();
     same(&held, &home);
     assert!(held.folder() && !held.link());
-    let file = held_entry_at(folder.as_fd(), c"file").unwrap();
+    let file = held_entry_at(Some(folder.as_fd()), c"file").unwrap();
     same(&file, &home.join("file"));
     assert!(!file.folder() && !file.link());
-    let link = held_entry_at(folder.as_fd(), c"link").unwrap();
+    let link = held_entry_at(Some(folder.as_fd()), c"link").unwrap();
     same(&link, &home.join("link"));
     assert!(link.link());
+    for name in ["file", "link"] {
+        let whole = home.join(name);
+        let path = std::ffi::CString::new(whole.as_os_str().as_bytes()).unwrap();
+        let by_path = held_entry_at(None, &path).unwrap();
+        same(&by_path, &whole);
+        assert_eq!(by_path.link(), name == "link");
+    }
     assert!(open_search(Some(folder.as_fd()), c"link", false).is_err());
     std::fs::remove_dir_all(&home).unwrap();
 }
