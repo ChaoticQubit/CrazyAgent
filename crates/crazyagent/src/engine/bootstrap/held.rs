@@ -34,6 +34,7 @@ pub(crate) enum Judged {
 
 /// One file's identity, compared to tell a swapped name from the held entry: device and
 /// inode on Unix, volume serial number and file id on Windows.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Pin {
     pub(crate) device: u64,
@@ -66,8 +67,10 @@ pub(crate) struct Child {
 /// up in the held folder, never through a link (DESIGN-0515 D1). On Windows it also keeps
 /// its own plain place, read from the handle, never a caller's path, and binds every child
 /// to it (rv-sec3 #716 C1). It carries how its root was judged (rv-sec3 #725 U1).
+#[derive(Debug)]
 pub(crate) struct Folder {
     file: File,
+    #[cfg(test)]
     pin: Pin,
     judged: Judged,
     #[cfg(windows)]
@@ -127,6 +130,7 @@ fn assert_component(text: &str) {
 
 impl Folder {
     /// The held folder's identity. Output: the pin.
+    #[cfg(test)]
     pub(crate) fn pin(&self) -> Pin {
         self.pin
     }
@@ -379,7 +383,7 @@ fn cause(error: std::io::Error) -> HeldError {
 
 /// Reads an open entry's device and inode. Input: the handle. Output: the pin, or the
 /// error.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn pin_of(file: &File) -> Result<Pin, HeldError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(cause)?;
@@ -396,6 +400,7 @@ impl Folder {
     /// must be the plain spelling (leader 05:2x, LIMITS line 15). The folder keeps the place
     /// read from its handle, not this path (rv-sec3 #716 C1). Input: its absolute plain
     /// path. Output: the held folder, `Missing`, or `Unsafe`.
+    #[cfg(test)]
     pub(crate) fn root(path: &Path) -> Result<Self, HeldError> {
         assert!(plain_drive(path), "{}", path.display());
         let file = private::open_dir(path).map_err(cause)?;
@@ -412,6 +417,7 @@ impl Folder {
     /// Opens and holds one child folder at this folder's place with W1, never creating it,
     /// then binds it to this folder. Input: its name. Output: the held child, `Missing`, or
     /// `Unsafe`.
+    #[cfg(test)]
     pub(crate) fn open_dir(&self, name: &Name) -> Result<Self, HeldError> {
         let path = self.path.join(name.as_os_str());
         let file = private::open_dir(&path).map_err(cause)?;
@@ -428,6 +434,7 @@ impl Folder {
     /// Makes one private child folder with W1, create-only, so an entry already at the name
     /// is `Unsafe` (rv-sec3 #716 C2), writes this folder's entries to disk, then binds the
     /// child to this folder. Input: its name. Output: the held child, or the error.
+    #[cfg(test)]
     pub(crate) fn make_dir(&self, name: &Name) -> Result<Self, HeldError> {
         let path = self.path.join(name.as_os_str());
         let file = private::new_dir(&path).map_err(|error| self.made_cause(name, error))?;
@@ -445,6 +452,7 @@ impl Folder {
     /// Opens one child file for reading with W1, which refuses a link, a second name and any
     /// list other than the private one, then binds it to this folder. Input: its name.
     /// Output: the file and its identity, `Missing`, `InUse`, or `Unsafe`.
+    #[cfg(test)]
     pub(crate) fn open_read(&self, name: &Name) -> Result<(File, Pin), HeldError> {
         let path = self.path.join(name.as_os_str());
         let file = private::read_only(&path).map_err(cause)?;
@@ -456,6 +464,7 @@ impl Folder {
     /// Makes one private child file with W1, create-only, so an entry already at the name is
     /// `Unsafe`, writes this folder's entries to disk, then binds the file to this folder.
     /// Input: its name. Output: the file, open for reading and writing, and its identity.
+    #[cfg(test)]
     pub(crate) fn make_file(&self, name: &Name) -> Result<(File, Pin), HeldError> {
         self.private_file(name, true)
     }
@@ -463,6 +472,7 @@ impl Folder {
     /// Opens one private child file for reading and writing with W1, which refuses a link,
     /// a second name and any list other than the private one, then binds it to this folder.
     /// Input: its name. Output: the file and its identity, `Missing`, `InUse`, or `Unsafe`.
+    #[cfg(test)]
     pub(crate) fn open_write(&self, name: &Name) -> Result<(File, Pin), HeldError> {
         self.private_file(name, false)
     }
@@ -496,6 +506,7 @@ impl Folder {
     /// delete access, never sharing delete, bound to this folder, compared with the pin and
     /// judged by W1, then deleted through that handle with POSIX semantics. Inputs: its name
     /// and pin. Output: Ok, `Missing`, `InUse` while another handle holds it, or `Unsafe`.
+    #[cfg(test)]
     pub(crate) fn remove(&self, name: &Name, pin: Pin) -> Result<(), HeldError> {
         use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
         use std::os::windows::fs::OpenOptionsExt;
@@ -518,6 +529,7 @@ impl Folder {
     /// entry, the held entry passes W1's check, links included, and its identity is the pin.
     /// Inputs: the name, the held entry, its pin and whether it is a folder. Output: Ok, or
     /// the error, `Unsafe` for any mismatch.
+    #[cfg(test)]
     pub(crate) fn verify(
         &self,
         name: &Name,
@@ -545,6 +557,7 @@ impl Folder {
     /// Makes or opens one private child file with W1 for reading and writing, then binds
     /// it to this folder; a make writes this folder's entries to disk first. Inputs: its
     /// name and whether to create it. Output: the file and its identity, or the error.
+    #[cfg(test)]
     fn private_file(&self, name: &Name, create: bool) -> Result<(File, Pin), HeldError> {
         let path = self.path.join(name.as_os_str());
         let file = private::file(&path, create).map_err(|error| {
@@ -733,7 +746,7 @@ fn place_of(file: &File) -> Result<PathBuf, HeldError> {
 
 /// Reads an open entry's volume serial number and 64-bit file id with W1 `identity`.
 /// Input: the handle. Output: the pin, or the error.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn pin_of(file: &File) -> Result<Pin, HeldError> {
     let (device, inode) = private::identity(file).map_err(cause)?;
     Ok(Pin { device, inode })
@@ -744,6 +757,7 @@ fn pin_of(file: &File) -> Result<Pin, HeldError> {
 /// mandatory, so an exclusive lock also refuses other handles' reads. Inputs: the file and
 /// whether the lock is shared. Output: Ok, `InUse` while a conflicting lock is held, or
 /// `Unavailable`.
+#[cfg(test)]
 pub(crate) fn lock(file: &File, shared: bool) -> Result<(), HeldError> {
     #[cfg(unix)]
     let taken = {
@@ -776,6 +790,7 @@ pub(crate) fn lock(file: &File, shared: bool) -> Result<(), HeldError> {
 /// Releases a lock this handle took, now and not at the handle's close. A failed release
 /// is not reported: the lock still ends when the handle closes, as the custody guards'
 /// own unlocks already do on Unix. Input: the file.
+#[cfg(test)]
 pub(crate) fn unlock(file: &File) {
     #[cfg(unix)]
     let _ = rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock);
@@ -784,19 +799,15 @@ pub(crate) fn unlock(file: &File) {
 }
 
 /// The most entries one folder of a tree removal may list, past which the removal is `Full`.
-#[cfg(test)]
 const TREE_ENTRIES_MAX: usize = 4096;
 
 /// The deepest a tree removal may be asked to go below the folder it removes.
-#[cfg(test)]
-const TREE_DEPTH_MAX: usize = 16;
+pub(crate) const TREE_DEPTH_MAX: usize = 16;
 
 /// How many times a tree removal empties a folder that fills again before it gives up with
 /// `InUse`.
-#[cfg(test)]
 const REFILL_TRIES: usize = 3;
 
-#[cfg(test)]
 impl Folder {
     /// Removes one entry of a caller-judged tree, a folder with all it holds, bottom up
     /// through held folders, never following a link: a link anywhere goes as itself, and a
@@ -912,15 +923,14 @@ impl Folder {
 
     /// Makes one child file of a caller-judged tree with mode 0600, create-only and never
     /// through a link, then writes this folder's entries to disk. Input: its name. Output:
-    /// the file, open for reading and writing, and its identity, or the error.
-    pub(crate) fn make_file_inherited(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+    /// the file, open for reading and writing, or the error.
+    pub(crate) fn make_file_inherited(&self, name: &Name) -> Result<File, HeldError> {
         use rustix::fs::{Mode, OFlags};
         self.assert_caller_judged();
         let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL;
         let file = self.open_at(name, flags, Mode::from_raw_mode(0o600))?;
-        let pin = pin_of(&file)?;
         self.file.sync_all().map_err(cause)?;
-        Ok((file, pin))
+        Ok(file)
     }
 
     /// Reads what one entry of a caller-judged tree is without following it. Input: its
@@ -952,7 +962,7 @@ impl Folder {
     }
 }
 
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 impl Folder {
     /// Holds the first folder of a chain its caller judges: only the plain drive spelling,
     /// opened as itself, never sharing delete, refused as `Unsafe` when it is a reparse point
@@ -969,9 +979,11 @@ impl Folder {
         if !judge(&file) {
             return Err(HeldError::Unsafe);
         }
+        #[cfg(test)]
         let pin = pin_of(&file)?;
         Ok(Self {
             file,
+            #[cfg(test)]
             pin,
             judged: Judged::Caller,
             path: place,
@@ -988,9 +1000,11 @@ impl Folder {
         let file = open_as_itself(&path, None)?;
         plain_folder(&file)?;
         self.bind(name, &file)?;
+        #[cfg(test)]
         let pin = pin_of(&file)?;
         Ok(Self {
             file,
+            #[cfg(test)]
             pin,
             judged: self.judged,
             path,
@@ -1013,8 +1027,8 @@ impl Folder {
     /// Makes one child file of a caller-judged tree, create-only and never through a link,
     /// taking this folder's inheritable list, so an agent the folder lets read gets it; then
     /// writes this folder's entries to disk and binds the file. Input: its name. Output: the
-    /// file, open for reading and writing, and its identity, or the error.
-    pub(crate) fn make_file_inherited(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+    /// file, open for reading and writing, or the error.
+    pub(crate) fn make_file_inherited(&self, name: &Name) -> Result<File, HeldError> {
         use crate::platform::FILE_FLAG_OPEN_REPARSE_POINT;
         use std::os::windows::fs::OpenOptionsExt;
         self.assert_caller_judged();
@@ -1029,8 +1043,7 @@ impl Folder {
             .map_err(|error| self.made_cause(name, error))?;
         private::sync_folder(&self.path).map_err(cause)?;
         self.bind(name, &file)?;
-        let pin = pin_of(&file)?;
-        Ok((file, pin))
+        Ok(file)
     }
 
     /// Deletes one entry of a caller-judged tree through a handle opened as itself with
@@ -1048,7 +1061,7 @@ impl Folder {
 }
 
 /// The access right to write an object's attributes, `FILE_WRITE_ATTRIBUTES`.
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
 
 /// Opens one entry as itself, never through a reparse point, a folder as well as a file,
@@ -1073,7 +1086,7 @@ fn open_as_itself(path: &Path, access: Option<u32>) -> Result<File, HeldError> {
 
 /// Refuses an entry opened as itself that is a reparse point or not a folder. Input: the
 /// open entry. Output: Ok, or `Unsafe`.
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 fn plain_folder(entry: &File) -> Result<(), HeldError> {
     let facts = private::facts(entry).map_err(cause)?;
     let folder = entry.metadata().map_err(cause)?.is_dir();

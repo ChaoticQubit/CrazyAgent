@@ -239,6 +239,8 @@ pub struct Installed {
     handover: Option<crate::harnesses::accounts::Handover>,
     tool_home: Option<PathBuf>,
     _lock: File,
+    #[cfg(windows)]
+    held: Option<crate::engine::bootstrap::held::Folder>,
 }
 
 /// The engine's own MCP server as an ACP launch hands it to its agent in `session/new`:
@@ -1124,9 +1126,9 @@ impl AgentContext {
     /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`, and Codex
     /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
     /// the files hold the agent's own `getconf`
-    /// ([`kernel_sandbox::toolchains::write_getconf`]). On Windows it is refused with
-    /// `launch_context_unavailable` once H1's check passes, before it takes the lock or
-    /// changes the home, until S9b writes its files handle-relative (CodeRabbit CR-1140).
+    /// ([`kernel_sandbox::toolchains::write_getconf`]). On Windows only Claude Code with tools
+    /// off and no process or relay installs, every write through the held home; the rest is
+    /// refused with `launch_context_unavailable` before it takes the lock or changes the home.
     /// Output: the guard holding the files and the harness arguments, or `launch_home_busy`
     /// while another launch uses the home.
     pub fn install(
@@ -1153,8 +1155,9 @@ impl AgentContext {
             return Err(failure("launch_account_handover_mismatch"));
         }
         crate::harnesses::launch::validate_home(home)?;
+        #[cfg(windows)]
         if cfg!(windows) {
-            return Err(failure("launch_context_unavailable"));
+            return windows::install(self, home, tools, codex);
         }
         let lock = lock(home)?;
         let state = home.join(STATE);
@@ -1180,6 +1183,8 @@ impl AgentContext {
             handover: None,
             tool_home: None,
             _lock: lock,
+            #[cfg(windows)]
+            held: None,
         };
         remove(&state);
         directory(&state, true)?;
@@ -1479,6 +1484,8 @@ impl AgentContext {
             handover: self.handover.clone(),
             tool_home: self.tool_home.clone(),
             _lock: lock,
+            #[cfg(windows)]
+            held: None,
         };
         let acp = manifest.piped == Some(crate::harnesses::manifest::DriverKind::Acp);
         let servers = self.plugins.servers.iter().filter(|server| {
@@ -1708,6 +1715,8 @@ impl Installed {
             handover: None,
             tool_home: None,
             _lock: lock,
+            #[cfg(windows)]
+            held: None,
         })
     }
 
@@ -1715,46 +1724,6 @@ impl Installed {
     /// quits; a later engine adopts them from the pane record. Takes the guard.
     pub fn keep(mut self) {
         self.files = None;
-    }
-}
-
-impl InstalledFiles {
-    /// Lists the generated file and folder paths a launch deletes by path, all inside its
-    /// home; none for a listed harness's private home, whose files go only through a
-    /// no-follow walk from the agent home.
-    fn removals(&self) -> Vec<PathBuf> {
-        if self.listed {
-            return Vec::new();
-        }
-        let mut paths = vec![self.home.join(STATE)];
-        if self.codex {
-            paths.push(self.home.join("config.toml"));
-        }
-        paths
-    }
-}
-
-impl Drop for Installed {
-    /// Deletes the launch's files, then releases the home lock on its open file
-    /// description, so a process that shares it, such as a child another thread is
-    /// starting, can never keep the home busy after the launch ends. Codex skills it cannot
-    /// remove stay for the next Codex launch, which refuses to start with them.
-    fn drop(&mut self) {
-        if let Some(files) = &self.files {
-            for path in files.removals() {
-                remove(&path);
-            }
-            if files.codex {
-                let _ = remove_copies(&files.home);
-            }
-            for path in &files.rendered {
-                crate::harnesses::render::remove(&files.home, path);
-            }
-        }
-        #[cfg(unix)]
-        let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
-        #[cfg(windows)]
-        let _ = crazyagent_win_sandbox::private::unlock(&self._lock);
     }
 }
 
@@ -2742,54 +2711,6 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     })
 }
 
-/// Confirms on Windows that a launch lock is the lock name directly in the held home
-/// (CodeRabbit CR-1252): both real places are read from their handles, so a lock the home's
-/// path reached in another folder, as after a junction above the home was pointed elsewhere
-/// between the hold and the lock, is refused. Inputs: the lock and the held home. Output:
-/// Ok, or `launch_context_unsafe`.
-#[cfg(windows)]
-fn locked_in(lock: &File, held: &File) -> Result<(), LaunchError> {
-    const SEPARATOR: u16 = b'\\' as u16;
-    let unsafe_lock = |_: std::io::Error| failure("launch_context_unsafe");
-    let mut wanted = crazyagent_win_sandbox::final_name(held).map_err(unsafe_lock)?;
-    if wanted.last() != Some(&SEPARATOR) {
-        wanted.push(SEPARATOR);
-    }
-    wanted.extend(LOCK.encode_utf16());
-    let found = crazyagent_win_sandbox::final_name(lock).map_err(unsafe_lock)?;
-    if found != wanted {
-        return Err(failure("launch_context_unsafe"));
-    }
-    Ok(())
-}
-
-/// Opens and locks the agent home's launch lock through W1 (V244-WIN-MASTER S9a): made a
-/// private file when it is missing, else opened, never through a link, a second name or a
-/// list that is not private, then locked without waiting. A name a launched agent left as a
-/// link, a folder or an open file stays refused until S9b clears it handle-relative; no
-/// Windows launch reuses a home before then (D6, D8). Input: the home H1's check passed.
-/// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
-#[cfg(windows)]
-fn lock(home: &Path) -> Result<File, LaunchError> {
-    use crazyagent_win_sandbox::private;
-    const LOCK_VIOLATION: i32 = 33;
-    let path = home.join(LOCK);
-    let file = match private::file(&path, true) {
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            private::file(&path, false)
-        }
-        made => made,
-    }
-    .map_err(|_| failure("launch_context_unsafe"))?;
-    match private::lock(&file) {
-        Ok(()) => Ok(file),
-        Err(error) if error.raw_os_error() == Some(LOCK_VIOLATION) => {
-            Err(failure("launch_home_busy"))
-        }
-        Err(_) => Err(failure("launch_context_unsafe")),
-    }
-}
-
 /// Opens and locks the agent home's launch lock, made owner-only and never through a link.
 /// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
 /// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
@@ -3079,6 +3000,8 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         handover: None,
         tool_home: None,
         _lock: lock,
+        #[cfg(windows)]
+        held: None,
     })
 }
 
@@ -3632,3 +3555,10 @@ pub use pinned_keys::*;
 
 mod teammate;
 use teammate::teammate_section;
+
+mod installed;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::{lock, locked_in};
