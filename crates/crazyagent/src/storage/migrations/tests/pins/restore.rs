@@ -604,3 +604,136 @@ fn the_sweep_connection_refuses_a_write_to_the_kept_copy() {
         .unwrap();
     assert_eq!(rows, 1);
 }
+
+/// A kept copy of replaced 2.5 data at `folder`, private, whose rows name one plugin key
+/// and one account key. Inputs: the folder and the two key names. Output: none.
+fn naming_copy(folder: &Path, plugin_key: &str, account_key: &str) {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder)
+        .unwrap();
+    let db = Connection::open(folder.join(DATABASE)).unwrap();
+    crate::app_plugins::initialize(&db).unwrap();
+    crate::storage::accounts::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO app_plugin_secrets (plugin, secret, source, reference) \
+         VALUES ('acme', 'api_key', 'key', ?1)",
+        [plugin_key],
+    )
+    .unwrap();
+    let body = format!(r#"{{"credential_ref":"{account_key}"}}"#);
+    db.execute(
+        "INSERT INTO accounts (id, body) VALUES ('copy-account', ?1)",
+        [body.as_bytes()],
+    )
+    .unwrap();
+}
+
+/// An engine root after a second restore: live rows naming no key, an older kept copy
+/// naming the `older` keys, the newest naming the `newest` keys, and in each key folder an
+/// older, a newest and an orphan key. Input: whether the older copy is a link to a folder
+/// rather than a copy. Output: the root and the newest copy's folder.
+fn second_restore(older_is_link: bool) -> (Root, PathBuf) {
+    use crate::storage::accounts::{self, KEY_FOLDERS};
+    let root = Root::new();
+    let live = root.connection();
+    accounts::initialize(&live).unwrap();
+    crate::app_plugins::initialize(&live).unwrap();
+    drop(live);
+    let backups = root.path().join(BACKUPS);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&backups)
+        .unwrap();
+    let older = backups.join(format!("{REPLACED}-20261101T000000000Z"));
+    if older_is_link {
+        let elsewhere = root.path().join("elsewhere");
+        naming_copy(&elsewhere, "plugin-key-older", "account-key-older");
+        std::os::unix::fs::symlink(&elsewhere, &older).unwrap();
+    } else {
+        naming_copy(&older, "plugin-key-older", "account-key-older");
+    }
+    let newest = backups.join(format!("{REPLACED}-20261102T000000000Z"));
+    naming_copy(&newest, "plugin-key-newest", "account-key-newest");
+    for folder in KEY_FOLDERS {
+        let kind = folder.split('-').next().unwrap();
+        for which in ["older", "newest", "orphan"] {
+            let name = format!("{kind}-key-{which}");
+            let reference = crate::protocol::CredentialRef::new(&name).unwrap();
+            accounts::replace_key_in(root.path(), folder, &reference, b"sk-kept".to_vec()).unwrap();
+        }
+    }
+    (root, newest)
+}
+
+/// Runs a restore's key sweep over the root's live rows with the newest copy as the one
+/// it kept. Inputs: the root and the newest copy's folder. Output: none.
+fn sweep_second_restore(root: &Root, newest: &Path) {
+    let db = root.connection();
+    let settings = sources(root);
+    sweep_unbound_keys(&db, root.path(), Some(&settings), newest);
+}
+
+#[test]
+fn a_plugin_key_only_an_older_replaced_copy_names_stays_after_a_later_restore() {
+    use crate::storage::accounts::PLUGIN_KEYS;
+    let (root, newest) = second_restore(false);
+
+    sweep_second_restore(&root, &newest);
+
+    assert_eq!(key_files(root.path(), PLUGIN_KEYS), ["plugin-key-older"]);
+    assert_eq!(key_files(&newest, PLUGIN_KEYS), ["plugin-key-newest"]);
+}
+
+#[test]
+fn a_replaced_link_naming_a_key_does_not_keep_it() {
+    use crate::storage::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS};
+    let (root, newest) = second_restore(true);
+
+    sweep_second_restore(&root, &newest);
+
+    assert!(key_files(root.path(), PLUGIN_KEYS).is_empty());
+    assert!(key_files(root.path(), ACCOUNT_KEYS).is_empty());
+    assert_eq!(key_files(&newest, PLUGIN_KEYS), ["plugin-key-newest"]);
+    assert_eq!(key_files(&newest, ACCOUNT_KEYS), ["account-key-newest"]);
+}
+
+#[test]
+fn an_account_key_only_an_older_replaced_copy_names_stays_after_a_later_restore() {
+    use crate::storage::accounts::ACCOUNT_KEYS;
+    let (root, newest) = second_restore(false);
+
+    sweep_second_restore(&root, &newest);
+
+    assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["account-key-older"]);
+    assert_eq!(key_files(&newest, ACCOUNT_KEYS), ["account-key-newest"]);
+}
+
+#[test]
+fn an_unlisted_backups_folder_keeps_every_key() {
+    use crate::storage::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS};
+    let (root, newest) = second_restore(false);
+    let backups = root.path().join(BACKUPS);
+    std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let listed = std::fs::read_dir(&backups).is_ok();
+    if listed && rustix::process::geteuid().is_root() {
+        std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    if !listed {
+        sweep_second_restore(&root, &newest);
+    }
+    std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        !listed,
+        "this user lists a 0300 folder, so the row proves nothing"
+    );
+    for (folder, kind) in [(PLUGIN_KEYS, "plugin"), (ACCOUNT_KEYS, "account")] {
+        let all = ["newest", "older", "orphan"].map(|which| format!("{kind}-key-{which}"));
+        assert_eq!(key_files(root.path(), folder), all, "{folder}");
+        assert!(key_files(&newest, folder).is_empty(), "{folder}");
+    }
+}

@@ -433,7 +433,9 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
 /// The key names the binding rows of a kept replaced copy name, read by the plugin store.
 /// Input: the copy's database. Output: the names, or the store's refusal.
 #[cfg(unix)]
-fn copy_key_names(copy: &Connection) -> Result<std::collections::BTreeSet<String>, EngineError> {
+pub(crate) fn copy_key_names(
+    copy: &Connection,
+) -> Result<std::collections::BTreeSet<String>, EngineError> {
     kernel_plugin_host::store::named_keys(copy).map_err(error)
 }
 
