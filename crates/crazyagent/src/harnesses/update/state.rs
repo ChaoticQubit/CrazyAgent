@@ -106,9 +106,9 @@ impl Roots {
     }
 
     /// The roots of this machine with the given resolver places: the engine's own home
-    /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS and no npm yet.
-    /// Input: the places. Output: the roots; an unknown home is an empty home that matches
-    /// nothing.
+    /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS, no npm yet and, on
+    /// Windows, the token's elevation, read as elevated when it cannot be read. Input: the
+    /// places. Output: the roots; an unknown home is an empty home that matches nothing.
     fn on(places: kernel_processes::finding::Places) -> Self {
         let home = home_folder().unwrap_or_default();
         Self {
@@ -118,7 +118,7 @@ impl Roots {
             npm: None,
             places,
             #[cfg(windows)]
-            elevated: false,
+            elevated: crazyagent_win_sandbox::elevated().unwrap_or(true),
         }
     }
 
@@ -670,9 +670,9 @@ impl Updates {
 
     /// Checks one installed harness for a newer version, by its install method: the
     /// installing tool for Homebrew and npm, the vendor pointer for a self-updating install
-    /// with online lookups on. Where the engine runs no tool ([`run_raw`] refuses, Windows)
-    /// a tool check is not run and reads as not checked, never as a failure. Inputs: the id,
-    /// method, real path, roots, settings and the installed version. Output: the check result.
+    /// with online lookups on. Where the engine runs no tool check yet (Windows, where npm has
+    /// no Node to run with) it reads as not checked, never as a failure. Inputs: the id, method,
+    /// real path, roots, settings and the installed version. Output: the check result.
     fn looked(
         &self,
         id: &str,

@@ -656,6 +656,11 @@ fn taken_copy(
 /// answer, so an elevated owner never reads that an update needs an administrator. Input:
 /// the roots. Output: Ok, or `AS_ROOT`.
 fn refused_here(roots: &Roots) -> Result<(), &'static str> {
+    #[cfg(windows)]
+    if let Some(code) = run::refused_token(roots.elevated) {
+        return Err(code);
+    }
+    #[cfg(not(windows))]
     let _ = roots;
     Ok(())
 }

@@ -54,8 +54,7 @@ pub fn refused_user(effective_user: u32) -> Option<&'static str> {
 /// elevated token, None for any other.
 #[cfg(windows)]
 pub(super) fn refused_token(elevated: bool) -> Option<&'static str> {
-    let _ = elevated;
-    None
+    elevated.then_some(AS_ROOT)
 }
 
 /// Runs one fixed command with no shell, no input, a cleared environment and a search path of
@@ -184,11 +183,11 @@ pub(super) fn version_raw(
     run_raw(fixed, home, limit)
 }
 
-/// Runs a harness's version words where [`run_raw`] refuses every tool: started suspended
-/// with no window in a kill-on-close job of its own, so everything it starts ends with the
-/// job once it exits or passes its limit. Only version reads run this way; updates and tool
-/// checks stay refused. Inputs: the absolute words, the command's search folders, the home
-/// folder and the limit. Output: the exit and both stream tails, or a refusal code.
+/// Runs a harness's version words on Windows as [`run_raw`] runs a tool there: started
+/// suspended with no window in a kill-on-close job of its own, so everything it starts ends
+/// with the job once it exits or passes its limit, with nothing added to its environment.
+/// Inputs: the absolute words, the command's search folders, the home folder and the limit.
+/// Output: the exit and both stream tails, or a refusal code.
 #[cfg(windows)]
 pub(super) fn version_raw(
     words: &[std::ffi::OsString],
@@ -407,8 +406,11 @@ mod unix {
 
 #[cfg(windows)]
 mod windows {
-    use super::{Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, Tail, waited};
-    use crate::harnesses::update::{ARGS_MAX, TOOL_UNSAFE};
+    use super::{
+        AS_ROOT, Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, Tail, refused_token,
+        waited,
+    };
+    use crate::harnesses::update::{ARGS_MAX, Fixed, TOOL_UNSAFE};
     use kernel_processes::finding::INTERPRETER_DEPTH_MAX;
     use std::ffi::OsString;
     use std::os::windows::process::CommandExt;
@@ -416,6 +418,7 @@ mod windows {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
+    const NPM_PREFIX: &str = "npm_config_prefix";
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const SYSTEM_ROOT_DEFAULT: &str = r"C:\Windows";
@@ -435,9 +438,15 @@ mod windows {
 
     /// Builds the child: no shell, the fixed arguments only, the environment a plugin
     /// server check keeps ([`crate::plugins::check::ENV_KEPT`]) with the home as
-    /// USERPROFILE and the search path as PATH, no input, no window, started suspended.
-    /// Inputs: the words, the home folder and the search path. Output: the command.
-    fn command(words: &[OsString], home: &Path, path: OsString) -> Command {
+    /// USERPROFILE, the search path as PATH and the extra pairs, no input, no window, started
+    /// suspended. Inputs: the words, the home, the search path and the extra pairs. Output:
+    /// the command.
+    fn command(
+        words: &[OsString],
+        home: &Path,
+        path: OsString,
+        extra: &[(&str, OsString)],
+    ) -> Command {
         let mut command = Command::new(&words[0]);
         command.args(&words[1..]).env_clear();
         for name in crate::plugins::check::ENV_KEPT {
@@ -448,6 +457,7 @@ mod windows {
         command
             .env("USERPROFILE", home)
             .env("PATH", path)
+            .envs(extra.iter().map(|(name, value)| (name, value)))
             .current_dir(home)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -456,29 +466,78 @@ mod windows {
         command
     }
 
+    /// Runs one checked command unless the token is elevated: the words the resolver gives its
+    /// program, each file it starts judged again ([`crazyagent_win_sandbox::program_trusted`]),
+    /// then the fixed arguments, with npm's prefix pinned for an npm command ([`ran`]).
+    /// Inputs: the command, the places, the home, the limit and the elevation. Output: the
+    /// exit and both stream tails, or a refusal code.
     pub(super) fn run_raw(
-        fixed: &crate::harnesses::update::Fixed,
+        fixed: &Fixed,
         places: &kernel_processes::finding::Places,
         home: &Path,
         limit: Duration,
         elevated: bool,
     ) -> Result<Raw, &'static str> {
-        let _ = (fixed, places, home, limit, elevated);
-        Err(crate::harnesses::update::UNSUPPORTED_HERE)
+        if let Some(code) = refused_token(elevated) {
+            assert!(code == AS_ROOT);
+            return Err(code);
+        }
+        assert!(fixed.program.is_absolute());
+        assert!(fixed.args.len() <= ARGS_MAX);
+        assert!(fixed.search.len() <= SEARCH_MAX);
+        assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
+        assert!(fixed.prefix.as_deref().is_none_or(Path::is_absolute));
+        if !home.is_absolute() {
+            return Err(TOOL_UNSAFE);
+        }
+        let tool = kernel_processes::finding::resolve_entry(&fixed.program, places)
+            .map_err(|_| TOOL_UNSAFE)?;
+        for file in tool.grants() {
+            crazyagent_win_sandbox::program_trusted(&file).map_err(|_| TOOL_UNSAFE)?;
+        }
+        let mut words = tool.argv();
+        words.extend(fixed.args.iter().map(OsString::from));
+        if words.len() > WORDS_MAX {
+            return Err(TOOL_UNSAFE);
+        }
+        let extra: Vec<(&str, OsString)> = fixed
+            .prefix
+            .iter()
+            .map(|prefix| (NPM_PREFIX, prefix.as_os_str().to_owned()))
+            .collect();
+        ran(&words, &fixed.search, home, limit, &extra)
     }
 
+    /// Runs a harness's version words with nothing added to the environment ([`ran`]).
+    /// Inputs: the absolute words, the command's search folders, the home and the limit.
+    /// Output: the exit and both stream tails, or a refusal code.
     pub(super) fn version_raw(
         words: &[OsString],
         search: &[PathBuf],
         home: &Path,
         limit: Duration,
     ) -> Result<Raw, &'static str> {
+        ran(words, search, home, limit, &[])
+    }
+
+    /// Starts the words suspended with no window in a kill-on-close job of their own, so
+    /// everything they start ends with the job once they exit or pass the limit. Inputs: the
+    /// absolute words, the search folders, the home, the limit and the extra environment
+    /// pairs. Output: the exit and both stream tails, or a refusal code.
+    fn ran(
+        words: &[OsString],
+        search: &[PathBuf],
+        home: &Path,
+        limit: Duration,
+        extra: &[(&str, OsString)],
+    ) -> Result<Raw, &'static str> {
         assert!((1..=WORDS_MAX).contains(&words.len()));
         assert!(Path::new(&words[0]).is_absolute());
         assert!(search.len() <= SEARCH_MAX);
         assert!(search.iter().all(|folder| folder.is_absolute()));
+        assert!(extra.len() <= 1);
         let path = search_path(search).ok_or(TOOL_UNSAFE)?;
-        let mut child = kernel_processes::spawn_gate::spawn(&mut command(words, home, path))
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command(words, home, path, extra))
             .map_err(|_| START_FAILED)?;
         let tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
             Ok(tree) => tree,
