@@ -1,4 +1,4 @@
-.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script caps-check test-caps-script sleeps-check test-sleeps-script
+.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script caps-check test-caps-script sleeps-check test-sleeps-script owner-packets-check test-owner-packets-script
 
 NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
@@ -58,6 +58,12 @@ sleeps-check:
 
 test-sleeps-script:
 	node --test scripts/quality/sleeps.test.mjs
+
+owner-packets-check:
+	node scripts/quality/owner-packets.mjs
+
+test-owner-packets-script:
+	node --test scripts/quality/owner-packets.test.mjs
 
 test-node:
 	CRAZYAGENT_BUN="$(BUN)" CRAZYAGENT_RCLI_SDK="$(RCLI_SDK)" node --test --test-timeout=15000 $(NODE_TEST_ARGS) $(NODE_TESTS)
