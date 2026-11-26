@@ -4,7 +4,7 @@ import { intakeCopy, loadFolderSize, loadProjectsHome, moveProjectsHome, setProj
 import { receiptState } from "../../api-projects";
 import type { FolderSize, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, LoadError, NotReady, SettingLine, SettingSection, Skeleton } from "../../ui";
+import { Button, ConfirmDialog, LoadError, NotReady, SettingLine, SettingSection, Skeleton, fileManager } from "../../ui";
 import { displayText } from "../conversation";
 import { homeLine, pickedFolderProblem } from "../intake/intake";
 import { formatBytes } from "../new-project/wizard";
@@ -16,7 +16,7 @@ const trimSlash = (path: string) => path.replace(/\/+$/u, "") || "/";
 
 const HOME_TOP = <div className="settings-top"><div>
   <h2>Projects folder</h2>
-  <p>CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with Finder and it shows up on Home.</p>
+  <p>{`CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with ${fileManager()} and it shows up on Home.`}</p>
 </div></div>;
 
 /** Checks a folder picked as the new projects folder. Inputs: the picked path and the current
