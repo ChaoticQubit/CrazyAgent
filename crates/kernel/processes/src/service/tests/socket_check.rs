@@ -140,7 +140,7 @@ fn the_held_walk_reads_every_part_as_lstat_does() {
         "loop/x/sock",
         "locked/in/sock",
     ];
-    let seen: Vec<(PathBuf, Vec<Part>, Vec<Part>)> = paths
+    let seen: Vec<(PathBuf, Vec<Part>, Vec<Part>, Vec<Part>)> = paths
         .iter()
         .map(|path| {
             let path = home.join(path);
@@ -148,12 +148,14 @@ fn the_held_walk_reads_every_part_as_lstat_does() {
             walked.reverse();
             let entries: Vec<&Path> = path.ancestors().collect();
             let read = changeable::read_parts(&entries);
-            (path, shape(walked), shape(read))
+            let by_name = changeable::read_parts_known(&entries, &[]);
+            (path, shape(walked), shape(read), shape(by_name))
         })
         .collect();
     std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(seen.len(), paths.len());
-    for (path, walked, read) in seen {
+    for (path, walked, read, by_name) in seen {
         assert_eq!(walked, read, "{}", path.display());
+        assert_eq!(walked, by_name, "{}", path.display());
     }
 }

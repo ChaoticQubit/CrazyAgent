@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 /// What one read of a place found without following a link ([`read_place`]): on macOS one
 /// `getattrlist` reply carrying the access list too, elsewhere what `lstat` found.
 #[cfg(target_os = "macos")]
-type Read = crazyagent_macos_fs::HeldEntry;
+pub(super) type Read = crazyagent_macos_fs::HeldEntry;
 
 /// What one read of a place found without following a link ([`read_place`]): on macOS one
 /// `getattrlist` reply carrying the access list too, elsewhere what `lstat` found.
 #[cfg(not(target_os = "macos"))]
-type Read = std::fs::Metadata;
+pub(super) type Read = std::fs::Metadata;
 
 /// What [`read_place`] read of each place a link walk found, by the place's path as the walk
 /// named it.
@@ -293,7 +293,7 @@ pub(super) fn read_parts(entries: &[&Path]) -> Vec<Part> {
 /// reply ([`held_part`]), each volume asked once per device. Inputs: the parts and the reads
 /// already made. Output: the reads, in order.
 #[cfg(target_os = "macos")]
-fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> Vec<Part> {
+pub(super) fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> Vec<Part> {
     let mut volumes: Volumes = Vec::new();
     let parts: Vec<Part> = entries
         .iter()
