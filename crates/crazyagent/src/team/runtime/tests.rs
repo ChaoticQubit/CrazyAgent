@@ -45,9 +45,6 @@ mod freeze_tests;
 #[path = "hidden_seers_tests.rs"]
 mod hidden_seers_tests;
 
-#[path = "live_adopt_tests.rs"]
-mod live_adopt_tests;
-
 #[cfg(target_os = "macos")]
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
@@ -182,7 +179,7 @@ impl Fixture {
         ))
     }
 
-    fn runtime(&self) -> TeamRuntime {
+    pub(super) fn runtime(&self) -> TeamRuntime {
         let access = self.access.clone();
         TeamRuntime::open(
             &self.base.join("engine.db"),
@@ -17934,7 +17931,6 @@ fn between_turns(
         turn_started: None,
         fed: None,
         session: None,
-        named: None,
         seed: None,
         bound: None,
         spawned: Instant::now(),
@@ -33820,7 +33816,7 @@ fn granted_policy(
 /// A worker between turns that holds no toolchain and the saved network, so only what an
 /// F08 row changes widens or narrows it, with the receiver of its orders. Input: the
 /// project and the role. Output: the worker and its orders.
-fn held_worker(project: &ProjectId, role: AgentRole) -> (Worker, Receiver<Order>) {
+pub(super) fn held_worker(project: &ProjectId, role: AgentRole) -> (Worker, Receiver<Order>) {
     let mut worker = between_turns(project, role, true, false);
     let (order, orders) = channel();
     worker.orders = order;

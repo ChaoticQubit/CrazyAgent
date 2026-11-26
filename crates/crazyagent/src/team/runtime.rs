@@ -821,7 +821,6 @@ struct Worker {
     fed: Option<crate::master_sessions::Fed>,
     counted_none: bool,
     session: Option<String>,
-    named: Option<Resume>,
     seed: Option<String>,
     bound: Option<TurnBound>,
     spawned: Instant,
@@ -924,6 +923,7 @@ pub struct TeamRuntime {
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     unread: BTreeMap<ProjectId, (i64, Instant)>,
     resuming: Option<(i64, Resume)>,
+    named: BTreeMap<i64, Resume>,
     settled: bool,
     naming: Option<i64>,
     fresh_start: Option<i64>,
@@ -1279,6 +1279,7 @@ impl TeamRuntime {
             live_starts: BTreeMap::new(),
             unread: BTreeMap::new(),
             resuming: None,
+            named: BTreeMap::new(),
             settled: false,
             naming: None,
             fresh_start: None,
@@ -4670,9 +4671,7 @@ impl TeamRuntime {
         }
         let session = crate::master_sessions::live_session(&self.connection, project)?;
         if let Some(id) = self.master(project) {
-            if on {
-                self.adopt_session(project, id)?;
-            }
+            self.adopt_session(project, id, on)?;
             let chosen_off = !on
                 && self.workers[&id].live
                 && super::master::switch(&self.connection, project)?.0 == Some(true);
@@ -4934,48 +4933,6 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Seats a live master the Live terminal switch started before any master session in
-    /// the project's live session when that session is still empty: no owner turn and no
-    /// kept conversation. The reads and the seat run in one immediate transaction, and the
-    /// conversation the master named is kept for the session, so a restart resumes it.
-    /// Takes the project and the master agent. Returns any SQLite failure.
-    fn adopt_session(&mut self, project: &ProjectId, id: i64) -> Result<(), EngineError> {
-        let worker = &self.workers[&id];
-        assert!(&worker.project == project && worker.role == AgentRole::Master);
-        if !worker.live || worker.stopping || worker.session.is_some() {
-            return Ok(());
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(error)?;
-        let Some(session) = crate::master_sessions::live_session(&tx, project)? else {
-            return Ok(());
-        };
-        let id_of = SessionId::new(&session).map_err(error)?;
-        if crate::master_sessions::has_owner_turn(&tx, &id_of)?
-            || super::master::session_conversation(&tx, project, &session)?.is_some()
-        {
-            return Ok(());
-        }
-        if let Some(resume) = worker.named.clone() {
-            let kept = super::master::SessionConversation {
-                agent: id,
-                harness: launch_harness(&worker.harness)
-                    .unwrap_or(&worker.harness)
-                    .to_owned(),
-                connection: worker.connection.as_str().to_owned(),
-                resume,
-            };
-            super::master::keep_conversation(&tx, project, &session, &kept)?;
-        }
-        tx.commit().map_err(error)?;
-        let worker = self.workers.get_mut(&id).expect("adopting master exists");
-        worker.session = Some(session);
-        assert!(worker.session.is_some() && !worker.stopping);
-        Ok(())
-    }
-
     /// Starts a project's live master for its live session. A session whose harness
     /// conversation can continue starts the master that kept it, in its worktree and home,
     /// resuming that conversation; otherwise the project's last master on this harness
@@ -5202,35 +5159,6 @@ impl TeamRuntime {
             launch,
             &|kept| super::resumes_on(&pool, account, kept),
         )
-    }
-
-    /// Binds a live master that just started to the session it runs, with the seed its
-    /// briefing carries: the earlier turns for a fresh conversation, or the turns a kept
-    /// conversation does not hold for one that continues. A master that did not start live
-    /// and unbriefed is stopped and its start refused, so a start that read the switch off
-    /// never ends the team thread (RV-DS241-121). Takes the agent, the session, the seed and
-    /// the note of the start. Returns the agent and the note, or the refusal.
-    fn seat_session(
-        &mut self,
-        id: i64,
-        session: Option<&SessionId>,
-        seed: Option<String>,
-        note: Option<String>,
-    ) -> Start<(i64, Option<String>)> {
-        let Some(worker) = self
-            .workers
-            .get_mut(&id)
-            .filter(|worker| worker.live && !worker.briefed)
-        else {
-            if let Some(worker) = self.workers.get_mut(&id) {
-                worker.stop_for("engine_stop:not_live");
-                let _ = worker.orders.send(Order::Stop);
-            }
-            return Start::Refused(MASTER_NOT_LIVE.to_owned());
-        };
-        worker.session = session.map(|session| session.as_str().to_owned());
-        worker.seed = seed;
-        Start::Started((id, note))
     }
 
     /// Turns a project's live master off after it could not keep running, so the runtime
@@ -8055,6 +7983,7 @@ impl TeamRuntime {
             .map_err(error)?
             .flatten();
         self.hooks_checked.remove(&id);
+        self.named.remove(&id);
         self.workers.insert(
             id,
             Worker {
@@ -8096,7 +8025,6 @@ impl TeamRuntime {
                 turn_started: None,
                 counted_none: false,
                 session: None,
-                named: None,
                 seed: None,
                 bound: None,
                 spawned: Instant::now(),
@@ -10244,10 +10172,7 @@ impl TeamRuntime {
                         &kept,
                     )?;
                 } else if worker.live && worker.role == AgentRole::Master {
-                    self.workers
-                        .get_mut(&id)
-                        .expect("named worker exists")
-                        .named = Some(resume);
+                    self.named.insert(id, resume);
                 }
                 Ok(false)
             }
@@ -14689,6 +14614,7 @@ mod task_prompt_lines;
 #[path = "runtime/turn_end.rs"]
 mod turn_end;
 
+mod live_adopt;
 mod teammates;
 
 /// The team loop's side of a wake: the count read before a tick, and the wait that ends at

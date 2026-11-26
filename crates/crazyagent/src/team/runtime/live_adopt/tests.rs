@@ -1,3 +1,4 @@
+use super::super::tests::{ENDPOINT, Fixture, PROJECT, held_worker};
 use super::*;
 
 const NAMED: &str = "conversation-before-the-first-open";
@@ -155,7 +156,7 @@ fn a_session_that_kept_a_conversation_is_not_adopted() {
     let (id, orders) = sessionless_master(&fixture, &mut team);
 
     open_session(&fixture.connection, "kept-before");
-    let earlier = super::super::master::SessionConversation {
+    let earlier = crate::team::master::SessionConversation {
         agent: id + 1,
         harness: "codex".into(),
         connection: ENDPOINT.into(),
@@ -164,7 +165,7 @@ fn a_session_that_kept_a_conversation_is_not_adopted() {
             record: fixture.base.join("earlier.jsonl"),
         },
     };
-    super::super::master::keep_conversation(&fixture.connection, &project, "kept-before", &earlier)
+    crate::team::master::keep_conversation(&fixture.connection, &project, "kept-before", &earlier)
         .unwrap();
     step(&fixture, &mut team);
 
