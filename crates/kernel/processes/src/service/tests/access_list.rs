@@ -461,6 +461,7 @@ fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
     .unwrap_or_else(|error| panic!("chmod +a on {folder:?}: {error}"));
     assert!(status.success(), "chmod +a on {folder:?}");
     assert_eq!(changeable_by_others(&tool), None);
+    temp.close().unwrap();
 }
 
 /// A world-writable folder above a tool reads as the changeable part of the tool's path,
