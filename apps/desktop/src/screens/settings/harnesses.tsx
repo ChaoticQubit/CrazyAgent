@@ -48,10 +48,12 @@ const INSTALLS: { value: InstallFromApp; label: string }[] = [
   { value: "on", label: "Offer Install for harnesses that are not installed" },
   { value: "off", label: "Don't offer Install" },
 ];
-const INSTALL_HELP = `Install runs Homebrew when it is on ${thisComputer()}, else npm. It never uses sudo or a script from a website.`;
+const INSTALL_HELP = isWindows()
+  ? "Install runs npm with the Node CrazyAgent sets up. It never runs as an administrator or a script from a website."
+  : `Install runs Homebrew when it is on ${thisComputer()}, else npm. It never uses sudo or a script from a website.`;
 const LOOKUP_HELP = "Claude Code's own installer and Codex's standalone installer have no check command, so CrazyAgent reads one small public file from downloads.claude.ai or releases.openai.com. It sends no account, project or file details. It never downloads or runs anything from there.";
 const PURPOSE = isWindows()
-  ? `Agents run inside these tools. CrazyAgent finds them on ${thisComputer()}. Install and update them outside CrazyAgent.`
+  ? `Agents run inside these tools. CrazyAgent finds them on ${thisComputer()}. It can install one with npm and update one with that harness's own updater, each only when you choose it.`
   : `CrazyAgent finds harnesses installed on ${thisComputer()}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
 
 type Save = (settings: UpdateSettings) => Promise<Result<void>>;
