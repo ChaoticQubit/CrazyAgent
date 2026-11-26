@@ -4324,7 +4324,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_log_compaction" => {
-            let result: Result<_, BridgeError> = async { lock(state).await?.log_compaction().await }.await;
+            let result: Result<_, BridgeError> = async { state.log_compaction().await }.await;
             routed(result)
         }
         "desktop_set_log_compaction" => {
