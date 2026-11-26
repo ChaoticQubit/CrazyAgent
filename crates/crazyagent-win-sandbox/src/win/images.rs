@@ -7,7 +7,8 @@ use windows_sys::Wdk::System::Threading::{
     NtQueryInformationProcess, ProcessCommandLineInformation,
 };
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    UNICODE_STRING,
 };
 use windows_sys::Win32::Security::TOKEN_QUERY;
 use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
@@ -15,20 +16,44 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 const PROCESSES_MAX: usize = 65536;
 const IMAGE_UNITS_MAX: usize = 32768;
 const COMMAND_WORDS: usize = (size_of::<UNICODE_STRING>() + 2 * 32768) / 8;
+const HOSTS: [&str; 6] = [
+    "node.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "bun.exe",
+    "deno.exe",
+];
 
-/// Tells whether a process of this user runs from one of the folders or files, or names one in
-/// its command line as `node.exe` names its script; another account's process is skipped, and
-/// one of this user's whose command line cannot be read counts as running. Input: absolute
-/// folders and files in their real spelling. Output: the answer, or the Windows error code when
-/// the snapshot or this user's SID cannot be read or the snapshot holds too many processes.
+/// Why the scan counted one process as running one of the folders: its program lies there,
+/// its command line names one, or it is a script host whose command line could not be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    Image,
+    Command,
+    Unread,
+}
+
+/// Tells whether a live process of this user runs from one of the folders or files, or names
+/// one in its command line as `node.exe` names its script; another account's process and one
+/// that has exited are skipped, and a script host whose command line cannot be read counts.
+/// Input: absolute folders and files in their real spelling. Output: the answer, or the
+/// Windows error code when the snapshot or this user's SID cannot be read or holds too many.
 pub fn runs_under(folders: &[PathBuf]) -> Result<bool, u32> {
+    scan(folders).map(|hit| hit.is_some())
+}
+
+/// The work of [`runs_under`], keeping the first process counted and why, so a row can name
+/// it. Input: absolute folders and files. Output: the process id, why it counted and the
+/// NTSTATUS of its command-line read (0 once read), none when no process counts, or the error.
+fn scan(folders: &[PathBuf]) -> Result<Option<(u32, Seen, i32)>, u32> {
     assert!(folders.iter().all(|folder| folder.is_absolute()));
     let user = user_sid()?;
     let spellings: Vec<String> = folders
@@ -53,49 +78,68 @@ pub fn runs_under(folders: &[PathBuf]) -> Result<bool, u32> {
         if !found {
             let code = last_error();
             return if code == ERROR_NO_MORE_FILES {
-                Ok(false)
+                Ok(None)
             } else {
                 Err(code)
             };
         }
-        if runs(
-            entry.th32ProcessID,
-            &user,
-            &spellings,
-            &mut units,
-            &mut command,
-        ) {
-            return Ok(true);
+        let id = entry.th32ProcessID;
+        if let Some((why, status)) = seen(id, &user, &spellings, &mut units, &mut command) {
+            return Ok(Some((id, why, status)));
         }
         found = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
     }
     Err(ERROR_INSUFFICIENT_BUFFER)
 }
 
-/// Tells whether one process of this user runs from or names one of the spellings; a process
-/// that cannot be opened, ended since the snapshot or belongs to another account does not.
-/// Relies on the opened handle being null on failure or a new handle this caller owns alone.
-/// Inputs: the process id, this user's SID, the spellings and the two read buffers. Output:
-/// the answer; true when its command line cannot be read.
-fn runs(
+/// Judges one process. Relies on the opened handle being null on failure or a new handle this
+/// caller owns alone. Inputs: the process id, this user's SID, the spellings and the buffers.
+/// Output: why it counts, with its command-line read status, or none when it cannot be
+/// opened, belongs to another account, has exited, or names none of the spellings.
+fn seen(
     id: u32,
     user: &[u8],
     spellings: &[String],
     units: &mut [u16],
     command: &mut [u64],
-) -> bool {
+) -> Option<(Seen, i32)> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, id) };
     if process.is_null() {
-        return false;
+        return None;
     }
     let process = unsafe { OwnedHandle::from_raw_handle(process) };
-    if owner(&process).as_deref() != Some(user) {
-        return false;
+    if owner(&process).as_deref() != Some(user) || exited(&process) {
+        return None;
     }
-    if image(&process, units).is_some_and(|image| names(&image, spellings)) {
-        return true;
+    let image = image(&process, units);
+    if image
+        .as_deref()
+        .is_some_and(|image| names(image, spellings))
+    {
+        return Some((Seen::Image, 0));
     }
-    command_line(&process, command).is_none_or(|text| names(&text, spellings))
+    match command_line(&process, command) {
+        Ok(text) => names(&text, spellings).then_some((Seen::Command, 0)),
+        Err(status) => host(image.as_deref()).then_some((Seen::Unread, status)),
+    }
+}
+
+/// Tells whether a process has ended, read from its exit code, so a process whose handle
+/// someone still holds is not counted as running. An exit code that cannot be read reads
+/// as still running. Input: the process handle. Output: the answer.
+fn exited(process: &OwnedHandle) -> bool {
+    let mut code = 0u32;
+    let read = unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) };
+    read != 0 && code != STILL_ACTIVE as u32
+}
+
+/// Tells whether a program is a script host that can run a harness from a folder by naming
+/// its script, so a command line of it that cannot be read counts as running it. Input: the
+/// lowered program file name, none when unread. Output: the answer.
+fn host(image: Option<&str>) -> bool {
+    image
+        .and_then(|image| image.rsplit('\\').next())
+        .is_some_and(|name| HOSTS.contains(&name))
 }
 
 /// The user SID of a process's token, or none when the token cannot be opened or read, as a
@@ -133,8 +177,8 @@ fn image(process: &OwnedHandle, units: &mut [u16]) -> Option<String> {
 /// A process's command line in the compared spelling, read by ntdll into a buffer that holds
 /// the longest one Windows allows. Relies on Windows writing the string's text inside that
 /// buffer. Inputs: the process handle and the [`COMMAND_WORDS`] buffer. Output: the lowered
-/// command line, or none when it cannot be read.
-fn command_line(process: &OwnedHandle, command: &mut [u64]) -> Option<String> {
+/// command line, or the NTSTATUS of a read that failed.
+fn command_line(process: &OwnedHandle, command: &mut [u64]) -> Result<String, i32> {
     assert_eq!(command.len(), COMMAND_WORDS);
     let bytes = (command.len() * 8) as u32;
     let mut written = 0u32;
@@ -148,20 +192,20 @@ fn command_line(process: &OwnedHandle, command: &mut [u64]) -> Option<String> {
         )
     };
     if status < 0 {
-        return None;
+        return Err(status);
     }
     let string = unsafe { &*command.as_ptr().cast::<UNICODE_STRING>() };
     let length = usize::from(string.Length);
     assert_eq!(length % 2, 0);
     if length == 0 {
-        return Some(String::new());
+        return Ok(String::new());
     }
     let start = command.as_ptr() as usize;
     let text = string.Buffer as usize;
     assert!(text >= start + size_of::<UNICODE_STRING>());
     assert!(text + length <= start + bytes as usize);
     let units = unsafe { std::slice::from_raw_parts(string.Buffer, length / 2) };
-    Some(lowered(units))
+    Ok(lowered(units))
 }
 
 /// The spellings a folder or file is looked for in: its own and, where the volume keeps one
@@ -209,7 +253,7 @@ fn names(text: &str, spellings: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::runs_under;
+    use super::{HOSTS, host, lowered, runs_under, scan};
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
@@ -313,6 +357,41 @@ mod tests {
         assert_eq!(runs_under(&here), Ok(false));
         sibling.kill().unwrap();
         sibling.wait().unwrap();
+    }
+
+    /// A program that named a folder and has ended counts as running it no more while its
+    /// handle is still held, scanned many times so a process that only sometimes counts is
+    /// named with why.
+    #[test]
+    fn an_ended_program_whose_handle_is_held_runs_under_nothing() {
+        let made = tempfile::tempdir().unwrap();
+        let folder = plain(made.path());
+        let script = folder.join("node_modules").join("tool").join("cli.js");
+        let mut child = naming(script.to_str().unwrap());
+        let mine = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let here = [folder.clone()];
+        for round in 0..50 {
+            let hit = scan(&here);
+            assert_eq!(hit, Ok(None), "round {round}, ended child {mine}");
+        }
+        drop(child);
+    }
+
+    /// An unread command line counts only for a script host, its file name read in any case,
+    /// and never for another program or one whose file name is unread.
+    #[test]
+    fn only_a_script_host_counts_when_its_command_line_is_unread() {
+        for name in HOSTS {
+            assert!(host(Some(&format!("c:\\tools\\{name}"))), "{name}");
+        }
+        let upper: Vec<u16> = r"C:\Program Files\nodejs\NODE.EXE".encode_utf16().collect();
+        assert!(host(Some(&lowered(&upper))));
+        assert!(!host(Some(r"c:\windows\system32\ping.exe")));
+        assert!(!host(Some(r"c:\tools\node.exe.bak")));
+        assert!(!host(Some("node.exe.old")));
+        assert!(!host(None));
     }
 
     /// A folder named without its drive is a caller's mistake, never a folder no program
