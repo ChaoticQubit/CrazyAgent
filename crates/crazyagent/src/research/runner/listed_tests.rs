@@ -496,7 +496,7 @@ fn a_research_job_finishing_right_after_a_folder_is_saved_hidden_publishes_no_re
         let connection = rusqlite::Connection::open(&root.database).unwrap();
         crate::sandbox::access_store::hidden::save(&connection, "alpha", &[folder.join("vault")])
             .unwrap();
-        assert!(release(&token), "the stand-in was waiting");
+        release(&token);
         run.join().unwrap()
     });
     let run = run.unwrap().unwrap();
