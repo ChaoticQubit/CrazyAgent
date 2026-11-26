@@ -843,6 +843,46 @@ fn a_removal_whose_retired_folder_cannot_lose_the_name_is_refused_with_nothing_m
     assert_eq!(plugin(&listing, "acme").name, "acme");
 }
 
+/// The two retired folders a row puts beside acme, by name.
+const TWO_RETIRED: [&str; 2] = [
+    ".old-acme.00000000000000000000000000000000000000000000000000000000000000f1",
+    ".old-acme.00000000000000000000000000000000000000000000000000000000000000f2",
+];
+
+/// Two retired folders beside a live acme whose text the trust row holds are leftovers,
+/// not the original, so the start sweep deletes both and keeps acme.
+#[test]
+fn two_retired_folders_beside_a_trusted_live_plugin_are_deleted_at_start() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    drop_in(&case, TWO_RETIRED[0], NEAR);
+    drop_in(&case, TWO_RETIRED[1], ACME);
+
+    start_sweep(&case).unwrap();
+
+    trusted_on_disk(&case, &folder, ACME);
+}
+
+/// Two retired folders beside a live acme whose text the trust row does not hold are all
+/// kept with it, since which one is the original is not known.
+#[test]
+fn two_retired_folders_beside_an_untrusted_live_plugin_are_kept() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case);
+    drop_in(&case, TWO_RETIRED[0], NEAR);
+    drop_in(&case, TWO_RETIRED[1], ACME);
+    let three = ACME.replace("Acme embeddings", "Acme embeddings three");
+    trust_row_holds(&case, &three);
+
+    start_sweep(&case).unwrap();
+
+    let mut names = names_in(&folder);
+    names.sort();
+    assert_eq!(names, [TWO_RETIRED[0], TWO_RETIRED[1], "acme"]);
+}
+
 /// A removal whose rows fail to commit keeps a retired folder kept beside the live one of
 /// its name: after the failed removal both folders are still there, the trusted original
 /// under its retired name, so nothing the owner trusted is lost.
