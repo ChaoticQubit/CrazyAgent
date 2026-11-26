@@ -287,10 +287,13 @@ function logged({ bin, agents }) {
 }
 
 /** Reads every harness turn the stand-in claude held open: its kind (--session-id, --resume
- * or --print), the session it names and its log key. Calls that start no turn and one-shot
- * runs the stand-in ended at once are left out. Input: the log places. Output: the starts. */
+ * or --print), the session it names and its log key; one-shot runs are left out. Every caller
+ * runs after team agents started, so no logged turn refuses the step instead of reading as none.
+ * Input: the log places. Output: the starts, at least one. */
 function launches(logs) {
-  return logged(logs).filter((item) => item.kind !== "other" && item.kind !== ONESHOT);
+  const starts = logged(logs).filter((item) => item.kind !== "other" && item.kind !== ONESHOT);
+  if (!starts.length) throw new Refused("no_harness_start_logged", "team agents started but the stand-in logged no held turn");
+  return starts;
 }
 
 /** Counts the one-shot claude runs (a --print call with no --input-format, such as a mapping
