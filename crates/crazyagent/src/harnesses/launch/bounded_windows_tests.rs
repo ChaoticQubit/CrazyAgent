@@ -503,8 +503,8 @@ fn a_windows_launch_refuses_a_boundary_that_grants_another_home_than_the_held_on
     let context = crate::launch_context::windows_tests::context();
     let held = context.install("claude-code", &plain.home, false).unwrap();
     let launch = LaunchBoundary::Installed(boundary);
-    let request = request(&plain, "claude-code", launch, &plain.home, false);
-    assert!(build(&request, Some(&held)).is_ok());
+    let plain_request = request(&plain, "claude-code", launch, &plain.home, false);
+    assert!(build(&plain_request, Some(&held)).is_ok());
     drop(held);
     let case = case();
     let boundary = installed(&case, &case.project, &case.home, "agent.sb");
@@ -512,9 +512,9 @@ fn a_windows_launch_refuses_a_boundary_that_grants_another_home_than_the_held_on
     let held = context.install("claude-code", &case.home, false).unwrap();
     repoint_agent(&case);
     let launch = LaunchBoundary::Installed(boundary);
-    let request = request(&case, "claude-code", launch, &case.home, false);
+    let linked_request = request(&case, "claude-code", launch, &case.home, false);
     assert_eq!(
-        build(&request, Some(&held)).unwrap_err().0,
+        build(&linked_request, Some(&held)).unwrap_err().0,
         "launch_environment_refused"
     );
     drop(held);
