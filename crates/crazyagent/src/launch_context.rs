@@ -1224,6 +1224,7 @@ impl AgentContext {
         if codex {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
+            #[cfg(unix)]
             remove_copies(home)?;
             let mut developer = self.instructions.clone();
             if tools {
@@ -2978,8 +2979,13 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         let lock = lock(home)?;
         #[cfg(windows)]
         locked_in(&lock, &held)?;
+        #[cfg(windows)]
+        if drivers::piped(harness) == Ok(Piped::Codex) {
+            windows::codex_copies(home, &held)?;
+        }
         (lock, Vec::new())
     };
+    #[cfg(unix)]
     if drivers::piped(harness) == Ok(Piped::Codex) {
         remove_copies(home)?;
     }
@@ -3166,14 +3172,6 @@ fn park(home: &Path) -> Option<(PathBuf, std::os::fd::OwnedFd)> {
         }
     }
     None
-}
-
-/// Refuses a Codex launch's skill removal where it is not yet handle-relative, so a Codex
-/// home is never launched with skills an earlier run left; S9b removes them through the
-/// held-folder layer (D8). Input: unused. Output: `launch_context_unavailable`.
-#[cfg(not(unix))]
-fn remove_copies(_home: &Path) -> Result<(), LaunchError> {
-    Err(failure("launch_context_unavailable"))
 }
 
 /// Whether `name` is still in `folder`, read without following a link. A read that fails

@@ -48,11 +48,11 @@ pub(super) fn lock(home: &Path) -> Result<File, LaunchError> {
     }
 }
 
-/// Installs a Claude Code launch with tools off in a home `validate_home` passed, every
-/// write held: the home is held and judged as itself, the lock must sit in it, the launch
-/// folder is cleared through it and a process's home prepared, links as themselves, then the
-/// MCP list and instructions written. Tools, Codex or a relay is refused before any change.
-/// Inputs: the context, the home, tools and Codex. Output: the guard, or the code.
+/// Installs a Claude Code or Codex launch with tools off in a home `validate_home` passed,
+/// every write held: the home is held and judged as itself, the lock must sit in it, Codex's
+/// skills, the launch folder and a process's home are cleared through it, links as
+/// themselves, then the launch's files written. Tools or a relay is refused before any
+/// change. Inputs: the context, the home, tools and Codex. Output: the guard, or the code.
 pub(super) fn install(
     context: &AgentContext,
     home: &Path,
@@ -60,12 +60,15 @@ pub(super) fn install(
     codex: bool,
 ) -> Result<Installed, LaunchError> {
     use crate::engine::bootstrap::held::{Folder, HeldError, Name, TREE_DEPTH_MAX};
-    if tools || codex || context.relay.is_some() {
+    if tools || context.relay.is_some() {
         return Err(failure("launch_context_unavailable"));
     }
     let root = Folder::root_judged_by(home, held_home_judge).map_err(held_failure)?;
     let lock = lock(home)?;
     locked_in(&lock, root.file())?;
+    if codex {
+        remove_copies_held(&root)?;
+    }
     let state = Name::constant(STATE);
     match root.remove_tree_unjudged(&state, TREE_DEPTH_MAX) {
         Ok(()) | Err(HeldError::Missing) => {}
@@ -74,28 +77,47 @@ pub(super) fn install(
     let folder = root.make_dir_inherited(&state).map_err(held_failure)?;
     let mut text = context.instructions.clone();
     if let Some(process) = &context.process {
-        let given = prepare_process(&root, process)?;
-        if !given.text.is_empty() {
+        let given = prepare_process(&root, process, codex)?;
+        if !given.text.is_empty() && !codex {
             text.push('\n');
             text.push_str(&given.text);
         }
     }
-    write_inherited(&folder, "mcp.json", claude_config(&[])?.into_bytes())?;
-    write_inherited(&folder, "instructions.md", text.into_bytes())?;
+    if codex {
+        let source = root.place().join("config.toml");
+        let source = source.to_string_lossy();
+        let config = codex_config(&text, &[], &context.off_tools, &[], &source, None)?;
+        let keys = serde_json::to_vec(&codex_hook_keys(&[], &source))
+            .map_err(|_| failure("launch_context_hook_unavailable"))?;
+        match root.remove_tree_unjudged(&Name::constant("config.toml"), TREE_DEPTH_MAX) {
+            Ok(()) | Err(HeldError::Missing) => {}
+            Err(error) => return Err(held_failure(error)),
+        }
+        write_inherited(&root, "config.toml", config.into_bytes())?;
+        write_inherited(&folder, CODEX_HOOK_KEYS, keys)?;
+    } else {
+        write_inherited(&folder, "mcp.json", claude_config(&[])?.into_bytes())?;
+        write_inherited(&folder, "instructions.md", text.into_bytes())?;
+    }
     let place = root
         .place_now()
         .map_err(|_| failure("launch_context_unsafe"))?;
     let path = place.join(STATE);
-    let installed = Installed {
-        arguments: vec![
+    let arguments = if codex {
+        Vec::new()
+    } else {
+        vec![
             OsString::from("--mcp-config"),
             path.join("mcp.json").into_os_string(),
             OsString::from("--append-system-prompt-file"),
             path.join("instructions.md").into_os_string(),
-        ],
+        ]
+    };
+    let installed = Installed {
+        arguments,
         files: Some(InstalledFiles {
             home: place.to_path_buf(),
-            codex: false,
+            codex,
             rendered: Vec::new(),
             listed: false,
         }),
@@ -121,15 +143,48 @@ pub(super) fn install(
 }
 
 /// Removes a held install's launch folder through the home it held, links as themselves,
-/// before the drop releases the lock; a launch with no held home, or one `keep` left to a
-/// running pane, removes nothing, since Windows never removes by path. Input: the launch.
+/// and for Codex its config and skills, before the drop releases the lock; a launch with no
+/// held home, or one `keep` left to a running pane, removes nothing, since Windows never
+/// removes by path. A failure is left for the next Codex launch to refuse. Input: the launch.
 pub(super) fn remove_held(installed: &mut Installed) {
     use crate::engine::bootstrap::held::{Name, TREE_DEPTH_MAX};
-    if installed.files.take().is_some()
+    if let Some(files) = installed.files.take()
         && let Some(root) = &installed.held
     {
         let _ = root.remove_tree_unjudged(&Name::constant(STATE), TREE_DEPTH_MAX);
+        if files.codex {
+            let _ = root.remove_tree_unjudged(&Name::constant("config.toml"), TREE_DEPTH_MAX);
+            let _ = remove_copies_held(root);
+        }
     }
+}
+
+/// Removes the skills an earlier Codex run left in a held home, whatever their owner, links
+/// as themselves, and makes an empty `skills` again with the home's inheritable list.
+/// Input: the held home. Output: Ok, or [`SKILLS_KEPT`] when anything stays.
+fn remove_copies_held(root: &crate::engine::bootstrap::held::Folder) -> Result<(), LaunchError> {
+    use crate::engine::bootstrap::held::{HeldError, Name, TREE_DEPTH_MAX};
+    let skills = Name::constant("skills");
+    match root.remove_tree_unjudged(&skills, TREE_DEPTH_MAX) {
+        Ok(()) | Err(HeldError::Missing) => {}
+        Err(_) => return Err(failure(SKILLS_KEPT)),
+    }
+    root.make_dir_inherited(&skills)
+        .map(drop)
+        .map_err(|_| failure(SKILLS_KEPT))
+}
+
+/// Removes an earlier Codex run's skills for a lock taken without an install: the home is
+/// held again as itself and judged, refused unless it is the object `held` first held, so a
+/// link above the home moved between the two opens reaches nothing. Inputs: the home and the
+/// first hold. Output: Ok, `launch_context_unsafe`, another held code or [`SKILLS_KEPT`].
+pub(super) fn codex_copies(home: &Path, held: &File) -> Result<(), LaunchError> {
+    use crate::engine::bootstrap::held::Folder;
+    let root = Folder::root_judged_by(home, held_home_judge).map_err(held_failure)?;
+    if !crazyagent_win_sandbox::private::same(held, root.file()).unwrap_or(false) {
+        return Err(failure("launch_context_unsafe"));
+    }
+    remove_copies_held(&root)
 }
 
 /// Writes one file made in the held launch folder, create-only, with the folder's
@@ -159,16 +214,22 @@ fn write_inherited(
     }
 }
 
-/// Prepares a process launch's held Claude Code home and records what it was given and its
-/// empty skill list, every record keyed by the held home's place read from its handle,
-/// never a spelling a link above the home could repoint. Inputs: the held home and the
-/// process. Output: what the home was given, or the launch's refusal.
+/// Prepares a process launch's held Claude Code or Codex home and records what it was given
+/// and its empty skill list, every record keyed by the held home's place read from its
+/// handle, never a spelling a link above the home could repoint. Inputs: the held home, the
+/// process and Codex. Output: what the home was given, or the launch's refusal.
 pub(super) fn prepare_process(
     root: &crate::engine::bootstrap::held::Folder,
     process: &Process,
+    codex: bool,
 ) -> Result<crate::agent_home::Given, LaunchError> {
+    use crate::agent_home::Harness;
     let given = process_text(process)?;
-    let harness = crate::agent_home::Harness::Claude;
+    let harness = if codex {
+        Harness::Codex
+    } else {
+        Harness::Claude
+    };
     crate::agent_home::held_home::prepare_held(
         root,
         harness,

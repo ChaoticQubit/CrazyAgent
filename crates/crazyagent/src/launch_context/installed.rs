@@ -54,6 +54,7 @@ impl Drop for Installed {
             for path in files.removals() {
                 remove(&path);
             }
+            #[cfg(unix)]
             if files.codex {
                 let _ = remove_copies(&files.home);
             }

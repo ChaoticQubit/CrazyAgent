@@ -1131,7 +1131,7 @@ fn a_windows_process_keys_its_records_by_the_held_home_after_a_junction_above_is
     let (root, held_home, other) = held_through_a_repointed_link(&base, &data);
     let context = process_context(&data, "Check every row.", HomeCaches::Keep);
     let other_given = given(&process_context(&data, "Other rows.", HomeCaches::Keep));
-    let held_given = windows::prepare_process(&root, context.process.as_ref().unwrap())
+    let held_given = windows::prepare_process(&root, context.process.as_ref().unwrap(), false)
         .unwrap()
         .text;
     assert_eq!(held_given, given(&context));
@@ -1155,7 +1155,7 @@ fn a_windows_process_keys_its_skills_record_by_the_held_home_after_a_junction_ab
     let (root, _held_home, _other) = held_through_a_repointed_link(&base, &data);
     assert_eq!(record_texts(&data, "agent-skills").len(), 1);
     let context = process_context(&data, "Check every row.", HomeCaches::Keep);
-    windows::prepare_process(&root, context.process.as_ref().unwrap()).unwrap();
+    windows::prepare_process(&root, context.process.as_ref().unwrap(), false).unwrap();
     assert_eq!(record_texts(&data, "agent-skills").len(), 2);
 }
 
