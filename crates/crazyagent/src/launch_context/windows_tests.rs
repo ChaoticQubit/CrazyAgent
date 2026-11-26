@@ -749,6 +749,10 @@ fn a_windows_process_install_keeps_a_kept_file_it_cannot_open() {
             .open(&kept)
             .unwrap()
     };
+    assert_eq!(
+        std::fs::File::open(&kept).unwrap_err().raw_os_error(),
+        Some(32)
+    );
     let context = process_context(&data, "Rows.", HomeCaches::Keep);
     assert_eq!(
         context.install("claude-code", &home, false).unwrap_err().0,

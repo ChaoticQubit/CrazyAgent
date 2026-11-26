@@ -1069,3 +1069,31 @@ fn an_unjudged_file_open_reads_a_plain_file_and_refuses_a_link_or_folder() {
         Some(HeldError::Missing)
     );
 }
+
+/// On Windows a file another handle holds without sharing cannot be opened through a
+/// caller-judged folder: the open is `InUse`, as a plain open of it fails with a sharing
+/// violation, and once the hold ends the same open works.
+#[cfg(windows)]
+#[test]
+fn an_unjudged_file_open_of_a_file_held_without_sharing_is_in_use() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const SHARING_VIOLATION: i32 = 32;
+    let (_temp, root) = caller_root();
+    std::fs::write(root.join("busy.md"), "busy").unwrap();
+    let busy = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(root.join("busy.md"))
+        .unwrap();
+    assert_eq!(
+        File::open(root.join("busy.md")).unwrap_err().raw_os_error(),
+        Some(SHARING_VIOLATION)
+    );
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    assert_eq!(
+        held.open_file_unjudged(&name("busy.md")).err(),
+        Some(HeldError::InUse)
+    );
+    drop(busy);
+    assert!(held.open_file_unjudged(&name("busy.md")).is_ok());
+}

@@ -1070,11 +1070,26 @@ impl Folder {
     }
 
     /// Opens one child file of a caller-judged tree as itself for reading only, never
-    /// through a link, and binds it to this folder; a reparse point or a folder at the name
-    /// is `Unsafe`. Input: its name. Output: the open file, `Missing`, or the error.
+    /// through a link and without backup semantics, so another handle's sharing and the
+    /// file's list hold as for any reader; binds it to this folder. A reparse point or a
+    /// folder at the name is `Unsafe`. Input: its name. Output: the file, `Missing`, or the error.
     pub(crate) fn open_file_unjudged(&self, name: &Name) -> Result<File, HeldError> {
+        use crate::platform::FILE_FLAG_OPEN_REPARSE_POINT;
+        use std::os::windows::fs::OpenOptionsExt;
         self.assert_caller_judged();
-        let file = open_as_itself(&self.path.join(name.as_os_str()), None)?;
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name.as_os_str()));
+        let file = opened.map_err(|error| match cause(error) {
+            HeldError::Unavailable
+                if matches!(self.kind_unjudged(name), Ok(Kind::Folder | Kind::Link)) =>
+            {
+                HeldError::Unsafe
+            }
+            kind => kind,
+        })?;
         let facts = private::facts(&file).map_err(cause)?;
         if facts.reparse || !file.metadata().map_err(cause)?.is_file() {
             return Err(HeldError::Unsafe);
