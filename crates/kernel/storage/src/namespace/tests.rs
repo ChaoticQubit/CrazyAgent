@@ -398,6 +398,20 @@ fn sources(folder: &Path) -> Vec<PathBuf> {
     found
 }
 
+#[cfg(unix)]
+#[test]
+fn the_namespace_walk_panics_naming_a_folder_link() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/a.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
+
+    let cause = std::panic::catch_unwind(|| sources(root.path())).expect_err("the walk panics");
+    let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
+
+    assert!(said.contains(&format!("{:?}", root.path().join("linked"))), "{said}");
+}
+
 /// Whether a source file may name a plugin's namespace without the gateway's grant check.
 /// Input: the path from the repo root. Output: true for the bus gateway's source and for
 /// the storage crate's own test-only files that make a namespace (its namespace tests and
