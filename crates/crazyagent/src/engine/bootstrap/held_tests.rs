@@ -1,4 +1,4 @@
-use super::{Child, Folder, HeldError, Judged, Kind, Name, lock, unlock};
+use super::{Child, Folder, HeldError, Judged, Kind, Name, TREE_DEPTH_MAX, lock, unlock};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -971,6 +971,82 @@ fn a_tree_removal_stops_at_its_depth_bound() {
     );
     held.remove_tree_unjudged(&name("tree"), 3).unwrap();
     assert!(!root.join("tree").exists());
+}
+
+/// Makes a chain of `depth` nested folders named `name` below `top`, with one file at its
+/// bottom. Inputs: the top folder, the depth and the folder name. Output: the bottom folder.
+fn chain(top: &Path, depth: usize, name: &str) -> PathBuf {
+    let bottom = (0..depth).fold(top.to_path_buf(), |path, _| path.join(name));
+    std::fs::create_dir_all(&bottom).unwrap();
+    std::fs::write(bottom.join("deep.md"), "deep").unwrap();
+    bottom
+}
+
+/// A tree removal takes a chain of 16 nested folders and one of 17 alike, so no depth an
+/// agent nests blocks the removal.
+#[test]
+fn a_tree_removal_takes_a_chain_deeper_than_sixteen_folders() {
+    let (_temp, root) = caller_root();
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    for depth in [16, 17] {
+        chain(&root.join("tree"), depth, "d");
+        held.remove_tree_unjudged(&name("tree"), TREE_DEPTH_MAX)
+            .unwrap_or_else(|error| panic!("{depth}: {error:?}"));
+        assert!(!root.join("tree").exists(), "{depth}");
+    }
+}
+
+/// A tree removal takes a chain 70 folders deep whose path passes the 260-character limit.
+#[test]
+fn a_tree_removal_takes_a_chain_past_the_long_path_limit() {
+    let (_temp, root) = caller_root();
+    let bottom = chain(&root.join("tree"), 70, "folder01");
+    assert!(bottom.as_os_str().len() > 260);
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    held.remove_tree_unjudged(&name("tree"), TREE_DEPTH_MAX)
+        .unwrap();
+    assert!(!root.join("tree").exists());
+}
+
+/// A tree removal takes a folder holding more entries than one listing returns.
+#[test]
+fn a_tree_removal_takes_a_folder_wider_than_one_listing() {
+    let (_temp, root) = caller_root();
+    let wide = root.join("tree");
+    std::fs::create_dir(&wide).unwrap();
+    for index in 0..4097 {
+        std::fs::write(wide.join(format!("{index}.md")), "w").unwrap();
+    }
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    held.remove_tree_unjudged(&name("tree"), TREE_DEPTH_MAX)
+        .unwrap();
+    assert!(!root.join("tree").exists());
+}
+
+/// A tree removal takes a tree of as many names as its budget, a link among them as itself,
+/// and refuses one name more with `Full`: what the link names keeps every byte.
+#[test]
+fn a_tree_removal_takes_its_name_budget_and_refuses_one_name_more() {
+    let (_temp, root) = caller_root();
+    let outside = root.with_file_name("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("kept.txt"), "kept").unwrap();
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    for (count, removed) in [(10, true), (11, false)] {
+        let tree = root.join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        link_folder(&tree.join("out"), &outside);
+        for index in 1..count {
+            std::fs::write(tree.join(format!("{index}.md")), "n").unwrap();
+        }
+        let result = held.remove_tree_unjudged(&name("tree"), 10);
+        assert_eq!(result.is_ok(), removed, "{count}: {result:?}");
+        assert_eq!(!tree.exists(), removed, "{count}");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("kept.txt")).unwrap(),
+            "kept"
+        );
+    }
 }
 
 /// On Windows a file in the tree that another handle holds without delete sharing makes
