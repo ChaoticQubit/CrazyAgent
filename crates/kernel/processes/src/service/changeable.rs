@@ -546,3 +546,6 @@ pub fn changeable_above_socket(socket: &Path) -> Option<PathBuf> {
         .and_then(|depth| socket.ancestors().nth(depth))
         .map(Path::to_path_buf)
 }
+
+#[cfg(all(test, unix))]
+mod link_walk_tests;
