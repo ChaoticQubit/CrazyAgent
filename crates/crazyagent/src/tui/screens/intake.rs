@@ -387,7 +387,7 @@ mod tests {
             .map(|line| {
                 let (key, text) = line.trim().split_once(": ").unwrap();
                 let text = text.strip_suffix(',').unwrap_or(text);
-                let shown = super::desktop_literal(text)
+                let shown = super::super::desktop_literal(text)
                     .unwrap_or_else(|| panic!("{key}: not one quoted literal"));
                 (key, shown)
             })
