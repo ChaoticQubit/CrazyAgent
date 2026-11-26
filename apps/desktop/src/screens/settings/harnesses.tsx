@@ -13,6 +13,7 @@ import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode,
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, thisComputer } from "../../ui";
 import { SettingRow } from "../../ui/setting";
+import { isWindows } from "../../ui/keys";
 import { ProviderRetrySettings } from "./provider-retry";
 import "../project/projects.css";
 
@@ -49,7 +50,9 @@ const INSTALLS: { value: InstallFromApp; label: string }[] = [
 ];
 const INSTALL_HELP = `Install runs Homebrew when it is on ${thisComputer()}, else npm. It never uses sudo or a script from a website.`;
 const LOOKUP_HELP = "Claude Code's own installer and Codex's standalone installer have no check command, so CrazyAgent reads one small public file from downloads.claude.ai or releases.openai.com. It sends no account, project or file details. It never downloads or runs anything from there.";
-const PURPOSE = `CrazyAgent finds harnesses installed on ${thisComputer()}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
+const PURPOSE = isWindows()
+  ? `Agents run inside these tools. CrazyAgent finds them on ${thisComputer()}. Install and update them outside CrazyAgent.`
+  : `CrazyAgent finds harnesses installed on ${thisComputer()}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
 
 type Save = (settings: UpdateSettings) => Promise<Result<void>>;
 type Reads = Readonly<Record<string, HarnessVersions | null>>;
