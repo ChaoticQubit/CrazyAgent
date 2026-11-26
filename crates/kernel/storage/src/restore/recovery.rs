@@ -5,8 +5,8 @@ use super::{
 };
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, CopyCheck, DATABASE, Flush, V24_VERSION_MAX, check_copy, error, file_digest,
-    flush, schema, stamp,
+    BACKUPS, CopyCheck, DATABASE, Flush, V24_VERSION_MAX, check_copy, error, file_digest, flush,
+    schema, stamp,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};

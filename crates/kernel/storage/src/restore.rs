@@ -1,8 +1,8 @@
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
-    V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, created, error,
-    file_digest, flush, mark_checked, pinned, private_file, schema, stamp, stamp_time, write_texts,
+    BACKUPS, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts, V24_VERSION_MAX,
+    backup_time, backups_folder, backups_in, check_copy, created, error, file_digest, flush,
+    mark_checked, pinned, private_file, schema, stamp, stamp_time, write_texts,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
@@ -426,7 +426,9 @@ fn write_record_with(
     write: fn(&Path, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     if !valid_record_line(line) {
-        return Err(restore_failed("a restore record is one line of 1 to 512 bytes"));
+        return Err(restore_failed(
+            "a restore record is one line of 1 to 512 bytes",
+        ));
     }
     let record = root.join(RESTORE_RECORD_FILE);
     let temp = root.join(RESTORE_RECORD_TEMP);

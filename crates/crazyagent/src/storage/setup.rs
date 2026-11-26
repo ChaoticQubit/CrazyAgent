@@ -787,9 +787,10 @@ pub(crate) fn restore_after_stop(
     global: &Path,
     project: &Path,
 ) -> Result<PathBuf, EngineError> {
-    if let Err(problem) =
-        kernel_storage::restore::write_restore_record(root, kernel_storage::restore::RECORD_RESTORING)
-    {
+    if let Err(problem) = kernel_storage::restore::write_restore_record(
+        root,
+        kernel_storage::restore::RECORD_RESTORING,
+    ) {
         let failed = format!(
             "{} {}",
             kernel_storage::restore::RECORD_FAILED,
