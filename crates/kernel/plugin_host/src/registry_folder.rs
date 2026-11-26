@@ -448,10 +448,10 @@ fn sweep(directory: &Dir, file: &OsStr, shared: bool) -> Result<(), Refused> {
 
 /// Settles each retired folder a replace left beside the live folder of its plugin name, by
 /// the SHA-256 the trust rows hold: while the live plugin.toml is the trusted text the
-/// retired one is a committed leftover and is deleted; while only the retired one is
-/// trusted the replace never committed, so it goes back in place of the live folder;
-/// otherwise both stay. A name with more than one retired folder or a folder owed back to
-/// it is left as it is, and nothing moves when the plugins folder cannot be counted.
+/// retired ones are committed leftovers and are deleted; while the one retired folder of a
+/// name is trusted the replace never committed, so it goes back in place of the live
+/// folder; otherwise all stay. A name with a folder owed back to it is left as it is, and
+/// nothing moves when the plugins folder cannot be counted.
 /// Inputs: the engine root and the trusted SHA-256 per name. Output: Ok, or the first
 /// refusal after every name was tried.
 pub(super) fn sweep_replaced(
@@ -488,13 +488,10 @@ pub(super) fn sweep_replaced(
     assert!(retired.values().map(Vec::len).sum::<usize>() <= OWED_SCAN_ENTRIES_MAX);
     let mut first = None;
     for (name, files) in &retired {
-        let [only] = files.as_slice() else {
-            continue;
-        };
         if owed.contains_key(name) {
             continue;
         }
-        if let Err(refusal) = settle_replaced(&directory, only, name, &trusted) {
+        if let Err(refusal) = settle_replaced(&directory, files, name, &trusted) {
             first.get_or_insert(refusal);
         }
     }
@@ -502,22 +499,26 @@ pub(super) fn sweep_replaced(
     first.map_or(Ok(()), Err)
 }
 
-/// Settles one retired folder beside the live folder of its plugin name by the trusted
+/// Settles the retired folders beside the live folder of their plugin name by the trusted
 /// SHA-256, each plugin.toml read without following a link and hashed as the trust row
-/// is: deleted while the live text is trusted, put back in place of the live folder while
-/// only its own text is trusted and the live one reads, else kept. Inputs: the plugins
-/// folder, the retired entry, its plugin name and the trust check. Output: Ok, or the
-/// refusal with both folders kept.
+/// is: all deleted while the live text is trusted; a lone retired folder whose text alone
+/// is trusted goes back in place of the live folder while the live one reads; else all
+/// kept. Inputs: the plugins folder, the retired entries, their plugin name and the trust
+/// check. Output: Ok, or the first refusal with the folders it could not settle kept.
 fn settle_replaced(
     directory: &Dir,
-    file: &str,
+    files: &[String],
     name: &str,
     trusted: &impl Fn(&str) -> Result<Option<String>, Refused>,
 ) -> Result<(), Refused> {
-    assert_eq!(retired_name(file), Some(name));
-    if os::kind(directory, file.as_ref()).map_err(|()| unavailable())? != Some(Kind::Folder)
-        || !exists(directory, name)?
-    {
+    assert!(files.iter().all(|file| retired_name(file) == Some(name)));
+    let mut folders: Vec<&str> = Vec::new();
+    for file in files {
+        if os::kind(directory, file.as_ref()).map_err(|()| unavailable())? == Some(Kind::Folder) {
+            folders.push(file);
+        }
+    }
+    if folders.is_empty() || !exists(directory, name)? {
         return Ok(());
     }
     let Some(sha256) = trusted(name)? else {
@@ -527,26 +528,42 @@ fn settle_replaced(
         let bytes = read_in(directory, entry).ok()?;
         Some(kernel_common::hash(&bytes))
     };
-    let (_, id) = file
-        .rsplit_once('.')
-        .expect("a retired name ends in its id");
-    let nameless = format!("{RETIRED}{id}");
-    assert!(retired_name(&nameless).is_none());
+    let nameless = |file: &str| {
+        let (_, id) = file
+            .rsplit_once('.')
+            .expect("a retired name ends in its id");
+        let entry = format!("{RETIRED}{id}");
+        assert!(retired_name(&entry).is_none());
+        entry
+    };
     let Some(live) = hashed(name) else {
         return Ok(());
     };
     if live == sha256 {
-        if os::rename(directory, file.as_ref(), nameless.as_ref()).is_ok() {
-            return remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
+        let mut first = None;
+        for &file in &folders {
+            let aside = nameless(file);
+            let gone = if os::rename(directory, file.as_ref(), aside.as_ref()).is_ok() {
+                remove_level(directory, aside.as_ref(), TREE_DEPTH_MAX)
+            } else {
+                remove_level(directory, file.as_ref(), TREE_DEPTH_MAX)
+            };
+            if let Err(refusal) = gone {
+                first.get_or_insert(refusal);
+            }
         }
-        return remove_level(directory, file.as_ref(), TREE_DEPTH_MAX);
+        return first.map_or(Ok(()), Err);
     }
-    if hashed(file).as_deref() != Some(sha256.as_str()) {
+    let [only] = folders[..] else {
+        return Ok(());
+    };
+    if hashed(only).as_deref() != Some(sha256.as_str()) {
         return Ok(());
     }
-    os::rename(directory, name.as_ref(), nameless.as_ref()).map_err(|()| unavailable())?;
-    let _ = remove_level(directory, nameless.as_ref(), TREE_DEPTH_MAX);
-    os::rename(directory, file.as_ref(), name.as_ref()).map_err(|()| unavailable())
+    let aside = nameless(only);
+    os::rename(directory, name.as_ref(), aside.as_ref()).map_err(|()| unavailable())?;
+    let _ = remove_level(directory, aside.as_ref(), TREE_DEPTH_MAX);
+    os::rename(directory, only.as_ref(), name.as_ref()).map_err(|()| unavailable())
 }
 
 /// Takes the plugin name off every retired folder of a plugin before a removal moves its

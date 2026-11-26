@@ -268,6 +268,16 @@ pub const TMUX_MISSING: &str = "tmux is missing, so the live master's terminal c
 pub const TMUX_MISSING: &str =
     "The live master's terminal can't open on this computer. Try again in a moment.";
 
+/// How to install git on macOS, where the Command Line Tools carry it.
+#[cfg(target_os = "macos")]
+const GIT_HINT: &str = "Install git: run xcode-select --install in Terminal.";
+/// How to install git on Linux and the other Unix systems, from the system's packages.
+#[cfg(all(unix, not(target_os = "macos")))]
+const GIT_HINT: &str = "Install git with your package manager.";
+/// How to install git on Windows.
+#[cfg(not(unix))]
+const GIT_HINT: &str = "Install Git for Windows from git-scm.com.";
+
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
@@ -1360,7 +1370,7 @@ fn install_hint(tool: &str) -> &'static str {
         "claude" => {
             "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal."
         }
-        "git" => "Install git: run xcode-select --install in Terminal.",
+        "git" => GIT_HINT,
         _ => "Install it, or run setup again from Settings.",
     }
 }

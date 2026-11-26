@@ -106,6 +106,34 @@ fn a_system_package_name_that_turns_the_verb_or_names_a_file_is_refused() {
     }
 }
 
+/// A system package name its manager reads as more than one package name is refused: for
+/// dnf a last `-` segment that starts with a digit, read as a version or release, and for
+/// apt-get a `.`, read as a pattern over every package name when no package has the name.
+/// The same shapes stay accepted for the other manager.
+#[test]
+fn a_system_package_name_a_manager_reads_as_a_version_or_pattern_is_refused() {
+    use SystemManager::{AptGet, Dnf};
+    for (manager, package, answer) in [
+        (Dnf, "openssl-3.0.9-1.fc39", Err(NAME_INVALID)),
+        (Dnf, "name-1.2", Err(NAME_INVALID)),
+        (Dnf, "tmux-3", Err(NAME_INVALID)),
+        (AptGet, "python3.11", Err(NAME_INVALID)),
+        (AptGet, "t.ux", Err(NAME_INVALID)),
+        (Dnf, "python3.11", Ok(())),
+        (Dnf, "7zip", Ok(())),
+        (Dnf, "openssh-server", Ok(())),
+        (AptGet, "xorg-x11-fonts-75dpi", Ok(())),
+        (AptGet, "tmux", Ok(())),
+        (Dnf, "tmux", Ok(())),
+    ] {
+        let recipe = InstallRecipe::SystemPackage {
+            manager,
+            package: package.to_owned(),
+        };
+        assert_eq!(validate(&recipe), answer, "{manager:?} {package}");
+    }
+}
+
 /// On Windows a download recipe is refused as a template mismatch rather than built, since
 /// its curl and tar are Unix paths, which Windows does not read as absolute.
 #[cfg(windows)]
