@@ -509,7 +509,7 @@ async function main() {
     applied("save_owner_profile", await value("desktop_save_owner_profile", { profile: { name: "Questions Flow" }, generation: generation() }));
     applied("set_projects_home", await value("desktop_set_projects_home", { path: projects, generation: generation() }));
 
-    await step("0", "a project with a live Claude master whose launch names the engine's team tool server", [], async () => {
+    await step("0", "a project with a live Claude master, opened as the app's Live switch opens it, whose launch names the engine's team tool server", [], async () => {
       state.account = await signIn("Questions Claude");
       const page = await value("desktop_model_access_page", { collection: "pools", next: false });
       const pool = "pool-questionsflow000000";
@@ -519,6 +519,14 @@ async function main() {
       await assignPool(project, pool);
       await saveSetup(project, { about: ABOUT, research: [], pool, team: { master: "claude-code", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 } });
       state.project = project;
+      const opened = await value("desktop_open_project", { id: project });
+      if (opened.project_id !== project) throw new Refused("master_project_mismatch", opened.project_id);
+      const phase = (await value("desktop_master_state", { ticket: opened.ticket })).session?.phase;
+      if ([undefined, "parked", "closed"].includes(phase)) applied("open_master", await value("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
+      const master = await until("master_open_before_live", VIEW_MS, async () => {
+        const session = (await value("desktop_master_state", { ticket: opened.ticket })).session;
+        return session?.phase === "configured" ? session : null;
+      });
       const team = await value("desktop_team_status", { id: project });
       applied("team_live_master", await value("desktop_team_live_master", { id: project, on: true, version: team.settings_version, generation: generation() }));
       const control = await until("live_master_launch", LAUNCH_MS, () => findControl(crazyHome) ?? findControl(userHome));
@@ -528,7 +536,7 @@ async function main() {
       });
       if (!launch.server) throw new Refused("live_master_without_team_server", "the launch named no crazyagent-team server in --mcp-config");
       state.control = control;
-      return `project ${project}; live master pid ${launch.pid}, session ${launch.session}`;
+      return `project ${project}; master session ${master.session_id} open before the live switch; live master pid ${launch.pid}, session ${launch.session}`;
     });
 
     const desktop = async (page) => {
