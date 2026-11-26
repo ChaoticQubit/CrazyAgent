@@ -391,3 +391,16 @@ fn an_engine_db_that_is_itself_a_link_is_still_refused_before_any_write() {
     assert!(replaced(root.path()).is_empty());
     assert!(replaced(other.path()).is_empty());
 }
+
+#[test]
+fn a_finish_makes_one_full_flush() {
+    let (root, path) = upgraded(true);
+    let kept = restore_pinned(&path, &quiet_hooks()).unwrap().kept;
+    crate::migrations::take_flushes();
+
+    finish(&path, &|_, _, _| {}).unwrap();
+
+    assert_eq!(crate::migrations::take_flushes().0, 1);
+    let restored = format!("{RECORD_RESTORED} {}", name(&kept));
+    assert_eq!(read_restore_record(root.path()), Some(restored));
+}

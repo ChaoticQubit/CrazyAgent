@@ -520,3 +520,17 @@ fn a_bare_database_name_is_the_database_in_the_working_folder() {
         std::fs::canonicalize(".").unwrap().join(DATABASE)
     );
 }
+
+#[test]
+fn a_restore_record_write_makes_one_full_flush() {
+    let (root, _path) = upgraded(false);
+    crate::migrations::take_flushes();
+
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+
+    assert_eq!(crate::migrations::take_flushes().0, 1);
+    assert_eq!(
+        read_restore_record(root.path()),
+        Some(RECORD_PENDING.to_owned())
+    );
+}
