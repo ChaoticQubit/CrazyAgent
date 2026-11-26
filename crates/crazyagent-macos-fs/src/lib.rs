@@ -831,9 +831,42 @@ mod tests {
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    /// A fresh folder under the system temp folder, removed by the caller. Input: a tag.
-    /// Output: the folder.
-    fn scratch(tag: &str) -> std::path::PathBuf {
+    /// A fresh folder under the system temp folder that removes itself, with everything in
+    /// it, when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        /// The folder's path. Input: none. Output: the path.
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        /// Gives the owner every right on each entry without following a link, takes every
+        /// access list off, then removes the folder; each step must succeed unless the row is
+        /// already failing. Input: none. Output: none.
+        fn drop(&mut self) {
+            let restored = ["u+rwx", "-N"].map(|change| {
+                std::process::Command::new("/bin/chmod")
+                    .args(["-R", "-P", change])
+                    .arg(&self.0)
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+            let removed = std::fs::remove_dir_all(&self.0);
+            if !std::thread::panicking() {
+                assert_eq!(restored, [true, true], "restore {:?}", self.0);
+                removed.unwrap();
+            }
+        }
+    }
+
+    /// A fresh folder under the system temp folder, held from its creation so it is removed
+    /// whether the row passes or fails. Input: a tag. Output: the folder.
+    fn scratch(tag: &str) -> Scratch {
         let folder = std::env::temp_dir().join(format!(
             "macos-fs-{tag}-{}-{}",
             std::process::id(),
@@ -843,7 +876,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&folder).unwrap();
-        folder
+        Scratch(folder)
     }
 
     /// The path as a C string. Input: the path. Output: the string.
@@ -905,9 +938,7 @@ mod tests {
         std::fs::write(shut.join("inside"), "x").unwrap();
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
         let unread = super::access_list(&c_path(&shut.join("inside")));
-        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::remove_dir_all(&folder).unwrap();
+        drop(folder);
         assert_eq!(
             unread.map_err(|error| error.raw_os_error()),
             Err(Some(libc::EACCES))
@@ -938,9 +969,7 @@ mod tests {
         chmod(&["+a", &format!("user:{user} deny readsecurity")], &case);
         let read = super::access_list(&c_path(&control));
         let denied = super::access_list(&c_path(&case));
-        chmod(&["-N"], &case);
-        chmod(&["-N"], &control);
-        std::fs::remove_dir_all(&folder).unwrap();
+        drop(folder);
         assert_eq!(
             read.unwrap().entries,
             vec![super::AccessEntry {
@@ -982,7 +1011,6 @@ mod tests {
         );
         let target_read = super::access_list(&c_path(&target)).unwrap();
         assert_eq!(target_read.entries[0].rights, 1 << 2);
-        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     /// A scratch folder whose setup fails part way, with a shut folder inside and a file whose
@@ -1301,15 +1329,7 @@ int main(void) {
     /// crate's, so an SDK that moves a field fails here and never reads a wrong one.
     #[test]
     fn the_socket_record_layout_and_constants_are_the_sdk_headers() {
-        let folder = std::env::temp_dir().join(format!(
-            "crazyagent-macos-fs-probe-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&folder).unwrap();
+        let folder = scratch("probe");
         let source = folder.join("probe.c");
         let binary = folder.join("probe");
         std::fs::write(&source, PROBE).unwrap();
@@ -1325,7 +1345,7 @@ int main(void) {
             String::from_utf8_lossy(&built.stderr)
         );
         let ran = std::process::Command::new(&binary).output().unwrap();
-        std::fs::remove_dir_all(&folder).unwrap();
+        drop(folder);
         assert!(ran.status.success(), "the probe runs");
         let printed = String::from_utf8(ran.stdout).unwrap();
         let ours = [
