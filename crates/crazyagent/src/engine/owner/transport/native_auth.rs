@@ -1,10 +1,10 @@
-use super::{Authority, OwnerClient, OwnerRuntimeHandle, SOCKET};
+use super::{Authority, OwnerClient, OwnerRuntimeHandle};
 use crate::engine::owner::native_auth::{self as auth, Command, Envelope};
 use crate::engine::owner::{
     Admission, NativeAuthCancel, NativeAuthLogout, NativeAuthQuery, NativeAuthReply,
     NativeAuthStart, OwnerClientKind, failure,
 };
-use crate::engine::{Engine, EngineError, io_error, read_frame, verify_server};
+use crate::engine::{Engine, EngineError, io_error, read_frame};
 use crate::ipc::Stream;
 use crate::protocol::encode_frame;
 use std::sync::Arc;
@@ -60,16 +60,9 @@ impl OwnerClient {
             return Err(failure("native_auth_request_bounds"));
         }
         tokio::time::timeout(self.timeout, async {
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
-            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
-                .await
-                .map_err(|_| failure("native_auth_owner_unavailable"))?;
-            verify_server(&stream)?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
+            let mut stream = self
+                .connect_checked(|_| failure("native_auth_owner_unavailable"))
+                .await?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {

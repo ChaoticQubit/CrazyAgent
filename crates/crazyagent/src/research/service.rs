@@ -155,6 +155,17 @@ impl Drop for ResearchService {
     }
 }
 
+/// Joins one finished research run and writes why it erred or panicked to the engine log,
+/// so no run's real cause is dropped with its handle; a run that ended in an outcome writes
+/// nothing. Input: the run's handle. Output: none.
+fn log_ended(run: JoinHandle<Result<ResearchRun, RunError>>) {
+    match run.join() {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => eprintln!("research run failed: {error}"),
+        Err(_) => eprintln!("research run panicked"),
+    }
+}
+
 fn serve<F>(runner: &Arc<ResearchRunner>, resolve: &Arc<F>, tick: Duration, stop: &AtomicBool)
 where
     F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static,
@@ -210,14 +221,15 @@ where
                 }
             }
         }
-        runs.retain(|run| !run.is_finished());
+        let (ended, running): (Vec<_>, Vec<_>) =
+            runs.into_iter().partition(|run| run.is_finished());
+        runs = running;
+        ended.into_iter().for_each(log_ended);
         #[cfg(unix)]
         status.tick(runner, resolve);
         std::thread::sleep(tick);
     }
-    for run in runs {
-        let _ = run.join();
-    }
+    runs.into_iter().for_each(log_ended);
     #[cfg(unix)]
     status.join();
 }
