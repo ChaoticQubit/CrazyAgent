@@ -1,6 +1,6 @@
 use crate::dacl::{
-    ADMINISTRATORS, FILE_CHANGES, SYSTEM, allowing, held_only_by, inherited_grantee,
-    inherited_label, label, labelled, other_writer, trusted_owner,
+    ADMINISTRATORS, FILE_CHANGES, SYSTEM, TRUSTED_INSTALLER, allowing, held_only_by,
+    inherited_grantee, inherited_label, label, labelled, other_writer, trusted_owner,
 };
 
 #[cfg(windows)]
@@ -63,15 +63,15 @@ pub fn judge_store_before_label(facts: &Facts, user: &[u8]) -> Result<(), &'stat
 }
 
 /// Judges a program the engine starts with its own rights to install or update a harness:
-/// no link or junction, one name, a local volume, a trusted owner, an access list that gives
-/// no other SID a right that changes it (reading and running stay open to everyone), and no
-/// label that lets a lower integrity process write it. Inputs: the facts and the user's SID.
-/// Output: Ok, or the reason another account could change the program.
+/// no link or junction, one name unless TrustedInstaller owns it (the system's programs keep
+/// a second name in its component store), a local volume, a trusted owner, a list giving no
+/// other SID a right that changes it, and no label letting a lower integrity process write
+/// it. Inputs: the facts and the user's SID. Output: Ok, or the reason it is refused.
 pub fn judge_program(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
     if facts.reparse {
         return Err("a program is a link or a junction");
     }
-    if facts.links != 1 {
+    if facts.links != 1 && facts.owner != TRUSTED_INSTALLER {
         return Err("a program has more than one name");
     }
     if facts.remote {
