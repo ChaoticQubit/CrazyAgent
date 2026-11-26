@@ -1,7 +1,7 @@
 use super::{
     AgentHomeError, AgentProject, CLAUDE_MEMORY, Caches, GIVEN_FOLDER, Given, HOME_PASSES_MAX,
-    Harness, Kept, LEVELS_FOLDER, PROCESS_BYTES_MAX, clears_caches, failure, kept_in, record_files,
-    write_record,
+    Harness, KEPT_DEPTH_MAX, Kept, LEVELS_FOLDER, PROCESS_BYTES_MAX, clears_caches, failure,
+    kept_in, record_files, write_record,
 };
 use crate::engine::bootstrap::held::{Folder, HeldError, Kind, Name, TREE_DEPTH_MAX};
 use kernel_sandbox::policy::AgentAccess;
@@ -34,7 +34,7 @@ pub(crate) fn prepare_held(
     let clear = clears_caches(&project.data, home, caches)?;
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
-    keep_only_held(root, &kept_in(harness, clear))?;
+    keep_only_held(root, &kept_in(harness, clear), 0)?;
     let level = caches.level.unwrap_or(AgentAccess::Sandboxed);
     write_record(&project.data, LEVELS_FOLDER, home, level.id())?;
     let name = Name::constant(harness.instruction_file());
@@ -48,9 +48,15 @@ pub(crate) fn prepare_held(
 /// Removes from one held folder of an agent home every entry `kept` does not name with its
 /// kind, keeps each kept folder with its own list to that list and clears each project's
 /// auto-memory in a kept `projects`; a lock is kept as a plain file, as on the path walk.
-/// Inputs: the folder and what stays in it. Output: unit, or `agent_home_unwritable` when it
-/// cannot be listed, one entry stays or it still changes after [`HOME_PASSES_MAX`] passes.
-fn keep_only_held(folder: &Folder, kept: &[(&str, Kept)]) -> Result<(), AgentHomeError> {
+/// Inputs: the folder, what stays in it and its depth below the home. Output: unit, or
+/// `agent_home_unwritable` when it cannot be listed, one entry stays or it still changes.
+fn keep_only_held(
+    folder: &Folder,
+    kept: &[(&str, Kept)],
+    depth: usize,
+) -> Result<(), AgentHomeError> {
+    assert!(depth <= KEPT_DEPTH_MAX);
+    assert!(depth > 0 || !kept.is_empty());
     for _ in 0..HOME_PASSES_MAX {
         let mut removed = false;
         for child in folder.list(HOME_ENTRIES_MAX).map_err(unwritable)? {
@@ -68,7 +74,7 @@ fn keep_only_held(folder: &Folder, kept: &[(&str, Kept)]) -> Result<(), AgentHom
                     clear_memory_held(&open_folder(folder, &name)?)?;
                 }
                 (Some(Kept::Only(inner)), Kind::Folder) => {
-                    keep_only_held(&open_folder(folder, &name)?, inner)?;
+                    keep_only_held(&open_folder(folder, &name)?, inner, depth + 1)?;
                 }
                 _ => {
                     remove_held(folder, &name)?;

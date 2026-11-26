@@ -50,7 +50,6 @@ pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-
 const HOME_PASSES_MAX: usize = 8;
 /// How many lists deep [`HOME_KEPT`] nests below the home's own, `Library/Preferences` being
 /// the deepest folder a launch keeps only part of.
-#[cfg(unix)]
 const KEPT_DEPTH_MAX: usize = 2;
 /// The entry of a Claude Code project folder in `projects` that holds the project's
 /// auto-memory, which every home reset removes ([`Kept::Transcripts`], B20).
