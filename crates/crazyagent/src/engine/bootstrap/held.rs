@@ -757,6 +757,7 @@ fn pin_of(file: &File) -> Result<Pin, HeldError> {
 /// mandatory, so an exclusive lock also refuses other handles' reads. Inputs: the file and
 /// whether the lock is shared. Output: Ok, `InUse` while a conflicting lock is held, or
 /// `Unavailable`.
+#[cfg(test)]
 pub(crate) fn lock(file: &File, shared: bool) -> Result<(), HeldError> {
     #[cfg(unix)]
     let taken = {
@@ -789,6 +790,7 @@ pub(crate) fn lock(file: &File, shared: bool) -> Result<(), HeldError> {
 /// Releases a lock this handle took, now and not at the handle's close. A failed release
 /// is not reported: the lock still ends when the handle closes, as the custody guards'
 /// own unlocks already do on Unix. Input: the file.
+#[cfg(test)]
 pub(crate) fn unlock(file: &File) {
     #[cfg(unix)]
     let _ = rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock);

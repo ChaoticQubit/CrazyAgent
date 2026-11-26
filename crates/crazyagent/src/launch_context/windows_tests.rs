@@ -378,7 +378,14 @@ fn a_windows_tools_off_claude_install_writes_its_two_files_and_holds_the_home() 
     );
     for file in [&mcp, &instructions] {
         let opened = std::fs::File::open(file).unwrap();
-        assert!(private::check(&opened).is_err(), "{}", file.display());
+        let list = private::facts(&opened).unwrap().list.unwrap();
+        let entries = crazyagent_win_sandbox::dacl::entries(&list).unwrap();
+        assert!(!entries.is_empty(), "{}", file.display());
+        assert!(
+            entries.iter().all(|entry| entry.flags & 0x10 != 0),
+            "{} has an entry not inherited from the home",
+            file.display()
+        );
     }
     assert_held(&home);
     drop(installed);
