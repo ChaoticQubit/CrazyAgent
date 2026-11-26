@@ -598,8 +598,14 @@ pub(in crate::tui) const MOVE_ASK_TEAM: &str = "Stop the team first (Stop all on
 /// What the move ask says about its two ways.
 pub(in crate::tui) const MOVE_ASK_WAYS: &str = "Move takes the folder into your CrazyAgent folder. Copy leaves the old folder where it is and the project uses the copy.";
 
-/// What the move ask says when its folder read failed, so the move downloads everything.
+/// What the move ask says on macOS when its folder read failed, so the move downloads
+/// everything, iCloud-only items included.
+#[cfg(target_os = "macos")]
 pub(in crate::tui) const MOVE_ASK_UNREAD: &str = "CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.";
+/// What the move ask says on Windows and Linux when its folder read failed; there are no
+/// iCloud-only items to download there.
+#[cfg(not(target_os = "macos"))]
+pub(in crate::tui) const MOVE_ASK_UNREAD: &str = "CrazyAgent couldn't read this folder.";
 
 /// Draws the move ask: that the team must be stopped and its work follows; once the folder
 /// read lands, the rebuildable folders a move leaves in iCloud, as many named as fit the

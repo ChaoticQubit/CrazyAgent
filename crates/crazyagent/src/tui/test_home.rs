@@ -41,6 +41,52 @@ pub(in crate::tui) fn connecting(link: &crate::tui::ctx::Link) -> bool {
     )
 }
 
+/// Starts a test engine on `root` whose harness search holds only stub `codex` and `claude`
+/// programs in a fresh 0700 folder under HOME, outside the engine folder and the temp folders
+/// the tool resolver refuses, so its catalog reads both runnable on any host.
+/// Input: the engine folder, its global settings file and the stop signal.
+/// Output: the stub folder, removed when dropped, and the started engine service.
+pub(in crate::tui) async fn stubbed_engine(
+    root: &std::path::Path,
+    global: &std::path::Path,
+    stopped: &tokio::sync::watch::Receiver<bool>,
+) -> (tempfile::TempDir, crate::engine::bootstrap::EngineService) {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let stubs = tempfile::Builder::new()
+        .prefix(".crazyagent-test-stub-")
+        .tempdir_in(std::fs::canonicalize(home).unwrap())
+        .unwrap();
+    std::fs::set_permissions(stubs.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bin = stubs.path().to_path_buf();
+    for name in ["codex", "claude"] {
+        let path = bin.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let search = crate::harnesses::Search::new(vec![bin.clone()], None, Vec::new());
+    let entries = crate::harnesses::with_needs(
+        crate::harnesses::catalog(&search),
+        &crate::tools::tools_places(Some(root)),
+    );
+    let codex = entries.iter().find(|entry| entry.id == "codex").unwrap();
+    assert_eq!(codex.status, crate::harnesses::HarnessStatus::Ready);
+    assert_eq!(
+        codex.executable.as_deref(),
+        Some(bin.join("codex").as_path())
+    );
+    let mut service = crate::engine::bootstrap::EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        global,
+        &root.join("project.toml"),
+        stopped,
+    )
+    .await
+    .unwrap();
+    service.set_harness_search(search).unwrap();
+    (stubs, service)
+}
+
 /// How long a TUI engine test lets the engine and its client wait for one answer.
 /// Parallel test engines share one disk, so their flushed writes queue behind
 /// each other and one write can take seconds; the 1 s default then answers

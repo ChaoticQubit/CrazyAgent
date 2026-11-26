@@ -727,27 +727,6 @@ fn owner_keys_leave_a_draft_until_enter_ctrl_c_or_ctrl_u_and_arrows_change_nothi
 }
 
 #[test]
-fn only_a_views_focus_and_mouse_reports_are_not_pressed_keys() {
-    assert!(!pressed(b""));
-    assert!(!pressed(b"\x1b[I"));
-    assert!(!pressed(b"\x1b[O\x1b[I"));
-    assert!(!pressed(b"\x1b[<65;10;5M\x1b[<0;3;4m"));
-    assert!(!pressed(b"\x1b[M`!!"));
-    assert!(pressed(b"\x1b[A"), "an arrow key is the owner's");
-    assert!(pressed(b"\x1bOB"));
-    assert!(pressed(b"\x1b[Ix"), "a key beside a report counts");
-    assert!(pressed(b"\x1b[<65;10;5"), "a cut report is not one");
-    assert!(pressed(b"\x1b[M`"), "a cut X10 report is not one");
-    assert!(
-        pressed(b"\x1b[Mab\r"),
-        "an X10 report holds no control byte, so Enter after ESC [ M a b counts"
-    );
-    assert!(pressed(b"\x1b[M\r\r\r"));
-    assert!(pressed(b"\r"));
-    assert!(pressed(b"\x1b"));
-}
-
-#[test]
 fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() {
     let mut fixture = Fixture::new();
     let host = fixture.host();
@@ -6928,3 +6907,5 @@ fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
 
 #[path = "tests/other_lead.rs"]
 mod other_lead;
+#[path = "tests/view_keys.rs"]
+mod view_keys;
