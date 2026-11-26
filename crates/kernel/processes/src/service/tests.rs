@@ -1359,6 +1359,16 @@ fn service_labels_are_unchanged() {
     assert_eq!(WINDOWS_TASK, "CrazyAgent Engine");
 }
 
+/// A text with none of the five characters XML reserves is borrowed as it is, and each of
+/// them is escaped to its entity.
+#[test]
+fn xml_borrows_a_plain_text_and_escapes_each_reserved_character() {
+    let plain = xml("/Users/owner/Library/CrazyAgent/engine");
+    assert!(matches!(plain, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(plain, "/Users/owner/Library/CrazyAgent/engine");
+    assert_eq!(xml("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
+}
+
 /// The definition each manager reads is byte for byte the text kept in
 /// `tests/fixtures/service/`, written by the earlier `definition_text`. The Windows task is
 /// stored with LF, since the repository checks text out with LF; the text itself ends every
