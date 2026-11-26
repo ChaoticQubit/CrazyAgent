@@ -721,6 +721,17 @@ mod windows_tests {
         String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
     }
 
+    /// Whether a process id stops running within ten seconds, asked every tenth of a second,
+    /// as a job's processes end a moment after the job closes. Input: the id. Output: true
+    /// once it no longer runs.
+    fn ended(pid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        !running(pid)
+    }
+
     /// V243-W1-VERSION-READ: a version run that passes its limit ends as timed out, and the
     /// process it started ends with its job, so no child of a harness outlives a version read.
     /// The version command is the test binary as a grandchild holder
@@ -745,11 +756,7 @@ mod windows_tests {
             .parse()
             .unwrap();
         assert!(pid > 4);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while running(pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(!running(pid), "the version run's child {pid} outlived it");
+        assert!(ended(pid), "the version run's child {pid} outlived it");
     }
 
     /// A copy of the grandchild holder in a fresh folder under the profile, which only this
@@ -791,11 +798,7 @@ mod windows_tests {
             .parse()
             .unwrap();
         assert!(pid > 4);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while running(pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(!running(pid), "the update run's child {pid} outlived it");
+        assert!(ended(pid), "the update run's child {pid} outlived it");
     }
 
     /// An npm command's run gets npm's global prefix pinned in its environment, here read
