@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { connect } from "node:net";
@@ -277,11 +278,13 @@ function tmux(binary, socket, env, ...args) {
   return run.status === 0 ? run.stdout : "";
 }
 
-/** Reads every claude call the stand-in logged beside itself or, in an agent's sandbox, in
- * that agent's temp folder: its kind, the session it names and a file:line key. Input: the
- * stand-in's folder and the team agents' folder. Output: the logged calls. */
+/** Reads every claude call the stand-in logged beside itself or, for a team agent, in the short
+ * temp folder the engine gives that agent as TMPDIR, the one place its sandbox lets it write:
+ * `ca-` and 16 hex digits of the SHA-256 of the agent's home, in the real /tmp. Each call gives
+ * its kind, the session it names and a file:line key. Input: the stand-in's folder and the
+ * team agents' folder. Output: the logged calls. */
 function logged({ bin, agents }) {
-  const folders = existsSync(agents) ? readdirSync(agents).sort().map((name) => join(agents, name, "tmp")) : [];
+  const folders = existsSync(agents) ? readdirSync(agents).sort().map((name) => join(realpathSync("/tmp"), `ca-${createHash("sha256").update(join(agents, name, "home")).digest("hex").slice(0, 16)}`)) : [];
   const paths = [bin, ...folders].map((folder) => join(folder, LAUNCHES)).filter((path) => existsSync(path));
   return paths.flatMap((path) => readFileSync(path, "utf8").split("\n").filter(Boolean).map((line, at) => ({ kind: line.split(" ")[0], id: line.split(" ")[1], key: `${path}:${at}` })));
 }
@@ -294,13 +297,6 @@ function launches(logs) {
   const starts = logged(logs).filter((item) => item.kind !== "other" && item.kind !== ONESHOT);
   if (!starts.length) throw new Refused("no_harness_start_logged", "team agents started but the stand-in logged no held turn");
   return starts;
-}
-
-/** Counts the one-shot claude runs (a --print call with no --input-format, such as a mapping
- * try, a research run or a token renewal) the stand-in ended at once.
- * Input: the log places. Output: the count. */
-function oneshots(logs) {
-  return logged(logs).filter((item) => item.kind === ONESHOT).length;
 }
 
 /** Counts the lines a file holds, none when it is missing. Input: the path. Output: the count. */
@@ -379,6 +375,7 @@ async function main() {
   const userHome = join(root, "u");
   const bin = join(userHome, ".local", "bin");
   const logs = { bin, agents: join(crazyHome, "team", "agents") };
+  const oneshots = () => logged(logs).filter((item) => item.kind === ONESHOT).length;
   const repo = join(root, "repos", REPO);
   const projects = join(root, "projects");
   for (const folder of [crazyHome, userHome, bin, repo, projects, evidence]) mkdirSync(folder, { recursive: true, mode: 0o700 });
@@ -638,7 +635,7 @@ async function main() {
       if (state.groupB !== null && !groupAlive(state.groupB)) throw new Refused("agent_b_died_with_the_app");
       await pause(SETTLE_MS);
       state.before = launches(logs);
-      state.oneshots = oneshots(logs);
+      state.oneshots = oneshots();
       state.crashedMs = Date.now();
       return `engine and bridge killed; team-${a} closed, team-${state.b} running; a third task delegated just before the kill; ${state.before.length} harness starts so far`;
     });
@@ -733,13 +730,13 @@ async function main() {
     await step("9", "Retry tries the resume again; it fails the same way and still starts nothing", async () => {
       const failed = needs(state.failed, "6");
       const before = new Set(launches(logs).map((item) => item.key));
-      const shots = oneshots(logs);
+      const shots = oneshots();
       await value("desktop_retry_recovery", { agent: failed.agent });
       const { run } = await recoveryRun(failed.agent, (item) => item.state === "failed" || item.state === "resumed");
       if (run.state !== "failed" || run.reason !== RECORD_MISSING) throw new Refused(`retried_resume_${run.state}`, run.reason ?? "none");
       const added = launches(logs).filter((item) => !before.has(item.key));
       if (added.length) throw new Refused("retry_started_a_harness", added.map((item) => `${item.kind} ${item.id}`).join(","));
-      const shotsAfter = oneshots(logs);
+      const shotsAfter = oneshots();
       if (shotsAfter !== shots) throw new Refused("retry_started_a_harness", `${shotsAfter - shots} one-shot claude runs`);
       return `retried; ${run.label} failed again: ${run.reason}`;
     });
@@ -753,7 +750,7 @@ async function main() {
       if (again.length) throw new Refused("session_started_again", again.map((item) => `${item.kind} ${item.id}`).join(","));
       if (all.some((item) => item.kind === "--resume")) throw new Refused("stand_in_session_resumed");
       if (fresh.length > 1) throw new Refused("more_than_the_waiting_task_started", fresh.map((item) => `${item.kind} ${item.id}`).join(","));
-      const shots = oneshots(logs) - needs(state.oneshots, "3");
+      const shots = oneshots() - needs(state.oneshots, "3");
       if (shots !== 0) throw new Refused("more_than_the_waiting_task_started", `${shots} one-shot claude runs after the crash`);
       const doneTwice = engineRows(database, "SELECT kind, action_key, COUNT(*) AS n FROM ledger_actions WHERE outcome = 'done' GROUP BY kind, action_key HAVING COUNT(*) > 1");
       if (doneTwice.length) throw new Refused("ledger_action_done_twice", doneTwice.map((row) => `${row.kind} ${row.action_key} x${row.n}`).join(","));
