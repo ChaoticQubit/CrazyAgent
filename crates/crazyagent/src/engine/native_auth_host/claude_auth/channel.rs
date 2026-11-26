@@ -453,15 +453,14 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut packet = [0; 37];
+            let mut packet = kernel_security::secret::Zeroizing::new([0u8; 37]);
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
                 OwnerClientKind::Tui => 0,
                 OwnerClientKind::Desktop => 1,
             };
             packet[5..].copy_from_slice(&self.token);
-            stream.write_all(&packet).await.map_err(io_error)?;
-            kernel_security::secret::wipe(&mut packet);
+            stream.write_all(&*packet).await.map_err(io_error)?;
             stream
                 .write_all(
                     &encode_frame(&InputEnvelope {
