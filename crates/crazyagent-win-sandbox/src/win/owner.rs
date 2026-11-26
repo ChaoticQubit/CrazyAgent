@@ -90,6 +90,15 @@ pub fn owner_only(program: &Path) -> Result<(), BoundaryError> {
     Ok(())
 }
 
+/// Refuses a program the engine would start with its own rights to install or update a
+/// harness unless its real file, opened without following a link, passes
+/// [`crate::private::judge_program`] and [`owner_only`] passes it both as written and at its
+/// real place. Input: the absolute program path. Output: Ok, or the refusal with its reason
+/// or the failed step.
+pub fn program_trusted(_program: &Path) -> Result<(), BoundaryError> {
+    Err(BoundaryError::Refused("a program is not checked yet"))
+}
+
 /// Refuses a file or folder unless one of the trusted owners owns it and no other SID holds
 /// any of `rights` on it. Inputs: the path, the engine's user SID and the rights that count
 /// here. Output: Ok, or the refusal or the failed step.

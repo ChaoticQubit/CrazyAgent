@@ -1069,11 +1069,11 @@ pub fn latest_from_pointer(pointer: &Pointer, body: &[u8], installed: &str) -> L
 mod windows_tests {
     use super::*;
 
-    /// W1 (leader 01:25, DEC-194): on Windows a harness installed under a drive path is
-    /// named by how it was installed, as on Unix, while its update and its check stay refused
-    /// as unsupported here. A verbatim, UNC or forward-slash path names no install.
+    /// On Windows a harness installed under a drive path is named by how it was installed, as
+    /// on Unix, and its update and its check are refused as missing their tool while the npm
+    /// they would run is not there. A verbatim, UNC or forward-slash path names no install.
     #[test]
-    fn a_windows_npm_install_is_named_and_its_update_and_check_stay_refused() {
+    fn a_windows_npm_install_is_named_and_its_missing_npm_is_refused() {
         let roots = Roots {
             home: PathBuf::from(r"C:\Users\unit"),
             brew_prefixes: Vec::new(),
@@ -1091,9 +1091,9 @@ mod windows_tests {
         );
         assert_eq!(
             update_command("codex", real, real, &roots),
-            Err(UNSUPPORTED_HERE)
+            Err(TOOL_MISSING)
         );
-        assert_eq!(check_command("codex", real, &roots), Err(UNSUPPORTED_HERE));
+        assert_eq!(check_command("codex", real, &roots), Err(TOOL_MISSING));
         for refused in [
             r"\\?\C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js",
             r"\\server\share\npm\node_modules\@openai\codex\bin\codex.js",
@@ -1106,11 +1106,11 @@ mod windows_tests {
             );
         }
     }
-    /// V243-W1-VERSION-READ: with the engine's home now the profile folder on Windows, a
-    /// harness that installed itself under it is named as self-updating, and its update
-    /// stays refused as unsupported here.
+    /// With the engine's home the profile folder on Windows, a harness that installed itself
+    /// under it is named as self-updating; an empty file there passes the trust check but no
+    /// lookup would run it, so its update is refused as unsafe.
     #[test]
-    fn a_windows_self_updating_install_is_named_and_its_update_stays_refused() {
+    fn a_windows_self_updating_install_is_named_and_an_unrunnable_one_is_refused() {
         let folder = tempfile::tempdir().unwrap();
         let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let installed = home.join(".codex").join("packages").join("standalone");
@@ -1127,7 +1127,62 @@ mod windows_tests {
         assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
         assert_eq!(
             update_command("codex", &entry, &entry, &roots),
-            Err(UNSUPPORTED_HERE)
+            Err(TOOL_UNSAFE)
         );
+    }
+
+    /// Runs icacls on one path and asserts it succeeded, with its error output when not.
+    /// Inputs: the path and the icacls arguments.
+    /// Output: none.
+    fn icacls(path: &Path, change: &[&str]) {
+        let done = std::process::Command::new("icacls")
+            .arg(path)
+            .args(change)
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+
+    /// A tool the engine would start passes the Windows trust check when only the system and
+    /// this user may change it, as the curl Windows ships; a relative or missing tool is
+    /// missing, and one the users group may write is unsafe.
+    #[test]
+    fn a_windows_tool_is_trusted_only_while_no_other_account_may_change_it() {
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        assert_eq!(trusted(&shipped), Ok(()));
+        assert_eq!(trusted(Path::new("curl.exe")), Err(TOOL_MISSING));
+        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let tool = folder.path().join("tool.exe");
+        assert_eq!(trusted(&tool), Err(TOOL_MISSING));
+        std::fs::write(&tool, "").unwrap();
+        assert_eq!(trusted(&tool), Ok(()));
+        icacls(&tool, &["/grant", "*S-1-5-32-545:(W)"]);
+        assert_eq!(trusted(&tool), Err(TOOL_UNSAFE));
+    }
+
+    /// A global npm install needs no administrator only in a folder this user owns: a folder
+    /// whose owner is set to this user is owned, one the administrators own is not, and
+    /// neither is a file or a missing path.
+    #[test]
+    fn a_windows_folder_is_owned_only_when_this_user_owns_it() {
+        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let modules = folder.path().join("node_modules");
+        std::fs::create_dir(&modules).unwrap();
+        let me = std::process::Command::new("whoami").output().unwrap();
+        let me = String::from_utf8(me.stdout).unwrap();
+        icacls(&modules, &["/setowner", me.trim()]);
+        assert!(owned(&modules));
+        icacls(&modules, &["/setowner", "*S-1-5-32-544"]);
+        assert!(!owned(&modules));
+        let file = folder.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(!owned(&file));
+        assert!(!owned(&folder.path().join("gone")));
     }
 }

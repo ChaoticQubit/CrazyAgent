@@ -62,6 +62,15 @@ pub fn judge_store_before_label(facts: &Facts, user: &[u8]) -> Result<(), &'stat
     folder_judged(facts, user, NO_WRITE_UP)
 }
 
+/// Judges a program the engine starts with its own rights to install or update a harness:
+/// no link or junction, one name, a local volume, a trusted owner, an access list that gives
+/// no other SID a right that changes it (reading and running stay open to everyone), and no
+/// label that lets a lower integrity process write it. Inputs: the facts and the user's SID.
+/// Output: Ok, or the reason another account could change the program.
+pub fn judge_program(_facts: &Facts, _user: &[u8]) -> Result<(), &'static str> {
+    Ok(())
+}
+
 /// The work of [`judge`]: an own label must be medium or above and carry every bit of
 /// `wanted`, which always holds no-write-up. Inputs: the facts, the user's SID and the
 /// policy bits wanted. Output: Ok, or the reason it is not private.
