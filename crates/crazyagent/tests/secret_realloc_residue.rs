@@ -5,8 +5,8 @@ use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerClientKind};
 use kernel_security::secret::wipe;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 const KEY_MARK: &[u8] = b"sk-residue-probe";
@@ -57,9 +57,7 @@ fn a_probe_request_frees_no_copy_of_its_key() {
         })
         .collect();
     let mut grown = Vec::new();
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     FREED_WITH_KEY.store(0, Ordering::SeqCst);
     WATCHING.store(true, Ordering::SeqCst);
     for key in &keys {
@@ -89,12 +87,17 @@ fn a_probe_request_frees_no_copy_of_its_key() {
     );
 }
 
-/// Counts the blocks freed holding the key's mark while `steps` runs, the row's lock held,
-/// so no other row's blocks are counted. Input: the steps. Output: the count.
-fn freed_while(steps: impl FnOnce()) -> usize {
-    let _serial = SERIAL
+/// Takes the lock every row holds from its first step to its last, so no row counts a block
+/// another row frees, before, during or after its watch. Output: the held lock.
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Counts the blocks freed holding the key's mark while `steps` runs; the caller holds
+/// [`serial`]. Input: the steps. Output: the count.
+fn freed_while(steps: impl FnOnce()) -> usize {
     FREED_WITH_KEY.store(0, Ordering::SeqCst);
     WATCHING.store(true, Ordering::SeqCst);
     steps();
@@ -114,19 +117,21 @@ fn marked_key(length: usize) -> Vec<u8> {
 #[test]
 fn a_probe_cut_off_by_its_timeout_mid_write_frees_no_copy_of_its_key() {
     const KEY_BYTES: usize = 32 << 20;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-    let (held, release) = std::sync::mpsc::channel::<()>();
-    let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let _ = release.recv();
-        drop(stream);
-    });
-    let mut key = marked_key(KEY_BYTES);
+    let _serial = serial();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
+    let listener = runtime
+        .block_on(kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0"))
+        .unwrap();
+    let url = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    runtime.spawn(async move {
+        let accepted = kernel_processes::spawn_gate::accept_tcp(&listener).await;
+        std::future::pending::<()>().await;
+        drop(accepted);
+    });
+    let mut key = marked_key(KEY_BYTES);
     let mut code = String::new();
     let freed = freed_while(|| {
         let sent = runtime.block_on(get(
@@ -137,8 +142,7 @@ fn a_probe_cut_off_by_its_timeout_mid_write_frees_no_copy_of_its_key() {
         ));
         code = sent.err().map(|error| error.0).unwrap_or_default();
     });
-    drop(held);
-    server.join().unwrap();
+    drop(runtime);
     wipe(&mut key);
     assert_eq!(code, "account_url_unreachable");
     assert_eq!(freed, 0, "freed blocks still holding the key");
@@ -148,6 +152,7 @@ fn a_probe_cut_off_by_its_timeout_mid_write_frees_no_copy_of_its_key() {
 /// key to, frees no block that still holds the account's saved key.
 #[test]
 fn checking_an_https_account_frees_no_copy_of_its_saved_key() {
+    let _serial = serial();
     let root = tempfile::Builder::new()
         .prefix("ca-wipe-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -156,7 +161,7 @@ fn checking_an_https_account_frees_no_copy_of_its_saved_key() {
     let global = root.path().join("global.toml");
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
