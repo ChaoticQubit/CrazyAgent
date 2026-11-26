@@ -175,7 +175,7 @@ fn a_named_copy_that_fails_its_check_is_refused_before_any_write() {
 fn a_named_copy_whose_digest_marker_is_not_a_digest_is_refused_before_any_write() {
     for length in [crate::migrations::DIGEST_HEX_BYTES + 1, 4 << 20] {
         let (root, path, kept) = broken(true);
-        std::fs::write(kept.join(CHECKED), "a".repeat(length)).unwrap();
+        std::fs::write(kept.join(crate::migrations::CHECKED), "a".repeat(length)).unwrap();
         let before = untouched(root.path(), &path);
 
         let refused = put_back(&path).unwrap_err().0;

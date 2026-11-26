@@ -247,6 +247,30 @@ pub(crate) fn checked_copy(
     mark_checked(folder, target, &digest?, last)
 }
 
+/// Reads the `checked` digest marker of a backup or a kept copy without following a link,
+/// at most one byte past a digest, so a grown file is never read whole. Input: the folder.
+/// Output: the marker, empty as a 2.4 build writes it or the 64 hex digest, or the cause
+/// for a marker that cannot be read or is neither.
+#[cfg(unix)]
+pub(crate) fn digest_marker(folder: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(folder.join(CHECKED))
+        .map_err(|cause| format!("the digest marker cannot be read: {cause}"))?;
+    let mut marker = Vec::with_capacity(DIGEST_HEX_BYTES + 1);
+    let limit = u64::try_from(DIGEST_HEX_BYTES + 1).map_err(|cause| cause.to_string())?;
+    file.take(limit)
+        .read_to_end(&mut marker)
+        .map_err(|cause| format!("the digest marker cannot be read: {cause}"))?;
+    assert!(marker.len() <= DIGEST_HEX_BYTES + 1);
+    if !marker.is_empty() && marker.len() != DIGEST_HEX_BYTES {
+        return Err("the digest marker is not a digest".to_owned());
+    }
+    Ok(marker)
+}
+
 /// Records that a backup copy passed its check and makes the record durable: the `checked`
 /// file, holding the sha256 of the checked engine.db so a restore can tell the copy has not
 /// changed since, and the backup folder, each behind a barrier, then the backups folder

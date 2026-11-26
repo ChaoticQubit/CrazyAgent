@@ -470,7 +470,7 @@ fn a_pinned_copy_whose_digest_marker_is_not_a_digest_is_refused_before_any_write
     for length in [DIGEST_HEX_BYTES + 1, 4 << 20] {
         let (root, path) = upgraded(true);
         std::fs::write(
-            pinned_folder(root.path()).join(CHECKED),
+            pinned_folder(root.path()).join(crate::migrations::CHECKED),
             "a".repeat(length),
         )
         .unwrap();

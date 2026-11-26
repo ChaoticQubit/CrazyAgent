@@ -1,6 +1,6 @@
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
+    BACKUPS, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
     V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, created, error,
     file_digest, flush, mark_checked, pinned, private_file, schema, stamp, stamp_time, write_texts,
 };
@@ -175,7 +175,7 @@ fn restore_pinned_at(
 /// as [`PinCheck::Unverified`] for [`shape`] to run the integrity check, and anything else is
 /// refused. Input: the backup folder. Output: the check, or `storage_restore_failed`.
 fn pin_check(source: &Path) -> Result<PinCheck, StorageError> {
-    let marker = std::fs::read(source.join(CHECKED)).map_err(restore_failed)?;
+    let marker = crate::migrations::digest_marker(source).map_err(restore_failed)?;
     if marker.is_empty() {
         return Ok(PinCheck::Unverified);
     }

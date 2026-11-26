@@ -5,7 +5,7 @@ use super::{
 };
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, CHECKED, CopyCheck, DATABASE, Flush, V24_VERSION_MAX, check_copy, error, file_digest,
+    BACKUPS, CopyCheck, DATABASE, Flush, V24_VERSION_MAX, check_copy, error, file_digest,
     flush, schema, stamp,
 };
 use crate::upgrade::{restore, version};
@@ -157,7 +157,7 @@ fn usable(root: &Path, name: &str) -> Result<(PathBuf, i64, Vec<String>), Storag
         return Err(error(PUTBACK_COPY_MISSING));
     }
     let copy = folder.join(DATABASE);
-    let marker = std::fs::read(folder.join(CHECKED)).map_err(copy_failed)?;
+    let marker = crate::migrations::digest_marker(&folder).map_err(copy_failed)?;
     let found = file_digest(&copy).map_err(|cause| copy_failed(cause.0))?;
     if marker != found.as_bytes() {
         return Err(copy_failed(
