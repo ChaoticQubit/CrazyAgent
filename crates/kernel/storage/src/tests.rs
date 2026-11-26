@@ -132,6 +132,12 @@ fn refused_places(
     refused
 }
 
+/// An I/O step's result with the step and its path named in the error, for row fixtures.
+/// Inputs: the result, the step and the path. Output: the value, or the named error.
+fn named<T>(result: std::io::Result<T>, step: &str, path: &std::path::Path) -> Result<T, String> {
+    result.map_err(|error| format!("{step} {path:?}: {error}"))
+}
+
 /// The manifests the test-support guard reads under a workspace root: every Cargo.toml
 /// under `crates` and `apps`, the root's own and each member's the root lists. A glob member
 /// panics naming it, so no member drops out unread. Input: the root. Output: the paths,
@@ -170,34 +176,59 @@ fn manifests(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// A workspace root with empty `crates` and `apps` folders and the given root manifest.
-/// Input: the root manifest text. Output: the folder.
-fn planted_root(text: &str) -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("crates")).unwrap();
-    std::fs::create_dir(root.path().join("apps")).unwrap();
-    std::fs::write(root.path().join("Cargo.toml"), text).unwrap();
-    root
+/// Input: the root manifest text. Output: the folder, or the step and path that failed.
+fn planted_root(text: &str) -> Result<tempfile::TempDir, String> {
+    let root = tempfile::tempdir().map_err(|error| format!("make a temporary folder: {error}"))?;
+    named(
+        std::fs::create_dir(root.path().join("crates")),
+        "create",
+        &root.path().join("crates"),
+    )?;
+    named(
+        std::fs::create_dir(root.path().join("apps")),
+        "create",
+        &root.path().join("apps"),
+    )?;
+    named(
+        std::fs::write(root.path().join("Cargo.toml"), text),
+        "write",
+        &root.path().join("Cargo.toml"),
+    )?;
+    Ok(root)
 }
 
 #[test]
-fn a_member_outside_crates_and_apps_is_read() {
-    let root = planted_root("[workspace]\nmembers = [\"plugins/p\"]\n");
-    std::fs::create_dir_all(root.path().join("plugins/p")).unwrap();
-    std::fs::write(root.path().join("plugins/p/Cargo.toml"), "").unwrap();
+fn a_member_outside_crates_and_apps_is_read() -> Result<(), String> {
+    let root = planted_root("[workspace]\nmembers = [\"plugins/p\"]\n")?;
+    named(
+        std::fs::create_dir_all(root.path().join("plugins/p")),
+        "create",
+        &root.path().join("plugins/p"),
+    )?;
+    named(
+        std::fs::write(root.path().join("plugins/p/Cargo.toml"), ""),
+        "write",
+        &root.path().join("plugins/p/Cargo.toml"),
+    )?;
 
     let found = manifests(root.path());
 
-    assert!(found.contains(&root.path().join("plugins/p/Cargo.toml")), "{found:?}");
+    assert!(
+        found.contains(&root.path().join("plugins/p/Cargo.toml")),
+        "{found:?}"
+    );
+    Ok(())
 }
 
 #[test]
-fn a_glob_member_panics_naming_it() {
-    let root = planted_root("[workspace]\nmembers = [\"plugins/*\"]\n");
+fn a_glob_member_panics_naming_it() -> Result<(), String> {
+    let root = planted_root("[workspace]\nmembers = [\"plugins/*\"]\n")?;
 
     let cause = std::panic::catch_unwind(|| manifests(root.path())).expect_err("a glob panics");
     let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
 
     assert!(said.contains("plugins/*"), "{said}");
+    Ok(())
 }
 
 #[test]
@@ -242,7 +273,10 @@ fn refused_with_root(root: &str, text: &str) -> Vec<String> {
         .get("workspace")
         .and_then(|workspace| workspace.get("dependencies"))
         .and_then(toml::Value::as_table);
-    assert!(inherited.is_some(), "the root text has workspace dependencies");
+    assert!(
+        inherited.is_some(),
+        "the root text has workspace dependencies"
+    );
     refused_places(std::path::Path::new("member/Cargo.toml"), text, inherited)
 }
 
@@ -267,7 +301,10 @@ fn an_inherited_dependency_whose_member_adds_test_support_is_caught() {
 #[test]
 fn an_inherited_dev_dependency_turning_test_support_on_passes() {
     let text = "[dev-dependencies]\nstore = { workspace = true }\nplain = { workspace = true, features = [\"test-support\"] }\n";
-    assert_eq!(refused_with_root(ROOT_WITH_STORAGE, text), Vec::<String>::new());
+    assert_eq!(
+        refused_with_root(ROOT_WITH_STORAGE, text),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -308,72 +345,125 @@ fn a_feature_that_turns_test_support_on_through_a_dependency_is_caught() {
 #[cfg(unix)]
 fn files_panic(folder: &std::path::Path) -> String {
     let cause = std::panic::catch_unwind(|| files(folder, "Cargo.toml")).expect_err("files panics");
-    cause
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_default()
+    cause.downcast_ref::<String>().cloned().unwrap_or_default()
 }
 
 #[cfg(unix)]
 #[test]
-fn files_panics_naming_a_folder_link() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("real")).unwrap();
-    std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
-    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
+fn files_panics_naming_a_folder_link() -> Result<(), String> {
+    let root = tempfile::tempdir().map_err(|error| format!("make a temporary folder: {error}"))?;
+    named(
+        std::fs::create_dir(root.path().join("real")),
+        "create",
+        &root.path().join("real"),
+    )?;
+    named(
+        std::fs::write(root.path().join("real/Cargo.toml"), ""),
+        "write",
+        &root.path().join("real/Cargo.toml"),
+    )?;
+    named(
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")),
+        "link",
+        &root.path().join("linked"),
+    )?;
 
     let said = files_panic(root.path());
 
-    assert!(said.contains(&format!("{:?}", root.path().join("linked"))), "{said}");
+    assert!(
+        said.contains(&format!("{:?}", root.path().join("linked"))),
+        "{said}"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn files_panics_naming_a_file_link() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("real")).unwrap();
-    std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
-    std::os::unix::fs::symlink(
-        root.path().join("real/Cargo.toml"),
-        root.path().join("Cargo.toml"),
-    )
-    .unwrap();
+fn files_panics_naming_a_file_link() -> Result<(), String> {
+    let root = tempfile::tempdir().map_err(|error| format!("make a temporary folder: {error}"))?;
+    named(
+        std::fs::create_dir(root.path().join("real")),
+        "create",
+        &root.path().join("real"),
+    )?;
+    named(
+        std::fs::write(root.path().join("real/Cargo.toml"), ""),
+        "write",
+        &root.path().join("real/Cargo.toml"),
+    )?;
+    let link = root.path().join("Cargo.toml");
+    named(
+        std::os::unix::fs::symlink(root.path().join("real/Cargo.toml"), &link),
+        "link",
+        &link,
+    )?;
 
     let said = files_panic(root.path());
 
-    assert!(said.contains(&format!("{:?}", root.path().join("Cargo.toml"))), "{said}");
+    assert!(
+        said.contains(&format!("{:?}", root.path().join("Cargo.toml"))),
+        "{said}"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn files_leaves_out_a_linked_excluded_folder_before_the_link_check() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("real")).unwrap();
-    std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
-    for name in ["node_modules", "target", ".local-state", ".worktrees", ".git"] {
-        std::os::unix::fs::symlink(root.path().join("real"), root.path().join(name)).unwrap();
+fn files_leaves_out_a_linked_excluded_folder_before_the_link_check() -> Result<(), String> {
+    let root = tempfile::tempdir().map_err(|error| format!("make a temporary folder: {error}"))?;
+    named(
+        std::fs::create_dir(root.path().join("real")),
+        "create",
+        &root.path().join("real"),
+    )?;
+    named(
+        std::fs::write(root.path().join("real/Cargo.toml"), ""),
+        "write",
+        &root.path().join("real/Cargo.toml"),
+    )?;
+    for name in [
+        "node_modules",
+        "target",
+        ".local-state",
+        ".worktrees",
+        ".git",
+    ] {
+        named(
+            std::os::unix::fs::symlink(root.path().join("real"), root.path().join(name)),
+            "link",
+            &root.path().join(name),
+        )?;
     }
 
     let found = files(root.path(), "Cargo.toml");
 
     assert_eq!(found, [root.path().join("real/Cargo.toml")]);
+    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn files_panics_naming_a_folder_it_cannot_read() {
+fn files_panics_naming_a_folder_it_cannot_read() -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().map_err(|error| format!("make a temporary folder: {error}"))?;
     let shut = root.path().join("shut");
-    std::fs::create_dir(&shut).unwrap();
-    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+    named(std::fs::create_dir(&shut), "create", &shut)?;
+    named(
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)),
+        "set the mode of",
+        &shut,
+    )?;
     let readable = std::fs::read_dir(&shut).is_ok();
 
     let walked = std::panic::catch_unwind(|| files(root.path(), "Cargo.toml"));
 
-    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+    named(
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)),
+        "set the mode of",
+        &shut,
+    )?;
     if readable && rustix::process::geteuid().is_root() {
-        return;
+        return Ok(());
     }
     assert!(
         !readable,
@@ -382,6 +472,7 @@ fn files_panics_naming_a_folder_it_cannot_read() {
     let cause = walked.unwrap_err();
     let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
     assert!(said.contains(&format!("{shut:?}")), "{said}");
+    Ok(())
 }
 
 #[test]
@@ -390,7 +481,10 @@ fn for_test_names_stay_in_test_files() {
     let own = root.join("crates/kernel/storage/src");
     let mut names = Vec::new();
     for file in files(&own, ".rs") {
-        for line in std::fs::read_to_string(&file).unwrap().lines() {
+        for line in std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("read {file:?}: {error}"))
+            .lines()
+        {
             if let Some(rest) = line.trim_start().strip_prefix("pub fn ")
                 && let Some(name) = rest
                     .split('(')
