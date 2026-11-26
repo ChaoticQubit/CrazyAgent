@@ -102,16 +102,22 @@ jobs:
       - name: Clippy each touched crate with warnings denied
         if: ${{ matrix.clippy == 'yes' }}
         run: |
-          set -euo pipefail
+          set +e
+          set -u
+          failed=0
           for target in "crazyagent-win-sandbox --tests" "crazyagent-kernel-processes --lib --tests" "crazyagent --lib --tests"; do
             read -r -a words <<< "$target"
             crate="${words[0]}"
             started=$(date +%s)
-            cargo clippy --locked -p "$crate" "${words[@]:1}" -- -D warnings 2>&1 | tee "clippy-$crate.log"
-            built=$(grep -c -E "^ *(Checking|Compiling) $crate v" "clippy-$crate.log" || true)
-            echo "CASE clippy $crate built=$built seconds=$(( $(date +%s) - started ))"
-            [ "$built" -ge 1 ] || { echo "::error::clippy never checked $crate"; exit 1; }
+            cargo clippy --locked -p "$crate" "${words[@]:1}" -- -D warnings > "clippy-$crate.log" 2>&1
+            rc=$?
+            cat "clippy-$crate.log"
+            built=$(grep -c -E "^ *(Checking|Compiling) $crate v" "clippy-$crate.log")
+            echo "CASE clippy $crate rc=$rc built=$built seconds=$(( $(date +%s) - started ))"
+            if [ "$rc" != 0 ]; then failed=1; fi
+            if [ "$built" -lt 1 ]; then echo "::error::clippy never checked $crate"; failed=1; fi
           done
+          exit "$failed"
       - name: Run the rows this entry names
         if: ${{ !cancelled() }}
         env:
@@ -140,6 +146,11 @@ jobs:
               tail -40 "$log"
             fi
             [ "$rc" = 0 ] || failed=1
+            count=$(echo "$ran" | grep -o -E '[0-9]+' | head -1)
+            if [ "${count:-0}" -lt 1 ]; then
+              echo "ROW-EMPTY $crate $target $filter ran no test"
+              failed=1
+            fi
           done <<< "$ROWS"
           if [ "$EXPECT" = green ] && [ "$failed" != 0 ]; then
             exit 1
