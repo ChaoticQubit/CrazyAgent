@@ -34,17 +34,19 @@ impl TeamRuntime {
     /// the project's live session when that session is still empty: no owner turn and no
     /// kept conversation. The reads and the seat run in one immediate transaction, and the
     /// conversation the master named is kept for the session, so a restart resumes it.
-    /// Takes the project, the master agent and the live switch. Returns any SQLite failure.
+    /// The live session is read once: in that transaction, or plainly when the master is not
+    /// one to seat. Takes the project, the master agent and the live switch. Returns the
+    /// live session read, or any SQLite failure.
     pub(super) fn adopt_session(
         &mut self,
         project: &ProjectId,
         id: i64,
         on: bool,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<String>, EngineError> {
         let worker = &self.workers[&id];
         assert!(&worker.project == project && worker.role == AgentRole::Master);
         if !on || !worker.live || worker.stopping || worker.session.is_some() {
-            return Ok(());
+            return crate::master_sessions::live_session(&self.connection, project);
         }
         #[cfg(all(test, unix))]
         if let Some(step) = BEFORE_ADOPT_READ.with(|step| step.borrow_mut().take()) {
@@ -55,13 +57,13 @@ impl TeamRuntime {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
         let Some(session) = crate::master_sessions::live_session(&tx, project)? else {
-            return Ok(());
+            return Ok(None);
         };
         let id_of = SessionId::new(&session).map_err(error)?;
         if crate::master_sessions::has_owner_turn(&tx, &id_of)?
             || super::master::session_conversation(&tx, project, &session)?.is_some()
         {
-            return Ok(());
+            return Ok(Some(session));
         }
         if let Some(resume) = self.named.get(&id).cloned() {
             let kept = super::master::SessionConversation {
@@ -76,9 +78,24 @@ impl TeamRuntime {
         }
         tx.commit().map_err(error)?;
         let worker = self.workers.get_mut(&id).expect("adopting master exists");
-        worker.session = Some(session);
+        worker.session = Some(session.clone());
         assert!(worker.session.is_some() && !worker.stopping);
-        Ok(())
+        Ok(Some(session))
+    }
+
+    /// The project's live master session, read once for one keep-live step: through
+    /// [`Self::adopt_session`] when the project has a master, which may seat it there, else
+    /// read plainly. Takes the project and the live switch. Returns the session, or any
+    /// SQLite failure.
+    pub(super) fn live_session_once(
+        &mut self,
+        project: &ProjectId,
+        on: bool,
+    ) -> Result<Option<String>, EngineError> {
+        match self.master(project) {
+            Some(id) => self.adopt_session(project, id, on),
+            None => crate::master_sessions::live_session(&self.connection, project),
+        }
     }
 }
 
