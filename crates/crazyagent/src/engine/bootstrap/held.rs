@@ -586,6 +586,33 @@ impl Folder {
         }
         Ok(())
     }
+
+    /// Classifies a failed create-only make: Windows reports a name already taken by a folder
+    /// or a link with a code that is no collision, so an `Unavailable` failure is `Unsafe` when
+    /// the name's kind reads through this folder, as itself and only read. Nothing is written,
+    /// and a lookup that fails keeps `Unavailable`. Inputs: the name and the error. Output: the kind.
+    fn made_cause(&self, name: &Name, error: std::io::Error) -> HeldError {
+        match cause(error) {
+            HeldError::Unavailable if self.kind_unjudged(name).is_ok() => HeldError::Unsafe,
+            kind => kind,
+        }
+    }
+
+    /// Reads what one entry of this folder is, opened as itself, only read and bound to this
+    /// folder: any reparse point is a link. Input: its name. Output: its kind, or the error.
+    fn kind_unjudged(&self, name: &Name) -> Result<Kind, HeldError> {
+        let entry = open_as_itself(&self.path.join(name.as_os_str()), None)?;
+        self.bind(name, &entry)?;
+        let facts = private::facts(&entry).map_err(cause)?;
+        let folder = entry.metadata().map_err(cause)?.is_dir();
+        Ok(if facts.reparse {
+            Kind::Link
+        } else if folder {
+            Kind::Folder
+        } else {
+            Kind::File
+        })
+    }
 }
 
 /// The access right to delete an object, `DELETE`.
@@ -1006,33 +1033,6 @@ impl Folder {
         Ok((file, pin))
     }
 
-    /// Classifies a failed create-only make: Windows reports a name already taken by a folder
-    /// or a link with a code that is no collision, so an `Unavailable` failure is `Unsafe` when
-    /// the name's kind reads through this folder, as itself and only read. Nothing is written,
-    /// and a lookup that fails keeps `Unavailable`. Inputs: the name and the error. Output: the kind.
-    fn made_cause(&self, name: &Name, error: std::io::Error) -> HeldError {
-        match cause(error) {
-            HeldError::Unavailable if self.kind_unjudged(name).is_ok() => HeldError::Unsafe,
-            kind => kind,
-        }
-    }
-
-    /// Reads what one entry of a caller-judged tree is, opened as itself and bound to this
-    /// folder: any reparse point is a link. Input: its name. Output: its kind, or the error.
-    fn kind_unjudged(&self, name: &Name) -> Result<Kind, HeldError> {
-        let entry = open_as_itself(&self.path.join(name.as_os_str()), None)?;
-        self.bind(name, &entry)?;
-        let facts = private::facts(&entry).map_err(cause)?;
-        let folder = entry.metadata().map_err(cause)?.is_dir();
-        Ok(if facts.reparse {
-            Kind::Link
-        } else if folder {
-            Kind::Folder
-        } else {
-            Kind::File
-        })
-    }
-
     /// Deletes one entry of a caller-judged tree through a handle opened as itself with
     /// delete access and bound to this folder, its read-only mark cleared first, with POSIX
     /// semantics; a link goes as itself and a folder only when empty. Inputs: its name and
@@ -1055,7 +1055,7 @@ const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
 /// sharing read and write but never delete, so it cannot be renamed or deleted by another
 /// handle while held. Inputs: the path and the access, read when none. Output: the open
 /// entry, or the error by cause.
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 fn open_as_itself(path: &Path, access: Option<u32>) -> Result<File, HeldError> {
     use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     use std::os::windows::fs::OpenOptionsExt;
