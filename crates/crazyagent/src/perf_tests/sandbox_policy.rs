@@ -109,8 +109,9 @@ fn names_and_errors() {
 }
 
 /// Times the access, network, tool cache, home cache, agent files and apply choices: each
-/// call runs over every variant in turn, so one row stands for the whole enum. Prints one
-/// PERF line per call and asserts no time.
+/// call runs over every variant it accepts in turn, so one row stands for the whole enum.
+/// Reach gets a proxy port only where the choice is proxied, and the IDE network skips Full,
+/// which never asks. Prints one PERF line per call and asserts no time.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn choices() {
@@ -183,7 +184,7 @@ fn choices() {
     });
     time(&row("policy.ide_network", 100), SAMPLES, || {
         let step = next();
-        black_box(ide_network(ACCESS[step % 3], NETWORK[(step / 3) % 3]));
+        black_box(ide_network(ACCESS[step % 2], NETWORK[(step / 2) % 3]));
     });
     time(&row("policy.IdeAgentFiles.label", 1000), SAMPLES, || {
         black_box(AGENT_FILES[next() % 3].label());
