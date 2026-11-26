@@ -4,7 +4,6 @@ use crate::perf_kit::{SAMPLES, time};
 use crate::policy::AccessGrant;
 use std::fs;
 use std::hint::black_box;
-use std::os::unix::net::UnixListener;
 
 /// The harness folders 2.4.4 named in its fixed secret list, which 2.5 takes from the engine.
 const HARNESSES: [&str; 3] = [".codex", ".claude", ".claude.json"];
@@ -30,7 +29,7 @@ fn socket_grants() {
     let data = root.join("data");
     fs::create_dir_all(&data).unwrap();
     let real = root.join("perf-grant.sock");
-    let _listener = UnixListener::bind(&real).unwrap();
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&real).unwrap();
     let grant = AccessGrant::Socket { path: real.clone() };
     let hooks = hooks();
     assert_eq!(socket_fit(&real), Ok(()));
