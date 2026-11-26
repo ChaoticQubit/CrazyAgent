@@ -334,9 +334,51 @@ fn missing(id: &str, roots: &Roots, settings: UpdateSettings) -> HarnessVersions
     }
 }
 
-/// Tells whether a live session runs a harness. Inputs: the engine database and the
-/// catalog id. Output: whether one runs, or `harness_update_unavailable` when the read fails.
-pub(crate) fn in_use(_db: &Connection, _id: &str) -> Result<bool, &'static str> {
+/// The live sessions a harness may run in: team agents that are starting, idle or working,
+/// and agent runs still running, each read from its table by the harness name it stores.
+const LIVE: [(&str, &str); 2] = [
+    (
+        "team_agents",
+        "SELECT DISTINCT harness FROM team_agents WHERE status IN ('starting','idle','working') LIMIT ?1",
+    ),
+    (
+        "agent_runs",
+        "SELECT DISTINCT harness FROM agent_runs WHERE state='running' LIMIT ?1",
+    ),
+];
+/// The most distinct harness names one table may hold for live sessions; a read past it
+/// refuses, since the name asked about could be the one left out.
+const LIVE_NAMES_MAX: u16 = 256;
+
+/// Tells whether a live session runs a harness ([`LIVE`]), stored under the catalog id or
+/// one of its aliases. A table this database never made holds no session: the Windows engine
+/// keeps no agent runs. Inputs: the engine database and the catalog id. Output: whether one
+/// runs, or `harness_update_unavailable` when a read fails.
+pub(crate) fn in_use(db: &Connection, id: &str) -> Result<bool, &'static str> {
+    assert_eq!(harnesses::canonical(id), id);
+    for (table, query) in LIVE {
+        let made: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|_| UNAVAILABLE)?;
+        if !made {
+            continue;
+        }
+        let mut statement = db.prepare(query).map_err(|_| UNAVAILABLE)?;
+        let names = statement
+            .query_map([LIVE_NAMES_MAX + 1], |row| row.get::<_, String>(0))
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .map_err(|_| UNAVAILABLE)?;
+        if names.len() > usize::from(LIVE_NAMES_MAX) {
+            return Err(UNAVAILABLE);
+        }
+        if names.iter().any(|name| harnesses::canonical(name) == id) {
+            return Ok(true);
+        }
+    }
     Ok(false)
 }
 
@@ -346,10 +388,19 @@ fn unused(db: &Connection, id: &str) -> Result<(), &'static str> {
     if in_use(db, id)? { Err(IN_USE) } else { Ok(()) }
 }
 
-/// Opens the engine database at a path again for a job whose turn came after a wait.
-/// Input: the path. Output: the connection, or `harness_update_unavailable`.
+/// Opens the engine database file again, read-only, for a job whose turn came after a wait,
+/// so it reads the sessions that started meanwhile. Input: the path the first read used,
+/// empty for a database held in memory. Output: the connection, or
+/// `harness_update_unavailable` for a path that names no database file.
 fn reopened(path: &str) -> Result<Connection, &'static str> {
-    Connection::open(path).map_err(|_| UNAVAILABLE)
+    if path.is_empty() {
+        return Err(UNAVAILABLE);
+    }
+    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| UNAVAILABLE)?;
+    db.busy_timeout(Duration::from_secs(5))
+        .map_err(|_| UNAVAILABLE)?;
+    Ok(db)
 }
 
 /// Turns the end of an update or install run into its record.
