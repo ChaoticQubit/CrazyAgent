@@ -45,6 +45,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+mod dates;
+pub(crate) use dates::utc_date;
 
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
@@ -1321,7 +1323,10 @@ impl ResearchRunner {
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
         #[cfg(target_os = "macos")]
-        toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
+        {
+            private_directory(&home.join(crate::launch_context::STATE))?;
+            toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
+        }
         kernel_sandbox::toolchains::prepare_cargo_home(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             &home,
@@ -4823,37 +4828,6 @@ fn write_report(root: &Path, kind: &str, report: &str) -> io::Result<PathBuf> {
         return Err(error);
     }
     Ok(target)
-}
-
-/// Formats an instant as a UTC minute for plain status text. Takes the instant.
-/// Returns `YYYY-MM-DD HH:MM UTC`; an instant before the epoch reads as the epoch.
-pub(crate) fn utc_date(time: SystemTime) -> String {
-    let seconds = time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (seconds / 86_400) as i64;
-    let minutes = (seconds % 86_400) / 60;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    assert!((1..=12).contains(&month) && (1..=31).contains(&day));
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
-        minutes / 60,
-        minutes % 60
-    )
 }
 
 #[cfg(all(test, unix))]
