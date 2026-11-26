@@ -424,6 +424,37 @@ fn retiring_leaves_a_link_alone_when_the_old_copy_only_links_to_its_engine() {
     assert!(other.is_file(), "the engine the old copy linked to stays");
 }
 
+/// A command line link that names a hard link of the old copy kept elsewhere names the same
+/// file under another path, not the old copy: it stays as it was and keeps working once the
+/// old copy goes, as two paths that share a file id but resolve apart never count as one.
+#[cfg(unix)]
+#[test]
+fn retiring_leaves_a_link_to_a_hard_link_of_the_old_copy_alone() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = old_copy(&layout);
+    let twin = temp.path().join("kept").join("crazyagent");
+    std::fs::create_dir_all(twin.parent().unwrap()).unwrap();
+    std::fs::hard_link(&old, &twin).unwrap();
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(&twin, cli.join("crazyagent")).unwrap();
+    let installed = persistable(&bundled, layout.root(), Some(&mount), &HOOKS).unwrap();
+    retire_old_copies_with(layout.root(), &installed, Some(&cli), &HOOKS);
+    assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), twin);
+    assert!(
+        std::fs::symlink_metadata(&old).is_err(),
+        "the old copy is retired"
+    );
+    assert!(
+        cli.join("crazyagent").is_file(),
+        "the link still leads to the kept file"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn persistable_never_copies_from_a_folder_other_users_can_change_and_install_refuses_it() {
