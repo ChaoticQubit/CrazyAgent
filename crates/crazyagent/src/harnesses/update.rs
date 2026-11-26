@@ -805,9 +805,22 @@ fn trusted(program: &Path) -> Result<(), &'static str> {
     if safe { Ok(()) } else { Err(TOOL_UNSAFE) }
 }
 
+/// Checks that a program is safe to start as this user on Windows: a plain file that only
+/// SYSTEM, the administrators, TrustedInstaller and this user can change, nor any folder
+/// above it as written or at its real place ([`crazyagent_win_sandbox::program_trusted`]).
+/// Input: the absolute program path. Output: Ok, `TOOL_MISSING` for a relative or missing
+/// program, or `TOOL_UNSAFE`.
+#[cfg(windows)]
+fn trusted(program: &Path) -> Result<(), &'static str> {
+    if !program.is_absolute() || std::fs::metadata(program).is_err() {
+        return Err(TOOL_MISSING);
+    }
+    crazyagent_win_sandbox::program_trusted(program).map_err(|_| TOOL_UNSAFE)
+}
+
 /// Refuses every tool where the engine has no safe way to check and start one.
 /// Input: the program path, unused. Output: the refusal code.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn trusted(_program: &Path) -> Result<(), &'static str> {
     Err(UNSUPPORTED_HERE)
 }
@@ -822,9 +835,36 @@ fn owned(folder: &Path) -> bool {
     })
 }
 
+/// Tells whether this user owns a folder on Windows, read from a handle opened without
+/// following a link, so a global npm install there needs no administrator. Input: the
+/// folder. Output: true only for a folder that exists, is no link or junction and whose
+/// owner is this user's SID.
+#[cfg(windows)]
+fn owned(folder: &Path) -> bool {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let Ok(held) = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(folder)
+    else {
+        return false;
+    };
+    let folder_read = held.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let facts = crazyagent_win_sandbox::private::facts(&held);
+    let user = crazyagent_win_sandbox::private::user_sid();
+    match (facts, user) {
+        (Ok(facts), Ok(user)) => folder_read && !facts.reparse && facts.owner == user,
+        _ => false,
+    }
+}
+
 /// Reports no folder as this user's where ownership cannot be read.
 /// Input: the folder, unused. Output: false.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn owned(_folder: &Path) -> bool {
     false
 }
@@ -1069,11 +1109,11 @@ pub fn latest_from_pointer(pointer: &Pointer, body: &[u8], installed: &str) -> L
 mod windows_tests {
     use super::*;
 
-    /// W1 (leader 01:25, DEC-194): on Windows a harness installed under a drive path is
-    /// named by how it was installed, as on Unix, while its update and its check stay refused
-    /// as unsupported here. A verbatim, UNC or forward-slash path names no install.
+    /// On Windows a harness installed under a drive path is named by how it was installed, as
+    /// on Unix, and its update and its check are refused as missing their tool while the npm
+    /// they would run is not there. A verbatim, UNC or forward-slash path names no install.
     #[test]
-    fn a_windows_npm_install_is_named_and_its_update_and_check_stay_refused() {
+    fn a_windows_npm_install_is_named_and_its_missing_npm_is_refused() {
         let roots = Roots {
             home: PathBuf::from(r"C:\Users\unit"),
             brew_prefixes: Vec::new(),
@@ -1091,9 +1131,9 @@ mod windows_tests {
         );
         assert_eq!(
             update_command("codex", real, real, &roots),
-            Err(UNSUPPORTED_HERE)
+            Err(TOOL_MISSING)
         );
-        assert_eq!(check_command("codex", real, &roots), Err(UNSUPPORTED_HERE));
+        assert_eq!(check_command("codex", real, &roots), Err(TOOL_MISSING));
         for refused in [
             r"\\?\C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js",
             r"\\server\share\npm\node_modules\@openai\codex\bin\codex.js",
@@ -1106,17 +1146,18 @@ mod windows_tests {
             );
         }
     }
-    /// V243-W1-VERSION-READ: with the engine's home now the profile folder on Windows, a
-    /// harness that installed itself under it is named as self-updating, and its update
-    /// stays refused as unsupported here.
+    /// With the engine's home the profile folder on Windows, a harness that installed itself
+    /// under it is named as self-updating, and its update is refused as unsafe once the users
+    /// group may write the file, whatever the resolver would say about it.
     #[test]
-    fn a_windows_self_updating_install_is_named_and_its_update_stays_refused() {
+    fn a_windows_self_updating_install_is_named_and_one_others_may_write_is_refused() {
         let folder = tempfile::tempdir().unwrap();
         let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let installed = home.join(".codex").join("packages").join("standalone");
         std::fs::create_dir_all(&installed).unwrap();
         let entry = installed.join("codex.exe");
         std::fs::write(&entry, "").unwrap();
+        icacls(&entry, &["/grant", "*S-1-5-32-545:(W)"]);
         let roots = Roots {
             home,
             brew_prefixes: Vec::new(),
@@ -1127,7 +1168,61 @@ mod windows_tests {
         assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
         assert_eq!(
             update_command("codex", &entry, &entry, &roots),
-            Err(UNSUPPORTED_HERE)
+            Err(TOOL_UNSAFE)
         );
+    }
+
+    /// Runs icacls on one path and asserts it succeeded, with its error output when not.
+    /// Inputs: the path and the icacls arguments.
+    /// Output: none.
+    fn icacls(path: &Path, change: &[&str]) {
+        let mut command = std::process::Command::new("icacls");
+        command.arg(path).args(change);
+        let done = kernel_processes::spawn_gate::collected(&mut command).unwrap();
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+
+    /// A tool the engine would start passes the Windows trust check when only the system and
+    /// this user may change it, as the curl Windows ships; a relative or missing tool is
+    /// missing, and one the users group may write is unsafe.
+    #[test]
+    fn a_windows_tool_is_trusted_only_while_no_other_account_may_change_it() {
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        assert_eq!(trusted(&shipped), Ok(()));
+        assert_eq!(trusted(Path::new("curl.exe")), Err(TOOL_MISSING));
+        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let tool = folder.path().join("tool.exe");
+        assert_eq!(trusted(&tool), Err(TOOL_MISSING));
+        std::fs::write(&tool, "").unwrap();
+        assert_eq!(trusted(&tool), Ok(()));
+        icacls(&tool, &["/grant", "*S-1-5-32-545:(W)"]);
+        assert_eq!(trusted(&tool), Err(TOOL_UNSAFE));
+    }
+
+    /// A global npm install needs no administrator only in a folder this user owns: a folder
+    /// whose owner is set to this user is owned, one the administrators own is not, and
+    /// neither is a file or a missing path.
+    #[test]
+    fn a_windows_folder_is_owned_only_when_this_user_owns_it() {
+        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let modules = folder.path().join("node_modules");
+        std::fs::create_dir(&modules).unwrap();
+        let me = kernel_processes::spawn_gate::collected(&mut std::process::Command::new("whoami"))
+            .unwrap();
+        let me = String::from_utf8(me.stdout).unwrap();
+        icacls(&modules, &["/setowner", me.trim()]);
+        assert!(owned(&modules));
+        icacls(&modules, &["/setowner", "*S-1-5-32-544"]);
+        assert!(!owned(&modules));
+        let file = folder.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(!owned(&file));
+        assert!(!owned(&folder.path().join("gone")));
     }
 }

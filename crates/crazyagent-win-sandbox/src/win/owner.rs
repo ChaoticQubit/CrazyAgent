@@ -90,6 +90,40 @@ pub fn owner_only(program: &Path) -> Result<(), BoundaryError> {
     Ok(())
 }
 
+/// Refuses a program the engine would start with its own rights to install or update a
+/// harness unless its real file, opened without following a link, passes
+/// [`crate::private::judge_program`] and [`owner_only`] passes it both as written and at its
+/// real place. Input: the absolute program path. Output: Ok, or the refusal with its reason
+/// or the failed step.
+pub fn program_trusted(program: &Path) -> Result<(), BoundaryError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    if !program.is_absolute() {
+        return Err(BoundaryError::Refused("a program path is not absolute"));
+    }
+    let failed = |step: &'static str| {
+        move |error: std::io::Error| BoundaryError::Windows {
+            step,
+            code: error.raw_os_error().map_or(0, i32::cast_unsigned),
+        }
+    };
+    let real = std::fs::canonicalize(program).map_err(failed("resolve a program"))?;
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&real)
+        .map_err(failed("open a program"))?;
+    if !held.metadata().map_err(failed("read a program"))?.is_file() {
+        return Err(BoundaryError::Refused("a program is not a file"));
+    }
+    let facts = super::private::facts(&held).map_err(failed("read a program's owner and lists"))?;
+    let user = user_sid().map_err(windows("read the engine's user"))?;
+    crate::private::judge_program(&facts, &user).map_err(BoundaryError::Refused)?;
+    drop(held);
+    owner_only(program)?;
+    owner_only(&real)
+}
+
 /// Refuses a file or folder unless one of the trusted owners owns it and no other SID holds
 /// any of `rights` on it. Inputs: the path, the engine's user SID and the rights that count
 /// here. Output: Ok, or the refusal or the failed step.

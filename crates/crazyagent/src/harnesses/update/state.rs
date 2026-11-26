@@ -398,9 +398,9 @@ fn version_gate(executable: &Path, _places: &kernel_processes::finding::Places) 
 /// Lets a harness file be started for its version only when a session would start it, the
 /// gate Windows launch passes ([`crate::harnesses::interactive::launch_tool`]), and only the
 /// system and this user can change the entry as written and the program launch would start
-/// ([`owner_only`]), since [`super::trusted`] refuses every program here and keeps every
-/// update refused. Inputs: the harness file and the resolver's places. Output: Some when it
-/// may start.
+/// ([`owner_only`]). A version read starts the program a launch starts, a script's node
+/// included, so it is gated as launch is. Inputs: the harness file and the resolver's
+/// places. Output: Some when it may start.
 #[cfg(windows)]
 fn version_gate(executable: &Path, places: &kernel_processes::finding::Places) -> Option<()> {
     let launched = crate::harnesses::interactive::launch_tool(executable, places).ok()?;
