@@ -165,32 +165,45 @@ fn a_windows_adopt_refuses_an_open_or_linked_home_before_a_lock() {
     });
 }
 
-/// CodeRabbit CR-1140 (1): a W1 private home passes H1's check at `install`, which is then
-/// refused with `launch_context_unavailable` before it takes the lock or changes the home,
-/// so the launch state folder and a Codex `config.toml` already there keep every byte. It
-/// used to delete the state folder before its first file write was refused.
+/// What the Windows install cannot write yet, a process's project files, tools, Codex and a
+/// team relay, is refused with `launch_context_unavailable` once the home's checks pass,
+/// before it takes the lock or changes the home, so the launch folder and a Codex
+/// `config.toml` already there keep every byte.
 #[test]
-fn a_windows_install_is_refused_before_it_changes_the_home() {
+fn a_windows_install_it_cannot_write_yet_is_refused_before_it_changes_the_home() {
     let (_temp, base) = base();
     let home = private_home(&base, "home");
+    let data = private_home(&base, "data");
     std::fs::create_dir(home.join(STATE)).unwrap();
     std::fs::write(home.join(STATE).join("kept"), "state").unwrap();
     std::fs::write(home.join("config.toml"), "model = \"kept\"\n").unwrap();
-    for harness in ["claude-code", "codex"] {
+    let relay = AgentContext {
+        relay: Some((base.join("engine.exe"), base.join("mailbox"))),
+        ..context()
+    };
+    let cases = [
+        ("process", context_with_process(&data), "claude-code", false),
+        ("tools", context(), "claude-code", true),
+        ("codex", context(), "codex", false),
+        ("relay", relay, "claude-code", false),
+    ];
+    for (case, context, harness, tools) in cases {
         assert_eq!(
-            context().install(harness, &home, false).unwrap_err().0,
+            context.install(harness, &home, tools).unwrap_err().0,
             "launch_context_unavailable",
-            "{harness}"
+            "{case}"
         );
         assert_eq!(
             std::fs::read_to_string(home.join(STATE).join("kept")).unwrap(),
-            "state"
+            "state",
+            "{case}"
         );
         assert_eq!(
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
-            "model = \"kept\"\n"
+            "model = \"kept\"\n",
+            "{case}"
         );
-        assert!(!home.join(LOCK).exists(), "{harness}");
+        assert!(!home.join(LOCK).exists(), "{case}");
     }
 }
 
@@ -282,4 +295,205 @@ fn a_windows_launch_lock_its_path_reached_outside_the_held_home_is_refused() {
     drop(elsewhere);
     let own = lock(&held_home).unwrap();
     locked_in(&own, &held).unwrap();
+}
+
+/// Makes a junction at `link` that names `target`. Inputs: both absolute paths.
+fn junction(link: &Path, target: &Path) {
+    run(
+        "cmd.exe",
+        &[
+            "/d",
+            "/c",
+            "mklink",
+            "/J",
+            link.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    );
+}
+
+/// A private folder outside the home holding one file, the place a planted junction names.
+/// Inputs: the base and a name. Output: the folder's path.
+fn outside(base: &Path, name: &str) -> PathBuf {
+    let folder = private_home(base, name);
+    std::fs::write(folder.join("kept"), name).unwrap();
+    folder
+}
+
+/// Asserts a folder a junction named still holds only its one file, with its bytes. Inputs:
+/// the folder and the name it was made with.
+fn assert_untouched(folder: &Path, name: &str) {
+    assert_eq!(std::fs::read_to_string(folder.join("kept")).unwrap(), name);
+    assert_eq!(std::fs::read_dir(folder).unwrap().count(), 1);
+}
+
+/// A context that gives a process, as an agent launch with its project does. Input: the
+/// project's data folder. Output: it.
+fn context_with_process(data: &Path) -> AgentContext {
+    AgentContext {
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data: data.to_path_buf(),
+                id: ProjectId::new("process").unwrap(),
+                folder: None,
+                mode: crate::instruction_files::Mode::Both,
+                repeated: crate::agent_home::Repeated::LeaveOut,
+            },
+            hooks: Vec::new(),
+            agent: String::new(),
+            caches: crate::agent_home::Caches::default(),
+        })),
+        ..context()
+    }
+}
+
+/// A Claude Code install with tools off writes its MCP list and its instructions into the
+/// launch folder of a private home, names both in its arguments, and gives both the home's
+/// inheritable list rather than a private one; it holds the home's lock until it drops, and
+/// the drop removes the launch folder.
+#[test]
+fn a_windows_tools_off_claude_install_writes_its_two_files_and_holds_the_home() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let state = home.join(STATE);
+    let installed = context().install("claude-code", &home, false).unwrap();
+    let mcp = state.join("mcp.json");
+    let instructions = state.join("instructions.md");
+    assert_eq!(
+        std::fs::read_to_string(&mcp).unwrap(),
+        claude_config(&[]).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&instructions).unwrap(),
+        context().instructions
+    );
+    assert_eq!(
+        installed.arguments(),
+        [
+            OsString::from("--mcp-config"),
+            mcp.clone().into_os_string(),
+            OsString::from("--append-system-prompt-file"),
+            instructions.clone().into_os_string(),
+        ]
+    );
+    for file in [&mcp, &instructions] {
+        let opened = std::fs::File::open(file).unwrap();
+        assert!(private::check(&opened).is_err(), "{}", file.display());
+    }
+    assert_held(&home);
+    drop(installed);
+    assert!(!state.exists());
+    drop(lock_only(&home, "claude-code").unwrap());
+}
+
+/// A junction an earlier agent left at the launch folder's name, or inside the launch
+/// folder, is removed as itself before the install writes: the folders it named keep every
+/// byte and gain no file.
+#[test]
+fn a_windows_install_removes_a_planted_junction_as_itself() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let state = home.join(STATE);
+    let at_name = outside(&base, "at-name");
+    junction(&state, &at_name);
+    drop(context().install("claude-code", &home, false).unwrap());
+    assert_untouched(&at_name, "at-name");
+    std::fs::create_dir(&state).unwrap();
+    let inside = outside(&base, "inside");
+    junction(&state.join("plugin"), &inside);
+    let installed = context().install("claude-code", &home, false).unwrap();
+    assert_untouched(&inside, "inside");
+    assert!(!state.join("plugin").exists());
+    assert!(state.join("mcp.json").is_file());
+    drop(installed);
+}
+
+/// The drop removes the launch folder through the home it held, so a junction planted in
+/// the launch folder after the install is removed as itself, and a junction above the home
+/// pointed at another folder after the install never sends the drop there.
+#[test]
+fn a_windows_install_drop_never_follows_a_junction_planted_after_it() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let installed = context().install("claude-code", &home, false).unwrap();
+    let planted = outside(&base, "planted");
+    junction(&home.join(STATE).join("link"), &planted);
+    drop(installed);
+    assert_untouched(&planted, "planted");
+    assert!(!home.join(STATE).exists());
+    let first = private_home(&base, "first");
+    private_home(&first, "home");
+    let second = private_home(&base, "second");
+    let elsewhere = private_home(&second, "home");
+    std::fs::create_dir(elsewhere.join(STATE)).unwrap();
+    std::fs::write(elsewhere.join(STATE).join("kept"), "second").unwrap();
+    let alias = base.join("alias");
+    junction(&alias, &first);
+    let installed = context()
+        .install("claude-code", &alias.join("home"), false)
+        .unwrap();
+    assert!(first.join("home").join(STATE).join("mcp.json").is_file());
+    run("cmd.exe", &["/d", "/c", "rmdir", alias.to_str().unwrap()]);
+    junction(&alias, &second);
+    drop(installed);
+    assert!(!first.join("home").join(STATE).exists());
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join(STATE).join("kept")).unwrap(),
+        "second"
+    );
+}
+
+/// The Windows install's own judge runs on the home it holds, after every earlier check: a
+/// home whose list was opened to the Users group is refused with `launch_context_unsafe`
+/// before the lock is made or the launch folder is touched.
+#[test]
+fn a_windows_install_refuses_a_home_its_held_judge_refuses_before_a_lock() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    std::fs::create_dir(home.join(STATE)).unwrap();
+    std::fs::write(home.join(STATE).join("kept"), "state").unwrap();
+    run(
+        "icacls.exe",
+        &[
+            home.to_str().unwrap(),
+            "/grant",
+            "*S-1-5-32-545:(OI)(CI)(RX)",
+        ],
+    );
+    assert_eq!(
+        windows::install(&context(), &home, false, false)
+            .unwrap_err()
+            .0,
+        "launch_context_unsafe"
+    );
+    assert!(!home.join(LOCK).exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join(STATE).join("kept")).unwrap(),
+        "state"
+    );
+}
+
+/// The held judge refuses a home whose label for what is made in it, an inherit-only entry,
+/// is below medium or lacks no-write-up, as it refuses such a label on the home itself; an
+/// inherit-only medium no-write-up label passes.
+#[test]
+fn the_held_home_judge_refuses_a_low_or_open_inherited_label() {
+    const INHERITED: u8 = 0x01 | 0x02 | 0x08;
+    const MEDIUM: u32 = 0x2000;
+    const LOW: u32 = 0x1000;
+    const NO_WRITE_UP: u32 = 0x1;
+    let (_temp, base) = base();
+    let held = private::dir(&base.join("home")).unwrap();
+    let facts = private::facts(&held).unwrap();
+    let user = private::user_sid().unwrap();
+    assert!(windows::judged_home(&facts, &user));
+    let labelled = |level, policy| private::Facts {
+        label: Some(crazyagent_win_sandbox::dacl::labelled(
+            level, policy, INHERITED,
+        )),
+        ..facts.clone()
+    };
+    assert!(windows::judged_home(&labelled(MEDIUM, NO_WRITE_UP), &user));
+    assert!(!windows::judged_home(&labelled(LOW, NO_WRITE_UP), &user));
+    assert!(!windows::judged_home(&labelled(MEDIUM, 0), &user));
 }
