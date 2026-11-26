@@ -30,6 +30,7 @@ pub const INSTALL_NOT_FOUND: &str = "harness_install_not_found";
 pub const INSTALL_FAILED: &str = "harness_install_failed";
 pub const INSTALL_LIST_INVALID: &str = "harness_install_list_invalid";
 pub const IN_USE: &str = "harness_update_in_use";
+pub const LAUNCH_UPDATING: &str = "harness_launch_updating";
 const UNAVAILABLE: &str = "harness_update_unavailable";
 
 const NO_VERSION: &str = "0";
@@ -388,6 +389,33 @@ fn unused(db: &Connection, id: &str) -> Result<(), &'static str> {
     if in_use(db, id)? { Err(IN_USE) } else { Ok(()) }
 }
 
+/// Reads whether a program runs from one of the folders or is one of the files: the Windows
+/// process snapshot in the engine, a stand-in in tests. Input: the folders. Output: whether
+/// one runs, or the Windows error code of a snapshot that could not be read.
+type Images = fn(&[PathBuf]) -> Result<bool, u32>;
+
+#[cfg(windows)]
+const IMAGES: Images = crazyagent_win_sandbox::image_runs_under;
+#[cfg(not(windows))]
+const IMAGES: Images = |_| Ok(false);
+
+/// Answers `harness_update_in_use` while a program runs from the folders an update changes,
+/// one CrazyAgent never started included, such as a harness run in a terminal pane. Inputs:
+/// the folders and the process reader. Output: Ok while none runs, else the code, or
+/// `harness_update_unavailable` when the processes cannot be read.
+fn not_running(watched: &[PathBuf], images: Images) -> Result<(), &'static str> {
+    let _ = (watched, images);
+    Ok(())
+}
+
+/// The folders whose running programs block an update: the ones its command changes, or,
+/// for a self-updater, which names none, the folder of the harness's real file. Inputs: the
+/// folders the command holds and the real file. Output: the folders, never empty.
+fn watched(held: &[PathBuf], real: &Path) -> Vec<PathBuf> {
+    let _ = real;
+    held.to_vec()
+}
+
 /// Opens the engine database file again, read-only, for a job whose turn came after a wait,
 /// so it reads the sessions that started meanwhile. Input: the path the first read used,
 /// empty for a database held in memory. Output: the connection, or
@@ -608,6 +636,19 @@ pub struct Updates {
     state: Mutex<State>,
     turns: Turns,
     reader: Reader,
+}
+
+/// The harnesses whose update or install job runs in this process, once per running job, so
+/// a launch, which holds no engine handle, can refuse one while its files change.
+static UPDATING: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+/// Refuses, on Windows, a launch of a harness whose update or install job runs in this
+/// process, since the job replaces the files the launch would run; elsewhere every launch
+/// goes on. Inputs: the harness name, an alias allowed, and whether this is Windows.
+/// Output: Ok, or `harness_launch_updating`.
+pub(crate) fn launchable(harness: &str, windows: bool) -> Result<(), &'static str> {
+    let _ = (harness, windows, &UPDATING);
+    Ok(())
 }
 
 /// A running job's hold on its harness; dropping it frees the harness on every path.

@@ -176,3 +176,74 @@ fn an_update_outside_windows_is_not_refused_for_a_live_session() {
     let started = Updates::new().start(&sessions_db("codex", "working"), &entry, &roots, |_| {});
     assert_ne!(started, Err(IN_USE));
 }
+
+/// A program running from the folders an update changes refuses it as in use, the reader
+/// being asked about exactly those folders; none running lets it go on, and processes that
+/// cannot be read refuse it as unavailable.
+#[test]
+fn a_program_running_from_the_update_folders_refuses_and_a_failed_read_is_unavailable() {
+    let held = [PathBuf::from("prefix")];
+    let asked: Images = |folders| Ok(folders == [PathBuf::from("prefix")]);
+    assert_eq!(not_running(&held, asked), Err(IN_USE));
+    assert_eq!(not_running(&held, |_| Ok(false)), Ok(()));
+    assert_eq!(not_running(&held, |_| Err(5)), Err(UNAVAILABLE));
+}
+
+/// An update watches the folders its command changes, and a self-updater, whose command
+/// changes none, the folder of the harness's real file.
+#[test]
+fn an_update_watches_its_folders_or_the_folder_of_a_self_updater() {
+    let real = Path::new("tools").join("fx").join("fx.exe");
+    let held = vec![PathBuf::from("prefix")];
+    assert_eq!(watched(&held, &real), held);
+    assert_eq!(watched(&[], &real), vec![Path::new("tools").join("fx")]);
+}
+
+/// While an update or install job holds a harness, a Windows launch of it is refused with
+/// the updating code and a launch elsewhere goes on; once the job ends, also by a panic,
+/// the launch goes on again.
+#[test]
+fn a_launch_during_a_running_job_refuses_on_windows_until_the_job_ends() {
+    let updates = Updates::new();
+    let running = updates.begin("fx").unwrap();
+    assert_eq!(launchable("fx", true), Err(LAUNCH_UPDATING));
+    assert_eq!(launchable("fx", false), Ok(()));
+    drop(running);
+    assert_eq!(launchable("fx", true), Ok(()));
+    let held = Arc::clone(&updates);
+    let ended = std::thread::spawn(move || {
+        let _running = held.begin("fx").unwrap();
+        assert_eq!(launchable("fx", true), Err(LAUNCH_UPDATING));
+        panic!("the job failed");
+    })
+    .join();
+    assert!(ended.is_err());
+    assert_eq!(launchable("fx", true), Ok(()));
+}
+
+/// On Windows a program started from an update's folder outside any runtime, held
+/// suspended, refuses the update as in use through the process snapshot until it ends.
+#[cfg(windows)]
+#[test]
+fn a_windows_program_started_outside_the_runtime_under_the_prefix_refuses_the_update() {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let made = tempfile::tempdir().unwrap();
+    let prefix = kernel_sandbox::paths::canonical(made.path()).unwrap();
+    let copy = prefix.join("fx.exe");
+    std::fs::copy(system.join("PING.EXE"), &copy).unwrap();
+    let mut child = Command::new(&copy)
+        .args(["-n", "60", "127.0.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0000_0004 | 0x0800_0000)
+        .spawn()
+        .unwrap();
+    let held = [prefix];
+    assert_eq!(not_running(&held, IMAGES), Err(IN_USE));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(not_running(&held, IMAGES), Ok(()));
+}

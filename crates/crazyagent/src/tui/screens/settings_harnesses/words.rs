@@ -171,4 +171,13 @@ mod tests {
             "Close the sessions that use it, then update."
         );
     }
+
+    /// A launch refused while the harness's update runs gets the owner's sentence.
+    #[test]
+    fn a_launch_during_an_update_says_to_try_again_when_it_is_done() {
+        assert_eq!(
+            update_copy("harness_launch_updating"),
+            "This harness is updating. Try again when it's done."
+        );
+    }
 }

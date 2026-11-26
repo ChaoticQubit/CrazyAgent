@@ -1,6 +1,7 @@
 mod acl;
 mod container;
 mod file_id;
+mod images;
 mod job;
 mod launch;
 mod listeners;
@@ -13,6 +14,7 @@ mod system;
 mod tree;
 
 pub use file_id::file_id;
+pub use images::image_runs_under;
 pub use listeners::listener_beside;
 pub use name::final_name;
 pub use owner::{
