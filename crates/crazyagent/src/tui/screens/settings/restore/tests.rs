@@ -383,6 +383,10 @@ fn a_second_switch_waits_for_the_refreshed_choice_and_then_sends_off() {
         &mut ctx,
     );
     assert!(matches!(page.key(&Key::Char('c'), &mut ctx), Flow::Ignored));
+    assert!(
+        ctx.message().is_none(),
+        "a failed refresh says nothing, as a failed read does"
+    );
     page.shown(&mut ctx);
     assert_eq!(
         compaction_jobs(&mut ctx),

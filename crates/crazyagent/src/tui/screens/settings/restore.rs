@@ -171,6 +171,20 @@ fn read(ctx: &Ctx) -> Offer {
     offer(until_ms, last.as_ref(), now_ms(), local_offset())
 }
 
+/// Where the compaction switch stands. The TUI's owner worker answers Settings jobs one at a
+/// time in the order they were sent, and the page sends no read of the switch outside `Idle`,
+/// so the first read reply after the save's reply is the refresh that reply asked for: the key
+/// comes back only with the engine's choice after the save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Switch {
+    /// No save runs; the key sends the other choice.
+    Idle,
+    /// A save was sent and has not answered.
+    Saving,
+    /// The save answered and the refresh it asked for has not.
+    Refreshing,
+}
+
 /// Settings, Restore 2.4 (L5): the pinned 2.4 backup's end, the last restore, and the button
 /// that asks first with the three things a restore does, then sends it once. Input: keys and
 /// the restore's reply. Output: the page; an admitted restore stops the engine.
@@ -180,7 +194,7 @@ pub struct RestorePage {
     confirm_focused: bool,
     sending: bool,
     compaction: Option<LogCompactionView>,
-    switching: bool,
+    switch: Switch,
 }
 
 impl RestorePage {
@@ -197,7 +211,7 @@ impl RestorePage {
             confirm_focused: false,
             sending: false,
             compaction: None,
-            switching: false,
+            switch: Switch::Idle,
         }
     }
 
@@ -207,19 +221,20 @@ impl RestorePage {
         let Some(view) = self.compaction.filter(|view| view.dev_build) else {
             return false;
         };
-        if self.switching {
+        if self.switch != Switch::Idle {
             return false;
         }
         let choice = match view.choice {
             LogCompaction::Off => LogCompaction::On,
             LogCompaction::On => LogCompaction::Off,
         };
-        self.switching = true;
+        self.switch = Switch::Saving;
         let generation = ctx.next_generation();
         send(
             ctx,
             SettingsJob::AppSetup(AppSetupJob::SetLogCompaction { choice, generation }),
         );
+        assert_eq!(self.switch, Switch::Saving);
         true
     }
 
@@ -277,7 +292,7 @@ impl Screen for RestorePage {
         if self.shown.offer && !self.sending {
             hints.push(hint("Enter", BUTTON));
         }
-        if !compaction_lines(self.compaction.as_ref()).is_empty() && !self.switching {
+        if !compaction_lines(self.compaction.as_ref()).is_empty() && self.switch == Switch::Idle {
             hints.push(hint("c", LABEL));
         }
         hints.push(sections_hint(ctx.glyphs));
@@ -316,15 +331,19 @@ impl Screen for RestorePage {
             }
             Some(SettingsEvent::AppSetup(AppSetupEvent::LogCompaction(result))) => {
                 self.compaction = result.as_ref().ok().copied();
+                if self.switch == Switch::Refreshing {
+                    self.switch = Switch::Idle;
+                }
             }
             Some(SettingsEvent::AppSetup(AppSetupEvent::LogCompactionSet(result)))
-                if self.switching =>
+                if self.switch == Switch::Saving =>
             {
-                self.switching = false;
+                self.switch = Switch::Refreshing;
                 if result.is_err() {
                     ctx.say(Message::warning(COMPACTION_UNSAVED, ""));
                 }
                 send(ctx, SettingsJob::AppSetup(AppSetupJob::LogCompaction));
+                assert_eq!(self.switch, Switch::Refreshing);
             }
             _ => {}
         }
@@ -335,7 +354,7 @@ impl Screen for RestorePage {
         if !self.asking && !self.sending {
             self.shown = read(ctx);
         }
-        if !self.switching {
+        if self.switch == Switch::Idle {
             send(ctx, SettingsJob::AppSetup(AppSetupJob::LogCompaction));
         }
     }
