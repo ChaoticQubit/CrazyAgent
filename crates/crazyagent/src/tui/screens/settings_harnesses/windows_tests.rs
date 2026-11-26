@@ -19,13 +19,18 @@ fn windows_offers_no_update_in_any_mode() {
     );
 }
 
-/// On Windows the subtitle offers install with npm and update with the harness's own
-/// updater, the macOS and Linux sentence without Homebrew.
+/// On Windows the subtitle offers install with npm and promises no update, since the page
+/// offers none there, and names no Homebrew.
 #[test]
-fn the_subtitle_offers_install_with_npm_and_update_on_windows() {
+fn the_subtitle_offers_install_with_npm_and_no_update_on_windows() {
     assert_eq!(
         SUBTITLE,
-        "Agents run inside these tools. CrazyAgent finds them on this computer. It can install one with npm and update one with that harness's own updater, each only when you choose it."
+        "Agents run inside these tools. CrazyAgent finds them on this computer. It can install one with npm when you choose it. Update them outside CrazyAgent."
     );
     assert!(!SUBTITLE.contains("Homebrew"));
+    assert!(!SUBTITLE.contains("update one"));
+    assert_eq!(
+        update_blocked(UpdateMode::CheckAndUpdate),
+        Some(UNSUPPORTED_HERE)
+    );
 }
