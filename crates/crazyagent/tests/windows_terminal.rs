@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 fn cmd() -> PathBuf {
-    PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+    PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is not set"))
         .join("System32")
         .join("cmd.exe")
 }
