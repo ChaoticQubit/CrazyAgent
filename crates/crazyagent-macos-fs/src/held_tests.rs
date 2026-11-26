@@ -95,16 +95,19 @@ fn a_held_reply_reads_each_field_only_when_whole() {
 /// change time, owner, group and permission bits `lstat` reads, the folder read through its
 /// own search handle too, and a link is read itself and refused by a no-follow open.
 #[test]
-fn held_reads_match_lstat_for_a_folder_a_file_and_a_link() {
-    let home = std::env::temp_dir().join(format!("held-{}", std::process::id()));
+fn held_reads_match_lstat_for_a_folder_a_file_and_a_link() -> Result<(), Box<dyn std::error::Error>>
+{
+    let home =
+        std::fs::canonicalize(std::env::temp_dir())?.join(format!("held-{}", std::process::id()));
+    assert!(home.is_absolute());
     let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir(&home).unwrap();
-    std::fs::write(home.join("file"), b"x").unwrap();
-    std::os::unix::fs::symlink("file", home.join("link")).unwrap();
-    let path = std::ffi::CString::new(home.as_os_str().as_encoded_bytes()).unwrap();
-    let folder = open_search(None, &path, false).unwrap();
-    let same = |read: &super::HeldEntry, entry: &std::path::Path| {
-        let seen = std::fs::symlink_metadata(entry).unwrap();
+    std::fs::create_dir(&home)?;
+    std::fs::write(home.join("file"), b"x")?;
+    std::os::unix::fs::symlink("file", home.join("link"))?;
+    let path = std::ffi::CString::new(home.as_os_str().as_encoded_bytes())?;
+    let folder = open_search(None, &path, false)?;
+    let same = |read: &super::HeldEntry, entry: &std::path::Path| -> std::io::Result<()> {
+        let seen = std::fs::symlink_metadata(entry)?;
         assert_eq!(
             (
                 read.device,
@@ -129,23 +132,26 @@ fn held_reads_match_lstat_for_a_folder_a_file_and_a_link() {
             "{}",
             entry.display()
         );
+        Ok(())
     };
-    let held = held_entry(folder.as_fd()).unwrap();
-    same(&held, &home);
+    let held = held_entry(folder.as_fd())?;
+    same(&held, &home)?;
     assert!(held.folder() && !held.link());
-    let file = held_entry_at(Some(folder.as_fd()), c"file").unwrap();
-    same(&file, &home.join("file"));
+    let file = held_entry_at(Some(folder.as_fd()), c"file")?;
+    same(&file, &home.join("file"))?;
     assert!(!file.folder() && !file.link());
-    let link = held_entry_at(Some(folder.as_fd()), c"link").unwrap();
-    same(&link, &home.join("link"));
+    let link = held_entry_at(Some(folder.as_fd()), c"link")?;
+    same(&link, &home.join("link"))?;
     assert!(link.link());
     for name in ["file", "link"] {
         let whole = home.join(name);
-        let path = std::ffi::CString::new(whole.as_os_str().as_bytes()).unwrap();
-        let by_path = held_entry_at(None, &path).unwrap();
-        same(&by_path, &whole);
+        assert!(whole.is_absolute());
+        let path = std::ffi::CString::new(whole.as_os_str().as_bytes())?;
+        let by_path = held_entry_at(None, &path)?;
+        same(&by_path, &whole)?;
         assert_eq!(by_path.link(), name == "link");
     }
     assert!(open_search(Some(folder.as_fd()), c"link", false).is_err());
-    std::fs::remove_dir_all(&home).unwrap();
+    std::fs::remove_dir_all(&home)?;
+    Ok(())
 }
