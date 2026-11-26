@@ -190,14 +190,9 @@ impl ProjectTab {
 /// wizard is open or its draft was kept after leaving it.
 pub const DRAFT_LOSS: &str = "Your new project draft will be lost.";
 
-/// What a screen sentence calls the computer CrazyAgent runs on: the Mac on macOS.
-#[cfg(target_os = "macos")]
-const THIS_COMPUTER: &str = "this Mac";
-
-/// What a screen sentence calls the computer CrazyAgent runs on: the computer off macOS,
-/// as the Linux and Windows builds show the same sentences.
-#[cfg(not(target_os = "macos"))]
-const THIS_COMPUTER: &str = "this computer";
+/// What a screen sentence calls the computer CrazyAgent runs on: "this Mac" on macOS, "this
+/// computer" on Linux and Windows, from the same words every joined sentence uses.
+const THIS_COMPUTER: &str = on_this_computer!("", "");
 
 /// A place the owner can go to; the registry builds its screen.
 /// Input: from Go to, Home and Settings. Output: `open` returns its screen.

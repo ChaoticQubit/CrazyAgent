@@ -1,6 +1,7 @@
 use super::THIS_COMPUTER;
 use super::harness_setup::{INSTALLED, READING};
 use super::home::HARNESSES_HERE;
+use super::intake::AddWarning;
 use super::settings::profile::{ARROWS_LOST, COLORS_LOST, ENTER_LOST};
 use super::settings_accounts::plain;
 use super::settings_add_account::{url_problem, words::CHECK_LINE};
@@ -108,5 +109,21 @@ fn plugin_and_profile_sentences_name_the_computer_the_build_runs_on() {
             shown,
             format!("Profile saved, but the {choice} choice could not be kept on {here}.")
         );
+    }
+}
+
+#[test]
+fn intake_warnings_name_the_computer_the_build_runs_on() {
+    let here = THIS_COMPUTER;
+    for warning in [AddWarning::AcrossDisks, AddWarning::CopyAll] {
+        let text = warning.text();
+        assert!(
+            text.contains(&format!(" If {here} sleeps, loses power ")),
+            "{warning:?}: {text}"
+        );
+        assert!(!text.contains("the Mac"), "{warning:?}: {text}");
+        if !cfg!(target_os = "macos") {
+            assert!(!text.contains("Mac"), "{warning:?}: {text}");
+        }
     }
 }
