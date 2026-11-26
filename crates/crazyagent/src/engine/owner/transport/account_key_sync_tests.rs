@@ -45,7 +45,10 @@ fn a_store_whose_folder_sync_fails_leaves_no_key_file() {
     assert!(names(&base).is_empty());
     assert!(read_key(&root, &credential).unwrap().is_none());
     store_key(&root, &credential, secret("sk-ant-synced")).unwrap();
-    assert_eq!(read_key(&root, &credential).unwrap().unwrap(), b"sk-ant-synced");
+    assert_eq!(
+        read_key(&root, &credential).unwrap().unwrap(),
+        b"sk-ant-synced"
+    );
 }
 
 #[test]
@@ -56,8 +59,14 @@ fn a_replace_whose_folder_sync_fails_leaves_the_new_key_and_no_staged_file() {
     fail_next_sync();
     let refused = replace_key(&root, &credential, secret("sk-ant-new")).unwrap_err();
     assert_eq!(refused.0, "account_key_store_unavailable");
-    assert_eq!(read_key(&root, &credential).unwrap().unwrap(), b"sk-ant-new");
+    assert_eq!(
+        read_key(&root, &credential).unwrap().unwrap(),
+        b"sk-ant-new"
+    );
     assert_eq!(names(&base), [NAME]);
     replace_key(&root, &credential, secret("sk-ant-again")).unwrap();
-    assert_eq!(read_key(&root, &credential).unwrap().unwrap(), b"sk-ant-again");
+    assert_eq!(
+        read_key(&root, &credential).unwrap().unwrap(),
+        b"sk-ant-again"
+    );
 }
