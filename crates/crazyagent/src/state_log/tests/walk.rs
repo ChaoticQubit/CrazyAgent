@@ -323,10 +323,7 @@ fn a_comma_inside_a_nested_value_does_not_end_the_kind() {
 #[cfg(unix)]
 fn walk_panic(src: &std::path::Path) -> String {
     let cause = std::panic::catch_unwind(|| sources(src)).expect_err("the walk panics");
-    cause
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_default()
+    cause.downcast_ref::<String>().cloned().unwrap_or_default()
 }
 
 /// A link to a folder under the source folder panics naming it, since cargo compiles
@@ -342,7 +339,10 @@ fn a_folder_link_under_the_sources_panics_naming_it() {
 
     let said = walk_panic(&src);
 
-    assert!(said.contains(&format!("{:?}", src.join("linked"))), "{said}");
+    assert!(
+        said.contains(&format!("{:?}", src.join("linked"))),
+        "{said}"
+    );
 }
 
 /// A link to a source file panics naming it, as a folder link does.

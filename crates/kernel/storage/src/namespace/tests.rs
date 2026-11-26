@@ -383,10 +383,14 @@ fn the_namespace_walk_panics_naming_a_folder_link() {
     std::fs::write(root.path().join("real/a.rs"), "fn a() {}\n").unwrap();
     std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
 
-    let cause = std::panic::catch_unwind(|| crate::tests::files(root.path(), ".rs")).expect_err("the walk panics");
+    let cause = std::panic::catch_unwind(|| crate::tests::files(root.path(), ".rs"))
+        .expect_err("the walk panics");
     let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
 
-    assert!(said.contains(&format!("{:?}", root.path().join("linked"))), "{said}");
+    assert!(
+        said.contains(&format!("{:?}", root.path().join("linked"))),
+        "{said}"
+    );
 }
 
 /// Whether a source file may name a plugin's namespace without the gateway's grant check.
