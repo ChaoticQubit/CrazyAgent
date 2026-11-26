@@ -19,7 +19,7 @@ impl AccountSecret {
             || bytes.iter().any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
             || std::str::from_utf8(&bytes).is_err()
         {
-            kernel_security::secret::wipe(&mut bytes);
+            kernel_security::secret::wipe_owned(&mut bytes);
             return Err(EngineError("account_secret_invalid".into()));
         }
         Ok(Self(bytes))
@@ -33,7 +33,7 @@ impl AccountSecret {
 
 impl Drop for AccountSecret {
     fn drop(&mut self) {
-        kernel_security::secret::wipe(&mut self.0);
+        kernel_security::secret::wipe_owned(&mut self.0);
     }
 }
 
