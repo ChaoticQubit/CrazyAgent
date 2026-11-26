@@ -3,7 +3,7 @@ import { cloneRepo, gitHubSignIn, gitHubToken, gitHubUseCli, intakeCopy, loadGit
 import { openLink } from "../../api-projects";
 import type { GitHubDeviceCode, GitHubRepo, GitHubStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, Icon, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, navigate, signInStore } from "../../ui";
+import { Button, Icon, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, isMac, navigate, signInStore } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { GITHUB_POLL_MS, REPO_PAGES_MAX, accountLine, deviceLine, devicePolling, gitHubPage, oneAtATime, repoMatches, repoMeta } from "./intake";
@@ -54,7 +54,7 @@ export function GitHubSignInView({ device, now, busy, problem, tokenOpen, tokenR
     </span>}
     {tokenOpen && !device && <form className="pj-stack-s" onSubmit={(event) => { event.preventDefault(); onToken(); }}>
       <SecretField id="gh-token" label="GitHub token" inputRef={tokenRef} maxLength={255}
-        helper="A fine-grained token that can read the repositories you want to clone. It goes to your keychain and isn't shown again." />
+        helper={`A fine-grained token that can read the repositories you want to clone. It goes to ${isMac() ? "your keychain" : signInStore()} and isn't shown again.`} />
       <span><Button type="submit" icon="key-round" disabled={busy}>Save token</Button></span>
     </form>}
     {problem && <p className="pj-error" role="alert">{displayText(problem)}</p>}

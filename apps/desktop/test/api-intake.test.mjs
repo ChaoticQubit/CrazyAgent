@@ -1,7 +1,9 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api-intake.ts");
 const { thisComputer } = await import("../src/ui/keys.ts");
@@ -192,4 +194,19 @@ test("a started onboarding's kept change guesses no project from the folder name
   const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
   assert.match(bridge, /OwnerMutation::StartOnboarding \{ \.\. \} => \("start_onboarding", None, None\)/);
   assert.ok(!bridge.includes("onboarded_project("), "no folder-name guess is left in the bridge");
+});
+
+test("the GitHub sign-in store lines name each computer's store, and macOS keeps saying your keychain", async () => {
+  const kept = (os, store) => (os === "mac" ? "your keychain" : store);
+  await eachComputer("../src/api-intake.ts", (each, { os, store }) => {
+    assert.equal(each.intakeCopy("credential_missing"), `The saved GitHub sign-in is gone from ${kept(os, store)}. Sign in again.`, os);
+    const lead = os === "mac" ? "Your system keychain" : store[0].toUpperCase() + store.slice(1);
+    assert.equal(each.intakeCopy("credential_store_unavailable"), `${lead} can't be used right now.`, os);
+  });
+  await eachComputer("../src/screens/intake/clone.tsx", (clone, { os, store }) => {
+    const noop = () => {};
+    const html = renderToStaticMarkup(createElement(clone.GitHubSignInView, { device: null, now: 0, busy: false, problem: "", tokenOpen: true, tokenRef: { current: null },
+      onDevice: noop, onCli: noop, onTokenOpen: noop, onToken: noop, onOpenPage: noop }));
+    assert.ok(html.includes(`It goes to ${kept(os, store)} and isn`), `${os}: ${html}`);
+  });
 });
