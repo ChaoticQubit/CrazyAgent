@@ -204,8 +204,9 @@ impl<'a, 'c> Appender<'a, 'c> {
     }
 
     /// Appends one checked event at the next `seq`, refusing a name the engine's replay does
-    /// not read (`state_log_aggregate_unknown`), one past the transaction's bound or past the
-    /// last possible `seq`. Input: the draft. Output: its `seq`.
+    /// not read (`state_log_aggregate_unknown`), one past the transaction's bound, past the
+    /// last possible `seq`, or after the `state` revision moved off this appender's
+    /// (`state_log_revision_stale`). Input: the draft. Output: its `seq`.
     fn push(&mut self, draft: &Draft<'_>) -> Result<u64, StorageError> {
         check(draft)?;
         if (self.known)(draft.aggregate.name()).is_none() {
@@ -214,11 +215,18 @@ impl<'a, 'c> Appender<'a, 'c> {
         if self.appended >= TRANSACTION_EVENTS_MAX {
             return Err(error("state_log_transaction_full"));
         }
-        let previous: i64 = self
+        let (previous, revision): (i64, i64) = self
             .tx
-            .prepare("SELECT COALESCE(MAX(seq), 0) FROM state_log")
-            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
+            .prepare(
+                "SELECT COALESCE(MAX(seq), 0), (SELECT revision FROM state WHERE id=1) FROM state_log",
+            )
+            .and_then(|mut statement| {
+                statement.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
+            })
             .map_err(error)?;
+        if u64::try_from(revision).ok() != Some(self.revision) {
+            return Err(error("state_log_revision_stale"));
+        }
         let seq = previous
             .checked_add(1)
             .ok_or_else(|| error("state_log_seq_exhausted"))?;
