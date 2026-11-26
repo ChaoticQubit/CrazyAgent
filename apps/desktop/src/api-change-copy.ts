@@ -57,6 +57,7 @@ export const CHANGE: Record<PendingIntent["kind"], string> = {
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
   plan_roadmap: "planning the roadmap",
+  log_compaction: "changing the event log compaction setting",
 };
 
 export const MODEL_ACCESS_CHANGE: Record<ModelAccessEdit["kind"], string> = {

@@ -16,7 +16,8 @@ const projects = [{ id: "harbor", name: "Harbor Notes" }, { id: "fieldnotes-mobi
 
 test("Go to lists every project and its tabs, Home, every Settings section, then the actions", () => {
   const targets = goTo.goToTargets(projects);
-  assert.deepEqual(targets.slice(0, 7).map((target) => [target.label, target.kind, formatRoute(target.route)]), [
+  const perProject = TABS.length + 1;
+  assert.deepEqual(targets.slice(0, perProject).map((target) => [target.label, target.kind, formatRoute(target.route)]), [
     ["Harbor Notes", "Project", "#/projects/harbor/overview"],
     ["Harbor Notes / Conversation", "Project tab", "#/projects/harbor/conversation"],
     ["Harbor Notes / Agents", "Project tab", "#/projects/harbor/agents"],
@@ -28,7 +29,7 @@ test("Go to lists every project and its tabs, Home, every Settings section, then
     ["Harbor Notes / Settings", "Project tab", "#/projects/harbor/settings"],
     ["Harbor Notes / IDE", "Project tab", "#/projects/harbor/ide"],
   ]);
-  assert.deepEqual(targets.slice(20).map((target) => [target.label, formatRoute(target.route)]), [
+  assert.deepEqual(targets.slice(projects.length * perProject).map((target) => [target.label, formatRoute(target.route)]), [
     ["Home", "#/home"],
     ["Profile", "#/settings/profile"],
     ["Settings / Accounts", "#/settings/accounts"],
