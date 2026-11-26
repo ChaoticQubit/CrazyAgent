@@ -3,8 +3,12 @@ use super::*;
 /// The Rust files under one folder and its subfolders. Input: the folder. Output: the files.
 fn rust_files(folder: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(folder).unwrap() {
-        let path = entry.unwrap().path();
+    let entries =
+        std::fs::read_dir(folder).unwrap_or_else(|error| panic!("{}: {error}", folder.display()));
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|error| panic!("{}: {error}", folder.display()))
+            .path();
         if path.is_dir() {
             files.extend(rust_files(&path));
         } else if path.extension().is_some_and(|extension| extension == "rs") {
@@ -51,38 +55,56 @@ fn opens_inline_module(line: &str) -> bool {
     rest.starts_with("mod ") && rest.ends_with('{')
 }
 
-/// Whether a line is a `#[cfg(...)]` attribute naming `test`. Input: the trimmed line.
+/// Whether a line is a `#[cfg(...)]` attribute that builds only in tests: `cfg(test)` or
+/// `cfg(all(test, ..))` with `test` as one of the `all` terms. Input: the trimmed line.
 /// Output: the answer.
 fn names_test_cfg(line: &str) -> bool {
-    line.starts_with("#[cfg(")
-        && line
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| word == "test")
+    let Some(condition) = line
+        .strip_prefix("#[cfg(")
+        .and_then(|rest| rest.strip_suffix(")]"))
+    else {
+        return false;
+    };
+    let condition = condition.trim();
+    condition == "test"
+        || condition
+            .strip_prefix("all(")
+            .and_then(|terms| terms.strip_suffix(')'))
+            .is_some_and(|terms| terms.split(',').any(|term| term.trim() == "test"))
 }
 
-/// The production part of a file: the text above its first inline test module, a test cfg
-/// line whose next non-blank line opens `mod <name> {`. A test cfg on a helper or on a module
-/// kept in its own file does not cut. Input: the text. Output: the part and whether it was cut.
-fn production(text: &str) -> (&str, bool) {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for line in text.split_inclusive('\n') {
-        lines.push((start, line.trim()));
-        start += line.len();
-    }
-    for (index, (start, line)) in lines.iter().enumerate() {
-        if !names_test_cfg(line) {
+/// The production part of a file: the text without its inline test modules. An inline test
+/// module runs from a test cfg line whose next non-blank line opens `mod <name> {` to the
+/// line that closes it, `}` at that line's indent; the text after it is production again. A
+/// test cfg on a helper or on a module kept in its own file does not cut. Input: the text.
+/// Output: the part and whether any module was cut.
+fn production(text: &str) -> (String, bool) {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let (mut kept, mut cut, mut index) = (String::new(), false, 0);
+    while index < lines.len() {
+        let line = lines[index];
+        let module = names_test_cfg(line.trim())
+            .then(|| (index + 1..lines.len()).find(|at| !lines[*at].trim().is_empty()))
+            .flatten()
+            .filter(|at| opens_inline_module(lines[*at].trim()));
+        let Some(at) = module else {
+            kept.push_str(line);
+            index += 1;
             continue;
-        }
-        let next = lines[index + 1..]
-            .iter()
-            .map(|(_, line)| *line)
-            .find(|line| !line.is_empty());
-        if next.is_some_and(opens_inline_module) {
-            return (&text[..*start], true);
-        }
+        };
+        let indent = &lines[at][..lines[at].len() - lines[at].trim_start().len()];
+        let close = (at + 1..lines.len())
+            .find(|end| lines[*end].trim_end() == format!("{indent}}}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "an inline test module opened at line {} never closes",
+                    at + 1
+                )
+            });
+        cut = true;
+        index = close + 1;
     }
-    (text, false)
+    (kept, cut)
 }
 
 /// Whether a path under the owner folder holds test code only: a `tests` or `*_tests` file or
@@ -136,8 +158,11 @@ fn the_production_cut_starts_at_the_first_inline_test_module() {
     let (kept, cut) = production(text);
     assert!(cut, "{text}");
     assert!(kept.ends_with("mod stream_tests;\n"), "{kept}");
-    assert_eq!(connects_in(kept), 1, "{kept}");
-    assert_eq!(production("fn real() {}\n"), ("fn real() {}\n", false));
+    assert_eq!(connects_in(&kept), 1, "{kept}");
+    assert_eq!(
+        production("fn real() {}\n"),
+        ("fn real() {}\n".to_string(), false)
+    );
 }
 
 /// A production function placed after an inline test module stays in the production text,
@@ -162,15 +187,23 @@ fn a_module_built_outside_tests_is_counted() {
 fn the_guarded_files_are_cut_on_their_inline_test_module() {
     let owner = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/owner"));
     for name in ["transport.rs", "transport/native_auth_channel.rs"] {
-        let text = std::fs::read_to_string(owner.join(name)).unwrap();
+        let path = owner.join(name);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         let (kept, cut) = production(&text);
         assert!(cut, "{name} has no inline test module");
-        let mut rest = text[kept.len()..]
+        assert!(kept.len() < text.len(), "{name}");
+        let lines: Vec<&str> = text
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty());
-        assert!(rest.next().is_some_and(names_test_cfg), "{name}");
-        assert!(rest.next().is_some_and(opens_inline_module), "{name}");
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert!(
+            lines
+                .windows(2)
+                .any(|pair| names_test_cfg(pair[0]) && opens_inline_module(pair[1])),
+            "{name}"
+        );
     }
 }
 
@@ -194,12 +227,14 @@ fn every_owner_client_connects_through_the_checked_connect() {
     let mut found: Vec<(String, usize)> = guarded
         .iter()
         .map(|path| {
-            let text = std::fs::read_to_string(owner.join(path)).unwrap();
+            let file = owner.join(path);
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
             let name: Vec<String> = path
                 .components()
                 .map(|part| part.as_os_str().to_string_lossy().into_owned())
                 .collect();
-            (name.join("/"), connects_in(production(&text).0))
+            (name.join("/"), connects_in(&production(&text).0))
         })
         .filter(|(_, count)| *count > 0)
         .collect();
