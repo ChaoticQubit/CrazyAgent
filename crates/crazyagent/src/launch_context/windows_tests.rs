@@ -731,9 +731,9 @@ fn a_windows_process_install_clears_project_memory_and_links_but_keeps_transcrip
     assert_untouched(&target, "target");
 }
 
-/// A kept file the engine cannot open for a reason other than its absence refuses the
-/// launch with `agent_home_unwritable` and stays with its bytes: a failed open never
-/// removes a kept file.
+/// A kept file the engine cannot open for a reason other than its absence, here one another
+/// handle holds without sharing, refuses the launch with `agent_home_unwritable` and stays
+/// with its bytes: a failed open never removes a kept file.
 #[test]
 fn a_windows_process_install_keeps_a_kept_file_it_cannot_open() {
     let (_temp, base) = base();
@@ -741,14 +741,19 @@ fn a_windows_process_install_keeps_a_kept_file_it_cannot_open() {
     let data = private_home(&base, "data");
     let kept = home.join(".claude.json");
     std::fs::write(&kept, "{\"kept\":true}").unwrap();
-    let user = std::env::var("USERNAME").unwrap();
-    let file = kept.to_str().unwrap();
-    run("icacls.exe", &[file, "/deny", &format!("{user}:(R)")]);
+    let holder = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&kept)
+            .unwrap()
+    };
     let context = process_context(&data, "Rows.", HomeCaches::Keep);
     assert_eq!(
         context.install("claude-code", &home, false).unwrap_err().0,
         "agent_home_unwritable"
     );
-    run("icacls.exe", &[file, "/remove:d", &user]);
+    drop(holder);
     assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{\"kept\":true}");
 }
