@@ -154,3 +154,17 @@ pub(super) const COPY: [(&str, &str); 28] = [
         "CrazyAgent couldn't install that list of harnesses. Pick them again.",
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::super::update_copy;
+
+    /// A harness a live session runs gets the owner's sentence, not the unknown outcome.
+    #[test]
+    fn an_update_a_live_session_blocks_says_to_close_those_sessions() {
+        assert_eq!(
+            update_copy("harness_update_in_use"),
+            "Close the sessions that use it, then update."
+        );
+    }
+}
