@@ -882,20 +882,7 @@ fn confined<'a>(
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
     let words = super::interactive::launch_words(&request.executable)?;
-    let (program, script) = words
-        .split_first()
-        .ok_or_else(|| failure("launch_environment_refused"))?;
-    let program = Path::new(program);
-    let mut command = bounded(
-        request,
-        home,
-        program,
-        script,
-        arguments,
-        &base,
-        harness_env,
-        handed,
-    )?;
+    let mut command = bounded(request, home, &words, arguments, &base, harness_env, handed)?;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -921,19 +908,22 @@ fn confined<'a>(
 /// Builds the harness command inside the request's boundary, in its working folder: on macOS
 /// the confined profile or the Full access shim, on Linux and Windows the installed sandbox
 /// whose home is `home`, the held place on Windows, once [`home_containers`] passes there;
-/// anything else is `launch_sandbox_unavailable`. Inputs: the request, the home, program,
-/// script words, arguments, base and harness variables and the exception. Output: the command.
+/// anything else is `launch_sandbox_unavailable`. Inputs: the request, the home, the program
+/// and script words, arguments, base and harness variables and the exception. Output: the command.
 fn bounded<'a>(
     request: &LaunchRequest,
     home: &Path,
-    program: &Path,
-    script: &[String],
+    words: &[String],
     arguments: &[OsString],
     base: &[(&str, &OsStr)],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
     handed: Option<Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     assert!(home.is_absolute());
+    let (program, script) = words
+        .split_first()
+        .ok_or_else(|| failure("launch_environment_refused"))?;
+    let program = Path::new(program);
     #[cfg(target_os = "macos")]
     {
         use kernel_sandbox::profile::env::{
