@@ -288,6 +288,7 @@ fn a_step_that_ends_the_transaction_is_restored_from_the_backup() -> Result<(), 
         "the committed table is undone"
     );
     assert_eq!(kept(&db)?, ["one"]);
+    Ok(())
 }
 
 #[test]
