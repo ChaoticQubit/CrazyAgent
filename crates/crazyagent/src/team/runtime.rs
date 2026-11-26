@@ -1454,7 +1454,7 @@ impl TeamRuntime {
 
     /// Replaces what the runtime runs to look for tools again when the owner switches a live
     /// master on, for a row that counts those looks. Takes the function. Returns the runtime.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, unix))]
     fn with_tools_refresh(mut self, refresh: fn()) -> Self {
         self.tools_refresh = refresh;
         self
@@ -4432,9 +4432,7 @@ impl TeamRuntime {
         if super::master::live(&self.connection, project)? {
             return self.feed_live(project);
         }
-        let settling = self.workers.values().any(|w| {
-            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
-        });
+        let settling = self.master_settling(project);
         let master = self.master(project);
         if settling
             || master.is_some_and(|id| self.workers[&id].live || self.workers[&id].busy.is_some())
@@ -4664,9 +4662,7 @@ impl TeamRuntime {
             self.live_starts.remove(project);
             (self.tools_refresh)();
         }
-        if self.workers.values().any(|w| {
-            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
-        }) {
+        if self.master_settling(project) || self.master_held(project) {
             return Ok(());
         }
         let session = crate::master_sessions::live_session(&self.connection, project)?;
