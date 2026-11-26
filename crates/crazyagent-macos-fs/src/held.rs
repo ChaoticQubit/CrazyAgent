@@ -256,7 +256,7 @@ pub(super) fn held_reply(reply: &[u8]) -> std::io::Result<HeldEntry> {
         }
     }
     assert!(entries.len() <= 128);
-    assert!(length >= HELD_REPLY_FIXED && length <= ENTRY_REPLY_BYTES);
+    assert!((HELD_REPLY_FIXED..=ENTRY_REPLY_BYTES).contains(&length));
     Ok(HeldEntry {
         device,
         inode: u64::from_ne_bytes(inode),
