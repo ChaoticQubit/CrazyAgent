@@ -11,7 +11,7 @@ import { loadFoundProjects, loadIntakeJobs } from "./api-intake";
 import { notifyIntake } from "./notify";
 import { foundPollMs, intakePollMs, jobEnds, jobLine } from "./screens/intake/intake";
 import { carryFollowUps } from "./screens/new-project/carry";
-export { choiceListeners } from "./choice-listeners";
+export { CHOICE_NOT_KEPT, choiceListeners } from "./choice-listeners";
 export { readLastProject, saveLastProject } from "./last-project";
 export { onTerminalInput, onTerminalRenderer, readTerminalInput, readTerminalRenderer, saveTerminalInput, saveTerminalRenderer } from "./terminal-choices";
 export type Loaded<T> = { kind: "loading" } | Result<T>;
@@ -46,17 +46,19 @@ export function readTheme(): ThemeChoice {
 }
 
 /** Applies and remembers the appearance choice; system follows the macOS setting.
- * Input: the choice. Output: none. */
-export function applyTheme(choice: ThemeChoice): void {
-  if (typeof document === "undefined") return;
+ * Input: the choice. Output: true once stored; false without a document or when storage
+ * refused it, and the window still shows the choice then. */
+export function applyTheme(choice: ThemeChoice): boolean {
+  if (typeof document === "undefined") return false;
   if (choice === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", choice);
   try {
     if (choice === "system") window.localStorage.removeItem(THEME_KEY);
     else window.localStorage.setItem(THEME_KEY, choice);
   } catch {
-    return;
+    return false;
   }
+  return true;
 }
 
 /** Tells the native side the appearance choice, so the window and the app icon follow it
@@ -67,10 +69,11 @@ export function mirrorTheme(choice: ThemeChoice): void {
 }
 
 /** Applies, remembers and mirrors a choice the owner just made in Profile.
- * Input: the choice. Output: none. */
-export function chooseTheme(choice: ThemeChoice): void {
-  applyTheme(choice);
+ * Input: the choice. Output: true once stored, false when storage refused it. */
+export function chooseTheme(choice: ThemeChoice): boolean {
+  const kept = applyTheme(choice);
   mirrorTheme(choice);
+  return kept;
 }
 
 /** Keeps the value shown when a poll reads the same one, compared as the bridge's JSON, so a

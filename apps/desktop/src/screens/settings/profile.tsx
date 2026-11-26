@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { chooseTheme, readTheme, useAppSession, type ThemeChoice } from "../../state";
+import { CHOICE_NOT_KEPT, chooseTheme, readTheme, useAppSession, type ThemeChoice } from "../../state";
 import { saveQuestionsShown, useQuestionsShown } from "../../questions-shown";
 import { QuestionsShownSetting } from "../project/question-popup";
 import { TerminalLines } from "./terminal";
@@ -8,17 +8,23 @@ import { ProfileFields, draftFromProfile, emptyProfileDraft, submitProfile, type
 import { LearningReplay } from "../dashboard/learn";
 import { themeHelp } from "../../ui/keys";
 
+const THEME_NOT_KEPT = "This theme shows now, but CrazyAgent couldn't keep it, so the next start uses the one before. Try again.";
+
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
+  const [themeKept, setThemeKept] = useState(true);
+  const [questionsKept, setQuestionsKept] = useState(true);
   const questions = useQuestionsShown();
   return <SettingSection title="Appearance">
     <SettingLine label="Theme" help={themeHelp()}>
-      <Segmented label="Theme" value={theme} onValue={(value) => { setTheme(value); chooseTheme(value); }} options={[
+      <Segmented label="Theme" value={theme} onValue={(value) => { setTheme(value); setThemeKept(chooseTheme(value)); }} options={[
         { value: "system", label: "System", icon: "monitor" }, { value: "light", label: "Light", icon: "sun" }, { value: "dark", label: "Dark", icon: "moon" },
       ]} />
     </SettingLine>
+    {!themeKept && <div className="set-body"><Notice alert>{THEME_NOT_KEPT}</Notice></div>}
     <TerminalLines />
-    <QuestionsShownSetting value={questions} onValue={saveQuestionsShown} />
+    <QuestionsShownSetting value={questions} onValue={(value) => setQuestionsKept(saveQuestionsShown(value))} />
+    {!questionsKept && <div className="set-body"><Notice alert>{CHOICE_NOT_KEPT}</Notice></div>}
   </SettingSection>;
 }
 

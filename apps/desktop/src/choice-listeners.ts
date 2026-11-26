@@ -23,3 +23,6 @@ export function choiceListeners(key: string): { tell: () => void; listen: (liste
     },
   };
 }
+
+/** What a setting line kept in this app says under it when storage refused the choice. */
+export const CHOICE_NOT_KEPT = "CrazyAgent couldn't keep this choice, so it stays as it was. Try again.";

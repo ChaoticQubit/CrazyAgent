@@ -13,6 +13,7 @@ const THEME_NOT_KEPT = "This theme shows now, but CrazyAgent couldn't keep it, s
 const FULL = `Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: () => null, setItem: () => { throw new Error("full"); }, removeItem: () => { throw new Error("full"); } } }); true`;
 const lineOf = (label) => `document.querySelector('[data-setting="${label}"]')`;
 const checked = (label) => `[...${lineOf(label)}.querySelectorAll('[role=radiogroup] button[aria-checked="true"]')].map((button) => button.textContent.trim())`;
+const said = (label, words) => `${lineOf(label)}.nextElementSibling?.querySelector('[role=alert]')?.textContent.includes(${JSON.stringify(words)}) ?? false`;
 const other = (label) => `[...${lineOf(label)}.querySelectorAll('[role=radiogroup] button[aria-checked="false"]')][0].textContent.trim()`;
 
 /** Puts a stand-in storage on the window for one call, the document's root for the theme, and
@@ -51,7 +52,7 @@ test("a Questions show, Terminal input or Terminal renderer choice the app canno
     for (const label of ["Questions show", "Terminal input", "Terminal renderer"]) {
       const wanted = await page.evaluate(other(label));
       await press(page, `[data-setting="${label}"] [role=radiogroup] button`, wanted);
-      lines.push({ label, wanted, now: await page.evaluate(checked(label)), says: await page.evaluate(`${lineOf(label)}.textContent.includes(${JSON.stringify(NOT_KEPT)})`) });
+      lines.push({ label, wanted, now: await page.evaluate(checked(label)), says: await page.evaluate(said(label, NOT_KEPT)) });
     }
     return lines;
   });
@@ -68,7 +69,7 @@ test("a Theme the app cannot keep shows now and its line says the next start use
     return {
       theme: await page.evaluate("document.documentElement.dataset.theme"),
       now: await page.evaluate(checked("Theme")),
-      says: await page.evaluate(`${lineOf("Theme")}.textContent.includes(${JSON.stringify(THEME_NOT_KEPT)})`),
+      says: await page.evaluate(said("Theme", THEME_NOT_KEPT)),
     };
   });
   assert.deepEqual(seen, { theme: "dark", now: ["Dark"], says: true });

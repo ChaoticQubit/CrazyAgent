@@ -20,14 +20,15 @@ const inputHeard = choiceListeners(TERMINAL_INPUT_KEY);
 
 /** Remembers where the owner types to every agent's terminal and tells this window's
  * listeners at once; other windows hear it through the storage event. Input: the choice.
- * Output: none. */
-export function saveTerminalInput(choice: InputChoice): void {
+ * Output: true once stored; false when storage refused it, and then nobody is told. */
+export function saveTerminalInput(choice: InputChoice): boolean {
   try {
     window.localStorage.setItem(TERMINAL_INPUT_KEY, choice);
   } catch {
-    return;
+    return false;
   }
   inputHeard.tell();
+  return true;
 }
 
 /** Calls `listener` after each Terminal input choice, made in this window or in another
@@ -50,14 +51,16 @@ export function readTerminalRenderer(): RendererChoice {
 const rendererHeard = choiceListeners(TERMINAL_RENDERER_KEY);
 
 /** Remembers how every terminal draws and tells this window's listeners at once; other
- * windows hear it through the storage event. Input: the choice. Output: none. */
-export function saveTerminalRenderer(choice: RendererChoice): void {
+ * windows hear it through the storage event. Input: the choice. Output: true once stored;
+ * false when storage refused it, and then nobody is told. */
+export function saveTerminalRenderer(choice: RendererChoice): boolean {
   try {
     window.localStorage.setItem(TERMINAL_RENDERER_KEY, choice);
   } catch {
-    return;
+    return false;
   }
   rendererHeard.tell();
+  return true;
 }
 
 /** Calls `listener` after each Terminal renderer choice, made in this window or in another
