@@ -465,6 +465,26 @@ fn a_pinned_copy_changed_after_its_backup_is_refused_before_any_write() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
+#[test]
+fn a_pinned_copy_whose_digest_marker_is_not_a_digest_is_refused_before_any_write() {
+    for length in [DIGEST_HEX_BYTES + 1, 4 << 20] {
+        let (root, path) = upgraded(true);
+        std::fs::write(
+            pinned_folder(root.path()).join(CHECKED),
+            "a".repeat(length),
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let refused = restore_pinned(&path, &refusing_hooks()).unwrap_err().0;
+
+        assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+        assert!(refused.contains("digest marker"), "{refused}");
+        assert!(replaced(root.path()).is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
 /// A pin written before digests, with an empty `checked` marker, still
 /// restores once `PRAGMA integrity_check` reads ok, and says so as unverified.
 #[test]

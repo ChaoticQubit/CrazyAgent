@@ -172,6 +172,21 @@ fn a_named_copy_that_fails_its_check_is_refused_before_any_write() {
 }
 
 #[test]
+fn a_named_copy_whose_digest_marker_is_not_a_digest_is_refused_before_any_write() {
+    for length in [crate::migrations::DIGEST_HEX_BYTES + 1, 4 << 20] {
+        let (root, path, kept) = broken(true);
+        std::fs::write(kept.join(CHECKED), "a".repeat(length)).unwrap();
+        let before = untouched(root.path(), &path);
+
+        let refused = put_back(&path).unwrap_err().0;
+
+        assert!(refused.starts_with(PUTBACK_COPY_FAILED), "{refused}");
+        assert!(refused.contains("digest marker"), "{refused}");
+        assert_eq!(untouched(root.path(), &path), before);
+    }
+}
+
+#[test]
 fn a_record_without_a_name_or_naming_a_missing_copy_offers_no_put_back() {
     let (root, path, _kept) = broken(false);
     let before = untouched(root.path(), &path);
