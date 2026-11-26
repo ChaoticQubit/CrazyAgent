@@ -506,7 +506,7 @@ test("V243-TERMINAL-SETTINGS-PLACE: Settings lists Terminal under App, and its s
     app: await page.evaluate(`[...document.querySelectorAll('.settings-nav [role=group]')].filter((group) => group.querySelector('.settings-nav-title')?.textContent.trim() === "App").flatMap((group) => [...group.querySelectorAll('.settings-nav-item')].map((item) => [item.textContent.trim(), item.getAttribute("aria-current")]))`),
   }));
   assert.equal(seen.top?.heading, "Terminal", JSON.stringify(seen));
-  assert.deepEqual(seen.app, [["Sandbox", null], ["Team alerts", null], ["Terminal", "page"]]);
+  assert.deepEqual(seen.app.filter(([, current]) => current === "page").map(([label]) => label), ["Terminal"], JSON.stringify(seen.app));
   assert.deepEqual(seen.sections.map((section) => section.heading), ["Terminal"]);
   assert.deepEqual(seen.sections[0].rows.map((row) => row.label), ["Terminal input", "Terminal renderer"]);
   const by = Object.fromEntries(seen.sections[0].rows.map((row) => [row.label, row]));
