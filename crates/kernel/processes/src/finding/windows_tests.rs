@@ -18,6 +18,29 @@ fn copy_named(from: &Path, to: &Path) {
     }
 }
 
+/// Resolves an entry a row expects to start, or panics naming the file and what was missing.
+/// Inputs: the entry and the places. Output: what it resolved to.
+fn resolved_named(entry: &Path, places: &Places) -> Resolved {
+    match resolve_entry(entry, places) {
+        Ok(resolved) => resolved,
+        Err(missing) => panic!("{} did not resolve: {missing:?}", entry.display()),
+    }
+}
+
+/// The refusal for an entry a row expects refused, or a panic naming the file when it
+/// resolved or came back missing with no refusal. Inputs: the entry and the places. Output:
+/// the refusal.
+fn refusal_of(entry: &Path, places: &Places) -> Refused {
+    match resolve_entry(entry, places) {
+        Ok(resolved) => panic!("{} resolved, not refused: {resolved:?}", entry.display()),
+        Err(Missing {
+            refused: Some(refused),
+            ..
+        }) => *refused,
+        Err(missing) => panic!("{} missing with no refusal: {missing:?}", entry.display()),
+    }
+}
+
 /// On Windows the engine looks for the harnesses it installed with npm at its npm prefix's
 /// root, where npm writes their `.cmd` shims, since a Windows npm prefix has no `bin`.
 #[test]
@@ -56,7 +79,7 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
     let shim = real.join("codex.cmd");
     or_named(std::fs::write(&shim, crate::batch::CODEX), &shim);
 
-    let resolved = resolve_entry(&shim, &places).unwrap();
+    let resolved = resolved_named(&shim, &places);
     assert_eq!(resolved.entry, shim);
     assert_eq!(
         resolved.program,
@@ -86,7 +109,7 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     or_named(std::fs::write(&written, "#!/usr/bin/env node\n"), &written);
     let npx = real.join("npx.cmd");
     or_named(std::fs::write(&npx, "@ECHO off\r\ncalc.exe\r\n"), &npx);
-    let resolved = resolve_entry(&npx, &places).unwrap();
+    let resolved = resolved_named(&npx, &places);
     assert_eq!(
         resolved.argv(),
         vec![
@@ -111,8 +134,7 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     let script = other.join("tool.BAT");
     or_named(std::fs::write(&script, "@ECHO off\r\n"), &script);
     for file in [lone_npx, tool, script] {
-        let missing = resolve_entry(&file, &places).unwrap_err();
-        let refused = missing.refused.unwrap();
+        let refused = refusal_of(&file, &places);
         assert_eq!(refused.why, Refusal::Batch, "{file:?}");
         assert_eq!(refused.file, or_named(file.canonicalize(), &file));
     }
@@ -134,7 +156,7 @@ fn npm_runs_by_its_layout_and_only_with_its_own_script() {
         std::fs::write(&command, "@ECHO off\r\ncalc.exe\r\n"),
         &command,
     );
-    let resolved = resolve_entry(&command, &places).unwrap();
+    let resolved = resolved_named(&command, &places);
     let real_of = |file: &Path| or_named(file.canonicalize(), file).into_os_string();
     assert_eq!(
         resolved.argv(),
@@ -154,8 +176,7 @@ fn npm_runs_by_its_layout_and_only_with_its_own_script() {
     let lone = other.join("npm.cmd");
     copy_named(&command, &lone);
     for (file, places) in [(without_cli, &npx_places), (lone, &places)] {
-        let missing = resolve_entry(&file, places).unwrap_err();
-        let refused = missing.refused.unwrap();
+        let refused = refusal_of(&file, places);
         assert_eq!(refused.why, Refusal::Batch, "{file:?}");
     }
 }
@@ -172,7 +193,7 @@ fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
     let npx = real.join("npx.cmd");
     or_named(std::fs::write(&npx, "@ECHO off\r\n"), &npx);
     let elsewhere = stub_new(Vec::new(), None);
-    let resolved = resolve_entry(&npx, &elsewhere).unwrap();
+    let resolved = resolved_named(&npx, &elsewhere);
     let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(
         resolved.argv(),
@@ -207,7 +228,7 @@ fn a_cmd_shim_off_the_engine_s_path_runs_with_the_node_beside_it() {
     let (_folder, real, _places) = node_folder();
     let (shim, script) = shim_beside_node(&real);
     let elsewhere = stub_new(Vec::new(), None);
-    let resolved = resolve_entry(&shim, &elsewhere).unwrap();
+    let resolved = resolved_named(&shim, &elsewhere);
     let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(resolved.entry, shim);
     assert_eq!(
@@ -223,7 +244,7 @@ fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
     let (_path_folder, _path_real, path_places) = node_folder();
     let (_folder, real, _places) = node_folder();
     let (shim, script) = shim_beside_node(&real);
-    let resolved = resolve_entry(&shim, &path_places).unwrap();
+    let resolved = resolved_named(&shim, &path_places);
     let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(
         resolved.argv(),
@@ -242,8 +263,7 @@ fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
     let script = real.join("tool.js");
     or_named(std::fs::write(&script, "#!/usr/bin/env Env\n"), &script);
     let places = stub_new(vec![real.clone()], None);
-    let missing = resolve_entry(&script, &places).unwrap_err();
-    assert_eq!(missing.refused.unwrap().why, Refusal::FirstLine);
+    assert_eq!(refusal_of(&script, &places).why, Refusal::FirstLine);
     for name in ["env.exe", "ENV.EXE", "BusyBox.exe", "nice"] {
         assert!(launches_by_name(name), "{name}");
     }

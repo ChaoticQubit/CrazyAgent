@@ -115,9 +115,11 @@ fn a_program_through_a_junction_is_judged_at_its_real_place() {
 /// level in the process's groups, as an elevated administrator's process has, so the
 /// harness install refusal follows the real token on every runner.
 #[test]
-fn the_token_reads_as_elevated_exactly_at_the_high_mandatory_level() {
-    let groups = Command::new("whoami").arg("/groups").output().unwrap();
+fn the_token_reads_as_elevated_exactly_at_the_high_mandatory_level()
+-> Result<(), Box<dyn std::error::Error>> {
+    let groups = Command::new("whoami").arg("/groups").output()?;
     assert!(groups.status.success());
     let high = String::from_utf8_lossy(&groups.stdout).contains("S-1-16-12288");
-    assert_eq!(elevated().unwrap(), high);
+    assert_eq!(elevated()?, high);
+    Ok(())
 }

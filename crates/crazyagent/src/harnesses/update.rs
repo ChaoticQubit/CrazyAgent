@@ -1296,6 +1296,28 @@ mod windows_tests {
         );
     }
 
+    /// The owner the trust check reads for a folder, opened without following a link, as raw
+    /// SID bytes and whether it is TrustedInstaller. Input: the folder. Output: the line the
+    /// owned row prints.
+    fn windows_owner(folder: &Path) -> String {
+        use crate::platform::FILE_FLAG_BACKUP_SEMANTICS;
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(folder);
+        let owner = held.and_then(|held| crazyagent_win_sandbox::private::facts(&held));
+        match owner {
+            Ok(facts) => format!(
+                "{} owner {:?} trusted_installer={}",
+                folder.display(),
+                facts.owner,
+                facts.owner == crazyagent_win_sandbox::dacl::TRUSTED_INSTALLER
+            ),
+            Err(error) => format!("{} owner unread: {error}", folder.display()),
+        }
+    }
+
     /// A tool the engine would start passes the Windows trust check when only the system and
     /// this user may change it, as the curl Windows ships; a relative or missing tool is
     /// missing, and one the users group may write is unsafe.
@@ -1316,8 +1338,9 @@ mod windows_tests {
     }
 
     /// A global npm install needs no administrator only in a folder this user owns: a folder
-    /// whose owner is set to this user is owned, one the administrators own is not, and
-    /// neither is a file or a missing path.
+    /// whose owner is set to this user is owned, the Windows folder (TrustedInstaller's) is
+    /// not, and neither is a file or a missing path. The Windows folder's owner is printed,
+    /// so a runner image where another account owns it shows why the row fails.
     #[test]
     fn a_windows_folder_is_owned_only_when_this_user_owns_it() {
         let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
@@ -1328,8 +1351,10 @@ mod windows_tests {
         let me = String::from_utf8(me.stdout).unwrap();
         icacls(&modules, &["/setowner", me.trim()]);
         assert!(owned(&modules));
-        icacls(&modules, &["/setowner", "*S-1-5-32-544"]);
-        assert!(!owned(&modules));
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let seen = windows_owner(&windows);
+        eprintln!("{seen}");
+        assert!(!owned(&windows), "{seen}");
         let file = folder.path().join("file");
         std::fs::write(&file, "").unwrap();
         assert!(!owned(&file));
