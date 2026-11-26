@@ -1,9 +1,13 @@
 use crazyagent::accounts::probe::{get, request};
+#[cfg(unix)]
 use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
+#[cfg(unix)]
 use crazyagent::engine::bootstrap::EngineService;
+#[cfg(unix)]
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerClientKind};
 use kernel_security::secret::wipe;
 use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -150,6 +154,7 @@ fn a_probe_cut_off_by_its_timeout_mid_write_frees_no_copy_of_its_key() {
 
 /// Checking an account whose URL is https, which the probe only dials and never sends the
 /// key to, frees no block that still holds the account's saved key.
+#[cfg(unix)]
 #[test]
 fn checking_an_https_account_frees_no_copy_of_its_saved_key() {
     let _serial = serial();
