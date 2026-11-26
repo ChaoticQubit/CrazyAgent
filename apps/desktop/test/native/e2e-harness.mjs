@@ -359,7 +359,6 @@ export const INTERNALS = `(() => {
         failures = 0;
       } catch (failure) {
         if (failure?.code === "terminal_not_attached" || (failures += 1) > 5) return;
-        await new Promise((done) => setTimeout(done, Math.min(1000 * 2 ** (failures - 1), 5000)));
         continue;
       }
       for (const frame of next.frames) {
