@@ -1,6 +1,5 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::os::unix::net::UnixListener;
 
 /// A private temporary folder named through the `/var` link, as macOS names its temporary
 /// folders. Output: the folder's guard and its path through `/var`.
@@ -34,14 +33,14 @@ fn the_socket_check_reads_each_path_shape_as_it_does_now() {
     let (_guard, home) = home_through_var();
     folder(&home.join("open"), 0o777);
     folder(&home.join("open/shut"), 0o700);
-    let _listener = UnixListener::bind(home.join("open/shut/sock")).unwrap();
+    let _listener = crate::spawn_gate::bind_unix_std(home.join("open/shut/sock")).unwrap();
     std::fs::write(home.join("file"), b"x").unwrap();
     symlink(home.join("open"), home.join("to-open")).unwrap();
     symlink(home.join("gone"), home.join("dangling")).unwrap();
     symlink("loop", home.join("loop")).unwrap();
     folder(&home.join("locked"), 0o700);
     folder(&home.join("locked/in"), 0o700);
-    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o0)).unwrap();
     let cases = [
         ("open/shut/sock", Some("open")),
         ("to-open/shut/sock", None),
@@ -71,7 +70,7 @@ fn the_socket_check_names_the_changeable_folder_nearest_the_socket() {
     folder(&home.join("a/b"), 0o777);
     folder(&home.join("a/b/c"), 0o700);
     let socket = home.join("a/b/c/sock");
-    let _listener = UnixListener::bind(&socket).unwrap();
+    let _listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     assert_eq!(changeable_above_socket(&socket), Some(home.join("a/b")));
 }
 
@@ -82,12 +81,12 @@ fn the_socket_check_sets_aside_only_the_socket_and_its_folder_write_bits() {
     let (_guard, home) = home_through_var();
     folder(&home.join("m"), 0o777);
     let near = home.join("m/sock");
-    let _near = UnixListener::bind(&near).unwrap();
+    let _near = crate::spawn_gate::bind_unix_std(&near).unwrap();
     std::fs::set_permissions(&near, std::fs::Permissions::from_mode(0o777)).unwrap();
     folder(&home.join("m2"), 0o777);
     folder(&home.join("m2/n"), 0o700);
     let far = home.join("m2/n/sock");
-    let _far = UnixListener::bind(&far).unwrap();
+    let _far = crate::spawn_gate::bind_unix_std(&far).unwrap();
     assert_eq!(changeable_above_socket(&near), None);
     assert_eq!(changeable_above_socket(&far), Some(home.join("m2")));
 }
@@ -124,14 +123,14 @@ fn the_held_walk_reads_every_part_as_lstat_does() {
     let (_guard, home) = home_through_var();
     folder(&home.join("open"), 0o777);
     folder(&home.join("open/shut"), 0o700);
-    let _listener = UnixListener::bind(home.join("open/shut/sock")).unwrap();
+    let _listener = crate::spawn_gate::bind_unix_std(home.join("open/shut/sock")).unwrap();
     std::fs::write(home.join("file"), b"x").unwrap();
     symlink(home.join("open"), home.join("to-open")).unwrap();
     symlink(home.join("gone"), home.join("dangling")).unwrap();
     symlink("loop", home.join("loop")).unwrap();
     folder(&home.join("locked"), 0o700);
     folder(&home.join("locked/in"), 0o700);
-    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o0)).unwrap();
     let paths = [
         "open/shut/sock",
         "to-open/shut/sock",
