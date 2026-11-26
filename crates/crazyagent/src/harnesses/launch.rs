@@ -654,22 +654,6 @@ fn chatgpt_home(
     Err(failure("launch_account_home_unavailable"))
 }
 
-/// Refuses a folder that holds a native sign-in's own record, Codex's or Claude Code's,
-/// as a file, a link or anything else, so a listed harness never runs where it could read
-/// a sign-in's tokens. Input: the folder. Output: Ok, or
-/// `launch_account_home_holds_sign_in`, also when the folder cannot be looked into.
-#[cfg(unix)]
-pub(crate) fn holds_no_sign_in(folder: &Path) -> Result<(), LaunchError> {
-    use crate::engine::bootstrap::{CLAUDE_RECORD, CODEX_RECORD};
-    for record in [CODEX_RECORD, CLAUDE_RECORD] {
-        match std::fs::symlink_metadata(folder.join(record)) {
-            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(failure("launch_account_home_holds_sign_in")),
-        }
-    }
-    Ok(())
-}
-
 /// Builds the exact command a launch would spawn, without spawning it.
 /// Input: the launch request. Output: the command, or a plain refusal code when an
 /// input is unsafe or the harness has no launch adapter.
@@ -2707,6 +2691,10 @@ pub struct RunLogs {
     pub bytes_max: u64,
 }
 
+#[cfg(unix)]
+mod sign_in_record;
+#[cfg(unix)]
+pub(crate) use sign_in_record::holds_no_sign_in;
 mod claude_limit;
 mod turn_session;
 pub use claude_limit::rate_limited;
