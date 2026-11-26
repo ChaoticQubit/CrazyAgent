@@ -679,7 +679,8 @@ fn a_windows_process_install_with_no_text_removes_the_instruction_file() {
     assert_untouched(&target, "target");
 }
 
-/// The download caches stay under Keep and go under Clear every launch.
+/// The download caches, `.cache` and npm's content cache, stay under Keep and go under
+/// Clear every launch.
 #[test]
 fn a_windows_process_install_keeps_or_clears_the_caches_by_the_choice() {
     let (_temp, base) = base();
@@ -689,13 +690,13 @@ fn a_windows_process_install_keeps_or_clears_the_caches_by_the_choice() {
     ] {
         let home = private_home(&base, case);
         let data = private_home(&base, &format!("{case}-data"));
-        for cache in [".cache", ".npm"] {
-            std::fs::create_dir(home.join(cache)).unwrap();
+        for cache in [".cache", ".npm/_cacache"] {
+            std::fs::create_dir_all(home.join(cache)).unwrap();
             std::fs::write(home.join(cache).join("blob"), "cached").unwrap();
         }
         let context = process_context(&data, "Rows.", choice);
         drop(context.install("claude-code", &home, false).unwrap());
-        for cache in [".cache", ".npm"] {
+        for cache in [".cache", ".npm/_cacache"] {
             assert_eq!(
                 home.join(cache).join("blob").exists(),
                 stays,
