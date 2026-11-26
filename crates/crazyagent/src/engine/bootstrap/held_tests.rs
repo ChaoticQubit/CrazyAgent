@@ -712,6 +712,55 @@ fn a_held_folder_turned_into_a_junction_lists_as_unsafe() {
     assert_eq!(child.list(4).err(), Some(HeldError::Unsafe));
 }
 
+/// The raw system code a plain create-only open or folder make gets at a path already
+/// taken, so a row's failure names the code the layer classified. Inputs: the path and
+/// whether to make a folder. Output: the code, or none when the create succeeds or has none.
+fn raw_create_error(path: &Path, folder: bool) -> Option<i32> {
+    let made = if folder {
+        std::fs::create_dir(path)
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(drop)
+    };
+    made.err().and_then(|error| error.raw_os_error())
+}
+
+/// A private file or folder made where an entry of another kind already is, a folder, a
+/// file or a link, is `Unsafe`, the same refusal as a second make of the same kind, and the
+/// entry stays. A failure names the raw code a plain create there gets.
+#[test]
+fn a_private_make_over_another_kind_of_entry_is_unsafe() {
+    let (_temp, root) = private_root();
+    let outside = root.with_file_name("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let held = Folder::root(&root).unwrap();
+    drop(held.make_dir(&name("folder")).unwrap());
+    private_file(&root.join("file"), b"kept");
+    link_folder(&root.join("link"), &outside);
+    for taken in ["folder", "link"] {
+        assert_eq!(
+            held.make_file(&name(taken)).err(),
+            Some(HeldError::Unsafe),
+            "{taken}: a create-only file open there fails with {:?}",
+            raw_create_error(&root.join(taken), false)
+        );
+    }
+    for taken in ["file", "link"] {
+        assert_eq!(
+            held.make_dir(&name(taken)).err(),
+            Some(HeldError::Unsafe),
+            "{taken}: a create-only folder there fails with {:?}",
+            raw_create_error(&root.join(taken), true)
+        );
+    }
+    assert!(root.join("folder").is_dir());
+    assert_eq!(std::fs::read(root.join("file")).unwrap(), b"kept");
+    assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+}
+
 /// How many times a row's judge ran, so a row can tell a root refused before its judge
 /// from one its judge refused.
 static JUDGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -833,12 +882,14 @@ fn an_inherited_file_and_folder_are_create_only_and_take_the_folder_s_list() {
         assert_eq!(
             held.make_file_inherited(&name(taken)).err(),
             Some(HeldError::Unsafe),
-            "{taken}"
+            "{taken}: a create-only file open there fails with {:?}",
+            raw_create_error(&root.join(taken), false)
         );
         assert_eq!(
             held.make_dir_inherited(&name(taken)).err(),
             Some(HeldError::Unsafe),
-            "{taken}"
+            "{taken}: a create-only folder there fails with {:?}",
+            raw_create_error(&root.join(taken), true)
         );
     }
     assert!(std::fs::read_dir(&outside).unwrap().next().is_none());

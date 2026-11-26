@@ -971,7 +971,8 @@ impl Folder {
     pub(crate) fn make_dir_inherited(&self, name: &Name) -> Result<Self, HeldError> {
         self.assert_caller_judged();
         self.unmoved()?;
-        std::fs::create_dir(self.path.join(name.as_os_str())).map_err(cause)?;
+        std::fs::create_dir(self.path.join(name.as_os_str()))
+            .map_err(|error| self.made_cause(name, error))?;
         private::sync_folder(&self.path).map_err(cause)?;
         self.open_dir_unjudged(name)
     }
@@ -992,11 +993,22 @@ impl Folder {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(self.path.join(name.as_os_str()))
-            .map_err(cause)?;
+            .map_err(|error| self.made_cause(name, error))?;
         private::sync_folder(&self.path).map_err(cause)?;
         self.bind(name, &file)?;
         let pin = pin_of(&file)?;
         Ok((file, pin))
+    }
+
+    /// Classifies a failed create-only make: Windows reports a name already taken by a folder
+    /// or a link with a code that is no collision, so an `Unavailable` failure is `Unsafe` when
+    /// the name's kind reads through this folder, as itself and only read. Nothing is written,
+    /// and a lookup that fails keeps `Unavailable`. Inputs: the name and the error. Output: the kind.
+    fn made_cause(&self, name: &Name, error: std::io::Error) -> HeldError {
+        match cause(error) {
+            HeldError::Unavailable if self.kind_unjudged(name).is_ok() => HeldError::Unsafe,
+            kind => kind,
+        }
     }
 
     /// Reads what one entry of a caller-judged tree is, opened as itself and bound to this
