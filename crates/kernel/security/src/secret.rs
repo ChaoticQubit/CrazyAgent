@@ -176,31 +176,56 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
 }
 
 /// Serializes a value as compact JSON into one buffer of exactly its size, measured by a
-/// first pass and written by the second through a fixed slice that cannot grow, so no
-/// growth frees a partial copy of a secret the value holds; the caller wipes the result.
-/// Public in the kernel crate only because its callers stay in crazyagent. Input: the
-/// value. Output: the bytes, or serde_json's error when the value changed between passes.
+/// first pass and written by the second through [`Fixed`], which refuses any byte past the
+/// measured capacity, so no growth frees a partial copy of a secret the value holds; the
+/// caller wipes the result. Public in the kernel crate only because its callers stay in
+/// crazyagent. Input: the value. Output: the bytes, or serde_json's error when it changed.
 #[cfg(unix)]
 pub fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
     let mut counted = Counted(0);
     serde_json::to_writer(&mut counted, value)?;
-    let mut buffer = vec![0_u8; counted.0];
-    let capacity = buffer.capacity();
-    let mut room: &mut [u8] = &mut buffer;
-    let written = serde_json::to_writer(&mut room, value);
-    let left = room.len();
+    let mut fixed = Fixed(Vec::with_capacity(counted.0));
+    let capacity = fixed.0.capacity();
+    let written = serde_json::to_writer(&mut fixed, value);
+    let mut buffer = fixed.0;
     if let Err(problem) = written {
         wipe_owned(&mut buffer);
         return Err(problem);
     }
-    if left != 0 {
+    if buffer.len() != counted.0 {
         wipe_owned(&mut buffer);
         let changed = std::io::Error::other("the value changed between the two passes");
         return Err(serde_json::Error::io(changed));
     }
-    assert_eq!(buffer.len(), counted.0);
     assert_eq!(buffer.capacity(), capacity);
     Ok(buffer)
+}
+
+/// A writer over a buffer that never grows, for [`sized_json`]'s second pass: a write that
+/// does not fit the room left in the capacity is refused with `WriteZero` and nothing of
+/// it is copied, so the buffer is never reallocated. Input: bytes. Output: the count, or
+/// the refusal.
+#[cfg(unix)]
+struct Fixed(Vec<u8>);
+
+#[cfg(unix)]
+impl std::io::Write for Fixed {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if bytes.len() > self.0.capacity() - self.0.len() {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A writer that only counts the bytes written to it, for [`sized_json`]'s first pass.

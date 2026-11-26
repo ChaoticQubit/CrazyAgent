@@ -111,6 +111,20 @@ fn sized_json_refuses_a_value_that_grows_between_passes() {
 
 #[cfg(unix)]
 #[test]
+fn sized_json_fills_a_buffer_of_exactly_the_measured_size() {
+    let value = Changing {
+        first: 10,
+        then: 10,
+        passes: std::cell::Cell::new(0),
+    };
+    let bytes = super::sized_json(&value).unwrap();
+    assert_eq!(bytes, br#"[10,"secret-bytes"]"#);
+    assert_eq!(bytes.len(), bytes.capacity());
+    assert_eq!(value.passes.get(), 2);
+}
+
+#[cfg(unix)]
+#[test]
 fn sized_json_refuses_a_value_that_shrinks_between_passes() {
     let value = Changing {
         first: 10,
