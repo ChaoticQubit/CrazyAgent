@@ -375,29 +375,6 @@ fn replay_sets_put_seq_from_the_event() {
     );
 }
 
-/// Every Rust source under a folder, recursively. Input: the folder. Output: the paths.
-fn sources(folder: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return found;
-    };
-    for entry in entries.map(Result::unwrap) {
-        let path = entry.path();
-        if path.is_dir() {
-            if path
-                .file_name()
-                .is_some_and(|name| name == "target" || name == "node_modules")
-            {
-                continue;
-            }
-            found.extend(sources(&path));
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            found.push(path);
-        }
-    }
-    found
-}
-
 #[cfg(unix)]
 #[test]
 fn the_namespace_walk_panics_naming_a_folder_link() {
@@ -406,7 +383,7 @@ fn the_namespace_walk_panics_naming_a_folder_link() {
     std::fs::write(root.path().join("real/a.rs"), "fn a() {}\n").unwrap();
     std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
 
-    let cause = std::panic::catch_unwind(|| sources(root.path())).expect_err("the walk panics");
+    let cause = std::panic::catch_unwind(|| crate::tests::files(root.path(), ".rs")).expect_err("the walk panics");
     let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
 
     assert!(said.contains(&format!("{:?}", root.path().join("linked"))), "{said}");
@@ -454,9 +431,9 @@ fn namespace_is_made_only_by_the_bus_gateway() {
         at > 0 && lines[at - 1] == "#[cfg(test)]",
         "perf_tests stays test code"
     );
-    let walked: Vec<PathBuf> = ["crates", "apps"]
+    let walked: Vec<PathBuf> = ["crates", "apps", "plugins"]
         .iter()
-        .flat_map(|top| sources(&repo.join(top)))
+        .flat_map(|top| crate::tests::files(&repo.join(top), ".rs"))
         .collect();
     assert!(walked.len() > 100, "the walk reads the workspace");
     assert!(
@@ -474,7 +451,9 @@ fn namespace_is_made_only_by_the_bus_gateway() {
         .iter()
         .filter(|path| !exempt(path.strip_prefix(&repo).unwrap()))
         .filter(|path| {
-            std::fs::read_to_string(path).is_ok_and(|code| code.contains("Namespace::for_plugin"))
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path:?}: {error}"))
+                .contains("Namespace::for_plugin")
         })
         .collect();
 
