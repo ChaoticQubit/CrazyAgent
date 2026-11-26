@@ -799,7 +799,7 @@ struct Authority {
     host: HostStamp,
     slots: Mutex<[Slot; 2]>,
     runners: Mutex<Vec<Option<RunnerSlot>>>,
-    native_auth: Mutex<Option<NativeAuthSlot>>,
+    native_auth: Mutex<Option<Box<NativeAuthSlot>>>,
     native_auth_host: Mutex<NativeAuthHostRegistration>,
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
