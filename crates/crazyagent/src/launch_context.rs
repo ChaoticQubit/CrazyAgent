@@ -2742,54 +2742,6 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     })
 }
 
-/// Confirms on Windows that a launch lock is the lock name directly in the held home
-/// (CodeRabbit CR-1252): both real places are read from their handles, so a lock the home's
-/// path reached in another folder, as after a junction above the home was pointed elsewhere
-/// between the hold and the lock, is refused. Inputs: the lock and the held home. Output:
-/// Ok, or `launch_context_unsafe`.
-#[cfg(windows)]
-fn locked_in(lock: &File, held: &File) -> Result<(), LaunchError> {
-    const SEPARATOR: u16 = b'\\' as u16;
-    let unsafe_lock = |_: std::io::Error| failure("launch_context_unsafe");
-    let mut wanted = crazyagent_win_sandbox::final_name(held).map_err(unsafe_lock)?;
-    if wanted.last() != Some(&SEPARATOR) {
-        wanted.push(SEPARATOR);
-    }
-    wanted.extend(LOCK.encode_utf16());
-    let found = crazyagent_win_sandbox::final_name(lock).map_err(unsafe_lock)?;
-    if found != wanted {
-        return Err(failure("launch_context_unsafe"));
-    }
-    Ok(())
-}
-
-/// Opens and locks the agent home's launch lock through W1 (V244-WIN-MASTER S9a): made a
-/// private file when it is missing, else opened, never through a link, a second name or a
-/// list that is not private, then locked without waiting. A name a launched agent left as a
-/// link, a folder or an open file stays refused until S9b clears it handle-relative; no
-/// Windows launch reuses a home before then (D6, D8). Input: the home H1's check passed.
-/// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
-#[cfg(windows)]
-fn lock(home: &Path) -> Result<File, LaunchError> {
-    use crazyagent_win_sandbox::private;
-    const LOCK_VIOLATION: i32 = 33;
-    let path = home.join(LOCK);
-    let file = match private::file(&path, true) {
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            private::file(&path, false)
-        }
-        made => made,
-    }
-    .map_err(|_| failure("launch_context_unsafe"))?;
-    match private::lock(&file) {
-        Ok(()) => Ok(file),
-        Err(error) if error.raw_os_error() == Some(LOCK_VIOLATION) => {
-            Err(failure("launch_home_busy"))
-        }
-        Err(_) => Err(failure("launch_context_unsafe")),
-    }
-}
-
 /// Opens and locks the agent home's launch lock, made owner-only and never through a link.
 /// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
 /// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
@@ -3632,3 +3584,8 @@ pub use pinned_keys::*;
 
 mod teammate;
 use teammate::teammate_section;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::{lock, locked_in};
