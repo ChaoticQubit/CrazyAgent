@@ -22,10 +22,26 @@ fn folder(path: &Path, mode: u32) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
-/// Shuts a folder to mode 000. Input: the folder. Output: the error the mode change gave, if
-/// any.
-fn shut(path: &Path) -> std::io::Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o0))
+/// A folder shut to mode 000 that is opened again to 0700 when dropped, so the home it sits
+/// in can be removed whether the row passes or fails.
+struct Shut(PathBuf);
+
+impl Drop for Shut {
+    /// Puts mode 0700 back on the folder; the change must succeed unless the row is already
+    /// failing. Input: none. Output: none.
+    fn drop(&mut self) {
+        let opened = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        if !std::thread::panicking() {
+            opened.expect("the shut folder opens again");
+        }
+    }
+}
+
+/// Shuts a folder to mode 000. Input: the folder. Output: the guard that opens it again, or
+/// the error the mode change gave.
+fn shut(path: &Path) -> std::io::Result<Shut> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o0))?;
+    Ok(Shut(path.to_path_buf()))
 }
 
 /// A home whose setup fails after a folder in it is shut is gone once the failure unwinds.
@@ -70,7 +86,7 @@ fn the_socket_check_reads_each_path_shape_as_it_does_now() -> std::io::Result<()
     symlink("loop", home.join("loop"))?;
     folder(&home.join("locked"), 0o700)?;
     folder(&home.join("locked/in"), 0o700)?;
-    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o0))?;
+    let locked = shut(&home.join("locked"))?;
     let cases = [
         ("open/shut/sock", Some("open")),
         ("to-open/shut/sock", None),
@@ -84,7 +100,7 @@ fn the_socket_check_reads_each_path_shape_as_it_does_now() -> std::io::Result<()
         .iter()
         .map(|(socket, _)| changeable_above_socket(&home.join(socket)))
         .collect();
-    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o700))?;
+    drop(locked);
     assert_eq!(seen.len(), cases.len());
     for ((socket, wanted), seen) in cases.iter().zip(seen) {
         assert_eq!(seen, wanted.map(|part| home.join(part)), "{socket}");
@@ -163,7 +179,7 @@ fn the_held_walk_reads_every_part_as_lstat_does() -> std::io::Result<()> {
     symlink("loop", home.join("loop"))?;
     folder(&home.join("locked"), 0o700)?;
     folder(&home.join("locked/in"), 0o700)?;
-    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o0))?;
+    let locked = shut(&home.join("locked"))?;
     let paths = [
         "open/shut/sock",
         "to-open/shut/sock",
@@ -184,7 +200,7 @@ fn the_held_walk_reads_every_part_as_lstat_does() -> std::io::Result<()> {
             (path, shape(walked), shape(read))
         })
         .collect();
-    std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o700))?;
+    drop(locked);
     assert_eq!(seen.len(), paths.len());
     for (path, walked, read) in seen {
         assert_eq!(walked, read, "{}", path.display());
