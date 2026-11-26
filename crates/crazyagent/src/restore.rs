@@ -305,7 +305,8 @@ pub fn recovery(root: &Path, running: bool) -> Result<Option<Recovery>, String> 
 
 /// Puts the copy the restore record names back over engine.db, checked before and after,
 /// and clears the record. Inputs: the root and whether its login service still runs a
-/// process. Output: Ok, or the refusal's text with the record left as it was.
+/// process. Output: Ok, or the refusal's text with the record left as it was, except a
+/// failed flush after the record's removal, which leaves the data back and no record.
 pub fn put_back(root: &Path, running: bool) -> Result<(), String> {
     idle(running)?;
     #[cfg(unix)]

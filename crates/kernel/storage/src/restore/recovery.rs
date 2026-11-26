@@ -229,7 +229,8 @@ pub fn put_back(path: &Path) -> Result<PathBuf, StorageError> {
 /// it is in a new `replaced-<time>` folder, the copy is restored over it on the held
 /// connection and checked against it with `check`, and only then is the record removed.
 /// Inputs: the database path, the check and a step run on the root before the lock.
-/// Output: the folder that keeps the replaced data, or the refusal with the record as it was.
+/// Output: the folder that keeps the replaced data, or the refusal with the record as it was,
+/// except a failed flush after the record's removal, which leaves the data back and no record.
 pub(super) fn put_back_with(
     path: &Path,
     check: CopyCheck,
