@@ -1,8 +1,8 @@
 use crate::StorageError;
 use crate::migrations::{
     BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
-    V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, error, file_digest, fill,
-    flush, mark_checked, pinned, private_file, schema, stamp, stamp_time,
+    V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, checked_copy, error,
+    file_digest, flush, pinned, private_file, schema, stamp, stamp_time,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
@@ -266,9 +266,7 @@ fn keep_replaced(
         .mode(0o700)
         .create(&target)
         .map_err(restore_failed)?;
-    let made = fill(db, &target, texts)
-        .and_then(|()| check_copy(db, &target.join(DATABASE)))
-        .and_then(|()| mark_checked(folder, &target));
+    let made = checked_copy(db, folder, &target, texts, check_copy, Flush::Full);
     if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);
         return Err(restore_failed(cause.0));

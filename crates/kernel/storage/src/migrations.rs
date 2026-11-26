@@ -145,9 +145,7 @@ fn backup_checked(
             return Err(backup_failed(cause));
         }
     }
-    let made = fill(db, &target, texts)
-        .and_then(|()| check(db, &target.join(DATABASE)))
-        .and_then(|()| mark_checked(&folder, &target));
+    let made = checked_copy(db, &folder, &target, texts, check, Flush::Full);
     if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);
         return Err(cause);
@@ -222,24 +220,59 @@ fn count(db: &Connection, table: &str) -> Result<i64, StorageError> {
     Ok(rows)
 }
 
+/// Fills a new backup folder, checks its copy and marks it checked: the copy's sha256 is
+/// read on a second thread while `check` reads the copy against the live database, and both
+/// must pass. Inputs: the connection, the backups folder, the new backup, the settings
+/// texts, the check and the flush of the backups folder. Output: Ok, or the first failure,
+/// after which the caller removes the folder.
+pub(crate) fn checked_copy(
+    db: &Connection,
+    folder: &Path,
+    target: &Path,
+    texts: Texts<'_>,
+    check: CopyCheck,
+    last: Flush,
+) -> Result<(), StorageError> {
+    fill(db, target, texts)?;
+    let copy = target.join(DATABASE);
+    let (checked, digest) = std::thread::scope(|scope| {
+        let hashing = scope.spawn(|| file_digest(&copy));
+        let checked = check(db, &copy);
+        let digest = hashing
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (checked, digest)
+    });
+    checked?;
+    mark_checked(folder, target, &digest?, last)
+}
+
 /// Records that a backup copy passed its check and makes the record durable: the `checked`
 /// file, holding the sha256 of the checked engine.db so a restore can tell the copy has not
-/// changed since, then the backup folder and the backups folder synced, so a crash after
-/// this point still finds the backup checked; on Windows each folder is flushed through W1's
-/// `sync_folder`, as a plain open refuses a folder there. Inputs: the backups folder and the
-/// new backup. Output: Ok once synced.
-pub(crate) fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
+/// changed since, and the backup folder, each behind a barrier, then the backups folder
+/// flushed as `last` says, so a crash after a full flush still finds the backup checked; on
+/// Windows each folder is flushed through W1's `sync_folder`, as a plain open refuses a
+/// folder there. Inputs: the backups folder, the new backup, the copy's digest and the last
+/// flush. Output: Ok once flushed.
+pub(crate) fn mark_checked(
+    folder: &Path,
+    target: &Path,
+    digest: &str,
+    last: Flush,
+) -> Result<(), StorageError> {
     assert!(target.starts_with(folder));
-    let digest = file_digest(&target.join(DATABASE))?;
     assert_eq!(digest.len(), DIGEST_HEX_BYTES);
-    private_file(&target.join(CHECKED), digest.as_bytes(), Flush::Full)?;
-    for synced in [target, folder] {
+    private_file(&target.join(CHECKED), digest.as_bytes(), Flush::Barrier)?;
+    for (synced, kind) in [(target, Flush::Barrier), (folder, last)] {
         #[cfg(unix)]
         std::fs::File::open(synced)
-            .and_then(|handle| flush(&handle, Flush::Full))
+            .and_then(|handle| flush(&handle, kind))
             .map_err(backup_failed)?;
         #[cfg(windows)]
-        private::sync_folder(synced).map_err(backup_failed)?;
+        {
+            let _ = kind;
+            private::sync_folder(synced).map_err(backup_failed)?;
+        }
     }
     Ok(())
 }
@@ -428,13 +461,13 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
         .find(|code| text == *code)
 }
 
-/// Writes the database and settings copies into a new backup folder. The pinned restore in
-/// crazyagent calls it until Task 7c moves that restore here.
-/// Inputs: the connection, the folder and the settings texts. Output: Ok once every copy is
-/// on disk; a text name that is not one plain file name fails the assert.
+/// Writes the database and settings copies into a new backup folder: engine.db is created
+/// private and empty, then filled by SQLite's backup, and each text is written behind a
+/// barrier. Inputs: the connection, the folder and the settings texts. Output: Ok once every
+/// copy is written; a text name that is not one plain file name fails the assert.
 pub(crate) fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(), StorageError> {
     let file = target.join(DATABASE);
-    private_file(&file, b"", Flush::Full)?;
+    drop(created(&file)?);
     db.backup(rusqlite::MAIN_DB, &file, None)
         .map_err(backup_failed)?;
     for (name, text) in texts()? {
@@ -442,7 +475,7 @@ pub(crate) fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(
             plain_name(name),
             "a settings text is one plain file name beside engine.db and checked"
         );
-        private_file(&target.join(name), text.as_bytes(), Flush::Full)?;
+        private_file(&target.join(name), text.as_bytes(), Flush::Barrier)?;
     }
     Ok(())
 }
@@ -511,19 +544,26 @@ pub(crate) fn take_flushes() -> (usize, usize) {
     FLUSHES.with(|counted| counted.replace((0, 0)))
 }
 
-/// Creates a new file readable only by this user and writes it to disk.
-/// Inputs: the path, which must not exist, the bytes and the flush that ends the write.
-/// Output: Ok once flushed.
-pub(crate) fn private_file(path: &Path, bytes: &[u8], kind: Flush) -> Result<(), StorageError> {
+/// Creates a new empty file readable only by this user. Input: the path, which must not
+/// exist. Output: the open file.
+fn created(path: &Path) -> Result<std::fs::File, StorageError> {
     #[cfg(unix)]
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(backup_failed)?;
     #[cfg(windows)]
-    let mut file = private::file(path, true).map_err(backup_failed)?;
+    let file = private::file(path, true).map_err(backup_failed)?;
+    Ok(file)
+}
+
+/// Creates a new file readable only by this user and writes it to disk.
+/// Inputs: the path, which must not exist, the bytes and the flush that ends the write.
+/// Output: Ok once flushed.
+pub(crate) fn private_file(path: &Path, bytes: &[u8], kind: Flush) -> Result<(), StorageError> {
+    let mut file = created(path)?;
     file.write_all(bytes).map_err(backup_failed)?;
     flush(&file, kind).map_err(backup_failed)
 }
