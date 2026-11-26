@@ -892,3 +892,6 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
     assert_eq!(survivors(&token), Vec::<String>::new());
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
+
+#[path = "prune_rows.rs"]
+mod prune_rows;

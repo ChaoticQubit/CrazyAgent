@@ -49,7 +49,7 @@ pub(crate) fn prune_until(
 /// Deletes one discarded change set's ref, marks it pruned and forgets the owner edits
 /// settled on it. The caller holds [`hold`] on its repository. Inputs: the store and the change set. Output: whether it was pruned
 /// now, false when it is no longer discarded or already pruned.
-fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+pub(super) fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     let mut record = store::load(db, id)?;
     if record.state != ChangeState::Discarded || record.pruned {
         return Ok(false);
