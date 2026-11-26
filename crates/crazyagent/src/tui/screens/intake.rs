@@ -42,13 +42,15 @@ impl AddWarning {
             Self::OldPlace => {
                 "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working."
             }
-            Self::AcrossDisks => {
-                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left."
-            }
+            Self::AcrossDisks => on_this_computer!(
+                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If ",
+                " sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left."
+            ),
             Self::SameDisk => "This is a rename on the same disk; it is quick.",
-            Self::CopyAll => {
-                "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete."
-            }
+            Self::CopyAll => on_this_computer!(
+                "This copies every file into your projects folder. It can take a long time and needs as much free space again. If ",
+                " sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete."
+            ),
             Self::Large => "This folder is very large.",
             Self::Unmeasured => "CrazyAgent couldn't measure it.",
             Self::TooMany => {
