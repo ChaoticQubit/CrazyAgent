@@ -1639,7 +1639,7 @@ fn validate_registration(
         return Err(error("master_configured_receipt_conflict"));
     }
     let metadata = std::fs::symlink_metadata(&record.database_path).map_err(error)?;
-    if !crate::file_identity::same_files(
+    if !kernel_common::file_identity::same_files(
         &[record.database_identity],
         &[database_identity(&record.database_path, &metadata)?],
     ) {
