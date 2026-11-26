@@ -83,7 +83,8 @@ test("#383 code F1 r2 (leader 16:30, B): a failed folder read makes Move and Cop
   const props = { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "copy", size: failed,
     busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle };
   const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, props));
-  assert.ok(page.includes(unreadLine), page);
+  assert.ok(page.includes(`>${unreadLine}<`), page);
+  assert.doesNotMatch(page, /only in iCloud/);
   assert.doesNotMatch(page, /role="switch"/);
   assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: read })), /couldn(&#x27;|')t read this folder/);
 });
@@ -97,7 +98,8 @@ test("V243-MOVE-SIZE-PROBLEM-DESKTOP: a folder read the engine could not finish,
     for (const way of ["move", "copy"]) {
       const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI",
         home: "/Users/o/CrazyAgent", way, size: unfinished, busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle }));
-      assert.ok(page.includes(unreadLine), `${code} ${way}`);
+      assert.ok(page.includes(`>${unreadLine}<`), `${code} ${way}`);
+      assert.doesNotMatch(page, /only in iCloud/, `${code} ${way}`);
       assert.doesNotMatch(page, /role="switch"/, `${code} ${way}`);
     }
   }
