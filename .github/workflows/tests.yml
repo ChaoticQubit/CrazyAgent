@@ -47,7 +47,7 @@ env:
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
   NODE_TEST_TIMEOUT_MACOS_MS: "60000"
   FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
+    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3 macos-model-servers
     windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
 
 defaults:
@@ -253,6 +253,54 @@ jobs:
           parts: ${{ matrix.parts }}
           node-version: ${{ env.NODE_VERSION }}
 
+  rust-windows:
+    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    needs: build-windows
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            runner: windows-2022
+            part: 1
+            parts: 3
+          - os: windows
+            runner: windows-2022
+            part: 2
+            parts: 3
+          - os: windows
+            runner: windows-2022
+            part: 3
+            parts: 3
+    env:
+      FARM_JUNIT: target/nextest/farm/junit.xml
+      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install SQLite for Windows
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - uses: ./.github/actions/rust-shard
+        with:
+          os: ${{ matrix.os }}
+          part: ${{ matrix.part }}
+          parts: ${{ matrix.parts }}
+          node-version: ${{ env.NODE_VERSION }}
+
   rust-model-servers:
     name: Rust macos model-server rows
     needs: build-macos
@@ -304,54 +352,6 @@ jobs:
           path: target/nextest/farm/junit.xml
           if-no-files-found: error
           retention-days: 14
-
-  rust-windows:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-windows
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-            part: 1
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 2
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
 
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
@@ -580,7 +580,7 @@ jobs:
 
   report:
     name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-model-servers, rust-windows, node, typecheck]
+    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, rust-model-servers, node, typecheck]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15

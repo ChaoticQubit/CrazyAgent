@@ -11,7 +11,7 @@ runs:
         if [ "$RUNNER_OS" != macOS ] || [ "$(uname -m)" != arm64 ]; then echo "::error::server unavailable: the pinned bottles are arm64_sequoia"; exit 1; fi
     - name: Restore the downloads
       id: cache
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
       with:
         path: ~/model-servers-cache
         key: model-servers-${{ hashFiles('.github/actions/model-servers/action.yml') }}
@@ -149,3 +149,9 @@ runs:
           echo "CRAZYAGENT_TEST_LLAMA_URL=http://127.0.0.1:$LLAMA_PORT"
           echo "CRAZYAGENT_TEST_LLAMA_KEYED_URL=http://127.0.0.1:$LLAMA_KEYED_PORT"
         } >> "$GITHUB_ENV"
+    - name: Keep the downloads for later runs, from master only
+      if: ${{ github.ref == 'refs/heads/master' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ~/model-servers-cache
+        key: model-servers-${{ hashFiles('.github/actions/model-servers/action.yml') }}
