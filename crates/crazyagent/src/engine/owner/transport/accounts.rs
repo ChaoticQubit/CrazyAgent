@@ -930,7 +930,9 @@ async fn check(
     };
     crate::accounts::account_url(url.as_str())?;
     let key = match &listed.connection.auth {
-        ModelAuthentication::ApiKey { credential_ref } => read_key(root, credential_ref)?,
+        ModelAuthentication::ApiKey { credential_ref } => {
+            read_key(root, credential_ref)?.map(kernel_security::secret::Zeroizing::new)
+        }
         _ => None,
     };
     if url.scheme() != "http" {
@@ -941,11 +943,8 @@ async fn check(
         };
         return Ok((view(&listed, status), Vec::new()));
     }
-    let checked = probe::check(&url, key.as_deref(), CHECK_PROBE).await;
-    let mut key = key;
-    if let Some(bytes) = key.as_mut() {
-        kernel_security::secret::wipe(bytes);
-    }
+    let checked = probe::check(&url, key.as_ref().map(|key| key.as_slice()), CHECK_PROBE).await;
+    drop(key);
     Ok(match checked {
         Err(_) => (view(&listed, AccountStatus::Unreachable), Vec::new()),
         Ok((401 | 403, _)) => (view(&listed, AccountStatus::NotSignedIn), Vec::new()),
