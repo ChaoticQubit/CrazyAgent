@@ -1683,20 +1683,20 @@ impl Installed {
     /// Output: the guard, a `launch_account_home_*` code for a home that is no longer a
     /// private agent home, or `launch_home_busy` while another launch uses it.
     pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
+        #[cfg(windows)]
+        let mut held = None;
         let lock = if files.listed {
             #[cfg(windows)]
             crate::harnesses::launch::validate_home(&files.home)?;
             lock_listed(&files.home, None)?
         } else {
             #[cfg(windows)]
-            let held = crate::harnesses::launch::hold_home(&files.home)?;
-            #[cfg(windows)]
-            crate::harnesses::launch::validate_held_home(&files.home, &held)?;
+            let root = held.insert(windows::adopt_root(&files.home)?);
             #[cfg(unix)]
             crate::harnesses::launch::validate_home(&files.home)?;
             let lock = lock(&files.home)?;
             #[cfg(windows)]
-            locked_in(&lock, &held)?;
+            locked_in(&lock, root.file())?;
             lock
         };
         Ok(Self {
@@ -1717,7 +1717,7 @@ impl Installed {
             tool_home: None,
             _lock: lock,
             #[cfg(windows)]
-            held: None,
+            held,
         })
     }
 

@@ -161,6 +161,22 @@ pub(super) fn remove_held(installed: &mut Installed) {
     }
 }
 
+/// Holds the home a pane record names for an adopt as the install holds its home: judged as
+/// itself and never sharing delete, then checked by H1 on that same handle, so nothing is
+/// judged by path after the hold. Input: the home. Output: the held root,
+/// `launch_account_home_unsafe`, `launch_account_home_unavailable` or another H1 code.
+pub(super) fn adopt_root(
+    home: &Path,
+) -> Result<crate::engine::bootstrap::held::Folder, LaunchError> {
+    use crate::engine::bootstrap::held::{Folder, HeldError};
+    let root = Folder::root_judged_by(home, held_home_judge).map_err(|error| match error {
+        HeldError::Unsafe => failure("launch_account_home_unsafe"),
+        _ => failure("launch_account_home_unavailable"),
+    })?;
+    crate::harnesses::launch::validate_held_home(home, root.file())?;
+    Ok(root)
+}
+
 /// Removes the skills an earlier Codex run left in a held home, whatever their owner, links
 /// as themselves, and makes an empty `skills` again with the home's inheritable list.
 /// Input: the held home. Output: Ok, or [`SKILLS_KEPT`] when anything stays.
