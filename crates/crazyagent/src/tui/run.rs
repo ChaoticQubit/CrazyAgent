@@ -185,7 +185,7 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
     let colors = prefs
         .as_deref()
         .map_or(Colors::default(), prefs::load_colors);
-    let appearance = if colors == Colors::FollowMacos {
+    let appearance = if colors == Colors::FollowSystem {
         theme::system_appearance()
     } else {
         Appearance::Dark
@@ -421,7 +421,7 @@ fn drive(
                     .map_err(|error| TuiError(error.to_string()))?;
                 dirty = true;
             }
-            Event::FocusGained if shell.ctx.colors == Colors::FollowMacos => {
+            Event::FocusGained if shell.ctx.colors == Colors::FollowSystem => {
                 let appearance = theme::system_appearance();
                 if appearance != shell.ctx.appearance {
                     let colors = shell.ctx.colors;
