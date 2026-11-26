@@ -26,6 +26,10 @@ busy_slots() {
 }
 
 build_of() {
+  local pair
+  for pair in ${PERF_LABELS:-}; do
+    if [ "${pair%%=*}" = "$1" ]; then echo "${pair#*=}"; return 0; fi
+  done
   if [ -d "$1/crates/kernel" ]; then echo 2.5; else echo 2.4.4; fi
 }
 
@@ -66,7 +70,7 @@ measure() {
   [ "$others" -ge 0 ] || others=0
   awk -v l="$load1" 'BEGIN { exit !(l < 4) }' && [ "$others" -eq 0 ] && condition=quiet
   echo "PERF-RUN build=$build commit=$(git -C "$dir" rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition load1=$load1 slots=$others runs=1 order=$order"
-  (cd "$dir" && CARGO_TARGET_DIR="$dir/.local-state/target" cargo test --release "${packages[@]}" --lib perf_tests -- --ignored --nocapture --test-threads=1 2>&1) | sed -E 's/^test [^ ]+ \.\.\. (PERF )/\1/'
+  (cd -P "$dir" && CARGO_TARGET_DIR="$PWD/.local-state/target" cargo test --release "${packages[@]}" --lib perf_tests -- --ignored --nocapture --test-threads=1 2>&1) | sed -E 's/^test [^ ]+ \.\.\. (PERF )/\1/'
   return "${PIPESTATUS[0]}"
 }
 
