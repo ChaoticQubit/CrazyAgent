@@ -298,6 +298,37 @@ fn replace_staged(
         let _ = rustix::fs::unlinkat(&directory, staged.as_str(), AtFlags::empty());
         return Err(error("account_key_store_unavailable"));
     }
+    synced(&directory)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether the next key folder sync on this thread fails, as a lost disk makes it; the
+    /// sync that reads it sets it back to false.
+    static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes a test's next key folder sync on this thread fail. Input: none. Output: none.
+#[cfg(test)]
+pub(crate) fn fail_next_sync() {
+    FAIL_SYNC.with(|fail| fail.set(true));
+}
+
+/// Whether a test asked this sync to fail, which clears the ask. Input: none. Output: true
+/// once per [`fail_next_sync`].
+#[cfg(test)]
+fn sync_refused() -> bool {
+    FAIL_SYNC.with(|fail| fail.replace(false))
+}
+
+/// Syncs one owner-only key folder so a rename or removal in it reaches the disk. Input:
+/// the open folder. Output: Ok, or `account_key_store_unavailable`.
+#[cfg(unix)]
+pub(crate) fn synced(directory: &std::fs::File) -> Result<(), EngineError> {
+    #[cfg(test)]
+    if sync_refused() {
+        return Err(error("account_key_store_unavailable"));
+    }
     directory
         .sync_all()
         .map_err(|_| error("account_key_store_unavailable"))

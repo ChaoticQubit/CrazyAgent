@@ -67,3 +67,20 @@ fn a_linked_key_and_a_hidden_name_are_refused() {
         "account_key_reference_invalid"
     );
 }
+
+#[test]
+fn a_replace_whose_folder_sync_fails_leaves_the_new_key_and_no_staged_file() {
+    let root = root_with(b"sk-ant-old");
+    super::fail_next_sync();
+    let refused =
+        super::replace_key_in(root.path(), ACCOUNT_KEYS, &reference(), b"sk-ant-new".to_vec())
+            .unwrap_err();
+    assert_eq!(refused.0, "account_key_store_unavailable");
+    let key = read_key_file(root.path(), &reference()).unwrap().unwrap();
+    assert_eq!(key.expose(), "sk-ant-new");
+    let names: Vec<_> = std::fs::read_dir(root.path().join(ACCOUNT_KEYS))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["anthropic-key-0123456789abcdef0123"]);
+}

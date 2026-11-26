@@ -1,6 +1,7 @@
 use super::{
     ACCOUNT_KEYS, KEY_BYTES_MAX, PLUGIN_KEYS, key_saved_in, read_key_file, read_key_in,
-    remove_key_file, remove_key_in, replace_key_file, replace_key_in, store_key_file,
+    fail_next_sync, remove_key_file, remove_key_in, replace_key_file, replace_key_in,
+    store_key_file,
 };
 use crate::harnesses::launch::low_probe::{Try, low_probe, probe};
 use crate::protocol::CredentialRef;
@@ -601,4 +602,28 @@ fn windows_the_engine_key_store_backs_the_plugin_host() {
     assert!(!(KEYS.saved)(&root, KeyFolder::Plugin, &reference_of).unwrap());
     store_key_file(&root, &reference(NAME), b"sk-ant-account").unwrap();
     assert!((KEYS.saved)(&root, KeyFolder::Account, &KeyRef::new(NAME).unwrap()).unwrap());
+}
+
+#[test]
+fn a_store_whose_folder_sync_fails_leaves_no_key_file() {
+    let (_temp, root) = engine_root();
+    fail_next_sync();
+    let refused = store_key_file(&root, &reference(NAME), b"sk-ant-unsynced").unwrap_err();
+    assert_eq!(refused.0, "account_key_store_unavailable");
+    assert!(names(&root.join(ACCOUNT_KEYS)).is_empty());
+    assert!(read_key_file(&root, &reference(NAME)).unwrap().is_none());
+    store_key_file(&root, &reference(NAME), b"sk-ant-synced").unwrap();
+    assert_eq!(saved(&root, NAME), "sk-ant-synced");
+}
+
+#[test]
+fn a_replace_whose_folder_sync_fails_leaves_the_new_key_and_no_staged_file() {
+    let (_temp, root) = engine_root();
+    store_key_file(&root, &reference(NAME), b"sk-ant-old").unwrap();
+    fail_next_sync();
+    let refused = replace_key_file(&root, &reference(NAME), b"sk-ant-new").unwrap_err();
+    assert_eq!(refused.0, "account_key_store_unavailable");
+    assert_eq!(saved(&root, NAME), "sk-ant-new");
+    assert_eq!(names(&root.join(ACCOUNT_KEYS)), [NAME]);
+    assert_secret_file(&root.join(ACCOUNT_KEYS).join(NAME));
 }

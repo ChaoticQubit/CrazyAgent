@@ -120,8 +120,7 @@ pub(crate) fn store_key_file(
     let (_held, folder) = key_folder(root, ACCOUNT_KEYS, credential.as_str(), true)?
         .ok_or_else(|| error("account_key_store_unavailable"))?;
     write_secret(&folder.join(credential.as_str()), key)?;
-    crazyagent_win_sandbox::private::sync_folder(&folder)
-        .map_err(|_| error("account_key_store_unavailable"))
+    synced(&folder)
 }
 
 /// Swaps the saved key of one credential for a new one on Windows: the new key is written to
@@ -179,7 +178,17 @@ fn replace_in(
         let _ = std::fs::remove_file(&staged);
         return Err(error("account_key_store_unavailable"));
     }
-    crazyagent_win_sandbox::private::sync_folder(&folder)
+    synced(&folder)
+}
+
+/// Syncs one held key folder through W1 so a rename or removal in it reaches the disk.
+/// Input: the folder path. Output: Ok, or `account_key_store_unavailable`.
+fn synced(folder: &Path) -> Result<(), EngineError> {
+    #[cfg(test)]
+    if sync_refused() {
+        return Err(error("account_key_store_unavailable"));
+    }
+    crazyagent_win_sandbox::private::sync_folder(folder)
         .map_err(|_| error("account_key_store_unavailable"))
 }
 

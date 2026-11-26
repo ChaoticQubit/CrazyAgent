@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 
+#[cfg(all(test, unix))]
+#[path = "account_key_sync_tests.rs"]
+mod account_key_sync_tests;
+
 #[cfg(unix)]
 const KEYS: &str = crate::storage::accounts::ACCOUNT_KEYS;
 const SECRET_MAX: usize = 8192;
@@ -570,10 +574,7 @@ fn store_key(
     let directory =
         keys_directory(root, true)?.ok_or_else(|| failure("account_key_store_unavailable"))?;
     write_key(&directory, key_name(credential)?, key)?;
-    directory
-        .sync_all()
-        .map_err(|_| failure("account_key_store_unavailable"))?;
-    Ok(())
+    crate::storage::accounts::synced(&directory)
 }
 
 /// Writes a key into a new owner-only file in the key directory, removing the file again
@@ -618,10 +619,7 @@ pub(super) fn replace_key(
         let _ = rustix::fs::unlinkat(&directory, staged.as_str(), rustix::fs::AtFlags::empty());
         return Err(failure("account_key_store_unavailable"));
     }
-    directory
-        .sync_all()
-        .map_err(|_| failure("account_key_store_unavailable"))?;
-    Ok(())
+    crate::storage::accounts::synced(&directory)
 }
 
 /// Saves an account key on Windows as a new W1 secret file in the engine root's key folder,
