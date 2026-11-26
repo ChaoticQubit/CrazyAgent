@@ -5,7 +5,7 @@ import {
 } from "../../api";
 import type { NativeAuthMethod } from "../../native-auth";
 import { useAppSession, useLoad } from "../../state";
-import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Notice, ProviderMark, SecretField, Select, Skeleton, TextField, thisComputer } from "../../ui";
 import { readyAdded } from "./pools";
 import { discardAccount, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
@@ -15,7 +15,7 @@ export const TILE_LINES: Record<string, string> = {
   gemini: "Pay-as-you-go Google Gemini API key.",
   openrouter: "One key for many models.",
   openai_compatible: "Any server that speaks the OpenAI API.",
-  local: "Ollama or another model running on this Mac.",
+  local: `Ollama, LM Studio or a server on ${thisComputer()}.`,
 };
 
 const COMPANIES: { key: string; name: string; subscription: AccountProvider; keyed: AccountProvider }[] = [
@@ -105,7 +105,7 @@ export function defaultAccountName(provider: ProviderEntry, accounts: AccountVie
  * on another machine never on a port a cloud metadata service answers on (80, 988, 32526).
  * Input: the text. Output: an error sentence, or undefined when it is acceptable. */
 export function urlError(text: string): string | undefined {
-  const message = "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.";
+  const message = `Enter a full URL that starts with https://, or http://127.0.0.1 for ${thisComputer()}.`;
   try {
     const url = new URL(text.trim());
     if (url.username || url.password) return message;
@@ -300,10 +300,10 @@ export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
         helper={entry.model === "optional" ? "Optional. Leave empty to use the provider's default." : undefined} spellCheck={false} />)}
     {local && <div className="row">
       <Button icon="search" onClick={() => void findModels()}>Find models</Button>
-      {models?.kind === "ok" && models.value.length === 0 && <span className="secondary">No models found. Pull one in Ollama, then try again.</span>}
+      {models?.kind === "ok" && models.value.length === 0 && <span className="secondary">No models found. Pull one on the local server at {url.trim()}, then try again.</span>}
     </div>}
     {models && models.kind !== "ok" && <Notice tone="danger" alert>{models.kind === "not_ready" ? "Finding models isn't ready yet in this build. Type the model name instead."
-      : models.code === "account_url_unreachable" ? `Can't reach Ollama at ${url.trim()}. Start Ollama, then try again.` : models.message}</Notice>}
+      : models.code === "account_url_unreachable" ? `Can't reach the local server at ${url.trim()}. Start it, then try again.` : models.message}</Notice>}
     {errors.form && <Notice tone="danger" alert>{errors.form}</Notice>}
     <div className="row"><Button type="submit" variant="primary" pending={pending} pendingLabel="Saving...">{entry.method === "api_key" ? "Save key" : "Save"}</Button></div>
   </form>;

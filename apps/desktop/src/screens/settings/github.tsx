@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { gitHubSignOut, intakeCopy, loadGitHubRuleDefaults, loadGitHubStatus, saveGitHubRuleDefaults } from "../../api-intake";
 import type { GitHubStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, LoadError, NotReady, SettingLine, SettingSection, Skeleton, Switch } from "../../ui";
+import { Button, ConfirmDialog, LoadError, NotReady, SettingLine, SettingSection, Skeleton, Switch, signInStore, thisComputer } from "../../ui";
 import { DEFAULTS_ABOUT, DEFAULTS_TITLE, STANDARD_LABEL, STANDARD_RULES, withRule } from "../project/github-rules";
 import { RULE_LABELS } from "../project/publish-job";
 import { displayText } from "../conversation";
@@ -21,8 +21,8 @@ export function GitHubAccountView({ status, busy, problem, onSignOut }: {
 }) {
   return <SettingSection title="GitHub account">
     <SettingLine label={accountLine(status)} help={status.method === "cli"
-      ? "CrazyAgent uses the GitHub CLI's sign-in on this Mac to list, clone and publish your repositories and set their rules. Signing out here leaves the GitHub CLI signed in."
-      : "CrazyAgent keeps this sign-in in your Mac's keychain and uses it to list, clone and publish your repositories and set their rules. Agents never get it."}>
+      ? `CrazyAgent uses the GitHub CLI's sign-in on ${thisComputer()} to list, clone and publish your repositories and set their rules. Signing out here leaves the GitHub CLI signed in.`
+      : `CrazyAgent keeps this sign-in in ${signInStore()} and uses it to list, clone and publish your repositories and set their rules. Agents never get it.`}>
       <Button variant="danger-text" icon="log-out" pending={busy} pendingLabel="Signing out..." onClick={onSignOut}>Sign out of GitHub</Button>
     </SettingLine>
     {status.problem && <p className="set-body pj-error" role="alert">{displayText(status.problem)}</p>}

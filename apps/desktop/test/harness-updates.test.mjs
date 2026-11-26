@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api-harness-updates.ts");
 const view = await import("../src/screens/settings/harnesses.tsx");
+const step = await import("../src/screens/first-run/harnesses.ts");
 
 const entry = (id, name, status) => ({ id, name, status, status_label: "", executable: status.kind === "not_installed" ? null : `/opt/homebrew/bin/${id}`,
   headless: `${id} -p`, tools: { kind: "switchable" }, model_selection: true, account_kinds: ["subscription"], team: { kind: "lead" }, aliases: [] });
@@ -215,7 +216,11 @@ test("another harness installed some other way says to use its own installer and
 
 test("the page lists the install setting with both options, and changing it keeps the other three", async () => {
   const html = page({ mode: "check_and_update", when: "on_button", online: "on", install: "on" });
-  for (const word of ["Install from the app", "Offer Install for harnesses that are not installed", "Don't offer Install", "Install runs Homebrew when it is on this Mac, else npm\\. It never uses sudo or a script from a website\\."]) assert.match(html, new RegExp(word));
+  for (const word of ["Install from the app", "Offer Install for harnesses that are not installed", "Don't offer Install"]) assert.match(html, new RegExp(word));
+  await eachComputer("../src/screens/settings/harnesses.tsx", (settings, { os, computer }) => {
+    const shown = markup(createElement(settings.UpdateSettingsView, { settings: { mode: "check_and_update", when: "on_button", online: "on", install: "on" }, save: () => Promise.resolve({ kind: "ok", value: undefined }) }));
+    assert.ok(shown.includes(`Install runs Homebrew when it is on ${computer}, else npm. It never uses sudo or a script from a website.`), `${os}: ${shown}`);
+  });
   const sent = [];
   await view.chooseInstall({ mode: "check_only", when: "on_open", online: "off", install: "on" }, "off", (settings) => { sent.push(settings); return Promise.resolve({ kind: "ok", value: undefined }); });
   assert.deepEqual(sent, [{ mode: "check_only", when: "on_open", online: "off", install: "off" }]);
@@ -449,4 +454,18 @@ test("the page reads Node as installing while a job on Node runs over an old fai
   const busy = (state) => ({ dependencies: [{ name: "node", label: "Node.js", state, busy: true, waiting: "setup" }], pack: [], running: true, version: 1 });
   assert.deepEqual(view.pageNode(["codex"], reads, busy({ state: "failed", reason: NODE_FAILED })), { kind: "installing" });
   assert.equal(view.pageNodeReads(["codex"], reads, busy({ state: "failed", reason: NODE_FAILED })), true);
+});
+
+test("update and first-run words name this Mac on macOS and this computer on Windows and Linux", async () => {
+  await eachComputer("../src/api-harness-updates.ts", (updates, { os, computer }) => {
+    for (const [code, line] of [["harness_update_tool_missing", `The tool that updates it is no longer on ${computer}.`],
+      ["harness_update_not_installed", `It isn't installed on ${computer}.`], ["harness_install_already", `It's already installed on ${computer}.`],
+      ["harness_install_needs_node", `CrazyAgent installs this one with npm, and Node.js isn't on ${computer} yet.`]]) {
+      assert.equal(updates.updateCopy(code), line, `${os} ${code}`);
+    }
+  });
+  await eachComputer("../src/screens/first-run/harnesses.ts", (first, { os, computer }) => {
+    assert.equal(first.HARNESS_WORDS.installed, `Already on ${computer}.`, os);
+    assert.equal(first.HARNESS_WORDS.reading, `Reading what's on ${computer}.`, os);
+  });
 });

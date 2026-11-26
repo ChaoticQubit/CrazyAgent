@@ -50,6 +50,8 @@ pub(in crate::tui) mod team_settings;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
+#[cfg(test)]
+mod computer_words_tests;
 #[cfg(all(test, unix))]
 mod github_rules_tests;
 #[cfg(all(test, unix))]
@@ -515,4 +517,18 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         }
     };
     screen
+}
+
+/// The text render a frame test compares against, for screens whose words name the computer:
+/// on macOS the frame's `<name>.macos.txt` twin when there is one, else `<name>.txt`. Input:
+/// the frame name. Output: the file's path.
+#[cfg(test)]
+pub(in crate::tui) fn frame_path(name: &str) -> String {
+    let base = format!("{}/src/tui/frames/{name}", env!("CARGO_MANIFEST_DIR"));
+    let twin = format!("{base}.macos.txt");
+    if cfg!(target_os = "macos") && std::path::Path::new(&twin).is_file() {
+        twin
+    } else {
+        format!("{base}.txt")
+    }
 }

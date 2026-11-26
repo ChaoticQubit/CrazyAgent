@@ -6,7 +6,7 @@ import type {
   MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, SkippedFolder, SkippedMore, ToolFix,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
-import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
+import { formatRoute, thisComputer, type IconName, type SidebarProject, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, researchChoices, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
@@ -998,7 +998,7 @@ const INSTALL_ALONE: ReadonlySet<DependencyName> = new Set<DependencyName>(["nod
  * Input: the state. Output: the fixed word, its tone and one line or null. */
 export function stateView(state: DependencyState): { word: string; tone: Tone; line: string | null } {
   switch (state.state) {
-    case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on this Mac.` };
+    case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on ${thisComputer()}.` };
     case "installed": return { word: "Installed", tone: "ok", line: `Version ${displayText(state.version)} installed.` };
     case "bundled": return { word: "Bundled", tone: "ok", line: `Bundled with CrazyAgent, version ${displayText(state.version)}.` };
     case "system": return { word: "Found", tone: "ok", line: displayText(state.note) };
