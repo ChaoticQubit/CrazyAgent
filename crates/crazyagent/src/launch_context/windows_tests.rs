@@ -1260,3 +1260,128 @@ fn a_windows_install_clears_a_deep_chain_in_its_launch_folder() {
     assert!(home.join(STATE).join("mcp.json").is_file());
     drop(installed);
 }
+
+/// Installs a harness in a home with tools off and hands its files over as a pane kept
+/// running leaves them, for a later `adopt`. Inputs: the home and the harness. Output: the
+/// pane record's files.
+fn kept_install(home: &Path, harness: &str) -> InstalledFiles {
+    let installed = context().install(harness, home, false).unwrap();
+    let files = installed.files().unwrap().clone();
+    installed.keep();
+    files
+}
+
+/// Replaces the launch folder, and for Codex its `config.toml`, with junctions to folders
+/// outside the home, as an agent could after the install. Inputs: the base, the home and
+/// whether Codex. Output: the folders the junctions name.
+fn plant_after_install(base: &Path, home: &Path, codex: bool) -> Vec<(PathBuf, &'static str)> {
+    std::fs::remove_dir_all(home.join(STATE)).unwrap();
+    let state = outside(base, "state-target");
+    junction(&home.join(STATE), &state);
+    let mut planted = vec![(state, "state-target")];
+    if codex {
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        let config = outside(base, "config-target");
+        junction(&home.join("config.toml"), &config);
+        planted.push((config, "config-target"));
+    }
+    planted
+}
+
+/// An adopted Claude Code launch keeps its files while it lives and removes its launch
+/// folder through the held home when it drops, as the install it adopts would.
+#[test]
+fn a_windows_adopted_launch_removes_its_files_when_it_drops() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let files = kept_install(&home, "claude-code");
+    let adopted = Installed::adopt(&files).unwrap();
+    assert!(home.join(STATE).join("mcp.json").is_file());
+    assert!(home.join(STATE).join("instructions.md").is_file());
+    drop(adopted);
+    assert!(gone(&home.join(STATE)));
+    drop(lock_only(&home, "claude-code").unwrap());
+}
+
+/// An adopted Codex launch removes its config and leaves `skills` empty when it drops.
+#[test]
+fn a_windows_adopted_codex_launch_removes_its_config_when_it_drops() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let files = kept_install(&home, "codex");
+    let adopted = Installed::adopt(&files).unwrap();
+    assert!(home.join("config.toml").is_file());
+    drop(adopted);
+    assert!(gone(&home.join("config.toml")));
+    assert!(gone(&home.join(STATE)));
+    assert!(skills_empty(&home));
+}
+
+/// Junctions an agent plants at the launch folder and at Codex's `config.toml` after a fresh
+/// install go as themselves when the launch drops, and what they name keeps every byte.
+#[test]
+fn a_windows_junction_planted_after_install_is_not_followed_at_drop() {
+    let (_temp, base) = base();
+    for (harness, codex) in [("claude-code", false), ("codex", true)] {
+        let home = private_home(&base, harness);
+        let installed = context().install(harness, &home, false).unwrap();
+        let planted = plant_after_install(
+            &private_home(&base, &format!("{harness}-out")),
+            &home,
+            codex,
+        );
+        drop(installed);
+        assert!(gone(&home.join(STATE)), "{harness}");
+        assert!(gone(&home.join("config.toml")), "{harness}");
+        for (folder, name) in &planted {
+            assert_untouched(folder, name);
+        }
+    }
+}
+
+/// The same junctions planted after an adopt go as themselves when the adopted launch drops,
+/// and what they name keeps every byte.
+#[test]
+fn a_windows_junction_planted_after_adopt_is_not_followed_at_drop() {
+    let (_temp, base) = base();
+    for (harness, codex) in [("claude-code", false), ("codex", true)] {
+        let home = private_home(&base, harness);
+        let files = kept_install(&home, harness);
+        let adopted = Installed::adopt(&files).unwrap();
+        let planted = plant_after_install(
+            &private_home(&base, &format!("{harness}-out")),
+            &home,
+            codex,
+        );
+        drop(adopted);
+        assert!(gone(&home.join(STATE)), "{harness}");
+        assert!(gone(&home.join("config.toml")), "{harness}");
+        for (folder, name) in &planted {
+            assert_untouched(folder, name);
+        }
+    }
+}
+
+/// An adopted home cannot be swapped for a junction while the adopted launch lives: the
+/// hold shares no delete, so the rename is refused and the home stays itself. Once the
+/// launch drops the rename goes, and an adopt of the junction then put at the home's name
+/// is refused before it makes a lock.
+#[test]
+fn a_windows_adopted_home_swapped_for_a_junction_is_refused() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let target = private_home(&base, "target");
+    let aside = base.join("aside");
+    let files = kept_install(&home, "claude-code");
+    let adopted = Installed::adopt(&files).unwrap();
+    assert!(std::fs::rename(&home, &aside).is_err());
+    assert!(!gone(&home.join(LOCK)));
+    drop(adopted);
+    std::fs::rename(&home, &aside).unwrap();
+    junction(&home, &target);
+    assert_eq!(
+        Installed::adopt(&files).unwrap_err().0,
+        "launch_account_home_unsafe"
+    );
+    assert!(!target.join(LOCK).exists());
+}
