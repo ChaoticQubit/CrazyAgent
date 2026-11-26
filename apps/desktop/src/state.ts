@@ -11,40 +11,14 @@ import { loadFoundProjects, loadIntakeJobs } from "./api-intake";
 import { notifyIntake } from "./notify";
 import { foundPollMs, intakePollMs, jobEnds, jobLine } from "./screens/intake/intake";
 import { carryFollowUps } from "./screens/new-project/carry";
-import { INPUT_DEFAULT, inputChoice, type InputChoice } from "./screens/team/terminal-io";
-import { rendererChoice, rendererDefault, type RendererChoice } from "./screens/team/terminal-renderer";
+export { choiceListeners } from "./choice-listeners";
+export { readLastProject, saveLastProject } from "./last-project";
+export { onTerminalInput, onTerminalRenderer, readTerminalInput, readTerminalRenderer, saveTerminalInput, saveTerminalRenderer } from "./terminal-choices";
 export type Loaded<T> = { kind: "loading" } | Result<T>;
 export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
-const TERMINAL_INPUT_KEY = "crazyagent.terminal-input";
-const TERMINAL_RENDERER_KEY = "crazyagent.terminal-renderer";
-
-const LAST_PROJECT_KEY = "crazyagent.last-project";
-const PROJECT_ID_MAX = 256;
-
-/** Reads the project whose page the owner opened last, as kept in this app, so app start can
- * load its views in the background (DEC-187). Output: the project id; null when none was
- * kept, storage is unavailable or it holds something else. */
-export function readLastProject(): string | null {
-  try {
-    const value = window.localStorage.getItem(LAST_PROJECT_KEY);
-    return value && value.length <= PROJECT_ID_MAX ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Remembers the project whose page the owner opened. Input: the project id. Output: none. */
-export function saveLastProject(id: string): void {
-  if (!id || id.length > PROJECT_ID_MAX) return;
-  try {
-    window.localStorage.setItem(LAST_PROJECT_KEY, id);
-  } catch {
-    return;
-  }
-}
 
 /** Runs work once the window has drawn its next frame and that frame's task is over, so work
  * started at app start never delays what the owner sees first (DEC-187). Input: the work.
@@ -58,93 +32,6 @@ export function afterFirstPaint(run: () => void): () => void {
     window.cancelAnimationFrame(frame);
     window.clearTimeout(timer);
   };
-}
-
-/** Reads where the owner types to every agent's terminal, as kept in this app (not in the
- * engine). The old Master input key is ignored on purpose: a live trial left Both in it.
- * Output: the choice; the default when storage is unavailable or holds something else. */
-export function readTerminalInput(): InputChoice {
-  try {
-    return inputChoice(window.localStorage.getItem(TERMINAL_INPUT_KEY));
-  } catch {
-    return INPUT_DEFAULT;
-  }
-}
-
-/** The listeners of one choice kept in this app: a save in this window tells them at once,
- * and the storage event tells them of a save in another window. Input: the stored key.
- * Output: `tell`, called after a save, and `listen`, which returns the call that stops it. */
-export function choiceListeners(key: string): { tell: () => void; listen: (listener: () => void) => () => void } {
-  const heard = new Set<() => void>();
-  let watched = false;
-  const tell = () => {
-    for (const listener of [...heard]) listener();
-  };
-  return {
-    tell,
-    listen: (listener) => {
-      if (!watched) {
-        watched = true;
-        window.addEventListener("storage", (event) => {
-          if (event.key === key) tell();
-        });
-      }
-      heard.add(listener);
-      return () => {
-        heard.delete(listener);
-      };
-    },
-  };
-}
-
-const inputHeard = choiceListeners(TERMINAL_INPUT_KEY);
-
-/** Remembers where the owner types to every agent's terminal and tells this window's
- * listeners at once; other windows hear it through the storage event. Input: the choice.
- * Output: none. */
-export function saveTerminalInput(choice: InputChoice): void {
-  try {
-    window.localStorage.setItem(TERMINAL_INPUT_KEY, choice);
-  } catch {
-    return;
-  }
-  inputHeard.tell();
-}
-
-/** Calls `listener` after each Terminal input choice, made in this window or in another
- * window of the app, so every copy of the setting shows the stored choice (#406 F1). Input:
- * the listener. Output: the call that stops it. */
-export function onTerminalInput(listener: () => void): () => void {
-  return inputHeard.listen(listener);
-}
-
-/** Reads how every terminal draws, as kept in this app (not in the engine). Output: the
- * choice; the platform's default when storage is unavailable or holds something else. */
-export function readTerminalRenderer(): RendererChoice {
-  try {
-    return rendererChoice(window.localStorage.getItem(TERMINAL_RENDERER_KEY));
-  } catch {
-    return rendererDefault();
-  }
-}
-
-const rendererHeard = choiceListeners(TERMINAL_RENDERER_KEY);
-
-/** Remembers how every terminal draws and tells this window's listeners at once; other
- * windows hear it through the storage event. Input: the choice. Output: none. */
-export function saveTerminalRenderer(choice: RendererChoice): void {
-  try {
-    window.localStorage.setItem(TERMINAL_RENDERER_KEY, choice);
-  } catch {
-    return;
-  }
-  rendererHeard.tell();
-}
-
-/** Calls `listener` after each Terminal renderer choice, made in this window or in another
- * window of the app. Input: the listener. Output: the call that stops it. */
-export function onTerminalRenderer(listener: () => void): () => void {
-  return rendererHeard.listen(listener);
 }
 
 /** Reads the owner's appearance choice kept in this app (not in the engine profile).
