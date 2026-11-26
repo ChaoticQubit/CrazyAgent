@@ -302,3 +302,117 @@ fn an_added_agent_worktree_refuses_remotes_with_the_plain_message() {
     assert!(refs.status.success(), "{refs:?}");
     assert!(refs.stdout.is_empty(), "{refs:?}");
 }
+
+/// A research job whose launch errs after its run folder exists ends with the plain owner
+/// line, and the real cause is kept in that run's owner-only log, where the research log
+/// shows it: here the Codex file was removed after engine start, so the launch finds no
+/// harness to run.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_research_launch_that_errs_keeps_its_cause_in_the_run_log() {
+    let root = engine_root();
+    let folder = root.base.join("repo");
+    fs::create_dir(&folder).unwrap();
+    repository_git(&folder, &["init", "-q"]);
+    repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+    register_project(&root.database, "alpha", &folder);
+    let codex = root.base.join("bin").join("codex");
+    fs::create_dir(codex.parent().unwrap()).unwrap();
+    fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    let runner = ResearchRunner::new(
+        &root.database,
+        &root.state,
+        &codex,
+        ResearchLimits::default(),
+    )
+    .unwrap();
+    fs::remove_file(&codex).unwrap();
+    let jobs = ResearchJobs::open(&root.database).unwrap();
+    let id = jobs
+        .enqueue("alpha", "market_research", "codex", false)
+        .unwrap();
+    let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let project = ResearchProject {
+        id: "alpha",
+        root: &folder,
+        account: Some(ResearchAccount::Endpoint {
+            base_url: format!(
+                "http://127.0.0.1:{}/v1",
+                provider.local_addr().unwrap().port()
+            ),
+            model: "local-model".into(),
+            key: None,
+        }),
+    };
+    let run = runner.run_once(&project);
+    assert!(
+        matches!(run, Err(RunError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound),
+        "{run:?}"
+    );
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(
+        job.error.as_deref(),
+        Some("Could not prepare the research sandbox")
+    );
+    let lines = crate::project_setup::research_log(&root.database, id).unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("research launch failed")
+                && line.contains("harness is not installed")),
+        "{lines:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn adding_an_agent_worktree_never_runs_the_project_fsmonitor() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let home = base.join("agent").join("home");
+    let tmp = base.join("agent").join("tmp");
+    let profiles = base.join("profiles");
+    for folder in [&project, &home, &tmp, &profiles] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    ensure_repository(&project, &tmp).unwrap();
+    let marker = tmp.join("fsmonitor-ran");
+    let monitor = tmp.join("monitor.sh");
+    fs::write(
+        &monitor,
+        format!("#!/bin/sh\necho ran >> '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = kernel_processes::spawn_gate::status(
+        Command::new(GIT)
+            .env_clear()
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(&project)
+            .args(["config", "core.fsmonitor"])
+            .arg(&monitor),
+    )
+    .unwrap();
+    assert!(configured.success());
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let profile = profiles.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let worktree = project.join("worktrees").join("agent-one");
+    add_worktree(&sandbox, &profile, &worktree).unwrap();
+    assert!(worktree.join(".git").is_file());
+    assert!(
+        !marker.exists(),
+        "the engine's git ran the project fsmonitor"
+    );
+}
