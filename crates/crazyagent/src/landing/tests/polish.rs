@@ -873,7 +873,10 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
             .stderr(Stdio::null()),
     )
     .unwrap();
-    assert!(released.success(), "the version probe was waiting");
+    assert!(
+        matches!(released.code(), Some(0 | 1)),
+        "the version probe was signalled or had already ended: {released:?}"
+    );
     let set = set_within(&case, &id, Duration::from_secs(15), |set| {
         set.state == ChangeState::Updating || regenerated(&case, set)
     });

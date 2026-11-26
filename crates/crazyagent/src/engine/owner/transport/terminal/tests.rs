@@ -920,44 +920,6 @@ async fn paste_chunks_reach_the_host_once_after_the_last_filtered() {
     );
 }
 
-/// Slice C: a paste chunk that is empty or over `INPUT_BYTES_MAX`, chunks past
-/// `PASTE_BYTES_MAX` or a paste that is not UTF-8 are refused whole, so the view ends; a
-/// paste of exactly `PASTE_BYTES_MAX` is taken.
-#[test]
-fn a_paste_out_of_bounds_is_refused_whole() {
-    let full = [b'a'; INPUT_BYTES_MAX];
-    assert_eq!(Pasting::default().add(&[], true), Err(()));
-    assert_eq!(
-        Pasting::default().add(&[b'a'; INPUT_BYTES_MAX + 1], true),
-        Err(())
-    );
-    assert_eq!(
-        Pasting::default().add(&[0xc3], true),
-        Err(()),
-        "half a UTF-8 character"
-    );
-    let mut over = Pasting::default();
-    for _ in 0..PASTE_BYTES_MAX / INPUT_BYTES_MAX {
-        assert_eq!(over.add(&full, false), Ok(None));
-    }
-    assert_eq!(
-        over.add(b"a", true),
-        Err(()),
-        "one byte past PASTE_BYTES_MAX"
-    );
-    let mut whole = Pasting::default();
-    for _ in 1..PASTE_BYTES_MAX / INPUT_BYTES_MAX {
-        assert_eq!(whole.add(&full, false), Ok(None));
-    }
-    assert_eq!(
-        whole
-            .add(&full, true)
-            .map(|keys| keys.map(|keys| keys.len())),
-        Ok(Some(PASTE_BYTES_MAX))
-    );
-    assert!(!whole.open());
-}
-
 /// Slice C: inside an open paste any other request ends the view as an invalid request, and
 /// nothing is pasted or typed; a grant revoked after a paste's first chunk ends the view as
 /// stale and nothing is pasted.
@@ -1052,7 +1014,8 @@ async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone
 
 /// Slice C (DEC-203): an input-only view opens at the size it asked for and sends no output,
 /// and its typed keys and its paste reach the agent's pane, as a full view of the same agent
-/// then shows; a size out of bounds is refused at the handshake.
+/// then shows; a size out of bounds is refused at the handshake. The full view holds its control
+/// open until the line is read, so no detach can end its output first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_input_only_view_types_and_pastes_without_sending_output() {
     let tmp = tempfile::Builder::new()
@@ -1146,6 +1109,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         cols,
         rows,
         output: mut full,
+        control: full_control,
         ..
     } = owner.terminal_attach(agent).await.unwrap();
     assert_eq!(
@@ -1171,6 +1135,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
     .unwrap_or_else(|_| "the pane never showed the typed and pasted line".into());
     assert_eq!(shown, "typed and pasted");
 
+    drop(full_control);
     drop(control);
     drop(owner);
     tokio::time::timeout(WAIT, service.shutdown())
@@ -1946,3 +1911,5 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
         .unwrap()
         .unwrap();
 }
+
+mod paste_bounds;
