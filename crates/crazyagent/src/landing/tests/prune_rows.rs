@@ -56,3 +56,20 @@ fn a_prune_that_cannot_read_the_repository_is_tried_again() {
     assert_eq!(case.owner(&["for-each-ref", "refs/crazyagent/"]), "");
     assert!(store::load(&case.db, &id).unwrap().pruned);
 }
+
+/// A discarded set whose repository folder was replaced by a file is gone like a removed
+/// repository: the pass marks it pruned once instead of refusing it on every pass.
+#[test]
+fn a_set_whose_repository_became_a_file_is_marked_pruned() {
+    let case = Case::new();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    std::fs::remove_dir_all(&case.repo).unwrap();
+    write(&case.repo, "not a repository\n");
+
+    assert_eq!(prune(&case.db, NOW_MS + 7 * DAY_MS), Ok(1));
+    assert!(store::load(&case.db, &id).unwrap().pruned);
+    assert_eq!(prune(&case.db, NOW_MS + 8 * DAY_MS), Ok(0));
+}
