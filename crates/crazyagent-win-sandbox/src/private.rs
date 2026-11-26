@@ -1,6 +1,6 @@
 use crate::dacl::{
-    ADMINISTRATORS, SYSTEM, allowing, inherited_grantee, inherited_label, label, labelled,
-    other_writer, trusted_owner,
+    ADMINISTRATORS, FILE_CHANGES, SYSTEM, allowing, held_only_by, inherited_grantee,
+    inherited_label, label, labelled, other_writer, trusted_owner,
 };
 
 #[cfg(windows)]
@@ -67,7 +67,23 @@ pub fn judge_store_before_label(facts: &Facts, user: &[u8]) -> Result<(), &'stat
 /// no other SID a right that changes it (reading and running stay open to everyone), and no
 /// label that lets a lower integrity process write it. Inputs: the facts and the user's SID.
 /// Output: Ok, or the reason another account could change the program.
-pub fn judge_program(_facts: &Facts, _user: &[u8]) -> Result<(), &'static str> {
+pub fn judge_program(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
+    if facts.reparse {
+        return Err("a program is a link or a junction");
+    }
+    if facts.links != 1 {
+        return Err("a program has more than one name");
+    }
+    if facts.remote {
+        return Err("a program is on a network volume");
+    }
+    held_only_by(&facts.owner, facts.list.as_deref(), user, FILE_CHANGES)?;
+    if let Some(sacl) = facts.label.as_deref()
+        && let Some((level, policy)) = label(sacl)?
+        && (level < MEDIUM_LEVEL || policy & NO_WRITE_UP == 0)
+    {
+        return Err("a lower integrity process may change a program");
+    }
     Ok(())
 }
 

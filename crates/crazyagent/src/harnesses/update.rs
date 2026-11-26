@@ -805,9 +805,22 @@ fn trusted(program: &Path) -> Result<(), &'static str> {
     if safe { Ok(()) } else { Err(TOOL_UNSAFE) }
 }
 
+/// Checks that a program is safe to start as this user on Windows: a plain file that only
+/// SYSTEM, the administrators, TrustedInstaller and this user can change, nor any folder
+/// above it as written or at its real place ([`crazyagent_win_sandbox::program_trusted`]).
+/// Input: the absolute program path. Output: Ok, `TOOL_MISSING` for a relative or missing
+/// program, or `TOOL_UNSAFE`.
+#[cfg(windows)]
+fn trusted(program: &Path) -> Result<(), &'static str> {
+    if !program.is_absolute() || std::fs::metadata(program).is_err() {
+        return Err(TOOL_MISSING);
+    }
+    crazyagent_win_sandbox::program_trusted(program).map_err(|_| TOOL_UNSAFE)
+}
+
 /// Refuses every tool where the engine has no safe way to check and start one.
 /// Input: the program path, unused. Output: the refusal code.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn trusted(_program: &Path) -> Result<(), &'static str> {
     Err(UNSUPPORTED_HERE)
 }
@@ -822,9 +835,36 @@ fn owned(folder: &Path) -> bool {
     })
 }
 
+/// Tells whether this user owns a folder on Windows, read from a handle opened without
+/// following a link, so a global npm install there needs no administrator. Input: the
+/// folder. Output: true only for a folder that exists, is no link or junction and whose
+/// owner is this user's SID.
+#[cfg(windows)]
+fn owned(folder: &Path) -> bool {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let Ok(held) = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(folder)
+    else {
+        return false;
+    };
+    let folder_read = held.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let facts = crazyagent_win_sandbox::private::facts(&held);
+    let user = crazyagent_win_sandbox::private::user_sid();
+    match (facts, user) {
+        (Ok(facts), Ok(user)) => folder_read && !facts.reparse && facts.owner == user,
+        _ => false,
+    }
+}
+
 /// Reports no folder as this user's where ownership cannot be read.
 /// Input: the folder, unused. Output: false.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn owned(_folder: &Path) -> bool {
     false
 }
