@@ -56,6 +56,23 @@ fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_is_recorded_as_fai
     );
 }
 
+#[test]
+fn a_failed_rollback_line_names_only_a_kept_copy_and_stays_one_short_line() {
+    let rollback = || {
+        Err(EngineError(format!(
+            "{}: check; the rollback failed: check",
+            kernel_storage::restore::RESTORE_ROLLBACK_FAILED
+        )))
+    };
+    let long = format!("replaced-{}", "x".repeat(600));
+    for named in [long.as_str(), "replaced-x\nrestored y", "not-a-copy"] {
+        assert_eq!(
+            restore_line(&rollback(), Some(named)),
+            "failed storage_restore_rollback_failed"
+        );
+    }
+}
+
 /// The restore writes `restoring` before it starts and does not
 /// start when that write fails, so no restore runs that a crash could leave unmarked: here
 /// the record's temp file is a folder, and no backups folder is ever made.

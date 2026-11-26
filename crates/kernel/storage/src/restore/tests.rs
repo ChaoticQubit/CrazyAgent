@@ -345,6 +345,33 @@ fn a_record_write_that_fails_keeps_the_old_record_and_leaves_no_temp_file() {
     );
 }
 
+#[test]
+fn a_record_line_that_is_empty_too_long_or_not_one_line_is_refused_and_keeps_the_old_record() {
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    let long = "x".repeat(RESTORE_RECORD_BYTES_MAX + 1);
+    for line in [
+        "",
+        "failed x\nrestored y",
+        "failed x\rrestored y",
+        long.as_str(),
+    ] {
+        let refused = write_restore_record(root.path(), line).unwrap_err().0;
+        assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+        assert_eq!(
+            read_restore_record(root.path()).as_deref(),
+            Some(RECORD_PENDING)
+        );
+    }
+    let names = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, [RESTORE_RECORD_FILE]);
+}
+
 /// The folder of the pinned backup [`upgraded`] took. Input: the engine root. Output: it.
 pub(super) fn pinned_folder(root: &Path) -> PathBuf {
     std::fs::read_dir(root.join(BACKUPS))
