@@ -49,7 +49,7 @@ fn harness_sentences_name_the_computer_the_build_runs_on() {
         (
             SUBTITLE,
             if cfg!(windows) {
-                "Agents run inside these tools. CrazyAgent finds them on this computer. Install and update them outside CrazyAgent.".to_owned()
+                "Agents run inside these tools. CrazyAgent finds them on this computer. It can install one with npm and update one with that harness's own updater, each only when you choose it.".to_owned()
             } else {
                 format!(
                     "Agents run inside these tools. CrazyAgent finds them on {here}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it."
