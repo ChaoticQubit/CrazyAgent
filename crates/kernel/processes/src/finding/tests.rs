@@ -1256,3 +1256,100 @@ fn a_missing_git_names_the_package_manager_on_linux() {
     );
     assert!(!line.contains("xcode-select"), "{line}");
 }
+
+/// The owner line for a tool found nowhere the resolver looks. Input: the tool name.
+/// Output: the line.
+fn missing_line(tool: &str) -> String {
+    Missing {
+        tool: tool.into(),
+        reason: Reason::NotFound,
+        needs: None,
+        found: None,
+        looked: Vec::new(),
+        refused: None,
+    }
+    .line()
+}
+
+/// The owner line for an npm Codex whose node is missing. Input: none. Output: the line.
+fn codex_needs_node_line() -> String {
+    Missing {
+        tool: "codex".into(),
+        reason: Reason::NeedsInterpreter,
+        needs: Some("node".into()),
+        found: None,
+        looked: Vec::new(),
+        refused: None,
+    }
+    .line()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_missing_node_names_homebrew_and_terminal_on_macos() {
+    let hint = "Install Node.js from nodejs.org, or run brew install node in Terminal.";
+    assert_eq!(
+        missing_line("node"),
+        format!("node is missing. {hint} Then try again.")
+    );
+    assert_eq!(
+        missing_line("npm"),
+        format!("npm is missing. {hint} Then try again.")
+    );
+    assert_eq!(
+        codex_needs_node_line(),
+        format!("codex needs node, which is missing. {hint} Then try again.")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_missing_codex_or_claude_names_terminal_on_macos() {
+    assert_eq!(
+        missing_line("codex"),
+        "codex is missing. Install Codex: run npm install -g @openai/codex in Terminal. Then try again."
+    );
+    assert_eq!(
+        missing_line("claude"),
+        "claude is missing. Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal. Then try again."
+    );
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn a_missing_node_names_the_package_manager_on_linux() {
+    let hint = "Install Node.js from nodejs.org or with your package manager.";
+    assert_eq!(
+        missing_line("node"),
+        format!("node is missing. {hint} Then try again.")
+    );
+    assert_eq!(
+        missing_line("npm"),
+        format!("npm is missing. {hint} Then try again.")
+    );
+    let needs = codex_needs_node_line();
+    assert_eq!(
+        needs,
+        format!("codex needs node, which is missing. {hint} Then try again.")
+    );
+    assert!(
+        !needs.contains("brew") && !needs.contains("Terminal"),
+        "{needs}"
+    );
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn a_missing_codex_or_claude_names_a_terminal_on_linux() {
+    let codex = missing_line("codex");
+    assert_eq!(
+        codex,
+        "codex is missing. Install Codex: run npm install -g @openai/codex in a terminal. Then try again."
+    );
+    let claude = missing_line("claude");
+    assert_eq!(
+        claude,
+        "claude is missing. Install Claude Code: run npm install -g @anthropic-ai/claude-code in a terminal. Then try again."
+    );
+    assert!(!codex.contains("Terminal") && !claude.contains("Terminal"));
+}

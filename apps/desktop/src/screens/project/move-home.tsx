@@ -8,6 +8,7 @@ import type { AddFolderMode, AddOverride, FolderSize, IntakeJob, IntentReceipt }
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, Notice, Segmented } from "../../ui";
 import { displayText } from "../conversation";
+import { moveUnreadLine } from "./move-home-words";
 import { AnywayDialog, leftInIcloud } from "../intake/add-folder";
 import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, sizeLine, withEverything, worktreesLine } from "../intake/intake";
 import { folderLabel, projectFolder } from "./overview";
@@ -111,7 +112,7 @@ export function MoveHomeDialog({ open, name, folder, home, way, size, busy, prob
     {!ready && <p className="pj-secondary" role="status">Reading the folder...</p>}
     {ready && (line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>)}
     {leftInIcloud({ skipped: read?.skipped ?? [], skippedMore: read?.skipped_more ?? null, everything, onEverything, source: folder, job: way })}
-    {readFailed(size) && <Notice tone="info">CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.</Notice>}
+    {readFailed(size) && <Notice tone="info">{moveUnreadLine()}</Notice>}
     {way === "copy" && <Notice tone="info">The copy becomes the project. The old folder stays where it is, with the agents' old copies in it.</Notice>}
     {way === "copy" && (read?.worktrees ?? 0) > 0 && <Notice tone="info">{worktreesLine(read?.worktrees ?? 0)}</Notice>}
     <Notice tone="warn">{loss.map((text) => <p key={text}>{text}</p>)}</Notice>
