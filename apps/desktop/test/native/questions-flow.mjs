@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { gitRepo } from "./questions-flow-repo.mjs";
-import { shownField, shownText, terminalSettled } from "./shown-text.mjs";
+import { echoed, shownField, shownText, terminalSettled } from "./shown-text.mjs";
 import { INTERNALS, bridgeCall, owner, serveApp, start, stop } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -728,15 +728,15 @@ async function main() {
         const id = await ask("popup");
         await until("popup_shows_question", VIEW_MS, async () => (await popupText()).includes(ASKS.popup.question));
         await view.capture("questions-popup-conversation");
+        if (field === null && process.platform !== "darwin") throw new Refused("no_live_terminal", "no terminal field the owner can see in the Conversation tab, where the xterm terminal is the product");
         if (field !== null) {
+          await echoed(page, "#pj-tab-panel", "qf6b", until, VIEW_MS);
           const kept = await page.evaluate(`document.activeElement?.closest("#pj-tab-panel") !== null && document.activeElement.matches(".xterm-helper-textarea, textarea")`);
           if (!kept) throw new Refused("popup_took_the_keyboard", `${field} lost it to ${await page.evaluate("document.activeElement?.outerHTML?.slice(0, 120) ?? null")}`);
         }
         const over = await page.evaluate(`(() => { const card = document.querySelector(${JSON.stringify(POPUP)}).getBoundingClientRect(); const panel = document.getElementById("pj-tab-panel").getBoundingClientRect(); return card.bottom <= panel.top + 1 ? null : { card: card.bottom, panel: panel.top }; })()`);
         if (over !== null) throw new Refused("popup_over_the_tab", JSON.stringify(over));
-        for (const word of ["A question for you", "Recommended", "Answer", "Dismiss", "Hide", "Questions tab"]) {
-          if (!(await popupText()).includes(word)) throw new Refused("popup_without", word);
-        }
+        for (const word of ["A question for you", "Recommended", "Answer", "Dismiss", "Hide", "Questions tab"]) if (!(await popupText()).includes(word)) throw new Refused("popup_without", word);
         await view.follow(`${POPUP} .qs-option input[type=radio]`);
         await view.click("Answer", `${POPUP} button`);
         await until("popup_answer_recorded", VIEW_MS, () => question(id)?.status === "answered");
@@ -749,7 +749,7 @@ async function main() {
           return text.includes("Answered") && !text.includes("Waiting for you") ? text : null;
         });
         await view.capture("questions-popup-answered-in-tab");
-        return `pop-up above the tab, ${field === null ? "keyboard check NOT RUN, no field the owner can see in the tab" : `keyboard kept in ${field}`}; answered in the pop-up, ${card.includes("Answer: Yes") ? "shown answered" : "answered"} in the Questions tab; delivered once: ${typed.split("\n")[0].slice(0, 80)}`;
+        return `pop-up above the tab, ${field === null ? "keyboard check NOT RUN: macOS draws native terminal views (DEC-203), the xterm keyboard check gates on the Linux leg" : `keyboard kept in ${field} while typed keys reached the terminal`}; answered in the pop-up, ${card.includes("Answer: Yes") ? "shown answered" : "answered"} in the Questions tab; delivered once: ${typed.split("\n")[0].slice(0, 80)}`;
       });
 
       await step("6c", "Questions show, Pop-up on every tab: a master question pops up on Overview, and Dismiss there is the Questions tab's dismissal", ["QL-1", "OB-9"], async () => {

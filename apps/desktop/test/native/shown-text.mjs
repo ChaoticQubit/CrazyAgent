@@ -30,3 +30,33 @@ export function shownField(selector) {
     return field && document.activeElement === field ? field.className || field.tagName : null;
   })()`;
 }
+
+/** The page expression that finds the first line of a tab panel's terminal screen that shows
+ * a text, read from the terminal's own buffer through its host's `readScreen`. Inputs: the
+ * panel's CSS selector and the text. Output: the expression, which gives that line, or null
+ * when no terminal is shown there or no line has the text. */
+export function screenLine(panel, text) {
+  return `(() => {
+    const host = document.querySelector(${JSON.stringify(panel)})?.querySelector(".tg-terminal-host");
+    const lines = host?.checkVisibility() ? host.readScreen?.() ?? [] : [];
+    return lines.find((line) => line.includes(${JSON.stringify(text)})) ?? null;
+  })()`;
+}
+
+/** Types a word at the keyboard as the owner does, one key at a time into the focused field,
+ * waits until the panel's terminal screen shows it, then erases it with as many Backspaces,
+ * so the keys provably reached the agent's terminal and its input line is left as it was.
+ * Inputs: the page ({ send, evaluate }), the panel selector, the word, the flow's `until`
+ * and its wait in milliseconds. Output: the screen line that showed the word. */
+export async function echoed(page, panel, word, until, wait) {
+  if (!/^[a-z0-9]{1,16}$/.test(word)) throw new TypeError(`echoed types 1 to 16 lowercase letters or digits, not ${JSON.stringify(word)}`);
+  for (const key of word) {
+    await page.send("Input.dispatchKeyEvent", { type: "keyDown", key, text: key });
+    await page.send("Input.dispatchKeyEvent", { type: "keyUp", key });
+  }
+  const line = await until("typed_keys_echoed", wait, () => page.evaluate(screenLine(panel, word)));
+  for (let index = 0; index < word.length; index += 1) {
+    for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
+  }
+  return line;
+}
