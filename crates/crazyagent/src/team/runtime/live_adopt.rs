@@ -46,6 +46,10 @@ impl TeamRuntime {
         if !on || !worker.live || worker.stopping || worker.session.is_some() {
             return Ok(());
         }
+        #[cfg(all(test, unix))]
+        if let Some(step) = BEFORE_ADOPT_READ.with(|step| step.borrow_mut().take()) {
+            step();
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -76,6 +80,15 @@ impl TeamRuntime {
         assert!(worker.session.is_some() && !worker.stopping);
         Ok(())
     }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step a test runs in [`TeamRuntime::adopt_session`] just before it opens its
+    /// transaction, standing in for an owner open that commits from another connection
+    /// meanwhile. Runs once; None runs nothing.
+    static BEFORE_ADOPT_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(test, unix))]
