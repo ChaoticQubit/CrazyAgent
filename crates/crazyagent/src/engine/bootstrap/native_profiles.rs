@@ -145,7 +145,7 @@ impl RootIdentity {
 /// when they name the same files.
 fn same_files<const N: usize>(pinned: &[Identity; N], live: &[Identity; N]) -> bool {
     let pair = |identity: Identity| (identity.device, identity.inode);
-    crate::file_identity::same_files(&pinned.map(pair), &live.map(pair))
+    kernel_common::file_identity::same_files(&pinned.map(pair), &live.map(pair))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

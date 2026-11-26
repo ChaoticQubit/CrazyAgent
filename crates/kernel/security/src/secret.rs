@@ -120,11 +120,14 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
         size += match piece {
             Piece::Plain(text) => text.len(),
             Piece::Escaped(text) => {
-                if text.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-                    return None;
+                let mut escapes = 0;
+                for byte in text.bytes() {
+                    if byte < 0x20 || byte == 0x7f {
+                        return None;
+                    }
+                    escapes += usize::from(matches!(byte, b'\\' | b'"'));
                 }
-                let escapes = text.bytes().filter(|byte| matches!(byte, b'\\' | b'"'));
-                text.len() + escapes.count()
+                text.len() + escapes
             }
             Piece::Form(text) => form_urlencoded::byte_serialize(text.as_bytes())
                 .map(str::len)
@@ -132,57 +135,65 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
             Piece::Hex(bytes) => bytes.len() * 2,
         };
     }
-    let mut buffer = Vec::with_capacity(size);
+    let mut buffer = vec![0_u8; size];
     let capacity = buffer.capacity();
+    let mut at = 0;
     for piece in pieces {
         match piece {
-            Piece::Plain(text) => buffer.extend_from_slice(text.as_bytes()),
+            Piece::Plain(text) => {
+                buffer[at..at + text.len()].copy_from_slice(text.as_bytes());
+                at += text.len();
+            }
             Piece::Escaped(text) => {
                 for byte in text.bytes() {
                     if matches!(byte, b'\\' | b'"') {
-                        buffer.push(b'\\');
+                        buffer[at] = b'\\';
+                        at += 1;
                     }
-                    buffer.push(byte);
+                    buffer[at] = byte;
+                    at += 1;
                 }
             }
             Piece::Form(text) => {
                 for part in form_urlencoded::byte_serialize(text.as_bytes()) {
-                    buffer.extend_from_slice(part.as_bytes());
+                    buffer[at..at + part.len()].copy_from_slice(part.as_bytes());
+                    at += part.len();
                 }
             }
             Piece::Hex(bytes) => {
                 for byte in *bytes {
-                    buffer.push(HEX_DIGITS[usize::from(byte >> 4)]);
-                    buffer.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
+                    buffer[at] = HEX_DIGITS[usize::from(byte >> 4)];
+                    buffer[at + 1] = HEX_DIGITS[usize::from(byte & 0x0f)];
+                    at += 2;
                 }
             }
         }
     }
+    assert_eq!(at, size);
     assert_eq!(buffer.len(), size);
     assert_eq!(buffer.capacity(), capacity);
     Some(buffer)
 }
 
 /// Serializes a value as compact JSON into one buffer of exactly its size, measured by a
-/// first pass, so no growth frees a partial copy of a secret the value holds; the caller
-/// wipes the result after use. Public in the kernel crate only because its callers stay in
-/// crazyagent. Input: the value. Output: the bytes, or serde_json's error.
+/// first pass and written by the second through a fixed slice that cannot grow, so no
+/// growth frees a partial copy of a secret the value holds; the caller wipes the result.
+/// Public in the kernel crate only because its callers stay in crazyagent. Input: the
+/// value. Output: the bytes, or serde_json's error when the value changed between passes.
 #[cfg(unix)]
 pub fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
     let mut counted = Counted(0);
     serde_json::to_writer(&mut counted, value)?;
-    let mut bounded = Bounded {
-        bytes: Vec::with_capacity(counted.0),
-        limit: counted.0,
-    };
-    let capacity = bounded.bytes.capacity();
-    let written = serde_json::to_writer(&mut bounded, value);
-    let mut buffer = bounded.bytes;
+    let mut buffer = vec![0_u8; counted.0];
+    let capacity = buffer.capacity();
+    let mut room: &mut [u8] = &mut buffer;
+    let written = serde_json::to_writer(&mut room, value);
+    let left = room.len();
     if let Err(problem) = written {
         wipe_owned(&mut buffer);
         return Err(problem);
     }
-    if buffer.len() != counted.0 {
+    if left != 0 {
         wipe_owned(&mut buffer);
         let changed = std::io::Error::other("the value changed between the two passes");
         return Err(serde_json::Error::io(changed));
@@ -200,33 +211,6 @@ struct Counted(usize);
 impl std::io::Write for Counted {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// A writer into a buffer that refuses any write past `limit` bytes, for [`sized_json`]'s
-/// second pass, so a value that grew since the first pass never makes the buffer grow and
-/// free a partial copy. Nothing of a refused write is kept.
-#[cfg(unix)]
-struct Bounded {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-
-#[cfg(unix)]
-impl std::io::Write for Bounded {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len() > self.limit - self.bytes.len() {
-            return Err(std::io::Error::other(
-                "the value grew between the two passes",
-            ));
-        }
-        self.bytes.extend_from_slice(bytes);
-        assert!(self.bytes.len() <= self.limit);
         Ok(bytes.len())
     }
 

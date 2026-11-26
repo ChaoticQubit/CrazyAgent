@@ -20,14 +20,16 @@ impl SecretRef {
 impl TryFrom<&str> for SecretRef {
     type Error = StoreError;
 
-    /// Reads a reference back from its text. Input: the text. Output: the reference, or
+    /// Reads a reference back from its text, checking it in place with the same rules as
+    /// [`reference`] and keeping the given text. Input: the text. Output: the reference, or
     /// `credential_reference_invalid` for anything [`reference`] would not have made.
     fn try_from(text: &str) -> Result<Self, StoreError> {
         let invalid = || StoreError::code("credential_reference_invalid");
         let (service, account) = text.split_once(':').ok_or_else(invalid)?;
-        let found = reference(service, account).map_err(|_| invalid())?;
-        assert_eq!(found.as_str(), text);
-        Ok(found)
+        checked_name(service).map_err(|_| invalid())?;
+        checked_name(account).map_err(|_| invalid())?;
+        allowed(service, account, text).map_err(|_| invalid())?;
+        Ok(SecretRef(text.to_owned()))
     }
 }
 
@@ -80,18 +82,33 @@ pub fn checked_name(name: &str) -> Result<&str, StoreError> {
 /// refused on every OS. Inputs: the service and account. Output: the reference, which holds
 /// no secret, or `credential_name_invalid`.
 pub fn reference(service: &str, account: &str) -> Result<SecretRef, StoreError> {
+    checked_name(service)?;
+    checked_name(account)?;
+    let mut joined = String::with_capacity(service.len() + 1 + account.len());
+    joined.push_str(service);
+    joined.push(':');
+    joined.push_str(account);
+    allowed(service, account, &joined)?;
+    Ok(SecretRef(joined))
+}
+
+/// Runs the rules a reference must pass beyond [`checked_name`] on its two names and their
+/// joined text: an account not ending in `.`, no Windows device stem and no one-letter
+/// service. Inputs: the service and account, both already passed by [`checked_name`], and
+/// `<service>:<account>`. Output: Ok, or `credential_name_invalid`.
+fn allowed(service: &str, account: &str, joined: &str) -> Result<(), StoreError> {
     let invalid = || StoreError::code("credential_name_invalid");
     if !kernel_common::names::is_store_account(account) {
         return Err(invalid());
     }
-    let joined = format!("{}:{}", checked_name(service)?, checked_name(account)?);
     let drive = service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
-    if kernel_common::windows_device(&joined) || drive {
+    if kernel_common::windows_device(joined) || drive {
         return Err(invalid());
     }
+    assert_eq!(joined.len(), service.len() + 1 + account.len());
     assert!(!joined.ends_with(['.', ' ']));
     assert!(joined.len() <= REFERENCE_BYTES_MAX);
-    Ok(SecretRef(joined))
+    Ok(())
 }
 
 /// Splits a reference made by `reference` back into service and account.
