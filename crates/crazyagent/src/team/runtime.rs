@@ -821,6 +821,7 @@ struct Worker {
     fed: Option<crate::master_sessions::Fed>,
     counted_none: bool,
     session: Option<String>,
+    named: Option<Resume>,
     seed: Option<String>,
     bound: Option<TurnBound>,
     spawned: Instant,
@@ -4646,7 +4647,9 @@ impl TeamRuntime {
     /// installed is found, and the automatic start count clears, so the owner's own press
     /// is never refused by [`LIVE_STARTS_MAX`]; a Try again with the switch already on also
     /// stops a master that has not read keys [`MASTER_OVERDUE`] after its start, to start
-    /// again as the first counted start. Takes the setup, live access and paused accounts.
+    /// again as the first counted start. A master the switch started before any master
+    /// session takes the first session the owner opens, while it is empty, without a
+    /// restart. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4667,6 +4670,9 @@ impl TeamRuntime {
         }
         let session = crate::master_sessions::live_session(&self.connection, project)?;
         if let Some(id) = self.master(project) {
+            if on {
+                self.adopt_session(project, id)?;
+            }
             let chosen_off = !on
                 && self.workers[&id].live
                 && super::master::switch(&self.connection, project)?.0 == Some(true);
@@ -4925,6 +4931,48 @@ impl TeamRuntime {
         self.master_restarts.insert(project.clone());
         self.master_moves.insert(project.clone(), left);
         self.moves_next.insert(project.clone(), now + MOVE_DWELL);
+        Ok(())
+    }
+
+    /// Seats a live master the Live terminal switch started before any master session in
+    /// the project's live session when that session is still empty: no owner turn and no
+    /// kept conversation. The reads and the seat run in one immediate transaction, and the
+    /// conversation the master named is kept for the session, so a restart resumes it.
+    /// Takes the project and the master agent. Returns any SQLite failure.
+    fn adopt_session(&mut self, project: &ProjectId, id: i64) -> Result<(), EngineError> {
+        let worker = &self.workers[&id];
+        assert!(&worker.project == project && worker.role == AgentRole::Master);
+        if !worker.live || worker.stopping || worker.session.is_some() {
+            return Ok(());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let Some(session) = crate::master_sessions::live_session(&tx, project)? else {
+            return Ok(());
+        };
+        let id_of = SessionId::new(&session).map_err(error)?;
+        if crate::master_sessions::has_owner_turn(&tx, &id_of)?
+            || super::master::session_conversation(&tx, project, &session)?.is_some()
+        {
+            return Ok(());
+        }
+        if let Some(resume) = worker.named.clone() {
+            let kept = super::master::SessionConversation {
+                agent: id,
+                harness: launch_harness(&worker.harness)
+                    .unwrap_or(&worker.harness)
+                    .to_owned(),
+                connection: worker.connection.as_str().to_owned(),
+                resume,
+            };
+            super::master::keep_conversation(&tx, project, &session, &kept)?;
+        }
+        tx.commit().map_err(error)?;
+        let worker = self.workers.get_mut(&id).expect("adopting master exists");
+        worker.session = Some(session);
+        assert!(worker.session.is_some() && !worker.stopping);
         Ok(())
     }
 
@@ -8048,6 +8096,7 @@ impl TeamRuntime {
                 turn_started: None,
                 counted_none: false,
                 session: None,
+                named: None,
                 seed: None,
                 bound: None,
                 spawned: Instant::now(),
@@ -10194,6 +10243,11 @@ impl TeamRuntime {
                         session,
                         &kept,
                     )?;
+                } else if worker.live && worker.role == AgentRole::Master {
+                    self.workers
+                        .get_mut(&id)
+                        .expect("named worker exists")
+                        .named = Some(resume);
                 }
                 Ok(false)
             }

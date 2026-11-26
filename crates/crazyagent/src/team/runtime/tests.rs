@@ -17934,6 +17934,7 @@ fn between_turns(
         turn_started: None,
         fed: None,
         session: None,
+        named: None,
         seed: None,
         bound: None,
         spawned: Instant::now(),
