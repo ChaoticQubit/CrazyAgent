@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { chooseTheme, readTheme, saveQuestionsShown, useAppSession, useQuestionsShown, type ThemeChoice } from "../../state";
+import { chooseTheme, readTheme, useAppSession, type ThemeChoice } from "../../state";
+import { saveQuestionsShown, useQuestionsShown } from "../../questions-shown";
 import { QuestionsShownSetting } from "../project/question-popup";
 import { TerminalLines } from "./terminal";
 import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";

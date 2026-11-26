@@ -8,7 +8,7 @@ import "./load-source.mjs";
 
 const client = await import("../src/api-questions.ts");
 const popup = await import("../src/screens/project/question-popup.tsx");
-const state = await import("../src/state.ts");
+const state = await import("../src/questions-shown.ts");
 const page = await import("../src/screens/project/index.tsx");
 
 const NOW = Date.UTC(2026, 10, 11, 13, 0);
