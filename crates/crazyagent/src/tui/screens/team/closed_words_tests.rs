@@ -26,9 +26,12 @@ fn on_linux_a_terminal_with_no_tmux_says_to_install_it_with_the_package_manager(
 
 #[cfg(target_os = "windows")]
 #[test]
-fn on_windows_a_terminal_with_no_tmux_keeps_the_generic_closed_words() {
+fn on_windows_an_unavailable_terminal_says_the_engine_could_not_open_it() {
     assert_eq!(
         closed_words("terminal_unavailable"),
-        ("The terminal closed.", "Enter on the agent opens it again.")
+        (
+            "The engine couldn't open this terminal.",
+            "Enter on the agent opens it again.",
+        )
     );
 }
