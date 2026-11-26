@@ -85,6 +85,10 @@ fn a_store_name_is_lowercase_and_bounded() {
         "a.",
         "nul",
         "com1.token",
+        "x.-_y",
+        "a.b.c",
+        "0",
+        "_",
         &"t".repeat(STORE_NAME_BYTES_MAX),
     ] {
         assert!(is_store_name(good), "{good:?}");
@@ -95,9 +99,20 @@ fn a_store_name_is_lowercase_and_bounded() {
         ".token",
         "-token",
         "a..b",
+        "a..",
+        "ab..",
+        "..",
+        ".",
+        "-",
         "a b",
+        "a:b",
+        "a/b",
+        "a\0b",
+        "a\u{7f}b",
+        "caf\u{e9}",
         "CON",
         &"t".repeat(STORE_NAME_BYTES_MAX + 1),
+        &format!("{}..", "t".repeat(STORE_NAME_BYTES_MAX - 2)),
     ] {
         assert!(!is_store_name(bad), "{bad:?}");
     }
