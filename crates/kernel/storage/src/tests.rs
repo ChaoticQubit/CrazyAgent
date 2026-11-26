@@ -58,9 +58,15 @@ const STORAGE: &str = "crazyagent-kernel-storage";
 
 /// The places one Cargo.toml turns this crate's `test-support` feature on outside a
 /// dev-dependency, read as TOML so a dependency table of its own, a wrapped features list,
-/// a target table or a feature naming the dependency counts. Panics naming the manifest
-/// when it does not parse. Inputs: the manifest's path and text. Output: the places, sorted.
-fn refused_places(path: &std::path::Path, text: &str) -> Vec<String> {
+/// a target table or a feature naming the dependency counts. A `workspace = true` entry reads
+/// its package and features through the root's `[workspace.dependencies]`, with its own
+/// features added. Panics naming the manifest when it does not parse. Inputs: the manifest's
+/// path, text and the root's workspace dependencies. Output: the places, sorted.
+fn refused_places(
+    path: &std::path::Path,
+    text: &str,
+    inherited: Option<&toml::Table>,
+) -> Vec<String> {
     let manifest: toml::Table = toml::from_str(text)
         .unwrap_or_else(|error| panic!("{path:?} does not parse as a manifest: {error}"));
     let kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
@@ -82,21 +88,28 @@ fn refused_places(path: &std::path::Path, text: &str) -> Vec<String> {
     for (place, table) in &tables {
         for (key, entry) in *table {
             let entry = entry.as_table();
-            let package = entry
-                .and_then(|entry| entry.get("package"))
-                .and_then(toml::Value::as_str);
+            let from_workspace = entry
+                .and_then(|entry| entry.get("workspace"))
+                .and_then(toml::Value::as_bool)
+                == Some(true);
+            let base = inherited
+                .filter(|_| from_workspace)
+                .and_then(|inherited| inherited.get(key))
+                .and_then(toml::Value::as_table);
+            let package = [entry, base]
+                .into_iter()
+                .flatten()
+                .find_map(|table| table.get("package").and_then(toml::Value::as_str));
             if key != STORAGE && package != Some(STORAGE) {
                 continue;
             }
             keys.push(key.clone());
-            let turned_on = entry
-                .and_then(|entry| entry.get("features"))
-                .and_then(toml::Value::as_array)
-                .is_some_and(|features| {
-                    features
-                        .iter()
-                        .any(|feature| feature.as_str() == Some("test-support"))
-                });
+            let turned_on = [entry, base]
+                .into_iter()
+                .flatten()
+                .filter_map(|table| table.get("features").and_then(toml::Value::as_array))
+                .flatten()
+                .any(|feature| feature.as_str() == Some("test-support"));
             if turned_on && !place.ends_with("dev-dependencies") {
                 refused.push(place.clone());
             }
@@ -122,6 +135,14 @@ fn refused_places(path: &std::path::Path, text: &str) -> Vec<String> {
 #[test]
 fn test_support_is_turned_on_only_by_dev_dependencies() {
     let root = workspace();
+    let root_text = std::fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap_or_else(|error| panic!("read the root manifest: {error}"));
+    let root_manifest: toml::Table = toml::from_str(&root_text)
+        .unwrap_or_else(|error| panic!("the root manifest does not parse: {error}"));
+    let inherited = root_manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table);
     let manifests: Vec<_> = files(&root.join("crates"), "Cargo.toml")
         .into_iter()
         .chain(files(&root.join("apps"), "Cargo.toml"))
@@ -132,7 +153,7 @@ fn test_support_is_turned_on_only_by_dev_dependencies() {
     for manifest in &manifests {
         let text = std::fs::read_to_string(manifest)
             .unwrap_or_else(|error| panic!("read {manifest:?}: {error}"));
-        for place in refused_places(manifest, &text) {
+        for place in refused_places(manifest, &text, inherited) {
             refused.push(format!("{} {place}", manifest.display()));
         }
     }
@@ -145,7 +166,7 @@ fn test_support_is_turned_on_only_by_dev_dependencies() {
 /// The places a manifest text turns storage's `test-support` on outside dev-dependencies.
 /// Input: the text. Output: the places.
 fn refused_in(text: &str) -> Vec<String> {
-    refused_places(std::path::Path::new("other/Cargo.toml"), text)
+    refused_places(std::path::Path::new("other/Cargo.toml"), text, None)
 }
 
 /// The places a member manifest turns storage's `test-support` on outside dev-dependencies,
@@ -153,13 +174,12 @@ fn refused_in(text: &str) -> Vec<String> {
 /// Inputs: the root text and the member text. Output: the places.
 fn refused_with_root(root: &str, text: &str) -> Vec<String> {
     let root: toml::Table = toml::from_str(root).expect("the root text parses");
-    assert!(
-        root.get("workspace")
-            .and_then(|workspace| workspace.get("dependencies"))
-            .is_some(),
-        "the root text has workspace dependencies"
-    );
-    refused_in(text)
+    let inherited = root
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table);
+    assert!(inherited.is_some(), "the root text has workspace dependencies");
+    refused_places(std::path::Path::new("member/Cargo.toml"), text, inherited)
 }
 
 /// The root text these rows plant: storage under an alias, once with test-support on.
