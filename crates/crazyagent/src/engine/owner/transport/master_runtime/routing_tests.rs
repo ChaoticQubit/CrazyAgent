@@ -550,10 +550,7 @@ impl Fixture {
         request: &OwnerRequest,
     ) -> OwnerReply {
         let runtime = service.owner_runtime().unwrap();
-        let mut auth = [0; 37];
-        auth[..4].copy_from_slice(b"CAO1");
-        auth[4] = 0;
-        auth[5..].copy_from_slice(&owner.token);
+        let auth = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &owner.token);
         let admission = runtime.authority.authenticate(&auth).unwrap();
         let _barrier = tokio::time::timeout(TEST_BOUND, runtime.engine.owner_egress.write())
             .await

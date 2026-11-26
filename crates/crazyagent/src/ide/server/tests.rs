@@ -2289,15 +2289,14 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
 }
 
 /// The handshake the built-in extension sends with the token in its capability file.
-fn capability_packet(path: &Path) -> [u8; 37] {
+fn capability_packet(path: &Path) -> crate::engine::secret_frame::OwnerPacket {
     let text = fs::read_to_string(path).unwrap();
     assert_eq!(text.len(), 64);
-    let mut packet = [0; 37];
-    packet[..4].copy_from_slice(bridge::MAGIC);
-    for (index, byte) in packet[5..].iter_mut().enumerate() {
+    let mut token = [0; 32];
+    for (index, byte) in token.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap();
     }
-    packet
+    crate::engine::secret_frame::owner_packet(bridge::MAGIC, 0, &token)
 }
 
 #[tokio::test]
