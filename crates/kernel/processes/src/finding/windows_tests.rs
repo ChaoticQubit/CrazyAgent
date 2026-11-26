@@ -354,3 +354,21 @@ fn a_drive_prefixed_name_never_reaches_a_file_outside_the_searched_folders() {
     assert_eq!(missing.reason, Reason::NotFound);
     assert!(missing.refused.is_none());
 }
+
+#[test]
+fn a_missing_git_names_git_for_windows_on_windows() {
+    let line = Missing {
+        tool: "git".into(),
+        reason: Reason::NotFound,
+        needs: None,
+        found: None,
+        looked: Vec::new(),
+        refused: None,
+    }
+    .line();
+    assert_eq!(
+        line,
+        "git is missing. Install Git for Windows from git-scm.com. Then try again."
+    );
+    assert!(!line.contains("xcode-select"), "{line}");
+}

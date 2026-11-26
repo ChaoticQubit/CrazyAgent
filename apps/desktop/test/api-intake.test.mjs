@@ -181,7 +181,10 @@ test("an add anyway sends the overrides with the add and a bad override reads as
 
 test("an iCloud refusal reads as a plain sentence that keeps the folder safe", () => {
   assert.equal(api.intakeCopy("home_icloud_not_downloaded"), "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.");
-  assert.match(api.intakeCopy("home_permission_denied"), /System Settings > Privacy & Security > Files and Folders/);
+  assert.match(api.intakeCopy("home_permission_denied", true), /System Settings > Privacy & Security > Files and Folders/);
+  const elsewhere = api.intakeCopy("home_permission_denied", false);
+  assert.equal(elsewhere, "CrazyAgent couldn't read or move this folder: its permissions don't allow it. Check the folder's owner and permissions, then try again. Nothing was removed.");
+  assert.doesNotMatch(elsewhere, /macOS|System Settings/);
 });
 
 test("a started onboarding's kept change guesses no project from the folder name, so only the engine's id names it (rv-secreview S2 F1)", () => {
