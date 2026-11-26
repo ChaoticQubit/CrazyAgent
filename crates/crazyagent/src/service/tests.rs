@@ -445,8 +445,14 @@ fn retiring_leaves_a_link_to_a_hard_link_of_the_old_copy_alone() {
     let installed = persistable(&bundled, layout.root(), Some(&mount), &HOOKS).unwrap();
     retire_old_copies_with(layout.root(), &installed, Some(&cli), &HOOKS);
     assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), twin);
-    assert!(std::fs::symlink_metadata(&old).is_err(), "the old copy is retired");
-    assert!(cli.join("crazyagent").is_file(), "the link still leads to the kept file");
+    assert!(
+        std::fs::symlink_metadata(&old).is_err(),
+        "the old copy is retired"
+    );
+    assert!(
+        cli.join("crazyagent").is_file(),
+        "the link still leads to the kept file"
+    );
 }
 
 #[cfg(unix)]
