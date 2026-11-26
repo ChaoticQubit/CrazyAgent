@@ -62,3 +62,32 @@ test("v2.5 S3c: the harness page hands each e2e_watch_next change to the watch's
   assert.deepEqual(asked.map(({ cmd }) => cmd), ["desktop_watch", "e2e_watch_next", "e2e_watch_next", "e2e_watch_next", "e2e_watch_next"]);
   assert.deepEqual(asked[0].args, { changes: `__CHANNEL__:${id}` });
 });
+
+test("the harness page keeps following the engine watch after a dropped long-poll, as the app's feed does, and asks the bridge to watch again", { timeout: 15000 }, async () => {
+  const answers = [
+    { value: null },
+    { dropped: "e2e_watch_next got no answer from the bridge: socket hang up" },
+    { value: null },
+    { value: { topics: ["team", "unknown"] } },
+    { failure: { code: "watch_superseded", message: "a newer page follows the engine watch" } },
+  ];
+  const asked = [];
+  let ended;
+  const drained = new Promise((resolve) => (ended = resolve));
+  const window = { addEventListener() {} };
+  const fetch = async (_url, { body }) => {
+    asked.push(JSON.parse(body));
+    const answer = answers.shift();
+    if (answers.length === 0) ended();
+    return { json: async () => answer };
+  };
+  vm.runInNewContext(INTERNALS, { window, fetch, setTimeout });
+  const got = [];
+  const id = window.__TAURI_INTERNALS__.transformCallback((raw) => got.push(JSON.parse(JSON.stringify(raw))));
+  const channel = { id, toJSON: () => `__CHANNEL__:${id}` };
+  assert.equal(await window.__TAURI_INTERNALS__.invoke("desktop_watch", { changes: channel }), null);
+  await drained;
+  assert.deepEqual(got, [{ index: 0, message: { topics: ["team", "unknown"] } }]);
+  assert.deepEqual(asked.map(({ cmd }) => cmd), ["desktop_watch", "e2e_watch_next", "desktop_watch", "e2e_watch_next", "e2e_watch_next"]);
+  assert.deepEqual(asked[2].args, { changes: `__CHANNEL__:${id}` });
+});
