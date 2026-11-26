@@ -749,7 +749,7 @@ async function main() {
           return text.includes("Answered") && !text.includes("Waiting for you") ? text : null;
         });
         await view.capture("questions-popup-answered-in-tab");
-        return `pop-up above the tab, ${field === null ? "no tab field held the keyboard" : `keyboard kept in ${field}`}; answered in the pop-up, ${card.includes("Answer: Yes") ? "shown answered" : "answered"} in the Questions tab; delivered once: ${typed.split("\n")[0].slice(0, 80)}`;
+        return `pop-up above the tab, ${field === null ? "keyboard check NOT RUN, no field the owner can see in the tab" : `keyboard kept in ${field}`}; answered in the pop-up, ${card.includes("Answer: Yes") ? "shown answered" : "answered"} in the Questions tab; delivered once: ${typed.split("\n")[0].slice(0, 80)}`;
       });
 
       await step("6c", "Questions show, Pop-up on every tab: a master question pops up on Overview, and Dismiss there is the Questions tab's dismissal", ["QL-1", "OB-9"], async () => {
