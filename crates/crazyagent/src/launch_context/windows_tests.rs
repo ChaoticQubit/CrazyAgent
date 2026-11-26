@@ -106,8 +106,8 @@ fn context() -> AgentContext {
 }
 
 /// V244-WIN-MASTER S9a: a W1 private home passes H1's check at `lock_only`, and the Windows
-/// lock then holds it until the guard drops. A Codex hold stays refused until its skills can
-/// be removed handle-relative (S9b), and gives the lock back.
+/// lock then holds it until the guard drops. A Codex hold takes the same lock once its skills
+/// are removed through the held home, and gives the lock back.
 #[test]
 fn a_windows_lock_only_holds_a_private_home_until_its_guard_drops() {
     let (_temp, base) = base();
@@ -116,10 +116,9 @@ fn a_windows_lock_only_holds_a_private_home_until_its_guard_drops() {
     assert_held(&home);
     drop(held);
     drop(lock_only(&home, "claude-code").unwrap());
-    assert_eq!(
-        lock_only(&home, "codex").unwrap_err().0,
-        "launch_context_unavailable"
-    );
+    let codex = lock_only(&home, "codex").unwrap();
+    assert_held(&home);
+    drop(codex);
     drop(lock_only(&home, "claude-code").unwrap());
 }
 
@@ -166,10 +165,10 @@ fn a_windows_adopt_refuses_an_open_or_linked_home_before_a_lock() {
     });
 }
 
-/// What the Windows install cannot write yet, tools, Codex and a team relay, is refused
-/// with `launch_context_unavailable` once the home's checks pass, before it takes the lock
-/// or changes the home, so the launch folder and a Codex `config.toml` already there keep
-/// every byte.
+/// What the Windows install cannot write yet, tools for Claude Code or Codex and a team
+/// relay, is refused with `launch_context_unavailable` once the home's checks pass, before
+/// it takes the lock or changes the home, so the launch folder and a Codex `config.toml`
+/// already there keep every byte.
 #[test]
 fn a_windows_install_it_cannot_write_yet_is_refused_before_it_changes_the_home() {
     let (_temp, base) = base();
@@ -183,7 +182,7 @@ fn a_windows_install_it_cannot_write_yet_is_refused_before_it_changes_the_home()
     };
     let cases = [
         ("tools", context(), "claude-code", true),
-        ("codex", context(), "codex", false),
+        ("codex tools", context(), "codex", true),
         ("relay", relay, "claude-code", false),
     ];
     for (case, context, harness, tools) in cases {
@@ -760,4 +759,275 @@ fn a_windows_process_install_keeps_a_kept_file_it_cannot_open() {
     );
     drop(holder);
     assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{\"kept\":true}");
+}
+
+/// Asserts each file holds exactly the home's inheritable list, passes W1's private check
+/// and grants nothing to Everyone, Users or a package. Inputs: the home and the files.
+fn assert_home_list(home: &Path, files: &[&Path]) {
+    use crazyagent_win_sandbox::dacl;
+    const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    const USERS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 33, 2, 0, 0];
+    let home_list = private::facts(&private::open_dir(home).unwrap())
+        .unwrap()
+        .list
+        .unwrap();
+    let home_entries: Vec<_> = dacl::entries(&home_list)
+        .unwrap()
+        .iter()
+        .map(|entry| (entry.allows, entry.mask, entry.sid.to_vec()))
+        .collect();
+    assert!(!home_entries.is_empty());
+    for file in files {
+        let opened = std::fs::File::open(file).unwrap();
+        assert!(private::check(&opened).is_ok(), "{}", file.display());
+        let list = private::facts(&opened).unwrap().list.unwrap();
+        let entries = dacl::entries(&list).unwrap();
+        let held: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.allows, entry.mask, entry.sid.to_vec()))
+            .collect();
+        assert_eq!(held, home_entries, "{}: {entries:?}", file.display());
+        assert!(
+            entries.iter().all(|entry| entry.sid != EVERYONE
+                && entry.sid != USERS
+                && !dacl::package(entry.sid)),
+            "{}: {entries:?}",
+            file.display()
+        );
+    }
+}
+
+/// The `config.toml` a Codex launch with tools off writes in a home: its instructions and
+/// no hooks, keyed to the home's own config path. Inputs: the home and the instructions.
+/// Output: the text.
+fn codex_text(home: &Path, instructions: &str) -> String {
+    let source = std::fs::canonicalize(home).unwrap().join("config.toml");
+    codex_config(instructions, &[], &[], &[], &source.to_string_lossy(), None).unwrap()
+}
+
+/// Whether a home's `skills` is a real folder, no link, holding nothing. Input: the home.
+/// Output: the answer.
+fn skills_empty(home: &Path) -> bool {
+    let skills = home.join("skills");
+    let found = std::fs::symlink_metadata(&skills).unwrap();
+    found.is_dir()
+        && !found.file_type().is_symlink()
+        && std::fs::read_dir(&skills).unwrap().count() == 0
+}
+
+/// Plants an earlier run's `skills` in a home: a file, a nested folder, Codex's `.system`
+/// folder and a junction to a folder outside the home. Inputs: the home and the junction's
+/// target.
+fn plant_skills(home: &Path, target: &Path) {
+    let skills = home.join("skills");
+    std::fs::create_dir_all(skills.join("nested")).unwrap();
+    std::fs::create_dir_all(skills.join(".system")).unwrap();
+    std::fs::write(skills.join("a.md"), "a").unwrap();
+    std::fs::write(skills.join("nested").join("b.md"), "b").unwrap();
+    std::fs::write(
+        skills.join(".system").join(".codex-system-skills.marker"),
+        "m",
+    )
+    .unwrap();
+    junction(&skills.join("linked"), target);
+}
+
+/// A Codex install with tools off writes its `config.toml` with the home's inheritable list
+/// and an empty hook key list through the held home, names no argument, leaves an empty
+/// `skills` and holds the home's lock; the drop removes the launch folder and the config
+/// and leaves `skills` empty.
+#[test]
+fn a_windows_tools_off_codex_install_writes_its_config_and_holds_the_home() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let config = home.join("config.toml");
+    let installed = context().install("codex", &home, false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        codex_text(&home, &context().instructions)
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(STATE).join(CODEX_HOOK_KEYS)).unwrap(),
+        "[]"
+    );
+    assert!(installed.arguments().is_empty());
+    assert!(skills_empty(&home));
+    assert_home_list(&home, &[&config]);
+    assert_held(&home);
+    drop(installed);
+    assert!(gone(&home.join(STATE)));
+    assert!(gone(&config));
+    assert!(skills_empty(&home));
+    drop(lock_only(&home, "claude-code").unwrap());
+}
+
+/// The `skills` an earlier run left, a junction inside it included, is removed as itself
+/// before a Codex install writes anything, and an empty `skills` is made again: what the
+/// junction named keeps every byte.
+#[test]
+fn a_windows_codex_install_removes_an_earlier_runs_skills_without_following() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let target = outside(&base, "target");
+    plant_skills(&home, &target);
+    drop(context().install("codex", &home, false).unwrap());
+    assert!(skills_empty(&home));
+    assert_untouched(&target, "target");
+}
+
+/// A junction at `skills` or at `config.toml` is removed as itself, never followed: an
+/// empty real `skills` and the config are made in their place, and what each junction
+/// named keeps every byte.
+#[test]
+fn a_windows_codex_install_removes_a_junction_at_skills_or_config_as_itself() {
+    let (_temp, base) = base();
+    for name in ["skills", "config.toml"] {
+        let home = private_home(&base, &format!("{name}-home"));
+        let named = format!("{name}-target");
+        let target = outside(&base, &named);
+        junction(&home.join(name), &target);
+        drop(context().install("codex", &home, false).unwrap());
+        assert!(skills_empty(&home), "{name}");
+        assert_untouched(&target, &named);
+    }
+    let home = private_home(&base, "config-written");
+    let target = outside(&base, "config-target-2");
+    junction(&home.join("config.toml"), &target);
+    let installed = context().install("codex", &home, false).unwrap();
+    let config = home.join("config.toml");
+    assert!(std::fs::symlink_metadata(&config).unwrap().is_file());
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        codex_text(&home, &context().instructions)
+    );
+    drop(installed);
+    assert_untouched(&target, "config-target-2");
+}
+
+/// A Codex hold at `lock_only` removes an earlier run's `skills` through the held home,
+/// a junction inside it as itself, leaves an empty `skills`, holds the lock until it drops
+/// and gives it back.
+#[test]
+fn a_windows_codex_lock_only_removes_an_earlier_runs_skills_without_following() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let target = outside(&base, "target");
+    plant_skills(&home, &target);
+    let held = lock_only(&home, "codex").unwrap();
+    assert_held(&home);
+    assert!(skills_empty(&home));
+    assert_untouched(&target, "target");
+    drop(held);
+    drop(lock_only(&home, "claude-code").unwrap());
+}
+
+/// A Codex launch with a process prepares the home through the held root: AGENTS.md holds
+/// the given text, the config holds the launch's own instructions, and an entry the home
+/// does not keep goes.
+#[test]
+fn a_windows_codex_process_install_prepares_the_home_through_the_held_root() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let data = private_home(&base, "data");
+    std::fs::write(home.join("stray.txt"), "stray").unwrap();
+    let context = process_context(&data, "Check every row.", HomeCaches::Keep);
+    let given = given(&context);
+    let installed = context.install("codex", &home, false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
+        given
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join("config.toml")).unwrap(),
+        codex_text(&home, &context.instructions)
+    );
+    assert!(gone(&home.join("stray.txt")));
+    assert!(skills_empty(&home));
+    drop(installed);
+}
+
+/// A `skills` the engine cannot remove, a file in it held by another handle without delete
+/// sharing, refuses a Codex install with `launch_context_skills_kept` before the config or
+/// the hook key list is written, and gives the lock back.
+#[test]
+fn a_windows_codex_install_refuses_skills_it_cannot_remove_before_the_config() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const SHARING_VIOLATION: i32 = 32;
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    std::fs::create_dir(home.join("skills")).unwrap();
+    let busy = home.join("skills").join("busy.md");
+    std::fs::write(&busy, "busy").unwrap();
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&busy)
+        .unwrap();
+    assert_eq!(
+        std::fs::remove_file(&busy).unwrap_err().raw_os_error(),
+        Some(SHARING_VIOLATION)
+    );
+    assert_eq!(
+        context().install("codex", &home, false).unwrap_err().0,
+        SKILLS_KEPT
+    );
+    assert!(gone(&home.join("config.toml")));
+    assert!(gone(&home.join(STATE).join(CODEX_HOOK_KEYS)));
+    assert_eq!(std::fs::read_to_string(&busy).unwrap(), "busy");
+    drop(lock_only(&home, "claude-code").unwrap());
+    drop(holder);
+}
+
+/// Makes a W1 private folder `home` inside `folder` with one skill file in its `skills`.
+/// Inputs: the folder and the skill's bytes. Output: the home's path.
+fn home_with_skill(folder: &Path, bytes: &str) -> PathBuf {
+    let home = private_home(folder, "home");
+    std::fs::create_dir(home.join("skills")).unwrap();
+    std::fs::write(home.join("skills").join("kept.md"), bytes).unwrap();
+    home
+}
+
+/// A junction above the home pointed at another folder between the first hold and the
+/// Codex skills removal makes the second open reach another home: it is refused with
+/// `launch_context_unsafe`, both homes' `skills` keep every byte, and no lock stays held.
+#[test]
+fn a_windows_codex_skills_removal_refuses_a_home_swapped_after_the_hold() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let second = private_home(&base, "second");
+    let first_home = home_with_skill(&first, "first");
+    let second_home = home_with_skill(&second, "second");
+    let link = base.join("link");
+    junction(&link, &first);
+    let home = link.join("home");
+    let held = crate::harnesses::launch::hold_home(&home).unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    assert_eq!(
+        windows::codex_copies(&home, &held).unwrap_err().0,
+        "launch_context_unsafe"
+    );
+    for (folder, bytes) in [(&first_home, "first"), (&second_home, "second")] {
+        assert_eq!(
+            std::fs::read_to_string(folder.join("skills").join("kept.md")).unwrap(),
+            bytes
+        );
+    }
+    drop(held);
+    drop(lock_only(&second_home, "claude-code").unwrap());
+}
+
+/// With no swap, the Codex skills removal after the first hold takes the same home: the
+/// earlier run's `skills` goes, a junction in it as itself, and an empty one is made.
+#[test]
+fn a_windows_codex_skills_removal_after_the_hold_takes_the_held_home() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let target = outside(&base, "target");
+    plant_skills(&home, &target);
+    let held = crate::harnesses::launch::hold_home(&home).unwrap();
+    windows::codex_copies(&home, &held).unwrap();
+    assert!(skills_empty(&home));
+    assert_untouched(&target, "target");
+    drop(held);
 }
