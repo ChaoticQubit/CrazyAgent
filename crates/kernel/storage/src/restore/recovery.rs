@@ -337,7 +337,8 @@ pub(super) fn continue_2_5_with(path: &Path, before_lock: fn(&Path)) -> Result<(
 /// Finishes a restore that wrote the 2.4 data and stopped before it recorded so: under the
 /// restore lock, engine.db must pass its check at a 2.4 version, the engine's key sweep runs
 /// again over the named copy, and the record becomes `restored <copy>`. Inputs: the database
-/// path and the sweep. Output: the copy's name, or the refusal with the record as it was.
+/// path and the sweep. Output: the copy's name, or the refusal with the record as it was,
+/// except a failed flush of the new record, which leaves `restored <copy>` in place.
 pub fn finish(
     path: &Path,
     after_restore: &dyn Fn(&Connection, &Path, &Path),

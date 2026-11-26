@@ -388,8 +388,9 @@ pub fn valid_record_line(line: &str) -> bool {
 
 /// Replaces the restore record of the engine at `root` with one line: the line goes to a private
 /// temp file beside it behind a barrier, which is then renamed over the record, and the folder
-/// is fully flushed, so a failure at any step leaves the old record whole. Inputs: the root
-/// and the line. Output: Ok once it is on disk.
+/// is fully flushed. A failure before the rename leaves the old record whole; a failed flush
+/// after it is an error with the new record already visible. Inputs: the root and the line.
+/// Output: Ok once it is on disk.
 pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError> {
     write_record_with(root, line, |temp, bytes| {
         private_file(temp, bytes, Flush::Barrier)

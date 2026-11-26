@@ -776,18 +776,30 @@ pub(crate) fn restore_pending(root: &Path) -> Result<(), EngineError> {
     )?)
 }
 
-/// Brings back the pinned 2.4 backup once the engine has stopped and every connection it
-/// held is closed. It records `restoring` first and does not start unless that is on disk,
-/// so a crash or a failed outcome write leaves a record the next start refuses, then records
-/// how it ended as [`restore_line`] says. Inputs: the engine root and the settings files.
-/// Output: the folder of the copy kept of the 2.5 data, or the failure.
+/// Brings back the pinned 2.4 backup once the engine stopped and closed its connections. It
+/// records `restoring` first and does not start unless that is on disk, so a crash or a failed
+/// outcome write leaves a record the next start refuses; a failed `restoring` write leaves
+/// `failed storage_restore_failed` when it can. Then it records how it ended as [`restore_line`]
+/// says. Inputs: the engine root and settings files. Output: the kept copy's folder, or the failure.
 #[cfg(unix)]
 pub(crate) fn restore_after_stop(
     root: &Path,
     global: &Path,
     project: &Path,
 ) -> Result<PathBuf, EngineError> {
-    kernel_storage::restore::write_restore_record(root, kernel_storage::restore::RECORD_RESTORING)?;
+    if let Err(problem) =
+        kernel_storage::restore::write_restore_record(root, kernel_storage::restore::RECORD_RESTORING)
+    {
+        let failed = format!(
+            "{} {}",
+            kernel_storage::restore::RECORD_FAILED,
+            kernel_storage::restore::RESTORE_FAILED
+        );
+        if let Err(kept) = kernel_storage::restore::write_restore_record(root, &failed) {
+            eprintln!("{}", kept.0);
+        }
+        return Err(problem.into());
+    }
     let restored = super::settings::SettingsSources::open(global, project).and_then(|sources| {
         migrations::restore_pinned(
             &root.join(kernel_storage::migrations::DATABASE),
