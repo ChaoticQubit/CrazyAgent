@@ -177,3 +177,21 @@ fn a_private_file_makes_one_full_flush() {
     assert_eq!(take_flushes(), (1, 0));
     assert_eq!(std::fs::read(root.path().join("one")).unwrap(), b"bytes");
 }
+
+#[test]
+fn a_backup_with_settings_texts_makes_one_full_flush() {
+    let (_root, path, db) = database();
+    let texts = || {
+        Ok(vec![
+            ("global.toml", "a = 1\n".to_owned()),
+            ("project.toml", "b = 2\n".to_owned()),
+        ])
+    };
+    take_flushes();
+
+    let made = backup(&db, &path, &texts, (1, 2), SystemTime::now()).unwrap();
+
+    assert_eq!(take_flushes().0, 1);
+    let digest = std::fs::read_to_string(made.join(CHECKED)).unwrap();
+    assert_eq!(digest, file_digest(&made.join(DATABASE)).unwrap());
+}
