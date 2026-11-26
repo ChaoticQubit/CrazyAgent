@@ -1,11 +1,11 @@
-use super::run::{run_raw, version_raw};
+use super::run::{masked_ran, started, version_raw};
 use super::turn::{Turns, folders, wait_max};
 use super::{
     BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
     InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
     START_FAILED, UNKNOWN_INSTALL, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME,
     check_command, guide, install_command, installed_version, latest, latest_from_pointer, lookup,
-    method, pointer, run, shown, update_command,
+    method, pointer, shown, update_command,
 };
 use crate::engine::EngineError;
 use crate::harnesses::{self, HarnessEntry};
@@ -106,9 +106,9 @@ impl Roots {
     }
 
     /// The roots of this machine with the given resolver places: the engine's own home
-    /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS and no npm yet.
-    /// Input: the places. Output: the roots; an unknown home is an empty home that matches
-    /// nothing.
+    /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS, no npm yet and, on
+    /// Windows, the token's elevation, read as elevated when it cannot be read. Input: the
+    /// places. Output: the roots; an unknown home is an empty home that matches nothing.
     fn on(places: kernel_processes::finding::Places) -> Self {
         let home = home_folder().unwrap_or_default();
         Self {
@@ -117,6 +117,8 @@ impl Roots {
             casks: cfg!(target_os = "macos"),
             npm: None,
             places,
+            #[cfg(windows)]
+            elevated: crazyagent_win_sandbox::elevated().unwrap_or(true),
         }
     }
 
@@ -268,7 +270,7 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
         Ok(None) => return Latest::NotChecked,
         Err(code) => return failed(code),
     };
-    match run_raw(&fixed, &roots.home, CHECK_TIME) {
+    match started(&fixed, &roots.places, &roots.home, CHECK_TIME) {
         Ok(raw) => {
             let found = latest(method, &String::from_utf8_lossy(&raw.stdout), installed);
             if !raw.success && matches!(found, Latest::Failed { .. }) {
@@ -368,7 +370,7 @@ fn updated(
     places: &kernel_processes::finding::Places,
 ) -> LastUpdate {
     let from = version_if_runs(executable, home, places);
-    let ran = run(fixed, home, UPDATE_TIME);
+    let ran = started(fixed, places, home, UPDATE_TIME).map(|raw| masked_ran(raw, home));
     let to = version_if_runs(executable, home, places);
     outcome(ran, UPDATE_FAILED, from, to)
 }
@@ -497,7 +499,7 @@ fn installed_now(
     after: impl FnOnce() -> Option<PathBuf>,
 ) -> LastUpdate {
     assert!(fixed.args.first() == Some(&"install"));
-    let ran = match run(fixed, home, UPDATE_TIME) {
+    let ran = match started(fixed, places, home, UPDATE_TIME).map(|raw| masked_ran(raw, home)) {
         Ok(ran) if ran.success => ran,
         other => return outcome(other, INSTALL_FAILED, None, None),
     };
@@ -668,9 +670,9 @@ impl Updates {
 
     /// Checks one installed harness for a newer version, by its install method: the
     /// installing tool for Homebrew and npm, the vendor pointer for a self-updating install
-    /// with online lookups on. Where the engine runs no tool ([`run_raw`] refuses, Windows)
-    /// a tool check is not run and reads as not checked, never as a failure. Inputs: the id,
-    /// method, real path, roots, settings and the installed version. Output: the check result.
+    /// with online lookups on. Where the engine runs no tool check yet (Windows, where npm has
+    /// no Node to run with) it reads as not checked, never as a failure. Inputs: the id, method,
+    /// real path, roots, settings and the installed version. Output: the check result.
     fn looked(
         &self,
         id: &str,
@@ -1023,6 +1025,7 @@ mod windows_tests {
             casks: false,
             npm: None,
             places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");

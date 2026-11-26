@@ -108,6 +108,48 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     }
 }
 
+/// npm's own `npm.cmd` runs as the `node.exe` and `npm-cli.js` beside it, whatever its text
+/// says, so the engine installs and updates through npm with no command shell. An `npm.cmd`
+/// with only npx's script beside it, or with no node beside it, is refused as a batch file,
+/// and npx's own mapping never takes an `npm.cmd`.
+#[test]
+fn npm_runs_by_its_layout_and_only_with_its_own_script() {
+    let (_folder, real, places) = node_folder();
+    let npm = real.join("node_modules").join("npm").join("bin");
+    or_named(std::fs::create_dir_all(&npm), &npm);
+    let cli = npm.join("npm-cli.js");
+    or_named(std::fs::write(&cli, "#!/usr/bin/env node\n"), &cli);
+    let command = real.join("npm.cmd");
+    or_named(
+        std::fs::write(&command, "@ECHO off\r\ncalc.exe\r\n"),
+        &command,
+    );
+    let resolved = resolve_entry(&command, &places).unwrap();
+    let real_of = |file: &Path| or_named(file.canonicalize(), file).into_os_string();
+    assert_eq!(
+        resolved.argv(),
+        vec![real_of(&real.join("node.exe")), real_of(&cli)]
+    );
+    assert_eq!(crate::batch::npx_real(&command), None);
+
+    let (_npx_only, npx_folder, npx_places) = node_folder();
+    let npx_bin = npx_folder.join("node_modules").join("npm").join("bin");
+    or_named(std::fs::create_dir_all(&npx_bin), &npx_bin);
+    let npx_cli = npx_bin.join("npx-cli.js");
+    or_named(std::fs::write(&npx_cli, "#!/usr/bin/env node\n"), &npx_cli);
+    let without_cli = npx_folder.join("npm.cmd");
+    copy_named(&command, &without_cli);
+    let other = or_named(tempfile::tempdir(), &std::env::temp_dir());
+    let other = or_named(other.path().canonicalize(), other.path());
+    let lone = other.join("npm.cmd");
+    copy_named(&command, &lone);
+    for (file, places) in [(without_cli, &npx_places), (lone, &places)] {
+        let missing = resolve_entry(&file, places).unwrap_err();
+        let refused = missing.refused.unwrap();
+        assert_eq!(refused.why, Refusal::Batch, "{file:?}");
+    }
+}
+
 /// npm's `npx.cmd` runs by its layout when its folder is off the engine's
 /// PATH, as a portable Node is, since `npx-cli.js` looks its `node` up beside npx.cmd only.
 #[test]

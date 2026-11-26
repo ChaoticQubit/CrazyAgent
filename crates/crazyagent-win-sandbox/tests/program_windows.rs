@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use crazyagent_win_sandbox::program_trusted;
+use crazyagent_win_sandbox::{elevated, program_trusted};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -109,4 +109,15 @@ fn a_program_through_a_junction_is_judged_at_its_real_place() {
     program_trusted(&written).unwrap();
     icacls(&real, &["/grant", "*S-1-5-32-545:(AD)"]);
     assert!(program_trusted(&written).is_err());
+}
+
+/// The engine's token reads as elevated exactly when Windows lists the high mandatory
+/// level in the process's groups, as an elevated administrator's process has, so the
+/// harness install refusal follows the real token on every runner.
+#[test]
+fn the_token_reads_as_elevated_exactly_at_the_high_mandatory_level() {
+    let groups = Command::new("whoami").arg("/groups").output().unwrap();
+    assert!(groups.status.success());
+    let high = String::from_utf8_lossy(&groups.stdout).contains("S-1-16-12288");
+    assert_eq!(elevated().unwrap(), high);
 }
