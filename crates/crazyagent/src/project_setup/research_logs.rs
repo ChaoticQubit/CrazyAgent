@@ -39,17 +39,22 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
         };
         let start = bytes.saturating_sub(RESEARCH_LOG_TAIL_BYTES);
         let read_from = start.saturating_sub(RESEARCH_LOG_TAIL_BYTES);
-        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(read_from)).map_err(error)?;
+        let before = read_from.saturating_sub(1);
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(before)).map_err(error)?;
         let mut earlier = Vec::new();
         std::io::Read::by_ref(&mut file)
-            .take(start - read_from)
+            .take(start - before)
             .read_to_end(&mut earlier)
             .map_err(error)?;
         let mut tail = Vec::new();
         file.take(RESEARCH_LOG_TAIL_BYTES)
             .read_to_end(&mut tail)
             .map_err(error)?;
-        let opened = start > 0 && opens_block(&earlier, &tail, read_from > 0);
+        let (cut, earlier) = match earlier.split_first() {
+            Some((byte, rest)) if read_from > 0 => (*byte != b'\n', rest),
+            _ => (false, earlier.as_slice()),
+        };
+        let opened = start > 0 && opens_block(earlier, &tail, cut);
         let text = String::from_utf8_lossy(&tail);
         let mut rows = text.lines();
         if start > 0 {
