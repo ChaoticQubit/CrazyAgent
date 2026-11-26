@@ -469,3 +469,13 @@ test("update and first-run words name this Mac on macOS and this computer on Win
     assert.equal(first.HARNESS_WORDS.reading, `Reading what's on ${computer}.`, os);
   });
 });
+
+test("the page's purpose line says to install and update harnesses outside CrazyAgent on Windows, and keeps its words elsewhere", async () => {
+  await eachComputer("../src/screens/settings/harnesses.tsx", (settings, { os, computer }) => {
+    const shown = markup(createElement(settings.HarnessesView, { catalog: { kind: "loading" }, onCheck: quiet }));
+    const purpose = os === "windows"
+      ? "Agents run inside these tools. CrazyAgent finds them on this computer. Install and update them outside CrazyAgent."
+      : `CrazyAgent finds harnesses installed on ${computer}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
+    assert.ok(shown.includes(`<p>${purpose}</p>`), `${os}: ${shown.slice(0, 400)}`);
+  });
+});

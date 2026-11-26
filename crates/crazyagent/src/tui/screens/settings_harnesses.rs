@@ -33,9 +33,19 @@ use words::{COPY, PATH_COPY};
 const LABEL_WIDTH: usize = 13;
 const DETAIL_ROWS: usize = 6;
 const CHROME_ROWS: usize = 4 + 1;
+/// The page's subtitle on macOS and Linux: where CrazyAgent finds the harnesses and how it
+/// installs and updates one when the owner chooses it.
+#[cfg(not(windows))]
 pub(super) const SUBTITLE: &str = on_this_computer!(
     "Agents run inside these tools. CrazyAgent finds them on ",
     ". It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it."
+);
+/// The page's subtitle on Windows, where CrazyAgent installs and updates no harness yet; it
+/// holds until install and update ship on Windows.
+#[cfg(windows)]
+pub(super) const SUBTITLE: &str = on_this_computer!(
+    "Agents run inside these tools. CrazyAgent finds them on ",
+    ". Install and update them outside CrazyAgent."
 );
 const MODAL_WIDTH: u16 = 72;
 const UPDATE_POLLS_MAX: usize = 240;
