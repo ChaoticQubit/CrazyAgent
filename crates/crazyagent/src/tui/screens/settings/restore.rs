@@ -234,7 +234,6 @@ impl RestorePage {
             ctx,
             SettingsJob::AppSetup(AppSetupJob::SetLogCompaction { choice, generation }),
         );
-        assert_eq!(self.switch, Switch::Saving);
         true
     }
 
@@ -343,7 +342,6 @@ impl Screen for RestorePage {
                     ctx.say(Message::warning(COMPACTION_UNSAVED, ""));
                 }
                 send(ctx, SettingsJob::AppSetup(AppSetupJob::LogCompaction));
-                assert_eq!(self.switch, Switch::Refreshing);
             }
             _ => {}
         }
