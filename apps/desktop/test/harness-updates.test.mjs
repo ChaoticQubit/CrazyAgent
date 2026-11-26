@@ -126,7 +126,7 @@ test("changing the online lookup keeps the other two settings", async () => {
 });
 
 test("every update refusal has its own plain sentence", () => {
-  const codes = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_tool_missing", "harness_update_tool_unsafe", "harness_update_needs_admin", "harness_update_as_root", "harness_update_off", "harness_update_check_only", "harness_update_busy", "harness_update_not_installed", "harness_update_timeout", "harness_update_failed", "harness_update_unsupported_here", "harness_update_lookup_failed", "harness_update_check_unreadable", "harness_update_check_failed", "harness_update_start_failed", "harness_update_settings_unreadable", "harness_update_unavailable"];
+  const codes = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_tool_missing", "harness_update_tool_unsafe", "harness_update_needs_admin", "harness_update_as_root", "harness_update_off", "harness_update_check_only", "harness_update_busy", "harness_update_in_use", "harness_update_not_installed", "harness_update_timeout", "harness_update_failed", "harness_update_unsupported_here", "harness_update_lookup_failed", "harness_update_check_unreadable", "harness_update_check_failed", "harness_update_start_failed", "harness_update_settings_unreadable", "harness_update_unavailable"];
   assert.equal(new Set(codes.map(api.updateCopy)).size, codes.length);
   for (const code of codes) assert.doesNotMatch(api.updateCopy(code), /harness_|\u2014/, code);
 });
@@ -243,6 +243,10 @@ test("an update whose old version could not be read is not called an install", (
 
 test("a second job on the same harness says it is already updating or installing", () => {
   assert.equal(api.updateCopy("harness_update_busy"), "This harness is already updating or installing.");
+});
+
+test("an update a live session blocks says to close those sessions first", () => {
+  assert.equal(api.updateCopy("harness_update_in_use"), "Close the sessions that use it, then update.");
 });
 
 test("a job held behind another harness's job says which one it waits for, with no error and its buttons off", () => {
