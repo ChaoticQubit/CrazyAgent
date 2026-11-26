@@ -700,7 +700,9 @@ pub(crate) fn launchable(harness: &str, windows: bool) -> Result<Launching, &'st
     if gate.updating.contains(&id) {
         return Err(LAUNCH_UPDATING);
     }
-    Ok(Launching(None))
+    gate.launching.push(id.to_owned());
+    assert!(gate.launching.iter().any(|held| held == id));
+    Ok(Launching(Some(id.to_owned())))
 }
 
 /// The process's [`GATE`], also after a job or a launch panicked while it held it. Output:
@@ -786,6 +788,9 @@ impl Updates {
             return Err(BUSY);
         }
         let mut gate = gate();
+        if gate.launching.iter().any(|held| held == id) {
+            return Err(IN_USE);
+        }
         state.running.push(id);
         assert!(state.running.len() <= harnesses::specs().len());
         gate.updating.push(id);
