@@ -30,6 +30,10 @@ pub mod owner;
 /// kind, claim, end and reply, never a payload, path or name. Off by default; only the test
 /// farm's build turns it on, and no release build may ([`owner_trace::connection`]).
 pub(crate) mod owner_trace;
+#[cfg(any(test, feature = "test-support"))]
+pub mod secret_frame;
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) mod secret_frame;
 #[cfg(all(test, windows))]
 mod windows_tests;
 
