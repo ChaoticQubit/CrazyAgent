@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, GrantLogRow, HomeCaches, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
 import { desktopPlatform } from "../../api-ide";
-import { Switch } from "../../ui";
+import { Switch, isWindows } from "../../ui";
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -463,7 +463,7 @@ export function ToolchainSwitches({ prefix, view, allowed, onChange }: {
 }) {
   return <fieldset className="pj-field">
     <legend>Toolchains agents may use</legend>
-    <p className="pj-help">Agents read these from your home folder and never change them or download into them. Homebrew tools stay readable.</p>
+    <p className="pj-help">Agents read these from your home folder and never change them or download into them.{isWindows() ? "" : " Homebrew tools stay readable."}</p>
     {view.toolchains.length === 0 && <p className="pj-muted">No toolchains found in your home folder or this project.</p>}
     <div className="pj-switch-list">{view.toolchains.map((row, index) => <div className="pj-switch-item" key={row.toolchain}>
       <span><strong>{row.label}</strong><span className="pj-secondary">{toolchainNote(row)}</span></span>

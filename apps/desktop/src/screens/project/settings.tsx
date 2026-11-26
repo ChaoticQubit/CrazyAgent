@@ -7,7 +7,7 @@ import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, 
 import type { IntakeJob, IntentReceipt, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
 import { intakeCopy } from "../../api-intake";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
-import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Segmented, Select, isWindows, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -430,6 +430,13 @@ export function addHiddenPath(paths: string[], typed: string): { paths: string[]
   return { paths: [...paths, path] };
 }
 
+/** The sentence saying which toolchains agents find on their own: Homebrew is named on macOS and
+ * Linux, not on Windows. Input: none, the window's computer. Output: the sentence. */
+export function toolchainsFound(): string {
+  const found = isWindows() ? "Rust, Node and Python" : "Rust, Node, Python and Homebrew";
+  return `Agents find the toolchains this project uses (${found}) on their own and can read them, never change them.`;
+}
+
 function SandboxSection({ data }: { data: ProjectData }) {
   const [saved, setSaved] = useState<ReadPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
@@ -484,7 +491,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Sandbox</h2>
-    <p className="pj-secondary">Agents find the toolchains this project uses (Rust, Node, Python and Homebrew) on their own and can read them, never change them. Add other folders they may read here. They can never read credential files, such as .npmrc, .netrc or .ssh, even inside these folders.</p>
+    <p className="pj-secondary">{toolchainsFound()} Add other folders they may read here. They can never read credential files, such as .npmrc, .netrc or .ssh, even inside these folders.</p>
     {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {saved !== null && <ul className="pj-paths" aria-label="Extra read-only folders">
       {paths.length === 0 && <li className="pj-muted">No extra folders.</li>}
