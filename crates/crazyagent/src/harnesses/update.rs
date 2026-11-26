@@ -230,9 +230,10 @@ pub struct Roots {
     pub elevated: bool,
 }
 
-/// The npm an npm harness installs with and the node entry it runs, found by the one
-/// Node test of setup (`crate::setup::node::usable`), the folders its run puts first (Node's
-/// own, then the prefix's `bin`) and the engine-owned prefix it installs into, never global.
+/// The npm an npm harness installs with and the node entry it runs, found by the one Node
+/// test of setup (`crate::setup::node_usable::usable`), the folders its run puts first
+/// (Node's own, then the folder the prefix keeps its entries in) and the engine-owned prefix
+/// it installs into, never global.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpmInstall {
     pub node: PathBuf,
@@ -440,12 +441,25 @@ fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
 }
 
 /// The npm command for one npm prefix: the engine's npm with its search folders when the
-/// prefix is the engine's own, else the npm in that prefix's `bin`. Inputs: the prefix, the
-/// roots and the arguments. Output: the command, not yet checked.
+/// prefix is the engine's own; on Windows, where npm keeps no npm in a prefix, the engine's
+/// npm with that prefix pinned and searched after Node's folder; else the npm in that
+/// prefix's `bin`. Inputs: the prefix, the roots and the arguments. Output: the command.
 fn npm_for(prefix: &Path, roots: &Roots, args: Vec<&'static str>) -> Fixed {
-    match roots.npm.as_ref().filter(|engine| engine.prefix == prefix) {
-        Some(engine) => engine_npm_fixed(engine, args),
-        None => npm_fixed(prefix, args),
+    match roots.npm.as_ref() {
+        Some(engine) if engine.prefix == prefix => engine_npm_fixed(engine, args),
+        Some(engine) if cfg!(windows) => Fixed {
+            program: engine.program.clone(),
+            args,
+            search: engine
+                .node
+                .parent()
+                .map(Path::to_path_buf)
+                .into_iter()
+                .chain([prefix.to_path_buf()])
+                .collect(),
+            prefix: Some(prefix.to_path_buf()),
+        },
+        _ => npm_fixed(prefix, args),
     }
 }
 
@@ -1171,6 +1185,48 @@ mod windows_tests {
                 "{refused}"
             );
         }
+    }
+    /// On Windows an npm install outside the engine prefix, such as the owner's own
+    /// `%APPDATA%\npm`, is checked and updated in place by the engine's npm with its own prefix
+    /// pinned, since npm puts no npm of its own in a prefix there; the engine prefix keeps the
+    /// engine's search.
+    #[test]
+    fn a_windows_npm_install_outside_the_engine_prefix_runs_the_engine_npm_with_its_prefix() {
+        let node = PathBuf::from(r"C:\Program Files\nodejs");
+        let engine = NpmInstall {
+            node: node.join("node.exe"),
+            program: node.join("npm.cmd"),
+            search: vec![node.clone(), PathBuf::from(r"C:\engine\setup\harnesses")],
+            prefix: PathBuf::from(r"C:\engine\setup\harnesses"),
+        };
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: Some(engine.clone()),
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let owner = PathBuf::from(r"C:\Users\unit\AppData\Roaming\npm");
+        let args = vec!["view", "@openai/codex", "version"];
+        assert_eq!(
+            npm_for(&owner, &roots, args.clone()),
+            Fixed {
+                program: engine.program.clone(),
+                args: args.clone(),
+                search: vec![node.clone(), owner.clone()],
+                prefix: Some(owner.clone()),
+            }
+        );
+        assert_eq!(
+            npm_for(&engine.prefix, &roots, args.clone()),
+            Fixed {
+                program: engine.program.clone(),
+                args,
+                search: engine.search.clone(),
+                prefix: Some(engine.prefix.clone()),
+            }
+        );
     }
     /// With the engine's home the profile folder on Windows, a harness that installed itself
     /// under it is named as self-updating, and its update is refused as unsafe once the users

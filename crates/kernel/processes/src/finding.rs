@@ -2,6 +2,7 @@ pub mod permission_fix;
 /// The methods of [`Places`]: how the places are built, which folders they keep and which
 /// paths agents can write.
 mod places;
+pub use places::npm_shims;
 pub mod probe;
 #[cfg(test)]
 pub(crate) mod stub;
@@ -424,12 +425,13 @@ pub fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
 }
 
 /// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
-/// then its npm harness prefix's `bin` ([`FindingHooks::harness_prefix`]). Input: the engine
-/// root and the hooks. Output: the two folders in that order.
+/// then the folder its npm harness prefix ([`FindingHooks::harness_prefix`]) keeps their
+/// entries in ([`npm_shims`]). Input: the engine root and the hooks. Output: the two folders
+/// in that order.
 fn engine_folders(hooks: &FindingHooks, root: &Path) -> [PathBuf; 2] {
     [
         root.join("setup").join("bin"),
-        (hooks.harness_prefix)(root).join("bin"),
+        npm_shims(&(hooks.harness_prefix)(root)),
     ]
 }
 

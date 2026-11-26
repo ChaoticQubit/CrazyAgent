@@ -136,7 +136,6 @@ impl Roots {
 /// Finds the npm an npm harness installs with for one engine on the engine's own resolver
 /// places. Inputs: the engine root and those places. Output: the npm, or none with no
 /// usable Node.
-#[cfg(unix)]
 fn engine_npm(
     engine_root: &Path,
     places: &kernel_processes::finding::Places,
@@ -145,34 +144,26 @@ fn engine_npm(
 }
 
 /// Finds the npm an npm harness installs with: the Node setup's one test finds on the places
-/// and the engine prefix, named by its real path when it exists so an install found inside
-/// it matches. Inputs: the engine root and the places. Output: the npm, or none with no
-/// usable Node.
-#[cfg(unix)]
+/// and the engine prefix, named by its real path when it exists (its plain drive spelling on
+/// Windows) so an install found inside it matches, searched where it keeps its entries.
+/// Inputs: the engine root and the places. Output: the npm, or none with no usable Node.
 pub(crate) fn engine_npm_at(
     engine_root: &Path,
     places: &kernel_processes::finding::Places,
 ) -> Option<super::NpmInstall> {
-    let found = crate::setup::node::usable(places)?;
+    let found = crate::setup::node_usable::usable(places)?;
     let named = crate::setup::harness_prefix(engine_root);
+    #[cfg(unix)]
     let prefix = named.canonicalize().unwrap_or(named);
+    #[cfg(not(unix))]
+    let prefix = kernel_sandbox::paths::canonical(&named).unwrap_or(named);
     let node_bin = found.node.parent()?.to_path_buf();
     Some(super::NpmInstall {
         node: found.node,
         program: found.npm,
-        search: vec![node_bin, prefix.join("bin")],
+        search: vec![node_bin, kernel_processes::finding::npm_shims(&prefix)],
         prefix,
     })
-}
-
-/// Finds no npm where setup has no Node. Inputs: the engine root and the places, unused.
-/// Output: none.
-#[cfg(not(unix))]
-fn engine_npm(
-    _engine_root: &Path,
-    _places: &kernel_processes::finding::Places,
-) -> Option<super::NpmInstall> {
-    None
 }
 
 /// Makes the engine prefix private before an npm install into it, so npm never makes it
@@ -188,8 +179,25 @@ fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
     }
 }
 
+/// Makes the engine prefix and its `node_modules` private folders of this user, with any
+/// missing parent, before an npm install into it, refusing one that exists and is not, with
+/// no `node.exe` put in it: a shim there runs the engine's Node from the places. Inputs: the
+/// install command and the roots. Output: Ok, or `harness_install_failed`.
+#[cfg(windows)]
+fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
+    match (&fixed.prefix, &roots.npm) {
+        (Some(prefix), Some(engine)) if *prefix == engine.prefix => {
+            for folder in [prefix.clone(), prefix.join("node_modules")] {
+                crate::paths::private_folder(&folder).map_err(|_| INSTALL_FAILED)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Makes nothing where npm installs never run. Inputs: unused. Output: Ok.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn ready_prefix(_fixed: &Fixed, _roots: &Roots) -> Result<(), &'static str> {
     Ok(())
 }
@@ -670,9 +678,9 @@ impl Updates {
 
     /// Checks one installed harness for a newer version, by its install method: the
     /// installing tool for Homebrew and npm, the vendor pointer for a self-updating install
-    /// with online lookups on. Where the engine runs no tool check yet (Windows, where npm has
-    /// no Node to run with) it reads as not checked, never as a failure. Inputs: the id, method,
-    /// real path, roots, settings and the installed version. Output: the check result.
+    /// with online lookups on, no check with them off. An install whose method is not known
+    /// reads as not checked, never as a failure. Inputs: the id, method, real path, roots,
+    /// settings and the installed version. Output: the check result.
     fn looked(
         &self,
         id: &str,
@@ -682,25 +690,13 @@ impl Updates {
         settings: UpdateSettings,
         installed: &str,
     ) -> Latest {
-        let tools_run = cfg!(unix);
         match method {
-            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. }
-                if tools_run =>
-            {
+            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. } => {
                 tool_check(id, method, real, roots, installed)
             }
-            Method::SelfUpdate if settings.online == OnlineLookup::Off && tools_run => {
-                Latest::NoCheck
-            }
-            Method::SelfUpdate if settings.online != OnlineLookup::Off => {
-                self.pointed(id, method, installed)
-            }
-            Method::Homebrew { .. }
-            | Method::HomebrewFormula { .. }
-            | Method::Npm { .. }
-            | Method::SelfUpdate
-            | Method::WithApp
-            | Method::Unknown => Latest::NotChecked,
+            Method::SelfUpdate if settings.online == OnlineLookup::Off => Latest::NoCheck,
+            Method::SelfUpdate => self.pointed(id, method, installed),
+            Method::WithApp | Method::Unknown => Latest::NotChecked,
         }
     }
 
@@ -1012,12 +1008,12 @@ impl Updates {
 mod windows_tests {
     use super::*;
 
-    /// W1 (leader 01:25, DEC-194): on Windows, where the engine runs no Homebrew or npm and
-    /// no updater, a check of an install those tools made is not run and is no failure, and a
-    /// self-updating install with online lookups off reads as not checked, never as one that
-    /// Update asks to look.
+    /// On Windows a check of an install a tool made runs that tool, as on macOS and Linux, so
+    /// with no npm to run it fails as missing its tool instead of reading as not checked, and
+    /// a self-updating install with online lookups off has no check, never one Update asks
+    /// to look.
     #[test]
-    fn a_windows_install_is_not_checked_by_a_tool_and_never_offers_update_to_look() {
+    fn a_windows_install_is_checked_by_its_tool_as_on_macos_and_linux() {
         let updates = Updates::new();
         let roots = Roots {
             home: PathBuf::from(r"C:\Users\unit"),
@@ -1043,15 +1039,96 @@ mod windows_tests {
             Method::HomebrewFormula {
                 formula: "opencode".into(),
             },
-            Method::SelfUpdate,
         ] {
             assert_eq!(
                 updates.looked("codex", &method, real, &roots, settings, "0.164.0"),
-                Latest::NotChecked,
+                failed(super::super::TOOL_MISSING),
                 "{method:?}"
             );
         }
+        assert_eq!(
+            updates.looked(
+                "codex",
+                &Method::SelfUpdate,
+                real,
+                &roots,
+                settings,
+                "0.164.0"
+            ),
+            Latest::NoCheck
+        );
     }
+
+    /// On Windows the engine's npm is the `npm.cmd` beside the first `node.exe` the places
+    /// find, with npm's own `npm-cli.js` beside it, and npm installs into the engine prefix,
+    /// named in its plain drive spelling and searched second, where npm puts its shims.
+    #[test]
+    fn a_windows_engine_npm_is_the_npm_beside_the_node_the_places_find() {
+        let node_folder = tempfile::tempdir().unwrap();
+        let node_home = kernel_sandbox::paths::canonical(node_folder.path()).unwrap();
+        let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        std::fs::copy(&curl, node_home.join("node.exe")).unwrap();
+        let cli = node_home.join("node_modules").join("npm").join("bin");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::write(cli.join("npm-cli.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(node_home.join("npm.cmd"), "@ECHO off\r\n").unwrap();
+        let root_folder = tempfile::tempdir().unwrap();
+        let engine_root = kernel_sandbox::paths::canonical(root_folder.path()).unwrap();
+        let places = crate::tools::tools_new(vec![node_home.clone()], None);
+        let npm = engine_npm(&engine_root, &places).unwrap();
+        let prefix = crate::setup::harness_prefix(&engine_root);
+        assert_eq!(npm.node, node_home.join("node.exe"));
+        assert_eq!(npm.program, node_home.join("npm.cmd"));
+        assert_eq!(npm.search, vec![node_home.clone(), prefix.clone()]);
+        assert_eq!(npm.prefix, prefix);
+        assert!(!npm.prefix.to_str().unwrap().starts_with(r"\\?\"));
+        let empty = crate::tools::tools_new(Vec::new(), None);
+        assert_eq!(engine_npm(&engine_root, &empty), None);
+    }
+
+    /// On Windows an install into the engine prefix first makes the prefix, its missing
+    /// parents and its `node_modules` private folders of this user, and does so again over the
+    /// ones it made; a command for any other prefix makes nothing.
+    #[test]
+    fn a_windows_install_into_the_engine_prefix_makes_it_private_first() {
+        let root_folder = tempfile::tempdir().unwrap();
+        let engine_root = kernel_sandbox::paths::canonical(root_folder.path()).unwrap();
+        let prefix = crate::setup::harness_prefix(&engine_root);
+        let node = PathBuf::from(r"C:\Program Files\nodejs");
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: Some(super::super::NpmInstall {
+                node: node.join("node.exe"),
+                program: node.join("npm.cmd"),
+                search: vec![node.clone(), prefix.clone()],
+                prefix: prefix.clone(),
+            }),
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let other = engine_root.join("other");
+        let fixed = |prefix: &Path| Fixed {
+            program: node.join("npm.cmd"),
+            args: vec!["install"],
+            search: vec![node.clone()],
+            prefix: Some(prefix.to_path_buf()),
+        };
+        assert_eq!(ready_prefix(&fixed(&other), &roots), Ok(()));
+        assert!(!other.exists());
+        assert!(!prefix.exists());
+        for _ in 0..2 {
+            assert_eq!(ready_prefix(&fixed(&prefix), &roots), Ok(()));
+            assert!(crate::paths::is_private_folder(&prefix));
+            assert!(crate::paths::is_private_folder(
+                &prefix.join("node_modules")
+            ));
+        }
+    }
+
     /// V243-W1-VERSION-READ: on Windows the engine's home is the profile folder in its plain
     /// drive spelling, and a program a session would start tells its version through a job
     /// of its own, here the curl Windows ships.
