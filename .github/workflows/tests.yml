@@ -165,6 +165,7 @@ jobs:
           path: ${{ runner.temp }}/archive
       - name: Run the model-server rows with no server and require them to fail as unavailable
         run: |
+          set +e
           set -uo pipefail
           archive="$RUNNER_TEMP/archive/farm-macos.tar.zst"
           [ -f "$archive" ] || { echo "::error::no test archive at $archive; the build job for this platform failed"; exit 1; }
