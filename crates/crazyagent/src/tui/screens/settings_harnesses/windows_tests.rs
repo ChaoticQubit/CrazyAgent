@@ -18,3 +18,12 @@ fn windows_offers_no_update_in_any_mode() {
         "CrazyAgent can't update it on this computer."
     );
 }
+
+#[test]
+fn the_subtitle_says_to_install_and_update_harnesses_outside_crazyagent() {
+    assert_eq!(
+        SUBTITLE,
+        "Agents run inside these tools. CrazyAgent finds them on this computer. Install and update them outside CrazyAgent."
+    );
+    assert!(!SUBTITLE.contains("Homebrew"));
+}
