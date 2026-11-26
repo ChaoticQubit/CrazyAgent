@@ -136,6 +136,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Install Rust toolchain with clippy
         run: |
           set -euo pipefail
@@ -146,7 +147,8 @@ jobs:
         run: |
           set -uo pipefail
           rc=0
-          git checkout -q --detach 9873b2cf56
+          git checkout -q --detach 9873b2cf56 || { echo "::error::checkout 9873b2cf56"; exit 1; }
+          echo "== at $(git rev-parse --short=10 HEAD)"
           cargo clippy -p crazyagent --tests --locked -- -D warnings > "$RUNNER_TEMP/clippy.log" 2>&1 || rc=$?
           cat "$RUNNER_TEMP/clippy.log"
           echo "== clippy rc $rc"
