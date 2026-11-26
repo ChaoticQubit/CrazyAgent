@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { addProjectDocuments, deleteContextItem, failureCopy, loadContextText, pickDocuments, receiptState, saveResearchToMemory } from "../../api-projects";
 import type { ContextItem, ResearchKind } from "../../api-projects";
-import { Button, ConfirmDialog, Icon, Segmented, StatusBadge, thisComputer } from "../../ui";
+import { Button, ConfirmDialog, Icon, Segmented, StatusBadge, isMac, thisComputer } from "../../ui";
 import { displayText } from "../conversation";
 import { formatBytes } from "../new-project/wizard";
 import { useLinkOpener } from "./links";
@@ -136,6 +136,7 @@ export function followContext(project: string, path: string, writing: boolean, a
  * and the repository's linked files and nested docs folder by folder, with a reader.
  * Input: the project data. Output: the tree and the reader; reports render as safe Markdown. */
 export function ContextTab({ data }: { data: ProjectData }) {
+  const showFolder = isMac() ? "Show in Finder" : "Open folder";
   const context = valueOf(data.context);
   const jobs = valueOf(data.research)?.jobs ?? [];
   const listed = context?.items ?? [];
@@ -261,7 +262,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
       {data.context?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.context)}</p>}
       {context && <>
         <div className="pj-stack-s pj-tree-root"><span className="pj-mono" title={context.folder}>{displayText(folderLabel(context.folder))}</span>
-          <div className="pj-row"><Button size="small" icon="folder-open" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</Button>
+          <div className="pj-row"><Button size="small" icon="folder-open" onClick={() => void fileAction("desktop_reveal_project_folder", showFolder)}>{showFolder}</Button>
             <Button size="small" icon="plus" onClick={() => void chooseDocuments()}>Add documents</Button></div>
           {adding && <form className="pj-stack-s" onSubmit={(event) => { event.preventDefault(); if (adding.path.trim()) void addDocuments([adding.path.trim()]); }}>
             <label htmlFor="pj-add-doc" className="pj-small">{adding.error ? `Or type the full path of a file on ${thisComputer()}:` : `The file picker isn't in this build. Full path of a file on ${thisComputer()}:`}</label>
