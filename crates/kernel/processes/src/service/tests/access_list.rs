@@ -452,6 +452,7 @@ fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
     let folder = temp.path().join("home");
     let tool = folder.join("tmux");
     write_mode(&tool, "#!/bin/sh\n", 0o755);
+    let stripped = AccessListStripped(folder.clone());
     let status = crate::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .arg("+a")
@@ -461,6 +462,7 @@ fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
     .unwrap_or_else(|error| panic!("chmod +a on {folder:?}: {error}"));
     assert!(status.success(), "chmod +a on {folder:?}");
     assert_eq!(changeable_by_others(&tool), None);
+    drop(stripped);
     temp.close().unwrap();
 }
 
@@ -475,6 +477,30 @@ fn a_world_writable_folder_above_a_tool_reads_changeable() {
     write_mode(&tool, "#!/bin/sh\n", 0o755);
     settle(&[&folder, &tool]);
     assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+}
+
+/// Strips every access list entry from a folder when dropped, so a deny of `delete` a row put
+/// there never stops its scratch folder from being removed, on any exit path of the row.
+/// Input: the folder.
+#[cfg(target_os = "macos")]
+struct AccessListStripped(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for AccessListStripped {
+    fn drop(&mut self) {
+        let stripped = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("-N")
+                .arg(&self.0),
+        );
+        if !std::thread::panicking() {
+            assert!(
+                stripped.is_ok_and(|status| status.success()),
+                "chmod -N {:?}",
+                self.0
+            );
+        }
+    }
 }
 
 /// Runs `/bin/chmod` with the arguments on the entry and requires it to succeed. Inputs: the
