@@ -18,11 +18,13 @@ fn windows_offers_update_as_macos_and_linux_do() {
     );
 }
 
+/// On Windows the subtitle offers install with npm and update with the harness's own
+/// updater, the macOS and Linux sentence without Homebrew.
 #[test]
-fn the_subtitle_says_to_install_and_update_harnesses_outside_crazyagent() {
+fn the_subtitle_offers_install_with_npm_and_update_on_windows() {
     assert_eq!(
         SUBTITLE,
-        "Agents run inside these tools. CrazyAgent finds them on this computer. Install and update them outside CrazyAgent."
+        "Agents run inside these tools. CrazyAgent finds them on this computer. It can install one with npm and update one with that harness's own updater, each only when you choose it."
     );
     assert!(!SUBTITLE.contains("Homebrew"));
 }
