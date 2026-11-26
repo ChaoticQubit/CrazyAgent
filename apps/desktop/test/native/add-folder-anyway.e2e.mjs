@@ -25,7 +25,7 @@ const WAYS = '[role=radiogroup][aria-label="How to add it"] button';
 const SAID = {
   close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
   old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
-  across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
+  across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If this Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
   same_disk: "This is a rename on the same disk; it is quick.",
   large: "This folder is very large.",
   measured: "It is about 1.1 GB.",
