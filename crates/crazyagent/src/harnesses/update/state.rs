@@ -1450,6 +1450,8 @@ mod in_use_tests {
             casks: false,
             npm: None,
             places: crate::tools::tools_new(Vec::new(), None),
+            #[cfg(windows)]
+            elevated: false,
         };
         (folder, entry, roots)
     }
