@@ -116,13 +116,14 @@ pub(super) struct ListedSpec<'a> {
     pub(super) instructions: &'a str,
 }
 
-/// The command a listed master turn spawns, exactly as built, and the engine servers its ACP
-/// session opens with. The macOS launch tests also read the files written for it in the
-/// private home: the rendered MCP config and the instruction file.
+/// The command a listed master turn spawns, exactly as built, the engine servers its ACP
+/// session opens with, and the update hold its caller keeps until the spawn returned. The
+/// macOS launch tests also read the files written for it in the private home: the rendered
+/// MCP config and the instruction file.
 pub(super) struct ListedLaunch {
     pub(super) command: Command,
     pub(super) servers: Vec<EngineServer>,
-    pub(super) launching: crate::harnesses::update::Launching,
+    pub(super) _launching: crate::harnesses::update::Launching,
     #[cfg(all(test, target_os = "macos"))]
     pub(super) written: Vec<PathBuf>,
 }
@@ -186,7 +187,7 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
     Ok(ListedLaunch {
         command,
         servers,
-        launching,
+        _launching: launching,
         #[cfg(all(test, target_os = "macos"))]
         written,
     })
