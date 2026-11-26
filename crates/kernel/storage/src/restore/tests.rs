@@ -534,3 +534,21 @@ fn a_restore_record_write_makes_one_full_flush() {
         Some(RECORD_PENDING.to_owned())
     );
 }
+
+#[test]
+fn a_pinned_restore_makes_one_full_flush() {
+    let (root, path) = upgraded(true);
+    let hooks = Hooks {
+        texts: &no_texts,
+        busy: &idle,
+        after_restore: &|_, _, _| {},
+    };
+    crate::migrations::take_flushes();
+
+    let restored = restore_pinned(&path, &hooks).unwrap();
+
+    assert_eq!(crate::migrations::take_flushes().0, 1);
+    assert_eq!(restored.pin, PinCheck::Digest);
+    assert_eq!(read(&path), (vec!["one".to_owned()], 11));
+    assert_eq!(replaced(root.path()), vec![restored.kept]);
+}
