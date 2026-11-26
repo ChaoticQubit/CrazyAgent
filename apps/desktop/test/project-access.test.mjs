@@ -553,3 +553,24 @@ test("on Windows Full access is refused with its own sentence, a loopback model 
   assert.doesNotMatch(full, /Sandboxed|Own branch|always run/, "Full's sentence names no level Windows refuses in this version (#519 F3)");
   assert.match(api.knownError("model_loopback_unavailable_windows"), /on this computer[\s\S]*Windows/);
 });
+
+test("the toolchain help names Homebrew on macOS and Linux, and leaves it out on Windows", () => {
+  const host = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  try {
+    const computers = [["MacIntel", "mac"], ["Win32", "windows"], ["Linux x86_64", "linux"]];
+    for (const [platform, os] of computers) {
+      Object.defineProperty(globalThis, "navigator", { value: { platform }, configurable: true });
+      const html = renderToStaticMarkup(createElement(access.ToolchainSwitches, { prefix: "t", view: { toolchains: [] }, allowed: [], onChange: () => {} }));
+      assert.ok(html.includes("Agents read these from your home folder and never change them or download into them."), os);
+      assert.equal(html.includes("Homebrew tools stay readable."), os !== "windows", os);
+    }
+    for (const [platform, os] of computers) {
+      Object.defineProperty(globalThis, "navigator", { value: { platform }, configurable: true });
+      const found = os === "windows" ? "(Rust, Node and Python)" : "(Rust, Node, Python and Homebrew)";
+      assert.equal(access.toolchainsFound(), `Agents find the toolchains this project uses ${found} on their own and can read them, never change them.`, os);
+    }
+  } finally {
+    if (host) Object.defineProperty(globalThis, "navigator", host);
+    else delete globalThis.navigator;
+  }
+});
