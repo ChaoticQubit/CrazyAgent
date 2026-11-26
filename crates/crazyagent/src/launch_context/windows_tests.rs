@@ -816,3 +816,75 @@ fn a_windows_folder_above_the_homes_parent_cannot_be_moved_while_its_launch_hold
     drop(installed);
     std::fs::rename(&grand, base.join("moved")).unwrap();
 }
+
+/// Holds `first/home` through a junction `link`, after a plain launch of `second/home`
+/// recorded its own given text, and repoints the junction at `second`, so the caller's
+/// spelling names that other home while the held one stays. Inputs: the temp base and the
+/// data root. Output: the held root, the held home and the other home.
+fn held_through_a_repointed_link(
+    base: &Path,
+    data: &Path,
+) -> (crate::engine::bootstrap::held::Folder, PathBuf, PathBuf) {
+    use crate::engine::bootstrap::held::Folder;
+    let first = private_home(base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(base, "second");
+    let other = private_home(&second, "home");
+    let seeded = process_context(data, "Other rows.", HomeCaches::Keep);
+    drop(seeded.install("claude-code", &other, false).unwrap());
+    let link = base.join("link");
+    junction(&link, &first);
+    let root = Folder::root_judged_by(&link.join("home"), |_| true).unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    (root, held_home, other)
+}
+
+/// The texts of every record one record folder of the data root holds, sorted. Inputs: the
+/// data root and the folder name. Output: the texts.
+fn record_texts(data: &Path, folder: &str) -> Vec<String> {
+    let mut texts: Vec<String> = std::fs::read_dir(data.join(folder))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    texts.sort();
+    texts
+}
+
+/// A process launch whose home was held before a junction above it was repointed keys its
+/// given, level and instruction-file records by the held home's place: the other home's
+/// records keep their bytes beside them, and only the held home gets the instruction file.
+#[test]
+fn a_windows_process_keys_its_records_by_the_held_home_after_a_junction_above_is_repointed() {
+    let (_temp, base) = base();
+    let data = private_home(&base, "data");
+    let (root, held_home, other) = held_through_a_repointed_link(&base, &data);
+    let context = process_context(&data, "Check every row.", HomeCaches::Keep);
+    let other_given = given(&process_context(&data, "Other rows.", HomeCaches::Keep));
+    let held_given = windows::prepare_process(&root, context.process.as_ref().unwrap())
+        .unwrap()
+        .text;
+    assert_eq!(held_given, given(&context));
+    let mut both = vec![other_given.clone(), held_given.clone()];
+    both.sort();
+    assert_eq!(record_texts(&data, "agent-instructions-given"), both);
+    for folder in ["agent-home-levels", "agent-instruction-files"] {
+        assert_eq!(record_texts(&data, folder).len(), 2, "{folder}");
+    }
+    let claude = |home: &Path| std::fs::read_to_string(home.join("CLAUDE.md")).unwrap();
+    assert_eq!(claude(&held_home), held_given);
+    assert_eq!(claude(&other), other_given);
+}
+
+/// The same launch keys its skills record by the held home's place too, beside the other
+/// home's record, never in its place.
+#[test]
+fn a_windows_process_keys_its_skills_record_by_the_held_home_after_a_junction_above_is_repointed() {
+    let (_temp, base) = base();
+    let data = private_home(&base, "data");
+    let (root, _held_home, _other) = held_through_a_repointed_link(&base, &data);
+    assert_eq!(record_texts(&data, "agent-skills").len(), 1);
+    let context = process_context(&data, "Check every row.", HomeCaches::Keep);
+    windows::prepare_process(&root, context.process.as_ref().unwrap()).unwrap();
+    assert_eq!(record_texts(&data, "agent-skills").len(), 2);
+}
