@@ -105,3 +105,34 @@ fn a_restore_whose_restoring_line_cannot_be_written_never_starts() {
         None
     );
 }
+
+/// A `restoring` line that was renamed into place but whose folder flush failed stops the
+/// restore before it starts and leaves a failed record, which the next start accepts.
+#[cfg(unix)]
+#[test]
+fn a_restoring_line_that_is_visible_but_not_flushed_leaves_a_failed_record() {
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    kernel_storage::restore::fail_next_record_flush();
+
+    let refused = restore_after_stop(
+        root.path(),
+        &root.path().join("global.toml"),
+        &root.path().join("project.toml"),
+    )
+    .unwrap_err()
+    .0;
+
+    assert!(refused.starts_with("storage_restore_failed"), "{refused}");
+    assert!(
+        !root
+            .path()
+            .join(kernel_storage::migrations::BACKUPS)
+            .exists()
+    );
+    assert_eq!(
+        kernel_storage::restore::read_restore_record(root.path()).as_deref(),
+        Some("failed storage_restore_failed")
+    );
+}

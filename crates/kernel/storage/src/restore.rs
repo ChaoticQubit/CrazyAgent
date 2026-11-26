@@ -399,6 +399,21 @@ pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError>
 /// The temp file a record write fills before it renames it over the record.
 const RESTORE_RECORD_TEMP: &str = "restore-record.new";
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Whether the next record write on this thread fails its folder flush after the
+    /// rename; the write that reads it sets it back to false.
+    static FAIL_RECORD_FLUSH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the next restore record write on this thread fail its folder flush after the
+/// rename, as a lost disk makes it, so a row can meet a record that is visible but not on
+/// disk. Input: none. Output: none.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fail_next_record_flush() {
+    FAIL_RECORD_FLUSH.with(|fail| fail.set(true));
+}
+
 /// [`write_restore_record`] with the private file writer given, so a row can fail it. A line
 /// [`valid_record_line`] refuses is `storage_restore_failed` before any file step. A temp
 /// file left by an earlier crash is removed first, and the temp file is removed after any
@@ -424,6 +439,10 @@ fn write_record_with(
     if let Err(cause) = renamed {
         let _ = std::fs::remove_file(&temp);
         return Err(restore_failed(cause.0));
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    if FAIL_RECORD_FLUSH.with(|fail| fail.replace(false)) {
+        return Err(restore_failed("the record folder flush failed"));
     }
     std::fs::File::open(root)
         .and_then(|folder| flush(&folder, Flush::Full))
