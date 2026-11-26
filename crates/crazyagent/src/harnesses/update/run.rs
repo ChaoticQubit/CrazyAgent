@@ -49,23 +49,68 @@ pub fn refused_user(effective_user: u32) -> Option<&'static str> {
     (effective_user == 0).then_some(AS_ROOT)
 }
 
+/// Refuses to start any updater or installer from an elevated Windows token, the twin of
+/// [`refused_user`]. Input: whether the token is elevated. Output: the refusal code for an
+/// elevated token, None for any other.
+#[cfg(windows)]
+pub(super) fn refused_token(elevated: bool) -> Option<&'static str> {
+    let _ = elevated;
+    None
+}
+
 /// Runs one fixed command with no shell, no input, a cleared environment and a search path of
 /// only its own folder and the system folders, as one kernel install step: everything it
 /// started is ended when it returns, and past its time limit after TERM and a grace.
 /// Inputs: the command, the home folder and the limit. Output: the exit and the masked last
 /// lines, or a refusal code.
+#[cfg(not(windows))]
 pub fn run(fixed: &Fixed, home: &Path, limit: Duration) -> Result<Ran, &'static str> {
-    let raw = run_raw(fixed, home, limit)?;
+    run_raw(fixed, home, limit).map(|raw| masked_ran(raw, home))
+}
+
+/// Runs one checked command the way this system runs tools: [`run_raw`] on Unix, and on
+/// Windows the words the resolver gives its program, started in a kill-on-close job. Inputs:
+/// the command, the resolver's places, the home folder and the limit. Output: the exit and
+/// both stream tails, or a refusal code.
+#[cfg(not(windows))]
+pub(super) fn started(
+    fixed: &Fixed,
+    places: &kernel_processes::finding::Places,
+    home: &Path,
+    limit: Duration,
+) -> Result<Raw, &'static str> {
+    let _ = places;
+    run_raw(fixed, home, limit)
+}
+
+/// Runs one checked command the way this system runs tools: [`run_raw`] on Unix, and on
+/// Windows the words the resolver gives its program, started in a kill-on-close job. Inputs:
+/// the command, the resolver's places, the home folder and the limit. Output: the exit and
+/// both stream tails, or a refusal code.
+#[cfg(windows)]
+pub(super) fn started(
+    fixed: &Fixed,
+    places: &kernel_processes::finding::Places,
+    home: &Path,
+    limit: Duration,
+) -> Result<Raw, &'static str> {
+    run_raw(fixed, places, home, limit)
+}
+
+/// What the owner may see of one run: stdout then stderr, joined on a line end and masked
+/// ([`masked`]). Inputs: the run's two tails and the home folder. Output: the exit and the
+/// masked text.
+pub(super) fn masked_ran(raw: Raw, home: &Path) -> Ran {
     let mut all = raw.stdout;
     if !all.is_empty() && !all.ends_with(b"\n") {
         all.push(b'\n');
     }
     all.extend_from_slice(&raw.stderr);
     assert!(all.len() <= OUTPUT_BYTES_MAX + 1);
-    Ok(Ran {
+    Ran {
         success: raw.success,
         output: masked(&all, home),
-    })
+    }
 }
 
 /// Runs one fixed command exactly as [`run`] does and keeps each stream apart and unmasked.
@@ -92,9 +137,40 @@ pub(super) fn run_raw_as(
 
 /// Refuses every run where the engine cannot end a tool with everything it started.
 /// Inputs: unused. Output: the refusal code.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(super) fn run_raw(_fixed: &Fixed, _home: &Path, _limit: Duration) -> Result<Raw, &'static str> {
     Err(super::UNSUPPORTED_HERE)
+}
+
+/// Runs one checked command on Windows, refused while the engine's token is elevated or
+/// unreadable ([`refused_token`]): the words the resolver gives its program, each file it
+/// starts judged again ([`crazyagent_win_sandbox::program_trusted`]), then the fixed arguments,
+/// started suspended with no window in a kill-on-close job, with npm's prefix pinned for an
+/// npm command. Inputs: the command, the places, the home and the limit. Output: the run.
+#[cfg(windows)]
+pub(super) fn run_raw(
+    fixed: &Fixed,
+    places: &kernel_processes::finding::Places,
+    home: &Path,
+    limit: Duration,
+) -> Result<Raw, &'static str> {
+    let elevated = crazyagent_win_sandbox::elevated().unwrap_or(true);
+    windows::run_raw(fixed, places, home, limit, elevated)
+}
+
+/// Runs one checked command exactly as the Windows [`run_raw`] does for the given token
+/// elevation, so a row can run unelevated on an elevated runner. Inputs: the command, the
+/// places, the home folder, the limit and the elevation. Output: the exit and both stream
+/// tails, or a refusal code.
+#[cfg(all(test, windows))]
+pub(super) fn run_raw_as(
+    fixed: &Fixed,
+    places: &kernel_processes::finding::Places,
+    home: &Path,
+    limit: Duration,
+    elevated: bool,
+) -> Result<Raw, &'static str> {
+    windows::run_raw(fixed, places, home, limit, elevated)
 }
 
 /// Runs a harness's version command exactly as [`run_raw`] does. Inputs: the command, the
@@ -380,6 +456,17 @@ mod windows {
         command
     }
 
+    pub(super) fn run_raw(
+        fixed: &crate::harnesses::update::Fixed,
+        places: &kernel_processes::finding::Places,
+        home: &Path,
+        limit: Duration,
+        elevated: bool,
+    ) -> Result<Raw, &'static str> {
+        let _ = (fixed, places, home, limit, elevated);
+        Err(crate::harnesses::update::UNSUPPORTED_HERE)
+    }
+
     pub(super) fn version_raw(
         words: &[OsString],
         search: &[PathBuf],
@@ -564,6 +651,7 @@ pub(super) fn read_pointer(
 mod windows_tests {
     use super::*;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     /// Whether a process id still runs, as `tasklist` lists it. Input: the id. Output: the
     /// answer.
@@ -603,5 +691,86 @@ mod windows_tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(!running(pid), "the version run's child {pid} outlived it");
+    }
+
+    /// A copy of the grandchild holder in a fresh folder under the profile, which only this
+    /// user, SYSTEM and the administrators may change, so the program trust check passes it
+    /// whatever the build folder allows. Output: the folder guard, the copy and its arguments.
+    fn own_holder() -> (tempfile::TempDir, PathBuf, [&'static str; 5]) {
+        use crate::plugins::check::windows_tests::grandchild_holder;
+        let (holder, args) = grandchild_holder();
+        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let own = kernel_sandbox::paths::canonical(folder.path()).unwrap();
+        let copy = own.join(holder.file_name().unwrap());
+        std::fs::copy(&holder, &copy).unwrap();
+        (folder, copy, args)
+    }
+
+    /// An update run that passes its limit ends as timed out, and the process it started ends
+    /// with its job, so no child of an installer outlives its run. The command is the
+    /// grandchild holder, asked through a request file in the run's home.
+    #[test]
+    fn an_update_run_past_its_limit_ends_with_every_process_it_started() {
+        use crate::plugins::check::windows_tests::HOLDER_REQUEST;
+        let (_own, holder, args) = own_holder();
+        let folder = tempfile::tempdir().unwrap();
+        let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
+        std::fs::write(home.join(HOLDER_REQUEST), "").unwrap();
+        let search = holder.parent().unwrap().to_path_buf();
+        let fixed = Fixed {
+            program: holder,
+            args: args.to_vec(),
+            search: vec![search.clone()],
+            prefix: None,
+        };
+        let places = crate::tools::tools_new(vec![search], None);
+        let ran = run_raw_as(&fixed, &places, &home, Duration::from_secs(20), false);
+        assert_eq!(ran.err(), Some(TIMEOUT));
+        let pid: u32 = std::fs::read_to_string(home.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(pid > 4);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!running(pid), "the update run's child {pid} outlived it");
+    }
+
+    /// An npm command's run gets npm's global prefix pinned in its environment, here read
+    /// back by the command shell Windows ships; the same command from an elevated token is
+    /// refused before it starts, and the real token decides the plain run.
+    #[test]
+    fn an_npm_run_gets_its_prefix_and_an_elevated_engine_starts_nothing() {
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let folder = tempfile::tempdir().unwrap();
+        let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
+        let prefix = home.join("prefix");
+        let fixed = Fixed {
+            program: system.join("cmd.exe"),
+            args: vec!["/d", "/c", "set", "npm_config_prefix"],
+            search: vec![system.clone()],
+            prefix: Some(prefix.clone()),
+        };
+        let places = crate::tools::tools_new(vec![system], None);
+        let raw = run_raw_as(&fixed, &places, &home, CHECK_TIME, false).unwrap();
+        assert!(raw.success);
+        let printed = String::from_utf8_lossy(&raw.stdout).into_owned();
+        let pinned = format!("npm_config_prefix={}", prefix.display());
+        assert!(printed.lines().any(|line| line == pinned), "{printed}");
+        assert_eq!(
+            run_raw_as(&fixed, &places, &home, CHECK_TIME, true).err(),
+            Some(AS_ROOT)
+        );
+        if crazyagent_win_sandbox::elevated().unwrap() {
+            assert_eq!(
+                run_raw(&fixed, &places, &home, CHECK_TIME).err(),
+                Some(AS_ROOT)
+            );
+        } else {
+            assert!(run_raw(&fixed, &places, &home, CHECK_TIME).unwrap().success);
+        }
     }
 }

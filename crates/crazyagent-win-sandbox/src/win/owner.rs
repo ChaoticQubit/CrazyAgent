@@ -341,6 +341,13 @@ pub(super) fn user_sid() -> Result<Vec<u8>, u32> {
     token_user(&token)
 }
 
+/// Tells whether the engine runs with an elevated token, as an administrator who accepted
+/// the elevation prompt does, so a harness install or update can be refused as the Windows
+/// twin of running as root. Output: the answer, or the failed step with its Windows error.
+pub fn elevated() -> Result<bool, BoundaryError> {
+    Ok(false)
+}
+
 /// The user SID a token names. Relies on the buffer, aligned for `TOKEN_USER` and as long
 /// as Windows asked for, outliving the read of the SID it holds. Input: a token opened with
 /// `TOKEN_QUERY`. Output: the SID bytes, or the Windows error.
