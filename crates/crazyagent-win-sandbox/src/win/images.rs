@@ -308,11 +308,15 @@ mod tests {
     /// Input: the path. Output: the spelling.
     fn plain_text(path: &Path) -> PathBuf {
         let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
         let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
-        let kept: Vec<u16> = wide
-            .strip_prefix(verbatim.as_slice())
-            .unwrap_or(&wide)
-            .to_vec();
+        let kept: Vec<u16> = match wide.strip_prefix(unc.as_slice()) {
+            Some(rest) => r"\\".encode_utf16().chain(rest.iter().copied()).collect(),
+            None => wide
+                .strip_prefix(verbatim.as_slice())
+                .unwrap_or(&wide)
+                .to_vec(),
+        };
         PathBuf::from(OsString::from_wide(&kept))
     }
 
