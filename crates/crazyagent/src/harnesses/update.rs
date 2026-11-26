@@ -15,6 +15,7 @@ pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
     UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user,
 };
+pub use state::Launching;
 #[cfg(test)]
 pub use state::set_settings;
 pub use state::{

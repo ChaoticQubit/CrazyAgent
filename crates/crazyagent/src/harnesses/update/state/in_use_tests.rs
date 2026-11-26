@@ -208,19 +208,54 @@ fn an_update_watches_its_folders_or_the_folder_of_a_self_updater() {
 fn a_launch_during_a_running_job_refuses_on_windows_until_the_job_ends() {
     let updates = Updates::new();
     let running = updates.begin("fx").unwrap();
-    assert_eq!(launchable("fx", true), Err(LAUNCH_UPDATING));
-    assert_eq!(launchable("fx", false), Ok(()));
+    assert_eq!(launchable("fx", true).err(), Some(LAUNCH_UPDATING));
+    assert!(launchable("fx", false).is_ok());
     drop(running);
-    assert_eq!(launchable("fx", true), Ok(()));
+    assert!(launchable("fx", true).is_ok());
     let held = Arc::clone(&updates);
     let ended = std::thread::spawn(move || {
         let _running = held.begin("fx").unwrap();
-        assert_eq!(launchable("fx", true), Err(LAUNCH_UPDATING));
+        assert_eq!(launchable("fx", true).err(), Some(LAUNCH_UPDATING));
         panic!("the job failed");
     })
     .join();
     assert!(ended.is_err());
-    assert_eq!(launchable("fx", true), Ok(()));
+    assert!(launchable("fx", true).is_ok());
+}
+
+/// A Windows launch holds its harness from its update check until its process started: a
+/// job of the harness begun meanwhile is refused as in use, two holds both count, a launch
+/// refused while the job runs holds nothing, and once every hold drops the job begins.
+#[test]
+fn a_held_launch_refuses_a_job_of_its_harness_until_every_hold_drops() {
+    let updates = Updates::new();
+    let first = launchable("fx-held", true).unwrap();
+    let second = launchable("fx-held", true).unwrap();
+    assert_eq!(updates.begin("fx-held").err(), Some(IN_USE));
+    drop(first);
+    assert_eq!(updates.begin("fx-held").err(), Some(IN_USE));
+    drop(second);
+    let running = updates.begin("fx-held").unwrap();
+    assert_eq!(launchable("fx-held", true).err(), Some(LAUNCH_UPDATING));
+    drop(running);
+    assert!(updates.begin("fx-held").is_ok());
+    let elsewhere = launchable("fx-held", false).unwrap();
+    assert!(updates.begin("fx-held").is_ok());
+    drop(elsewhere);
+}
+
+/// A launch that holds a harness before its update begins makes the update refuse as in
+/// use before anything starts; once the hold drops, the update is not refused so.
+#[test]
+fn a_launch_held_before_an_update_begins_makes_the_update_refuse() {
+    let (_folder, entry, roots) = found_entry("opencode");
+    let db = sessions_db("codex", "stopped");
+    let held = launchable("opencode", true).unwrap();
+    let refused = Updates::new().start(&db, &entry, &roots, |_| {});
+    assert_eq!(refused, Err(IN_USE));
+    drop(held);
+    let started = Updates::new().start(&db, &entry, &roots, |_| {});
+    assert_ne!(started, Err(IN_USE));
 }
 
 /// On Windows a program started from an update's folder outside any runtime, held

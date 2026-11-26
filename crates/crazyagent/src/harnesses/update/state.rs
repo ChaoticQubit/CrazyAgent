@@ -656,26 +656,57 @@ pub struct Updates {
     reader: Reader,
 }
 
-/// The harnesses whose update or install job runs in this process, once per running job, so
-/// a launch, which holds no engine handle, can refuse one while its files change.
-static UPDATING: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+/// The harnesses whose update or install job runs in this process, once per running job, and
+/// the launches between their update check and their process's start, once per launch, kept
+/// under one lock so a job and a launch of one harness never overlap.
+struct Gate {
+    updating: Vec<&'static str>,
+    launching: Vec<String>,
+}
 
-/// Refuses, on Windows, a launch of a harness whose update or install job runs in this
-/// process, since the job replaces the files the launch would run; elsewhere every launch
-/// goes on. Inputs: the harness name, an alias allowed, and whether this is Windows.
-/// Output: Ok, or `harness_launch_updating`.
-pub(crate) fn launchable(harness: &str, windows: bool) -> Result<(), &'static str> {
-    let id = harnesses::canonical(harness);
-    match windows && updating().contains(&id) {
-        true => Err(LAUNCH_UPDATING),
-        false => Ok(()),
+/// The process's one [`Gate`], where a launch, which holds no engine handle, meets the jobs.
+static GATE: Mutex<Gate> = Mutex::new(Gate {
+    updating: Vec::new(),
+    launching: Vec::new(),
+});
+
+/// A launch's hold on its harness from its update check until its process started, so an
+/// update or install job of the harness is refused meanwhile; dropping it frees the hold on
+/// every path. It holds nothing outside Windows.
+#[must_use]
+pub struct Launching(Option<String>);
+
+impl Drop for Launching {
+    fn drop(&mut self) {
+        let Some(id) = self.0.take() else { return };
+        let mut gate = gate();
+        let at = gate.launching.iter().position(|held| *held == id);
+        assert!(at.is_some(), "a held launch is in the process's list");
+        gate.launching.swap_remove(at.unwrap_or_default());
     }
 }
 
-/// The process's list of running update and install jobs ([`UPDATING`]), also after a job
-/// panicked while it held the list. Output: the locked list.
-fn updating() -> MutexGuard<'static, Vec<&'static str>> {
-    UPDATING.lock().unwrap_or_else(PoisonError::into_inner)
+/// Refuses, on Windows, a launch of a harness whose update or install job runs in this
+/// process, since the job replaces the files the launch would run, and else holds the
+/// harness against a new job until the hold drops; elsewhere every launch goes on, holding
+/// nothing. Inputs: the harness name, an alias allowed, and whether this is Windows.
+/// Output: the hold, or `harness_launch_updating`.
+pub(crate) fn launchable(harness: &str, windows: bool) -> Result<Launching, &'static str> {
+    if !windows {
+        return Ok(Launching(None));
+    }
+    let id = harnesses::canonical(harness);
+    let mut gate = gate();
+    if gate.updating.contains(&id) {
+        return Err(LAUNCH_UPDATING);
+    }
+    Ok(Launching(None))
+}
+
+/// The process's [`GATE`], also after a job or a launch panicked while it held it. Output:
+/// the locked gate.
+fn gate() -> MutexGuard<'static, Gate> {
+    GATE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A running job's hold on its harness; dropping it frees the harness on every path.
@@ -701,10 +732,10 @@ impl Drop for Running {
         let mut state = self.updates.state();
         state.running.retain(|running| *running != self.id);
         assert!(!state.running.contains(&self.id));
-        let mut jobs = updating();
-        let at = jobs.iter().position(|job| *job == self.id);
+        let mut gate = gate();
+        let at = gate.updating.iter().position(|job| *job == self.id);
         assert!(at.is_some(), "a running job is in the process's list");
-        jobs.swap_remove(at.unwrap_or_default());
+        gate.updating.swap_remove(at.unwrap_or_default());
     }
 }
 
@@ -745,17 +776,19 @@ impl Updates {
         self.state().running.is_empty()
     }
 
-    /// Takes a harness for its one job; jobs of other harnesses may run beside it.
-    /// Input: its catalog id. Output: the hold, or `harness_update_busy` while an update or
-    /// install of the same harness runs.
+    /// Takes a harness for its one job; jobs of other harnesses may run beside it. A launch
+    /// hold is read and the job listed in one lock hold, so no launch starts in between.
+    /// Input: its catalog id. Output: the hold, `harness_update_busy` while an update or
+    /// install of the same harness runs, or `harness_update_in_use` while a launch holds it.
     fn begin(self: &Arc<Self>, id: &'static str) -> Result<Running, &'static str> {
         let mut state = self.state();
         if state.running.contains(&id) {
             return Err(BUSY);
         }
+        let mut gate = gate();
         state.running.push(id);
         assert!(state.running.len() <= harnesses::specs().len());
-        updating().push(id);
+        gate.updating.push(id);
         Ok(Running {
             updates: self.clone(),
             id,

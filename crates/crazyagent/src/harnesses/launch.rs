@@ -510,22 +510,22 @@ pub(crate) fn group_alive(group: u32) -> bool {
         .is_some_and(|pid| rustix::process::test_kill_process_group(pid).is_ok())
 }
 
+type Routed = (LaunchRequest, Option<Relay>, super::update::Launching);
 /// Routes a launch that carries a real provider key through an engine-owned key relay on
-/// 127.0.0.1: the relay keeps the key in engine memory and the returned request names the
-/// relay's base URL and a random placeholder token instead, so the key never reaches the
-/// agent's environment, arguments or files. Keyless, subscription and already routed
-/// launches come back unchanged. Input: the request. Output: the request to launch and
-/// the relay, which must live as long as the agent; `harness_launch_updating` first for a
-/// harness whose update runs ([`super::update::launchable`]), `launch_key_relay_unsupported`
-/// for a harness whose model protocol the relay does not carry (only Codex and Claude Code).
-pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>), LaunchError> {
-    super::update::launchable(&request.harness, cfg!(windows)).map_err(failure)?;
+/// 127.0.0.1 that keeps the key in engine memory; the returned request names the relay and a
+/// random placeholder token, so the key never reaches the agent. Keyless, subscription and
+/// routed launches come back unchanged. Input: the request. Output: the request, the relay,
+/// which must live as long as the agent, and the update hold ([`super::update::launchable`]),
+/// kept until the process started; `harness_launch_updating` first while its update runs, or
+/// `launch_key_relay_unsupported` for a harness the relay does not carry (Codex, Claude only).
+pub fn route(mut request: LaunchRequest) -> Result<Routed, LaunchError> {
+    let launching = super::update::launchable(&request.harness, cfg!(windows)).map_err(failure)?;
     let Some(key) = request
         .account
         .key()
         .filter(|key| !is_placeholder(key.reveal()))
     else {
-        return Ok((request, None));
+        return Ok((request, None, launching));
     };
     let default = match drivers::piped(&request.harness) {
         Ok(Piped::Codex) => CODEX_DEFAULT_BASE_URL,
@@ -550,7 +550,7 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
             .key()
             .is_some_and(|key| is_placeholder(key.reveal()))
     );
-    Ok((request, Some(relay)))
+    Ok((request, Some(relay), launching))
 }
 
 /// Routes a launch of a listed harness on a ChatGPT sign-in through a ChatGPT relay on
@@ -2041,7 +2041,7 @@ impl Session {
     /// through [`route`]. Input: the launch request. Output: a running session, or a plain
     /// refusal code.
     pub fn start(request: LaunchRequest) -> Result<Self, LaunchError> {
-        let (request, relay) = route(request)?;
+        let (request, relay, _launching) = route(request)?;
         let key = write_key_file(&request)?;
         let command = command(&request)?;
         Self::spawn(request, command, None, None, None, (relay, key), &[])
@@ -2091,7 +2091,7 @@ impl Session {
         context: AgentContext,
         logs: Option<RunLogs>,
     ) -> Result<Self, LaunchError> {
-        let (request, relay) = route(request)?;
+        let (request, relay, _launching) = route(request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
         let key = write_key_file(&request)?;
@@ -2116,7 +2116,7 @@ impl Session {
         context: Option<AgentContext>,
         state: &Path,
     ) -> Result<Self, LaunchError> {
-        let (request, relay) = route(request)?;
+        let (request, relay, _launching) = route(request)?;
         let (command, installed) = match &context {
             Some(context) => command_with_context(&request, context)?,
             None => lone_command(&request)?,

@@ -122,6 +122,7 @@ pub(super) struct ListedSpec<'a> {
 pub(super) struct ListedLaunch {
     pub(super) command: Command,
     pub(super) servers: Vec<EngineServer>,
+    pub(super) launching: crate::harnesses::update::Launching,
     #[cfg(all(test, target_os = "macos"))]
     pub(super) written: Vec<PathBuf>,
 }
@@ -134,7 +135,8 @@ pub(super) struct ListedLaunch {
 /// runs ([`crate::harnesses::update::launchable`]).
 pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, EngineError> {
     let request = spec.request;
-    crate::harnesses::update::launchable(&request.harness, cfg!(windows)).map_err(failure)?;
+    let launching =
+        crate::harnesses::update::launchable(&request.harness, cfg!(windows)).map_err(failure)?;
     if spec.tools.is_some() != request.tools {
         return Err(failure("master_runtime_binding"));
     }
@@ -184,6 +186,7 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
     Ok(ListedLaunch {
         command,
         servers,
+        launching,
         #[cfg(all(test, target_os = "macos"))]
         written,
     })
