@@ -14,11 +14,11 @@ use crazyagent::quit_settings::QuitSettings;
 use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 
 impl BridgeQueue {
-    /// Reads the event log compaction switch through the queue, for the window's command
-    /// and the e2e bridge alike. Input: none. Output: the view, or `busy` past the queue's
-    /// bounds.
+    /// Reads the event log compaction switch as a plain read that shares the bridge, for the
+    /// window's command and the e2e bridge alike. Input: none. Output: the view, or `busy`
+    /// past the queue's bounds.
     pub async fn log_compaction(&self) -> Result<LogCompactionView, BridgeError> {
-        self.enter().await?.log_compaction().await
+        self.read().await?.log_compaction().await
     }
 }
 
@@ -220,11 +220,11 @@ impl NativeBridge {
 
     /// Reads the event log compaction switch: the stored choice and whether this build is a
     /// dev build. Input: none. Output: the view.
-    pub async fn log_compaction(&mut self) -> Result<LogCompactionView, BridgeError> {
+    pub async fn log_compaction(&self) -> Result<LogCompactionView, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        self.controller()?
+        self.reader()?
             .log_compaction()
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))
