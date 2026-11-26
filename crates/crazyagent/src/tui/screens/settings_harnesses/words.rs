@@ -52,7 +52,7 @@ pub(super) const PATH_COPY: [(&str, &str); 13] = [
     ),
     ("owner_runtime_stale", "The engine restarted. Try again."),
 ];
-pub(super) const COPY: [(&str, &str); 29] = [
+pub(super) const COPY: [(&str, &str); 30] = [
     (
         UNKNOWN_INSTALL,
         "CrazyAgent can't tell how this was installed, so it won't update it.",
@@ -89,6 +89,10 @@ pub(super) const COPY: [(&str, &str); 29] = [
     (
         "harness_update_in_use",
         "Close the sessions that use it, then update.",
+    ),
+    (
+        "harness_launch_updating",
+        "This harness is updating. Try again when it's done.",
     ),
     (
         "harness_update_not_installed",

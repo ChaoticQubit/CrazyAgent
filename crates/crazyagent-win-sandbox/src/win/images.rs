@@ -1,11 +1,82 @@
+use super::last_error;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
+use windows_sys::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+
+const PROCESSES_MAX: usize = 65536;
+const IMAGE_UNITS_MAX: usize = 32768;
 
 /// Tells whether a running program's file lies in one of the folders or is one of the files,
-/// read from a snapshot of every process on the computer. Input: the folders and files.
-/// Output: whether one runs, or the Windows error code when the snapshot cannot be read.
+/// read from a snapshot of every process on the computer; a process this user cannot open is
+/// skipped. Input: absolute folders and files in their real spelling. Output: whether one
+/// runs, or the Windows error code when the snapshot cannot be read or holds too many.
 pub fn image_runs_under(folders: &[PathBuf]) -> Result<bool, u32> {
-    let _ = folders;
-    Ok(false)
+    assert!(folders.iter().all(|folder| folder.is_absolute()));
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut units = vec![0u16; IMAGE_UNITS_MAX];
+    let mut found = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
+    for _ in 0..PROCESSES_MAX {
+        if !found {
+            let code = last_error();
+            return if code == ERROR_NO_MORE_FILES {
+                Ok(false)
+            } else {
+                Err(code)
+            };
+        }
+        let runs = image(entry.th32ProcessID, &mut units)
+            .is_some_and(|image| folders.iter().any(|folder| image.starts_with(folder)));
+        if runs {
+            return Ok(true);
+        }
+        found = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
+    }
+    Err(ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// The full file name of a process's program, or none for a process this user cannot open,
+/// such as a system process, or one that ended since the snapshot. Relies on the opened
+/// handle being null on failure or a new handle this caller owns alone. Inputs: the process
+/// id and a buffer of [`IMAGE_UNITS_MAX`] units. Output: the file name.
+fn image(id: u32, units: &mut [u16]) -> Option<PathBuf> {
+    assert_eq!(units.len(), IMAGE_UNITS_MAX);
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, id) };
+    if process.is_null() {
+        return None;
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    let mut len = IMAGE_UNITS_MAX as u32;
+    let read = unsafe {
+        QueryFullProcessImageNameW(
+            process.as_raw_handle(),
+            PROCESS_NAME_WIN32,
+            units.as_mut_ptr(),
+            &mut len,
+        )
+    };
+    if read == 0 {
+        return None;
+    }
+    assert!((len as usize) < IMAGE_UNITS_MAX);
+    Some(PathBuf::from(OsString::from_wide(&units[..len as usize])))
 }
 
 #[cfg(test)]
@@ -53,5 +124,13 @@ mod tests {
         child.wait().unwrap();
         drop(child);
         assert_eq!(image_runs_under(&here), Ok(false));
+    }
+
+    /// A folder named without its drive is a caller's mistake, never a folder no program
+    /// runs from.
+    #[test]
+    #[should_panic]
+    fn a_relative_folder_is_refused() {
+        let _ = image_runs_under(&[PathBuf::from("relative")]);
     }
 }

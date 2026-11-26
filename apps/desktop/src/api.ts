@@ -191,6 +191,7 @@ const COPY: Record<string, string> = {
   temp_folder_shared: "Your temp folder is shared with other users on this computer, so it is never given to agents.",
   temp_folder_needs_macos: "Your temp folder can be given to agents only on macOS in this version.",
   ...GRANT_COPY,
+  harness_launch_updating: "This harness is updating. Try again when it's done.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);

@@ -515,9 +515,11 @@ pub(crate) fn group_alive(group: u32) -> bool {
 /// relay's base URL and a random placeholder token instead, so the key never reaches the
 /// agent's environment, arguments or files. Keyless, subscription and already routed
 /// launches come back unchanged. Input: the request. Output: the request to launch and
-/// the relay, which must live as long as the agent; `launch_key_relay_unsupported` for a
-/// harness whose model protocol the relay does not carry (only Codex and Claude Code).
+/// the relay, which must live as long as the agent; `harness_launch_updating` first for a
+/// harness whose update runs ([`super::update::launchable`]), `launch_key_relay_unsupported`
+/// for a harness whose model protocol the relay does not carry (only Codex and Claude Code).
 pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>), LaunchError> {
+    super::update::launchable(&request.harness, cfg!(windows)).map_err(failure)?;
     let Some(key) = request
         .account
         .key()

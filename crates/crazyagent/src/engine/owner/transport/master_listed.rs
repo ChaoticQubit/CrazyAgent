@@ -130,9 +130,11 @@ pub(super) struct ListedLaunch {
 /// switch when tools are off, the hand-over variables through the agent sandbox's guard, the
 /// team server for its session when tools are on, and an MCP config naming no server of the
 /// engine's or the owner's, beside the instruction file. Input: the turn's launch. Output:
-/// the launch, or the refusal.
+/// the launch, or the refusal, `harness_launch_updating` first for a harness whose update
+/// runs ([`crate::harnesses::update::launchable`]).
 pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, EngineError> {
     let request = spec.request;
+    crate::harnesses::update::launchable(&request.harness, cfg!(windows)).map_err(failure)?;
     if spec.tools.is_some() != request.tools {
         return Err(failure("master_runtime_binding"));
     }

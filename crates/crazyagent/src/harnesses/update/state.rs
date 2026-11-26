@@ -404,16 +404,23 @@ const IMAGES: Images = |_| Ok(false);
 /// the folders and the process reader. Output: Ok while none runs, else the code, or
 /// `harness_update_unavailable` when the processes cannot be read.
 fn not_running(watched: &[PathBuf], images: Images) -> Result<(), &'static str> {
-    let _ = (watched, images);
-    Ok(())
+    match images(watched).map_err(|_| UNAVAILABLE)? {
+        true => Err(IN_USE),
+        false => Ok(()),
+    }
 }
 
 /// The folders whose running programs block an update: the ones its command changes, or,
 /// for a self-updater, which names none, the folder of the harness's real file. Inputs: the
 /// folders the command holds and the real file. Output: the folders, never empty.
 fn watched(held: &[PathBuf], real: &Path) -> Vec<PathBuf> {
-    let _ = real;
-    held.to_vec()
+    let folders = match (held.is_empty(), real.parent()) {
+        (false, _) => held.to_vec(),
+        (true, Some(folder)) => vec![folder.to_path_buf()],
+        (true, None) => vec![real.to_path_buf()],
+    };
+    assert!(!folders.is_empty());
+    folders
 }
 
 /// Opens the engine database file again, read-only, for a job whose turn came after a wait,
@@ -647,8 +654,17 @@ static UPDATING: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 /// goes on. Inputs: the harness name, an alias allowed, and whether this is Windows.
 /// Output: Ok, or `harness_launch_updating`.
 pub(crate) fn launchable(harness: &str, windows: bool) -> Result<(), &'static str> {
-    let _ = (harness, windows, &UPDATING);
-    Ok(())
+    let id = harnesses::canonical(harness);
+    match windows && updating().iter().any(|job| *job == id) {
+        true => Err(LAUNCH_UPDATING),
+        false => Ok(()),
+    }
+}
+
+/// The process's list of running update and install jobs ([`UPDATING`]), also after a job
+/// panicked while it held the list. Output: the locked list.
+fn updating() -> MutexGuard<'static, Vec<&'static str>> {
+    UPDATING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A running job's hold on its harness; dropping it frees the harness on every path.
@@ -674,6 +690,10 @@ impl Drop for Running {
         let mut state = self.updates.state();
         state.running.retain(|running| *running != self.id);
         assert!(!state.running.contains(&self.id));
+        let mut jobs = updating();
+        let at = jobs.iter().position(|job| *job == self.id);
+        assert!(at.is_some(), "a running job is in the process's list");
+        jobs.swap_remove(at.unwrap_or_default());
     }
 }
 
@@ -724,6 +744,7 @@ impl Updates {
         }
         state.running.push(id);
         assert!(state.running.len() <= harnesses::specs().len());
+        updating().push(id);
         Ok(Running {
             updates: self.clone(),
             id,
@@ -957,13 +978,19 @@ impl Updates {
             kernel_sandbox::paths::canonical(&executable).unwrap_or_else(|_| executable.clone());
         let fixed = update_command(id, &executable, &real, roots)?;
         let held = folders(&fixed, roots);
+        let watching = watched(&held, &real);
+        if cfg!(windows) {
+            not_running(&watching, IMAGES)?;
+        }
         let roots = roots.clone();
         Self::spawn(
             running,
             held,
             move || {
                 if cfg!(windows)
-                    && let Err(code) = reopened(&path).and_then(|db| unused(&db, id))
+                    && let Err(code) = reopened(&path)
+                        .and_then(|db| unused(&db, id))
+                        .and_then(|()| not_running(&watching, IMAGES))
                 {
                     return outcome(Err(code), UPDATE_FAILED, None, None);
                 }
