@@ -686,7 +686,7 @@ async function main() {
         await view.capture("questions-withdrawn");
         await pause(QUIET_MS);
         const back = typedCount(control, delivered(id, "dismissed")) + deliveredRows(id, "dismissed").length;
-        if (back !== 0) throw new Refused("withdrawal_delivered_back", `${back} deliveries`);
+        if (back !== 0 || !typedCount(control, "")) throw new Refused(back ? "withdrawal_delivered_back" : "no_master_turn_read", `${back} deliveries`);
         return `withdrawn; second withdrawal refused: ${again.text.slice(0, 80)}`;
       });
 
@@ -956,7 +956,7 @@ async function main() {
       if (!roadmap.startsWith("# Roadmap") || !roadmap.includes("Written by the CrazyAgent engine")) throw new Refused("roadmap_md_shape", roadmap.slice(0, 120));
       if (!release.startsWith("# Release process") || !release.includes("Written by the CrazyAgent engine")) throw new Refused("release_process_md_shape", release.slice(0, 120));
       const asked = (await value("desktop_questions", { projectId: project, after: null }, via)).items.filter((item) => item.asker === "engine:planning");
-      if (asked.length > OPEN_POINTS_MAX) throw new Refused("too_many_open_points", String(asked.length));
+      if (asked.length < 1 || asked.length > OPEN_POINTS_MAX) throw new Refused(asked.length ? "too_many_open_points" : "no_open_points_asked", String(asked.length));
       applied("remove_project", await value("desktop_remove_project", { id: project, generation: next() }, via), real.database);
       return `roadmap.md ${roadmap.length} B, release-process.md ${release.length} B, ${asked.length} open points asked`;
     };
