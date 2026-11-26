@@ -65,6 +65,21 @@ fn keep_only_held(
                 .iter()
                 .find(|(known, _)| child.name == *known)
                 .map(|(_, kind)| *kind);
+            eprintln!(
+                "DIAG keep depth {depth} name {:?} kind {:?} wanted {}",
+                child.name,
+                child.kind,
+                match wanted {
+                    None => "none",
+                    Some(Kept::File) => "File",
+                    Some(Kept::Lock) => "Lock",
+                    Some(Kept::Folder) => "Folder",
+                    Some(Kept::Cache) => "Cache",
+                    Some(Kept::Link) => "Link",
+                    Some(Kept::Only(_)) => "Only",
+                    Some(Kept::Transcripts) => "Transcripts",
+                }
+            );
             match (wanted, child.kind) {
                 (Some(Kept::File), Kind::File) if kept_file_held(folder, &name)? => {}
                 (Some(Kept::Lock), Kind::File) => {}
@@ -110,8 +125,18 @@ fn clear_memory_held(folder: &Folder) -> Result<(), AgentHomeError> {
 /// false for an entry gone meanwhile, or `agent_home_unwritable` when it cannot be opened
 /// or read, so a failed open never removes a kept file.
 fn kept_file_held(folder: &Folder, name: &Name) -> Result<bool, AgentHomeError> {
-    match folder.open_file_unjudged(name) {
-        Ok(file) => sole_trusted_link(&file).map_err(|_| failure("agent_home_unwritable")),
+    let opened = folder.open_file_unjudged(name);
+    eprintln!(
+        "DIAG kept_file {:?} open {:?}",
+        name.as_os_str(),
+        opened.as_ref().map(|_| ()).err()
+    );
+    match opened {
+        Ok(file) => {
+            let sole = sole_trusted_link(&file);
+            eprintln!("DIAG kept_file {:?} sole {:?}", name.as_os_str(), sole);
+            sole.map_err(|_| failure("agent_home_unwritable"))
+        }
         Err(HeldError::Missing) => Ok(false),
         Err(_) => Err(failure("agent_home_unwritable")),
     }

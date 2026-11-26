@@ -1114,11 +1114,20 @@ fn open_as_itself(path: &Path, access: Option<u32>) -> Result<File, HeldError> {
         Some(access) => options.access_mode(access),
         None => options.read(true),
     };
-    options
+    let opened = options
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(cause)
+        .open(path);
+    eprintln!(
+        "DIAG open_as_itself {} access {:?} share 0x3 flags backup|open_reparse -> {:?}",
+        path.display(),
+        access,
+        opened
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| error.raw_os_error())
+    );
+    opened.map_err(cause)
 }
 
 /// Refuses an entry opened as itself that is a reparse point or not a folder. Input: the
