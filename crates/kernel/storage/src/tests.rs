@@ -182,13 +182,56 @@ fn a_feature_that_turns_test_support_on_through_a_dependency_is_caught() {
     assert_eq!(refused_in(text), ["features.extra", "features.other"]);
 }
 
+/// The panic text of a walk of `folder` for manifests, which must panic. Input: the folder.
+/// Output: the text.
+#[cfg(unix)]
+fn files_panic(folder: &std::path::Path) -> String {
+    let cause = std::panic::catch_unwind(|| files(folder, "Cargo.toml")).expect_err("files panics");
+    cause
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[cfg(unix)]
 #[test]
-fn files_leaves_out_a_folder_link() {
+fn files_panics_naming_a_folder_link() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("real")).unwrap();
     std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
     std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
+
+    let said = files_panic(root.path());
+
+    assert!(said.contains(&format!("{:?}", root.path().join("linked"))), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn files_panics_naming_a_file_link() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("real/Cargo.toml"),
+        root.path().join("Cargo.toml"),
+    )
+    .unwrap();
+
+    let said = files_panic(root.path());
+
+    assert!(said.contains(&format!("{:?}", root.path().join("Cargo.toml"))), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn files_leaves_out_a_linked_excluded_folder_before_the_link_check() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
+    for name in ["node_modules", "target", ".local-state", ".worktrees", ".git"] {
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join(name)).unwrap();
+    }
 
     let found = files(root.path(), "Cargo.toml");
 
