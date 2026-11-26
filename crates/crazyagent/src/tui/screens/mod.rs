@@ -527,3 +527,29 @@ pub(in crate::tui) fn frame_path(name: &str) -> String {
         format!("{base}.txt")
     }
 }
+
+/// Reads one desktop string literal as the desktop shows it: the text between one matching
+/// pair of double quotes or backticks, with `${thisComputer()}` filled in with this
+/// computer's word. Input: the literal with its quotes. Output: the shown text, or None when
+/// it is not one quoted literal.
+#[cfg(test)]
+pub(in crate::tui) fn desktop_literal(text: &str) -> Option<String> {
+    let quoted = |mark| text.strip_prefix(mark)?.strip_suffix(mark);
+    match (quoted('"'), quoted('`')) {
+        (Some(plain), _) => Some(plain.to_owned()),
+        (None, Some(template)) => Some(template.replace("${thisComputer()}", THIS_COMPUTER)),
+        (None, None) => None,
+    }
+}
+
+/// Reads the text a desktop source file shows for one key of an object literal, from its
+/// `key: literal,` line ([`desktop_literal`]). Inputs: the file's text and the key.
+/// Output: the shown text, or None when no line holds the key with one quoted literal.
+#[cfg(test)]
+pub(in crate::tui) fn desktop_entry(source: &str, key: &str) -> Option<String> {
+    let entry = format!("{key}: ");
+    let text = source
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(entry.as_str()))?;
+    desktop_literal(text.strip_suffix(',')?)
+}
