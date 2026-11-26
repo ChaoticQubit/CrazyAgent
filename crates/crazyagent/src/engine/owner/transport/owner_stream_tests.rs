@@ -14,6 +14,46 @@ fn rust_files(folder: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Whether a file's text opens an owner connection on its own. Input: the text. Output: true
+/// when the text holds the checked connect's own call.
+fn connects_on_its_own(text: &str) -> bool {
+    text.contains(concat!("owner_connect(", "self.root.path.join(SOCKET))"))
+}
+
+/// Every spelling of an owner connect is flagged: the call split over lines, a borrowed path,
+/// a path bound first, the endpoint named through its module, and a direct Unix socket or pipe
+/// client open.
+#[test]
+fn every_spelling_of_an_owner_connect_is_flagged() {
+    let spellings = [
+        "let stream = crate::ipc::owner_connect(\n    self.root.path.join(SOCKET),\n)\n.await",
+        "crate::ipc::owner_connect(&self.root.path.join(SOCKET)).await",
+        "let path = self.root.path.join(SOCKET);\nlet stream = crate::ipc::owner_connect(path).await;",
+        "crate::ipc::owner_connect(self.root.path.join(super::SOCKET)).await",
+        "kernel_processes::spawn_gate::connect_unix(self.root.path.join(SOCKET)).await",
+        "let pipe = named_pipe::ClientOptions::open(&name)?;",
+        "let pipe = ClientOptions::new()\n    .open(&name)?;",
+        "let socket = std::os::unix::net::UnixStream::connect(&path)?;",
+        "let pipe: NamedPipeClient = open(&name)?;",
+    ];
+    let missed: Vec<&str> = spellings
+        .into_iter()
+        .filter(|text| !connects_on_its_own(text))
+        .collect();
+    assert_eq!(
+        missed,
+        Vec::<&str>::new(),
+        "connect spellings the guard misses"
+    );
+}
+
+/// A file that names the endpoint but opens no connection of its own is not flagged.
+#[test]
+fn a_file_without_a_connect_is_not_flagged() {
+    let text = "let socket = self.root.path.join(SOCKET);\nlet reply = self.exchange(request).await?;\nconnected(socket)";
+    assert!(!connects_on_its_own(text), "{text}");
+}
+
 /// Every owner client opens its connection through the one checked connect, so none writes
 /// its capability to an endpoint it did not check again after the connect.
 #[test]
