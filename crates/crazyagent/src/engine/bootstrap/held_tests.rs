@@ -921,8 +921,8 @@ fn a_tree_removal_stops_at_its_depth_bound() {
 }
 
 /// On Windows a file in the tree that another handle holds without delete sharing makes
-/// the removal `InUse` after its bounded retries, and the file stays until that handle
-/// closes, when the same removal takes the whole tree.
+/// the removal `InUse`, and the file stays until that handle closes, when the same removal
+/// takes the whole tree.
 #[cfg(windows)]
 #[test]
 fn a_tree_removal_with_a_held_file_is_in_use_and_keeps_it() {
