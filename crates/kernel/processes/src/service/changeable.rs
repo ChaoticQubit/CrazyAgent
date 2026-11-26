@@ -3,6 +3,10 @@ use super::canonical;
 use super::{current_uid, trusted_group};
 use std::path::{Path, PathBuf};
 
+/// What `lstat` read of each place a link walk found, by the place's path as the walk
+/// named it.
+type Known = Vec<(PathBuf, std::fs::Metadata)>;
+
 /// The most links one path's resolution may pass through before the path counts as
 /// changeable, as an unreadable entry does.
 pub(crate) const LINK_HOPS_MAX: usize = 32;
@@ -29,7 +33,7 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 }
 
 /// Reads a path as written, with its links resolved, and every link, `..` folder and first
-/// missing part its resolution passes through ([`link_chain`]), and names the first
+/// missing part its resolution passes through ([`link_chain_read`]), and names the first
 /// changeable part of any of them ([`first_changeable_part`]). A link that cannot be read,
 /// or a chain past [`LINK_HOPS_MAX`], counts as changeable. A call that finds a changeable
 /// part keeps no access answer it read. Inputs: the path and whether world-writable stores
@@ -38,8 +42,8 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
     let resolved = canonical(path);
-    let hops = match link_chain(path) {
-        Ok(hops) => hops,
+    let (hops, known) = match link_chain_read(path) {
+        Ok(chain) => chain,
         Err(entry) => return Some(entry),
     };
     let mut paths: Vec<&Path> = vec![path, resolved.as_path()];
@@ -50,7 +54,7 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
             entries.push(entry);
         }
     }
-    let read = read_parts(&entries);
+    let read = read_parts_known(&entries, &known);
     assert_eq!(read.len(), entries.len());
     for path in &paths {
         let parts: Vec<Part> = path
@@ -70,6 +74,13 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     None
 }
 
+/// The places of [`link_chain_read`] without its reads. Input: an absolute path. Output:
+/// the places, or the entry that makes the path changeable.
+#[cfg(windows)]
+fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
+    link_chain_read(path).map(|(hops, _)| hops)
+}
+
 /// Every link a path's resolution passes through, named where it sits, every folder a `..`
 /// in it leaves, and the first missing part where it would sit, since whoever can write its
 /// folder can make it, in the order the resolution meets them. The missing part ends the
@@ -78,7 +89,10 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
 /// [`LINK_HOPS_MAX`], or one whose target names no start ([`link_start`]). A relative path,
 /// or one on no drive root, is changeable as a whole, since what it names depends on the
 /// working folder or on a share.
-fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
+/// Each place the walk found comes with what `lstat` read of it, named as the walk named it,
+/// so a caller that reads those places again in the same call can take these reads instead
+/// ([`read_parts_known`]).
+fn link_chain_read(path: &Path) -> Result<(Vec<PathBuf>, Known), PathBuf> {
     use std::path::Component;
     let Some(mut at) = link_start(path, path).filter(|_| path.is_absolute()) else {
         return Err(path.to_path_buf());
@@ -95,6 +109,7 @@ fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
     let mut pending = Vec::new();
     queue(&mut pending, path);
     let mut hops = Vec::new();
+    let mut known: Known = Vec::new();
     let mut links = 0;
     while let Some(part) = pending.pop() {
         if part.as_os_str() == ".." {
@@ -106,7 +121,11 @@ fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
         }
         let next = at.join(&part);
         let kind = match std::fs::symlink_metadata(&next) {
-            Ok(metadata) => metadata.file_type(),
+            Ok(metadata) => {
+                let kind = metadata.file_type();
+                known.push((next.clone(), metadata));
+                kind
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 hops.push(next);
                 break;
@@ -133,7 +152,8 @@ fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
     }
     assert!(links <= LINK_HOPS_MAX);
     assert!(hops.len() >= links);
-    Ok(hops)
+    assert!(known.len() >= links);
+    Ok((hops, known))
 }
 
 /// Where the walk of a link's target starts: the root of the drive a target with a drive
@@ -179,9 +199,19 @@ pub(crate) enum Part {
 /// as its mode is not. Input: the parts. Output: the reads, in order.
 #[cfg(target_os = "macos")]
 fn read_parts(entries: &[&Path]) -> Vec<Part> {
+    read_parts_known(entries, &[])
+}
+
+/// [`read_parts`], taking for an entry the read `known` already holds for that same path,
+/// made by `lstat` earlier in the same call ([`link_chain_read`]), and reading the rest.
+/// Inputs: the parts and the reads already made. Output: the reads, in order.
+#[cfg(target_os = "macos")]
+fn read_parts_known(entries: &[&Path], known: &[(PathBuf, std::fs::Metadata)]) -> Vec<Part> {
     use std::os::unix::fs::MetadataExt;
-    let read: Vec<std::io::Result<std::fs::Metadata>> =
-        entries.iter().map(std::fs::symlink_metadata).collect();
+    let read: Vec<std::io::Result<std::fs::Metadata>> = entries
+        .iter()
+        .map(|entry| lstat_known(entry, known))
+        .collect();
     let listed: Vec<(&Path, &std::fs::Metadata)> = entries
         .iter()
         .zip(&read)
@@ -221,15 +251,42 @@ fn read_parts(entries: &[&Path]) -> Vec<Part> {
 /// reads, in order.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn read_parts(entries: &[&Path]) -> Vec<Part> {
-    entries.iter().map(|entry| read_part(entry)).collect()
+    read_parts_known(entries, &[])
+}
+
+/// [`read_parts`], taking for an entry the read `known` already holds for that same path,
+/// made by `lstat` earlier in the same call ([`link_chain_read`]). Inputs: the parts and the
+/// reads already made. Output: the reads, in order.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_parts_known(entries: &[&Path], known: &[(PathBuf, std::fs::Metadata)]) -> Vec<Part> {
+    entries
+        .iter()
+        .map(|entry| read_part(entry, lstat_known(entry, known)))
+        .collect()
+}
+
+/// What `lstat` reads of an entry: the read `known` holds for that exact path, else a new
+/// `lstat`. Inputs: the entry and the reads already made. Output: the read.
+#[cfg(unix)]
+fn lstat_known(
+    entry: &Path,
+    known: &[(PathBuf, std::fs::Metadata)],
+) -> std::io::Result<std::fs::Metadata> {
+    match known.iter().find(|(place, _)| place.as_path() == entry) {
+        Some((place, metadata)) => {
+            assert_eq!(place.as_path(), entry);
+            Ok(metadata.clone())
+        }
+        None => std::fs::symlink_metadata(entry),
+    }
 }
 
 /// Reads one part of a path without following a link. A link's own access list is never
-/// read, as its mode is not. Input: the part. Output: the read.
+/// read, as its mode is not. Inputs: the part and what `lstat` read of it. Output: the read.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn read_part(entry: &Path) -> Part {
+fn read_part(entry: &Path, read: std::io::Result<std::fs::Metadata>) -> Part {
     use std::os::unix::fs::MetadataExt;
-    match std::fs::symlink_metadata(entry) {
+    match read {
         Ok(metadata) => {
             let link = metadata.file_type().is_symlink();
             #[cfg(not(target_os = "macos"))]
