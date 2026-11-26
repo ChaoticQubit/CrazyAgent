@@ -998,3 +998,74 @@ fn a_tree_removal_with_a_held_file_is_in_use_and_keeps_it() {
     held.remove_tree_unjudged(&name("tree"), 2).unwrap();
     assert!(!root.join("tree").exists());
 }
+
+/// On Windows a file made sole in a caller-judged folder is create-only and never made
+/// through a link, and while its handle is open no other handle may write it, though one
+/// may read it; once it closes, a writer may open it.
+#[cfg(windows)]
+#[test]
+fn a_sole_inherited_file_refuses_a_second_writer_while_it_is_open() {
+    use std::io::Write;
+    let (_temp, root) = caller_root();
+    let outside = root.with_file_name("outside");
+    std::fs::create_dir(&outside).unwrap();
+    link_folder(&root.join("link"), &outside);
+    std::fs::write(root.join("taken"), "kept").unwrap();
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    let mut file = held.make_file_sole(&name("made.md")).unwrap();
+    file.write_all(b"sole").unwrap();
+    let writer = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("made.md"))
+    };
+    assert!(writer().is_err());
+    assert_eq!(
+        std::fs::read_to_string(root.join("made.md")).unwrap(),
+        "sole"
+    );
+    drop(file);
+    writer().unwrap();
+    for taken in ["taken", "link"] {
+        assert_eq!(
+            held.make_file_sole(&name(taken)).err(),
+            Some(HeldError::Unsafe),
+            "{taken}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(root.join("taken")).unwrap(), "kept");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
+
+/// On Windows a caller-judged folder opens one of its files as itself for reading, bound
+/// to it; a link or a folder at the name is `Unsafe`, and a missing name is `Missing`.
+#[cfg(windows)]
+#[test]
+fn an_unjudged_file_open_reads_a_plain_file_and_refuses_a_link_or_folder() {
+    use std::io::Read;
+    let (_temp, root) = caller_root();
+    let outside = root.with_file_name("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("named.md"), "outside").unwrap();
+    std::fs::write(root.join("plain.md"), "plain").unwrap();
+    std::fs::create_dir(root.join("folder")).unwrap();
+    link_folder(&root.join("link"), &outside);
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    let mut text = String::new();
+    held.open_file_unjudged(&name("plain.md"))
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    assert_eq!(text, "plain");
+    for refused in ["folder", "link"] {
+        assert_eq!(
+            held.open_file_unjudged(&name(refused)).err(),
+            Some(HeldError::Unsafe),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        held.open_file_unjudged(&name("missing.md")).err(),
+        Some(HeldError::Missing)
+    );
+}

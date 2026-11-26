@@ -1,5 +1,6 @@
 use super::*;
 use crazyagent_win_sandbox::private;
+use kernel_sandbox::policy::HomeCaches;
 
 /// A temporary folder in the plain spelling H1's check takes. Output: the folder's guard and
 /// its plain path.
@@ -165,15 +166,14 @@ fn a_windows_adopt_refuses_an_open_or_linked_home_before_a_lock() {
     });
 }
 
-/// What the Windows install cannot write yet, a process's project files, tools, Codex and a
-/// team relay, is refused with `launch_context_unavailable` once the home's checks pass,
-/// before it takes the lock or changes the home, so the launch folder and a Codex
-/// `config.toml` already there keep every byte.
+/// What the Windows install cannot write yet, tools, Codex and a team relay, is refused
+/// with `launch_context_unavailable` once the home's checks pass, before it takes the lock
+/// or changes the home, so the launch folder and a Codex `config.toml` already there keep
+/// every byte.
 #[test]
 fn a_windows_install_it_cannot_write_yet_is_refused_before_it_changes_the_home() {
     let (_temp, base) = base();
     let home = private_home(&base, "home");
-    let data = private_home(&base, "data");
     std::fs::create_dir(home.join(STATE)).unwrap();
     std::fs::write(home.join(STATE).join("kept"), "state").unwrap();
     std::fs::write(home.join("config.toml"), "model = \"kept\"\n").unwrap();
@@ -182,7 +182,6 @@ fn a_windows_install_it_cannot_write_yet_is_refused_before_it_changes_the_home()
         ..context()
     };
     let cases = [
-        ("process", context_with_process(&data), "claude-code", false),
         ("tools", context(), "claude-code", true),
         ("codex", context(), "codex", false),
         ("relay", relay, "claude-code", false),
@@ -327,9 +326,10 @@ fn assert_untouched(folder: &Path, name: &str) {
     assert_eq!(std::fs::read_dir(folder).unwrap().count(), 1);
 }
 
-/// A context that gives a process, as an agent launch with its project does. Input: the
-/// project's data folder. Output: it.
-fn context_with_process(data: &Path) -> AgentContext {
+/// A context that gives a process, as an agent launch with its project does, with the
+/// agent's own text and a caches choice. Inputs: the project's data folder, the text and
+/// the choice. Output: it.
+fn process_context(data: &Path, agent: &str, choice: HomeCaches) -> AgentContext {
     AgentContext {
         process: Some(Box::new(Process {
             project: crate::agent_home::AgentProject {
@@ -340,11 +340,26 @@ fn context_with_process(data: &Path) -> AgentContext {
                 repeated: crate::agent_home::Repeated::LeaveOut,
             },
             hooks: Vec::new(),
-            agent: String::new(),
-            caches: crate::agent_home::Caches::default(),
+            agent: agent.to_string(),
+            caches: crate::agent_home::Caches {
+                choice,
+                level: None,
+            },
         })),
         ..context()
     }
+}
+
+/// The text a context's process gives its agent. Input: the context. Output: the text.
+fn given(context: &AgentContext) -> String {
+    process_text(context.process.as_ref().unwrap())
+        .unwrap()
+        .text
+}
+
+/// Whether nothing is at `path`, not even a link. Input: the path. Output: the answer.
+fn gone(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err()
 }
 
 /// A Claude Code install with tools off writes its MCP list and its instructions into the
@@ -523,4 +538,216 @@ fn the_held_home_judge_refuses_a_low_or_open_inherited_label() {
     assert!(windows::judged_home(&labelled(MEDIUM, NO_WRITE_UP), &user));
     assert!(!windows::judged_home(&labelled(LOW, NO_WRITE_UP), &user));
     assert!(!windows::judged_home(&labelled(MEDIUM, 0), &user));
+}
+
+/// A Claude Code launch with tools off and a process prepares its home through the held
+/// root: the instruction file holds the given text, the launch's instructions end with it,
+/// the given and level records are written in the data root, every entry the home does not
+/// keep goes, inside a kept folder of only some names too, and every kept one stays.
+#[test]
+fn a_windows_process_install_prepares_the_home_through_the_held_root() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let data = private_home(&base, "data");
+    std::fs::write(home.join("stray.txt"), "stray").unwrap();
+    std::fs::create_dir_all(home.join("junk").join("inner")).unwrap();
+    std::fs::write(home.join("junk").join("inner").join("file"), "junk").unwrap();
+    std::fs::write(home.join(".claude.json"), "{}").unwrap();
+    std::fs::create_dir_all(home.join("projects").join("p1")).unwrap();
+    std::fs::write(home.join("projects").join("p1").join("t.jsonl"), "t").unwrap();
+    std::fs::create_dir_all(home.join(".claude").join("teams")).unwrap();
+    std::fs::create_dir_all(home.join(".claude").join("other")).unwrap();
+    let context = process_context(&data, "Check every row.", HomeCaches::Keep);
+    let given = given(&context);
+    assert!(given.contains("Check every row."));
+    let installed = context.install("claude-code", &home, false).unwrap();
+    let claude = home.join("CLAUDE.md");
+    assert_eq!(std::fs::read_to_string(&claude).unwrap(), given);
+    assert!(private::check(&std::fs::File::open(&claude).unwrap()).is_ok());
+    assert_eq!(
+        std::fs::read_to_string(home.join(STATE).join("instructions.md")).unwrap(),
+        format!("{}\n{given}", context.instructions)
+    );
+    for removed in [
+        home.join("stray.txt"),
+        home.join("junk"),
+        home.join(".claude").join("other"),
+    ] {
+        assert!(gone(&removed), "{}", removed.display());
+    }
+    for kept in [
+        home.join(".claude.json"),
+        home.join("projects").join("p1").join("t.jsonl"),
+        home.join(".claude").join("teams"),
+    ] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+    let records = |folder: &str| -> Vec<PathBuf> {
+        std::fs::read_dir(data.join(folder))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    };
+    let recorded = records("agent-instructions-given");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(std::fs::read_to_string(&recorded[0]).unwrap(), given);
+    assert_eq!(records("agent-home-levels").len(), 1);
+    drop(installed);
+    assert!(gone(&home.join(STATE)));
+    assert_eq!(std::fs::read_to_string(&claude).unwrap(), given);
+}
+
+/// Junctions an earlier agent left in its home, at a name the home does not keep, at a kept
+/// folder's name and inside a kept folder of only some names, are removed as themselves:
+/// the folders they named keep every byte and gain no file.
+#[test]
+fn a_windows_process_install_removes_planted_junctions_in_the_home_as_themselves() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let data = private_home(&base, "data");
+    let at_name = outside(&base, "at-name");
+    let at_kept = outside(&base, "at-kept");
+    let in_only = outside(&base, "in-only");
+    junction(&home.join("linked"), &at_name);
+    junction(&home.join("teams"), &at_kept);
+    std::fs::create_dir(home.join(".claude")).unwrap();
+    junction(&home.join(".claude").join("linked"), &in_only);
+    let context = process_context(&data, "Rows.", HomeCaches::Keep);
+    drop(context.install("claude-code", &home, false).unwrap());
+    for removed in [
+        home.join("linked"),
+        home.join("teams"),
+        home.join(".claude").join("linked"),
+    ] {
+        assert!(gone(&removed), "{}", removed.display());
+    }
+    assert_untouched(&at_name, "at-name");
+    assert_untouched(&at_kept, "at-kept");
+    assert_untouched(&in_only, "in-only");
+}
+
+/// A junction or a folder an earlier agent left at the instruction file's name is removed
+/// as itself, and the given text is written there create-only: what the junction named
+/// keeps every byte.
+#[test]
+fn a_windows_process_install_replaces_a_link_or_folder_at_the_instruction_file() {
+    let (_temp, base) = base();
+    for case in ["junction", "folder"] {
+        let home = private_home(&base, case);
+        let data = private_home(&base, &format!("{case}-data"));
+        let named = format!("{case}-target");
+        let target = outside(&base, &named);
+        let claude = home.join("CLAUDE.md");
+        if case == "junction" {
+            junction(&claude, &target);
+        } else {
+            std::fs::create_dir(&claude).unwrap();
+            std::fs::write(claude.join("kept"), "planted").unwrap();
+        }
+        let context = process_context(&data, "Rows.", HomeCaches::Keep);
+        let given = given(&context);
+        drop(context.install("claude-code", &home, false).unwrap());
+        assert!(
+            std::fs::symlink_metadata(&claude).unwrap().is_file(),
+            "{case}"
+        );
+        assert_eq!(std::fs::read_to_string(&claude).unwrap(), given, "{case}");
+        assert_untouched(&target, &named);
+    }
+}
+
+/// With no given text the instruction file goes, a junction at its name as itself, so a
+/// stale copy never outlives a cleared page and what the junction named keeps every byte.
+#[test]
+fn a_windows_process_install_with_no_text_removes_the_instruction_file() {
+    let (_temp, base) = base();
+    let target = outside(&base, "target");
+    for case in ["file", "junction"] {
+        let home = private_home(&base, case);
+        let data = private_home(&base, &format!("{case}-data"));
+        let claude = home.join("CLAUDE.md");
+        if case == "file" {
+            std::fs::write(&claude, "stale").unwrap();
+        } else {
+            junction(&claude, &target);
+        }
+        let context = process_context(&data, "", HomeCaches::Keep);
+        assert!(given(&context).is_empty(), "{case}");
+        drop(context.install("claude-code", &home, false).unwrap());
+        assert!(gone(&claude), "{case}");
+    }
+    assert_untouched(&target, "target");
+}
+
+/// The download caches stay under Keep and go under Clear every launch.
+#[test]
+fn a_windows_process_install_keeps_or_clears_the_caches_by_the_choice() {
+    let (_temp, base) = base();
+    for (case, choice, stays) in [
+        ("keep", HomeCaches::Keep, true),
+        ("clear", HomeCaches::ClearEveryLaunch, false),
+    ] {
+        let home = private_home(&base, case);
+        let data = private_home(&base, &format!("{case}-data"));
+        for cache in [".cache", ".npm"] {
+            std::fs::create_dir(home.join(cache)).unwrap();
+            std::fs::write(home.join(cache).join("blob"), "cached").unwrap();
+        }
+        let context = process_context(&data, "Rows.", choice);
+        drop(context.install("claude-code", &home, false).unwrap());
+        for cache in [".cache", ".npm"] {
+            assert_eq!(
+                home.join(cache).join("blob").exists(),
+                stays,
+                "{case} {cache}"
+            );
+        }
+    }
+}
+
+/// In the kept `projects` folder each project's auto-memory goes and a junction directly in
+/// it goes as itself, while the transcripts stay and what the junction named keeps every
+/// byte.
+#[test]
+fn a_windows_process_install_clears_project_memory_and_links_but_keeps_transcripts() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let data = private_home(&base, "data");
+    let target = outside(&base, "target");
+    let project = home.join("projects").join("p1");
+    std::fs::create_dir_all(project.join("memory")).unwrap();
+    std::fs::write(project.join("memory").join("m.md"), "memory").unwrap();
+    std::fs::write(project.join("t.jsonl"), "t").unwrap();
+    junction(&home.join("projects").join("linked"), &target);
+    let context = process_context(&data, "Rows.", HomeCaches::Keep);
+    drop(context.install("claude-code", &home, false).unwrap());
+    assert!(gone(&project.join("memory")));
+    assert!(gone(&home.join("projects").join("linked")));
+    assert_eq!(
+        std::fs::read_to_string(project.join("t.jsonl")).unwrap(),
+        "t"
+    );
+    assert_untouched(&target, "target");
+}
+
+/// A kept file the engine cannot open for a reason other than its absence refuses the
+/// launch with `agent_home_unwritable` and stays with its bytes: a failed open never
+/// removes a kept file.
+#[test]
+fn a_windows_process_install_keeps_a_kept_file_it_cannot_open() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let data = private_home(&base, "data");
+    let kept = home.join(".claude.json");
+    std::fs::write(&kept, "{\"kept\":true}").unwrap();
+    let user = std::env::var("USERNAME").unwrap();
+    let file = kept.to_str().unwrap();
+    run("icacls.exe", &[file, "/deny", &format!("{user}:(R)")]);
+    let context = process_context(&data, "Rows.", HomeCaches::Keep);
+    assert_eq!(
+        context.install("claude-code", &home, false).unwrap_err().0,
+        "agent_home_unwritable"
+    );
+    run("icacls.exe", &[file, "/remove:d", &user]);
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{\"kept\":true}");
 }
