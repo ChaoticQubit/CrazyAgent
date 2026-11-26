@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, GrantLogRow, HomeCaches, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
 import { desktopPlatform } from "../../api-ide";
-import { Switch, isWindows } from "../../ui";
+import { Switch } from "../../ui";
+import { isWindows } from "../../ui/keys";
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
