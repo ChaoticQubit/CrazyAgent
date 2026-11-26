@@ -579,3 +579,44 @@ fn a_windows_folder_above_the_homes_parent_cannot_be_moved_while_its_launch_hold
     drop(installed);
     std::fs::rename(&grand, base.join("moved")).unwrap();
 }
+
+/// A pane record a Windows install leaves names the home it held, by its final path: after
+/// a junction above the home is repointed, an adopt holds and locks that home, so a second
+/// launch through the junction pointed back is busy and the pane's launch folder stays.
+#[test]
+fn a_windows_pane_record_names_the_held_home_so_adopt_locks_it_after_a_junction_is_repointed() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(&base, "second");
+    let other = private_home(&second, "home");
+    let link = base.join("link");
+    junction(&link, &first);
+    let installed = context()
+        .install("claude-code", &link.join("home"), false)
+        .unwrap();
+    let files = installed.files().unwrap().clone();
+    installed.keep();
+    assert_eq!(files.home, held_home);
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    let adopted = Installed::adopt(&files).unwrap();
+    assert_held(&held_home);
+    drop(lock_only(&other, "claude-code").unwrap());
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &first);
+    assert_eq!(
+        context()
+            .install("claude-code", &link.join("home"), false)
+            .unwrap_err()
+            .0,
+        "launch_home_busy"
+    );
+    let mcp = held_home.join(STATE).join("mcp.json");
+    assert_eq!(
+        std::fs::read_to_string(&mcp).unwrap(),
+        claude_config(&[]).unwrap()
+    );
+    drop(adopted);
+    drop(lock_only(&held_home, "claude-code").unwrap());
+}
