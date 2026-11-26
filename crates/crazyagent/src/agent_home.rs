@@ -1303,20 +1303,7 @@ fn sole_own_link(_file: &File, metadata: &fs::Metadata) -> bool {
 /// whose owner or links cannot be read is false.
 #[cfg(windows)]
 fn sole_own_link(file: &File, _metadata: &fs::Metadata) -> bool {
-    sole_trusted_link(file).unwrap_or(false)
-}
-
-/// Reads from an open file's handle on Windows whether it is no link, has one name and an
-/// owner W1's judge trusts: the engine's user, SYSTEM, the administrators or TrustedInstaller,
-/// as an elevated user's new files are owned by the administrators (DESIGN-0256 C6). Input:
-/// the open file. Output: the answer, or the Windows error.
-#[cfg(windows)]
-fn sole_trusted_link(file: &File) -> std::io::Result<bool> {
-    use crazyagent_win_sandbox::{dacl, private};
-    let facts = private::facts(file)?;
-    Ok(!facts.reparse
-        && facts.links == 1
-        && dacl::trusted_owner(&facts.owner, &private::user_sid()?))
+    held_home::sole_trusted_link(file).unwrap_or(false)
 }
 
 /// Tells whether a home entry kept as a file on Windows has one link and a trusted owner,
@@ -1330,7 +1317,7 @@ fn kept_file(path: &Path) -> Result<bool, AgentHomeError> {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(_) => return Err(failure("agent_home_unwritable")),
     };
-    sole_trusted_link(&file).map_err(|_| failure("agent_home_unwritable"))
+    held_home::sole_trusted_link(&file).map_err(|_| failure("agent_home_unwritable"))
 }
 
 fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
@@ -2123,6 +2110,8 @@ pub(crate) fn staged(staging: &Path, name: &str, count: u64) -> PathBuf {
     staging.join(format!(".{name}.{}.{count}", std::process::id()))
 }
 
+#[cfg(windows)]
+pub(crate) mod held_home;
 mod transcript;
 pub use transcript::{LoadedFile, Observed, observed};
 

@@ -49,10 +49,10 @@ pub(super) fn lock(home: &Path) -> Result<File, LaunchError> {
 }
 
 /// Installs a Claude Code launch with tools off in a home `validate_home` passed, every
-/// write held: the home is held as itself and judged on that handle, the lock must sit in
-/// it, the launch folder is cleared through it, links as themselves, then made again with
-/// the MCP list and instructions. A process, tools, Codex or a relay is refused before any
-/// change. Inputs: the context, the home, tools and Codex. Output: the guard, or the code.
+/// write held: the home is held and judged as itself, the lock must sit in it, the launch
+/// folder is cleared through it and a process's home prepared, links as themselves, then the
+/// MCP list and instructions written. Tools, Codex or a relay is refused before any change.
+/// Inputs: the context, the home, tools and Codex. Output: the guard, or the code.
 pub(super) fn install(
     context: &AgentContext,
     home: &Path,
@@ -60,7 +60,7 @@ pub(super) fn install(
     codex: bool,
 ) -> Result<Installed, LaunchError> {
     use crate::engine::bootstrap::held::{Folder, HeldError, Name, TREE_DEPTH_MAX};
-    if context.process.is_some() || tools || codex || context.relay.is_some() {
+    if tools || codex || context.relay.is_some() {
         return Err(failure("launch_context_unavailable"));
     }
     let root = Folder::root_judged_by(home, held_home_judge).map_err(held_failure)?;
@@ -72,12 +72,27 @@ pub(super) fn install(
         Err(error) => return Err(held_failure(error)),
     }
     let folder = root.make_dir_inherited(&state).map_err(held_failure)?;
+    let mut text = context.instructions.clone();
+    if let Some(process) = &context.process {
+        let given = process_text(process)?;
+        let harness = crate::agent_home::Harness::Claude;
+        crate::agent_home::held_home::prepare_held(
+            &root,
+            home,
+            harness,
+            &process.project,
+            &given,
+            process.caches,
+        )
+        .and_then(|()| crate::agent_home::record_skills(&process.project.data, home, &[]))
+        .map_err(|problem| LaunchError(problem.0, None))?;
+        if !given.text.is_empty() {
+            text.push('\n');
+            text.push_str(&given.text);
+        }
+    }
     write_inherited(&folder, "mcp.json", claude_config(&[])?.into_bytes())?;
-    write_inherited(
-        &folder,
-        "instructions.md",
-        context.instructions.clone().into_bytes(),
-    )?;
+    write_inherited(&folder, "instructions.md", text.into_bytes())?;
     let path = home.join(STATE);
     let installed = Installed {
         arguments: vec![
@@ -125,10 +140,10 @@ pub(super) fn remove_held(installed: &mut Installed) {
     }
 }
 
-/// Writes one file made in the held launch folder, create-only and with the folder's
-/// inheritable list, syncs it and checks its length from the handle; the bytes are wiped
-/// after. Inputs: the folder, the file name and its bytes. Output: Ok,
-/// `launch_context_unsafe` or `launch_context_unwritable`.
+/// Writes one file made in the held launch folder, create-only, with the folder's
+/// inheritable list and no other handle writing it meanwhile, syncs it and checks its length
+/// from the handle; the bytes are wiped after. Inputs: the folder, the file name and its
+/// bytes. Output: Ok, `launch_context_unsafe` or `launch_context_unwritable`.
 fn write_inherited(
     folder: &crate::engine::bootstrap::held::Folder,
     name: &'static str,
@@ -137,7 +152,7 @@ fn write_inherited(
     use crate::engine::bootstrap::held::Name;
     use std::io::Write;
     let mut file = folder
-        .make_file_inherited(&Name::constant(name))
+        .make_file_sole(&Name::constant(name))
         .map_err(held_failure)?;
     let written = file
         .write_all(&bytes)

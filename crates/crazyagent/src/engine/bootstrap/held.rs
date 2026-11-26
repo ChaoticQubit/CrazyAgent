@@ -1028,6 +1028,7 @@ impl Folder {
     /// taking this folder's inheritable list, so an agent the folder lets read gets it; then
     /// writes this folder's entries to disk and binds the file. Input: its name. Output: the
     /// file, open for reading and writing, or the error.
+    #[cfg(test)]
     pub(crate) fn make_file_inherited(&self, name: &Name) -> Result<File, HeldError> {
         use crate::platform::FILE_FLAG_OPEN_REPARSE_POINT;
         use std::os::windows::fs::OpenOptionsExt;
@@ -1042,6 +1043,42 @@ impl Folder {
             .open(self.path.join(name.as_os_str()))
             .map_err(|error| self.made_cause(name, error))?;
         private::sync_folder(&self.path).map_err(cause)?;
+        self.bind(name, &file)?;
+        Ok(file)
+    }
+
+    /// Makes one child file of a caller-judged tree, create-only and never through a link,
+    /// with this folder's inheritable list; while its handle is open other handles may only
+    /// read it, never write or delete it. Then writes this folder's entries to disk and
+    /// binds the file. Input: its name. Output: the file, open for reading and writing.
+    pub(crate) fn make_file_sole(&self, name: &Name) -> Result<File, HeldError> {
+        use crate::platform::FILE_FLAG_OPEN_REPARSE_POINT;
+        use std::os::windows::fs::OpenOptionsExt;
+        self.assert_caller_judged();
+        self.unmoved()?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name.as_os_str()))
+            .map_err(|error| self.made_cause(name, error))?;
+        private::sync_folder(&self.path).map_err(cause)?;
+        self.bind(name, &file)?;
+        Ok(file)
+    }
+
+    /// Opens one child file of a caller-judged tree as itself for reading only, never
+    /// through a link, and binds it to this folder; a reparse point or a folder at the name
+    /// is `Unsafe`. Input: its name. Output: the open file, `Missing`, or the error.
+    pub(crate) fn open_file_unjudged(&self, name: &Name) -> Result<File, HeldError> {
+        self.assert_caller_judged();
+        let file = open_as_itself(&self.path.join(name.as_os_str()), None)?;
+        let facts = private::facts(&file).map_err(cause)?;
+        if facts.reparse || !file.metadata().map_err(cause)?.is_file() {
+            return Err(HeldError::Unsafe);
+        }
         self.bind(name, &file)?;
         Ok(file)
     }

@@ -1127,7 +1127,7 @@ impl AgentContext {
     /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
     /// the files hold the agent's own `getconf`
     /// ([`kernel_sandbox::toolchains::write_getconf`]). On Windows only Claude Code with tools
-    /// off and no process or relay installs, every write through the held home; the rest is
+    /// off and no relay installs, every write through the held home; the rest is
     /// refused with `launch_context_unavailable` before it takes the lock or changes the home.
     /// Output: the guard holding the files and the harness arguments, or `launch_home_busy`
     /// while another launch uses the home.
