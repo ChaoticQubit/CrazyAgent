@@ -985,6 +985,36 @@ mod tests {
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
+    /// A scratch folder whose setup fails part way, with a shut folder inside and a file whose
+    /// list denies reading it, is gone once the failure unwinds. Input: none. Output: none; it
+    /// panics when the folder is left behind, after removing it itself.
+    #[test]
+    fn a_scratch_folder_is_gone_after_a_failed_setup() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut made = None;
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let folder = scratch("leak");
+            made = Some(folder.to_path_buf());
+            let shut = folder.join("shut");
+            std::fs::create_dir(&shut).unwrap();
+            std::fs::write(shut.join("inside"), "x").unwrap();
+            let file = folder.join("file");
+            std::fs::write(&file, "x").unwrap();
+            chmod(&["+a", "group:everyone deny readsecurity"], &file);
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+            panic!("the setup fails");
+        }));
+        assert!(failed.is_err());
+        let made = made.unwrap();
+        let left = made.exists();
+        if left {
+            chmod(&["-R", "-P", "u+rwx"], &made);
+            chmod(&["-R", "-P", "-N"], &made);
+            std::fs::remove_dir_all(&made).unwrap();
+        }
+        assert!(!left, "the failed setup left {made:?} behind");
+    }
+
     /// A `kauth_filesec` with the magic number, a 44-byte head and the given count field,
     /// then the entries. Inputs: the count field and the entries. Output: the bytes.
     fn filesec(count: u32, entries: &[([u8; 16], u32, u32)]) -> Vec<u8> {
