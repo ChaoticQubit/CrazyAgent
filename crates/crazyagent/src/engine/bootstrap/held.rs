@@ -725,16 +725,22 @@ fn plain_drive(path: &Path) -> bool {
 }
 
 /// Reads where an open entry really is from its handle with W1 `place`, in the plain
-/// spelling: the one `\\?\` drive prefix W1 gives is dropped, and any other form, a share
-/// among them, is `Unsafe`. The local strip goes once W3-4a's `one_spelling` arm lands
+/// spelling: checked to be a `\\?\` drive path first, its one prefix is then dropped, and any
+/// other form, a share or a device among them, is `Unsafe`. The local strip goes once W3-4a's `one_spelling` arm lands
 /// (DESIGN-0515 D6). Input: the handle. Output: the plain place, or the error.
 #[cfg(windows)]
 fn place_of(file: &File) -> Result<PathBuf, HeldError> {
     use std::os::windows::ffi::OsStringExt;
+    use std::path::{Component, Prefix};
     let units = private::place(file).map_err(cause)?;
-    let verbatim = OsString::from_wide(&units);
+    let verbatim = PathBuf::from(OsString::from_wide(&units));
+    let drive = matches!(
+        verbatim.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+    );
     let plain = verbatim
         .to_str()
+        .filter(|_| drive)
         .and_then(|text| text.strip_prefix(r"\\?\"))
         .map(PathBuf::from)
         .ok_or(HeldError::Unsafe)?;
@@ -964,6 +970,12 @@ impl Folder {
 
 #[cfg(windows)]
 impl Folder {
+    /// Where the held folder is, read from its handle when it was held: a plain drive path
+    /// with no link in it. Output: the place.
+    pub(crate) fn place(&self) -> &Path {
+        &self.path
+    }
+
     /// Holds the first folder of a chain its caller judges: only the plain drive spelling,
     /// opened as itself, never sharing delete, refused as `Unsafe` when it is a reparse point
     /// or not a folder before `judge` runs on the held handle. The folder keeps the place

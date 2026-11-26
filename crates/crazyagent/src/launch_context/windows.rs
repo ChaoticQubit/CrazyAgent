@@ -78,7 +78,10 @@ pub(super) fn install(
         "instructions.md",
         context.instructions.clone().into_bytes(),
     )?;
-    let path = home.join(STATE);
+    let path = root.place().join(STATE);
+    if folder.place() != path {
+        return Err(failure("launch_context_unsafe"));
+    }
     let installed = Installed {
         arguments: vec![
             OsString::from("--mcp-config"),
