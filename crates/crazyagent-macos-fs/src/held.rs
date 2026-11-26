@@ -122,19 +122,20 @@ pub fn held_entry(entry: BorrowedFd<'_>) -> std::io::Result<HeldEntry> {
     held_reply(&reply)
 }
 
-/// Reads one entry named by one part relative to an open folder with one `getattrlistat`
-/// that follows no link, so a link there is read itself ([`HeldEntry`]). Safety contract of
-/// its unsafe call: `parent` is borrowed, so it stays open for the call; `name` is a `CStr`;
-/// the attribute list and reply buffer are locals that outlive the call, whose length is
-/// passed as the buffer's own. Inputs: the folder and the name. Output: the read, or an error
-/// for a call that failed or a reply cut short or out of shape.
+/// Reads one entry named by one part relative to an open folder, or by an absolute name with
+/// no folder, with one `getattrlistat` that follows no link, so a link there is read itself
+/// ([`HeldEntry`]). Safety contract of its unsafe call: `parent` is borrowed, so it stays open
+/// for the call; `name` is a `CStr`; the attribute list and reply buffer are locals that
+/// outlive the call, whose length is passed as the buffer's own. Inputs: the folder or none,
+/// and the name. Output: the read, or an error for a call that failed or a reply out of shape.
 #[allow(unsafe_code)]
-pub fn held_entry_at(parent: BorrowedFd<'_>, name: &CStr) -> std::io::Result<HeldEntry> {
+pub fn held_entry_at(parent: Option<BorrowedFd<'_>>, name: &CStr) -> std::io::Result<HeldEntry> {
+    assert!(parent.is_some() || name.to_bytes().first() == Some(&b'/'));
     let mut list = held_list();
     let mut reply = [0u8; ENTRY_REPLY_BYTES];
     let done = unsafe {
         libc::getattrlistat(
-            parent.as_raw_fd(),
+            parent.map_or(libc::AT_FDCWD, |parent| parent.as_raw_fd()),
             name.as_ptr(),
             (&raw mut list).cast(),
             reply.as_mut_ptr().cast(),
@@ -185,21 +186,22 @@ pub fn held_volume_keeps_lists(entry: BorrowedFd<'_>, device: u64) -> std::io::R
     Ok(volume_keeps_lists(&reply, device, root_pair()))
 }
 
-/// [`held_volume_keeps_lists`] for one entry named by one part relative to an open folder,
-/// read with one `getattrlistat` that follows no link. Safety contract of its unsafe call:
-/// as [`held_entry_at`]. Inputs: the folder, the name and the device the entry read. Output:
-/// the answer, or the error of a call that failed.
+/// [`held_volume_keeps_lists`] for one entry named by one part relative to an open folder, or
+/// by an absolute name with no folder, read with one `getattrlistat` that follows no link.
+/// Safety contract of its unsafe call: as [`held_entry_at`]. Inputs: the folder or none, the
+/// name and the device the entry read. Output: the answer, or the error of a call that failed.
 #[allow(unsafe_code)]
 pub fn held_volume_keeps_lists_at(
-    parent: BorrowedFd<'_>,
+    parent: Option<BorrowedFd<'_>>,
     name: &CStr,
     device: u64,
 ) -> std::io::Result<bool> {
+    assert!(parent.is_some() || name.to_bytes().first() == Some(&b'/'));
     let mut list = volume_list();
     let mut reply = [0u8; VOLUME_REPLY_BYTES];
     let done = unsafe {
         libc::getattrlistat(
-            parent.as_raw_fd(),
+            parent.map_or(libc::AT_FDCWD, |parent| parent.as_raw_fd()),
             name.as_ptr(),
             (&raw mut list).cast(),
             reply.as_mut_ptr().cast(),
