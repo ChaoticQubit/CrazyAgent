@@ -1,7 +1,7 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use {kernel_processes::finding::NODE_HINT, std::time::Duration};
 
 mod parallel;
 mod runner;
@@ -1858,9 +1858,7 @@ fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_i
         case.versions(false).needs,
         Some(HarnessNeeds {
             program: Some("node".into()),
-            line: "codex needs node, which is missing. Install Node.js from nodejs.org, or run \
-                   brew install node in Terminal. Then try again."
-                .into(),
+            line: format!("codex needs node, which is missing. {NODE_HINT} Then try again."),
         }),
         "a found Codex that cannot run is never read as installed and ready"
     );
