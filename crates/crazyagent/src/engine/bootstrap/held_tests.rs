@@ -874,9 +874,8 @@ fn an_inherited_file_and_folder_are_create_only_and_take_the_folder_s_list() {
     link_folder(&root.join("link"), &outside);
     open_to_everyone(&root);
     let held = Folder::root_judged_by(&root, judge_any).unwrap();
-    let (mut file, pin) = held.make_file_inherited(&name("settings.json")).unwrap();
+    let mut file = held.make_file_inherited(&name("settings.json")).unwrap();
     file.write_all(b"{}").unwrap();
-    assert_ne!(pin.inode, 0);
     let folder = held.make_dir_inherited(&name("plugin")).unwrap();
     for taken in ["settings.json", "plugin", "link"] {
         assert_eq!(

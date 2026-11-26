@@ -239,6 +239,8 @@ pub struct Installed {
     handover: Option<crate::harnesses::accounts::Handover>,
     tool_home: Option<PathBuf>,
     _lock: File,
+    #[cfg(windows)]
+    held: Option<crate::engine::bootstrap::held::Folder>,
 }
 
 /// The engine's own MCP server as an ACP launch hands it to its agent in `session/new`:
@@ -1124,9 +1126,9 @@ impl AgentContext {
     /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`, and Codex
     /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
     /// the files hold the agent's own `getconf`
-    /// ([`kernel_sandbox::toolchains::write_getconf`]). On Windows it is refused with
-    /// `launch_context_unavailable` once H1's check passes, before it takes the lock or
-    /// changes the home, until S9b writes its files handle-relative (CodeRabbit CR-1140).
+    /// ([`kernel_sandbox::toolchains::write_getconf`]). On Windows only Claude Code with tools
+    /// off and no process or relay installs, every write through the held home; the rest is
+    /// refused with `launch_context_unavailable` before it takes the lock or changes the home.
     /// Output: the guard holding the files and the harness arguments, or `launch_home_busy`
     /// while another launch uses the home.
     pub fn install(
@@ -1153,8 +1155,9 @@ impl AgentContext {
             return Err(failure("launch_account_handover_mismatch"));
         }
         crate::harnesses::launch::validate_home(home)?;
+        #[cfg(windows)]
         if cfg!(windows) {
-            return Err(failure("launch_context_unavailable"));
+            return windows::install(self, home, tools, codex);
         }
         let lock = lock(home)?;
         let state = home.join(STATE);
@@ -1180,6 +1183,8 @@ impl AgentContext {
             handover: None,
             tool_home: None,
             _lock: lock,
+            #[cfg(windows)]
+            held: None,
         };
         remove(&state);
         directory(&state, true)?;
@@ -1479,6 +1484,8 @@ impl AgentContext {
             handover: self.handover.clone(),
             tool_home: self.tool_home.clone(),
             _lock: lock,
+            #[cfg(windows)]
+            held: None,
         };
         let acp = manifest.piped == Some(crate::harnesses::manifest::DriverKind::Acp);
         let servers = self.plugins.servers.iter().filter(|server| {
@@ -1708,6 +1715,8 @@ impl Installed {
             handover: None,
             tool_home: None,
             _lock: lock,
+            #[cfg(windows)]
+            held: None,
         })
     }
 
@@ -2991,6 +3000,8 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         handover: None,
         tool_home: None,
         _lock: lock,
+        #[cfg(windows)]
+        held: None,
     })
 }
 

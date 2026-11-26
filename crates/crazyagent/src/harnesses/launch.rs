@@ -1595,7 +1595,7 @@ fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchErro
 /// check cannot read, and no label a lower integrity process may write through.
 /// Inputs: the facts and the user's SID. Output: Ok, or the reason the home is refused.
 #[cfg(windows)]
-fn judge_home(
+pub(crate) fn judge_home(
     facts: &crazyagent_win_sandbox::private::Facts,
     user: &[u8],
 ) -> Result<(), &'static str> {

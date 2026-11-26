@@ -20,9 +20,14 @@ impl Drop for Installed {
     /// Deletes the launch's files, then releases the home lock on its open file
     /// description, so a process that shares it, such as a child another thread is
     /// starting, can never keep the home busy after the launch ends. Codex skills it cannot
-    /// remove stay for the next Codex launch, which refuses to start with them.
+    /// remove stay for the next Codex launch, which refuses to start with them. On Windows
+    /// the files go only through the held home, never by path.
     fn drop(&mut self) {
-        if let Some(files) = &self.files {
+        #[cfg(windows)]
+        super::windows::remove_held(self);
+        if !cfg!(windows)
+            && let Some(files) = &self.files
+        {
             for path in files.removals() {
                 remove(&path);
             }
