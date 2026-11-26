@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 mod elf;
+mod grants;
 mod paths;
 mod policy;
 
