@@ -1223,3 +1223,36 @@ fn a_registered_folder_under_an_install_root_stays_writable_after_a_failed_read(
     let other = or_named(unread.path().canonicalize(), unread.path());
     assert!(!Places::at_roots(Some(&other), None, failed).agent_writable(tool));
 }
+
+/// The owner line for git found nowhere the resolver looks. Input: none. Output: the line.
+fn missing_git_line() -> String {
+    Missing {
+        tool: "git".into(),
+        reason: Reason::NotFound,
+        needs: None,
+        found: None,
+        looked: Vec::new(),
+        refused: None,
+    }
+    .line()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_missing_git_names_the_command_line_tools_on_macos() {
+    assert_eq!(
+        missing_git_line(),
+        "git is missing. Install git: run xcode-select --install in Terminal. Then try again."
+    );
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn a_missing_git_names_the_package_manager_on_linux() {
+    let line = missing_git_line();
+    assert_eq!(
+        line,
+        "git is missing. Install git with your package manager. Then try again."
+    );
+    assert!(!line.contains("xcode-select"), "{line}");
+}
