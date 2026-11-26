@@ -67,7 +67,8 @@ fn joined(url: &url::Url, suffix: &str) -> String {
 }
 
 /// Sends one bounded plain-HTTP GET and reads the whole reply. An optional bearer key is
-/// written only into the Authorization header of this request and wiped afterwards.
+/// written only into the Authorization header of this request, wiped once it is sent or
+/// when the timeout ends the send.
 /// Inputs: http URL, request path, key and timeout. Output: status and body, or an error.
 pub async fn get(
     url: &url::Url,
@@ -83,9 +84,9 @@ pub async fn get(
         let mut stream = connect(&address)
             .await
             .map_err(|_| failure("account_url_unreachable"))?;
-        let mut request = request(path, &address, bearer);
+        let request = request(path, &address, bearer);
         let sent = stream.write_all(&request).await;
-        kernel_security::secret::wipe(&mut request);
+        drop(request);
         sent.map_err(|_| failure("account_url_unreachable"))?;
         let mut reply = Vec::new();
         (&mut stream)
@@ -103,10 +104,14 @@ pub async fn get(
 }
 
 /// Writes one plain-HTTP GET request, with the bearer key in its Authorization header when
-/// one is given, into one buffer of exactly its size, so no growth frees a copy of the key;
-/// the caller wipes the bytes once they are sent. Inputs: the request path, the host and
-/// port, and the key. Output: the request bytes.
-pub fn request(path: &str, address: &str, bearer: Option<&[u8]>) -> Vec<u8> {
+/// one is given, into one buffer of exactly its size, so no growth frees a copy of the key.
+/// Inputs: the request path, the host and port, and the key. Output: the request bytes,
+/// wiped when they are dropped.
+pub fn request(
+    path: &str,
+    address: &str,
+    bearer: Option<&[u8]>,
+) -> kernel_security::secret::Zeroizing<Vec<u8>> {
     const BEARER: &[u8] = b"Authorization: Bearer ";
     let head = format!(
         "GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n"
@@ -123,7 +128,7 @@ pub fn request(path: &str, address: &str, bearer: Option<&[u8]>) -> Vec<u8> {
     request.extend_from_slice(b"\r\n");
     assert_eq!(request.len(), size);
     assert_eq!(request.capacity(), capacity);
-    request
+    kernel_security::secret::Zeroizing::new(request)
 }
 
 fn parse(reply: &[u8]) -> Result<Response, EngineError> {

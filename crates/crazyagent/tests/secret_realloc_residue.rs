@@ -63,7 +63,7 @@ fn a_probe_request_frees_no_copy_of_its_key() {
     FREED_WITH_KEY.store(0, Ordering::SeqCst);
     WATCHING.store(true, Ordering::SeqCst);
     for key in &keys {
-        let mut bytes = request("/v1/models", "127.0.0.1:9", Some(key));
+        let bytes = request("/v1/models", "127.0.0.1:9", Some(key));
         let shape = (
             bytes.len(),
             bytes.capacity(),
@@ -72,7 +72,6 @@ fn a_probe_request_frees_no_copy_of_its_key() {
                 .windows(key.len())
                 .any(|window| window == key.as_slice()),
         );
-        wipe(&mut bytes);
         drop(bytes);
         if shape.0 != shape.1 || !shape.2 || !shape.3 {
             grown.push((key.len(), shape));
