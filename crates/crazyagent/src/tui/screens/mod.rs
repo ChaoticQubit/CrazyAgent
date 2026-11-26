@@ -527,3 +527,15 @@ pub(in crate::tui) fn frame_path(name: &str) -> String {
         format!("{base}.txt")
     }
 }
+
+/// Reads one desktop string literal as the desktop shows it: the text between one matching
+/// pair of double quotes or backticks, with `${thisComputer()}` filled in with this
+/// computer's word. Input: the literal with its quotes. Output: the shown text, or None when
+/// it is not one quoted literal.
+#[cfg(test)]
+pub(in crate::tui) fn desktop_literal(text: &str) -> Option<String> {
+    ['"', '`']
+        .iter()
+        .find_map(|mark| text.strip_prefix(*mark)?.strip_suffix(*mark))
+        .map(|inner| inner.replace("${thisComputer()}", THIS_COMPUTER))
+}

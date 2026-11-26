@@ -1,4 +1,3 @@
-use super::THIS_COMPUTER;
 use super::harness_setup::{INSTALLED, READING};
 use super::home::HARNESSES_HERE;
 use super::intake::AddWarning;
@@ -7,6 +6,7 @@ use super::settings_accounts::plain;
 use super::settings_add_account::{url_problem, words::CHECK_LINE};
 use super::settings_harnesses::{SUBTITLE, path_copy, update_copy};
 use super::settings_plugins::plugin_plain;
+use super::{THIS_COMPUTER, desktop_literal};
 use crate::accounts::Provider;
 use crate::harnesses::finding;
 
@@ -130,4 +130,22 @@ fn intake_warnings_name_the_computer_the_build_runs_on() {
             assert!(!text.contains("Mac"), "{warning:?}: {text}");
         }
     }
+}
+
+/// A desktop literal fills in the computer's word only inside backticks, where the desktop
+/// does; a double-quoted one keeps the token, so it can never pass as the TUI's words, and
+/// a text that is not one quoted literal reads as none.
+#[test]
+fn a_desktop_literal_fills_in_the_computer_only_inside_backticks() {
+    let filled = format!("on {THIS_COMPUTER}.");
+    assert_eq!(
+        desktop_literal("`on ${thisComputer()}.`").as_deref(),
+        Some(filled.as_str())
+    );
+    assert_eq!(
+        desktop_literal("\"on ${thisComputer()}.\"").as_deref(),
+        Some("on ${thisComputer()}.")
+    );
+    assert_eq!(desktop_literal("on this Mac."), None);
+    assert_eq!(desktop_literal("\"half`"), None);
 }
