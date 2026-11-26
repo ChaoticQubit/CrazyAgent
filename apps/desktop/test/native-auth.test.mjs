@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -69,9 +69,9 @@ function forbiddenEffect() {
   throw new Error("static rendering must not invoke an owner operation");
 }
 
-function markup(state, props = {}) {
+function markup(state, props = {}, panel = SignInPanel) {
   const harness = state?.context.harness;
-  return renderToStaticMarkup(createElement(SignInPanel, {
+  return renderToStaticMarkup(createElement(panel, {
     provider: harness === "claude" ? "claude" : "chatgpt", method: harness === "claude" ? "claude_official" : "codex_device_code",
     state, onStart: forbiddenEffect, onCancel: forbiddenEffect, onCheck: forbiddenEffect, onClaudeCode: forbiddenEffect, ...props,
   }));
@@ -97,7 +97,7 @@ test("synthetic typed selection opens inspectable auth without starting or editi
   assert.equal(state.in_flight, undefined);
   const existing = reduceNativeAuth(state, { kind: "begin", action: "codex_existing", request: 1 });
   assert.deepEqual(existing.in_flight, { action: "codex_existing", request: 1 });
-  assert.match(markup(state, { method: "codex_existing" }), /Nothing else on this computer is read\.[\s\S]*>Check this account&#x27;s sign-in<\/button>/);
+  assert.match(markup(state, { method: "codex_existing" }), new RegExp(`Nothing else on ${thisComputer()} is read\\.[\\s\\S]*>Check this account&#x27;s sign-in</button>`));
   const claudeCheck = structuredClone(detail);
   claudeCheck.record.connection.harness = "claude";
   assert.deepEqual(reduceNativeAuth(opened(claudeCheck), { kind: "begin", action: "claude_existing", request: 1 }).in_flight,
@@ -126,6 +126,11 @@ test("synthetic typed selection opens inspectable auth without starting or editi
     assert.match(markup(blocked), /role="alert"/);
     assert.doesNotMatch(markup(blocked), /Get sign-in code|Check this account/);
   }
+});
+
+test("the check of an account's own sign-in names the computer the app runs on, on every system", async () => {
+  await eachComputer("../src/screens/settings/sign-in.tsx", ({ SignInPanel: panel }, { os, computer }) =>
+    assert.match(markup(opened(), { method: "codex_existing" }, panel), new RegExp(`Nothing else on ${computer} is read\\.`), os));
 });
 
 test("synthetic typed replies attach only to the exact active selection and dispatch", () => {

@@ -280,19 +280,23 @@ test("account and server refusals name this Mac on macOS and this computer on Wi
 
 const TUI_SIGN_IN = "tui/screens/settings_add_account/words.rs";
 const TUI_SCREENS = "tui/screens/mod.rs";
+const ENGINE_LIB = "lib.rs";
 const TUI_OWN = new Set(["native_auth_recovery_required"]);
 const TUI_COMPUTER = [
-  [true, /#\[cfg\(target_os = "macos"\)\]\s*const THIS_COMPUTER: &str = "([^"]*)";/],
-  [false, /#\[cfg\(not\(target_os = "macos"\)\)\]\s*const THIS_COMPUTER: &str = "([^"]*)";/],
+  [true, /#\[cfg\(target_os = "macos"\)\]\s*macro_rules! on_this_computer \{[^}]*concat!\(\$before, "([^"]*)", \$after\)/],
+  [false, /#\[cfg\(not\(target_os = "macos"\)\)\]\s*macro_rules! on_this_computer \{[^}]*concat!\(\$before, "([^"]*)", \$after\)/],
 ];
 
-/** Reads the TUI's word for the computer on each system from its screens and checks it against
- * the app's word for the same system. Output: the words, macOS first. */
+/** Reads the TUI's word for the computer on each system from the engine's on_this_computer
+ * macro, which the screens' THIS_COMPUTER takes, and checks it against the app's word for the
+ * same system. Output: the words, macOS first. */
 function tuiComputers() {
   const screens = readFileSync(join(ENGINE, TUI_SCREENS), "utf8");
+  assert.match(screens, /^const THIS_COMPUTER: &str = on_this_computer!\("", ""\);$/m, `${TUI_SCREENS} takes THIS_COMPUTER from on_this_computer`);
+  const engine = readFileSync(join(ENGINE, ENGINE_LIB), "utf8");
   return TUI_COMPUTER.map(([mac, pattern]) => {
-    const word = screens.match(pattern)?.[1];
-    assert.equal(word, thisComputer(mac), `${TUI_SCREENS} names the computer as the app does on ${mac ? "macOS" : "Windows and Linux"}`);
+    const word = engine.match(pattern)?.[1];
+    assert.equal(word, thisComputer(mac), `${ENGINE_LIB} names the computer as the app does on ${mac ? "macOS" : "Windows and Linux"}`);
     return word;
   });
 }
