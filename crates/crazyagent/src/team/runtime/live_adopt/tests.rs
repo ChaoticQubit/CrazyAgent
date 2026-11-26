@@ -206,3 +206,36 @@ fn a_seated_master_stops_as_moved_on_close_or_on_another_session() {
         team.workers.clear();
     }
 }
+
+/// An owner open that commits after keep-live last read the live session and before the
+/// adopt reads it is adopted like any first open: the master keeps running, unstopped, in
+/// that session, and is never stopped as moved.
+#[test]
+fn an_open_between_the_move_read_and_the_adopt_read_is_adopted_not_stopped() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime().with_tools_refresh(|| {});
+    let (id, orders) = sessionless_master(&fixture, &mut team);
+    let database = fixture.base.join("engine.db");
+    BEFORE_ADOPT_READ.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            open_session(&Connection::open(&database).unwrap(), "first-open");
+        }));
+    });
+
+    step(&fixture, &mut team);
+
+    assert!(
+        BEFORE_ADOPT_READ.with(|step| step.borrow().is_none()),
+        "the open ran"
+    );
+    let worker = &team.workers[&id];
+    assert_eq!(worker.stop_why, "", "no engine_stop:moved");
+    assert!(!worker.stopping, "the master keeps running");
+    assert!(orders.try_recv().is_err(), "no stop order");
+    assert_eq!(worker.session.as_deref(), Some("first-open"));
+    assert_eq!(
+        kept(&fixture.connection, "first-open").as_deref(),
+        Some(NAMED)
+    );
+    team.workers.clear();
+}
