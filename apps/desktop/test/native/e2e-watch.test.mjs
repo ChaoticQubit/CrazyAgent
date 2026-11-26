@@ -25,10 +25,12 @@ test("v2.5 S3c: e2e_watch_next lives in the e2e bridge only and never builds int
   for (const path of app) {
     const text = readFileSync(path, "utf8");
     assert.doesNotMatch(text, /e2e_watch_next/, path);
+    assert.doesNotMatch(text, /e2e_terminal_next/, path);
     assert.doesNotMatch(text, /e2e_bridge/, path);
   }
   assert.match(readFileSync(join(DESKTOP, "src-tauri/e2e_bridge/watch.rs"), "utf8"), /pub const WATCH_NEXT: &str = "e2e_watch_next";/);
   assert.match(readFileSync(join(DESKTOP, "src-tauri/e2e_bridge/main.rs"), "utf8"), /^mod watch;$/m);
+  assert.match(readFileSync(join(DESKTOP, "src-tauri/e2e_bridge/terminal.rs"), "utf8"), /pub const NEXT: &str = "e2e_terminal_next";/);
 });
 
 const SUPERSEDED = { failure: { code: "watch_superseded", message: "a newer page follows the engine watch" } };
@@ -106,4 +108,33 @@ test("the harness page keeps following the engine watch after a dropped long-pol
   ]);
   for (const resent of asked.filter(({ cmd }) => cmd === "desktop_watch")) assert.deepEqual(resent.args, { changes: `__CHANNEL__:${id}` });
   assert.deepEqual(waits, [1000, 2000, 4000, 5000]);
+});
+
+test("the harness page hands a terminal view's frames to its channel in order, output as bytes, until the view ends", async () => {
+  const answers = [
+    { value: 3 },
+    { value: { frames: [{ json: { kind: "attached", agent_id: "master:1", cols: 80, rows: 24 } }, { raw: [113, 102] }], ended: false } },
+    { value: { frames: [], ended: false } },
+    { value: { frames: [{ raw: [54, 98] }, { json: { kind: "closed", reason: "terminal_closed" } }], ended: true } },
+  ];
+  const asked = [];
+  const window = { addEventListener() {} };
+  const fetch = async (_url, { body }) => {
+    asked.push(JSON.parse(body));
+    return answers.length === 0 ? new Promise(() => {}) : { json: async () => answers.shift() };
+  };
+  vm.runInNewContext(INTERNALS, { window, fetch, setTimeout, Uint8Array });
+  const got = [];
+  const id = window.__TAURI_INTERNALS__.transformCallback((raw) => got.push(raw));
+  const output = { id, toJSON: () => `__CHANNEL__:${id}` };
+  assert.equal(await window.__TAURI_INTERNALS__.invoke("desktop_terminal_attach", { agent: "master:1", pane: null, output, id: null }), 3);
+  for (let turn = 0; turn < 20; turn += 1) await new Promise((next) => setImmediate(next));
+  assert.deepEqual(asked.map(({ cmd }) => cmd), ["desktop_terminal_attach", "e2e_terminal_next", "e2e_terminal_next", "e2e_terminal_next"]);
+  assert.equal(asked[0].args.output, `__CHANNEL__:${id}`);
+  for (const poll of asked.slice(1)) assert.deepEqual(poll.args, { channel: id });
+  assert.deepEqual(got.map(({ index }) => index), [0, 1, 2, 3]);
+  assert.equal(got[0].message.kind, "attached");
+  assert.deepEqual([...new Uint8Array(got[1].message)], [113, 102]);
+  assert.deepEqual([...new Uint8Array(got[2].message)], [54, 98]);
+  assert.equal(got[3].message.kind, "closed");
 });

@@ -315,7 +315,9 @@ export async function serveApp(dist, bridge, picks, log, local = {}) {
 /** The page script that stands in for Tauri's injected internals: each invoke goes to the file
  * server, which hands it to the real bridge, and page errors are kept for the final check.
  * Callbacks are kept, so once `desktop_watch` answers, the page long-polls the bridge's
- * `e2e_watch_next` and hands each change to the watch's channel, as the app's feed does. */
+ * `e2e_watch_next` and hands each change to the watch's channel, as the app's feed does, and
+ * once `desktop_terminal_attach` answers, it long-polls `e2e_terminal_next` and hands each of
+ * the view's frames to its channel in order, raw output as bytes, until the view ends. */
 export const INTERNALS = `(() => {
   let next = 0;
   const callbacks = new Map();
@@ -349,10 +351,29 @@ export const INTERNALS = `(() => {
       index += 1;
     }
   };
+  const view = async (id) => {
+    for (let index = 0, failures = 0; ; ) {
+      let next;
+      try {
+        next = await forward("e2e_terminal_next", { channel: id });
+        failures = 0;
+      } catch (failure) {
+        if (failure?.code === "terminal_not_attached" || (failures += 1) > 5) return;
+        await new Promise((done) => setTimeout(done, Math.min(1000 * 2 ** (failures - 1), 5000)));
+        continue;
+      }
+      for (const frame of next.frames) {
+        callbacks.get(id)?.({ index, message: "raw" in frame ? new Uint8Array(frame.raw).buffer : frame.json });
+        index += 1;
+      }
+      if (next.ended) return;
+    }
+  };
   window.__TAURI_INTERNALS__ = {
     invoke: async (cmd, args = {}) => {
       const value = await forward(cmd, args);
       if (cmd === "desktop_watch") void follow(args.changes.id);
+      if (cmd === "desktop_terminal_attach") void view(args.output.id);
       return value;
     },
     transformCallback: (callback) => { next += 1; callbacks.set(next, callback); return next; },

@@ -1,4 +1,5 @@
 mod routes;
+mod terminal;
 mod watch;
 
 use crazyagent::agent_git::Layout;
@@ -196,6 +197,7 @@ async fn serve(
     mut stream: TcpStream,
     state: Shared,
     watched: Arc<watch::Watched>,
+    views: Arc<terminal::Views>,
     token: Arc<String>,
 ) {
     let (status, answer) = match request(&mut stream, &token).await {
@@ -212,6 +214,16 @@ async fn serve(
                         watch::watch(&state, &watched, args)
                     } else if command == watch::WATCH_NEXT {
                         watch::next(&watched).await
+                    } else if command == terminal::ATTACH {
+                        terminal::attach(&state, &views, args).await
+                    } else if [terminal::INPUT, terminal::PROMPT, terminal::RESIZE]
+                        .contains(&command.as_str())
+                    {
+                        terminal::send(&views, &command, args).await
+                    } else if command == terminal::DETACH {
+                        terminal::detach(&views, args)
+                    } else if command == terminal::NEXT {
+                        terminal::next(&views, args).await
                     } else {
                         routes::route(&state, &command, args).await
                     };
@@ -636,6 +648,7 @@ async fn run() -> std::process::ExitCode {
     )))));
     let token = Arc::new(token);
     let watched = Arc::new(watch::Watched::default());
+    let views = Arc::new(terminal::Views::default());
     std::thread::spawn(|| {
         let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
         std::process::exit(0);
@@ -655,6 +668,7 @@ async fn run() -> std::process::ExitCode {
             stream,
             Arc::clone(&state),
             Arc::clone(&watched),
+            Arc::clone(&views),
             Arc::clone(&token),
         ));
     }
