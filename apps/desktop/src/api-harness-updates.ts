@@ -30,6 +30,7 @@ const COPY: Record<string, string> = {
   harness_update_off: "Harness updates are off in settings.",
   harness_update_check_only: "Harness updates are set to Check only.",
   harness_update_busy: "This harness is already updating or installing.",
+  harness_update_in_use: "Close the sessions that use it, then update.",
   harness_update_not_installed: `It isn't installed on ${thisComputer()}.`,
   harness_update_timeout: "The update took too long and was stopped.",
   harness_update_failed: "The update didn't finish.",
