@@ -22,10 +22,12 @@ pub mod request;
 pub mod snapshot;
 #[cfg(windows)]
 mod win;
+#[cfg(windows)]
+pub use win::image_runs_under;
 
 #[cfg(windows)]
 pub use win::{
     BoundaryError, ProcessTree, changeable_part, container_sid, file_id, final_name,
-    image_runs_under, listener_beside, owner_only, release, run, system_folder,
-    unreadable_drive_root, unreadable_read_root, unreadable_root,
+    listener_beside, owner_only, release, run, system_folder, unreadable_drive_root,
+    unreadable_read_root, unreadable_root,
 };
