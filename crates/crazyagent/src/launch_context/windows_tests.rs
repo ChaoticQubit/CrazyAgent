@@ -1199,3 +1199,20 @@ fn a_windows_pane_record_names_the_held_home_so_adopt_locks_it_after_a_junction_
     drop(adopted);
     drop(lock_only(&held_home, "claude-code").unwrap());
 }
+
+/// A `skills` an earlier run nested 17 folders deep and a `config.toml` left as a folder
+/// chain 17 deep are both removed at the next Codex install, which then makes an empty
+/// `skills` and writes its config, so no depth blocks a later Codex launch.
+#[test]
+fn a_windows_codex_install_removes_deep_skills_and_a_deep_config_folder() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    for top in ["skills", "config.toml"] {
+        let bottom = (0..17).fold(home.join(top), |path, _| path.join("d"));
+        std::fs::create_dir_all(&bottom).unwrap();
+        std::fs::write(bottom.join("deep.md"), "deep").unwrap();
+    }
+    drop(context().install("codex", &home, false).unwrap());
+    assert!(skills_empty(&home));
+    assert!(home.join("config.toml").is_file());
+}
