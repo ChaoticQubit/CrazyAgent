@@ -295,7 +295,7 @@ impl ChannelCase {
         (fact, launch)
     }
 
-    fn token(&self) -> [u8; 32] {
+    fn token(&self) -> crate::engine::secret_frame::OwnerToken {
         self.host
             .authority
             .native_auth
@@ -304,6 +304,7 @@ impl ChannelCase {
             .as_ref()
             .unwrap()
             .token
+            .clone()
     }
 
     fn packet(&self) -> crate::engine::secret_frame::OwnerPacket {
@@ -583,7 +584,7 @@ async fn native_auth_channel_rejects_owner_runner_and_reserved_capability_roles(
                     } else {
                         OwnerClientKind::Desktop
                     };
-                    packet[5..].copy_from_slice(&case.client(kind).token);
+                    packet[5..].copy_from_slice(&*case.client(kind).token);
                 }
                 "as-tui" | "as-desktop" => {
                     packet[..4].copy_from_slice(b"CAO1");

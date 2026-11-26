@@ -2292,7 +2292,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
 fn capability_packet(path: &Path) -> crate::engine::secret_frame::OwnerPacket {
     let text = fs::read_to_string(path).unwrap();
     assert_eq!(text.len(), 64);
-    let mut token = [0; 32];
+    let mut token = crate::engine::secret_frame::owner_token();
     for (index, byte) in token.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap();
     }

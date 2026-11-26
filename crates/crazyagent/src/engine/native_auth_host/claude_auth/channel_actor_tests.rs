@@ -128,7 +128,8 @@ fallback_allowed = false
         .unwrap()
         .as_ref()
         .unwrap()
-        .token;
+        .token
+        .clone();
     let mut channel = NativeAuthCustodyChannel::connect(root.path(), token)
         .await
         .unwrap();

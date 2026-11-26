@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::transport::changes::CHANGES_TIMEOUT;
 use crate::engine::owner::{OwnerRuntimeHandle, failure};
+use crate::engine::secret_frame::{OwnerToken, owner_token};
 use crate::ipc::Stream;
 use crate::landing::ChangeSetId;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
@@ -518,8 +519,8 @@ pub(crate) struct Grants {
 /// a second try to take the session. Dropping `ended` wakes the grant's terminals.
 struct Grant {
     project: ProjectId,
-    token: [u8; 32],
-    spent: Option<[u8; 32]>,
+    token: OwnerToken,
+    spent: Option<OwnerToken>,
     file: PathBuf,
     identity: (u64, u64),
     taken: bool,
@@ -549,8 +550,8 @@ impl Grants {
         private_folder(&folder)?;
         let folder = folder.join(project.as_str());
         private_folder(&folder)?;
-        let mut token = [0; 32];
-        getrandom::fill(&mut token).map_err(|_| failure("ide_entropy_unavailable"))?;
+        let mut token = owner_token();
+        getrandom::fill(&mut *token).map_err(|_| failure("ide_entropy_unavailable"))?;
         if let Some(index) = earlier {
             live.swap_remove(index);
         }
@@ -605,16 +606,15 @@ impl Grants {
     /// a dead token. Each grant has one session: a second try ends the grant through
     /// `second_session`. Input: the handshake packet. Output: the session token, or
     /// `second_session`'s refusal, `ide_entropy_unavailable` or the file's cleanup failure.
-    fn session(&self, packet: &[u8; 37]) -> Result<[u8; 32], EngineError> {
-        let mut token = [0; 32];
-        getrandom::fill(&mut token).map_err(|_| failure("ide_entropy_unavailable"))?;
+    fn session(&self, packet: &[u8; 37]) -> Result<OwnerToken, EngineError> {
+        let mut token = owner_token();
+        getrandom::fill(&mut *token).map_err(|_| failure("ide_entropy_unavailable"))?;
         let swapped = {
             let mut live = self.live.lock().map_err(|_| failure("ide_unavailable"))?;
             match matching(&live, packet) {
                 Some(index) if !live[index].taken => {
                     let grant = &mut live[index];
-                    grant.spent = Some(grant.token);
-                    grant.token = token;
+                    grant.spent = Some(std::mem::replace(&mut grant.token, token.clone()));
                     grant.taken = true;
                     assert!(live.iter().filter(|grant| grant.token == token).count() == 1);
                     Some((live[index].file.clone(), live[index].identity))
@@ -740,14 +740,14 @@ impl Grants {
 /// constant time with every live token. Inputs: the grants and the packet. Output: the
 /// grant's index, or none.
 fn matching(live: &[Grant], packet: &[u8; 37]) -> Option<usize> {
-    holding(live, packet, |grant| Some(&grant.token))
+    holding(live, packet, |grant| Some(&*grant.token))
 }
 
 /// Finds the grant whose capability file's spent token a handshake carries, compared in
 /// constant time with every spent token. Inputs: the grants and the packet. Output: the
 /// grant's index, or none.
 fn spent(live: &[Grant], packet: &[u8; 37]) -> Option<usize> {
-    holding(live, packet, |grant| grant.spent.as_ref())
+    holding(live, packet, |grant| grant.spent.as_deref())
 }
 
 /// Finds the grant one of whose tokens a handshake carries: `CAI1`, slot zero and every
@@ -956,7 +956,7 @@ async fn serve_within(
         Ok(Ok((_, IdeCall::Session {}))) => {
             let reply = match runtime.ide_grants().session(&packet) {
                 Ok(token) => IdeReply::Ok {
-                    data: serde_json::json!({ "token": hex(&token) }),
+                    data: serde_json::json!({ "token": hex(&*token) }),
                 },
                 Err(error) => refusal(&error),
             };

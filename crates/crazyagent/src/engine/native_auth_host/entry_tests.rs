@@ -83,7 +83,7 @@ async fn native_auth_custodian_entry_exact_raw_bytes_and_eof() {
     let decoded = read_bootstrap(&pipe.reader, Instant::now() + SHORT_BOUND)
         .await
         .unwrap();
-    assert_eq!(decoded, TOKEN);
+    assert_eq!(*decoded, TOKEN);
     let mut trailing = [0; 1];
     assert_eq!(rustix::io::read(&pipe.reader, &mut trailing).unwrap(), 0);
 }
@@ -109,7 +109,7 @@ async fn native_auth_custodian_entry_fragmented_input_waits_for_eof() {
             closed
         }
     );
-    assert_eq!(decoded.unwrap(), TOKEN);
+    assert_eq!(*decoded.unwrap(), TOKEN);
     assert!(returned >= closed);
     assert!(started.elapsed() >= Duration::from_millis(40));
 }

@@ -3,6 +3,7 @@
 use crazyagent::config::resolve_config;
 use crazyagent::engine::Engine;
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerRuntimeHandle, OwnerServer};
+use crazyagent::engine::secret_frame::{OwnerToken, owner_token};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
@@ -10,7 +11,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 /// The most tokens one row watches for at once.
 const WATCHED_MAX: usize = 2;
@@ -100,8 +100,8 @@ fn stop() -> usize {
 
 /// Reads one owner key file into a buffer wiped when dropped, so the row's own copy is no
 /// residue. Input: the key file. Output: the token.
-fn key(path: &Path) -> Zeroizing<[u8; TOKEN_BYTES]> {
-    let mut token = Zeroizing::new([0u8; TOKEN_BYTES]);
+fn key(path: &Path) -> OwnerToken {
+    let mut token = owner_token();
     std::fs::File::open(path)
         .unwrap()
         .read_exact(&mut *token)
