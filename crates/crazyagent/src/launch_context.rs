@@ -1153,24 +1153,9 @@ impl AgentContext {
             return Err(failure("launch_account_handover_mismatch"));
         }
         crate::harnesses::launch::validate_home(home)?;
-        #[cfg(windows)]
-        return Err(failure("launch_context_unavailable"));
-        #[cfg(not(windows))]
-        return self.install_files(harness, home, tools, codex);
-    }
-
-    /// The part of [`AgentContext::install`] after the `validate_home` check passes, where
-    /// every file is written by path: it takes the lock, then writes Codex or Claude Code's
-    /// files and arguments. Inputs: the harness id, the checked home, whether tools are on and whether
-    /// the harness is Codex. Output: the guard, or `launch_home_busy` or another refusal.
-    #[cfg(not(windows))]
-    fn install_files(
-        &self,
-        harness: &str,
-        home: &Path,
-        tools: bool,
-        codex: bool,
-    ) -> Result<Installed, LaunchError> {
+        if cfg!(windows) {
+            return Err(failure("launch_context_unavailable"));
+        }
         let lock = lock(home)?;
         let state = home.join(STATE);
         let mut installed = Installed {
