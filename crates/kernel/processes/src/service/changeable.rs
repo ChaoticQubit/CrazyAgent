@@ -3,9 +3,19 @@ use super::canonical;
 use super::{current_uid, trusted_group};
 use std::path::{Path, PathBuf};
 
-/// What `lstat` read of each place a link walk found, by the place's path as the walk
+/// What one read of a place found without following a link ([`read_place`]): on macOS one
+/// `getattrlist` reply carrying the access list too, elsewhere what `lstat` found.
+#[cfg(target_os = "macos")]
+type Read = crazyagent_macos_fs::HeldEntry;
+
+/// What one read of a place found without following a link ([`read_place`]): on macOS one
+/// `getattrlist` reply carrying the access list too, elsewhere what `lstat` found.
+#[cfg(not(target_os = "macos"))]
+type Read = std::fs::Metadata;
+
+/// What [`read_place`] read of each place a link walk found, by the place's path as the walk
 /// named it.
-type Known = Vec<(PathBuf, std::fs::Metadata)>;
+type Known = Vec<(PathBuf, Read)>;
 
 /// The most links one path's resolution may pass through before the path counts as
 /// changeable, as an unreadable entry does.
@@ -35,9 +45,8 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 /// Reads a path as written, with its links resolved, and every link, `..` folder and first
 /// missing part its resolution passes through ([`link_chain_read`]), and names the first
 /// changeable part of any of them ([`first_changeable_part`]). A link that cannot be read,
-/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. A call that finds a changeable
-/// part keeps no access answer it read. Inputs: the path and whether world-writable stores
-/// pass. Output: the entry, or none.
+/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. Inputs: the path and whether
+/// world-writable stores pass. Output: the entry, or none.
 #[cfg(unix)]
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
@@ -66,8 +75,6 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
         if let Some(entry) = first_changeable_part(&parts, me, open_stores)
             .and_then(|depth| path.ancestors().nth(depth))
         {
-            #[cfg(target_os = "macos")]
-            super::acl::forget(&entries);
             return Some(entry.to_path_buf());
         }
     }
@@ -89,9 +96,9 @@ fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
 /// [`LINK_HOPS_MAX`], or one whose target names no start ([`link_start`]). A relative path,
 /// or one on no drive root, is changeable as a whole, since what it names depends on the
 /// working folder or on a share.
-/// Each place the walk found comes with what `lstat` read of it, named as the walk named it,
-/// so a caller that reads those places again in the same call can take these reads instead
-/// ([`read_parts_known`]).
+/// Each place the walk found comes with what [`read_place`] read of it, named as the walk
+/// named it, so a caller that reads those places again in the same call can take these reads
+/// instead ([`read_parts_known`]).
 fn link_chain_read(path: &Path) -> Result<(Vec<PathBuf>, Known), PathBuf> {
     use std::path::Component;
     let Some(mut at) = link_start(path, path).filter(|_| path.is_absolute()) else {
@@ -120,11 +127,11 @@ fn link_chain_read(path: &Path) -> Result<(Vec<PathBuf>, Known), PathBuf> {
             continue;
         }
         let next = at.join(&part);
-        let kind = match std::fs::symlink_metadata(&next) {
-            Ok(metadata) => {
-                let kind = metadata.file_type();
-                known.push((next.clone(), metadata));
-                kind
+        let link = match read_place(&next) {
+            Ok(read) => {
+                let link = is_link(&read);
+                known.push((next.clone(), read));
+                link
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 hops.push(next);
@@ -132,7 +139,7 @@ fn link_chain_read(path: &Path) -> Result<(Vec<PathBuf>, Known), PathBuf> {
             }
             Err(_) => return Err(next),
         };
-        if !kind.is_symlink() {
+        if !link {
             at = next;
             continue;
         }
@@ -154,6 +161,47 @@ fn link_chain_read(path: &Path) -> Result<(Vec<PathBuf>, Known), PathBuf> {
     assert!(hops.len() >= links);
     assert!(known.len() >= links);
     Ok((hops, known))
+}
+
+/// Reads one place without following a link, with one `getattrlistat` by its absolute name
+/// that brings owner, mode, kind and access list in one reply. A name that is not absolute or
+/// holds a NUL cannot be read. Input: the place. Output: the read, or the error.
+#[cfg(target_os = "macos")]
+fn read_place(place: &Path) -> std::io::Result<Read> {
+    let name = place_name(place)?;
+    crazyagent_macos_fs::held_entry_at(None, &name)
+}
+
+/// A place's absolute name as [`crazyagent_macos_fs::held_entry_at`] takes it with no folder
+/// ([`super::acl::c_path`]). Input: the place. Output: the name, or an error for a place that
+/// is not absolute or holds a NUL.
+#[cfg(target_os = "macos")]
+fn place_name(place: &Path) -> std::io::Result<std::ffi::CString> {
+    if !place.is_absolute() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let name = super::acl::c_path(place)?;
+    assert_eq!(name.as_bytes().first(), Some(&b'/'));
+    Ok(name)
+}
+
+/// Reads one place without following a link (`lstat`). Input: the place. Output: the read,
+/// or the error.
+#[cfg(not(target_os = "macos"))]
+fn read_place(place: &Path) -> std::io::Result<Read> {
+    std::fs::symlink_metadata(place)
+}
+
+/// Whether a read found a link. Input: the read. Output: the answer.
+#[cfg(target_os = "macos")]
+fn is_link(read: &Read) -> bool {
+    read.link()
+}
+
+/// Whether a read found a link. Input: the read. Output: the answer.
+#[cfg(not(target_os = "macos"))]
+fn is_link(read: &Read) -> bool {
+    read.file_type().is_symlink()
 }
 
 /// Where the walk of a link's target starts: the root of the drive a target with a drive
@@ -199,18 +247,10 @@ pub(crate) enum Part {
 /// as its mode is not. Input: the parts. Output: the reads, in order.
 #[cfg(target_os = "macos")]
 pub(super) fn read_parts(entries: &[&Path]) -> Vec<Part> {
-    read_parts_known(entries, &[])
-}
-
-/// [`read_parts`], taking for an entry the read `known` already holds for that same path,
-/// made by `lstat` earlier in the same call ([`link_chain_read`]), and reading the rest.
-/// Inputs: the parts and the reads already made. Output: the reads, in order.
-#[cfg(target_os = "macos")]
-fn read_parts_known(entries: &[&Path], known: &[(PathBuf, std::fs::Metadata)]) -> Vec<Part> {
     use std::os::unix::fs::MetadataExt;
     let read: Vec<std::io::Result<std::fs::Metadata>> = entries
         .iter()
-        .map(|entry| lstat_known(entry, known))
+        .map(|entry| std::fs::symlink_metadata(entry))
         .collect();
     let listed: Vec<(&Path, &std::fs::Metadata)> = entries
         .iter()
@@ -247,6 +287,31 @@ fn read_parts_known(entries: &[&Path], known: &[(PathBuf, std::fs::Metadata)]) -
     parts
 }
 
+/// Reads the parts of a path for one check, each with one read by its absolute name that
+/// follows no link ([`read_place`]), or the read `known` holds for that same path from earlier
+/// in the call ([`link_chain_read`]); owner, mode, kind and access list come from that one
+/// reply ([`held_part`]), each volume asked once per device. Inputs: the parts and the reads
+/// already made. Output: the reads, in order.
+#[cfg(target_os = "macos")]
+fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> Vec<Part> {
+    let mut volumes: Volumes = Vec::new();
+    let parts: Vec<Part> = entries
+        .iter()
+        .map(|entry| {
+            held_part(read_known(entry, known), &mut volumes, |device| {
+                place_name(entry)
+                    .and_then(|name| {
+                        crazyagent_macos_fs::held_volume_keeps_lists_at(None, &name, device)
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .collect();
+    assert!(volumes.len() <= parts.len());
+    assert_eq!(parts.len(), entries.len());
+    parts
+}
+
 /// Reads the parts of a path one by one ([`read_part`]). Input: the parts. Output: the
 /// reads, in order.
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -258,26 +323,23 @@ fn read_parts(entries: &[&Path]) -> Vec<Part> {
 /// made by `lstat` earlier in the same call ([`link_chain_read`]). Inputs: the parts and the
 /// reads already made. Output: the reads, in order.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn read_parts_known(entries: &[&Path], known: &[(PathBuf, std::fs::Metadata)]) -> Vec<Part> {
+fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> Vec<Part> {
     entries
         .iter()
-        .map(|entry| read_part(entry, lstat_known(entry, known)))
+        .map(|entry| read_part(entry, read_known(entry, known)))
         .collect()
 }
 
-/// What `lstat` reads of an entry: the read `known` holds for that exact path, else a new
-/// `lstat`. Inputs: the entry and the reads already made. Output: the read.
+/// What [`read_place`] reads of an entry: the read `known` holds for that exact path, else a
+/// new read. Inputs: the entry and the reads already made. Output: the read.
 #[cfg(unix)]
-fn lstat_known(
-    entry: &Path,
-    known: &[(PathBuf, std::fs::Metadata)],
-) -> std::io::Result<std::fs::Metadata> {
+fn read_known(entry: &Path, known: &[(PathBuf, Read)]) -> std::io::Result<Read> {
     match known.iter().find(|(place, _)| place.as_path() == entry) {
-        Some((place, metadata)) => {
+        Some((place, read)) => {
             assert_eq!(place.as_path(), entry);
-            Ok(metadata.clone())
+            Ok(read.clone())
         }
-        None => std::fs::symlink_metadata(entry),
+        None => read_place(entry),
     }
 }
 
@@ -406,9 +468,9 @@ pub(super) fn held_parts(path: &Path) -> Option<Vec<Part>> {
     }));
     for (index, name) in names.iter().enumerate() {
         let at = |held: &std::os::fd::OwnedFd, volumes: &mut Volumes| {
-            let read = crazyagent_macos_fs::held_entry_at(held.as_fd(), name);
+            let read = crazyagent_macos_fs::held_entry_at(Some(held.as_fd()), name);
             held_part(read, volumes, |device| {
-                crazyagent_macos_fs::held_volume_keeps_lists_at(held.as_fd(), name, device)
+                crazyagent_macos_fs::held_volume_keeps_lists_at(Some(held.as_fd()), name, device)
                     .unwrap_or(false)
             })
         };
