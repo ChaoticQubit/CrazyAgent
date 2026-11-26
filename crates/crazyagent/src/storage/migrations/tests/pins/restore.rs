@@ -572,6 +572,74 @@ fn kept_wal_copy() -> tempfile::TempDir {
     copy
 }
 
+/// A kept WAL copy whose `-wal` still holds a committed frame no checkpoint moved into
+/// engine.db, as a crash between a write and the close leaves it. Output: the folder.
+fn kept_copy_with_a_leftover_wal() -> tempfile::TempDir {
+    let made = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = made.path().join(DATABASE);
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; \
+             CREATE TABLE kept (value TEXT); INSERT INTO kept VALUES ('one'); \
+             PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO kept VALUES ('two');",
+        )
+        .unwrap();
+    let copy = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for name in [DATABASE, "engine.db-wal"] {
+        std::fs::copy(made.path().join(name), copy.path().join(name)).unwrap();
+    }
+    drop(writer);
+    let frames = std::fs::metadata(copy.path().join("engine.db-wal"))
+        .unwrap()
+        .len();
+    assert!(frames > 0, "the copy's -wal holds a frame");
+    copy
+}
+
+/// What the sweep must leave on disk: engine.db's bytes and the `-wal` length, if any.
+/// Input: the copy's folder. Output: the two.
+fn on_disk(copy: &Path) -> (Vec<u8>, Option<u64>) {
+    let wal = std::fs::metadata(copy.join("engine.db-wal"))
+        .ok()
+        .map(|found| found.len());
+    (std::fs::read(copy.join(DATABASE)).unwrap(), wal)
+}
+
+#[test]
+fn the_sweep_leaves_a_kept_copy_with_a_leftover_wal_unchanged_on_disk() {
+    let copy = kept_copy_with_a_leftover_wal();
+    let before = on_disk(copy.path());
+
+    let db = replaced_database(copy.path()).unwrap();
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM kept", [], |row| row.get(0))
+        .unwrap();
+    drop(db);
+
+    assert_eq!(rows, 2, "the sweep reads the leftover frame");
+    assert_eq!(on_disk(copy.path()), before);
+}
+
+#[test]
+fn the_sweep_leaves_a_clean_kept_copys_engine_db_unchanged() {
+    let copy = kept_wal_copy();
+    let before = std::fs::read(copy.path().join(DATABASE)).unwrap();
+
+    let db = replaced_database(copy.path()).unwrap();
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM kept", [], |row| row.get(0))
+        .unwrap();
+    drop(db);
+
+    assert_eq!(rows, 1);
+    assert_eq!(std::fs::read(copy.path().join(DATABASE)).unwrap(), before);
+}
+
 #[test]
 fn the_sweep_reads_a_kept_wal_copy_that_has_no_wal_or_shm_file() {
     let copy = kept_wal_copy();
