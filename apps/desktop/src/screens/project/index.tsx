@@ -3,7 +3,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loadSetup, revealProjectFolder } from "../../api-projects";
 import { loadUncommittedImport } from "../../api-process";
 import { loadQuestionCounts, pendingByProject } from "../../api-questions";
-import { SessionContext, readQuestionsShown, saveLastProject, useLoad, type Loaded } from "../../state";
+import { SessionContext, saveLastProject, useLoad, useQuestionsShown, type Loaded } from "../../state";
 import { Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { HEARTBEAT_MS, cachedIdeView, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
@@ -216,7 +216,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const settingsSection = section ?? hashSection();
   const [importMoves, setImportMoves] = useState(0);
   const [deleteAsks, setDeleteAsks] = useState(0);
-  const [questionsShown] = useState(readQuestionsShown);
+  const questionsShown = useQuestionsShown();
   const select =(next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
   const deleteAgain = () => {
     navigate(`/projects/${encodeURIComponent(projectId)}/settings?section=remove&ask=delete`);

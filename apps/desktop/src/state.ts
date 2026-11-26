@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as api from "./api";
 import type { OwnerProfile, Result } from "./api";
 import type { EngineState } from "./ui/shell";
@@ -35,14 +35,29 @@ export function readQuestionsShown(): QuestionsShown {
   }
 }
 
-/** Remembers where a waiting question shows on a project page. Input: the choice. Output:
- * none. */
+/** Remembers where a waiting question shows on a project page and tells this window's
+ * readers at once; other windows hear it through the storage event. Input: the choice.
+ * Output: none. */
 export function saveQuestionsShown(choice: QuestionsShown): void {
   try {
     window.localStorage.setItem(QUESTIONS_SHOWN_KEY, choice);
   } catch {
     return;
   }
+  questionsHeard.tell();
+}
+
+/** Calls `listener` after each Questions show choice, made in this window or in another
+ * window of the app. Input: the listener. Output: the call that stops it. */
+export function onQuestionsShown(listener: () => void): () => void {
+  return questionsHeard.listen(listener);
+}
+
+/** Follows where a waiting question shows, the one source every reader of the choice uses,
+ * so a choice made over an open project page applies to it at once. Output: the stored
+ * choice, rendering again on a change. */
+export function useQuestionsShown(): QuestionsShown {
+  return useSyncExternalStore(onQuestionsShown, readQuestionsShown, readQuestionsShown);
 }
 
 const LAST_PROJECT_KEY = "crazyagent.last-project";
@@ -122,6 +137,7 @@ function choiceListeners(key: string): { tell: () => void; listen: (listener: ()
 }
 
 const inputHeard = choiceListeners(TERMINAL_INPUT_KEY);
+const questionsHeard = choiceListeners(QUESTIONS_SHOWN_KEY);
 
 /** Remembers where the owner types to every agent's terminal and tells this window's
  * listeners at once; other windows hear it through the storage event. Input: the choice.
