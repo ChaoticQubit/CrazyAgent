@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { withPage } from "./browser.mjs";
+import { waitUntil } from "./native/golden-run.mjs";
 import { echoed, screenLine, shownField, shownText, terminalSettled } from "./native/shown-text.mjs";
 
 const POPUP = "section.qp-popup";
@@ -57,13 +58,7 @@ test("the questions flow's typed word must show on the tab's terminal screen and
     await show(page, `<div id="pj-tab-panel"><div class="tg-terminal-host"><textarea class="xterm-helper-textarea"></textarea></div></div>`);
     await page.evaluate(`(() => { const host = document.querySelector(".tg-terminal-host"); host.readScreen = () => ["$ " + host.querySelector("textarea").value]; host.querySelector("textarea").focus(); })()`);
     assert.equal(await page.evaluate(screenLine(PANEL, "qf6b")), null);
-    const until = async (what, ms, check) => {
-      for (const deadline = Date.now() + ms; ; await new Promise((done) => setTimeout(done, 20))) {
-        const found = await check();
-        if (found !== null) return found;
-        if (Date.now() > deadline) throw new Error(`timeout_${what}`);
-      }
-    };
+    const until = (what, ms, check) => waitUntil(what, check, (found) => found !== null, ms);
     assert.equal(await echoed(page, PANEL, "qf6b", until, 5000), "$ qf6b");
     assert.equal(await page.evaluate(`document.querySelector("textarea").value`), "");
     await show(page, `<div id="pj-tab-panel"><div class="tg-terminal-host" hidden><textarea></textarea></div></div>`);
