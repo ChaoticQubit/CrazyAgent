@@ -168,3 +168,12 @@ fn a_settings_text_named_checked_is_refused() {
 fn a_settings_text_in_another_folder_is_refused() {
     backup_named("a/b");
 }
+
+#[test]
+fn a_private_file_makes_one_full_flush() {
+    let root = tempfile::tempdir().unwrap();
+    take_flushes();
+    private_file(&root.path().join("one"), b"bytes").unwrap();
+    assert_eq!(take_flushes(), (1, 0));
+    assert_eq!(std::fs::read(root.path().join("one")).unwrap(), b"bytes");
+}

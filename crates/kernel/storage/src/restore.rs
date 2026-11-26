@@ -1,8 +1,8 @@
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, PINNED_DAYS, Texts, V24_VERSION_MAX,
-    backup_time, backups_folder, backups_in, check_copy, error, file_digest, fill, mark_checked,
-    pinned, private_file, schema, stamp, stamp_time,
+    BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
+    V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, error, file_digest, fill,
+    flush, mark_checked, pinned, private_file, schema, stamp, stamp_time,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
@@ -357,7 +357,7 @@ fn write_record_with(
         return Err(restore_failed(cause.0));
     }
     std::fs::File::open(root)
-        .and_then(|folder| folder.sync_all())
+        .and_then(|folder| flush(&folder, Flush::Full))
         .map_err(restore_failed)
 }
 

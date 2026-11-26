@@ -236,7 +236,7 @@ pub(crate) fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageEr
     for synced in [target, folder] {
         #[cfg(unix)]
         std::fs::File::open(synced)
-            .and_then(|handle| handle.sync_all())
+            .and_then(|handle| flush(&handle, Flush::Full))
             .map_err(backup_failed)?;
         #[cfg(windows)]
         private::sync_folder(synced).map_err(backup_failed)?;
@@ -456,6 +456,40 @@ fn plain_name(name: &str) -> bool {
         && !name.contains(['/', '\\'])
 }
 
+/// How far a flush carries the writes before it: `Full` makes them durable on the medium.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flush {
+    Full,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// How many full and barrier flushes this thread made, for rows that count them.
+    static FLUSHES: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Flushes one open file or folder handle and counts it by kind for the rows.
+/// Inputs: the handle and the kind. Output: Ok once flushed, or the sync's failure.
+pub(crate) fn flush(file: &std::fs::File, kind: Flush) -> std::io::Result<()> {
+    #[cfg(test)]
+    FLUSHES.with(|counted| {
+        let (full, barrier) = counted.get();
+        counted.set(match kind {
+            Flush::Full => (full + 1, barrier),
+        });
+    });
+    match kind {
+        Flush::Full => file.sync_all(),
+    }
+}
+
+/// The full and barrier flushes this thread made since the last call, which resets them.
+/// Output: (full, barrier).
+#[cfg(test)]
+pub(crate) fn take_flushes() -> (usize, usize) {
+    FLUSHES.with(|counted| counted.replace((0, 0)))
+}
+
 /// Creates a new file readable only by this user and writes it to disk.
 /// Inputs: the path, which must not exist, and the bytes. Output: Ok once synced.
 pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
@@ -469,7 +503,7 @@ pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError
     #[cfg(windows)]
     let mut file = private::file(path, true).map_err(backup_failed)?;
     file.write_all(bytes).map_err(backup_failed)?;
-    file.sync_all().map_err(backup_failed)
+    flush(&file, Flush::Full).map_err(backup_failed)
 }
 
 /// Removes the older backup folders: the pinned one stays outside the count, the one just

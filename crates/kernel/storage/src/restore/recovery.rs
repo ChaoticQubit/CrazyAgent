@@ -5,8 +5,8 @@ use super::{
 };
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, CHECKED, CopyCheck, DATABASE, V24_VERSION_MAX, check_copy, error, file_digest, schema,
-    stamp,
+    BACKUPS, CHECKED, CopyCheck, DATABASE, Flush, V24_VERSION_MAX, check_copy, error, file_digest,
+    flush, schema, stamp,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
@@ -266,8 +266,8 @@ fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, Stora
     let copy = target.join(DATABASE);
     let made = std::fs::copy(path, &copy)
         .and_then(|_| std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600)))
-        .and_then(|()| std::fs::File::open(&copy)?.sync_all())
-        .and_then(|()| std::fs::File::open(&target)?.sync_all());
+        .and_then(|()| flush(&std::fs::File::open(&copy)?, Flush::Full))
+        .and_then(|()| flush(&std::fs::File::open(&target)?, Flush::Full));
     if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);
         return Err(restore_failed(cause));
@@ -279,7 +279,7 @@ fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, Stora
 fn clear(root: &Path) -> Result<(), StorageError> {
     std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).map_err(restore_failed)?;
     std::fs::File::open(root)
-        .and_then(|folder| folder.sync_all())
+        .and_then(|folder| flush(&folder, Flush::Full))
         .map_err(restore_failed)
 }
 
