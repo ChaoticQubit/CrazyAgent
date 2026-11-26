@@ -780,6 +780,9 @@ fn a_caller_judged_root_runs_its_judge_on_the_held_handle() {
     assert_eq!(JUDGED.load(Ordering::SeqCst), before + 2);
 }
 
+/// One call a row runs on a held folder, with the name it reports.
+type Call<'a> = (&'a str, &'a dyn Fn(&Folder));
+
 /// Every call that skips the layer's own judge trips its assertion on a tree held through
 /// `Folder::root`, the private judge, and makes, opens or removes nothing there.
 #[test]
@@ -787,7 +790,7 @@ fn the_unjudged_and_inherited_calls_trip_on_a_private_tree() {
     let (_temp, root) = private_root();
     let held = Folder::root(&root).unwrap();
     drop(held.make_dir(&name("kept")).unwrap());
-    let calls: [(&str, &dyn Fn(&Folder)); 4] = [
+    let calls: [Call; 4] = [
         ("make_dir_inherited", &|folder| {
             let _ = folder.make_dir_inherited(&name("made"));
         }),
