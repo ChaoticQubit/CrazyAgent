@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { constants, tmpdir } from "node:os";
@@ -44,10 +45,11 @@ const STAND_IN = `#!/bin/sh
 marker="$CLAUDE_CONFIG_DIR/.recovery-flow-signed-in"
 keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/profile.keychain-db"
 service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
+note() { printf '%s\\n' "$1" 2>/dev/null >> "\${0%/*}/${LAUNCHES}" || { [ -n "$TMPDIR" ] && printf '%s\\n' "$1" >> "$TMPDIR/${LAUNCHES}"; }; }
 if [ "$1" != "auth" ]; then
   case " $* " in
     *" --input-format "*) ;;
-    *" --print "*) printf '${ONESHOT} -\\n' >> "\${0%/*}/${LAUNCHES}"; echo "${STAND_IN_SIGN}: this claude holds no one-shot print run open" >&2; exit 64 ;;
+    *" --print "*) note '${ONESHOT} -'; echo "${STAND_IN_SIGN}: this claude holds no one-shot print run open" >&2; exit 64 ;;
   esac
   kind=other
   id=-
@@ -55,7 +57,7 @@ if [ "$1" != "auth" ]; then
     case "$kind" in --session-id|--resume) [ "$id" = - ] && id="$arg" ;; esac
     case "$arg" in --session-id|--resume) kind="$arg" ;; --print) [ "$kind" = other ] && kind=--print ;; esac
   done
-  printf '%s %s\\n' "$kind" "$id" >> "\${0%/*}/${LAUNCHES}"
+  note "$kind $id"
   [ "$kind" = other ] || exec /bin/sleep ${SILENT_TURN_S}
   echo "${STAND_IN_SIGN}: this claude answers auth commands and holds a turn open, it never replies" >&2
   exit 64
@@ -276,29 +278,25 @@ function tmux(binary, socket, env, ...args) {
   return run.status === 0 ? run.stdout : "";
 }
 
-/** Reads every claude call the stand-in logged, in order: its kind and the session it names.
- * Input: the stand-in's folder. Output: the logged calls. */
-function logged(bin) {
-  const path = join(bin, LAUNCHES);
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => {
-    const [kind, id] = line.split(" ");
-    return { kind, id };
-  });
+/** Reads every claude call the stand-in logged beside itself or, for a team agent, in the short
+ * temp folder the engine gives that agent as TMPDIR, the one place its sandbox lets it write:
+ * `ca-` and 16 hex digits of the SHA-256 of the agent's home, in the real /tmp. Each call gives
+ * its kind, the session it names and a file:line key. Input: the stand-in's folder and the
+ * team agents' folder. Output: the logged calls. */
+function logged({ bin, agents }) {
+  const folders = existsSync(agents) ? readdirSync(agents).sort().map((name) => join(realpathSync("/tmp"), `ca-${createHash("sha256").update(join(agents, name, "home")).digest("hex").slice(0, 16)}`)) : [];
+  const paths = [bin, ...folders].map((folder) => join(folder, LAUNCHES)).filter((path) => existsSync(path));
+  return paths.flatMap((path) => readFileSync(path, "utf8").split("\n").filter(Boolean).map((line, at) => ({ kind: line.split(" ")[0], id: line.split(" ")[1], key: `${path}:${at}` })));
 }
 
-/** Reads every harness turn the stand-in claude held open, in order: its kind (--session-id,
- * --resume or --print) and the session it names. Calls that start no turn and one-shot runs
- * the stand-in ended at once are left out. Input: the stand-in's folder. Output: the starts. */
-function launches(bin) {
-  return logged(bin).filter((item) => item.kind !== "other" && item.kind !== ONESHOT);
-}
-
-/** Counts the one-shot claude runs (a --print call with no --input-format, such as a mapping
- * try, a research run or a token renewal) the stand-in ended at once.
- * Input: the stand-in's folder. Output: the count. */
-function oneshots(bin) {
-  return logged(bin).filter((item) => item.kind === ONESHOT).length;
+/** Reads every harness turn the stand-in claude held open: its kind (--session-id, --resume
+ * or --print), the session it names and its log key; one-shot runs are left out. Every caller
+ * runs after team agents started, so no logged turn refuses the step instead of reading as none.
+ * Input: the log places. Output: the starts, at least one. */
+function launches(logs) {
+  const starts = logged(logs).filter((item) => item.kind !== "other" && item.kind !== ONESHOT);
+  if (!starts.length) throw new Refused("no_harness_start_logged", "team agents started but the stand-in logged no held turn");
+  return starts;
 }
 
 /** Counts the lines a file holds, none when it is missing. Input: the path. Output: the count. */
@@ -376,6 +374,8 @@ async function main() {
   console.log(`temp root ${root} (${keep ? "kept for SMOKE_EVIDENCE" : "removed on exit; SMOKE_EVIDENCE=1 keeps it"})`);
   const userHome = join(root, "u");
   const bin = join(userHome, ".local", "bin");
+  const logs = { bin, agents: join(crazyHome, "team", "agents") };
+  const oneshots = () => logged(logs).filter((item) => item.kind === ONESHOT).length;
   const repo = join(root, "repos", REPO);
   const projects = join(root, "projects");
   for (const folder of [crazyHome, userHome, bin, repo, projects, evidence]) mkdirSync(folder, { recursive: true, mode: 0o700 });
@@ -619,7 +619,7 @@ async function main() {
         if (!ACTIVE_TURN.has(turn.phase)) throw new Refused(`master_turn_${turn.phase}`, turn.reason ?? "-");
         if (Date.now() > deadline) throw new Refused(`master_turn_still_${turn.phase}`);
       }
-      return `agents ${state.a} and ${state.b} working, master turn running; ${launches(bin).length} harness starts`;
+      return `agents ${state.a} and ${state.b} working, master turn running; ${launches(logs).length} harness starts`;
     });
 
     await step("3", "kill the app mid-turn: SIGKILL the engine and the desktop bridge; agent A's pane goes with it, agent B's pane lives on", async () => {
@@ -634,8 +634,8 @@ async function main() {
       }
       if (state.groupB !== null && !groupAlive(state.groupB)) throw new Refused("agent_b_died_with_the_app");
       await pause(SETTLE_MS);
-      state.before = launches(bin);
-      state.oneshots = oneshots(bin);
+      state.before = launches(logs);
+      state.oneshots = oneshots();
       state.crashedMs = Date.now();
       return `engine and bridge killed; team-${a} closed, team-${state.b} running; a third task delegated just before the kill; ${state.before.length} harness starts so far`;
     });
@@ -674,7 +674,7 @@ async function main() {
       const status = await teamStatus();
       const task = status.tasks.find((item) => item.id === state.taskA);
       if (task?.agent !== undefined && task.agent !== null && task.agent !== a) throw new Refused("interrupted_task_started_fresh", `agent ${task.agent}`);
-      const resumed = launches(bin).filter((item) => item.kind === "--resume");
+      const resumed = launches(logs).filter((item) => item.kind === "--resume");
       if (resumed.length) throw new Refused("resumed_without_a_record", resumed.map((item) => item.id).join(","));
       state.failed = run;
       return `${run.label} (${run.harness}) failed: ${run.reason}; its task ${task?.status ?? "is gone"}, no fresh start`;
@@ -729,34 +729,34 @@ async function main() {
 
     await step("9", "Retry tries the resume again; it fails the same way and still starts nothing", async () => {
       const failed = needs(state.failed, "6");
-      const before = launches(bin).length;
-      const shots = oneshots(bin);
+      const before = new Set(launches(logs).map((item) => item.key));
+      const shots = oneshots();
       await value("desktop_retry_recovery", { agent: failed.agent });
       const { run } = await recoveryRun(failed.agent, (item) => item.state === "failed" || item.state === "resumed");
       if (run.state !== "failed" || run.reason !== RECORD_MISSING) throw new Refused(`retried_resume_${run.state}`, run.reason ?? "none");
-      const after = launches(bin);
-      if (after.length !== before) throw new Refused("retry_started_a_harness", after.slice(before).map((item) => `${item.kind} ${item.id}`).join(","));
-      const shotsAfter = oneshots(bin);
+      const added = launches(logs).filter((item) => !before.has(item.key));
+      if (added.length) throw new Refused("retry_started_a_harness", added.map((item) => `${item.kind} ${item.id}`).join(","));
+      const shotsAfter = oneshots();
       if (shotsAfter !== shots) throw new Refused("retry_started_a_harness", `${shotsAfter - shots} one-shot claude runs`);
       return `retried; ${run.label} failed again: ${run.reason}`;
     });
 
-    await step("10", "nothing runs twice: no session starts again, no ledger action is done twice or left pending, one worktree per agent (UO-2a, UO-2b)", async () => {
+    await step("10", "nothing runs twice: no session starts again, no ledger action is done twice or left pending but by design, one worktree per agent (UO-2a, UO-2b)", async () => {
       const earlier = needs(state.before, "3");
-      const all = launches(bin);
-      const fresh = all.slice(earlier.length);
+      const all = launches(logs);
+      const fresh = all.filter((item) => !earlier.some((old) => old.key === item.key));
       const seen = new Set(earlier.filter((item) => item.id !== "-").map((item) => item.id));
       const again = fresh.filter((item) => seen.has(item.id));
       if (again.length) throw new Refused("session_started_again", again.map((item) => `${item.kind} ${item.id}`).join(","));
       if (all.some((item) => item.kind === "--resume")) throw new Refused("stand_in_session_resumed");
       if (fresh.length > 1) throw new Refused("more_than_the_waiting_task_started", fresh.map((item) => `${item.kind} ${item.id}`).join(","));
-      const shots = oneshots(bin) - needs(state.oneshots, "3");
+      const shots = oneshots() - needs(state.oneshots, "3");
       if (shots !== 0) throw new Refused("more_than_the_waiting_task_started", `${shots} one-shot claude runs after the crash`);
       const doneTwice = engineRows(database, "SELECT kind, action_key, COUNT(*) AS n FROM ledger_actions WHERE outcome = 'done' GROUP BY kind, action_key HAVING COUNT(*) > 1");
       if (doneTwice.length) throw new Refused("ledger_action_done_twice", doneTwice.map((row) => `${row.kind} ${row.action_key} x${row.n}`).join(","));
       let pending = [];
       for (const deadline = Date.now() + TEAM_MS; ; await pause(POLL_MS * 4)) {
-        pending = engineRows(database, "SELECT kind, action_key FROM ledger_actions WHERE outcome IS NULL AND started_ms <= ?", state.crashedMs);
+        pending = engineRows(database, `SELECT kind, action_key FROM ledger_actions l WHERE outcome IS NULL AND started_ms <= ? AND NOT (CASE WHEN json_valid(l.payload) THEN json_extract(l.payload, '$.unknown') END IS 1 OR EXISTS (SELECT 1 FROM recovery_runs r WHERE r.state = 'failed' AND ((l.kind = 'dispatch' AND l.action_key = 'team-task/' || r.task) OR (l.kind = 'message' AND l.action_key = 'team-message/' || r.message))))`, state.crashedMs);
         if (!pending.length) break;
         if (Date.now() > deadline) throw new Refused("ledger_action_left_pending", pending.map((row) => `${row.kind} ${row.action_key}`).join(","));
       }
@@ -765,7 +765,7 @@ async function main() {
       const worktrees = git(repo, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
       const doubled = agents.filter((id) => worktrees.filter((path) => path.endsWith(`/agent-${id}`)).length > 1);
       if (doubled.length) throw new Refused("agent_worktree_added_twice", doubled.join(","));
-      return `${fresh.length} start(s) after the restart, ${all.length} in all, none of a session already started; ledger ${total} actions, none done twice or left pending; ${agents.length} agents, one worktree each at most`;
+      return `${fresh.length} start(s) after the restart, ${all.length} in all, none of a session already started; ledger ${total} actions, none done twice or left pending but by design (an unknown arrival, or held for Retry); ${agents.length} agents, one worktree each at most`;
     });
 
     await step("11", "with an approved profile: an interrupted agent resumes its own session and its command ran once (REC-2 live)", async () => {
@@ -778,7 +778,7 @@ async function main() {
     console.log(`FAIL setup [${results.at(-1).code}]`);
   } finally {
     writeFileSync(join(evidence, "answers.json"), JSON.stringify(trail, null, 1).replace(/[0-9a-f]{64}/g, (hex) => hex.slice(0, 8)));
-    writeFileSync(join(evidence, LAUNCHES), logged(bin).filter((item) => item.kind !== "other").map((item) => `${item.kind} ${item.id}`).join("\n"));
+    writeFileSync(join(evidence, LAUNCHES), logged(logs).filter((item) => item.kind !== "other").map((item) => `${item.kind} ${item.id}`).join("\n"));
     await stop(bridgeProcess);
     await stop(engine);
   }

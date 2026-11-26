@@ -15,6 +15,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
+mod wake_default;
 
 pub const EVENT_TEXT_BYTES_MAX: usize = 1000;
 pub const EVENTS_PER_PROJECT_MAX: i64 = 2000;
@@ -206,19 +207,6 @@ pub struct WakeRule {
     pub change_set_ready: bool,
     pub progress: bool,
     pub hourly_cap: u32,
-}
-
-impl Default for WakeRule {
-    fn default() -> Self {
-        Self {
-            question: true,
-            finished: true,
-            failed: true,
-            change_set_ready: true,
-            progress: false,
-            hourly_cap: HOURLY_CAP_DEFAULT,
-        }
-    }
 }
 
 impl WakeRule {

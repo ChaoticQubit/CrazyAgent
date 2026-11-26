@@ -12,11 +12,13 @@ const BADGE_TONE = { ok: "ok", warn: "warn", danger: "danger", info: "running", 
 const CONSOLE_TONE = { ok: "terminal-green", warn: "terminal-yellow", danger: "terminal-red", muted: "terminal-muted" };
 
 /**
- * Mounts the chips in one theme and reads their look. Input: the theme.
+ * Mounts the chips in one theme, with motion allowed whatever the machine's own setting,
+ * and reads their look. Input: the theme.
  * Output: what `Fixture.look()` returns.
  */
 function looks(theme) {
   return withPage(async (page) => {
+    await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     await page.evaluate(fixture);
     await page.evaluate(`Fixture.mount(${JSON.stringify(theme)})`);
     return page.evaluate("Fixture.look()");
