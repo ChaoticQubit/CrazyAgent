@@ -1,7 +1,7 @@
 /// Every source file outside tests, as its path under `src` with `/` between parts and its
 /// code ([`code_only`]). A file or folder whose name ends in `tests` or `tests.rs` is left
-/// out, and a link to a folder is not walked. Input: the source folder. Output: the files;
-/// a folder, entry or file it cannot read panics naming its path.
+/// out first; any other link panics naming it, since cargo compiles through links. Input: the
+/// source folder. Output: the files; a folder, entry or file it cannot read panics naming it.
 pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
     const ENTRIES_MAX: usize = 100_000;
     let mut folders = vec![src.to_path_buf()];
@@ -22,6 +22,7 @@ pub(super) fn sources(src: &std::path::Path) -> Vec<(String, String)> {
             let kind = entry
                 .file_type()
                 .unwrap_or_else(|error| panic!("type of {path:?}: {error}"));
+            assert!(!kind.is_symlink(), "a link under the sources: {path:?}");
             if kind.is_dir() {
                 folders.push(path);
                 continue;
@@ -317,16 +318,57 @@ fn a_comma_inside_a_nested_value_does_not_end_the_kind() {
     );
 }
 
-/// A link to a folder under the source folder is not walked, so no file is read twice under
-/// two names.
+/// The panic text of a walk of `src`, which must panic. Input: the source folder. Output:
+/// the text.
+#[cfg(unix)]
+fn walk_panic(src: &std::path::Path) -> String {
+    let cause = std::panic::catch_unwind(|| sources(src)).expect_err("the walk panics");
+    cause.downcast_ref::<String>().cloned().unwrap_or_default()
+}
+
+/// A link to a folder under the source folder panics naming it, since cargo compiles
+/// through a link and a writer behind it would escape the walk.
 #[cfg(unix)]
 #[test]
-fn a_folder_link_under_the_sources_is_not_walked() {
+fn a_folder_link_under_the_sources_panics_naming_it() {
     let root = tempfile::tempdir().unwrap();
     let src = root.path().join("src");
     std::fs::create_dir_all(src.join("real")).unwrap();
     std::fs::write(src.join("real/a.rs"), "fn a() {}\n").unwrap();
     std::os::unix::fs::symlink(src.join("real"), src.join("linked")).unwrap();
+
+    let said = walk_panic(&src);
+
+    assert!(
+        said.contains(&format!("{:?}", src.join("linked"))),
+        "{said}"
+    );
+}
+
+/// A link to a source file panics naming it, as a folder link does.
+#[cfg(unix)]
+#[test]
+fn a_file_link_under_the_sources_panics_naming_it() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(root.path().join("a.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink(root.path().join("a.rs"), src.join("b.rs")).unwrap();
+
+    let said = walk_panic(&src);
+
+    assert!(said.contains(&format!("{:?}", src.join("b.rs"))), "{said}");
+}
+
+/// A link whose name the walk leaves out as tests is skipped before any link check.
+#[cfg(unix)]
+#[test]
+fn a_link_named_as_tests_is_left_out_before_the_link_check() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("real")).unwrap();
+    std::fs::write(src.join("real/a.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink(src.join("real"), src.join("tests")).unwrap();
 
     let names: Vec<String> = sources(&src).into_iter().map(|(name, _)| name).collect();
 
