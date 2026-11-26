@@ -3,8 +3,14 @@ use crazyagent::accounts::probe::{get, request};
 use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
 #[cfg(unix)]
 use crazyagent::engine::bootstrap::EngineService;
+use crazyagent::engine::owner::AccountSecret;
 #[cfg(unix)]
-use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerClientKind};
+use crazyagent::engine::owner::{OwnerClient, OwnerClientKind};
+#[cfg(unix)]
+use crazyagent::engine::secret_frame::drain_errors;
+use crazyagent::engine::secret_frame::{
+    read_profile_secret, read_secret_frame, write_secret_frame,
+};
 use kernel_security::secret::wipe;
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(unix)]
@@ -12,6 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 const KEY_MARK: &[u8] = b"sk-residue-probe";
 const HEADER_END: &[u8] = b"\r\n\r\n";
@@ -214,4 +221,130 @@ fn checking_an_https_account_frees_no_copy_of_its_saved_key() {
     drop(shutdown);
     drop(listener);
     assert_eq!(freed, 0, "freed blocks still holding the saved key");
+}
+
+/// A current-thread runtime with its timers and sockets. Output: the runtime.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// A secret frame cut off by a timeout mid-write, to a peer that never reads, frees no block
+/// that still holds the secret.
+#[test]
+fn a_secret_frame_cut_off_mid_write_frees_no_copy_of_the_secret() {
+    let _serial = serial();
+    let runtime = runtime();
+    let (mut writer, reader) = tokio::io::duplex(64);
+    let secret = AccountSecret::new(marked_key(8192)).unwrap();
+    let freed = freed_while(|| {
+        let sent = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                write_secret_frame(&mut writer, Some(secret)),
+            )
+            .await
+        });
+        assert!(
+            sent.is_err(),
+            "the write finished to a peer that never reads"
+        );
+    });
+    drop(reader);
+    assert_eq!(freed, 0, "freed blocks still holding the secret");
+}
+
+/// A secret frame cut off by a timeout mid-read, after half of the secret arrived, frees no
+/// block that still holds that half.
+#[test]
+fn a_secret_frame_cut_off_mid_read_frees_no_copy_of_the_secret() {
+    let _serial = serial();
+    let runtime = runtime();
+    let (mut peer, mut stream) = tokio::io::duplex(16 << 10);
+    let mut key = marked_key(8192);
+    runtime.block_on(async {
+        peer.write_all(&8192u32.to_be_bytes()).await.unwrap();
+        peer.write_all(&key[..4096]).await.unwrap();
+    });
+    let freed = freed_while(|| {
+        let read = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                read_secret_frame(&mut stream, 8192),
+            )
+            .await
+        });
+        assert!(read.is_err(), "the read finished with half a secret");
+    });
+    drop(peer);
+    wipe(&mut key);
+    assert_eq!(freed, 0, "freed blocks still holding the secret");
+}
+
+/// An account profile secret followed by one more byte is refused, and the refusal frees no
+/// block that still holds the secret.
+#[test]
+fn a_profile_secret_with_a_byte_after_it_frees_no_copy_of_the_secret() {
+    let _serial = serial();
+    let runtime = runtime();
+    let (mut peer, mut stream) = tokio::io::duplex(16 << 10);
+    let mut key = marked_key(64);
+    runtime.block_on(async {
+        peer.write_all(&64u32.to_be_bytes()).await.unwrap();
+        peer.write_all(&key).await.unwrap();
+        peer.write_all(b"x").await.unwrap();
+    });
+    let mut refused = None;
+    let freed = freed_while(|| {
+        refused = runtime
+            .block_on(read_profile_secret(&mut stream, true))
+            .err();
+    });
+    drop(peer);
+    wipe(&mut key);
+    assert_eq!(
+        refused.map(|error| error.0).as_deref(),
+        Some("account_profile_secret_frame_invalid")
+    );
+    assert_eq!(freed, 0, "freed blocks still holding the secret");
+}
+
+/// A child's error output read in more than one chunk is counted and frees no block that
+/// still holds it.
+#[cfg(unix)]
+#[test]
+fn a_child_error_output_drained_in_chunks_frees_no_copy_of_it() {
+    let _serial = serial();
+    let (mut child, ours) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
+    let mut output = marked_key(2048);
+    std::io::Write::write_all(&mut child, &output).unwrap();
+    drop(child);
+    let descriptor = std::os::fd::OwnedFd::from(ours);
+    let (mut count, mut eof) = (0, false);
+    let freed = freed_while(|| drain_errors(&descriptor, &mut count, &mut eof).unwrap());
+    wipe(&mut output);
+    assert_eq!((count, eof), (2048, true));
+    assert_eq!(freed, 0, "freed blocks still holding the error output");
+}
+
+/// An account secret made from bytes whose spare capacity past their length holds part of a
+/// key frees no block holding that part, whether the secret is dropped or refused.
+#[test]
+fn an_account_secret_dropped_or_refused_frees_no_copy_of_its_spare_capacity() {
+    let _serial = serial();
+    let spare = |kept: &[u8]| {
+        let mut bytes = Vec::with_capacity(64);
+        bytes.extend_from_slice(kept);
+        bytes.extend_from_slice(KEY_MARK);
+        bytes.truncate(kept.len());
+        bytes
+    };
+    let (taken, refused) = (spare(b"aaaaaaaaaaaaaaaa"), spare(b"aaaaaaa\naaaaaaaa"));
+    let freed = freed_while(|| {
+        drop(AccountSecret::new(taken).unwrap());
+        assert!(AccountSecret::new(refused).is_err());
+    });
+    assert_eq!(freed, 0, "freed blocks still holding the spare key bytes");
 }

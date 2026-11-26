@@ -226,13 +226,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("accounts_owner_unavailable"))?;
             if let Some(key) = key {
-                let mut bytes = key.into_bytes();
-                let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
-                framed.extend_from_slice(&bytes);
-                kernel_security::secret::wipe(&mut bytes);
-                let sent = stream.write_all(&framed).await;
-                kernel_security::secret::wipe(&mut framed);
-                sent.map_err(|_| failure("accounts_owner_unavailable"))?;
+                crate::engine::secret_frame::write_secret_frame(&mut stream, Some(key))
+                    .await
+                    .map_err(|_| failure("accounts_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
             match serde_json::from_slice(&frame[4..])
@@ -473,15 +469,10 @@ async fn authenticate(
 async fn receive_key(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("accounts_key_frame_invalid");
-        let size = stream.read_u32().await.map_err(|_| invalid())? as usize;
-        if size == 0 || size > SECRET_MAX {
-            return Err(invalid());
-        }
-        let mut bytes = vec![0; size];
-        if stream.read_exact(&mut bytes).await.is_err() {
-            kernel_security::secret::wipe(&mut bytes);
-            return Err(invalid());
-        }
+        let bytes = crate::engine::secret_frame::read_secret_frame(stream, SECRET_MAX)
+            .await
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(invalid)?;
         AccountSecret::new(bytes).map_err(|_| failure("account_key_invalid"))
     })
     .await
