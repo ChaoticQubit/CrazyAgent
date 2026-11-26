@@ -156,8 +156,15 @@ fn choices() {
     time(&row("policy.AgentNetwork.proxied", 1000), SAMPLES, || {
         black_box(NETWORK[next() % 3].proxied(black_box("macos"), true, MODEL));
     });
+    let reaches = NETWORK.map(|network| {
+        (
+            network,
+            network.proxied("macos", true, MODEL).then_some(8080),
+        )
+    });
     time(&row("policy.AgentNetwork.reach", 100), SAMPLES, || {
-        let _ = black_box(NETWORK[next() % 3].reach(black_box("macos"), true, MODEL, Some(8080)));
+        let (network, proxy) = reaches[next() % 3];
+        let _ = black_box(network.reach(black_box("macos"), true, MODEL, proxy));
     });
     time(&row("policy.AgentNetwork.sandbox", 100), SAMPLES, || {
         black_box(NETWORK[next() % 3].sandbox(Some(MODEL)));
