@@ -466,8 +466,9 @@ pub fn read_restore_record(root: &Path) -> Option<String> {
 }
 
 /// [`read_restore_record`] that tells a missing record from one that exists but cannot be
-/// read as a private regular file of this user. Input: the root. Output: Ok(None) when
-/// it is missing, Ok(Some) with its line, or Err for any other failure.
+/// read as a private regular file of this user of at most 512 bytes. Input: the root.
+/// Output: Ok(None) when it is missing, Ok(Some) with its line, or Err for any other
+/// failure, a longer file included, which is never read cut short.
 fn read_record_strict(root: &Path) -> Result<Option<String>, ()> {
     use std::io::Read;
     let opened = std::fs::OpenOptions::new()
@@ -487,8 +488,11 @@ fn read_record_strict(root: &Path) -> Result<Option<String>, ()> {
         return Err(());
     }
     let mut text = String::new();
-    let limit = u64::try_from(RESTORE_RECORD_BYTES_MAX).map_err(|_| ())?;
+    let limit = u64::try_from(RESTORE_RECORD_BYTES_MAX + 1).map_err(|_| ())?;
     file.take(limit).read_to_string(&mut text).map_err(|_| ())?;
+    if text.len() > RESTORE_RECORD_BYTES_MAX {
+        return Err(());
+    }
     assert!(text.len() <= RESTORE_RECORD_BYTES_MAX);
     Ok(Some(text))
 }
