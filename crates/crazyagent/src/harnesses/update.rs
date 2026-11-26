@@ -20,7 +20,7 @@ pub use state::{
     INSTALL_NOT_FOUND, INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS,
     UPDATE_FAILED, UPDATE_OFF, Updates, initialize, settings,
 };
-pub(crate) use state::{LAUNCH_UPDATING, launchable, needs};
+pub(crate) use state::{launchable, needs};
 
 use crate::harnesses;
 use kernel_processes::install::{InstallPaths, InstallRecipe, Verb};

@@ -655,7 +655,7 @@ static UPDATING: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 /// Output: Ok, or `harness_launch_updating`.
 pub(crate) fn launchable(harness: &str, windows: bool) -> Result<(), &'static str> {
     let id = harnesses::canonical(harness);
-    match windows && updating().iter().any(|job| *job == id) {
+    match windows && updating().contains(&id) {
         true => Err(LAUNCH_UPDATING),
         false => Ok(()),
     }
