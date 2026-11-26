@@ -9,8 +9,11 @@ export const HELPER = "crates/crazyagent/src/engine/secret_frame.rs";
 /** The tracked Rust files the check reads: the crate's sources and its integration tests. */
 export const SCOPE = /^crates\/crazyagent\/(src|tests)\/.+\.rs$/;
 
-/** A 37-byte array literal, the shape of a hand-built owner packet, with or without `u8`. */
-export const PACKET = /\[\s*0(?:u8)?\s*;\s*37\s*\]/g;
+/**
+ * A zeroed 37-byte array, the shape of a hand-built owner packet: `0`, `0u8` or `0_u8`, by
+ * the literal length or by the helper's `OWNER_PACKET_BYTES`, with or without a path.
+ */
+export const PACKET = /\[\s*0(?:_?u8)?\s*;\s*(?:37|(?:\w+::)*OWNER_PACKET_BYTES)\s*\]/g;
 
 /** The largest `git ls-files` listing read, far above the repository's size. */
 const LISTING_BYTES_MAX = 64 * 1024 * 1024;

@@ -22,6 +22,7 @@ const CLEAN = [
   'let packet = owner_packet(b"CAO1", client_tag(self.kind), &self.token);',
   "frame[..4].copy_from_slice(&(length as u32).to_be_bytes());",
   "fn known(&self, packet: &[u8; 37]) -> bool;",
+  "let wide = [0_u8; 370];",
 ].join("\n");
 
 /**
@@ -40,16 +41,23 @@ function repository(files) {
   return root;
 }
 
-test("a hand-built packet fails in sources and integration tests, u8 or not", () => {
+test("a hand-built packet fails in sources and integration tests, in every literal form", () => {
   const problems = check(
     new Map([
       ["crates/crazyagent/src/engine/owner/transport/watch.rs", HAND_BUILT],
       ["crates/crazyagent/tests/owner_client.rs", "let mut auth = [0u8;37];"],
+      ["crates/crazyagent/src/ide/bridge.rs", "let mut packet = [0_u8; 37];"],
+      [
+        "crates/crazyagent/src/engine/owner/transport/ide.rs",
+        "let mut packet = [0; secret_frame::OWNER_PACKET_BYTES];",
+      ],
     ]),
   );
   assert.deepEqual(problems, [
     "crates/crazyagent/src/engine/owner/transport/watch.rs:1: build the owner packet with secret_frame::owner_packet",
     "crates/crazyagent/tests/owner_client.rs:1: build the owner packet with secret_frame::owner_packet",
+    "crates/crazyagent/src/ide/bridge.rs:1: build the owner packet with secret_frame::owner_packet",
+    "crates/crazyagent/src/engine/owner/transport/ide.rs:1: build the owner packet with secret_frame::owner_packet",
   ]);
 });
 
