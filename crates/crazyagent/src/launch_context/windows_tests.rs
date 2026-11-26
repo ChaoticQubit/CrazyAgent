@@ -376,15 +376,34 @@ fn a_windows_tools_off_claude_install_writes_its_two_files_and_holds_the_home() 
             instructions.clone().into_os_string(),
         ]
     );
+    use crazyagent_win_sandbox::dacl;
+    const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    const USERS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 33, 2, 0, 0];
+    let home_list = private::facts(&private::open_dir(&home).unwrap())
+        .unwrap()
+        .list
+        .unwrap();
+    let home_entries: Vec<_> = dacl::entries(&home_list)
+        .unwrap()
+        .iter()
+        .map(|entry| (entry.allows, entry.mask, entry.sid.to_vec()))
+        .collect();
+    assert!(!home_entries.is_empty());
     for file in [&mcp, &instructions] {
         let opened = std::fs::File::open(file).unwrap();
         assert!(private::check(&opened).is_ok(), "{}", file.display());
         let list = private::facts(&opened).unwrap().list.unwrap();
-        let entries = crazyagent_win_sandbox::dacl::entries(&list).unwrap();
-        assert!(!entries.is_empty(), "{}", file.display());
+        let entries = dacl::entries(&list).unwrap();
+        let held: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.allows, entry.mask, entry.sid.to_vec()))
+            .collect();
+        assert_eq!(held, home_entries, "{}: {entries:?}", file.display());
         assert!(
-            entries.iter().all(|entry| entry.flags & 0x10 != 0),
-            "{} has an entry not inherited from the home: {entries:?}",
+            entries.iter().all(|entry| entry.sid != EVERYONE
+                && entry.sid != USERS
+                && !dacl::package(entry.sid)),
+            "{}: {entries:?}",
             file.display()
         );
     }
