@@ -484,6 +484,11 @@ fn sweep_failed(folder: &str, cause: &EngineError) {
 #[cfg(unix)]
 const REPLACED_DATABASE: &str = "replaced-database";
 
+/// The most kept copies of replaced 2.5 data the start sweep reads for the plugin key
+/// names they hold; with more, every plugin key stays.
+#[cfg(unix)]
+pub(crate) const REPLACED_SCAN_MAX: usize = 64;
+
 /// Opens the database of the dated copy of the replaced 2.5 data without following a link:
 /// read-write like `shape`, so a WAL copy with no -wal or -shm file opens on Apple's SQLite,
 /// then `query_only`, so the sweep can never write the kept copy. Input: the copy's folder.
@@ -498,6 +503,56 @@ fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
         .execute_batch("PRAGMA query_only = ON")
         .map_err(error)?;
     Ok(opened)
+}
+
+/// Every key name the binding rows of each kept copy of replaced 2.5 data name, for the
+/// start sweep to keep what a restore whose key settle stopped early left in place. A copy
+/// is a `backups/replaced-<time>` folder this user owns, read as itself; a link, another
+/// account's folder or any other name is not read. A copy whose database does not open or
+/// read, a folder that does not list, or more than [`REPLACED_SCAN_MAX`] copies is a
+/// failure, on which the sweep keeps every key. Inputs: the engine root and the plugin
+/// store's reader of a copy's key names. Output: the names.
+#[cfg(unix)]
+pub(crate) fn replaced_key_names(
+    root: &Path,
+    named: fn(&Connection) -> Result<std::collections::BTreeSet<String>, EngineError>,
+) -> Result<std::collections::BTreeSet<String>, EngineError> {
+    use std::os::unix::fs::MetadataExt;
+    let folder = root.join(kernel_storage::migrations::BACKUPS);
+    let entries = match std::fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(std::collections::BTreeSet::new());
+        }
+        Err(cause) => return Err(error(cause)),
+    };
+    let user = rustix::process::geteuid().as_raw();
+    let mut names = std::collections::BTreeSet::new();
+    let mut read = 0;
+    for entry in entries {
+        let entry = entry.map_err(error)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !kernel_storage::restore::recovery::copy_name(&name) {
+            continue;
+        }
+        let copy = folder.join(&name);
+        let found = std::fs::symlink_metadata(&copy).map_err(error)?;
+        if !found.is_dir() || found.uid() != user {
+            continue;
+        }
+        if read == REPLACED_SCAN_MAX {
+            return Err(error("app_plugins_replaced_copies_over_cap"));
+        }
+        read += 1;
+        let replaced = replaced_database(&copy)?;
+        if has_table(&replaced, "app_plugin_secrets")? {
+            names.extend(named(&replaced)?);
+        }
+    }
+    assert!(read <= REPLACED_SCAN_MAX);
+    Ok(names)
 }
 
 /// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.

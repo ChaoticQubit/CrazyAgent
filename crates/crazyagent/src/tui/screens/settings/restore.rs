@@ -163,7 +163,7 @@ fn epoch_ms(time: SystemTime) -> Option<i64> {
 /// engine. Input: the context. Output: what the page shows; nothing to restore without a
 /// default engine.
 fn read(ctx: &Ctx) -> Offer {
-    let root = ctx.engine_root.as_deref();
+    let root = ctx.engine.as_ref().map(|(layout, _)| layout.root());
     let until_ms = root
         .and_then(crate::restore::restorable_until)
         .and_then(epoch_ms);

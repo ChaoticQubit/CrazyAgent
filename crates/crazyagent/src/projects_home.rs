@@ -1498,9 +1498,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_icloud_not_downloaded" => {
             "Some files are still only in iCloud, so the folder was not added. Nothing was removed. Download them and try again."
         }
-        "home_permission_denied" => {
-            "macOS did not let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed."
-        }
+        "home_permission_denied" => intake::PERMISSION_DENIED,
         "icloud_download_busy" => {
             "Too many iCloud downloads are running at once. Wait for one to finish."
         }

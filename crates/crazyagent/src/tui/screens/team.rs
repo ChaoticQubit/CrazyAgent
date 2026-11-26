@@ -37,6 +37,10 @@ use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
 
 mod cleanup;
+/// Rows for the words a closed or refused terminal shows, apart from the long row file.
+/// Input: none. Output: the rows.
+#[cfg(test)]
+mod closed_words_tests;
 mod finished;
 mod questions;
 mod screen;
@@ -650,9 +654,22 @@ pub(in crate::tui) fn unopened(why: &str) -> String {
 }
 
 /// The words shown for a closed or refused terminal.
-/// Input: the code. Output: the lead line and the plain reason under it.
+/// Input: the code. Output: the lead line and the plain reason under it. A terminal with no
+/// tmux says what the desktop says on the same system; on Linux it names the package manager
+/// first, since setup there installs tmux only through Linux Homebrew or when the engine
+/// already runs as root, and never calls sudo.
 fn closed_words(code: &str) -> (&'static str, &'static str) {
     match code {
+        #[cfg(target_os = "macos")]
+        "terminal_unavailable" => (
+            "Terminals need tmux, and it isn't ready on this Mac.",
+            "Run setup again from Settings.",
+        ),
+        #[cfg(target_os = "linux")]
+        "terminal_unavailable" => (
+            "Terminals need tmux, and it isn't ready on this computer.",
+            "Install tmux with your package manager, then run setup again from Settings.",
+        ),
         NOT_READY => (
             "Not ready yet.",
             "This engine cannot stream agent terminals yet.",

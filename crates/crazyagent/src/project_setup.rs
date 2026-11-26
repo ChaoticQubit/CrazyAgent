@@ -55,8 +55,6 @@ pub const RESEARCH_LOG_BYTES_MAX: usize = 24 * 1024;
 const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
 #[cfg(unix)]
 const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
-#[cfg(unix)]
-const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
 const SECRET_MARKERS: [&str; 13] = [
     "api_key",
     "api-key",
@@ -3691,39 +3689,10 @@ pub fn read_context(
     Ok(text_chunk(path, size, offset, bytes))
 }
 
+mod redaction;
 mod research_logs;
+pub(crate) use redaction::redact;
 pub use research_logs::research_log;
-
-/// Hides words and lines that look like credentials before text leaves the engine: a
-/// research log line, or a past conversation's message, tool input or tool output. Takes
-/// the text, one line or many. Returns it with the same line breaks and white space: each
-/// line naming a credential field, and each line of a private key block from its BEGIN line
-/// to its END line, a fixed notice; each credential-like word, the value after a key named
-/// like a credential, a URL's user part and a wrapped token's tail replaced. This masks
-/// known shapes, not every secret: one in another shape, a short value under a key not
-/// named like a credential or one split across messages stays.
-pub(crate) fn redact(text: &str) -> String {
-    let mut key_block = false;
-    let mut wrapped = false;
-    text.split('\n')
-        .map(|line| {
-            let lower = line.to_ascii_lowercase();
-            key_block |= lower.contains(KEY_BLOCK_BEGIN);
-            let hidden = key_block || SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
-            if key_block && lower.contains(KEY_BLOCK_END) {
-                key_block = false;
-            }
-            if hidden {
-                wrapped = false;
-                return HIDDEN_LINE.to_owned();
-            }
-            let (kept, ends_hidden) = redact_words(line, wrapped);
-            wrapped = ends_hidden;
-            kept
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 /// Where the value of a key named like a credential sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3828,17 +3797,6 @@ fn secret_key(word: &str) -> Option<KeyValue> {
         start = end;
     }
     None
-}
-
-/// Whether a word at a line's start can be the wrapped tail of a token masked at the end of
-/// the line before: at least `WRAPPED_TAIL_MIN` bytes of the token and base64 alphabets,
-/// holding a digit. Takes the word.
-fn wrapped_tail(word: &str) -> bool {
-    word.len() >= WRAPPED_TAIL_MIN
-        && word.bytes().any(|b| b.is_ascii_digit())
-        && word
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
 }
 
 /// Appends a word with the user part of each URL in it, `scheme://user:password@host`,
@@ -3956,3 +3914,6 @@ pub(crate) mod removed;
 mod retry;
 #[cfg(all(test, unix))]
 mod tests;
+
+mod wrapped_tail;
+use wrapped_tail::wrapped_tail;

@@ -18,7 +18,7 @@
                                                                                                                         
   Hooks  0   Claude Code on a key or URL and RCLI run none                                                              
   No hooks yet. Press h to add a plugin folder's hooks.                                                                 
-                                                                                                                        
+    App plugins                                                                                                         
                                                                                                                         
                                                                                                                         
                                                                                                                         

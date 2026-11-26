@@ -49,7 +49,7 @@ mod hidden_seers_tests;
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
 
-const PROJECT: &str = "team-panes";
+pub(super) const PROJECT: &str = "team-panes";
 
 pub(super) const ENDPOINT: &str = "local-a";
 
@@ -65,11 +65,11 @@ fn reference(value: &str) -> CredentialRef {
 
 pub(super) struct Fixture {
     _root: tempfile::TempDir,
-    base: PathBuf,
+    pub(super) base: PathBuf,
     tmux: PathBuf,
     pub(super) connection: Connection,
-    setup: StoredSetup,
-    access: ModelAccess,
+    pub(super) setup: StoredSetup,
+    pub(super) access: ModelAccess,
 }
 
 impl Fixture {
@@ -191,7 +191,7 @@ impl Fixture {
         .unwrap()
     }
 
-    fn agent(&self, role: AgentRole, harness: &str, status: AgentStatus) -> i64 {
+    pub(super) fn agent(&self, role: AgentRole, harness: &str, status: AgentStatus) -> i64 {
         self.connection
             .execute(
                 "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,?3,0,?4,?5,1,1)",
@@ -268,11 +268,11 @@ impl Fixture {
             .unwrap()
     }
 
-    fn status(&self) -> super::super::TeamStatus {
+    pub(super) fn status(&self) -> super::super::TeamStatus {
         status(&self.connection, &self.setup).unwrap()
     }
 
-    fn agent_status(&self, id: i64) -> (AgentStatus, Option<String>) {
+    pub(super) fn agent_status(&self, id: i64) -> (AgentStatus, Option<String>) {
         let agent = self
             .status()
             .agents
@@ -4093,7 +4093,7 @@ fn page_task(fixture: &Fixture, member: i64) -> (i64, String) {
 /// The worktree folder and git folder of an agent, as its worktree row keeps them. Takes the
 /// fixture and the agent. Returns both.
 #[cfg(target_os = "macos")]
-fn agent_places(fixture: &Fixture, member: i64) -> (PathBuf, PathBuf) {
+pub(super) fn agent_places(fixture: &Fixture, member: i64) -> (PathBuf, PathBuf) {
     let (worktree, git_dir): (String, String) = fixture
         .connection
         .query_row(
@@ -4766,7 +4766,7 @@ done
 "#;
 
 #[cfg(target_os = "macos")]
-fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
+pub(super) fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
     limited_runtime(fixture, host, script, TeamLimits::default())
 }
 
@@ -6121,7 +6121,7 @@ fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {
 }
 
 #[cfg(target_os = "macos")]
-const RESUMING_CODEX: &str = r#"#!/bin/sh
+pub(super) const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
@@ -8106,40 +8106,6 @@ fn a_short_task_line_inside_another_typed_turn_does_not_read_as_delivered() {
     );
 }
 
-/// The status log keeps only its newest 20000 rows, whichever project owns them: a new row
-/// drops every row that far behind it and keeps the next one (HB-S5-I, TEAM-11-L2).
-#[test]
-fn the_status_log_keeps_only_its_newest_rows() {
-    let fixture = Fixture::new(1);
-    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    for (id, project) in [
-        (10_001, "another-project"),
-        (10_002, PROJECT),
-        (30_000, PROJECT),
-    ] {
-        fixture
-            .connection
-            .execute(
-                "INSERT INTO team_status_log(id,project,agent,status,at_ms) VALUES (?1,?2,?3,'idle',1)",
-                params![id, project, agent],
-            )
-            .unwrap();
-    }
-    fixture
-        .connection
-        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [agent])
-        .unwrap();
-    let ids: Vec<i64> = fixture
-        .connection
-        .prepare("SELECT id FROM team_status_log ORDER BY id")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(ids, [10_002, 30_000, 30_001]);
-}
-
 /// An agent that starts its harness for each turn keeps no pane record, only the session
 /// record of its running turn. A start reads that record for a delivery intended before
 /// the session started, so a task the session shows is never handed out again, and never
@@ -8608,7 +8574,7 @@ pub(super) fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamActi
     }
 }
 
-fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
+pub(super) fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
     fixture
         .connection
         .query_row(
@@ -8637,7 +8603,7 @@ fn idle_stop(fixture: &Fixture, idle: Duration) {
 }
 
 #[cfg(target_os = "macos")]
-fn subs(fixture: &Fixture) -> Vec<i64> {
+pub(super) fn subs(fixture: &Fixture) -> Vec<i64> {
     fixture
         .connection
         .prepare("SELECT id FROM team_agents WHERE project=?1 AND role='sub' ORDER BY id")
@@ -14202,7 +14168,7 @@ fn stop_live(fixture: &Fixture, team: &mut TeamRuntime) {
 
 /// What the engine typed into one agent's pasted inputs, from its stand-in's log.
 #[cfg(target_os = "macos")]
-fn pasted(fixture: &Fixture, agent: i64) -> String {
+pub(super) fn pasted(fixture: &Fixture, agent: i64) -> String {
     std::fs::read_to_string(
         fixture
             .base
@@ -15241,7 +15207,7 @@ const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 /// Runs git as the owner on the test project: no system or global config, the test's own
 /// home. Inputs: the folder, the home and the arguments. Output: git's output.
 #[cfg(target_os = "macos")]
-fn level_git(folder: &Path, home: &Path, arguments: &[&str]) -> std::process::Output {
+pub(super) fn level_git(folder: &Path, home: &Path, arguments: &[&str]) -> std::process::Output {
     kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
@@ -27423,7 +27389,7 @@ fn reuse_idle(fixture: &Fixture, mode: crate::team::ReuseIdle) {
 /// Turns the owner's "Reuse idle agents" setting on, for a row about an idle agent taking
 /// the next task. Takes the fixture.
 #[cfg(target_os = "macos")]
-fn reuse_idle_on(fixture: &Fixture) {
+pub(super) fn reuse_idle_on(fixture: &Fixture) {
     reuse_idle(fixture, crate::team::ReuseIdle::On);
 }
 
@@ -35061,3 +35027,6 @@ fn only_codex_and_claude_code_name_model_hosts_for_a_signed_in_agent_with_no_net
 /// told why. Inputs: the team runtime fixtures. Output: none; each row asserts.
 #[path = "launch_home_hooks_tests.rs"]
 mod launch_home_hooks_tests;
+
+#[path = "tests/status_log.rs"]
+mod status_log;

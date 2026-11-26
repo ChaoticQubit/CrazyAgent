@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -139,6 +139,90 @@ test("the plan times 2.5 first and names the builds in order, whichever side cal
       const planned = execFileSync("bash", [script, "--plan", ...dirs], { encoding: "utf8" }).trim().split("\n");
       assert.deepEqual(planned, expected);
     }
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A checkout with one 2.5 perf crate in a new git repository, and a folder of stand-in
+ * tools put first on PATH: `cargo` prints one PERF row, and each other tool runs the shell
+ * text given for it. Inputs: the temp folder and the stand-ins as name to shell text.
+ * Output: the checkout and the environment that runs with the stand-ins.
+ */
+function standIns(folder, tools) {
+  const checkout = path.join(folder, "checkout");
+  const tests = path.join(checkout, "crates", "kernel", "storage", "src");
+  mkdirSync(tests, { recursive: true });
+  writeFileSync(path.join(checkout, "crates", "kernel", "storage", "Cargo.toml"), 'name = "stand-in"\n');
+  writeFileSync(path.join(tests, "perf_tests.rs"), "\n");
+  const git = (...words) => execFileSync("git", ["-C", checkout, "-c", "user.name=perf", "-c", "user.email=perf@example.invalid", ...words]);
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "stand-in");
+  const bin = path.join(folder, "bin");
+  mkdirSync(bin);
+  const all = {
+    cargo: 'echo "test perf_tests::rows ... PERF 1 storage stand.in p50_ns=5 p95_ns=6 n=200 batch=1000"',
+    ...tools,
+  };
+  for (const [name, text] of Object.entries(all)) {
+    writeFileSync(path.join(bin, name), `#!/bin/sh\n${text}\n`, { mode: 0o755 });
+  }
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+  return { checkout, env };
+}
+
+test("the runner reads load1 where sysctl has no vm.loadavg, as on Linux", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const { checkout, env } = standIns(folder, {
+      sysctl: 'echo "sysctl: cannot stat /proc/sys/vm/loadavg: No such file or directory" >&2; exit 255',
+    });
+    const sprint = path.join(folder, "sprint");
+    mkdirSync(sprint);
+    const log = path.join(folder, "runs.log");
+    const result = spawnSync("bash", [script, "--inner", sprint, "1", log, checkout], { env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^PERF-RUN build=2\.5 .* load1=\d+(\.\d+)? /m);
+    assert.match(result.stdout, /^PERF 1 storage stand\.in p50_ns=5 p95_ns=6 n=200 batch=1000$/m);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("the quiet wait refuses a load reader that prints nothing and never starts the runs", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const { checkout, env } = standIns(folder, { sysctl: "exit 0", python3: "exit 0" });
+    const sprint = path.join(folder, "sprint");
+    mkdirSync(sprint);
+    const calls = path.join(folder, "calls");
+    writeFileSync(path.join(sprint, "env.sh"), "\n");
+    writeFileSync(path.join(sprint, "slot.sh"), `printf '%s\\n' "$*" >> '${calls}'\n"$@"\n`);
+    const quiet = { ...env, PERF_SPRINT: sprint, PERF_WAIT_QUIET: "1" };
+    const result = spawnSync("bash", [script, "1"], { cwd: checkout, env: quiet, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /run\.sh: no load average/);
+    const called = readFileSync(calls, "utf8");
+    assert.match(called, /--no-run/);
+    assert.doesNotMatch(called, /--inner/);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a run refuses a load reader that prints text that is not a number and writes no quiet header", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const { checkout, env } = standIns(folder, { sysctl: "echo not-a-load", python3: "echo not-a-load" });
+    const sprint = path.join(folder, "sprint");
+    mkdirSync(sprint);
+    const log = path.join(folder, "runs.log");
+    const result = spawnSync("bash", [script, "--inner", sprint, "1", log, checkout], { env, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /run\.sh: no load average \(read 'not-a-load'\)/);
+    assert.doesNotMatch(`${result.stdout}${existsSync(log) ? readFileSync(log, "utf8") : ""}`, /condition=quiet/);
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }

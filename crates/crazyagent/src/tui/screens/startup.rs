@@ -264,7 +264,7 @@ impl Screen for Startup {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
         if Self::broken(ctx) && ctx.starts_engine {
-            self.recovery.start();
+            self.recovery.start(ctx.engine.as_ref());
         }
         let lines = if Self::broken(ctx) {
             self.recovery_lines(ctx, area.width)
@@ -307,6 +307,35 @@ impl Screen for Startup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::glyphs::UNICODE;
+    use crate::tui::screens::restore_recovery::Read;
+    use crate::tui::theme::{Appearance, Colors, Depth};
+
+    #[test]
+    fn a_read_with_nothing_to_recover_reconnects_and_never_starts_the_engine() {
+        let mut ctx = Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        );
+        ctx.link = Link::Down(crate::restore::ENGINE_RESTORE_BROKEN.into());
+        ctx.starts_engine = true;
+        let mut startup = Startup {
+            recovery: Recovering::answered(Ok(Read {
+                offer: None,
+                folder: std::path::PathBuf::from("/backups"),
+            })),
+            ..Startup::default()
+        };
+        startup.shown(&mut ctx);
+        assert!(!ctx.take_start(), "a restored record never starts 2.5");
+        assert!(
+            ctx.take_reconnect(),
+            "the reconnect shows how the engine stands"
+        );
+    }
 
     #[test]
     fn socket_paths_under_home_start_with_tilde() {

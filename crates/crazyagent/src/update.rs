@@ -1,6 +1,6 @@
 use kernel_processes::update::{
-    Channel, DOWNLOAD_BYTES_MAX, DOWNLOAD_TIMEOUT, MANIFEST_BYTES_MAX, Manifest, UpdateError,
-    data_root, download, fail, inside_app_bundle, io_failure, is_newer, not_published,
+    Channel, DOWNLOAD_BYTES_MAX, DOWNLOAD_TIMEOUT, MANIFEST_BYTES_MAX, Manifest, Unpacked,
+    UpdateError, data_root, download, fail, inside_app_bundle, io_failure, is_newer, not_published,
     parse_manifest, public_key, read_channel, service_step, swap, target, unpack, verify_file,
     write_channel,
 };
@@ -123,14 +123,14 @@ fn install_release(manifest: &Manifest, install: &Path, key: &str) -> Result<Str
     file.sync_all()
         .map_err(|error| io_failure("Can't save the download", error))?;
     drop(file);
-    verify_file(
+    let verified = verify_file(
         &archive,
         &asset.sha256,
         &asset.signature,
         key,
         &manifest.version,
     )?;
-    let unpacked = unpack(&archive, &staging.path.join("unpacked"))?;
+    let unpacked = unpack(&verified, &staging.path.join("unpacked"))?;
     let layout = crate::paths::Layout::current().map_err(|_| {
         fail(
             "update_no_data_root",
@@ -150,7 +150,7 @@ fn install_release(manifest: &Manifest, install: &Path, key: &str) -> Result<Str
 pub fn swap_around_engine(
     layout: &crate::paths::Layout,
     install: &Path,
-    unpacked: &Path,
+    unpacked: &Unpacked,
     version: &str,
 ) -> Result<String, UpdateError> {
     let current = install.join(format!("crazyagent{EXE_SUFFIX}"));
@@ -319,6 +319,8 @@ pub fn run(args: &[OsString]) -> Result<String, UpdateError> {
     install_release(&manifest, install, &public_key()?)
 }
 
+#[cfg(test)]
+mod install_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]

@@ -1059,7 +1059,6 @@ fn pressed(bytes: &[u8]) -> bool {
 /// Says whether bytes a view sent as wheel keys are only those: up and down arrow keys in
 /// CSI or SS3 form and the reports `report_len` reads. A wheel request holding any other
 /// byte counts as the owner's keys (OB10-L1). Takes the bytes. Returns the answer.
-#[cfg(unix)]
 pub(crate) fn wheel_only(bytes: &[u8]) -> bool {
     let mut index = 0;
     while index < bytes.len() {

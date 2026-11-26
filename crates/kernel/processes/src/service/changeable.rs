@@ -3,6 +3,10 @@ use super::canonical;
 use super::{current_uid, trusted_group};
 use std::path::{Path, PathBuf};
 
+/// The most links one path's resolution may pass through before the path counts as
+/// changeable, as an unreadable entry does.
+pub(crate) const LINK_HOPS_MAX: usize = 32;
+
 /// The first entry on a path that someone other than this user or root can change: an
 /// entry another user owns, a world-writable entry such as `/tmp`, a file or folder an
 /// untrusted group can write ([`trusted_group`]), or one whose access list lets someone else
@@ -24,23 +28,31 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
     changeable(path, true)
 }
 
-/// Reads a path as written and with its links resolved and names its first changeable part
-/// ([`first_changeable_part`]). Inputs: the path and whether world-writable stores pass.
-/// Output: the entry, or none.
+/// Reads a path as written, with its links resolved, and every link, `..` folder and first
+/// missing part its resolution passes through ([`link_chain`]), and names the first
+/// changeable part of any of them ([`first_changeable_part`]). A link that cannot be read,
+/// or a chain past [`LINK_HOPS_MAX`], counts as changeable. A call that finds a changeable
+/// part keeps no access answer it read. Inputs: the path and whether world-writable stores
+/// pass. Output: the entry, or none.
 #[cfg(unix)]
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
     let resolved = canonical(path);
-    let paths = [path, resolved.as_path()];
+    let hops = match link_chain(path) {
+        Ok(hops) => hops,
+        Err(entry) => return Some(entry),
+    };
+    let mut paths: Vec<&Path> = vec![path, resolved.as_path()];
+    paths.extend(hops.iter().map(PathBuf::as_path));
     let mut entries: Vec<&Path> = Vec::new();
-    for entry in paths.into_iter().flat_map(Path::ancestors) {
+    for entry in paths.iter().flat_map(|path| path.ancestors()) {
         if !entries.contains(&entry) {
             entries.push(entry);
         }
     }
     let read = read_parts(&entries);
     assert_eq!(read.len(), entries.len());
-    for path in paths {
+    for path in &paths {
         let parts: Vec<Part> = path
             .ancestors()
             .filter_map(|entry| entries.iter().position(|seen| *seen == entry))
@@ -50,10 +62,98 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
         if let Some(entry) = first_changeable_part(&parts, me, open_stores)
             .and_then(|depth| path.ancestors().nth(depth))
         {
+            #[cfg(target_os = "macos")]
+            super::acl::forget(&entries);
             return Some(entry.to_path_buf());
         }
     }
     None
+}
+
+/// Every link a path's resolution passes through, named where it sits, every folder a `..`
+/// in it leaves, and the first missing part where it would sit, since whoever can write its
+/// folder can make it, in the order the resolution meets them. The missing part ends the
+/// walk, since nothing past it exists to follow. Input: an absolute path. Output: those places,
+/// or the entry that makes the path changeable: one that cannot be read, or the link past
+/// [`LINK_HOPS_MAX`], or one whose target names no start ([`link_start`]). A relative path,
+/// or one on no drive root, is changeable as a whole, since what it names depends on the
+/// working folder or on a share.
+fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
+    use std::path::Component;
+    let Some(mut at) = link_start(path, path).filter(|_| path.is_absolute()) else {
+        return Err(path.to_path_buf());
+    };
+    let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
+        for part in from.components().rev() {
+            match part {
+                Component::Normal(name) => pending.push(PathBuf::from(name)),
+                Component::ParentDir => pending.push(PathBuf::from("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
+    };
+    let mut pending = Vec::new();
+    queue(&mut pending, path);
+    let mut hops = Vec::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop() {
+        if part.as_os_str() == ".." {
+            if at.parent().is_some() {
+                hops.push(at.clone());
+            }
+            at.pop();
+            continue;
+        }
+        let next = at.join(&part);
+        let kind = match std::fs::symlink_metadata(&next) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                hops.push(next);
+                break;
+            }
+            Err(_) => return Err(next),
+        };
+        if !kind.is_symlink() {
+            at = next;
+            continue;
+        }
+        if links == LINK_HOPS_MAX {
+            return Err(next);
+        }
+        links += 1;
+        let Ok(target) = std::fs::read_link(&next) else {
+            return Err(next);
+        };
+        let Some(start) = link_start(&at, &target) else {
+            return Err(next);
+        };
+        hops.push(next);
+        at = start;
+        queue(&mut pending, &target);
+    }
+    assert!(links <= LINK_HOPS_MAX);
+    assert!(hops.len() >= links);
+    Ok(hops)
+}
+
+/// Where the walk of a link's target starts: the root of the drive a target with a drive
+/// and root names, the root of the drive the walk is on for a target with a root and no
+/// drive, and the link's own folder for a relative target. Any other target (a share, a
+/// volume or device name, or a drive with no root) names none, so the link counts as
+/// changeable. Inputs: the link's folder and the target. Output: the folder, or none.
+pub(super) fn link_start(at: &Path, target: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    let mut parts = target.components();
+    match parts.next() {
+        Some(Component::Prefix(prefix)) => match (prefix.kind(), parts.next()) {
+            (Prefix::Disk(drive) | Prefix::VerbatimDisk(drive), Some(Component::RootDir)) => {
+                Some(PathBuf::from(format!("{}:\\", char::from(drive))))
+            }
+            _ => None,
+        },
+        Some(Component::RootDir) => at.ancestors().last().map(Path::to_path_buf),
+        _ => Some(at.to_path_buf()),
+    }
 }
 
 /// One part of a path as the ownership rule reads it: missing, unreadable, carrying an
@@ -74,9 +174,9 @@ pub(crate) enum Part {
     },
 }
 
-/// Reads the parts of a path without following a link, every access list in one listing
-/// ([`super::acl::shared_all`]). A link's own access list is never read, as its mode is not. Input:
-/// the parts. Output: the reads, in order.
+/// Reads the parts of a path without following a link, each part's access list read for the
+/// object `lstat` found ([`super::acl::shared_all`]). A link's own access list is never read,
+/// as its mode is not. Input: the parts. Output: the reads, in order.
 #[cfg(target_os = "macos")]
 fn read_parts(entries: &[&Path]) -> Vec<Part> {
     use std::os::unix::fs::MetadataExt;
@@ -191,13 +291,21 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
 }
 
 /// The first entry on a path that an account other than SYSTEM, the administrators,
-/// TrustedInstaller and this user can change, read as written and with its links resolved
-/// ([`crazyagent_win_sandbox::changeable_part`]); an unreadable entry counts. Input: the
-/// absolute path. Output: the entry, or none.
+/// TrustedInstaller and this user can change, read as written, with its links resolved, and
+/// every link, junction, `..` folder and first missing part its resolution passes through
+/// ([`link_chain`], [`crazyagent_win_sandbox::changeable_part`]); an unreadable entry, a link
+/// that cannot be read or followed from a drive root, or a chain past [`LINK_HOPS_MAX`]
+/// counts. Input: the absolute path. Output: the entry, or none.
 #[cfg(windows)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
-    crazyagent_win_sandbox::changeable_part(path)
-        .or_else(|| crazyagent_win_sandbox::changeable_part(&canonical(path)))
+    let hops = match link_chain(path) {
+        Ok(hops) => hops,
+        Err(entry) => return Some(entry),
+    };
+    [path.to_path_buf(), canonical(path)]
+        .iter()
+        .chain(&hops)
+        .find_map(|part| crazyagent_win_sandbox::changeable_part(part))
 }
 
 /// [`changeable_by_others`] for the tools the resolver runs. Windows has no sticky folder,

@@ -992,7 +992,9 @@ dependencies = [
 name = "crazyagent-kernel-common"
 version = "2.4.4"
 dependencies = [
+ "rusqlite",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
@@ -1001,6 +1003,7 @@ version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-common",
  "crazyagent-kernel-security",
+ "crazyagent-win-sandbox",
  "rusqlite",
  "rustix 1.1.5",
  "serde",
@@ -1016,6 +1019,7 @@ version = "2.4.4"
 dependencies = [
  "base64 0.22.1",
  "crazyagent-kernel-common",
+ "crazyagent-macos-fs",
  "crazyagent-win-sandbox",
  "getrandom 0.4.3",
  "minisign",

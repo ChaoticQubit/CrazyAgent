@@ -1,5 +1,5 @@
 use super::*;
-use kernel_processes::update::test_support::{code, response, said, serve};
+use kernel_processes::update::test_support::{TestResult, code, joined, response, said, serve};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -61,14 +61,14 @@ fn saving_the_channel_creates_a_missing_data_folder_the_engine_accepts() {
 }
 
 #[test]
-fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
+fn a_channel_with_no_release_says_so_in_one_plain_sentence() -> TestResult {
     let missing = || {
         response(
             "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\n",
             b"Not Found",
         )
     };
-    let (url, server) = serve(vec![missing(), missing()]);
+    let (url, server) = serve(vec![missing(), missing()])?;
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -83,11 +83,12 @@ fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
             "No dev release is published yet.".to_owned()
         )
     );
-    server.join().unwrap();
+    joined(server)?;
+    Ok(())
 }
 
 #[test]
-fn download_and_manifest_failures_never_quote_curl_or_the_server() {
+fn download_and_manifest_failures_never_quote_curl_or_the_server() -> TestResult {
     let answered = |head: &str, body: &[u8]| {
         response(
             &format!(
@@ -105,7 +106,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         answered("500 Internal Server Error", b"curl: (22) oops"),
         answered("200 OK", b"<html>no</html>"),
         answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
-    ]);
+    ])?;
     assert_eq!(
         said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
         (
@@ -121,7 +122,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
         said(fetch_manifest(Channel::Dev, &url).unwrap_err()),
         unreadable
     );
-    server.join().unwrap();
+    joined(server)?;
 
     let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let address = format!("127.0.0.1:{port}");
@@ -141,6 +142,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
             "Couldn't reach the update server. Check your connection and try again.".to_owned()
         )
     );
+    Ok(())
 }
 
 #[test]
@@ -206,33 +208,15 @@ fn function_holding<'a>(path: &Path, text: &'a str, at: usize) -> &'a str {
     &text[start..at]
 }
 
+/// Says whether a source is test code the install scan skips: a file under a `tests` or
+/// `perf_tests` folder, or one whose name ends in `tests.rs`. Input: the source's path.
+/// Output: true for test code.
 fn test_source(path: &Path) -> bool {
-    path.components().any(|part| part.as_os_str() == "tests")
+    path.components()
+        .any(|part| part.as_os_str() == "tests" || part.as_os_str() == "perf_tests")
         || path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().ends_with("tests.rs"))
-}
-
-fn calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
-    let needle = format!("{name}(");
-    text.match_indices(&needle)
-        .filter(|(at, _)| {
-            let before = &text[..*at];
-            let plain = before
-                .chars()
-                .next_back()
-                .is_some_and(|c| c == ' ' || c == '(' || c == '\n');
-            (plain || before.ends_with("update::")) && !before.ends_with("fn ")
-        })
-        .map(|(at, _)| function_holding(path, text, at + needle.len()))
-        .collect()
-}
-
-/// The plain or `update::` calls of one swap step in a non-test source, by the function
-/// holding each. Inputs: the source's path, its text and the step's name. Output: the
-/// holding functions' text up to each call.
-fn swap_calls<'a>(path: &Path, text: &'a str, name: &str) -> Vec<&'a str> {
-    calls(path, text, name)
 }
 
 /// A folder that holds a link to a sibling folder gives each `.rs` file once, at its real
@@ -250,19 +234,20 @@ fn rust_sources_skips_folder_links_and_finds_each_file_once() {
     assert_eq!(found, vec![real.join("held").join("one.rs")]);
 }
 
-/// A source that names the update module through a grouped import still has its plain swap
-/// calls looked at, so no import spelling hides a swap from the install guard.
+/// A file in a `perf_tests` folder is test code to the install scan, and a plain source
+/// beside it is not, so a timing row never reads as an install path.
 #[test]
-fn a_grouped_update_import_still_has_its_swap_calls_looked_at() {
-    let text = "use kernel_processes::{update, process};\n\nfn sneak() {\n    swap(&a, &b);\n}\n";
-    let found = swap_calls(Path::new("/repo/crates/other/src/lib.rs"), text, "swap");
-    assert_eq!(found, vec!["\nfn sneak() {\n    swap("]);
+fn a_perf_tests_folder_is_test_code_to_the_install_scan() {
+    let timing = Path::new("/repo/crates/kernel/processes/src/perf_tests/update.rs");
+    let shipped = Path::new("/repo/crates/kernel/processes/src/update.rs");
+    assert!(test_source(timing));
+    assert!(!test_source(shipped));
 }
 
-/// Every install step that writes a release over the running app is reached only after its
-/// signature check: the desktop installs only the bytes `update.download` verified, and the
-/// command line swaps only inside `swap_around_engine`, which only `install_release` runs,
-/// after `verify_file`.
+/// The desktop's one install step that writes a release over the running app is reached
+/// only after its signature check: it installs only the bytes `update.download` verified.
+/// The command line needs no such row, since `swap` takes only what `unpack` made from what
+/// `verify_file` passed.
 #[test]
 fn no_install_path_skips_verification() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -279,8 +264,6 @@ fn no_install_path_skips_verification() {
         ["install", "(&bytes"].concat(),
     ];
     let mut desktop = Vec::new();
-    let mut swaps = Vec::new();
-    let mut engine_swaps = Vec::new();
     for path in sources.iter().filter(|path| !test_source(path)) {
         let text =
             std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
@@ -294,12 +277,6 @@ fn no_install_path_skips_verification() {
         for site in sites {
             desktop.push((path.clone(), function_holding(path, &text, site).to_owned()));
         }
-        for body in swap_calls(path, &text, "swap") {
-            swaps.push((path.clone(), body.to_owned()));
-        }
-        for body in swap_calls(path, &text, "swap_around_engine") {
-            engine_swaps.push((path.clone(), body.to_owned()));
-        }
     }
     assert_eq!(desktop.len(), 1, "{desktop:?}");
     let (path, body) = &desktop[0];
@@ -309,16 +286,4 @@ fn no_install_path_skips_verification() {
     );
     let downloaded = body.find("update.download(").expect(body);
     assert!(Some(downloaded) < body.find(&installs[0]), "{body}");
-    let glue = root.join("crates/crazyagent/src/update.rs");
-    assert!(!swaps.is_empty() && !engine_swaps.is_empty());
-    for (path, body) in &swaps {
-        assert!(path == &glue, "{path:?}");
-        assert!(body.starts_with("\npub fn swap_around_engine("), "{body}");
-    }
-    assert_eq!(engine_swaps.len(), 1, "{engine_swaps:?}");
-    let (path, body) = &engine_swaps[0];
-    assert!(path == &glue, "{path:?}");
-    assert!(body.starts_with("\nfn install_release("), "{body}");
-    let verified = body.find("verify_file(").expect(body);
-    assert!(Some(verified) < body.find("swap_around_engine("), "{body}");
 }

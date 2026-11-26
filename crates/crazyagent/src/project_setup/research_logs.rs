@@ -1,9 +1,13 @@
 use super::*;
 
-/// Reads the last plain lines of one research job's agent output, with secrets hidden.
-/// Takes the engine database path, whose folder holds the research runner's agent state,
-/// and the job id. Returns the newest lines within RESEARCH_LOG_LINES_MAX and
-/// RESEARCH_LOG_BYTES_MAX, so the reply fits one owner frame; none before the first run.
+#[cfg(unix)]
+const OPENED_BLOCK: &str = "-----BEGIN PRIVATE KEY-----";
+
+/// Reads the last plain lines of one research job's agent output, with secrets hidden, also
+/// the rows of a key block opened in the RESEARCH_LOG_TAIL_BYTES before them. Takes the
+/// engine database path, whose folder holds the research runner's agent state, and the job
+/// id. Returns the newest lines within RESEARCH_LOG_LINES_MAX and RESEARCH_LOG_BYTES_MAX, so
+/// the reply fits one owner frame; none before the first run.
 #[cfg(unix)]
 pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineError> {
     assert!(job > 0);
@@ -19,7 +23,7 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
     ) else {
         return Ok(Vec::new());
     };
-    let Some(run) = latest_run(&agents, job)? else {
+    let Some(run) = latest_run(&directory, job)? else {
         return Ok(Vec::new());
     };
     let Ok(run) = open_directory(&directory, &run) else {
@@ -34,17 +38,41 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
             continue;
         };
         let start = bytes.saturating_sub(RESEARCH_LOG_TAIL_BYTES);
-        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start)).map_err(error)?;
+        let read_from = start.saturating_sub(RESEARCH_LOG_TAIL_BYTES);
+        let before = read_from.saturating_sub(1);
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(before)).map_err(error)?;
+        let mut earlier = Vec::new();
+        std::io::Read::by_ref(&mut file)
+            .take(start - before)
+            .read_to_end(&mut earlier)
+            .map_err(error)?;
         let mut tail = Vec::new();
         file.take(RESEARCH_LOG_TAIL_BYTES)
             .read_to_end(&mut tail)
             .map_err(error)?;
+        let (cut, earlier) = match earlier.split_first() {
+            Some((byte, rest)) if read_from > 0 => (*byte != b'\n', rest),
+            _ => (false, earlier.as_slice()),
+        };
+        let opened = start > 0 && opens_block(earlier, &tail, cut);
         let text = String::from_utf8_lossy(&tail);
         let mut rows = text.lines();
         if start > 0 {
             rows.next();
         }
-        lines.extend(rows.filter_map(plain_log_line));
+        let plain: Vec<String> = rows.filter_map(plain_text).collect();
+        if plain.is_empty() {
+            continue;
+        }
+        let joined = plain.join("\n");
+        let shown = if opened {
+            redact(&format!("{OPENED_BLOCK}\n{joined}"))
+        } else {
+            redact(&joined)
+        };
+        let before = lines.len();
+        lines.extend(shown.split('\n').skip(usize::from(opened)).map(clipped));
+        assert_eq!(lines.len() - before, plain.len());
     }
     let mut kept = 0;
     let mut bytes = 0;
@@ -61,6 +89,29 @@ pub fn research_log(database: &Path, job: i64) -> Result<Vec<String>, EngineErro
     Ok(lines)
 }
 
+/// Whether the rows before a tail window end inside a key block, tracked as redact tracks
+/// one but opened only by a PEM-shaped BEGIN line. Inputs: the bytes before the window, the
+/// window, whose first row they complete, and whether their own first row is cut. Output:
+/// the answer.
+#[cfg(unix)]
+fn opens_block(earlier: &[u8], tail: &[u8], cut: bool) -> bool {
+    let completed = tail
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(tail.len());
+    let mut bytes = earlier.to_vec();
+    bytes.extend_from_slice(&tail[..completed]);
+    let text = String::from_utf8_lossy(&bytes);
+    let mut rows = text.lines();
+    if cut {
+        rows.next();
+    }
+    rows.filter_map(plain_text).fold(false, |open, row| {
+        (open || super::redaction::block_begin(&row))
+            && !row.to_ascii_lowercase().contains(KEY_BLOCK_END)
+    })
+}
+
 /// Refuses research job output where no directory-relative no-follow read exists.
 /// Takes the engine database path and job id, both unused.
 /// Returns `research_log_unavailable`.
@@ -70,45 +121,35 @@ pub fn research_log(_database: &Path, _job: i64) -> Result<Vec<String>, EngineEr
 }
 
 /// Names the newest run folder of a research job in the runner's agent state.
-/// Takes the agents folder and the job id; run folders are named job-<id>-<attempt> with an
-/// optional -<launch>. Returns the highest attempt and launch, or none before any run.
+/// Takes the open agents folder and the job id; run folders are named job-<id>-<attempt> with
+/// an optional -<launch>, both bounded by the runner, so each name is probed newest first and
+/// no other entry can hide it. Returns the highest attempt and launch, or none before any run.
 #[cfg(unix)]
-fn latest_run(agents: &Path, job: i64) -> Result<Option<String>, EngineError> {
-    let prefix = format!("job-{job}-");
-    let mut latest: Option<((u32, u32), String)> = None;
-    for entry in std::fs::read_dir(agents)
-        .map_err(error)?
-        .take(RESEARCH_RUNS_SCANNED_MAX)
-    {
-        let Ok(name) = entry.map_err(error)?.file_name().into_string() else {
-            continue;
-        };
-        let Some(rest) = name.strip_prefix(prefix.as_str()) else {
-            continue;
-        };
-        let mut parts = rest.split('-');
-        let attempt = parts.next().and_then(|part| part.parse::<u32>().ok());
-        let launch = parts
-            .next()
-            .map_or(Some(0), |part| part.parse::<u32>().ok());
-        let (Some(attempt), Some(launch), None) = (attempt, launch, parts.next()) else {
-            continue;
-        };
-        if latest
-            .as_ref()
-            .is_none_or(|(order, _)| (attempt, launch) > *order)
-        {
-            latest = Some(((attempt, launch), name));
+fn latest_run(agents: &Directory, job: i64) -> Result<Option<String>, EngineError> {
+    for attempt in (1..=crate::research::jobs::ATTEMPTS_MAX).rev() {
+        for launch in (0..crate::research::runner::RUNS_PER_ATTEMPT_MAX).rev() {
+            let suffix = if launch == 0 {
+                String::new()
+            } else {
+                format!("-{launch}")
+            };
+            let name = format!("job-{job}-{attempt}{suffix}");
+            match rustix::fs::statat(agents, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => return Ok(Some(name)),
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(problem) => return Err(error(problem)),
+            }
         }
     }
-    Ok(latest.map(|(_, name)| name))
+    Ok(None)
 }
 
-/// Turns one raw agent log line into plain text with likely secrets hidden.
-/// Takes the raw line; a JSON event gives its message text and textless events are skipped.
-/// Returns the bounded plain line, or none for an empty or textless line.
+/// Turns one raw agent log line into one plain line, secrets not yet hidden: control
+/// characters, line breaks among them, become spaces. Takes the raw line; a JSON event gives
+/// its message text and textless events are skipped. Returns the line, or none for an empty
+/// or textless line.
 #[cfg(unix)]
-fn plain_log_line(raw: &str) -> Option<String> {
+fn plain_text(raw: &str) -> Option<String> {
     let text = match serde_json::from_str::<serde_json::Value>(raw.trim()) {
         Ok(event) if event.is_object() => event_text(&event)?,
         _ => raw.to_owned(),
@@ -121,13 +162,20 @@ fn plain_log_line(raw: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    let line = redact(text);
+    assert!(!text.contains('\n'));
+    Some(text.to_owned())
+}
+
+/// Bounds one redacted log line to RESEARCH_LOG_LINE_CHARS_MAX characters, marking a cut
+/// with "...". Takes the line. Returns it whole when it fits, else its head and the mark.
+#[cfg(unix)]
+fn clipped(line: &str) -> String {
     if line.chars().count() <= RESEARCH_LOG_LINE_CHARS_MAX {
-        return Some(line);
+        return line.to_owned();
     }
     let mut cut: String = line.chars().take(RESEARCH_LOG_LINE_CHARS_MAX).collect();
     cut.push_str("...");
-    Some(cut)
+    cut
 }
 
 #[cfg(unix)]
@@ -141,3 +189,6 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
                 .find_map(|key| scope.get(key)?.as_str().map(str::to_owned))
         })
 }
+
+#[cfg(all(test, unix))]
+mod tests;

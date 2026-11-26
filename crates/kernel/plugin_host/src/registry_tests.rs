@@ -156,9 +156,21 @@ pub(crate) struct Case {
     pub(crate) temp: tempfile::TempDir,
     pub(crate) root: PathBuf,
     pub(crate) db: rusqlite::Connection,
+    held: Option<crate::store_log::RowsHold>,
 }
 
 impl Case {
+    /// Ends this row's store hold, so the next store call runs outside any capture.
+    fn release(&mut self) {
+        assert!(self.held.take().is_some());
+    }
+
+    /// Takes the store hold again after [`Case::release`].
+    fn hold(&mut self) {
+        assert!(self.held.is_none());
+        self.held = Some(crate::store_log::rows_hold());
+    }
+
     pub(crate) fn engine(&self) -> Engine<'_> {
         Engine {
             root: &self.root,
@@ -176,7 +188,12 @@ pub(crate) fn case() -> Case {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let db = rusqlite::Connection::open_in_memory().unwrap();
     initialize(&db).unwrap();
-    Case { temp, root, db }
+    Case {
+        temp,
+        root,
+        db,
+        held: Some(crate::store_log::rows_hold()),
+    }
 }
 
 fn sha(text: &str) -> String {
@@ -291,6 +308,20 @@ fn fixture<'p, T>(path: &'p Path, read: impl FnOnce(&'p Path) -> std::io::Result
 fn a_failed_fixture_read_names_its_path_and_error() {
     let case = case();
     fixture(&case.root.join("missing.toml"), std::fs::read);
+}
+
+/// The entry names in a folder, read through the fixture helper. An entry or a name that
+/// does not read stops the row with the folder and what failed. Input: the folder. Output:
+/// the names.
+fn names_in(folder: &Path) -> Vec<String> {
+    fixture(folder, std::fs::read_dir)
+        .map(
+            |entry| match entry.map(|entry| entry.file_name().into_string()) {
+                Ok(Ok(name)) => name,
+                failed => panic!("{}: {failed:?}", folder.display()),
+            },
+        )
+        .collect()
 }
 
 fn plugin_keys(case: &Case) -> Vec<PathBuf> {
@@ -485,6 +516,31 @@ fn add_saves_a_private_file_trusts_it_and_turns_it_on() {
     assert_eq!(listing.plugins.last().unwrap().name, "acme");
 }
 
+/// A trust screen read before another add put a folder under the same name still says it
+/// adds a new plugin; the add it leads to is refused as a used name, not as a built-in's,
+/// so the owner reviews it again and is offered the replace.
+#[test]
+fn a_trust_screen_gone_stale_by_a_new_folder_is_refused_as_name_used() {
+    let case = case();
+    let source = picked(&case, "acme", ACME);
+    let Preview::Ready { trust } = preview(&case.db, &case.engine(), &source).unwrap() else {
+        panic!("ready");
+    };
+    assert!(!trust.replaces);
+    add_text(&case, ACME, false, 1).unwrap();
+
+    let stale = add(
+        &case.db,
+        &case.engine(),
+        &source,
+        &trust.sha256,
+        trust.replaces,
+        2,
+    );
+
+    assert_eq!(code(stale), "app_plugin_name_used");
+}
+
 #[test]
 fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     let case = case();
@@ -496,7 +552,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     add_text(&case, ACME, false, 1).unwrap();
     assert_eq!(
         code(add_text(&case, ACME, false, 2)),
-        "app_plugin_name_taken"
+        "app_plugin_name_used"
     );
     let newer = ACME.replace("release = \"1.0.0\"", "release = \"1.1.0\"");
     let Preview::Ready { trust } =
@@ -919,6 +975,44 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
 }
 
+/// A removal storage cannot commit changes nothing: its transaction ends, the plugin and its
+/// key stay, and the same removal goes through once storage is free.
+#[test]
+fn a_removal_storage_cannot_commit_ends_its_transaction_and_keeps_the_plugin() {
+    let mut case = case();
+    let file = case.temp.path().join("store.db");
+    case.db = rusqlite::Connection::open(&file).unwrap();
+    initialize(&case.db).unwrap();
+    case.db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    let reader = rusqlite::Connection::open(&file).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let tables: i64 = reader
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+        .unwrap();
+    assert!(tables > 0, "the reader holds the database");
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+    assert!(
+        case.db.is_autocommit(),
+        "the failed removal ended its transaction"
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    assert!(case.root.join(FOLDER).join("acme").exists());
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().any(|plugin| plugin.name == "acme"));
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    assert!(plugin_keys(&case).is_empty());
+}
+
 /// A plugin entry that is a link is removed as the link itself: the folder it points to
 /// and the plugin.toml inside stay untouched.
 #[test]
@@ -1234,3 +1328,154 @@ mod switch;
 
 #[path = "registry_folder_tests.rs"]
 mod folder;
+
+/// A plugin whose folder cannot be moved aside is not removed: its rows, its key and its
+/// folder all stay, so it is listed as it was, and the next removal goes through.
+#[test]
+fn a_removal_whose_folder_cannot_move_keeps_the_rows_and_the_key() {
+    fn no_ref() -> Result<String, &'static str> {
+        Err("app_plugin_folder_unavailable")
+    }
+    const NO_REF: Keys = Keys {
+        new_ref: no_ref,
+        ..KEYS
+    };
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    let stuck = Engine {
+        keys: &NO_REF,
+        ..case.engine()
+    };
+    assert!(remove(&case.db, &stuck, "acme").is_err());
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    assert!(plugin_keys(&case).is_empty());
+    assert!(!plugins_folder(&case).join("acme").exists());
+}
+
+/// A removal whose rows cannot be deleted puts the folder back under its name and keeps the
+/// key, leaving no retired folder behind.
+#[test]
+fn a_removal_whose_rows_fail_puts_the_folder_back() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER held BEFORE DELETE ON app_plugin_trust
+             BEGIN SELECT RAISE(ABORT, 'held'); END;",
+        )
+        .unwrap();
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+    let folder = plugins_folder(&case);
+    let names = names_in(&folder);
+    assert_eq!(names, ["acme"]);
+    assert_eq!(plugin_keys(&case).len(), 1);
+    case.db.execute_batch("DROP TRIGGER held").unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
+}
+
+/// A retired folder left beside the live plugin of its name, which cannot be deleted, loses
+/// the plugin name on the start sweep, so a later removal never brings it back.
+#[test]
+fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    let folder = plugins_folder(&case);
+    let retired = folder.join(format!(".old-acme.{}", "ab".repeat(32)));
+    std::fs::create_dir_all(retired.join("a/b/c/d/e/f")).unwrap();
+    std::fs::write(retired.join(MANIFEST_FILE), ACME).unwrap();
+    let _ = crate::registry::remove_staged(&case.root);
+    let _ = crate::registry::sweep_replaced(&case.db, &case.root);
+    let left = names_in(&folder);
+    assert!(
+        !left.iter().any(|name| name.starts_with(".old-acme.")),
+        "{left:?}"
+    );
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    let _ = crate::registry::remove_staged(&case.root);
+    assert!(
+        !folder.join("acme").exists(),
+        "the old folder never comes back"
+    );
+}
+
+/// A removal outside any capture is refused before anything is written: the folder stays
+/// under its name with no removal folder beside it, and the rows read as before.
+#[test]
+fn a_removal_outside_any_capture_is_refused_and_leaves_the_folder_and_rows() {
+    let mut case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    let before = plugin(&list(&case.db, &case.engine()).unwrap(), "acme")
+        .status
+        .clone();
+    case.release();
+    assert_eq!(
+        code(remove(&case.db, &case.engine(), "acme")),
+        "app_plugins_unavailable"
+    );
+    assert_eq!(names_in(&plugins_folder(&case)), ["acme"]);
+    case.hold();
+    let after = plugin(&list(&case.db, &case.engine()).unwrap(), "acme")
+        .status
+        .clone();
+    assert_eq!(after, before);
+}
+
+/// An add outside any capture is refused before its folder is written, so no folder is
+/// ever left with no trust record.
+#[test]
+fn an_add_outside_any_capture_is_refused_and_writes_no_folder() {
+    let mut case = case();
+    case.release();
+    assert_eq!(
+        code(add_text(&case, ACME, false, 1)),
+        "app_plugins_unavailable"
+    );
+    assert!(names_in(&plugins_folder(&case)).is_empty());
+    case.hold();
+    assert!(
+        list(&case.db, &case.engine())
+            .unwrap()
+            .plugins
+            .iter()
+            .all(|view| view.name != "acme")
+    );
+}
+
+/// A key entered outside any capture is refused before the key is saved, so no key file is
+/// ever left that no binding row names.
+#[test]
+fn a_key_set_outside_any_capture_is_refused_and_saves_no_key_file() {
+    let mut case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    case.release();
+    let refused = set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0002".to_vec(),
+    );
+    assert_eq!(code(refused), "app_plugins_unavailable");
+    assert!(plugin_keys(&case).is_empty());
+    case.hold();
+}

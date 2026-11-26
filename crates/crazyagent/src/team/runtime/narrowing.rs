@@ -5,11 +5,17 @@ use super::{
 use crate::agents::Agents;
 use crate::engine::EngineError;
 use crate::project_setup::StoredSetup;
-use crate::team::{AgentRole, now_ms};
+use crate::protocol::ProjectId;
+use crate::team::{AgentRole, AgentStatus, now_ms};
 use kernel_sandbox::policy::{AccessApply, AgentAccess, Narrowing};
 use kernel_sandbox::toolchains::Toolchain;
+use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
+
+/// The end of the problem an agent row keeps once the engine stopped it for a folder hidden
+/// after it started, as its process ended.
+const HIDDEN_HELD: &str = "(agent_folder_hidden_held)";
 
 impl TeamRuntime {
     /// Stops the project's agents whose running process holds more than the owner saved now.
@@ -161,8 +167,9 @@ impl TeamRuntime {
     /// hid after they started, as a narrowed agent stops: each not stopping, in the sandbox
     /// and not a teammate, whose start hid neither the folder nor one above it, a pane from
     /// before the engine kept that list counting as hiding none. Each stays listed for the
-    /// team status and the owner's Restart them until restarted or started again. Takes the
-    /// project's stored setup. Returns any SQLite failure.
+    /// team status and the owner's Restart them until restarted or started again; the live
+    /// master starts again as a planned restart. Takes the project's stored setup. Returns
+    /// any SQLite failure.
     pub(super) fn mark_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let saved = crate::sandbox::access_store::hidden::load(&self.connection, project.as_str())
@@ -186,7 +193,11 @@ impl TeamRuntime {
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
             let held = (project.clone(), worker.role, worker.live);
+            let planned = worker.role == AgentRole::Master && worker.live;
             self.hidden_held.insert(id, held);
+            if planned {
+                self.master_restarts.insert(project.clone());
+            }
         }
         let seers: BTreeSet<i64> = self
             .hidden_held
@@ -199,12 +210,33 @@ impl TeamRuntime {
             .map_err(error)
     }
 
+    /// The projects a tick steps for a restart: those with an agent restart planned, and
+    /// those with a listed agent the owner asked to restart, an ask only a step of that
+    /// project serves. Takes nothing. Returns the projects, or any SQLite failure.
+    pub(super) fn restarting_projects(&self) -> Result<Vec<ProjectId>, EngineError> {
+        let asked = crate::sandbox::access_store::hidden::asked_projects(&self.connection)
+            .map_err(error)?;
+        let mut projects: Vec<ProjectId> = self
+            .restarts
+            .values()
+            .map(|(project, _)| project.clone())
+            .collect();
+        projects.extend(
+            asked
+                .into_iter()
+                .filter_map(|project| ProjectId::new(project).ok()),
+        );
+        assert!(projects.len() >= self.restarts.len());
+        Ok(projects)
+    }
+
     /// Serves the owner's Restart them (SA-VID14-A): a listed agent still running stops with its
     /// work held, and one the engine stopped whose process ended starts again, a sub-agent in
     /// its own worktree and conversation and the live master as a planned restart, so its next
     /// start hides every saved folder. Takes the project's stored setup. Returns any SQLite failure.
     pub(super) fn restart_seers(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
+        self.reload_seers(project)?;
         let asked =
             crate::sandbox::access_store::hidden::restarts(&self.connection, project.as_str())
                 .map_err(error)?;
@@ -245,5 +277,62 @@ impl TeamRuntime {
             }
         }
         Ok(())
+    }
+
+    /// Holds again, once the engine started again, each agent the project's list still names
+    /// with no process here: a sub-agent or the master whose row in this project is not
+    /// running and still says the engine stopped it for a folder hidden after it started, the
+    /// master taking the project's live switch. Takes the project. Returns any SQLite failure.
+    fn reload_seers(&mut self, project: &ProjectId) -> Result<(), EngineError> {
+        let named = crate::sandbox::access_store::hidden::seers(&self.connection, project.as_str())
+            .map_err(error)?;
+        let held_before = self.hidden_held.len();
+        for id in named.iter().copied() {
+            if self.workers.contains_key(&id) || self.hidden_held.contains_key(&id) {
+                continue;
+            }
+            let row: Option<(String, String, Option<String>)> = self
+                .connection
+                .query_row(
+                    "SELECT role, status, error FROM team_agents WHERE id=?1 AND project=?2",
+                    params![id, project.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(error)?;
+            let Some((role, status, problem)) = row else {
+                continue;
+            };
+            let ended = AgentStatus::parse(&status).is_some_and(|status| !status.live());
+            let held = problem.is_some_and(|problem| problem.ends_with(HIDDEN_HELD));
+            let (Some(role @ (AgentRole::Sub | AgentRole::Master)), true, true) =
+                (AgentRole::parse(&role), ended, held)
+            else {
+                continue;
+            };
+            let live =
+                role == AgentRole::Master && crate::team::master::live(&self.connection, project)?;
+            self.hidden_held.insert(id, (project.clone(), role, live));
+        }
+        assert!(self.hidden_held.len() <= held_before + named.len());
+        Ok(())
+    }
+
+    /// Tells whether a master worker of the project is still stopping or restarting, so no
+    /// other master starts or gets a message until it ended. Takes the project. Returns the
+    /// answer.
+    pub(super) fn master_settling(&self, project: &ProjectId) -> bool {
+        self.workers.values().any(|w| {
+            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
+        })
+    }
+
+    /// Tells whether the project's master is held for a folder hidden after it started and
+    /// not yet restarted by the owner's Restart them, so the live master stays down until
+    /// then. Takes the project. Returns the answer.
+    pub(super) fn master_held(&self, project: &ProjectId) -> bool {
+        self.hidden_held
+            .values()
+            .any(|(owner, role, _)| owner == project && *role == AgentRole::Master)
     }
 }

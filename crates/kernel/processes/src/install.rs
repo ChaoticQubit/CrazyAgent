@@ -182,6 +182,19 @@ fn setup_name(text: &str) -> bool {
         })
 }
 
+/// Whether a system package name names one package to its manager: dnf reads a last `-`
+/// segment that starts with a digit as a version or release, and apt-get reads a `.` as a
+/// pattern. Real names of these shapes, such as `xorg-x11-fonts-75dpi` for dnf, are refused
+/// too. Inputs: the manager and the name. Output: the answer.
+fn one_package(manager: SystemManager, package: &str) -> bool {
+    match manager {
+        SystemManager::Dnf => package
+            .rsplit_once('-')
+            .is_none_or(|(_, last)| !last.starts_with(|first: char| first.is_ascii_digit())),
+        SystemManager::AptGet => !package.contains('.'),
+    }
+}
+
 /// Whether a text is a Winget id: at most [`NAME_BYTES_MAX`] bytes, a letter or digit
 /// first, then letters, digits, `.` and `-`. Input: the text. Output: the answer.
 fn winget_id(text: &str) -> bool {
@@ -328,8 +341,17 @@ pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
             }
             version(pinned).then_some(()).ok_or(VERSION_INVALID)
         }
-        InstallRecipe::SystemPackage { package, .. } => {
-            setup_name(package).then_some(()).ok_or(NAME_INVALID)
+        InstallRecipe::SystemPackage { manager, package } => {
+            let plain_end = package
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+            (setup_name(package)
+                && plain_end
+                && !package.ends_with(".rpm")
+                && one_package(*manager, package))
+            .then_some(())
+            .ok_or(NAME_INVALID)
         }
         InstallRecipe::SelfUpdate { program, args } => {
             if !(program.len() <= NAME_BYTES_MAX && plain(program)) {

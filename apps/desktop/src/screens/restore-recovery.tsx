@@ -49,10 +49,21 @@ export function RestoreRecoveryView({ read, busy, problem, onPutBack, onContinue
         {offer?.kind === "put_back" && <Button variant="primary" icon="hard-drive" pending={busy} disabled={busy} onClick={onPutBack}>{PUT_BACK}</Button>}
         {offer?.kind === "continue" && <Button variant="primary" pending={busy} disabled={busy} onClick={onContinue}>{CONTINUE}</Button>}
         {read.kind === "ok" && !unchanged && <Button icon="folder" disabled={busy} onClick={onOpenFolder}>{OPEN_FOLDER}</Button>}
-        {read.kind !== "loading" && offer?.kind !== "finished" && <Button icon="refresh-cw" disabled={busy} onClick={onRetry}>Try again</Button>}
+        {read.kind !== "loading" && (offer?.kind !== "finished" || problem !== null) && <Button icon="refresh-cw" disabled={busy} onClick={onRetry}>Try again</Button>}
       </span>
     </div>
   </main>;
+}
+
+/** Finishes a restore that wrote the 2.4 data, one run at a time. A refused finish clears the
+ * running flag, so Try again runs it again rather than the screen retrying on its own.
+ * Inputs: the running flag and the finish call. Output: null once it ran, else its code. */
+export async function finishOnce(finishing: { current: boolean }, finish: () => Promise<{ kind: string; code?: string }>): Promise<string | null> {
+  finishing.current = true;
+  const result = await finish();
+  if (result.kind === "ok") return null;
+  finishing.current = false;
+  return result.code ?? "storage_restore_failed";
 }
 
 /** The recovery screen for a restore that did not finish: reads the offer, finishes a restore
@@ -73,11 +84,18 @@ export function RestoreRecovery({ onDone }: { onDone: () => void }) {
     if (result.kind === "error") setProblem(result.code ?? "storage_restore_failed");
     reload();
   }
+  async function finish() {
+    setBusy(true);
+    setProblem(null);
+    const code = await finishOnce(finishing, () => restoreRecover("finish"));
+    setBusy(false);
+    if (code === null) return onDone();
+    setProblem(code);
+  }
   useEffect(() => {
     if (read.kind === "ok" && read.value.offer === null) onDone();
     if (read.kind !== "ok" || read.value.offer?.kind !== "finished" || finishing.current) return;
-    finishing.current = true;
-    void act(() => restoreRecover("finish"), true);
+    void finish();
   }, [read]);
   return <RestoreRecoveryView read={read} busy={busy} problem={problem}
     onPutBack={() => void act(() => restoreRecover("put_back"), true)}

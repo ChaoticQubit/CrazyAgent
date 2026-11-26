@@ -574,7 +574,7 @@ const NO_IDENTITY: (u64, u64) = (0, 0);
 /// on Windows before, so the caller's other checks decide. Inputs: the stored and the live
 /// identity. Output: whether they name the same record.
 fn same_record(stored: (u64, u64), live: (u64, u64)) -> bool {
-    stored == NO_IDENTITY || crate::file_identity::same_files(&[stored], &[live])
+    stored == NO_IDENTITY || kernel_common::file_identity::same_files(&[stored], &[live])
 }
 
 /// The identity a record's progress is kept under: its device and inode, as
@@ -1242,7 +1242,7 @@ pub(super) fn recount_read(
         return stopped;
     };
     let (identity, length) = (opened.1, opened.2);
-    if !crate::file_identity::same_files(&[listed], &[identity])
+    if !kernel_common::file_identity::same_files(&[listed], &[identity])
         || length < before
         || head_holds(&mut opened.0, &progress) != Some(true)
     {

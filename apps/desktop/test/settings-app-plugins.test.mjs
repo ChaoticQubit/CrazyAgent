@@ -41,7 +41,7 @@ const page = (patch = {}) => ({
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const actions = new Proxy({}, { get: () => forbidden });
 const render = (patch = {}) => renderToStaticMarkup(createElement(screen.AppPluginsView, {
-  page: { kind: "ok", value: page() }, grants: GRANTS, dialog: { kind: "none" }, accounts: [], busy: false, failure: "", actions, ...patch,
+  page: { kind: "ok", value: page() }, grants: { kind: "ok", value: GRANTS }, dialog: { kind: "none" }, accounts: [], busy: false, failure: "", actions, ...patch,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&quot;/gu, "\"").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
@@ -84,6 +84,31 @@ test("App plugins: an essential built-in code plugin has a locked switch with it
   assert.ok(shown.includes("Save what the agents were doing when the app quits"));
   assert.ok(shown.includes("Send requests to the internet addresses it lists"));
   assert.equal(api.permissionWords(WORDS, "service.status"), "service.status", "a name the table lacks shows itself");
+});
+
+test("App plugins: a failed built-in code plugin read says so with its reason and Try again, and the plugins still list", () => {
+  const failed = { kind: "error", code: "owner_busy", message: "x" };
+  const markup = render({ grants: failed });
+  const shown = text(markup);
+  assert.ok(shown.includes(`Built-in code plugins couldn't be read. ${api.appPluginRefusal(failed)}`), shown);
+  assert.match(markup, /role="alert"/u);
+  assert.ok(shown.includes("Try again"));
+  assert.ok(!shown.includes("agent-quit") && shown.includes("Harbor embeddings"));
+  assert.match(source("../src/screens/settings/app-plugins.tsx"), /onRetryGrants: reloadGrants,/u);
+});
+
+test("App plugins: built-in code plugins being read show their section with a placeholder, and an empty list shows no section", () => {
+  const loading = render({ grants: { kind: "loading" } });
+  assert.ok(text(loading).includes("Built-in code plugins"));
+  assert.match(loading, /class="skeleton row-shape"/u);
+  assert.ok(!text(loading).includes("agent-quit"));
+  assert.ok(!text(render({ grants: { kind: "ok", value: [] } })).includes("Built-in code plugins"));
+});
+
+test("App plugins: a build without the built-in code plugin list says it isn't ready yet", () => {
+  const shown = text(render({ grants: { kind: "not_ready" } }));
+  assert.ok(shown.includes("Built-in code plugins"));
+  assert.ok(shown.includes("The built-in code plugin list isn't ready yet"));
 });
 
 test("App plugins: an embedding plugin's summary counts the hosts it reaches and the keys it needs", () => {
@@ -176,7 +201,22 @@ test("App plugins: every app plugin code the engine can answer has its own sente
   const codes = [...block.matchAll(/"(app_plugins?_[a-z_]+)"/gu)].map((match) => match[1]);
   assert.ok(codes.includes("app_plugin_setting_unsafe") && codes.length >= 20, `the engine's codes were read: ${codes.length}`);
   for (const code of codes) assert.ok(Object.hasOwn(api.APP_PLUGIN_REFUSALS, code), `${code} has a sentence`);
-  assert.match(api.appPluginRefusal({ code: "app_plugin_folder_unavailable" }), /can't use a plugins folder on this computer yet/u);
+  assert.match(api.appPluginRefusal({ code: "app_plugin_folder_unavailable" }), /^CrazyAgent couldn't open your plugins folder\. Try again\.$/u);
+  assert.match(api.appPluginRefusal({ code: "app_plugin_key_store_unavailable" }), /^CrazyAgent couldn't reach its saved keys\. Nothing was changed; try again\.$/u);
+});
+
+test("App plugins: a name another add took after the review says to review again, not to rename", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_name_used" }),
+    "A plugin with that name was added after you reviewed this one. Review it again to replace it.",
+  );
+});
+
+test("App plugins: a plugin that is gone says how to see the current ones, as the TUI does", () => {
+  assert.equal(
+    api.appPluginRefusal({ code: "app_plugin_not_found" }),
+    "That plugin is gone. Open App plugins again to see the current ones.",
+  );
 });
 
 test("App plugins: each action is a direct bridge call with its own arguments, and an entered key travels only in its own call", () => {
@@ -203,4 +243,27 @@ test("Settings lists App plugins under App next to the other app pages and keeps
   const index = source("../src/screens/settings/index.tsx");
   assert.match(index, /tab === "app-plugins" \? <AppPluginsSettings \/>/u);
   assert.match(index, /tab === "plugins" \? <PluginsAndSkills skill=\{skill\} \/>/u);
+});
+
+test("App plugins: a stopped engine actor reads as the unknown outcome, since the change may have landed", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_actor_stopped_outcome_unknown" }), api.APP_PLUGIN_REFUSALS.app_plugin_outcome_unknown);
+});
+
+test("App plugins: a lost owner answer reads as the unknown outcome, since the change may have landed", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_outcome_unknown_reconcile_same_identity" }), api.APP_PLUGIN_REFUSALS.app_plugin_outcome_unknown);
+});
+
+test("App plugins: a change waiting on the database is a warning on the page and in a dialog, and any other refusal stays danger", () => {
+  const dialog = { kind: "trust", folder: null, trust: trust(), review: false };
+  for (const patch of [{}, { dialog }]) {
+    const waiting = render({ ...patch, failure: "Waiting its turn.", failureCode: "access_change_pending" });
+    assert.match(waiting, /<div class="notice" role="alert">(?:(?!<\/div>).)*<div>Waiting its turn\.<\/div>/u);
+    const refused = render({ ...patch, failure: "Refused.", failureCode: "app_plugin_refused" });
+    assert.match(refused, /<div class="notice danger" role="alert">(?:(?!<\/div>).)*<div>Refused\.<\/div>/u);
+  }
+});
+
+test("App plugins: a request refused because CrazyAgent was busy says so in the app's busy sentence and stays danger", () => {
+  assert.equal(api.appPluginRefusal({ code: "owner_busy" }), "CrazyAgent is busy with other requests. Try again in a moment.");
+  assert.equal(api.failureTone("owner_busy"), "danger");
 });

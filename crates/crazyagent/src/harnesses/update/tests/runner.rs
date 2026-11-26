@@ -332,3 +332,9 @@ fn a_tool_that_exits_leaves_no_process_it_started() {
     }
     assert!(rustix::process::test_kill_process(child).is_err());
 }
+
+#[test]
+fn the_root_user_is_refused() {
+    assert_eq!(refused_user(0), Some("harness_update_as_root"));
+    assert_eq!(refused_user(501), None);
+}

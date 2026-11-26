@@ -18,13 +18,14 @@ static FREED: AtomicU8 = AtomicU8::new(UNSEEN);
 /// Held by each row for its whole run, since all of them share the one watched block.
 static ONE_ROW: Mutex<()> = Mutex::new(());
 
-/// The system allocator, which also records whether the one watched block held only zeros
-/// when it was freed.
+/// The system allocator, handing out zeroed blocks, which also records whether the one
+/// watched block held only zeros when it was freed. Zeroed blocks leave no byte of it
+/// unwritten, capacity past what was asked for included.
 struct FreeWatch;
 
 unsafe impl GlobalAlloc for FreeWatch {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { System.alloc(layout) }
+        unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
