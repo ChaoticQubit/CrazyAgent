@@ -1,4 +1,5 @@
 use super::*;
+use crate::harnesses::update::UNSUPPORTED_HERE;
 
 /// Windows offers Update in Check and update mode as macOS and Linux do, so the key bar
 /// shows `u`; check only and off still say why not, and the not-here sentence stays for a

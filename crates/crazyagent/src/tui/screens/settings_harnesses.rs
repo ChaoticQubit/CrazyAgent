@@ -9,7 +9,7 @@ use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::harnesses::finding::{self, Found};
 use crate::harnesses::update::{
-    HarnessVersions, Latest, Method, UNSUPPORTED_HERE, UpdateMode, UpdateSettings, needs_newer_line,
+    HarnessVersions, Latest, Method, UpdateMode, UpdateSettings, needs_newer_line,
 };
 use crate::harnesses::{AccountKind, HarnessEntry, HarnessStatus, ToolControl};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
@@ -1495,15 +1495,13 @@ pub(super) fn plain_update(code: &str) -> &'static str {
     }
 }
 
-/// Why Update is not offered with these settings here, as an update code: updates are off,
-/// set to check only, or this is Windows, where the engine runs no updater (DEC-194: Update
-/// is hidden there and the engine's own refusal stays the guard). Input: the update mode.
-/// Output: the code, or none when Update is offered.
+/// Why Update is not offered with these settings, as an update code: updates are off or
+/// set to check only. Input: the update mode. Output: the code, or none when Update is
+/// offered.
 fn update_blocked(mode: UpdateMode) -> Option<&'static str> {
     match mode {
         UpdateMode::Off => Some("harness_update_off"),
         UpdateMode::CheckOnly => Some("harness_update_check_only"),
-        UpdateMode::CheckAndUpdate if !cfg!(unix) => Some(UNSUPPORTED_HERE),
         UpdateMode::CheckAndUpdate => None,
     }
 }

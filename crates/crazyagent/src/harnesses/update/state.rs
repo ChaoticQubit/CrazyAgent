@@ -136,7 +136,6 @@ impl Roots {
 /// Finds the npm an npm harness installs with for one engine on the engine's own resolver
 /// places. Inputs: the engine root and those places. Output: the npm, or none with no
 /// usable Node.
-#[cfg(unix)]
 fn engine_npm(
     engine_root: &Path,
     places: &kernel_processes::finding::Places,
@@ -145,34 +144,26 @@ fn engine_npm(
 }
 
 /// Finds the npm an npm harness installs with: the Node setup's one test finds on the places
-/// and the engine prefix, named by its real path when it exists so an install found inside
-/// it matches. Inputs: the engine root and the places. Output: the npm, or none with no
-/// usable Node.
-#[cfg(unix)]
+/// and the engine prefix, named by its real path when it exists (its plain drive spelling on
+/// Windows) so an install found inside it matches, searched where it keeps its entries.
+/// Inputs: the engine root and the places. Output: the npm, or none with no usable Node.
 pub(crate) fn engine_npm_at(
     engine_root: &Path,
     places: &kernel_processes::finding::Places,
 ) -> Option<super::NpmInstall> {
-    let found = crate::setup::node::usable(places)?;
+    let found = crate::setup::node_usable::usable(places)?;
     let named = crate::setup::harness_prefix(engine_root);
+    #[cfg(unix)]
     let prefix = named.canonicalize().unwrap_or(named);
+    #[cfg(not(unix))]
+    let prefix = kernel_sandbox::paths::canonical(&named).unwrap_or(named);
     let node_bin = found.node.parent()?.to_path_buf();
     Some(super::NpmInstall {
         node: found.node,
         program: found.npm,
-        search: vec![node_bin, prefix.join("bin")],
+        search: vec![node_bin, kernel_processes::finding::npm_shims(&prefix)],
         prefix,
     })
-}
-
-/// Finds no npm where setup has no Node. Inputs: the engine root and the places, unused.
-/// Output: none.
-#[cfg(not(unix))]
-fn engine_npm(
-    _engine_root: &Path,
-    _places: &kernel_processes::finding::Places,
-) -> Option<super::NpmInstall> {
-    None
 }
 
 /// Makes the engine prefix private before an npm install into it, so npm never makes it
@@ -188,8 +179,25 @@ fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
     }
 }
 
+/// Makes the engine prefix and its `node_modules` private folders of this user before an npm
+/// install into it, refusing one that exists and is not, with no `node.exe` put in it: a shim
+/// there runs the engine's Node from the places. Inputs: the install command and the roots.
+/// Output: Ok, or `harness_install_failed` when a folder can't be made private.
+#[cfg(windows)]
+fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
+    match (&fixed.prefix, &roots.npm) {
+        (Some(prefix), Some(engine)) if *prefix == engine.prefix => {
+            for folder in [prefix.clone(), prefix.join("node_modules")] {
+                crazyagent_win_sandbox::private::dir(&folder).map_err(|_| INSTALL_FAILED)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Makes nothing where npm installs never run. Inputs: unused. Output: Ok.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn ready_prefix(_fixed: &Fixed, _roots: &Roots) -> Result<(), &'static str> {
     Ok(())
 }
@@ -670,9 +678,9 @@ impl Updates {
 
     /// Checks one installed harness for a newer version, by its install method: the
     /// installing tool for Homebrew and npm, the vendor pointer for a self-updating install
-    /// with online lookups on. Where the engine runs no tool check yet (Windows, where npm has
-    /// no Node to run with) it reads as not checked, never as a failure. Inputs: the id, method,
-    /// real path, roots, settings and the installed version. Output: the check result.
+    /// with online lookups on, no check with them off. An install whose method is not known
+    /// reads as not checked, never as a failure. Inputs: the id, method, real path, roots,
+    /// settings and the installed version. Output: the check result.
     fn looked(
         &self,
         id: &str,
@@ -682,25 +690,13 @@ impl Updates {
         settings: UpdateSettings,
         installed: &str,
     ) -> Latest {
-        let tools_run = cfg!(unix);
         match method {
-            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. }
-                if tools_run =>
-            {
+            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. } => {
                 tool_check(id, method, real, roots, installed)
             }
-            Method::SelfUpdate if settings.online == OnlineLookup::Off && tools_run => {
-                Latest::NoCheck
-            }
-            Method::SelfUpdate if settings.online != OnlineLookup::Off => {
-                self.pointed(id, method, installed)
-            }
-            Method::Homebrew { .. }
-            | Method::HomebrewFormula { .. }
-            | Method::Npm { .. }
-            | Method::SelfUpdate
-            | Method::WithApp
-            | Method::Unknown => Latest::NotChecked,
+            Method::SelfUpdate if settings.online == OnlineLookup::Off => Latest::NoCheck,
+            Method::SelfUpdate => self.pointed(id, method, installed),
+            Method::WithApp | Method::Unknown => Latest::NotChecked,
         }
     }
 

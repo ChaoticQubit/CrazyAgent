@@ -231,7 +231,7 @@ pub struct Roots {
 }
 
 /// The npm an npm harness installs with and the node entry it runs, found by the one
-/// Node test of setup (`crate::setup::node::usable`), the folders its run puts first (Node's
+/// Node test of setup (`crate::setup::node_usable::usable`), the folders its run puts first (Node's
 /// own, then the prefix's `bin`) and the engine-owned prefix it installs into, never global.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpmInstall {
@@ -440,12 +440,25 @@ fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
 }
 
 /// The npm command for one npm prefix: the engine's npm with its search folders when the
-/// prefix is the engine's own, else the npm in that prefix's `bin`. Inputs: the prefix, the
-/// roots and the arguments. Output: the command, not yet checked.
+/// prefix is the engine's own; on Windows, where npm keeps no npm in a prefix, the engine's
+/// npm with that prefix pinned and searched after Node's folder; else the npm in that
+/// prefix's `bin`. Inputs: the prefix, the roots and the arguments. Output: the command.
 fn npm_for(prefix: &Path, roots: &Roots, args: Vec<&'static str>) -> Fixed {
-    match roots.npm.as_ref().filter(|engine| engine.prefix == prefix) {
-        Some(engine) => engine_npm_fixed(engine, args),
-        None => npm_fixed(prefix, args),
+    match roots.npm.as_ref() {
+        Some(engine) if engine.prefix == prefix => engine_npm_fixed(engine, args),
+        Some(engine) if cfg!(windows) => Fixed {
+            program: engine.program.clone(),
+            args,
+            search: engine
+                .node
+                .parent()
+                .map(Path::to_path_buf)
+                .into_iter()
+                .chain([prefix.to_path_buf()])
+                .collect(),
+            prefix: Some(prefix.to_path_buf()),
+        },
+        _ => npm_fixed(prefix, args),
     }
 }
 
