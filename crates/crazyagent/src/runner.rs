@@ -2,12 +2,12 @@ use crate::protocol::{
     ControllerEpoch, FRAME_BYTES_MAX, PROTOCOL_VERSION, RequestId, encode_frame,
 };
 use crazyagent::adapters::NativeAction;
-use crazyagent::file_identity::same_files;
 use crazyagent::file_lock::HeldLock;
 use crazyagent::worker_dispatch::{
     AdmissionCheckOffer, DeniedReceipt, FenceOrder, FenceReceipt,
     RunnerBootIdentity as RunnerIdentity, RunnerReady,
 };
+use kernel_common::file_identity::same_files;
 use rustix::fs::{FlockOperation, Mode, OFlags, open, openat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
