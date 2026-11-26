@@ -148,6 +148,44 @@ fn refused_in(text: &str) -> Vec<String> {
     refused_places(std::path::Path::new("other/Cargo.toml"), text)
 }
 
+/// The places a member manifest turns storage's `test-support` on outside dev-dependencies,
+/// with its `workspace = true` entries read through the root's `[workspace.dependencies]`.
+/// Inputs: the root text and the member text. Output: the places.
+fn refused_with_root(root: &str, text: &str) -> Vec<String> {
+    let root: toml::Table = toml::from_str(root).expect("the root text parses");
+    assert!(
+        root.get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .is_some(),
+        "the root text has workspace dependencies"
+    );
+    refused_in(text)
+}
+
+/// The root text these rows plant: storage under an alias, once with test-support on.
+const ROOT_WITH_STORAGE: &str = "[workspace.dependencies]\nstore = { package = \"crazyagent-kernel-storage\", path = \"crates/kernel/storage\", features = [\"test-support\"] }\nplain = { package = \"crazyagent-kernel-storage\", path = \"crates/kernel/storage\" }\n";
+
+#[test]
+fn an_inherited_workspace_dependency_turning_test_support_on_is_caught() {
+    let text = "[dependencies]\nstore = { workspace = true }\n";
+    assert_eq!(refused_with_root(ROOT_WITH_STORAGE, text), ["dependencies"]);
+}
+
+#[test]
+fn an_inherited_dependency_whose_member_adds_test_support_is_caught() {
+    let text = "[dependencies]\nplain = { workspace = true, features = [\"test-support\"] }\n\n[build-dependencies]\nplain = { workspace = true, optional = true }\n\n[features]\nextra = [\"plain?/test-support\"]\n";
+    assert_eq!(
+        refused_with_root(ROOT_WITH_STORAGE, text),
+        ["dependencies", "features.extra"]
+    );
+}
+
+#[test]
+fn an_inherited_dev_dependency_turning_test_support_on_passes() {
+    let text = "[dev-dependencies]\nstore = { workspace = true }\nplain = { workspace = true, features = [\"test-support\"] }\n";
+    assert_eq!(refused_with_root(ROOT_WITH_STORAGE, text), Vec::<String>::new());
+}
+
 #[test]
 fn another_crates_own_test_support_definition_passes() {
     let text = "[package]\nname = \"other\"\n\n[features]\ntest-support = [\"dep:tempfile\"]\n\n[dependencies]\ncrazyagent-kernel-storage = { path = \"../storage\" }\ntempfile = { version = \"1\", optional = true }\n";
