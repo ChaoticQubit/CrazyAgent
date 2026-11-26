@@ -1,4 +1,5 @@
 use super::flow::{discarded_ref, set_engine_ref, shared};
+use super::git::failure;
 use super::hold::hold;
 use super::store;
 use super::{ChangeSetId, ChangeState};
@@ -30,7 +31,7 @@ pub(crate) fn prune_until(
             break;
         }
         let _held = hold(&found.repository);
-        match prune_one(db, &found.id) {
+        match prune_one(db, &found.id, now) {
             Ok(true) => pruned += 1,
             Ok(false) => {}
             Err(error) if error.0 == "state_log_fence_out_of_process" => {
@@ -47,14 +48,25 @@ pub(crate) fn prune_until(
 }
 
 /// Deletes one discarded change set's ref, marks it pruned and forgets the owner edits
-/// settled on it. The caller holds [`hold`] on its repository. Inputs: the store and the change set. Output: whether it was pruned
-/// now, false when it is no longer discarded or already pruned.
-pub(super) fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+/// settled on it. The caller holds [`hold`] on its repository, and the restore window is read
+/// again under it, so a set restored and discarded again since the pass selected it keeps
+/// its new window. A repository that is gone is marked pruned with nothing to delete; one
+/// that cannot be read is refused, so the next pass tries it again. Inputs: the store, the
+/// change set and the time now. Output: whether it was pruned now, false when it is no
+/// longer discarded, already pruned or still inside its restore window.
+pub(super) fn prune_one(db: &Connection, id: &ChangeSetId, now: u64) -> Result<bool, EngineError> {
     let mut record = store::load(db, id)?;
-    if record.state != ChangeState::Discarded || record.pruned {
+    assert_eq!(&record.id, id, "the store loads the set asked for");
+    let due = record.restorable_until_ms.is_some_and(|until| until <= now);
+    if record.state != ChangeState::Discarded || record.pruned || !due {
         return Ok(false);
     }
-    if std::fs::symlink_metadata(record.repository.join(".git")).is_ok_and(|found| found.is_dir()) {
+    let repository = match std::fs::symlink_metadata(record.repository.join(".git")) {
+        Ok(found) => found.is_dir(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return Err(failure("changes_git_failed")),
+    };
+    if repository {
         set_engine_ref(
             &shared(&record.repository)?,
             &record.repository,

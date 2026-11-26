@@ -22,7 +22,7 @@ fn a_set_discarded_again_after_the_prune_selection_keeps_its_new_window() {
     assert_eq!(again.restorable_until_ms, Some(pass + 7 * DAY_MS));
     assert!(again.restorable_until_ms.is_some_and(|until| until > pass));
 
-    let pruned = crate::landing::prune::prune_one(&case.db, &id);
+    let pruned = crate::landing::prune::prune_one(&case.db, &id, pass);
 
     assert_eq!(pruned, Ok(false));
     let reference = format!("refs/crazyagent/discarded/{}", id.as_str());
