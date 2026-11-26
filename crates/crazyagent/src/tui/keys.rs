@@ -100,7 +100,16 @@ impl ShiftEnter {
     pub const ALL: [(ShiftEnter, &'static str); 2] = [(Self::Auto, "Auto"), (Self::Off, "Off")];
 }
 
+/// The most characters of one paste the TUI takes; the rest is dropped.
+pub const PASTE_CHARS_MAX: usize = 100_000;
+
 impl Key {
+    /// Makes the paste key from the text a terminal paste event carries, keeping at most
+    /// [`PASTE_CHARS_MAX`] characters. Input: the pasted text. Output: the paste key.
+    pub fn paste(text: String) -> Self {
+        Self::Paste(text.chars().take(PASTE_CHARS_MAX).collect())
+    }
+
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
     /// does not use (function keys, Alt and Super chords). Terminals send Ctrl-]

@@ -31,8 +31,6 @@ const REFRESH: Duration = Duration::from_secs(5);
 const JOB_READ: Duration = Duration::from_secs(1);
 const REPLY_WATCH: Duration = Duration::from_secs(1);
 const RECONNECT: Duration = Duration::from_secs(3);
-/// The most characters of one paste the TUI takes; the rest is dropped.
-pub(in crate::tui) const PASTE_CHARS_MAX: usize = 100_000;
 
 struct Extras;
 
@@ -410,8 +408,7 @@ fn drive(
                 }
             }
             Event::Paste(text) => {
-                let text: String = text.chars().take(PASTE_CHARS_MAX).collect();
-                shell.key(Key::Paste(text));
+                shell.key(Key::paste(text));
                 dirty = true;
             }
             Event::Resize(width, height) => {
