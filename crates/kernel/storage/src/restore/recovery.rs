@@ -244,7 +244,7 @@ pub(super) fn put_back_with(
         .and_then(|broken| broken.copy().map(str::to_owned))
         .ok_or_else(|| error(PUTBACK_COPY_MISSING))?;
     let (source, found, rows) = usable(root, &name)?;
-    let saved = keep_live(path, root, SystemTime::now())?;
+    let saved = keep_live(&db, path, root, SystemTime::now())?;
     restore(&mut db, &source, found, &rows).map_err(|cause| check_failed(cause.0))?;
     check(&db, &source.join(DATABASE)).map_err(|cause| check_failed(cause.0))?;
     clear(root)?;
@@ -253,11 +253,17 @@ pub(super) fn put_back_with(
 }
 
 /// Keeps engine.db's bytes as they are in a new 0700 `replaced-<UTC time>` folder before a
-/// put-back writes, so it can be undone by hand: a barrier orders the copy and its folder
-/// before the put-back's first write. The copy is not checked, since the data may fail any
-/// check, so it gets no `checked` marker. Inputs: the database path, held alone, the root
-/// and the time. Output: the folder.
-fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, StorageError> {
+/// put-back writes, so it can be undone by hand: the WAL is moved into the file first, and a
+/// barrier orders the copy and its folder before the put-back's first write. The copy is not
+/// checked, since the data may fail any check, so it gets no `checked` marker. Inputs: the
+/// held connection, the database path, the root and the time. Output: the folder.
+fn keep_live(
+    db: &Connection,
+    path: &Path,
+    root: &Path,
+    now: SystemTime,
+) -> Result<PathBuf, StorageError> {
+    settled(db)?;
     let taken = stamp(now).map_err(|cause| restore_failed(cause.0))?;
     let target = root.join(BACKUPS).join(format!("{REPLACED}-{taken}"));
     std::fs::DirBuilder::new()
@@ -274,6 +280,23 @@ fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, Stora
         return Err(restore_failed(cause));
     }
     Ok(target)
+}
+
+/// Moves every frame of engine.db's WAL into the file and empties the WAL, on the connection
+/// that holds engine.db alone, so a byte copy of the file holds every committed write.
+/// Input: the held connection. Output: Ok, or the checkpoint's failure.
+pub(super) fn settled(db: &Connection) -> Result<(), StorageError> {
+    let (busy, log, moved): (i64, i64, i64) = db
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(restore_failed)?;
+    assert_eq!(busy, 0, "engine.db held alone has no other reader");
+    assert!(
+        log == moved && log <= 0,
+        "the WAL is empty after the checkpoint"
+    );
+    Ok(())
 }
 
 /// Removes the restore record and fully flushes its folder. Input: the root. Output: Ok once
