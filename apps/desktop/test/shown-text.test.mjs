@@ -49,5 +49,9 @@ test("the questions flow puts the keyboard only in a field the owner can see", a
     assert.equal(await page.evaluate(shownField(FIELD)), null);
     await show(page, `<div id="pj-tab-panel"><div class="tg-terminal-screen"><textarea class="xterm-helper-textarea"></textarea></div></div>`);
     assert.equal(await page.evaluate(shownField(FIELD)), "xterm-helper-textarea");
+    for (const style of ["visibility: hidden", "opacity: 0"]) {
+      await show(page, `<div id="pj-tab-panel"><div class="tg-terminal-screen" style="${style}"><textarea class="xterm-helper-textarea"></textarea></div><textarea class="composer"></textarea></div>`);
+      assert.equal(await page.evaluate(shownField(FIELD)), "composer", style);
+    }
   });
 });
