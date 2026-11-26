@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 
+#[cfg(all(test, unix))]
+#[path = "account_key_sync_tests.rs"]
+mod account_key_sync_tests;
+
 #[cfg(unix)]
 const KEYS: &str = crate::storage::accounts::ACCOUNT_KEYS;
 const SECRET_MAX: usize = 8192;
@@ -552,6 +556,11 @@ fn keys_directory(root: &Root, create: bool) -> Result<Option<File>, EngineError
     Ok(Some(directory))
 }
 
+/// Saves an account key as a new owner-only file in the key directory beside the owner
+/// root. Inputs: owner root, credential reference and the key, which is zeroed after the
+/// write. Output: the directory synced, or `account_key_store_unavailable`; a failed write
+/// or directory sync removes the new file again, and a file it cannot remove stays, named
+/// by no account.
 #[cfg(unix)]
 fn store_key(
     root: &Root,
@@ -560,10 +569,12 @@ fn store_key(
 ) -> Result<(), EngineError> {
     let directory =
         keys_directory(root, true)?.ok_or_else(|| failure("account_key_store_unavailable"))?;
-    write_key(&directory, key_name(credential)?, key)?;
-    directory
-        .sync_all()
-        .map_err(|_| failure("account_key_store_unavailable"))?;
+    let name = key_name(credential)?;
+    write_key(&directory, name, key)?;
+    if crate::storage::accounts::synced(&directory).is_err() {
+        let _ = rustix::fs::unlinkat(&directory, name, rustix::fs::AtFlags::empty());
+        return Err(failure("account_key_store_unavailable"));
+    }
     Ok(())
 }
 
@@ -593,7 +604,8 @@ fn write_key(directory: &File, name: &str, key: AccountSecret) -> Result<(), Eng
 /// Swaps the saved key of one credential for a new one: the new key is written to a
 /// staged file, then renamed over the old file, so the old key is unlinked and the file
 /// never holds a partial key. Inputs: owner root, credential reference and the new key.
-/// Output: the key directory synced; on failure the old key stays and nothing is staged.
+/// Output: the key directory synced, or a refusal with nothing staged: before the rename the
+/// old key stays; after it the new key may be in place, and a retry writes it again.
 #[cfg(unix)]
 pub(super) fn replace_key(
     root: &Root,
@@ -609,10 +621,7 @@ pub(super) fn replace_key(
         let _ = rustix::fs::unlinkat(&directory, staged.as_str(), rustix::fs::AtFlags::empty());
         return Err(failure("account_key_store_unavailable"));
     }
-    directory
-        .sync_all()
-        .map_err(|_| failure("account_key_store_unavailable"))?;
-    Ok(())
+    crate::storage::accounts::synced(&directory)
 }
 
 /// Saves an account key on Windows as a new W1 secret file in the engine root's key folder,
@@ -663,8 +672,8 @@ fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, Eng
 
 /// Swaps the saved key of one credential for a new one on Windows: storage writes a staged
 /// W1 secret file and renames it over the old one. Inputs: owner root, credential reference
-/// and the new key, which is zeroed after the write. Output: Ok, or the refusal; on a
-/// refusal the old key stays.
+/// and the new key, which is zeroed after the write. Output: Ok, or the refusal; after a
+/// refusal the old key stays, or the new key may be in place and a retry writes it again.
 #[cfg(windows)]
 pub(super) fn replace_key(
     root: &Root,
