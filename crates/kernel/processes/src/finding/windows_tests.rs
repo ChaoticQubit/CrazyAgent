@@ -120,7 +120,10 @@ fn npm_runs_by_its_layout_and_only_with_its_own_script() {
     let cli = npm.join("npm-cli.js");
     or_named(std::fs::write(&cli, "#!/usr/bin/env node\n"), &cli);
     let command = real.join("npm.cmd");
-    or_named(std::fs::write(&command, "@ECHO off\r\ncalc.exe\r\n"), &command);
+    or_named(
+        std::fs::write(&command, "@ECHO off\r\ncalc.exe\r\n"),
+        &command,
+    );
     let resolved = resolve_entry(&command, &places).unwrap();
     let real_of = |file: &Path| or_named(file.canonicalize(), file).into_os_string();
     assert_eq!(
