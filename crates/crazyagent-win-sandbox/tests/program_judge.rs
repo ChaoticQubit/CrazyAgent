@@ -190,3 +190,23 @@ fn a_label_that_lets_a_lower_integrity_process_write_a_program_is_refused() {
     )]));
     assert_eq!(judge_program(&inherit_only, &USER), Ok(()));
 }
+
+/// The system's own programs carry a second name in its component store, so a program
+/// TrustedInstaller owns may have more than one name while its list still gives no one else
+/// a right to change it. A program the user, SYSTEM or the administrators own keeps one.
+#[test]
+fn only_a_trusted_installer_program_may_have_more_than_one_name() {
+    let mut inbox = program(Some(program_list(&[])));
+    inbox.owner = TRUSTED_INSTALLER.to_vec();
+    inbox.links = 2;
+    assert_eq!(judge_program(&inbox, &USER), Ok(()));
+    let mut writable = inbox.clone();
+    writable.list = Some(program_list(&[(ALLOW, 0, CHANGES[0], &USERS[..])]));
+    assert!(judge_program(&writable, &USER).is_err());
+    for owner in [&USER[..], &SYSTEM, &ADMINISTRATORS] {
+        let mut named_twice = program(Some(program_list(&[])));
+        named_twice.owner = owner.to_vec();
+        named_twice.links = 2;
+        assert!(judge_program(&named_twice, &USER).is_err(), "{owner:?}");
+    }
+}
