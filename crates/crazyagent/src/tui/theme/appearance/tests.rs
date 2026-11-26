@@ -222,6 +222,76 @@ fn linux_kde_reads_the_general_section_under_home_config() {
     assert!(homeless.read.is_empty() && homeless.spawned.is_empty());
 }
 
+/// Reads one kdeglobals text through the KDE path of the reader.
+/// Input: the file text. Output: the appearance it gives.
+fn kde(text: &str) -> Appearance {
+    let pairs = [("XDG_CURRENT_DESKTOP", "KDE"), ("HOME", "/home/mira")];
+    ask(Os::Linux, &pairs, None, Some(text)).appearance
+}
+
+#[test]
+fn a_kde_scheme_without_dark_in_its_name_reads_dark_from_its_window_background() {
+    let text = "[General]\nColorScheme=Midnight\n\n[Colors:Window]\nBackgroundNormal=35,38,41\n";
+    assert_eq!(kde(text), Appearance::Dark);
+}
+
+#[test]
+fn a_light_kde_window_background_wins_over_dark_in_the_scheme_name() {
+    let text =
+        "[Colors:Window]\nBackgroundNormal=239,240,241\n\n[General]\nColorScheme=BreezeDark\n";
+    assert_eq!(kde(text), Appearance::Light);
+    let grey = "[General]\nColorScheme=Midnight\n[Colors:Window]\nBackgroundNormal=118,118,118\n";
+    assert_eq!(kde(grey), Appearance::Light);
+    let darker = "[General]\nColorScheme=Daylight\n[Colors:Window]\nBackgroundNormal=117,117,117\n";
+    assert_eq!(kde(darker), Appearance::Dark);
+}
+
+#[test]
+fn a_missing_or_malformed_kde_window_background_falls_back_to_the_scheme_name() {
+    for value in [
+        "",
+        "35,38",
+        "35,38,41,255",
+        "256,0,0",
+        "-1,0,0",
+        "a,b,c",
+        "35,,41",
+        " ",
+    ] {
+        let named_dark = format!(
+            "[General]\nColorScheme=BreezeDark\n[Colors:Window]\nBackgroundNormal={value}\n"
+        );
+        assert_eq!(kde(&named_dark), Appearance::Dark, "{value:?}");
+        let named_light =
+            format!("[General]\nColorScheme=Midnight\n[Colors:Window]\nBackgroundNormal={value}\n");
+        assert_eq!(kde(&named_light), Appearance::Light, "{value:?}");
+    }
+    let other_section =
+        "[General]\nColorScheme=BreezeDark\n[Colors:View]\nBackgroundNormal=239,240,241\n";
+    assert_eq!(kde(other_section), Appearance::Dark);
+    assert_eq!(
+        kde("[Colors:Window]\nBackgroundNormal=35,38,41\n"),
+        Appearance::Dark
+    );
+}
+
+#[test]
+fn a_kdeglobals_file_over_the_cap_is_refused_and_one_at_the_cap_is_read() {
+    let folder = tempfile::tempdir().unwrap();
+    let cap = usize::try_from(KDEGLOBALS_BYTES_MAX).unwrap();
+    let at_cap = folder.path().join("at-cap");
+    std::fs::write(&at_cap, "a".repeat(cap)).unwrap();
+    assert_eq!(read_bounded(&at_cap).map(|text| text.len()), Some(cap));
+    let over = folder.path().join("over");
+    std::fs::write(&over, "a".repeat(cap + 1)).unwrap();
+    assert_eq!(read_bounded(&over), None);
+    let binary = folder.path().join("binary");
+    std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+    assert_eq!(read_bounded(&binary), None);
+    assert_eq!(read_bounded(folder.path()), None);
+    assert_eq!(read_bounded(&folder.path().join("missing")), None);
+}
+
 #[test]
 #[should_panic(expected = "absolute")]
 fn a_program_that_is_not_an_absolute_path_is_never_started() {
