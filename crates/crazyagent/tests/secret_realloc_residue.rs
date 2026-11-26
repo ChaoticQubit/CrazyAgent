@@ -60,6 +60,7 @@ static ALLOCATOR: FreeScan = FreeScan;
 /// exactly its size, which the wipe then clears whole.
 #[test]
 fn a_probe_request_frees_no_copy_of_its_key() {
+    let _serial = serial();
     let keys: Vec<Vec<u8>> = (KEY_MARK.len()..=256)
         .map(|length| {
             let mut key = KEY_MARK.to_vec();
@@ -68,7 +69,6 @@ fn a_probe_request_frees_no_copy_of_its_key() {
         })
         .collect();
     let mut grown = Vec::new();
-    let _serial = serial();
     FREED_WITH_KEY.store(0, Ordering::SeqCst);
     WATCHING.store(true, Ordering::SeqCst);
     for key in &keys {
