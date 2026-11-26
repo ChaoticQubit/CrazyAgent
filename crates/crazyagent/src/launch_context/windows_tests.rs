@@ -887,6 +887,7 @@ fn a_windows_process_keys_its_skills_record_by_the_held_home_after_a_junction_ab
     let context = process_context(&data, "Check every row.", HomeCaches::Keep);
     windows::prepare_process(&root, context.process.as_ref().unwrap()).unwrap();
     assert_eq!(record_texts(&data, "agent-skills").len(), 2);
+}
 
 /// A pane record a Windows install leaves names the home it held, by its final path: after
 /// a junction above the home is repointed, an adopt holds and locks that home, so a second
