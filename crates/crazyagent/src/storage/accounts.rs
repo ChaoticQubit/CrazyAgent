@@ -245,7 +245,8 @@ pub(crate) fn key_saved_in(
 /// the 0700 folder when missing. The key goes to a staged 0600 file renamed over the old
 /// one, so no file ever holds a partial key. Inputs: the engine root, a folder from
 /// [`KEY_FOLDERS`], the key's reference and the key bytes, which are wiped. Output: Ok with
-/// the folder synced; on failure the old key stays and nothing is staged.
+/// the folder synced, or a refusal with nothing staged: before the rename the old key stays;
+/// after it the new key may be in place, and a retry writes it again.
 #[cfg(unix)]
 pub(crate) fn replace_key_in(
     root: &Path,
@@ -261,7 +262,8 @@ pub(crate) fn replace_key_in(
 /// The disk work of [`replace_key_in`]: checks the key's length, makes the folder, writes
 /// and syncs a staged file and renames it over the key. Inputs: as there, with the key
 /// borrowed. Output: Ok once the folder is synced; a failed write or rename removes the
-/// staged file and is `account_key_store_unavailable`.
+/// staged file and is `account_key_store_unavailable`, as is a failed folder sync after the
+/// rename, which leaves the new key in place.
 #[cfg(unix)]
 fn replace_staged(
     root: &Path,
