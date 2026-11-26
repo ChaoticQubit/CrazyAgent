@@ -578,15 +578,17 @@ fn touched(db: &Connection) -> Result<bool, EngineError> {
     .map_err(error)
 }
 
-/// The marked keys in [`TABLES`] order, each table's in key order, at most [`MARKS_MAX`].
-/// Input: the connection. Output: the marks, or `sessions_log_mark_invalid`.
+/// The marked keys in [`TABLES`] order, each table's in key order, at most [`MARKS_MAX`];
+/// sessions whose row is not configured come before configured ones, so a replay never holds
+/// two configured sessions of one project. Input: the connection. Output: the marks, or
+/// `sessions_log_mark_invalid`.
 fn marks(db: &Connection) -> Result<Vec<Mark>, EngineError> {
     if !exists(db, "sessions_touched")? {
         return Ok(Vec::new());
     }
     let mut statement = db
         .prepare(
-            "SELECT tbl, key, project FROM sessions_touched ORDER BY CASE tbl WHEN 'master_sessions' THEN 0 WHEN 'conversation_entries' THEN 1 WHEN 'agent_texts' THEN 2 WHEN 'master_turns' THEN 3 WHEN 'master_preparations' THEN 4 WHEN 'master_waiting_resolves' THEN 5 ELSE 6 END, length(key), key LIMIT ?1",
+            "SELECT tbl, key, project FROM sessions_touched ORDER BY CASE tbl WHEN 'master_sessions' THEN 0 WHEN 'conversation_entries' THEN 1 WHEN 'agent_texts' THEN 2 WHEN 'master_turns' THEN 3 WHEN 'master_preparations' THEN 4 WHEN 'master_waiting_resolves' THEN 5 ELSE 6 END, tbl = 'master_sessions' AND EXISTS(SELECT 1 FROM master_sessions WHERE id = key AND phase = 'configured'), length(key), key LIMIT ?1",
         )
         .map_err(error)?;
     let stored = statement
