@@ -132,6 +132,47 @@ fn refused_places(
     refused
 }
 
+/// The manifests the test-support guard reads under a workspace root: every Cargo.toml
+/// under `crates` and `apps`, and the root's own. Input: the root. Output: the paths.
+fn manifests(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    files(&root.join("crates"), "Cargo.toml")
+        .into_iter()
+        .chain(files(&root.join("apps"), "Cargo.toml"))
+        .chain([root.join("Cargo.toml")])
+        .collect()
+}
+
+/// A workspace root with empty `crates` and `apps` folders and the given root manifest.
+/// Input: the root manifest text. Output: the folder.
+fn planted_root(text: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("crates")).unwrap();
+    std::fs::create_dir(root.path().join("apps")).unwrap();
+    std::fs::write(root.path().join("Cargo.toml"), text).unwrap();
+    root
+}
+
+#[test]
+fn a_member_outside_crates_and_apps_is_read() {
+    let root = planted_root("[workspace]\nmembers = [\"plugins/p\"]\n");
+    std::fs::create_dir_all(root.path().join("plugins/p")).unwrap();
+    std::fs::write(root.path().join("plugins/p/Cargo.toml"), "").unwrap();
+
+    let found = manifests(root.path());
+
+    assert!(found.contains(&root.path().join("plugins/p/Cargo.toml")), "{found:?}");
+}
+
+#[test]
+fn a_glob_member_panics_naming_it() {
+    let root = planted_root("[workspace]\nmembers = [\"plugins/*\"]\n");
+
+    let cause = std::panic::catch_unwind(|| manifests(root.path())).expect_err("a glob panics");
+    let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
+
+    assert!(said.contains("plugins/*"), "{said}");
+}
+
 #[test]
 fn test_support_is_turned_on_only_by_dev_dependencies() {
     let root = workspace();
@@ -143,11 +184,7 @@ fn test_support_is_turned_on_only_by_dev_dependencies() {
         .get("workspace")
         .and_then(|workspace| workspace.get("dependencies"))
         .and_then(toml::Value::as_table);
-    let manifests: Vec<_> = files(&root.join("crates"), "Cargo.toml")
-        .into_iter()
-        .chain(files(&root.join("apps"), "Cargo.toml"))
-        .chain([root.join("Cargo.toml")])
-        .collect();
+    let manifests = manifests(&root);
     assert!(manifests.len() > 3, "{manifests:?}");
     let mut refused = Vec::new();
     for manifest in &manifests {
