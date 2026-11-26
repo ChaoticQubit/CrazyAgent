@@ -162,9 +162,10 @@ pub(super) fn remove_held(installed: &mut Installed) {
 }
 
 /// Holds the home a pane record names for an adopt as the install holds its home: judged as
-/// itself and never sharing delete, then checked by H1 on that same handle, so nothing is
-/// judged by path after the hold. Input: the home. Output: the held root,
-/// `launch_account_home_unsafe`, `launch_account_home_unavailable` or another H1 code.
+/// itself and never sharing delete, then given the account-home checks on that same handle,
+/// so nothing is judged by path after the hold. Input: the home. Output: the held root,
+/// `launch_account_home_unsafe`, `launch_account_home_unavailable` or another account-home
+/// code.
 pub(super) fn adopt_root(
     home: &Path,
 ) -> Result<crate::engine::bootstrap::held::Folder, LaunchError> {
