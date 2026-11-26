@@ -519,3 +519,36 @@ fn a_windows_launch_refuses_a_boundary_that_grants_another_home_than_the_held_on
     );
     drop(held);
 }
+
+/// A legit home handed in another spelling, its case changed or through the temp folder's
+/// 8.3 short name where the runner has one, is held at the place its canonical spelling
+/// names: the boundary installed on that spelling builds, and the Claude variables name the
+/// held place.
+#[test]
+fn a_windows_launch_through_another_spelling_of_a_legit_home_builds_on_its_held_place() {
+    let case = case();
+    let raw = case._temp.path().join("agent").join("home");
+    let upper = PathBuf::from(case.home.to_str().unwrap().to_uppercase());
+    println!("short name spelling differs: {}", raw != case.home);
+    assert_ne!(upper, case.home);
+    let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+    let context = crate::launch_context::windows_tests::context();
+    for spelled in [&upper, &raw] {
+        let held = context.install("claude-code", spelled, false).unwrap();
+        assert_eq!(held.home_place(), Some(case.home.as_path()));
+        let launch = LaunchBoundary::Installed(boundary.clone());
+        let request = request(&case, "claude-code", launch, spelled, false);
+        assert!(
+            build(&request, Some(&held)).is_ok(),
+            "{}",
+            spelled.display()
+        );
+        let (_, environment) = claude_invocation(&request, Some(&held), None);
+        let config = environment
+            .iter()
+            .find(|(key, _)| *key == "CLAUDE_CONFIG_DIR")
+            .map(|(_, value)| value.clone());
+        assert_eq!(config, Some(case.home.clone().into_os_string()));
+        drop(held);
+    }
+}
