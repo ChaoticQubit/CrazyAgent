@@ -5,8 +5,7 @@ use crate::setup::{Dependency, DependencyState, DependencyStatus, SetupStatus};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::screens::settings_accounts::tests::{dataset, fixture, list_ctx, render};
-use crate::tui::seam::Request;
-use crate::tui::shell::Shell;
+use crate::tui::{seam::Request, shell::Shell};
 use kernel_processes::run::Version;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -592,18 +591,6 @@ fn u_shows_the_exact_command_and_updates_only_after_y() {
             Sent::Update("claude-code".into())
         ]
     );
-}
-
-#[test]
-fn u_shows_the_line_the_engine_has_now_not_the_one_read_when_the_page_opened() {
-    let found = found();
-    let mut shell = on_claude(&found);
-    deliver(&mut shell, newer());
-    press(&mut shell, 'u', with_npm());
-    let shown = frame(&mut shell);
-    assert!(shown.contains(NPM_LINE), "{shown}");
-    assert!(shown.contains("Installed with npm (@anthropic-ai/claude-code)."));
-    assert!(!shown.contains(BREW_LINE), "{shown}");
 }
 
 #[test]
@@ -1906,3 +1893,5 @@ fn a_listed_research_harness_says_which_research_it_runs_and_which_harnesses_run
     assert!(shown.contains(&format!("Research {words}")), "{shown}");
     assert!(!native.contains(words), "{native}");
 }
+
+mod engine_line;

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 #[cfg(unix)]
 mod ancestry;
+mod change_set_id;
 #[cfg(unix)]
 mod clone;
 #[cfg(unix)]
@@ -30,6 +31,8 @@ mod merges;
 #[cfg(unix)]
 mod owner;
 pub mod owner_edit;
+#[cfg(unix)]
+pub(crate) mod prune;
 #[cfg(unix)]
 pub(crate) mod retire;
 #[cfg(all(test, unix))]
@@ -233,19 +236,6 @@ impl ChangeSetId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl TryFrom<String> for ChangeSetId {
-    type Error = EngineError;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<ChangeSetId> for String {
-    fn from(id: ChangeSetId) -> Self {
-        id.0
     }
 }
 
@@ -2392,7 +2382,7 @@ pub fn retire_worktree(
 /// Inputs: the store and the time now. Output: how many were deleted.
 pub fn prune(db: &Connection, now_ms: u64) -> Result<usize, EngineError> {
     #[cfg(unix)]
-    return flow::prune(db, now_ms);
+    return prune::prune(db, now_ms);
     #[cfg(not(unix))]
     {
         let _ = (db, now_ms);
