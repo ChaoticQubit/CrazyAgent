@@ -4669,9 +4669,8 @@ impl TeamRuntime {
         if self.master_settling(project) || self.master_held(project) {
             return Ok(());
         }
-        let session = crate::master_sessions::live_session(&self.connection, project)?;
+        let session = self.live_session_once(project, on)?;
         if let Some(id) = self.master(project) {
-            self.adopt_session(project, id, on)?;
             let chosen_off = !on
                 && self.workers[&id].live
                 && super::master::switch(&self.connection, project)?.0 == Some(true);
