@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { onTab, press, readable, shown, walk } from "./fixtures/settings-app-tabs-run.mjs";
+import { HOST } from "./platform.mjs";
 
-const PURPOSE = "CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with Finder and it shows up on Home.";
+const FILES = HOST.os === "mac" ? "Finder" : "your file manager";
+const PURPOSE = `CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with ${FILES} and it shows up on Home.`;
 const CHOOSE = ".set-group button";
 
 test("Projects folder shows its title and purpose, then Folder with the place on the left and the chooser on the right", async () => {
@@ -11,7 +13,7 @@ test("Projects folder shows its title and purpose, then Folder with the place on
   assert.equal(seen.top.purpose, PURPOSE);
   assert.deepEqual(seen.top.actions, []);
   assert.deepEqual(seen.sections.map((section) => section.heading), ["Folder"]);
-  assert.equal(seen.sections[0].about, "Watching ~/Projects. Drop a project folder into it with Finder and it shows up here.");
+  assert.equal(seen.sections[0].about, `Watching ~/Projects. Drop a project folder into it with ${FILES} and it shows up here.`);
   const [row] = seen.sections[0].rows;
   assert.equal(row.label, "Projects folder");
   assert.equal(row.help, "Your projects folder is ~/Projects.");

@@ -4,7 +4,7 @@ import { failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loa
 import { loadUncommittedImport } from "../../api-process";
 import { loadQuestionCounts, pendingByProject } from "../../api-questions";
 import { SessionContext, readQuestionsShown, saveLastProject, useLoad, type Loaded } from "../../state";
-import { Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
+import { Menu, formatRoute, isMac, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { HEARTBEAT_MS, cachedIdeView, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
@@ -141,14 +141,15 @@ export function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: r
   const stopAll = useStopAll(data.id, data.reloadTeam, (note, stopping) => data.notify(note
     || (stopping ? "Stopped. Every agent of this project stays stopped until you start them again." : "Started again. The agents of this project run again.")));
 
+  const showFolder = isMac() ? "Show folder in Finder" : "Open folder";
   async function reveal() {
     const result = await revealProjectFolder(data.id);
-    if (result.kind !== "ok") data.notify(result.kind === "not_ready" ? "Not ready yet: Show folder in Finder isn't in this build." : "Couldn't open the folder.");
+    if (result.kind !== "ok") data.notify(result.kind === "not_ready" ? `Not ready yet: ${showFolder} isn't in this build.` : "Couldn't open the folder.");
   }
   return <>
     <Menu label="Project actions" items={[
       ...replaced.map((item) => ({ label: `Open ${item.label}`, icon: item.icon, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/${item.id}`) })),
-      { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
+      { label: showFolder, icon: "folder-open", onSelect: () => void reveal() },
       { label: "Pause all agents", icon: "circle-pause", onSelect: pause.ask },
       stopped ? { label: "Start all again", icon: "refresh-cw", onSelect: stopAll.start } : { label: "Stop all", icon: "circle-stop", danger: true, onSelect: stopAll.ask },
       { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove&ask=remove`) },
