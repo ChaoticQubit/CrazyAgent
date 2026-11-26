@@ -3,8 +3,8 @@ use super::*;
 /// What one pass of the engine's own cleanup did: the agents whose worktree it removed, in
 /// id order, the id the next pass starts after, 0 once this pass read the last finished agent
 /// so agents a check keeps never hold the others back, one line for each agent the engine
-/// could not check or remove, and one for each agent its check let through but its removal
-/// then kept, with the plain code that kept it, at most `CANDIDATES_MAX` lines in all.
+/// could not check, remove or note (a removed agent whose note failed is in both lists), and
+/// one for each agent its check let through but its removal then kept, with its plain code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Swept {
     pub removed: Vec<i64>,
@@ -85,7 +85,8 @@ pub fn sweep(
     }
     assert!(swept.removed.len() <= RECLAIMABLE_MAX);
     assert!(candidates.len() <= CANDIDATES_MAX);
-    assert!(swept.removed.len() + swept.kept.len() + swept.failures.len() <= candidates.len());
+    assert!(swept.removed.len() + swept.kept.len() <= candidates.len());
+    assert!(swept.kept.len() + swept.failures.len() <= candidates.len());
     Ok(swept)
 }
 
