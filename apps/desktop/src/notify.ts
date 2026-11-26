@@ -2,6 +2,7 @@ import { call } from "./api";
 import type { Result } from "./api";
 import { loadQuestions, pendingByProject, type QuestionCount } from "./api-questions";
 import { navigate } from "./ui";
+import { isMac, isWindows } from "./ui/keys";
 
 export type SystemNotifications = "available" | "unavailable";
 
@@ -15,8 +16,16 @@ export const PAGES_MAX = 64;
 export const NOTIFY_PER_READ_MAX = 3;
 
 export const UNAVAILABLE_LINE = "System notifications are unavailable on this system.";
-export const AVAILABLE_LINE = "When a question waits for you while CrazyAgent is in the background, macOS shows a notification. If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications.";
-export const FAILED_LINE = "Couldn't show a macOS notification. Check that CrazyAgent is allowed in System Settings, Notifications.";
+export const AVAILABLE_LINE = isMac()
+  ? "When a question waits for you while CrazyAgent is in the background, macOS shows a notification. If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications."
+  : isWindows()
+    ? "When a question waits for you while CrazyAgent is in the background, Windows shows a notification. If none appear, Windows is blocking them: allow CrazyAgent in Settings, System, Notifications."
+    : "When a question waits for you while CrazyAgent is in the background, your desktop shows a notification. If none appear, your desktop is blocking them: allow CrazyAgent in your desktop's notification settings.";
+export const FAILED_LINE = isMac()
+  ? "Couldn't show a macOS notification. Check that CrazyAgent is allowed in System Settings, Notifications."
+  : isWindows()
+    ? "Couldn't show a Windows notification. Check that CrazyAgent is allowed in Settings, System, Notifications."
+    : "Couldn't show a desktop notification. Check that CrazyAgent is allowed in your desktop's notification settings.";
 
 /** The plain line Settings shows about system notifications. Input: what the app reported,
  * or undefined while it loads. Output: the line, or null while loading or in a build
