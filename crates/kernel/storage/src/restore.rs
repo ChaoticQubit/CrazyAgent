@@ -322,11 +322,13 @@ pub const RECORD_FAILED: &str = "failed";
 const RESTORE_RECORD_BYTES_MAX: usize = 512;
 
 /// Replaces the restore record of the engine at `root` with one line: the line goes to a private
-/// temp file beside it, synced, which is then renamed over the record, and the folder is
-/// synced, so a failure at any step leaves the old record whole. Inputs: the root and the
-/// line. Output: Ok once it is on disk.
+/// temp file beside it behind a barrier, which is then renamed over the record, and the folder
+/// is fully flushed, so a failure at any step leaves the old record whole. Inputs: the root
+/// and the line. Output: Ok once it is on disk.
 pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError> {
-    write_record_with(root, line, private_file)
+    write_record_with(root, line, |temp, bytes| {
+        private_file(temp, bytes, Flush::Barrier)
+    })
 }
 
 /// The temp file a record write fills before it renames it over the record.

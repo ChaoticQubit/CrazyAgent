@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 /// The watch's event log in the engine store: the bodies after a cursor, read in bounded
 /// pages, and the write that logs one revision's body and prunes the old ones.

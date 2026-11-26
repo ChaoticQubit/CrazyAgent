@@ -173,7 +173,7 @@ fn a_settings_text_in_another_folder_is_refused() {
 fn a_private_file_makes_one_full_flush() {
     let root = tempfile::tempdir().unwrap();
     take_flushes();
-    private_file(&root.path().join("one"), b"bytes").unwrap();
+    private_file(&root.path().join("one"), b"bytes", Flush::Full).unwrap();
     assert_eq!(take_flushes(), (1, 0));
     assert_eq!(std::fs::read(root.path().join("one")).unwrap(), b"bytes");
 }

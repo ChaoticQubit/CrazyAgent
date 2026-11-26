@@ -232,7 +232,7 @@ pub(crate) fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageEr
     assert!(target.starts_with(folder));
     let digest = file_digest(&target.join(DATABASE))?;
     assert_eq!(digest.len(), DIGEST_HEX_BYTES);
-    private_file(&target.join(CHECKED), digest.as_bytes())?;
+    private_file(&target.join(CHECKED), digest.as_bytes(), Flush::Full)?;
     for synced in [target, folder] {
         #[cfg(unix)]
         std::fs::File::open(synced)
@@ -373,7 +373,7 @@ pub(crate) fn recorded(
                 BACKUP_FAILED
             };
             let _ = std::fs::remove_file(&record);
-            if private_file(&record, code.as_bytes()).is_err() {
+            if private_file(&record, code.as_bytes(), Flush::Full).is_err() {
                 eprintln!("storage_backup_record_unwritten");
             }
         }
@@ -434,7 +434,7 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
 /// on disk; a text name that is not one plain file name fails the assert.
 pub(crate) fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(), StorageError> {
     let file = target.join(DATABASE);
-    private_file(&file, b"")?;
+    private_file(&file, b"", Flush::Full)?;
     db.backup(rusqlite::MAIN_DB, &file, None)
         .map_err(backup_failed)?;
     for (name, text) in texts()? {
@@ -442,7 +442,7 @@ pub(crate) fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(
             plain_name(name),
             "a settings text is one plain file name beside engine.db and checked"
         );
-        private_file(&target.join(name), text.as_bytes())?;
+        private_file(&target.join(name), text.as_bytes(), Flush::Full)?;
     }
     Ok(())
 }
@@ -456,9 +456,12 @@ fn plain_name(name: &str) -> bool {
         && !name.contains(['/', '\\'])
 }
 
-/// How far a flush carries the writes before it: `Full` makes them durable on the medium.
+/// How far a flush carries the writes before it: `Full` makes them durable on the medium,
+/// `Barrier` orders them before every later write without waiting for the medium. Only
+/// macOS has a barrier; elsewhere a barrier is a full flush.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flush {
+    Barrier,
     Full,
 }
 
@@ -476,11 +479,29 @@ pub(crate) fn flush(file: &std::fs::File, kind: Flush) -> std::io::Result<()> {
         let (full, barrier) = counted.get();
         counted.set(match kind {
             Flush::Full => (full + 1, barrier),
+            Flush::Barrier => (full, barrier + 1),
         });
     });
     match kind {
         Flush::Full => file.sync_all(),
+        #[cfg(target_os = "macos")]
+        Flush::Barrier => barrier(std::os::fd::AsFd::as_fd(file)),
+        #[cfg(not(target_os = "macos"))]
+        Flush::Barrier => file.sync_all(),
     }
+}
+
+/// Orders every write made through `fd` before any write made after it, without waiting
+/// for the medium: `fcntl(F_BARRIERFSYNC)`, the one unsafe call of this crate. Input: an
+/// open file or folder. Output: Ok, or the call's failure.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn barrier(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
+    let done = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&fd), libc::F_BARRIERFSYNC) };
+    if done == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The full and barrier flushes this thread made since the last call, which resets them.
@@ -491,8 +512,9 @@ pub(crate) fn take_flushes() -> (usize, usize) {
 }
 
 /// Creates a new file readable only by this user and writes it to disk.
-/// Inputs: the path, which must not exist, and the bytes. Output: Ok once synced.
-pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+/// Inputs: the path, which must not exist, the bytes and the flush that ends the write.
+/// Output: Ok once flushed.
+pub(crate) fn private_file(path: &Path, bytes: &[u8], kind: Flush) -> Result<(), StorageError> {
     #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -503,7 +525,7 @@ pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError
     #[cfg(windows)]
     let mut file = private::file(path, true).map_err(backup_failed)?;
     file.write_all(bytes).map_err(backup_failed)?;
-    flush(&file, Flush::Full).map_err(backup_failed)
+    flush(&file, kind).map_err(backup_failed)
 }
 
 /// Removes the older backup folders: the pinned one stays outside the count, the one just
