@@ -97,7 +97,7 @@ test("synthetic typed selection opens inspectable auth without starting or editi
   assert.equal(state.in_flight, undefined);
   const existing = reduceNativeAuth(state, { kind: "begin", action: "codex_existing", request: 1 });
   assert.deepEqual(existing.in_flight, { action: "codex_existing", request: 1 });
-  assert.match(markup(state, { method: "codex_existing" }), /Nothing else on this Mac is read\.[\s\S]*>Check this account&#x27;s sign-in<\/button>/);
+  assert.match(markup(state, { method: "codex_existing" }), /Nothing else on this computer is read\.[\s\S]*>Check this account&#x27;s sign-in<\/button>/);
   const claudeCheck = structuredClone(detail);
   claudeCheck.record.connection.harness = "claude";
   assert.deepEqual(reduceNativeAuth(opened(claudeCheck), { kind: "begin", action: "claude_existing", request: 1 }).in_flight,

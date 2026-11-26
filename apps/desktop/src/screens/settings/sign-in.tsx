@@ -16,7 +16,7 @@ type Account = NonNullable<NativeAuthView["account"]>;
 export type SubscriptionProvider = "chatgpt" | "claude";
 export type FailureHint = "retry" | "check" | "expired" | "missing" | "sign_in" | "too_old";
 export const TOO_OLD = "native_auth_harness_too_old";
-export const CHECK_LINE = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this Mac is read.";
+export const CHECK_LINE = `Checking the sign-in this account already has in CrazyAgent. Nothing else on ${thisComputer()} is read.`;
 export const CHECK_SIGNED_OUT = "This account isn't signed in. Choose Sign in again.";
 
 /** Names the harness that signs a subscription provider in. Input: the provider. Output: the
