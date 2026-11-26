@@ -235,14 +235,15 @@ fn a_windows_program_started_outside_the_runtime_under_the_prefix_refuses_the_up
     let prefix = kernel_sandbox::paths::canonical(made.path()).unwrap();
     let copy = prefix.join("fx.exe");
     std::fs::copy(system.join("PING.EXE"), &copy).unwrap();
-    let mut child = Command::new(&copy)
-        .args(["-n", "60", "127.0.0.1"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(0x0000_0004 | 0x0800_0000)
-        .spawn()
-        .unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(
+        Command::new(&copy)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0000_0004 | 0x0800_0000),
+    )
+    .unwrap();
     let held = [prefix];
     assert_eq!(not_running(&held, IMAGES), Err(IN_USE));
     child.kill().unwrap();
