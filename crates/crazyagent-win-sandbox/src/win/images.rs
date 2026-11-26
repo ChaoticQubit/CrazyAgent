@@ -150,7 +150,12 @@ fn seen(
         return None;
     }
     let hit = match line {
-        Ok(_) => None,
+        Ok(units) => {
+            let paths: Option<Vec<String>> =
+                arguments(&units).map(|all| all.into_iter().filter_map(part).collect());
+            let directory = working_directory(id);
+            counted(directory.as_deref(), paths.as_deref(), spellings).then_some((Seen::Hosted, 0))
+        }
         Err(status) => Some((Seen::Unread, status)),
     };
     hit.filter(|_| !exited(&process))
@@ -491,7 +496,9 @@ fn names(text: &str, spellings: &[Spelling]) -> bool {
     spellings.iter().any(|spelling| {
         text.match_indices(spelling.text.as_str()).any(|(at, _)| {
             let next = text[at + spelling.text.len()..].chars().next();
-            spelling.text.ends_with('\\') || matches!(next, None | Some('\\' | '"' | ' '))
+            spelling.text.ends_with('\\')
+                || next == Some('\\')
+                || (spelling.file && matches!(next, None | Some('"' | ' ')))
         })
     })
 }
