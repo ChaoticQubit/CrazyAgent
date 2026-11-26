@@ -137,6 +137,28 @@ pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<
     answers
 }
 
+/// Whether an entry read with one `getattrlist` through a held handle carries an access-list
+/// entry that lets someone other than this user or root change it, judged from the list that
+/// same call returned, with nothing kept or reused across calls. Inputs: the read and whether
+/// its volume keeps access lists for its device. Output: the answer, none when the volume
+/// keeps no lists or the trusted principals cannot be read.
+#[cfg(target_os = "macos")]
+pub(super) fn held_shared(
+    read: &crazyagent_macos_fs::HeldEntry,
+    keeps_lists: bool,
+) -> Option<bool> {
+    if !keeps_lists {
+        return None;
+    }
+    let entries: Vec<Entry> = read
+        .entries
+        .iter()
+        .map(|entry| (entry.principal, entry.flags, entry.rights))
+        .collect();
+    assert_eq!(entries.len(), read.entries.len());
+    read_answer(Some(&entries), trusted())
+}
+
 /// Reads again one entry whose stamp moved during its read: read alone up to
 /// [`RELIST_TRIES`] times, an answer counting once the `lstat` before and after one read
 /// agree; past that, two last reads decide, since a busy folder's change time moves with

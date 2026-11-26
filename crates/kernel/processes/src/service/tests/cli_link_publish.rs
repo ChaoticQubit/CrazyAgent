@@ -77,3 +77,47 @@ fn a_file_that_replaces_the_link_after_the_check_is_kept() -> TestResult {
     assert_eq!(names(&bin)?, vec!["crazyagent"]);
     Ok(())
 }
+
+/// A link that goes away after the check is made again in place, so the publish still ends
+/// with the link and nothing staged left behind.
+#[test]
+fn a_link_removed_after_the_check_is_made_again_in_place() -> TestResult {
+    let (_temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    cli_link::before_publish(|link| std::fs::remove_file(link).unwrap());
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    assert_eq!(names(&bin)?, vec!["crazyagent"]);
+    Ok(())
+}
+
+/// A link left at the staged name by an earlier run is dropped, and the publish goes on to
+/// replace the link with nothing staged left behind.
+#[test]
+fn a_link_left_at_the_staged_name_is_dropped_and_the_link_published() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    let staged = bin.join(format!(".crazyagent.link.{}", std::process::id()));
+    let elsewhere = temp.path().join("elsewhere");
+    at(&staged, std::os::unix::fs::symlink(&elsewhere, &staged))?;
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    assert_eq!(names(&bin)?, vec!["crazyagent"]);
+    Ok(())
+}
+
+/// A regular file at the staged name is never removed: the publish is refused naming that
+/// name and the file it found there, and the file and the link both stay as they were.
+#[test]
+fn a_file_at_the_staged_name_is_kept_and_the_publish_refused() -> TestResult {
+    let (_temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    let staged = bin.join(format!(".crazyagent.link.{}", std::process::id()));
+    at(&staged, std::fs::write(&staged, "user file"))?;
+    let error = link_cli(&executable, &bin).unwrap_err();
+    let exists = std::io::Error::from(rustix::io::Errno::EXIST);
+    assert_eq!(error.0, format!("{}: {exists}", staged.display()));
+    assert_eq!(at(&staged, std::fs::read_to_string(&staged))?, "user file");
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    Ok(())
+}

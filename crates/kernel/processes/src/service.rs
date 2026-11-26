@@ -317,6 +317,7 @@ impl Service {
         let root = self.root.to_string_lossy();
         let log = self.log();
         let log = log.to_string_lossy();
+        let home = self.home.as_deref().map(Path::to_string_lossy);
         let text = match self.platform {
             Platform::MacOs => format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -336,7 +337,7 @@ impl Service {
 \t<dict>\n\
 \t\t<key>PATH</key>\n\
 \t\t<string>{path}</string>\n\
-{home}\
+{home_open}{home}{home_close}\
 \t</dict>\n\
 \t<key>RunAtLoad</key>\n\
 \t<true/>\n\
@@ -358,12 +359,13 @@ impl Service {
                 executable = self.written_executable(),
                 root = xml(&root),
                 path = xml(&self.path.to_string_lossy()),
-                home = self.home.as_deref().map_or_else(String::new, |home| {
-                    format!(
-                        "\t\t<key>HOME</key>\n\t\t<string>{}</string>\n",
-                        xml(&home.to_string_lossy())
-                    )
-                }),
+                home_open = if home.is_some() {
+                    "\t\t<key>HOME</key>\n\t\t<string>"
+                } else {
+                    ""
+                },
+                home = home.as_deref().map(xml).unwrap_or_default(),
+                home_close = if home.is_some() { "</string>\n" } else { "" },
                 log = xml(&log),
             ),
             Platform::Linux => format!(
@@ -754,9 +756,9 @@ WantedBy=default.target\n",
     fn written_executable(&self) -> String {
         let executable = self.executable.to_string_lossy();
         match self.platform {
-            Platform::MacOs => xml(&executable),
+            Platform::MacOs => xml(&executable).into_owned(),
             Platform::Linux => systemd_quoted(&executable),
-            Platform::Windows => xml(&windows_quoted(&executable)),
+            Platform::Windows => xml(&windows_quoted(&executable)).into_owned(),
         }
     }
 

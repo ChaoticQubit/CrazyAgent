@@ -17,8 +17,10 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
     persisted(executable)?;
     std::fs::create_dir_all(bin).map_err(|error| fail(bin, error))?;
     let link = bin.join("crazyagent");
-    if let Ok(metadata) = std::fs::symlink_metadata(&link)
-        && !metadata.file_type().is_symlink()
+    let found = std::fs::symlink_metadata(&link);
+    if found
+        .as_ref()
+        .is_ok_and(|metadata| !metadata.file_type().is_symlink())
     {
         return Err(not_a_link(&link));
     }
@@ -28,12 +30,16 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
             step(&link);
         }
     });
+    let mut make = found.is_err();
     for _ in 0..PUBLISH_ROUNDS_MAX {
-        match std::os::unix::fs::symlink(executable, &link) {
-            Ok(()) => return Ok(link),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(fail(&link, error)),
+        if make {
+            match std::os::unix::fs::symlink(executable, &link) {
+                Ok(()) => return Ok(link),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(fail(&link, error)),
+            }
         }
+        make = true;
         if replace_link(executable, &link)? {
             return Ok(link);
         }
@@ -79,8 +85,15 @@ fn replace_link(executable: &Path, link: &Path) -> Result<bool, ServiceError> {
             let _ = std::fs::remove_file(&staged);
         }
     };
-    drop_staged();
-    std::os::unix::fs::symlink(executable, &staged).map_err(|error| fail(&staged, error))?;
+    match std::os::unix::fs::symlink(executable, &staged) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            drop_staged();
+            std::os::unix::fs::symlink(executable, &staged)
+                .map_err(|error| fail(&staged, error))?;
+        }
+        Err(error) => return Err(fail(&staged, error)),
+    }
     match renameat_with(CWD, &staged, CWD, link, RenameFlags::EXCHANGE) {
         Ok(()) => {}
         Err(Errno::NOENT) => {
