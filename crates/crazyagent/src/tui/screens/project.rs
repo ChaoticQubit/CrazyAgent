@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 mod state;
 mod tabs;
+#[cfg(test)]
+mod words_tests;
 
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 pub(in crate::tui) const ACTIVITY_SHOWN: usize = 5;
