@@ -9,9 +9,11 @@ mod tests;
 mod turn;
 pub(crate) use turn::{Turns, wait_max};
 
+#[cfg(not(windows))]
+pub use run::run;
 pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
-    UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
+    UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user,
 };
 pub(crate) use state::needs;
 #[cfg(test)]
@@ -215,8 +217,8 @@ pub struct UpdateSettings {
 /// The folders an install is recognized by: the owner's home, the Homebrew prefixes in the
 /// order they are tried, whether Homebrew casks can be installed on this platform, the npm
 /// that installs npm harnesses into the engine's own prefix, when a usable Node is found, and
-/// the tool resolver's places a harness runs from. Tests pass temp folders; the engine
-/// passes the real ones.
+/// the tool resolver's places a harness runs from and, on Windows, whether the engine's token
+/// is elevated. Tests pass temp folders; the engine passes the real ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub home: PathBuf,
@@ -224,6 +226,8 @@ pub struct Roots {
     pub casks: bool,
     pub npm: Option<NpmInstall>,
     pub places: kernel_processes::finding::Places,
+    #[cfg(windows)]
+    pub elevated: bool,
 }
 
 /// The npm an npm harness installs with and the node entry it runs, found by the one
@@ -647,6 +651,20 @@ fn taken_copy(
     Ok(Some(taken))
 }
 
+/// Refuses every harness command on Windows while the engine's token is elevated, the twin
+/// of the Unix refusal to run an updater as root ([`refused_user`]): once the install is
+/// known and before any tool is checked, so an elevated owner never reads that an update
+/// needs an administrator. Input: the roots. Output: Ok, or `AS_ROOT`.
+fn refused_here(roots: &Roots) -> Result<(), &'static str> {
+    #[cfg(windows)]
+    if let Some(code) = run::refused_token(roots.elevated) {
+        return Err(code);
+    }
+    #[cfg(not(windows))]
+    let _ = roots;
+    Ok(())
+}
+
 /// Builds the one update command of an installed harness: its own updater, or the Homebrew
 /// or npm that installed it, by absolute path. A self-update runs the PATH entry, the
 /// launcher the vendor's updater repoints, never the versioned real file, and only while
@@ -659,7 +677,9 @@ pub fn update_command(
     real: &Path,
     roots: &Roots,
 ) -> Result<Fixed, &'static str> {
-    match found(id, real, roots)? {
+    let found = found(id, real, roots)?;
+    refused_here(roots)?;
+    match found {
         Found::Own(own) => {
             let folder = entry.parent().ok_or(TOOL_MISSING)?;
             if kernel_sandbox::paths::canonical(entry).ok().as_deref() != Some(real) {
@@ -707,7 +727,11 @@ pub fn update_command(
 /// Inputs: the harness id, the real path and the roots. Output: the command, None for an
 /// install that updates itself (it has no check-only command), or the refusal code.
 pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixed>, &'static str> {
-    match found(id, real, roots)? {
+    let found = found(id, real, roots)?;
+    if !matches!(found, Found::Own(_)) {
+        refused_here(roots)?;
+    }
+    match found {
         Found::Own(_) => Ok(None),
         Found::Brew { prefix, brew } => {
             let args = match brew.kind {
@@ -730,6 +754,7 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
 /// An untrusted tool is skipped; an npm harness with no usable Node is refused as needing
 /// Node. Inputs: the harness id and the roots. Output: the command, or the refusal code.
 pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
+    refused_here(roots)?;
     let id = harnesses::canonical(id);
     if id == BUNDLED {
         return Err(WITH_APP);
@@ -1120,6 +1145,7 @@ mod windows_tests {
             casks: false,
             npm: None,
             places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1164,11 +1190,39 @@ mod windows_tests {
             casks: false,
             npm: None,
             places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
         };
         assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
         assert_eq!(
             update_command("codex", &entry, &entry, &roots),
             Err(TOOL_UNSAFE)
+        );
+    }
+
+    /// An elevated engine is refused once the install is known and before any tool is
+    /// checked: an update, a check and an install all answer that the engine runs as an
+    /// administrator, where the same roots unelevated answer as before. The engine's own
+    /// roots carry the token's real elevation.
+    #[test]
+    fn an_elevated_engine_is_refused_before_every_other_answer() {
+        let mut roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: None,
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let real =
+            Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
+        assert_eq!(install_command("codex", &roots), Err(NEEDS_NODE));
+        roots.elevated = true;
+        assert_eq!(update_command("codex", real, real, &roots), Err(AS_ROOT));
+        assert_eq!(check_command("codex", real, &roots), Err(AS_ROOT));
+        assert_eq!(install_command("codex", &roots), Err(AS_ROOT));
+        assert_eq!(
+            Roots::system().elevated,
+            crazyagent_win_sandbox::elevated().unwrap()
         );
     }
 

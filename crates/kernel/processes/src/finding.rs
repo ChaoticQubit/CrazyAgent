@@ -1383,7 +1383,7 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
         ),
         Refusal::Batch => format!(
-            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npm.cmd or npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
         ),
     }
 }
