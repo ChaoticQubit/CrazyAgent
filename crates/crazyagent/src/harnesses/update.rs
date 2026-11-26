@@ -1176,11 +1176,9 @@ mod windows_tests {
     /// Inputs: the path and the icacls arguments.
     /// Output: none.
     fn icacls(path: &Path, change: &[&str]) {
-        let done = std::process::Command::new("icacls")
-            .arg(path)
-            .args(change)
-            .output()
-            .unwrap();
+        let mut command = std::process::Command::new("icacls");
+        command.arg(path).args(change);
+        let done = kernel_processes::spawn_gate::collected(&mut command).unwrap();
         assert!(
             done.status.success(),
             "{}",
@@ -1215,7 +1213,8 @@ mod windows_tests {
         let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
         let modules = folder.path().join("node_modules");
         std::fs::create_dir(&modules).unwrap();
-        let me = std::process::Command::new("whoami").output().unwrap();
+        let me = kernel_processes::spawn_gate::collected(&mut std::process::Command::new("whoami"))
+            .unwrap();
         let me = String::from_utf8(me.stdout).unwrap();
         icacls(&modules, &["/setowner", me.trim()]);
         assert!(owned(&modules));
