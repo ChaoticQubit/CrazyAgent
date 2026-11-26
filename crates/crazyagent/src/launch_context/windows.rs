@@ -59,7 +59,7 @@ pub(super) fn install(
     tools: bool,
     codex: bool,
 ) -> Result<Installed, LaunchError> {
-    use crate::engine::bootstrap::held::{Folder, HeldError, Name, TREE_DEPTH_MAX};
+    use crate::engine::bootstrap::held::{Folder, HeldError, Name, TREE_NAMES_MAX};
     if tools || codex || context.relay.is_some() {
         return Err(failure("launch_context_unavailable"));
     }
@@ -67,8 +67,9 @@ pub(super) fn install(
     let lock = lock(home)?;
     locked_in(&lock, root.file())?;
     let state = Name::constant(STATE);
-    match root.remove_tree_unjudged(&state, TREE_DEPTH_MAX) {
+    match root.remove_tree_unjudged(&state, TREE_NAMES_MAX) {
         Ok(()) | Err(HeldError::Missing) => {}
+        Err(HeldError::Full) => return Err(failure("launch_context_tree_too_large")),
         Err(error) => return Err(held_failure(error)),
     }
     let folder = root.make_dir_inherited(&state).map_err(held_failure)?;
@@ -124,11 +125,11 @@ pub(super) fn install(
 /// before the drop releases the lock; a launch with no held home, or one `keep` left to a
 /// running pane, removes nothing, since Windows never removes by path. Input: the launch.
 pub(super) fn remove_held(installed: &mut Installed) {
-    use crate::engine::bootstrap::held::{Name, TREE_DEPTH_MAX};
+    use crate::engine::bootstrap::held::{Name, TREE_NAMES_MAX};
     if installed.files.take().is_some()
         && let Some(root) = &installed.held
     {
-        let _ = root.remove_tree_unjudged(&Name::constant(STATE), TREE_DEPTH_MAX);
+        let _ = root.remove_tree_unjudged(&Name::constant(STATE), TREE_NAMES_MAX);
     }
 }
 

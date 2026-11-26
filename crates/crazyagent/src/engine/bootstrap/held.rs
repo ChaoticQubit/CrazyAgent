@@ -226,14 +226,14 @@ impl Folder {
         self.open_file(name, OFlags::RDWR | OFlags::NONBLOCK, Mode::empty())
     }
 
-    /// Lists this folder from its held descriptor, never by path, skipping `.` and `..` and
-    /// an entry gone meanwhile; the kind comes from a no-follow look at each name. Input:
-    /// the most entries allowed. Output: the entries, `Full` past the bound, or `Unsafe`
-    /// for an entry that is none of a file, a folder or a link.
-    pub(crate) fn list(&self, limit_count: usize) -> Result<Vec<Child>, HeldError> {
+    /// Lists the first `count` entries of this folder from its held descriptor, never by path,
+    /// skipping `.` and `..` and an entry gone meanwhile; the kind comes from a no-follow look
+    /// at each name. Input: how many entries at most. Output: the entries, or `Unsafe` for an
+    /// entry that is none of a file, a folder or a link.
+    pub(crate) fn list_first(&self, count: usize) -> Result<Vec<Child>, HeldError> {
         use rustix::fs::{AtFlags, Dir, FileType};
         use std::os::unix::ffi::OsStrExt;
-        assert!(limit_count > 0);
+        assert!(count > 0);
         let mut children = Vec::new();
         for entry in Dir::read_from(&self.file).map_err(errno_cause)? {
             let entry = entry.map_err(errno_cause)?;
@@ -253,15 +253,15 @@ impl Folder {
                 FileType::Symlink => Kind::Link,
                 _ => return Err(HeldError::Unsafe),
             };
-            if children.len() == limit_count {
-                return Err(HeldError::Full);
+            if children.len() == count {
+                break;
             }
             children.push(Child {
                 name: name.to_owned(),
                 kind,
             });
         }
-        assert!(children.len() <= limit_count);
+        assert!(children.len() <= count);
         Ok(children)
     }
 
@@ -477,20 +477,20 @@ impl Folder {
         self.private_file(name, false)
     }
 
-    /// Lists this folder by its bound place (rv-sec3 #725 Q2). Before and after the pass
-    /// the held handle must show no reparse point and the same place, so a folder turned
-    /// into a junction meanwhile is `Unsafe` (U4). The kind comes from the find data,
-    /// never followed. Input: the most entries allowed. Output: the entries, or `Full`.
-    pub(crate) fn list(&self, limit_count: usize) -> Result<Vec<Child>, HeldError> {
+    /// Lists the first `count` entries of this folder by its bound place (rv-sec3 #725 Q2).
+    /// Before and after the pass the held handle must show no reparse point and the same
+    /// place, so a folder turned into a junction meanwhile is `Unsafe` (U4). The kind comes
+    /// from the find data, never followed. Input: how many entries at most. Output: them.
+    pub(crate) fn list_first(&self, count: usize) -> Result<Vec<Child>, HeldError> {
         use std::os::windows::fs::MetadataExt;
-        assert!(limit_count > 0);
+        assert!(count > 0);
         self.unmoved()?;
         let mut children = Vec::new();
         for entry in std::fs::read_dir(&self.path).map_err(cause)? {
             let entry = entry.map_err(cause)?;
             let attributes = entry.metadata().map_err(cause)?.file_attributes();
-            if children.len() == limit_count {
-                return Err(HeldError::Full);
+            if children.len() == count {
+                break;
             }
             children.push(Child {
                 name: entry.file_name(),
@@ -498,7 +498,7 @@ impl Folder {
             });
         }
         self.unmoved()?;
-        assert!(children.len() <= limit_count);
+        assert!(children.len() <= count);
         Ok(children)
     }
 
@@ -805,76 +805,99 @@ pub(crate) fn unlock(file: &File) {
     let _ = private::unlock(file);
 }
 
-/// The most entries one folder of a tree removal may list, past which the removal is `Full`.
-const TREE_ENTRIES_MAX: usize = 4096;
+/// The most names one tree removal may act on, each name it removes, finds gone or opens
+/// counted, past which the removal is `Full`.
+pub(crate) const TREE_NAMES_MAX: usize = 262_144;
 
-/// The deepest a tree removal may be asked to go below the folder it removes.
-pub(crate) const TREE_DEPTH_MAX: usize = 16;
-
-/// How many times a tree removal empties a folder that fills again before it gives up with
-/// `InUse`.
-const REFILL_TRIES: usize = 3;
+/// The most entries one listing of a tree removal returns before the removal acts on them.
+const TREE_BATCH: usize = 64;
 
 impl Folder {
-    /// Removes one entry of a caller-judged tree, a folder with all it holds, bottom up
-    /// through held folders, never following a link: a link anywhere goes as itself, and a
-    /// folder that fills again is emptied again a fixed number of times. Inputs: the name and
-    /// the folders deep below it the removal may go. Output: Ok, `Missing`, `Full` past the
-    /// depth or an entry bound, `InUse`, or the error.
-    pub(crate) fn remove_tree_unjudged(&self, name: &Name, depth: usize) -> Result<(), HeldError> {
-        self.assert_caller_judged();
-        assert!(depth <= TREE_DEPTH_MAX, "{depth}");
-        let kind = self.kind_unjudged(name)?;
-        self.remove_child_unjudged(name, kind, depth)
+    /// Lists this folder whole, as [`Folder::list_first`] lists its first entries. Input: the
+    /// most entries allowed. Output: the entries, `Full` past the bound, or the error.
+    pub(crate) fn list(&self, limit_count: usize) -> Result<Vec<Child>, HeldError> {
+        assert!(limit_count > 0 && limit_count < usize::MAX);
+        let children = self.list_first(limit_count + 1)?;
+        if children.len() > limit_count {
+            return Err(HeldError::Full);
+        }
+        Ok(children)
     }
 
-    /// Removes one listed entry of a caller-judged tree: a file or a link at once, a folder
-    /// once emptied, again while it fills meanwhile. Inputs: the name, its kind and the depth
-    /// left below it. Output: Ok, or the error.
-    fn remove_child_unjudged(
+    /// Removes one entry of a caller-judged tree, a folder with all it holds, bottom up
+    /// through held folders kept on a heap stack, never recursing or following a link: a link
+    /// anywhere goes as itself. Each name acted on spends the budget, so a writer that keeps
+    /// refilling the tree ends the walk with `Full`. Inputs: the name and the budget. Output:
+    /// Ok, `Missing`, `Full`, `InUse`, or the error.
+    pub(crate) fn remove_tree_unjudged(
         &self,
         name: &Name,
-        kind: Kind,
-        depth: usize,
+        names_max: usize,
     ) -> Result<(), HeldError> {
+        self.assert_caller_judged();
+        assert!(names_max > 0 && names_max <= TREE_NAMES_MAX, "{names_max}");
+        let kind = self.kind_unjudged(name)?;
         if kind != Kind::Folder {
             return self.remove_entry_unjudged(name, kind);
         }
-        for _ in 0..REFILL_TRIES {
-            let child = self.open_dir_unjudged(name)?;
-            child.empty_unjudged(depth)?;
-            drop(child);
-            match self.remove_entry_unjudged(name, Kind::Folder) {
-                Err(HeldError::Unavailable) if self.refilled_unjudged(name) => {}
-                removed => return removed,
+        let mut left = names_max;
+        let mut stack = vec![(self.open_dir_unjudged(name)?, name.clone())];
+        while let Some((top, _)) = stack.last() {
+            assert!(stack.len() <= names_max + 1);
+            let batch = top.list_first(TREE_BATCH)?;
+            let mut opened = None;
+            for child in &batch {
+                left = left.checked_sub(1).ok_or(HeldError::Full)?;
+                let child_name = Name::checked(&child.name)?;
+                let acted = if child.kind == Kind::Folder {
+                    top.open_dir_unjudged(&child_name)
+                        .map(|folder| opened = Some((folder, child_name)))
+                } else {
+                    top.remove_entry_unjudged(&child_name, child.kind)
+                };
+                match acted {
+                    Ok(()) | Err(HeldError::Missing) => {}
+                    Err(error) => return Err(error),
+                }
+                if opened.is_some() {
+                    break;
+                }
             }
-        }
-        Err(HeldError::InUse)
-    }
-
-    /// Removes everything in this caller-judged folder, each entry as its listed kind, a
-    /// folder only while depth is left. An entry gone meanwhile counts as removed. Input: the
-    /// depth left below this folder. Output: Ok, `Full`, or the error.
-    fn empty_unjudged(&self, depth: usize) -> Result<(), HeldError> {
-        for child in self.list(TREE_ENTRIES_MAX)? {
-            let name = Name::checked(&child.name)?;
-            if child.kind == Kind::Folder && depth == 0 {
-                return Err(HeldError::Full);
-            }
-            match self.remove_child_unjudged(&name, child.kind, depth.saturating_sub(1)) {
-                Ok(()) | Err(HeldError::Missing) => {}
-                Err(error) => return Err(error),
+            if let Some(frame) = opened {
+                stack.push(frame);
+            } else if batch.is_empty() {
+                self.remove_emptied_unjudged(&mut stack, &mut left)?;
             }
         }
         Ok(())
     }
 
-    /// Whether a folder whose removal failed holds entries again. Input: its name. Output:
-    /// true when it lists one or more entries.
-    fn refilled_unjudged(&self, name: &Name) -> bool {
-        match self.open_dir_unjudged(name).and_then(|child| child.list(1)) {
-            Ok(children) => !children.is_empty(),
-            Err(error) => error == HeldError::Full,
+    /// Removes the emptied folder on top of a tree removal's stack from the folder below it,
+    /// or this folder for the first; a removal refused while it filled again puts it back
+    /// for one more name of the budget. Inputs: the stack and the names left. Output: Ok,
+    /// `Full`, or the error.
+    fn remove_emptied_unjudged(
+        &self,
+        stack: &mut Vec<(Folder, Name)>,
+        left: &mut usize,
+    ) -> Result<(), HeldError> {
+        let (folder, name) = stack
+            .pop()
+            .expect("a tree removal pops only a frame it holds");
+        drop(folder);
+        let parent = stack.last().map_or(self, |(parent, _)| parent);
+        match parent.remove_entry_unjudged(&name, Kind::Folder) {
+            Ok(()) | Err(HeldError::Missing) => Ok(()),
+            Err(HeldError::Unavailable) => {
+                let reopened = parent.open_dir_unjudged(&name)?;
+                if reopened.list_first(1)?.is_empty() {
+                    return Err(HeldError::Unavailable);
+                }
+                *left = left.checked_sub(1).ok_or(HeldError::Full)?;
+                stack.push((reopened, name));
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
     }
 }

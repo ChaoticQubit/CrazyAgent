@@ -1,4 +1,4 @@
-use super::{Child, Folder, HeldError, Judged, Kind, Name, TREE_DEPTH_MAX, lock, unlock};
+use super::{Child, Folder, HeldError, Judged, Kind, Name, TREE_NAMES_MAX, lock, unlock};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -850,7 +850,7 @@ fn the_unjudged_and_inherited_calls_trip_on_a_private_tree() {
             let _ = folder.open_dir_unjudged(&name("kept"));
         }),
         ("remove_tree_unjudged", &|folder| {
-            let _ = folder.remove_tree_unjudged(&name("kept"), 1);
+            let _ = folder.remove_tree_unjudged(&name("kept"), TREE_NAMES_MAX);
         }),
     ];
     for (call, run) in calls {
@@ -937,39 +937,44 @@ fn a_tree_removal_never_follows_a_link_and_keeps_what_it_names() {
     link_folder(&tree.join("one").join("out"), &outside);
     link_folder(&root.join("linked"), &outside);
     let held = Folder::root_judged_by(&root, judge_any).unwrap();
-    held.remove_tree_unjudged(&name("skills"), 3).unwrap();
+    held.remove_tree_unjudged(&name("skills"), TREE_NAMES_MAX)
+        .unwrap();
     assert!(std::fs::symlink_metadata(&tree).is_err());
-    held.remove_tree_unjudged(&name("linked"), 3).unwrap();
+    held.remove_tree_unjudged(&name("linked"), TREE_NAMES_MAX)
+        .unwrap();
     assert!(std::fs::symlink_metadata(root.join("linked")).is_err());
     assert_eq!(
         std::fs::read_to_string(outside.join("kept.txt")).unwrap(),
         "kept"
     );
     assert_eq!(
-        held.remove_tree_unjudged(&name("skills"), 3).err(),
+        held.remove_tree_unjudged(&name("skills"), TREE_NAMES_MAX)
+            .err(),
         Some(HeldError::Missing)
     );
     assert!(std::fs::read_dir(&root).unwrap().next().is_none());
 }
 
-/// A tree removal is bounded by its depth: folders nested past it are `Full`, and the
-/// deepest file stays, so a tree an agent nests without end never runs the walk on.
+/// A tree removal is bounded by its name budget, each name below the entry it removes
+/// counted: a tree of four names refuses a budget of three with `Full` and keeps its deepest
+/// file, so a tree an agent grows without end never runs the walk on, and a budget of four
+/// takes it whole.
 #[test]
-fn a_tree_removal_stops_at_its_depth_bound() {
+fn a_tree_removal_stops_at_its_name_budget() {
     let (_temp, root) = caller_root();
     let deep = root.join("tree").join("1").join("2").join("3");
     std::fs::create_dir_all(&deep).unwrap();
     std::fs::write(deep.join("deep.md"), "deep").unwrap();
     let held = Folder::root_judged_by(&root, judge_any).unwrap();
     assert_eq!(
-        held.remove_tree_unjudged(&name("tree"), 1).err(),
+        held.remove_tree_unjudged(&name("tree"), 3).err(),
         Some(HeldError::Full)
     );
     assert_eq!(
         std::fs::read_to_string(deep.join("deep.md")).unwrap(),
         "deep"
     );
-    held.remove_tree_unjudged(&name("tree"), 3).unwrap();
+    held.remove_tree_unjudged(&name("tree"), 4).unwrap();
     assert!(!root.join("tree").exists());
 }
 
@@ -990,7 +995,7 @@ fn a_tree_removal_takes_a_chain_deeper_than_sixteen_folders() {
     let held = Folder::root_judged_by(&root, judge_any).unwrap();
     for depth in [16, 17] {
         chain(&root.join("tree"), depth, "d");
-        held.remove_tree_unjudged(&name("tree"), TREE_DEPTH_MAX)
+        held.remove_tree_unjudged(&name("tree"), TREE_NAMES_MAX)
             .unwrap_or_else(|error| panic!("{depth}: {error:?}"));
         assert!(!root.join("tree").exists(), "{depth}");
     }
@@ -1003,7 +1008,7 @@ fn a_tree_removal_takes_a_chain_past_the_long_path_limit() {
     let bottom = chain(&root.join("tree"), 70, "folder01");
     assert!(bottom.as_os_str().len() > 260);
     let held = Folder::root_judged_by(&root, judge_any).unwrap();
-    held.remove_tree_unjudged(&name("tree"), TREE_DEPTH_MAX)
+    held.remove_tree_unjudged(&name("tree"), TREE_NAMES_MAX)
         .unwrap();
     assert!(!root.join("tree").exists());
 }
@@ -1018,7 +1023,7 @@ fn a_tree_removal_takes_a_folder_wider_than_one_listing() {
         std::fs::write(wide.join(format!("{index}.md")), "w").unwrap();
     }
     let held = Folder::root_judged_by(&root, judge_any).unwrap();
-    held.remove_tree_unjudged(&name("tree"), TREE_DEPTH_MAX)
+    held.remove_tree_unjudged(&name("tree"), TREE_NAMES_MAX)
         .unwrap();
     assert!(!root.join("tree").exists());
 }
@@ -1066,12 +1071,14 @@ fn a_tree_removal_with_a_held_file_is_in_use_and_keeps_it() {
         .unwrap();
     let held = Folder::root_judged_by(&root, judge_any).unwrap();
     assert_eq!(
-        held.remove_tree_unjudged(&name("tree"), 2).err(),
+        held.remove_tree_unjudged(&name("tree"), TREE_NAMES_MAX)
+            .err(),
         Some(HeldError::InUse)
     );
     assert!(root.join("tree").join("sub").join("busy.md").is_file());
     drop(busy);
-    held.remove_tree_unjudged(&name("tree"), 2).unwrap();
+    held.remove_tree_unjudged(&name("tree"), TREE_NAMES_MAX)
+        .unwrap();
     assert!(!root.join("tree").exists());
 }
 
