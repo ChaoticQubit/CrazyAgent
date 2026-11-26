@@ -1346,6 +1346,12 @@ mod windows_links;
 /// references. Inputs: the user's stored PATH, restored after each row. Output: none.
 mod windows_user_path;
 
+/// The socket check rows: each path shape under the `/var` link names the part it names now,
+/// the folder named is the one nearest the socket, and only the socket's and its folder's
+/// write bits are set aside. Inputs: real folders, links and sockets. Output: none.
+#[cfg(target_os = "macos")]
+mod socket_check;
+
 #[test]
 fn service_labels_are_unchanged() {
     assert_eq!(LAUNCHD_LABEL, "dev.crazyagent.engine");
