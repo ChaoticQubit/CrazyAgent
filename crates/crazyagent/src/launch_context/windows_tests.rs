@@ -85,7 +85,7 @@ fn assert_held(home: &Path) {
 }
 
 /// A launch context with nothing to install, as the Unix rows build one. Output: it.
-fn context() -> AgentContext {
+pub(crate) fn context() -> AgentContext {
     AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -298,7 +298,7 @@ fn a_windows_launch_lock_its_path_reached_outside_the_held_home_is_refused() {
 }
 
 /// Makes a junction at `link` that names `target`. Inputs: both absolute paths.
-fn junction(link: &Path, target: &Path) {
+pub(crate) fn junction(link: &Path, target: &Path) {
     run(
         "cmd.exe",
         &[
@@ -523,4 +523,59 @@ fn the_held_home_judge_refuses_a_low_or_open_inherited_label() {
     assert!(windows::judged_home(&labelled(MEDIUM, NO_WRITE_UP), &user));
     assert!(!windows::judged_home(&labelled(LOW, NO_WRITE_UP), &user));
     assert!(!windows::judged_home(&labelled(MEDIUM, 0), &user));
+}
+
+/// A junction above the home repointed after a Claude Code install leaves the launch's
+/// arguments naming the files in the home it held, by its final path, never the folder the
+/// junction names now, whose own launch folder keeps every byte.
+#[test]
+fn a_windows_install_names_its_files_in_the_held_home_after_a_junction_above_is_repointed() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(&base, "second");
+    let other = private_home(&second, "home");
+    std::fs::create_dir(other.join(STATE)).unwrap();
+    std::fs::write(other.join(STATE).join("mcp.json"), "other").unwrap();
+    let link = base.join("link");
+    junction(&link, &first);
+    let installed = context()
+        .install("claude-code", &link.join("home"), false)
+        .unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    let state = held_home.join(STATE);
+    assert_eq!(
+        installed.arguments(),
+        [
+            OsString::from("--mcp-config"),
+            state.join("mcp.json").into_os_string(),
+            OsString::from("--append-system-prompt-file"),
+            state.join("instructions.md").into_os_string(),
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("mcp.json")).unwrap(),
+        claude_config(&[]).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join(STATE).join("mcp.json")).unwrap(),
+        "other"
+    );
+    drop(installed);
+}
+
+/// A folder above the home's parent cannot be moved while its launch holds the home, so no
+/// junction can take its place to name another home in the held one's spelling; once the
+/// launch drops, it moves.
+#[test]
+fn a_windows_folder_above_the_homes_parent_cannot_be_moved_while_its_launch_holds_it() {
+    let (_temp, base) = base();
+    let grand = private_home(&base, "grand");
+    let parent = private_home(&grand, "parent");
+    let home = private_home(&parent, "home");
+    let installed = context().install("claude-code", &home, false).unwrap();
+    assert!(std::fs::rename(&grand, base.join("moved")).is_err());
+    drop(installed);
+    std::fs::rename(&grand, base.join("moved")).unwrap();
 }
