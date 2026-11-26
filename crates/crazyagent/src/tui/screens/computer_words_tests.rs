@@ -6,7 +6,7 @@ use super::settings_accounts::plain;
 use super::settings_add_account::{url_problem, words::CHECK_LINE};
 use super::settings_harnesses::{SUBTITLE, path_copy, update_copy};
 use super::settings_plugins::plugin_plain;
-use super::{THIS_COMPUTER, desktop_literal};
+use super::{THIS_COMPUTER, desktop_entry, desktop_literal};
 use crate::accounts::Provider;
 use crate::harnesses::finding;
 
@@ -148,4 +148,17 @@ fn a_desktop_literal_fills_in_the_computer_only_inside_backticks() {
     );
     assert_eq!(desktop_literal("on this Mac."), None);
     assert_eq!(desktop_literal("\"half`"), None);
+}
+
+/// A desktop entry is the shown text of the line that holds its key; a key whose line holds
+/// no quoted literal, or no such line, reads as none.
+#[test]
+fn a_desktop_entry_is_the_shown_text_of_its_key_line() {
+    let source =
+        "const X = {\n  a_key: `on ${thisComputer()}.`,\n  b_key: \"plain\",\n  c_key: bare,\n};";
+    let filled = format!("on {THIS_COMPUTER}.");
+    assert_eq!(desktop_entry(source, "a_key"), Some(filled));
+    assert_eq!(desktop_entry(source, "b_key").as_deref(), Some("plain"));
+    assert_eq!(desktop_entry(source, "c_key"), None);
+    assert_eq!(desktop_entry(source, "a"), None);
 }
