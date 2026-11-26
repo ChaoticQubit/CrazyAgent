@@ -1,0 +1,151 @@
+name: Real model servers
+description: Installs the pinned Ollama and llama.cpp bottles and model offline on a macos-15 runner, verified by sha256 and cached by this file, starts Ollama, a keyless llama-server and a keyed one on loopback, and names their addresses in CRAZYAGENT_TEST_OLLAMA_URL, CRAZYAGENT_TEST_LLAMA_URL and CRAZYAGENT_TEST_LLAMA_KEYED_URL. Any failure reads as server unavailable.
+runs:
+  using: composite
+  steps:
+    - name: Refuse a runner the pins do not fit
+      shell: bash
+      run: |
+        set -euo pipefail
+        [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::server unavailable: the model servers run only on GitHub-hosted runners"; exit 1; }
+        if [ "$RUNNER_OS" != macOS ] || [ "$(uname -m)" != arm64 ]; then echo "::error::server unavailable: the pinned bottles are arm64_sequoia"; exit 1; fi
+    - name: Restore the downloads
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ~/model-servers-cache
+        key: model-servers-${{ hashFiles('.github/actions/model-servers/action.yml') }}
+    - name: Download, verify, install and start the servers
+      shell: bash
+      env:
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        HOMEBREW_NO_ENV_HINTS: "1"
+        BOTTLES: |-
+          ca-certificates|2026-11-05|all|0|8a5a35e1a3223e6bc6ca7c853e0ac3d2568de2cc329b61688682bdf57165dab9
+          mpdecimal|4.0.1|arm64_sequoia|1|9e2dc44e47e91465c3cefa8969baa6af53a1ec339eda8443b18a30786147203e
+          openssl@4|4.1.0|arm64_sequoia|0|6fcbad388ef13f6f9481e91676e2ec1b49f0a3dbd473e838297a3c8850283978
+          readline|8.3.6|arm64_sequoia|0|461763fa21c050a59e5bbceedf67dcacf24e4aa4604490d73f0c9fa0f40e7fe5
+          sqlite|3.54.1|arm64_sequoia|0|38bdb30f8e13a07cdcd86233de9ab4d8db29f2b81cb08c15c202ecea6835ab2f
+          xz|5.8.4|arm64_sequoia|0|c2724c0db0398134694b8366d30d14f4de376115fb54c559c331d5fd0474af76
+          lz4|1.11.1|arm64_sequoia|0|69c0c38e660f81b36bbd165a77d7619d2b8b6b175bf670a4840aaaaddd86a520
+          zstd|1.6.0|arm64_sequoia|0|7c49194de54641895c5c965446472552d4619e30170eb8fd9d10eef223919730
+          python@3.15|3.15.2|arm64_sequoia|0|3b82ce3572a5aa75a3c0c33da828c1ede71812d7078b9752ed2224c8b02fa871
+          mlx|0.32.4|arm64_sequoia|0|6539ae6fa0ca10467bf410c065083646d143584fd2f7ab750054488a7a6ff4e4
+          mlx-c|0.8.0|arm64_sequoia|0|ffcb6877cde6ed171eed91b79cda3ec855849c3ce434602b811c419fca6715d4
+          ollama|0.40.18|arm64_sequoia|0|a09ff62d553e85771014c208a50882fbfbfece8c4a9f88efa651a61fdcbbac59
+          libomp|23.1.6|arm64_sequoia|0|d8d154f796a93a5fdca8470e254b402b29d6a66bbaf25bdc5e74ccd05ce09ffd
+          ggml|1.0.0|arm64_sequoia|0|d554c59c2a99d5b50010f7b4ba34dd0934b229768f24011975e8dff9bca7af3b
+          llama.cpp|1.0.0|arm64_sequoia|0|6c2507c840fc8c0f92c87827e9512b087a75227d375114460bee275b22a81730
+        GGUF_REPO: QuantFactory/SmolLM2-135M-Instruct-GGUF
+        GGUF_REVISION: 476854d00ede130660aba430d15f9347ad2e7d0e
+        GGUF_FILE: SmolLM2-135M-Instruct.Q2_K.gguf
+        GGUF_SHA256: 55aa88ddac43adce6af0e9be8d6cdff2337a3835cd9b50bbcd7a894eb66dfc75
+        OLLAMA_MODEL: smollm2
+        OLLAMA_TAG: 135m-instruct-q2_K
+        OLLAMA_MANIFEST_SHA256: 888e2e49aff1c1ff0c073a0c46afa26f54f4fad02f31bb5ad911b0124830852b
+        OLLAMA_SMALL_BLOBS: >-
+          e9b0cf58216b9dc298a403b296b0b7bdcf3606a3d2aaa1a64bc00fbc62e6348d
+          fbacade46b4da804e0398c339c64b944d4b954452adf77cf050b49420116129e
+          d502d55c1d609104ae6127aee92eb940e51e15c56dfb26dbd067e2771ee746f1
+          58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd
+          f02dd72bb2423204352eabc5637b44d79d17f109fdb510a7c51455892aa2d216
+        SERVED_MODEL: snapshot-model
+        OLLAMA_PORT: "11500"
+        LLAMA_PORT: "11501"
+        LLAMA_KEYED_PORT: "11502"
+        DUMMY_KEY: snapshot-dummy-provider-key-0001
+      run: |
+        set -uo pipefail
+        fail() { echo "server unavailable: $1 rc $2"; echo "::error::server unavailable: $1 rc $2"; exit 1; }
+        sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+        echo "cache-hit ${CACHE_HIT:-false}"
+        cache="$HOME/model-servers-cache"
+        mkdir -p "$cache/bottles" "$cache/ollama" "$cache/gguf" || fail "cache folders" $?
+        bottle_file() { local suffix=""; [ "$4" = 0 ] || suffix=".$4"; echo "$cache/bottles/$1--$2.$3.bottle${suffix}.tar.gz"; }
+        fetch() {
+          [ -f "$2" ] && return 0
+          curl -fsSL --retry 3 "${@:3}" -o "$2.part" "$1"
+          local rc=$?
+          [ "$rc" -eq 0 ] || fail "download $(basename "$2")" "$rc"
+          mv "$2.part" "$2" || fail "keep $(basename "$2")" $?
+        }
+        while IFS='|' read -r name version tag rebuild pin; do
+          [ -n "$name" ] || continue
+          fetch "https://ghcr.io/v2/homebrew/core/${name//@//}/blobs/sha256:${pin}" "$(bottle_file "$name" "$version" "$tag" "$rebuild")" -H "Authorization: Bearer QQ=="
+        done <<< "$BOTTLES"
+        gguf="$cache/gguf/$GGUF_FILE"
+        fetch "https://huggingface.co/${GGUF_REPO}/resolve/${GGUF_REVISION}/${GGUF_FILE}" "$gguf"
+        for blob in $OLLAMA_SMALL_BLOBS; do
+          fetch "https://registry.ollama.ai/v2/library/${OLLAMA_MODEL}/blobs/sha256:${blob}" "$cache/ollama/sha256-$blob"
+        done
+        manifest="$cache/ollama/manifest-${OLLAMA_TAG}"
+        fetch "https://registry.ollama.ai/v2/library/${OLLAMA_MODEL}/manifests/${OLLAMA_TAG}" "$manifest" -H "Accept: application/vnd.docker.distribution.manifest.v2+json"
+
+        while IFS='|' read -r name version tag rebuild pin; do
+          [ -n "$name" ] || continue
+          file=$(bottle_file "$name" "$version" "$tag" "$rebuild")
+          got=$(sha "$file")
+          [ "$got" = "$pin" ] || { rm -f "$file"; fail "verify bottle $name got $got" 1; }
+        done <<< "$BOTTLES"
+        got=$(sha "$gguf")
+        [ "$got" = "$GGUF_SHA256" ] || { rm -f "$gguf"; fail "verify gguf got $got" 1; }
+        for blob in $OLLAMA_SMALL_BLOBS; do
+          got=$(sha "$cache/ollama/sha256-$blob")
+          [ "$got" = "$blob" ] || { rm -f "$cache/ollama/sha256-$blob"; fail "verify ollama blob $blob got $got" 1; }
+        done
+        got=$(sha "$manifest")
+        [ "$got" = "$OLLAMA_MANIFEST_SHA256" ] || { rm -f "$manifest"; fail "verify ollama manifest got $got" 1; }
+        named=$(jq -r '.config.digest, .layers[].digest' "$manifest" | sed 's/^sha256://' | sort | tr '\n' ' ')
+        pinned=$(printf '%s %s' "$OLLAMA_SMALL_BLOBS" "$GGUF_SHA256" | tr ' ' '\n' | sort | tr '\n' ' ')
+        [ "$named" = "$pinned" ] || fail "ollama manifest names other blobs: $named" 1
+
+        while IFS='|' read -r name version tag rebuild pin; do
+          [ -n "$name" ] || continue
+          have=$(brew list --versions "$name" 2>/dev/null || true)
+          case " $have " in
+            *" $version "*) ;;
+            *)
+              brew install "$(bottle_file "$name" "$version" "$tag" "$rebuild")"
+              rc=$?
+              [ "$rc" -eq 0 ] || fail "brew install $name" "$rc"
+              ;;
+          esac
+          have=$(brew list --versions "$name" 2>/dev/null || true)
+          case " $have " in
+            *" $version "*) echo "installed $have" ;;
+            *) fail "installed version of $name is ${have:-absent}, pin $version" 1 ;;
+          esac
+        done <<< "$BOTTLES"
+
+        models="$RUNNER_TEMP/ollama-models"
+        served="$models/manifests/registry.ollama.ai/library/$SERVED_MODEL"
+        mkdir -p "$models/blobs" "$served" || fail "ollama folders" $?
+        cp "$gguf" "$models/blobs/sha256-$GGUF_SHA256" || fail "place ollama model blob" $?
+        for blob in $OLLAMA_SMALL_BLOBS; do
+          cp "$cache/ollama/sha256-$blob" "$models/blobs/sha256-$blob" || fail "place ollama blob $blob" $?
+        done
+        cp "$manifest" "$served/latest" || fail "place ollama manifest" $?
+
+        ready() {
+          for _ in $(seq 1 90); do
+            curl -fsS --max-time 5 "$2" > /dev/null 2>&1 && { echo "ready $1"; return 0; }
+            sleep 1
+          done
+          tail -n 40 "$RUNNER_TEMP/$1.log"
+          fail "start $1" 1
+        }
+        OLLAMA_MODELS="$models" OLLAMA_HOST="127.0.0.1:$OLLAMA_PORT" nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
+        ready ollama "http://127.0.0.1:$OLLAMA_PORT/api/version"
+        listed=$(curl -fsS --max-time 20 "http://127.0.0.1:$OLLAMA_PORT/api/tags" | jq -r '[.models[].name] | join(" ")')
+        [ "$listed" = "$SERVED_MODEL:latest" ] || fail "ollama lists '$listed', not $SERVED_MODEL:latest alone" 1
+        nohup llama-server -m "$gguf" --host 127.0.0.1 --port "$LLAMA_PORT" --alias "$SERVED_MODEL" > "$RUNNER_TEMP/llama.log" 2>&1 &
+        ready llama "http://127.0.0.1:$LLAMA_PORT/health"
+        nohup llama-server -m "$gguf" --host 127.0.0.1 --port "$LLAMA_KEYED_PORT" --alias "$SERVED_MODEL" --api-key "$DUMMY_KEY" > "$RUNNER_TEMP/llama-keyed.log" 2>&1 &
+        ready llama-keyed "http://127.0.0.1:$LLAMA_KEYED_PORT/health"
+        {
+          echo "CRAZYAGENT_TEST_OLLAMA_URL=http://127.0.0.1:$OLLAMA_PORT"
+          echo "CRAZYAGENT_TEST_LLAMA_URL=http://127.0.0.1:$LLAMA_PORT"
+          echo "CRAZYAGENT_TEST_LLAMA_KEYED_URL=http://127.0.0.1:$LLAMA_KEYED_PORT"
+        } >> "$GITHUB_ENV"
