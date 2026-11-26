@@ -90,7 +90,7 @@ pub(super) fn install(
             path.join("instructions.md").into_os_string(),
         ],
         files: Some(InstalledFiles {
-            home: home.to_path_buf(),
+            home: place.to_path_buf(),
             codex: false,
             rendered: Vec::new(),
             listed: false,
