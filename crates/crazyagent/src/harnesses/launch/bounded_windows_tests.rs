@@ -623,7 +623,10 @@ fn a_windows_lone_launch_builds_on_the_home_its_lock_holds() {
         let launch = LaunchBoundary::Installed(boundary);
         let linked_request = request(&case, harness, launch, &case.home, false);
         assert_eq!(
-            lone_command(&linked_request).err().map(|error| error.0),
+            lone_command(&linked_request)
+                .err()
+                .map(|error| error.0)
+                .as_deref(),
             Some("launch_environment_refused"),
             "{harness}"
         );
