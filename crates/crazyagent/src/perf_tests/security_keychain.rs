@@ -4,12 +4,16 @@ use crate::credentials::{Keychain, SecretString, Store, reference};
 use crate::engine::keychain::{agent_keychain_name, forget_record};
 use crate::perf_kit::{Row, SAMPLES, time};
 use std::hint::black_box;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const FAST: usize = 1000;
 const FILES: usize = 10;
 const ONE: usize = 1;
 const ONE_SHOT: usize = SAMPLES / 10 + SAMPLES;
+const SECURITY: &str = "/usr/bin/security";
 const NAMESPACE: &str = "dev.crazyagent.e0123456789ab";
 const SERVICE: &str = "dev.crazyagent.e0123456789ab.perf";
 const AGENT_KEYCHAIN: &str = "agent-0123456789abcdef.keychain-db";
@@ -22,6 +26,43 @@ fn row(name: &'static str, batch: usize) -> Row {
         name,
         batch,
     }
+}
+
+/// Runs one bare `security -h`, which reads no keychain, the way the store runs `security`:
+/// the spawn gate, a reader thread on its output of at most 4096 bytes and a `try_wait` poll
+/// every 10 ms, so its row times the spawn, reader and poll alone. Panics when the child
+/// fails or outlives its 10 s deadline.
+fn security_spawn() {
+    let mut command = Command::new(SECURITY);
+    command
+        .arg("-h")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout.take(4097).read_to_end(&mut bytes);
+        (read, bytes)
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "security -h outlived its deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let (read, bytes) = reader.join().unwrap();
+    assert!(status.success() && read.is_ok(), "security -h failed");
+    black_box(bytes);
 }
 
 /// Times the 2.4.4 path of every 2.5 macOS keychain row, under the 2.5 row names, on the
@@ -48,6 +89,7 @@ fn security_keychain_calls() {
     );
     assert!(agent_keychain_name(AGENT_KEYCHAIN) && owned_namespace(NAMESPACE).is_ok());
     forget_record(&agent_home, agent.path(), SERVICE).unwrap();
+    security_spawn();
     time(&row("keychain.agent_keychain_name", FAST), SAMPLES, || {
         black_box(agent_keychain_name(black_box(AGENT_KEYCHAIN)));
     });
@@ -60,6 +102,11 @@ fn security_keychain_calls() {
     time(&row("store.macos.Keychain.path", FAST), SAMPLES, || {
         black_box(black_box(&store).keychain_text());
     });
+    time(
+        &row("store.macos.security_spawn", ONE),
+        SAMPLES,
+        security_spawn,
+    );
     time(&row("store.macos.Keychain.in_home", ONE), SAMPLES, || {
         black_box(Keychain::new(black_box(NAMESPACE)).unwrap());
     });
