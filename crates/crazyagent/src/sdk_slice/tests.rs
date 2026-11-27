@@ -487,17 +487,19 @@ fn compiled(db: &Connection) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
     count
 }
 
-/// Runs two saves, each in its own committed request, and counts what SQLite compiled
-/// during each save alone, not during the read before it. Inputs: the read, given the
+/// Runs three saves on a fresh store, each in its own committed request, and counts what
+/// SQLite compiled during each save alone, not during the read before it. The first save
+/// creates the log table, and that schema change expires the statements compiled before it,
+/// so the third save is the first that may compile nothing. Inputs: the read, given the
 /// transaction, and the save, given the transaction, its revision and what was read.
-/// Output: the two counts.
+/// Output: the three counts.
 fn compiled_per_save<T>(
     read: impl Fn(&rusqlite::Transaction<'_>) -> T,
     save: impl Fn(&rusqlite::Transaction<'_>, u64, T) -> Outcome,
-) -> [usize; 2] {
+) -> [usize; 3] {
     let mut db = engine_store();
     let count = compiled(&db);
-    let mut counts = [0_usize; 2];
+    let mut counts = [0_usize; 3];
     for slot in &mut counts {
         let tx = db.transaction().unwrap();
         let revision = u64::try_from(moved(&tx).0).unwrap();
@@ -511,7 +513,7 @@ fn compiled_per_save<T>(
 }
 
 #[test]
-fn a_second_quit_save_compiles_no_sql() {
+fn a_later_quit_save_compiles_no_sql() {
     let refusals = EngineRefusals::new();
     let counts = compiled_per_save(
         |_| (),
@@ -530,11 +532,11 @@ fn a_second_quit_save_compiles_no_sql() {
     );
 
     assert!(counts[0] > 0, "the first save compiles its statements");
-    assert_eq!(counts[1], 0, "the second quit save compiled SQL again");
+    assert_eq!(counts[2], 0, "the third quit save compiled SQL again");
 }
 
 #[test]
-fn a_second_sandbox_save_compiles_no_sql() {
+fn a_later_sandbox_save_compiles_no_sql() {
     let counts = compiled_per_save(
         |tx| match crate::sandbox_settings::read(tx).unwrap() {
             crate::engine::owner::OwnerData::SandboxSettings { settings, version } => {
@@ -546,5 +548,5 @@ fn a_second_sandbox_save_compiles_no_sql() {
     );
 
     assert!(counts[0] > 0, "the first save compiles its statements");
-    assert_eq!(counts[1], 0, "the second sandbox save compiled SQL again");
+    assert_eq!(counts[2], 0, "the third sandbox save compiled SQL again");
 }
