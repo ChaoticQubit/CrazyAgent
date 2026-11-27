@@ -603,7 +603,7 @@ impl Root {
 
 struct Slot {
     registration: Registration,
-    token: OwnerToken,
+    token: Box<OwnerToken>,
     file: Option<File>,
     identity: Identity,
     closed: u64,
@@ -1199,11 +1199,11 @@ impl Authority {
         let result = (|| {
             slot.registration.active = false;
             if registration.active {
-                let mut token = owner_token();
-                getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
+                let mut token = Box::new(owner_token());
+                getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 let file = slot.held()?;
                 self.root.verify_key(KEYS[i], file, slot.identity)?;
-                file.write_all_at(&*token, 0).map_err(io_error)?;
+                file.write_all_at(&**token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
                 self.root.verify_key(KEYS[i], file, slot.identity)?;
                 slot.token = token;
@@ -1650,9 +1650,9 @@ impl OwnerServer {
                     Identity::of_file(&file)?,
                     file.try_clone().map_err(io_error)?,
                 ));
-                let mut token = owner_token();
-                getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
-                file.write_all_at(&*token, 0).map_err(io_error)?;
+                let mut token = Box::new(owner_token());
+                getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
+                file.write_all_at(&**token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
                 let identity = Identity::of_file(&file)?;
                 root.verify_key(KEYS[i], &file, identity)?;
