@@ -474,6 +474,10 @@ fn a_put_back_holds_engine_db_alone_from_its_copy_to_its_end() {
     assert_eq!(read(&path), (vec!["two".to_owned()], 12));
 }
 
+/// One way to damage engine.db in a test: its name and the step that damages the file at
+/// the path.
+type Damage<'a> = (&'a str, &'a dyn Fn(&Path));
+
 #[test]
 fn a_put_back_keeps_damaged_live_data_byte_for_byte() {
     let cut = |path: &Path| {
@@ -483,7 +487,7 @@ fn a_put_back_keeps_damaged_live_data_byte_for_byte() {
         let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         file.set_len((bytes.len() - page / 2) as u64).unwrap();
     };
-    let damages: [(&str, &dyn Fn(&Path)); 2] = [("a b-tree page", &damage), ("a cut page", &cut)];
+    let damages: [Damage<'_>; 2] = [("a b-tree page", &damage), ("a cut page", &cut)];
     for (kind, damaged) in damages {
         let (_root, path, _kept) = broken(true);
         damaged(&path);
