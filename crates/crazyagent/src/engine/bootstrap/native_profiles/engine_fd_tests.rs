@@ -136,3 +136,18 @@ fn a_refused_capture_leaves_an_idle_wal_engine_db_held() {
         "another process took engine.db after a refused capture"
     );
 }
+
+#[test]
+fn a_held_engine_db_is_closed_on_exec() {
+    let wal = idle_wal();
+    let Ok(custody) =
+        NativeProfileCustody::capture(&wal.database, &std::fs::metadata(&wal.database).unwrap())
+    else {
+        panic!("custody over a private engine.db");
+    };
+    let flags = rustix::io::fcntl_getfd(&*custody.database).unwrap();
+    assert!(
+        flags.contains(rustix::io::FdFlags::CLOEXEC),
+        "a held engine.db descriptor would pass into a child process"
+    );
+}
