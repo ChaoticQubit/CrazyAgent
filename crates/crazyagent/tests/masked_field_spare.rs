@@ -1,3 +1,5 @@
+mod freed_bytes_support;
+
 use crazyagent::tui::keys::Key;
 use crazyagent::tui::widgets::TextField;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -58,10 +60,14 @@ unsafe impl GlobalAlloc for FreeScan {
         unsafe { System.alloc_zeroed(layout) }
     }
 
+    /// Checks a freed block through a [`freed_bytes_support::Copied`] copy, so the scan reads
+    /// no uninitialized byte, then frees it. Inputs: the block and its layout. Safety: the
+    /// block is valid for reads of the layout's size, as `GlobalAlloc::dealloc` guarantees.
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
         let wide = layout.align() == 4 && layout.size().is_multiple_of(4);
         if WATCHING.load(Ordering::SeqCst) && wide {
-            let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
+            let copied = unsafe { freed_bytes_support::Copied::new(block, layout.size()) };
+            let bytes = copied.bytes();
             if let Some(mark) = mark()
                 && holds_wide(bytes, mark)
             {
@@ -69,7 +75,8 @@ unsafe impl GlobalAlloc for FreeScan {
             }
         }
         if WATCHING.load(Ordering::SeqCst) && layout.align() == 1 {
-            let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
+            let copied = unsafe { freed_bytes_support::Copied::new(block, layout.size()) };
+            let bytes = copied.bytes();
             if let Some(mark) = mark()
                 && bytes.windows(mark.len()).any(|window| window == mark)
             {

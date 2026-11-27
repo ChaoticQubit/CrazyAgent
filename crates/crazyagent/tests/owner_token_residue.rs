@@ -36,9 +36,13 @@ unsafe impl GlobalAlloc for FreeScan {
         unsafe { System.alloc(layout) }
     }
 
+    /// Checks a freed block through a [`freed_bytes_support::Copied`] copy, so the scan reads
+    /// no uninitialized byte, then frees it. Inputs: the block and its layout. Safety: the
+    /// block is valid for reads of the layout's size, as `GlobalAlloc::dealloc` guarantees.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if WATCHING.load(Ordering::SeqCst) && layout.size() >= TOKEN_BYTES {
-            let block = unsafe { std::slice::from_raw_parts(ptr, layout.size()) };
+            let copied = unsafe { freed_bytes_support::Copied::new(ptr, layout.size()) };
+            let block = copied.bytes();
             if holds_watched(block) {
                 FREED_WITH_TOKEN.fetch_add(1, Ordering::SeqCst);
             }

@@ -1,3 +1,5 @@
+mod freed_bytes_support;
+
 use crazyagent::plugins::SecretValue;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -20,6 +22,9 @@ unsafe impl GlobalAlloc for FreeWatch {
         unsafe { System.alloc_zeroed(layout) }
     }
 
+    /// Checks a freed block through a [`freed_bytes_support::Copied`] copy, so the scan reads
+    /// no uninitialized byte, then frees it. Inputs: the block and its layout. Safety: the
+    /// block is valid for reads of the layout's size, as `GlobalAlloc::dealloc` guarantees.
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
         let address = block as usize;
         if address != 0
@@ -27,7 +32,8 @@ unsafe impl GlobalAlloc for FreeWatch {
                 .compare_exchange(address, 0, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
         {
-            let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
+            let copied = unsafe { freed_bytes_support::Copied::new(block, layout.size()) };
+            let bytes = copied.bytes();
             let seen = if bytes.iter().all(|byte| *byte == 0) {
                 WIPED
             } else {
