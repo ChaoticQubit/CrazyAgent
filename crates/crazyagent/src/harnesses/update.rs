@@ -1320,30 +1320,35 @@ mod windows_tests {
 
     /// A tool the engine would start passes the Windows trust check when only the system and
     /// this user may change it, as the curl Windows ships; a relative or missing tool is
-    /// missing, and one the users group may write is unsafe.
+    /// missing, and one the users group may write is unsafe. Fails naming the variable when
+    /// SystemRoot or USERPROFILE is not set.
     #[test]
-    fn a_windows_tool_is_trusted_only_while_no_other_account_may_change_it() {
-        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+    fn a_windows_tool_is_trusted_only_while_no_other_account_may_change_it() -> Result<(), String> {
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?)
             .join("System32")
             .join("curl.exe");
         assert_eq!(trusted(&shipped), Ok(()));
         assert_eq!(trusted(Path::new("curl.exe")), Err(TOOL_MISSING));
-        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let profile = std::env::var_os("USERPROFILE").ok_or("USERPROFILE is not set")?;
+        let folder = tempfile::tempdir_in(profile).unwrap();
         let tool = folder.path().join("tool.exe");
         assert_eq!(trusted(&tool), Err(TOOL_MISSING));
         std::fs::write(&tool, "").unwrap();
         assert_eq!(trusted(&tool), Ok(()));
         icacls(&tool, &["/grant", "*S-1-5-32-545:(W)"]);
         assert_eq!(trusted(&tool), Err(TOOL_UNSAFE));
+        Ok(())
     }
 
     /// A global npm install needs no administrator only in a folder this user owns: a folder
     /// whose owner is set to this user is owned, the Windows folder (TrustedInstaller's) is
     /// not, and neither is a file or a missing path. The Windows folder's owner is printed,
-    /// so a runner image where another account owns it shows why the row fails.
+    /// so a runner image where another account owns it shows why the row fails; a missing
+    /// SystemRoot or USERPROFILE fails naming the variable.
     #[test]
-    fn a_windows_folder_is_owned_only_when_this_user_owns_it() {
-        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    fn a_windows_folder_is_owned_only_when_this_user_owns_it() -> Result<(), String> {
+        let profile = std::env::var_os("USERPROFILE").ok_or("USERPROFILE is not set")?;
+        let folder = tempfile::tempdir_in(profile).unwrap();
         let modules = folder.path().join("node_modules");
         std::fs::create_dir(&modules).unwrap();
         let me = kernel_processes::spawn_gate::collected(&mut std::process::Command::new("whoami"))
@@ -1351,7 +1356,7 @@ mod windows_tests {
         let me = String::from_utf8(me.stdout).unwrap();
         icacls(&modules, &["/setowner", me.trim()]);
         assert!(owned(&modules));
-        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?);
         let seen = windows_owner(&windows);
         eprintln!("{seen}");
         assert!(!owned(&windows), "{seen}");
@@ -1359,5 +1364,6 @@ mod windows_tests {
         std::fs::write(&file, "").unwrap();
         assert!(!owned(&file));
         assert!(!owned(&folder.path().join("gone")));
+        Ok(())
     }
 }
