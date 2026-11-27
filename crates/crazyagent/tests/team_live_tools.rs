@@ -22,6 +22,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+mod owner_support;
 
 const PROJECT: &str = "live-tools";
 const WAIT: Duration = Duration::from_secs(60);
@@ -498,6 +500,7 @@ fn a_live_master_s_merge_lands_on_the_land_on_branch_through_the_engine_binary()
     let master = agent(&connection, "master", "working");
     let harness = agent(&connection, "sub", "stopped");
     let label = named(&connection, &project, harness, "docs-writer");
+    let _owner = owner_support::owner_on(&base, &base);
     let db = crazyagent::landing::open(&base).unwrap();
     let worktree = base.join(format!("agent-{harness}"));
     let branch = crazyagent::landing::claim_task_branch(&db, &folder, &worktree, "docs").unwrap();
