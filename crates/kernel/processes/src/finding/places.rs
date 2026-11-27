@@ -511,3 +511,21 @@ pub fn in_temp_of(hooks: &FindingHooks, folder: &Path, temps: &[PathBuf]) -> boo
         .chain(real.as_deref())
         .any(|folder| under_temp(hooks, folder, temps))
 }
+
+/// The temp folders: the shared ones and this user's own, as given, with its links resolved
+/// and in the plain form [`FindingHooks::canonical`] gives (a Windows drive path without
+/// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
+/// dropped. Input: the hooks. Output: the absolute folders, each once.
+pub fn temp_roots(hooks: &FindingHooks) -> Vec<PathBuf> {
+    let owner = std::env::temp_dir();
+    let real = owner.canonicalize().ok();
+    let plain = (hooks.canonical)(&owner).ok();
+    let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
+    for root in std::iter::once(owner).chain(real).chain(plain) {
+        if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    assert!(roots.len() <= TEMP_FOLDERS.len() + 3);
+    roots
+}
