@@ -3,8 +3,6 @@ name: Tests
 on:
   push:
     branches:
-      - "chore/v242-batch*"
-      - "chore/v25*"
       - "test-farm/**"
   workflow_dispatch:
 
@@ -17,88 +15,29 @@ concurrency:
 
 env:
   RUST_TOOLCHAIN: "1.98.1"
-  NODE_VERSION: "26.12.1"
-  BUN_VERSION: "1.4.3"
-  RCLI_SOURCE_REPOSITORY: Backboard-io/Backboard-R-CLI
-  RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
-  TMUX_VERSION: "3.8"
-  TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
-  CLAUDE_CODE_VERSION: "2.1.309"
-  CODEX_VERSION: "0.164.0"
-  UV_VERSION: "0.13.5"
-  NEXTEST_VERSION: "0.9.152"
-  NEXTEST_PROFILE: farm
-  CHROME_VERSION: "151.0.7922.34"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  FARM_ENGINE_EXCLUDE: >-
-    agents_live codex_app_server_live codex_bridge_live launch_context_live
-    acceptance_v2_rcli_usage accounts_binary harness_catalog_bundled_rcli
-    worker_engine_boundary qualification_boundary/boundary_denies_escape_and_trusted_writes
-    accounts/local_model_discovery_reads_the_real_ollama accounts/an_openai_compatible_account_check_lists_the_real_ollama_models
-    harness_launch/live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups
-    harness_launch/live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file
-    harness_launch/live_tools_on_turn_completes_inside_the_project_sandbox
-    github::tests::signed_in_gh_cli_token_is_reused_through_the_real_gh
-    project_sandbox/an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run
-  FARM_DESKTOP_EXCLUDE: accounts_bridge/desktop_accounts_commands_reach_the_real_engine
-  NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
-  BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
-  NODE_TEST_TIMEOUT_MACOS_MS: "60000"
-  FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  TIP_FULL: 0c1b500a00a780039a018e85be8d465269f62082
+  TWIN_FULL: 3b1ad484b641e076b96331288091eb2b77c98dfb
+  PAIRS: "events.logged events.persist migrations.backup migrations.backup_failure migrations.backup_time migrations.backups_in migrations.stamp restore.read_restore_record restore.recovery.put_back restore.restore_failed restore.restore_pinned restore.write_restore_record state_log.Clock.now_ms state_log.replay.checkpoint upgrade.check upgrade.upgrade.newest upgrade.upgrade.one_step"
+  B_ONLY: "restore.recovery.finish"
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  build-linux:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the Linux runner
-        run: |
-          set -euo pipefail
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install Linux build packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-macos:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
+  sitting:
+    name: 1445 perf sitting, 2.4.4 twin vs 2.5 tip, quiet and loaded ABBA on macos-15
+    runs-on: macos-15
     timeout-minutes: 330
-    strategy:
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
       - name: Free disk on the macOS runner
         run: |
           set -euo pipefail
@@ -108,448 +47,333 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-windows:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
+          fetch-depth: 3
+      - name: Check the parents and add the 2.4.4 twin worktree
+        id: restore
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
+          git log -1 --format='farm %H %P %s'
+          [ "$(git rev-parse HEAD^1)" = "$TIP_FULL" ] || { echo "::error::HEAD^1 is not the 1445 tip 0c1b500a00"; exit 1; }
+          [ "$(git rev-parse HEAD^2)" = "$TWIN_FULL" ] || { echo "::error::HEAD^2 is not the 2.4.4 twin 3b1ad484b6"; exit 1; }
+          git checkout HEAD^1 -- .github/workflows/tests.yml
+          git diff --quiet HEAD^1 || { echo "::error::the tree is not the 1445 tip"; exit 1; }
+          git worktree add --detach "$RUNNER_TEMP/twin" "$TWIN_FULL"
+          [ "$(git -C "$RUNNER_TEMP/twin" rev-parse HEAD)" = "$TWIN_FULL" ] || exit 1
+          [ -d "$RUNNER_TEMP/twin/crates/kernel" ] && { echo "::error::the twin tree has crates/kernel, so it is not 2.4.4"; exit 1; }
+          [ -d crates/kernel/storage ] || { echo "::error::the tip tree has no crates/kernel/storage"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/sitting"
+      - name: Record the runner, the run and both commits
         run: |
           set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
           {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-linux:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-linux
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 3
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 4
-            parts: 4
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install Linux packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-macos:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-macos
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 2
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install tmux on macOS
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Select Xcode 26.3, whose git the engine runs
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.3.app
-          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
-          version="$("$git" --version)"
-          echo "engine git $git: $version"
-          IFS=. read -r major minor _ <<< "${version#git version }"
-          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
-          echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-windows:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-windows
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-            part: 1
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 2
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  node:
-    name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 1
-            chrome: mac-arm64
-            chrome_sha256: 01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef
-            headless_sha256: cb46a336dbe3d6f1339c5039c3083e4e5dd8e4379710790e34f8f4a865e2452d
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/node.xml
-      FARM_PART: ${{ matrix.os }}-node-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install IDE extension dependencies
-        working-directory: apps/ide-extension
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install rcli source dependencies
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Build desktop frontend
-        working-directory: apps/desktop
-        run: npm run build
-      - name: Install the pinned Chrome for Testing
-        env:
-          CHROME_PLATFORM: ${{ matrix.chrome }}
-          CHROME_SHA256: ${{ matrix.chrome_sha256 }}
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/chrome"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$CHROME_PLATFORM/chrome-$CHROME_PLATFORM.zip"
-          echo "$CHROME_SHA256  $work/chrome.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then
-            ditto -x -k "$work/chrome.zip" "$work"
-            chrome="$work/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-          else
-            unzip -q "$work/chrome.zip" -d "$work"
-            chrome="$work/chrome-linux64/chrome"
-          fi
-          "$chrome" --version
-          echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
+            echo "image $ImageOS $ImageVersion"
+            sw_vers
+            echo "cpu $(sysctl -n machdep.cpu.brand_string) ncpu $(sysctl -n hw.ncpu) memsize $(sysctl -n hw.memsize)"
+            echo "run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo "A 2.4.4 twin $TWIN_FULL"
+            echo "B 2.5 tip $TIP_FULL"
+            echo "load at record $(sysctl -n vm.loadavg)"
+          } | tee "$RUNNER_TEMP/sitting/record.txt"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          for attempt in 1 2 3; do
+            rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 20
+          done
+          [ "$(rustup run "$RUST_TOOLCHAIN" rustc -V | cut -d' ' -f2)" = "$RUST_TOOLCHAIN" ] || { echo "::error::rustc is not $RUST_TOOLCHAIN"; exit 1; }
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Install Linux packages
-        if: matrix.os == 'linux'
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - name: Install tmux on Linux
-        if: matrix.os == 'linux'
-        run: |
-          set -euo pipefail
-          sudo chmod go-w /usr/local/bin
-          test -z "$(find /usr/local/bin -maxdepth 0 -perm /022)"
-          work="$RUNNER_TEMP/tmux"
-          prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
-          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
-          tar -xzf "$work/tmux.tar.gz" -C "$work"
-          (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
-          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
-          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install tmux on macOS
-        if: matrix.os == 'macos'
+          rustup run "$RUST_TOOLCHAIN" rustc -V | tee -a "$RUNNER_TEMP/sitting/record.txt"
+      - name: Fetch the locked crates of both trees
         timeout-minutes: 20
         run: |
           set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install the pinned Chrome headless shell for the PDF rows
-        env:
-          HEADLESS_PLATFORM: ${{ matrix.chrome }}
-          HEADLESS_SHA256: ${{ matrix.headless_sha256 }}
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/chrome-headless-shell"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/headless.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$HEADLESS_PLATFORM/chrome-headless-shell-$HEADLESS_PLATFORM.zip"
-          echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k "$work/headless.zip" "$work"; else unzip -q "$work/headless.zip" -d "$work"; fi
-          shell="$work/chrome-headless-shell-$HEADLESS_PLATFORM/chrome-headless-shell"
-          "$shell" --version
-          echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"
-      - name: Run this share of the node suites
+          cargo fetch --locked
+          (cd "$RUNNER_TEMP/twin" && cargo fetch --locked)
+      - name: Build side B, the 2.5 kernel-storage perf binary, into its own target
         timeout-minutes: 60
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          limit=""
-          if [ "$RUNNER_OS" = macOS ]; then limit="--test-timeout=$NODE_TEST_TIMEOUT_MACOS_MS"; fi
-          make test-node BUN="$BUN" NODE_TEST_ARGS="--test-shard=${{ matrix.part }}/${{ matrix.parts }} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FARM_JUNIT $limit"
-      - name: Keep a JUnit report for this part
-        if: always()
+          df -h /
+          log="$RUNNER_TEMP/sitting/build-b.log"
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/target-b" cargo test --release --locked -p crazyagent-kernel-storage --lib --no-run --message-format=json > "$RUNNER_TEMP/build-b.json" 2> "$log"
+          code=$?
+          set -e
+          tail -n 5 "$log"
+          gate="$(grep -cE '^ +Compiling crazyagent-kernel-storage v' "$log" || true)"
+          bin="$(python3 -I -c 'import json,sys
+          for line in open(sys.argv[1]):
+              m = json.loads(line)
+              if m.get("reason") == "compiler-artifact" and m["target"]["name"] == "crazyagent_kernel_storage" and m["profile"]["test"] and m.get("executable"):
+                  print(m["executable"])' "$RUNNER_TEMP/build-b.json")"
+          echo "build B rc $code gate crazyagent-kernel-storage $gate binary $(basename "$bin")"
+          [ "$code" = 0 ] && [ "$gate" -ge 1 ] && [ -x "$bin" ] || exit 1
+          echo "BIN_B=$bin" >> "$GITHUB_ENV"
+      - name: Build side A, the 2.4.4 crazyagent perf binary, into its own target
+        timeout-minutes: 90
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
+          df -h /
+          log="$RUNNER_TEMP/sitting/build-a.log"
+          cd "$RUNNER_TEMP/twin"
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/target-a" cargo test --release --locked -p crazyagent --lib --no-run --message-format=json > "$RUNNER_TEMP/build-a.json" 2> "$log"
+          code=$?
+          set -e
+          tail -n 5 "$log"
+          gate="$(grep -cE '^ +Compiling crazyagent v' "$log" || true)"
+          bin="$(python3 -I -c 'import json,sys
+          for line in open(sys.argv[1]):
+              m = json.loads(line)
+              if m.get("reason") == "compiler-artifact" and m["target"]["name"] == "crazyagent" and "lib" in m["target"]["kind"] and m["profile"]["test"] and m.get("executable"):
+                  print(m["executable"])' "$RUNNER_TEMP/build-a.json")"
+          echo "build A rc $code gate crazyagent $gate binary $(basename "$bin")"
+          [ "$code" = 0 ] && [ "$gate" -ge 1 ] && [ -x "$bin" ] || exit 1
+          echo "BIN_A=$bin" >> "$GITHUB_ENV"
+          df -h /
+      - name: Write the block runner and the report script
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/block.sh" <<'SH'
+          set -uo pipefail
+          set_name=$1 index=$2 side=$3
+          out="$RUNNER_TEMP/sitting/$set_name-$index-$side.log"
+          if [ "$side" = A ]; then bin=$BIN_A; dir="$RUNNER_TEMP/twin/crates/crazyagent"; filter=perf_tests::storage::
+          else bin=$BIN_B; dir="$GITHUB_WORKSPACE/crates/kernel/storage"; filter=perf_tests::; fi
+          load_start="$(sysctl -n vm.loadavg | awk '{print $2}')"
+          started=$(date +%s)
+          (cd "$dir" && "$bin" --ignored --nocapture --test-threads=1 "$filter") > "$out.raw" 2>&1
+          code=$?
+          load_end="$(sysctl -n vm.loadavg | awk '{print $2}')"
+          seconds=$(( $(date +%s) - started ))
+          { echo "BLOCK set=$set_name index=$index side=$side rc=$code load1_start=$load_start load1_end=$load_end seconds=$seconds"; cat "$out.raw"; } > "$out"
+          rm -f "$out.raw"
+          python3 -I "$RUNNER_TEMP/report.py" block "$out"
+          [ "$code" = 0 ] || { tail -n 30 "$out"; exit 1; }
+          SH
+          cat > "$RUNNER_TEMP/report.py" <<'PY'
+          import os
+          import statistics
+          import sys
 
-  typecheck:
-    name: Desktop typecheck and Bun suites
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/bun.xml
-      FARM_PART: linux-bun-1
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Typecheck desktop
-        working-directory: apps/desktop
-        run: npm run typecheck
-      - name: Install rcli source dependencies
-        if: always()
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Run the Bun suites
-        if: always()
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          make test-bun BUN="$BUN" BUN_TEST_ARGS="--reporter=junit --reporter-outfile=$FARM_JUNIT"
-      - name: Keep a JUnit report for this part
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
+          PAIRS = os.environ["PAIRS"].split()
+          B_ONLY = os.environ["B_ONLY"].split()
+          WANTED = PAIRS + B_ONLY
 
-  report:
-    name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
+
+          def parse(path):
+              head, rows = None, {}
+              for raw in open(path):
+                  line = raw.rstrip("\n")
+                  if line.startswith("BLOCK "):
+                      head = dict(pair.split("=", 1) for pair in line.split()[1:])
+                      continue
+                  at = line.find("PERF ")
+                  if at < 0 or line.startswith("PERF-RUN"):
+                      continue
+                  words = line[at:].split()
+                  if len(words) < 5 or words[2] != "storage":
+                      continue
+                  values = dict(pair.split("=", 1) for pair in words[4:] if "=" in pair)
+                  if "p50_ns" in values:
+                      p50, p95 = int(values["p50_ns"]), int(values["p95_ns"])
+                  else:
+                      p50, p95 = int(values["p50"]) * 1000, int(values["p95"]) * 1000
+                  rows[words[3]] = (p50, p95, int(values["n"]))
+              assert head is not None, path
+              return head, rows
+
+
+          def block(path):
+              head, rows = parse(path)
+              print(" ".join(f"{k}={v}" for k, v in head.items()))
+              for name in WANTED:
+                  if name in rows:
+                      p50, p95, n = rows[name]
+                      print(f"  {name} p50_ns={p50} p95_ns={p95} n={n}")
+              missing = [name for name in (PAIRS if head["side"] == "A" else WANTED) if name not in rows]
+              print(f"  rows {len(rows)} wanted-missing {len(missing)} {' '.join(missing)}")
+
+
+          def load(folder, set_name):
+              blocks = []
+              for name in sorted(os.listdir(folder)):
+                  if name.startswith(set_name + "-") and name.endswith(".log"):
+                      blocks.append(parse(os.path.join(folder, name)))
+              blocks.sort(key=lambda b: int(b[0]["index"]))
+              return blocks
+
+
+          PERCENTILES = (("p50", 0), ("p95", 1))
+
+
+          def medians(blocks, side, name, k):
+              return [rows[name][k] for head, rows in blocks if head["side"] == side and name in rows]
+
+
+          def gap(values):
+              if len(values) != 2:
+                  return None
+              mean = (values[0] + values[1]) / 2
+              return abs(values[0] - values[1]) / mean * 100
+
+
+          def ratio(blocks, name, k):
+              a, b = medians(blocks, "A", name, k), medians(blocks, "B", name, k)
+              return statistics.median(b) / statistics.median(a) if a and b else None
+
+
+          def shown(value, form):
+              return "none" if value is None else form.format(value)
+
+
+          def table(blocks, title):
+              print(f"== {title}: {len(blocks)} blocks, order {' '.join(h['side'] for h, _ in blocks)}")
+              for head, rows in blocks:
+                  ns = sorted({rows[n][2] for n in WANTED if n in rows})
+                  print(f"  block {head['index']} {head['side']} load1 {head['load1_start']} -> {head['load1_end']} seconds {head['seconds']} rc {head['rc']} samples per row {ns}")
+              ratios = {}
+              for name in WANTED:
+                  ratios[name] = {}
+                  for label, k in PERCENTILES:
+                      r = ratio(blocks, name, k)
+                      ratios[name][label] = r
+                      print(f"  {name} {label} A {medians(blocks, 'A', name, k)} B {medians(blocks, 'B', name, k)} B/A {shown(r, '{:.3f}')}")
+              return ratios
+
+
+          def word(r, floor):
+              if r is None or floor is None:
+                  return "none"
+              return "inside" if abs(r - 1) * 100 <= floor else "outside"
+
+
+          def report(folder):
+              aa = load(folder, "aa")
+              gaps = {}
+              print(f"== aa: {len(aa)} blocks, order {' '.join(h['side'] for h, _ in aa)}")
+              for name in WANTED:
+                  gaps[name] = {}
+                  for label, k in PERCENTILES:
+                      va, vb = medians(aa, "A", name, k), medians(aa, "B", name, k)
+                      ga, gb = gap(va), gap(vb)
+                      known = [g for g in (ga, gb) if g is not None]
+                      gaps[name][label] = (ga, gb, max(known) if known else None)
+                      print(f"  {name} {label} A {va} gap {shown(ga, '{:.2f}%')} B {vb} gap {shown(gb, '{:.2f}%')}")
+              sets = {set_name: load(folder, set_name) for set_name in ("quiet", "loaded")}
+              quiet = table(sets["quiet"], "quiet")
+              loaded = table(sets["loaded"], "loaded")
+              for name in WANTED:
+                  parts = [f"ROW {name}"]
+                  for set_name, ratios in (("quiet", quiet), ("loaded", loaded)):
+                      parts.append(set_name)
+                      for label, _ in PERCENTILES:
+                          r = ratios[name][label]
+                          parts.append(f"{label} {shown(r, '{:.3f}')} {word(r, gaps[name][label][2])}")
+                  parts.append("aa")
+                  for label, _ in PERCENTILES:
+                      ga, gb, _ = gaps[name][label]
+                      parts.append(f"{label} {shown(ga, '{:.2f}%')}/{shown(gb, '{:.2f}%')}")
+                  print(" ".join(parts))
+              for name in B_ONLY:
+                  parts = [f"BONLY {name}"]
+                  for set_name in ("quiet", "loaded"):
+                      parts.append(set_name)
+                      for label, k in PERCENTILES:
+                          values = medians(sets[set_name], "B", name, k)
+                          parts.append(f"{label}_ns {shown(statistics.median(values) if values else None, '{:.0f}')}")
+                  print(" ".join(parts))
+
+
+          if sys.argv[1] == "block":
+              block(sys.argv[2])
+          else:
+              report(sys.argv[2])
+          PY
+      - name: Warm-up run of each binary (not measured)
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        timeout-minutes: 30
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          pattern: farm-junit-*
-          path: ${{ runner.temp }}/junit
-      - name: Write the summary table
-        env:
-          FARM_NEEDS: ${{ toJSON(needs) }}
+          bash "$RUNNER_TEMP/block.sh" warm 0 A
+          bash "$RUNNER_TEMP/block.sh" warm 0 B
+      - name: Quiet set, runner alone, A B B A A B B A
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        timeout-minutes: 120
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/junit"
-          node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+          index=0
+          for side in A B B A A B B A; do
+            index=$((index + 1))
+            bash "$RUNNER_TEMP/block.sh" quiet "$index" "$side"
+          done
+          python3 -I "$RUNNER_TEMP/report.py" report "$RUNNER_TEMP/sitting" > "$RUNNER_TEMP/sitting/report-after-quiet.txt" || true
+          cat "$RUNNER_TEMP/sitting/report-after-quiet.txt"
+      - name: Same-binary A/A gap, A A then B B
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          index=0
+          for side in A A B B; do
+            index=$((index + 1))
+            bash "$RUNNER_TEMP/block.sh" aa "$index" "$side"
+          done
+          python3 -I "$RUNNER_TEMP/report.py" report "$RUNNER_TEMP/sitting" > "$RUNNER_TEMP/sitting/report-after-aa.txt" || true
+          cat "$RUNNER_TEMP/sitting/report-after-aa.txt"
+      - name: Loaded set, A B B A A B B A beside a workspace build in a third target
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          mkdir -p apps/desktop/dist
+          [ -f apps/desktop/dist/index.html ] || printf '<!doctype html>\n' > apps/desktop/dist/index.html
+          df -h /
+          stop="$RUNNER_TEMP/load.stop"
+          rm -f "$stop"
+          (
+            round=0
+            while [ ! -f "$stop" ]; do
+              round=$((round + 1))
+              echo "LOAD build round $round start $(date +%H:%M:%S)"
+              CARGO_TARGET_DIR="$RUNNER_TEMP/target-load" cargo build --workspace --locked > "$RUNNER_TEMP/sitting/load-build-$round.log" 2>&1
+              echo "LOAD build round $round end rc $? $(date +%H:%M:%S)"
+              [ -f "$stop" ] && break
+              echo "LOAD restart: cargo clean -p crazyagent, build again"
+              CARGO_TARGET_DIR="$RUNNER_TEMP/target-load" cargo clean -p crazyagent > /dev/null 2>&1 || true
+            done
+          ) &
+          loader=$!
+          echo "LOAD loader pid $loader"
+          sleep 30
+          kill_tree() { local c; for c in $(pgrep -P "$1"); do kill_tree "$c"; done; kill "$1" 2>/dev/null || true; }
+          index=0
+          status=0
+          for side in A B B A A B B A; do
+            index=$((index + 1))
+            alive=no
+            kill -0 "$loader" 2>/dev/null && alive=yes
+            echo "LOAD before block $index loader alive $alive cargo $(pgrep -f 'cargo build --workspace' | wc -l | tr -d ' ')"
+            bash "$RUNNER_TEMP/block.sh" loaded "$index" "$side" || status=1
+          done
+          echo "LOAD at the last block's end loader alive $(kill -0 "$loader" 2>/dev/null && echo yes || echo no)"
+          touch "$stop"
+          kill_tree "$loader"
+          wait "$loader" 2>/dev/null || true
+          echo "LOAD loader stopped"
+          df -h /
+          exit "$status"
+      - name: Report tables and gate lines (printed, never failed)
+        if: ${{ !cancelled() }}
+        run: |
+          set +e
+          python3 -I "$RUNNER_TEMP/report.py" report "$RUNNER_TEMP/sitting" | tee "$RUNNER_TEMP/sitting/report.txt" || true
+          exit 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: ${{ !cancelled() }}
+        with:
+          name: sitting-1445-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sitting
+          retention-days: 14
