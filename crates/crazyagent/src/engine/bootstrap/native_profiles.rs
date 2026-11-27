@@ -377,7 +377,7 @@ fn held_database(parent: &File, name: &OsStr) -> Result<std::sync::Arc<File>, En
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Ok(named) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
-        && let Some(file) = held.files.get(&(named.st_dev as u64, named.st_ino as u64))
+        && let Some(file) = held.files.get(&(named.st_dev as u64, named.st_ino))
     {
         return Ok(std::sync::Arc::clone(file));
     }
