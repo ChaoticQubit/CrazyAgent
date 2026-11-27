@@ -485,9 +485,23 @@ fn scratch_damaged(kind: &str, path: &Path) {
     }
 }
 
+/// Compares two files byte by byte, outside the header bytes SQLite rewrites on a backup
+/// (24..28, the change counter, and 92..100, the version-valid-for number and the SQLite
+/// version) when `header_free` is set. Inputs: the two byte runs and that switch. Output:
+/// how many bytes differ over the shorter run, and the first one.
+fn scratch_diff(left: &[u8], right: &[u8], header_free: bool) -> (usize, Option<usize>) {
+    let skipped = |at: usize| header_free && ((24..28).contains(&at) || (92..100).contains(&at));
+    let differing: Vec<usize> = (0..left.len().min(right.len()))
+        .filter(|&at| !skipped(at) && left[at] != right[at])
+        .collect();
+    (differing.len(), differing.first().copied())
+}
+
 /// Prints, for each damage, what the backup API makes of engine.db and what today's
-/// put-back (a byte copy, then the backup over it) does. Input: none. Output: one
-/// `DAMAGE` line per kind.
+/// put-back (a byte copy, then the backup over it) does: each route's result, its length
+/// next to the live length, and the bytes that differ from the live file (outside the
+/// rewritten header bytes for the backup, exactly for the byte copy). Input: none. Output:
+/// one `DAMAGE` line per kind.
 #[test]
 fn scratch_damaged_put_back_routes() {
     for kind in ["d1", "d2", "d3", "d4"] {
@@ -495,25 +509,38 @@ fn scratch_damaged_put_back_routes() {
         scratch_damaged(kind, &path);
         let live = std::fs::read(&path).unwrap();
         let out = root.path().join("route-a.db");
-        let route_a = Connection::open(&path)
-            .and_then(|source| {
-                let mut target = Connection::open(&out)?;
-                rusqlite::backup::Backup::new(&source, &mut target)?.run_to_completion(
-                    64,
-                    std::time::Duration::ZERO,
-                    None,
+        let backed = Connection::open(&path).and_then(|source| {
+            let mut target = Connection::open(&out)?;
+            rusqlite::backup::Backup::new(&source, &mut target)?.run_to_completion(
+                64,
+                std::time::Duration::ZERO,
+                None,
+            )
+        });
+        let route_a = match &backed {
+            Ok(()) => {
+                let copy = std::fs::read(&out).unwrap();
+                let (diff, first) = scratch_diff(&copy, &live, true);
+                format!(
+                    "ok route_a_len={} live_len={} route_a_diff={diff} first_diff={first:?}",
+                    copy.len(),
+                    live.len()
                 )
-            })
-            .map(|()| std::fs::read(&out).unwrap() == live);
-        let put = put_back(&path);
-        let kept_equal = put
-            .as_ref()
-            .ok()
-            .map(|saved| std::fs::read(saved.join(DATABASE)).unwrap() == live);
-        let put = put.map(|_| ()).map_err(|refused| refused.0);
-        println!(
-            "\nDAMAGE {kind} live_bytes={} route_a_backup={route_a:?} put_back_byte_copy={put:?} kept_bytes_equal={kept_equal:?}",
-            live.len()
-        );
+            }
+            Err(cause) => format!("err:{cause}"),
+        };
+        let route_b = match put_back(&path) {
+            Ok(saved) => {
+                let kept = std::fs::read(saved.join(DATABASE)).unwrap();
+                let (diff, first) = scratch_diff(&kept, &live, false);
+                format!(
+                    "ok kept_len={} live_len={} kept_diff={diff} first_diff={first:?}",
+                    kept.len(),
+                    live.len()
+                )
+            }
+            Err(refused) => format!("err:{}", refused.0),
+        };
+        println!("\nDAMAGE {kind} route_a={route_a} route_b_put_back={route_b}");
     }
 }
