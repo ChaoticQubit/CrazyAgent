@@ -79,7 +79,7 @@ const COMMENT = /^\s*(?:\/\/|\/\*|\*)/;
  * The kind of a tracked path. Input: its repository-relative path.
  * Output: "rust", "js" for JS and TS scripts, or null when the check never reads it.
  */
-function kindOf(file) {
+export function kindOf(file) {
   if (file.endsWith(".rs")) {
     return "rust";
   }
@@ -208,7 +208,7 @@ function testItem(lines, index) {
  * folder; an indented `#[path]` is not followed. Inputs: the file's path and lines.
  * Output: each module's path without extension; its `.rs` file and folder are test code.
  */
-function testModules(file, lines) {
+export function testModules(file, lines) {
   assert.ok(file.endsWith(".rs"), `${file} is no Rust file`);
   const base = path.posix.basename(file);
   const roots = ["mod.rs", "lib.rs", "main.rs"];
@@ -292,7 +292,7 @@ function callsOf(text, name) {
  * and whether a test-only `mod` declares the file. Output: one flag per line, or null when the
  * file holds no test code.
  */
-function testLines(kind, file, lines, whole) {
+export function testLines(kind, file, lines, whole) {
   if (kind === null || (kind === "js" && !testPath(kind, file))) {
     return null;
   }

@@ -171,6 +171,10 @@ jobs:
         run: make sleeps-check
       - name: Check the sleeps check script
         run: make test-sleeps-script
+      - name: Check every sandbox install is guarded against the engine root
+        run: make engine-guard-check
+      - name: Check the engine guard check script
+        run: make test-engine-guard-script
       - name: Check that every owner packet is built by the helper
         run: make owner-packets-check
       - name: Check the owner packet check script

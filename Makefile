@@ -1,4 +1,4 @@
-.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script caps-check test-caps-script sleeps-check test-sleeps-script owner-packets-check test-owner-packets-script
+.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script caps-check test-caps-script sleeps-check test-sleeps-script engine-guard-check test-engine-guard-script owner-packets-check test-owner-packets-script
 
 NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
@@ -59,6 +59,12 @@ sleeps-check:
 
 test-sleeps-script:
 	node --test scripts/quality/sleeps.test.mjs
+
+engine-guard-check:
+	node scripts/quality/engine-guard.mjs
+
+test-engine-guard-script:
+	node --test scripts/quality/engine-guard.test.mjs
 
 owner-packets-check:
 	node scripts/quality/owner-packets.mjs
