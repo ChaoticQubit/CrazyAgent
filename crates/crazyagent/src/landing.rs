@@ -25,7 +25,7 @@ mod hold;
 #[cfg(unix)]
 pub(crate) mod ide;
 #[cfg(unix)]
-mod lockfiles;
+pub(crate) mod lockfiles;
 #[cfg(unix)]
 mod merges;
 #[cfg(unix)]
@@ -1825,11 +1825,11 @@ pub(crate) fn conflicts_with_main(
 }
 
 /// What runs after a lockfile regeneration that landed nothing, on its own thread with its
-/// own store: the set, whether another regeneration may start, which is false once one
-/// refused the clash and true when the set or main moved meanwhile, and the owner's
-/// settings files the regeneration was given.
+/// own store: the set, the refusal that hands the clash to the agent, or None when the set
+/// or main moved meanwhile and another regeneration may start, and the owner's settings
+/// files the regeneration was given.
 pub(crate) type AfterRegeneration =
-    fn(&Connection, &ChangeSetId, bool, Option<&(PathBuf, PathBuf)>);
+    fn(&Connection, &ChangeSetId, Option<&lockfiles::Refusal>, Option<&(PathBuf, PathBuf)>);
 
 /// Moves a sub-agent whose turn just ended and left nothing pending onto the tip of its
 /// Land on branch when its linked worktree carries only landed work (DEC-147.6); a step

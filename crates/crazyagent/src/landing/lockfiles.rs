@@ -128,13 +128,134 @@ pub(super) fn major_of(printed: &[u8]) -> Option<u32> {
 }
 
 /// How one regeneration ended: its commit is the set's head and the agent's worktree moved
-/// there, it rewrote nothing and the clash goes to the agent, or the set or main moved
-/// meanwhile and the clash is checked again.
+/// there, it rewrote nothing for a reason and the tool named in the owner's note and the
+/// clash goes to the agent, or the set or main moved meanwhile and the clash is checked again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Regenerated {
     Applied,
-    Refused,
+    Refused(Why, &'static str),
     Stale,
+}
+
+/// Why a regeneration rewrote nothing: no safe place to run the tools, a tool failed or ran
+/// out of time, the owner hid a folder during the run, the clash is not lockfiles alone, the
+/// owner's merge settings cover the paths, a tool changed other files, the agent's work
+/// moved before the commit was kept, or a reason the owner is not told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Why {
+    Setup,
+    Tool,
+    Hidden,
+    NotLockfileOnly,
+    MergeSettings,
+    WroteOutside,
+    Moved,
+    Other,
+}
+
+impl Why {
+    /// The word the refusal log line names. Input: the reason. Output: the word.
+    fn word(self) -> &'static str {
+        match self {
+            Why::Setup => "setup",
+            Why::Tool => "tool",
+            Why::Hidden => "hidden",
+            Why::NotLockfileOnly => "not_lockfile_only",
+            Why::MergeSettings => "merge_settings",
+            Why::WroteOutside => "wrote_outside",
+            Why::Moved => "moved",
+            Why::Other => "other",
+        }
+    }
+}
+
+/// What the owner's note names when no single tool ran.
+const PACKAGE_TOOLS: &str = "the package tools";
+
+/// The most bytes one lockfile path takes in the owner's note.
+const NOTE_PATH_BYTES_MAX: usize = 120;
+
+/// A regeneration that rewrote nothing: why, the tool it names and the clashing lockfiles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub(crate) why: Why,
+    pub(crate) tool: &'static str,
+    pub(crate) files: Vec<String>,
+}
+
+/// The owner's note that a set they heard waits in Changes went back to its agent, then
+/// why its lockfiles were not rewritten, naming as many of them as fit, each with control
+/// characters replaced and cut to `NOTE_PATH_BYTES_MAX`. Inputs: the agent's label and the
+/// refusal, if one. Output: the note, within `team::NOTE_BYTES_MAX`.
+pub(crate) fn went_back_note(agent: &str, refusal: Option<&Refusal>) -> String {
+    let agent = crate::team::bound_text(agent, crate::agents::LABEL_BYTES_MAX);
+    let note = format!(
+        "The edits from {agent} went back to it to take in newer work, so they are not waiting for you in Changes yet."
+    );
+    let Some(refusal) = refusal.filter(|refusal| !refusal.files.is_empty()) else {
+        return note;
+    };
+    let Some(empty) = because(refusal, "", &agent) else {
+        return note;
+    };
+    let room = crate::team::NOTE_BYTES_MAX - note.len() - 1 - empty.len();
+    let tail_max = " and 16 more".len();
+    assert!(room >= NOTE_PATH_BYTES_MAX + tail_max);
+    let mut files = String::new();
+    let mut shown = 0_usize;
+    for path in &refusal.files {
+        let name = crate::team::bound_text(
+            &path.replace(char::is_control, "\u{fffd}"),
+            NOTE_PATH_BYTES_MAX,
+        );
+        let gap = if shown == 0 { "" } else { ", " };
+        if files.len() + gap.len() + name.len() + tail_max > room {
+            break;
+        }
+        files = format!("{files}{gap}{name}");
+        shown += 1;
+    }
+    let more = refusal.files.len() - shown;
+    if more > 0 {
+        files = format!("{files} and {more} more");
+    }
+    let line = format!(
+        "{note} {}",
+        because(refusal, &files, &agent).unwrap_or_default()
+    );
+    assert!(line.len() <= crate::team::NOTE_BYTES_MAX);
+    line
+}
+
+/// The sentence on why a regeneration rewrote nothing. Inputs: the refusal, the named
+/// lockfiles and the agent's label. Output: the sentence, or None for a reason the owner is
+/// not told.
+fn because(refusal: &Refusal, files: &str, agent: &str) -> Option<String> {
+    let tool = refusal.tool;
+    Some(match refusal.why {
+        Why::Setup => format!(
+            "{files} could not be updated automatically because a safe place to run {tool} could not be set up, so {agent} will fix them itself."
+        ),
+        Why::Tool => format!(
+            "{files} could not be updated automatically because {tool} failed or took too long, so {agent} will fix them itself."
+        ),
+        Why::Hidden => format!(
+            "{files} were not updated automatically because you hid a folder while {tool} was running, so nothing it wrote was kept."
+        ),
+        Why::NotLockfileOnly => format!(
+            "The clash with the newer work is in more than {files}, so {agent} will sort it out itself."
+        ),
+        Why::MergeSettings => format!(
+            "{files} were not updated automatically because your repository has its own merge settings for them, so {agent} will fix them itself."
+        ),
+        Why::WroteOutside => format!(
+            "{files} were not updated automatically because {tool} also changed other files, so nothing it wrote was kept."
+        ),
+        Why::Moved => format!(
+            "{agent}'s work changed while {files} were being updated, so that update was dropped and {agent} will redo it."
+        ),
+        Why::Other => return None,
+    })
 }
 
 /// Marks one set's regeneration as running until it is dropped, also when it panics.
@@ -244,8 +365,16 @@ pub(super) fn regenerate_later(
             drop(guard);
             match ended {
                 Ok((_, Regenerated::Applied)) => {}
-                Ok((db, Regenerated::Refused)) => after(&db, &id, false, settings.as_ref()),
-                Ok((db, Regenerated::Stale)) => after(&db, &id, true, settings.as_ref()),
+                Ok((db, Regenerated::Refused(why, tool))) => {
+                    eprintln!("landing_regenerate_refused kind={}", why.word());
+                    let refusal = Refusal {
+                        why,
+                        tool,
+                        files: paths,
+                    };
+                    after(&db, &id, Some(&refusal), settings.as_ref());
+                }
+                Ok((db, Regenerated::Stale)) => after(&db, &id, None, settings.as_ref()),
                 Err(error) => eprintln!(
                     "landing_regenerate_failed code={}",
                     crate::protocol::plain_code(&error.0)
@@ -253,6 +382,12 @@ pub(super) fn regenerate_later(
             }
         });
     Ok(spawned.is_ok())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Why the last [`regenerate`] on this thread rewrote nothing, if it refused.
+    pub(super) static REFUSED: std::cell::Cell<Option<Why>> = const { std::cell::Cell::new(None) };
 }
 
 /// Rewrites the clashing lockfiles of a held set at once, as a regeneration does, for the
@@ -268,6 +403,10 @@ pub(super) fn regenerate(
 ) -> Result<Option<String>, EngineError> {
     let how = regenerated(db, &record.id, paths, settings)?;
     *record = store::load(db, &record.id)?;
+    REFUSED.set(match how {
+        Regenerated::Refused(why, _) => Some(why),
+        Regenerated::Applied | Regenerated::Stale => None,
+    });
     Ok((how == Regenerated::Applied).then(|| record.head.clone()))
 }
 
@@ -301,11 +440,11 @@ fn regenerated(
         "a regeneration names known lockfiles only"
     );
     if !cfg!(target_os = "macos") {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Other, PACKAGE_TOOLS));
     }
     let repository = store::load(db, id)?.repository;
     let Some(runtime) = runtime_of(db) else {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
     };
     let git_dir = repository.join(".git");
     let owner = Repo::open(&repository, &git_dir, None)?;
@@ -320,20 +459,20 @@ fn regenerated(
             return Ok(Regenerated::Stale);
         }
         if super::subagent::lead_of(db, &record.project, &record.agent, &repository)?.is_some() {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::Other, PACKAGE_TOOLS));
         }
         let Some((_, tip)) = owner::land_on(db, &owner, &record.project)? else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
         };
         verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
         let from = owner::measured_from(db, &owner, &record, &tip)?;
         let touched = owner::merge_paths(&owner, &from, &tip, &record.head)?;
         if owner::uses_configured_commands(&owner, &touched, &[&from, &tip, &record.head])? {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::MergeSettings, PACKAGE_TOOLS));
         }
         let (tree, conflicts) = owner::merge(&owner, &from, &tip, &record.head)?;
         if conflicts.is_empty() || conflicts.iter().any(|path| !paths.contains(path)) {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, PACKAGE_TOOLS));
         }
         (record, tip, tree)
     };
@@ -342,7 +481,7 @@ fn regenerated(
     index.capture(&["read-tree", &tree], 256)?;
     for path in paths {
         let Some((mode, blob)) = tip_blob(&owner, &tip, path)? else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, PACKAGE_TOOLS));
         };
         index.capture(&["update-index", "--cacheinfo", &mode, &blob, path], 256)?;
     }
@@ -354,7 +493,7 @@ fn regenerated(
         ENGINE,
     )?;
     let Some(worktree) = scratch.add_worktree(&merged)? else {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
     };
     let uv_clash = paths.iter().any(|path| program_for(path) == Some("uv"));
     let (sandbox, listed) = match confined(
@@ -363,7 +502,7 @@ fn regenerated(
         Ok(confined) => confined,
         Err(code) => {
             eprintln!("landing_regenerate_unconfined code={code}");
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
         }
     };
     let profile = scratch.folder.join("profile.sb");
@@ -386,7 +525,7 @@ fn regenerated(
             None => worktree.clone(),
         };
         if !plain_folder(&worktree, &folder) {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, PACKAGE_TOOLS));
         }
         let major = *majors.entry(program).or_insert_with(|| {
             run(
@@ -403,7 +542,8 @@ fn regenerated(
             .and_then(|(_, printed)| major_of(&printed))
         });
         let Some(command) = tool_for(path, major) else {
-            return Ok(Regenerated::Refused);
+            let why = if stop() { Why::Hidden } else { Why::Tool };
+            return Ok(Regenerated::Refused(why, program));
         };
         let ran = run(
             &sandbox,
@@ -416,26 +556,32 @@ fn regenerated(
             &stop,
         );
         if ran.map(|(code, _)| code) != Some(0) {
-            return Ok(Regenerated::Refused);
+            let why = if stop() { Why::Hidden } else { Why::Tool };
+            return Ok(Regenerated::Refused(why, program));
         }
     }
+    let named = match majors.len() {
+        1 => paths.iter().find_map(|path| program_for(path)),
+        _ => None,
+    }
+    .unwrap_or(PACKAGE_TOOLS);
     if crate::sandbox::access_store::hidden::hide_stops(
         db,
         record.project.as_str(),
         Some(&listed),
         &|| false,
     )() {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Hidden, named));
     }
     if changed_outside(&repository, &scratch, &worktree, &merged, paths)? {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::WroteOutside, named));
     }
     for path in paths {
         let Some(bytes) = read_plain(&worktree, path) else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::WroteOutside, named));
         };
         let Some((mode, _)) = tip_blob(&owner, &tip, path)? else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, named));
         };
         let output = owner.exec(&["hash-object", "-w", "--stdin"], Some(&bytes), &[], 256)?;
         if output.code != 0 || output.overflow {
@@ -462,7 +608,7 @@ fn regenerated(
     }
     let agent = flow::agent(db, &now)?;
     if agent.head()? != now.head || !flow::holds_only(&agent.repo, &now.head)? {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Moved, named));
     }
     let before = now.clone();
     now.waiting = false;
@@ -489,7 +635,7 @@ fn regenerated(
             &pending_ref(&before.id),
             Some(&before.head),
         )?;
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Moved, named));
     }
     now.intent = None;
     store::save(db, &now)?;

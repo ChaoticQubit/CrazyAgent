@@ -12775,6 +12775,7 @@ fn a_lockfile_its_tool_cannot_rewrite_changes_nothing_and_leaves_nothing_behind(
         lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap(),
         None
     );
+    polish::assert_refused(lockfiles::Why::Tool);
     assert_eq!(
         (record.head.clone(), record.base.clone(), record.state),
         before
@@ -12805,6 +12806,7 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
         lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap(),
         None
     );
+    polish::assert_refused(lockfiles::Why::NotLockfileOnly);
     assert_eq!(record.head, head);
     assert_eq!(store::load(&case.db, &id).unwrap().head, head);
     assert!(engine_notes(&case).is_empty());
@@ -12851,6 +12853,7 @@ fn a_lockfile_tool_never_listens_on_a_configured_model_port_and_unread_settings_
         None,
         "settings that do not read refuse the regeneration"
     );
+    polish::assert_refused(lockfiles::Why::Setup);
     assert_eq!(record.head, head);
     assert_eq!(store::load(&case.db, &id).unwrap().head, head);
     assert!(engine_notes(&case).is_empty());
@@ -14016,6 +14019,7 @@ fn a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to_never_runs_in_a_r
     let mut record = store::load(&case.db, &id).unwrap();
     let regenerated =
         lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap();
+    polish::assert_refused(lockfiles::Why::MergeSettings);
     assert!(
         !marker.exists(),
         "the owner's merge driver ran at the path main renamed the agent's file to"

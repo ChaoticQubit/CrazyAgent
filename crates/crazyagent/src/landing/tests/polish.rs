@@ -954,5 +954,31 @@ fn a_lockfile_tool_that_writes_another_file_tells_the_owner_why_the_set_went_bac
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
+/// Asserts the last regeneration on this thread refused for `why`. Input: the reason.
+/// Output: none.
+pub(super) fn assert_refused(why: lockfiles::Why) {
+    assert_eq!(lockfiles::REFUSED.get(), Some(why));
+}
+
+/// A lockfile folder name with a control character reads with U+FFFD in the owner's note,
+/// and sixteen long paths with the longest agent label still fit the note's bound, naming
+/// how many more there are.
+#[test]
+fn a_control_character_in_a_lockfile_folder_reads_replaced_and_the_note_stays_bounded() {
+    let mut files = vec!["sub\u{7}dir/Cargo.lock".to_owned()];
+    files.extend((1..16).map(|n| format!("{}{n}/Cargo.lock", "d".repeat(300))));
+    let refusal = lockfiles::Refusal {
+        why: lockfiles::Why::Tool,
+        tool: "cargo",
+        files,
+    };
+    let agent = "a".repeat(crate::agents::LABEL_BYTES_MAX);
+    let note = lockfiles::went_back_note(&agent, Some(&refusal));
+    assert!(note.contains("sub\u{fffd}dir/Cargo.lock, "), "{note}");
+    assert!(!note.contains(char::is_control), "{note}");
+    assert!(note.contains(" more could not be updated automatically because cargo failed"));
+    assert!(note.len() <= crate::team::NOTE_BYTES_MAX, "{}", note.len());
+}
+
 #[path = "prune_rows.rs"]
 mod prune_rows;
