@@ -154,7 +154,8 @@ fn seen(
             let paths: Option<Vec<String>> =
                 arguments(&units).map(|all| all.into_iter().filter_map(part).collect());
             let directory = working_directory(id);
-            counted(directory.as_deref(), paths.as_deref(), spellings).then_some((Seen::Hosted, 0))
+            let read = counted(directory.as_deref(), paths.as_deref(), spellings, a_file);
+            read.then_some((Seen::Hosted, 0))
         }
         Err(status) => Some((Seen::Unread, status)),
     };
@@ -162,20 +163,56 @@ fn seen(
 }
 
 /// Tells whether a script host counts as running one of the spellings from where it works:
-/// its working directory lies in one, or a path part of its arguments, made absolute
-/// against that directory, lies in one or names one, or cannot be made absolute, as a
-/// relative one cannot while the directory is unread. Inputs: the lowered working directory, ending in a backslash, the path parts
-/// (none when the command line could not be split) and the spellings. Output: the answer.
-fn counted(directory: Option<&str>, paths: Option<&[String]>, spellings: &[Spelling]) -> bool {
+/// its working directory lies in one, a path part made absolute against it lies in one or
+/// names one, a relative part cannot be made absolute, or a relative part names a script
+/// that is not an existing file there. Windows keeps no start directory, so a host that
+/// changed directory is judged by where its script is now. Inputs: the lowered working
+/// directory, ending in a backslash, the path parts (none when the command line could not
+/// be split), the spellings and the file check. Output: the answer.
+fn counted(
+    directory: Option<&str>,
+    paths: Option<&[String]>,
+    spellings: &[Spelling],
+    exists: fn(&str) -> bool,
+) -> bool {
     let Some(paths) = paths else {
         return true;
     };
     if directory.is_some_and(|directory| names(directory, spellings)) {
         return true;
     }
-    paths.iter().any(|path| {
-        resolved(directory, path).is_none_or(|path| names(&format!("{path}\\"), spellings))
+    let shared = directory.is_some_and(|directory| directory.starts_with(r"\\"));
+    paths.iter().any(|path| match resolved(directory, path) {
+        None => true,
+        Some(made) => {
+            let _ = (shared, exists);
+            names(&format!("{made}\\"), spellings)
+        }
     })
+}
+
+/// Tells whether a lowered path part names a file a script host runs, by its extension.
+/// Input: the path part. Output: the answer.
+fn script(path: &str) -> bool {
+    const SCRIPTS: [&str; 12] = [
+        "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "ps1", "psm1", "cmd", "bat",
+    ];
+    let name = path.rsplit('\\').next().unwrap_or(path);
+    name.rsplit_once('.')
+        .is_some_and(|(stem, extension)| !stem.is_empty() && SCRIPTS.contains(&extension))
+}
+
+/// Tells whether a lowered path part is absolute, `c:\x` or `\\server\share\x`, so no
+/// working directory changes where it lies. Input: the path part. Output: the answer.
+fn absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with(r"\\") || (bytes.len() >= 3 && &bytes[1..3] == br":\")
+}
+
+/// Tells whether a path is an existing file now, the check the scan gives [`counted`].
+/// Input: the absolute path. Output: the answer.
+fn a_file(path: &str) -> bool {
+    Path::new(path).is_file()
 }
 
 /// The path part of one argument: a flag gives the value after its first `=`, as
@@ -197,7 +234,7 @@ fn part(argument: String) -> Option<String> {
 fn resolved(directory: Option<&str>, path: &str) -> Option<String> {
     assert!(directory.is_none_or(|directory| directory.ends_with('\\')));
     let bytes = path.as_bytes();
-    let joined = if path.starts_with(r"\\") || (bytes.len() >= 3 && &bytes[1..3] == br":\") {
+    let joined = if absolute(path) {
         path.to_owned()
     } else {
         let directory = directory?;
@@ -507,7 +544,7 @@ fn names(text: &str, spellings: &[Spelling]) -> bool {
 mod tests {
     use super::{
         CURRENT_DIRECTORY, HOSTS, Spelling, arguments, counted, host, lowered, part, resolved,
-        runs_under, scan,
+        runs_under, scan, script,
     };
     use std::ffi::{OsStr, OsString};
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -619,6 +656,21 @@ mod tests {
             })
     }
 
+    /// Takes the lock every row that scans the real processes holds, since a script host one
+    /// row starts can count for another row's folder. Output: the held lock, also after a
+    /// row that held it failed.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static SCANS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SCANS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Writes an empty file. Input: the file. Output: Ok, or the error naming it.
+    fn written(file: &Path) -> Result<(), String> {
+        std::fs::write(file, b"").map_err(|error| format!("write {}: {error}", file.display()))
+    }
+
     /// Makes a folder and any missing parents. Input: the folder. Output: it, or the error.
     fn made(folder: PathBuf) -> Result<PathBuf, String> {
         std::fs::create_dir_all(&folder)
@@ -692,6 +744,7 @@ mod tests {
     /// folder, and under none once it has ended.
     #[test]
     fn a_program_started_from_a_folder_runs_under_it_until_it_ends() -> Result<(), String> {
+        let _serial = serial();
         let made = temporary()?;
         let other = temporary()?;
         let folder = plain(made.path())?;
@@ -717,6 +770,7 @@ mod tests {
     #[test]
     fn a_program_whose_command_line_names_a_file_under_a_folder_runs_under_it() -> Result<(), String>
     {
+        let _serial = serial();
         let made = temporary()?;
         let folder = plain(made.path())?;
         let script = folder.join("node_modules").join("tool").join("cli.js");
@@ -747,6 +801,7 @@ mod tests {
     /// named with why.
     #[test]
     fn an_ended_program_whose_handle_is_held_runs_under_nothing() -> Result<(), String> {
+        let _serial = serial();
         let made = temporary()?;
         let folder = plain(made.path())?;
         let script = folder.join("node_modules").join("tool").join("cli.js");
@@ -767,6 +822,7 @@ mod tests {
     /// a relative argument that resolves elsewhere does not.
     #[test]
     fn a_script_host_naming_a_relative_script_under_a_folder_runs_under_it() -> Result<(), String> {
+        let _serial = serial();
         let made_folder = temporary()?;
         let made_outside = temporary()?;
         let folder = plain(made_folder.path())?;
@@ -787,10 +843,32 @@ mod tests {
         )?;
         assert_eq!(runs_under(&here), Ok(true), "{}", into.display());
         child.end()?;
+        written(&outside.join("cli.js"))?;
         let _beside = host_in(
             &[OsStr::new("/d"), OsStr::new("/c"), OsStr::new(r".\cli.js")],
             &outside,
         )?;
+        assert_eq!(scan(&here), Ok(None));
+        Ok(())
+    }
+
+    /// A script host whose relative script is no file where it works now counts for every
+    /// folder, as one that changed directory after it started from a folder does, until the
+    /// script is there and so provably outside.
+    #[test]
+    fn a_script_host_whose_relative_script_is_missing_where_it_works_counts() -> Result<(), String>
+    {
+        let _serial = serial();
+        let made_folder = temporary()?;
+        let made_work = temporary()?;
+        let work = plain(made_work.path())?;
+        let here = [plain(made_folder.path())?];
+        let _moved = host_in(
+            &[OsStr::new("/d"), OsStr::new("/c"), OsStr::new(r".\cli.js")],
+            &work,
+        )?;
+        assert!(matches!(scan(&here), Ok(Some(_))), "{}", work.display());
+        written(&work.join("cli.js"))?;
         assert_eq!(scan(&here), Ok(None));
         Ok(())
     }
@@ -800,6 +878,7 @@ mod tests {
     /// working elsewhere with no argument does not.
     #[test]
     fn a_script_host_working_in_a_folder_runs_under_it_whatever_it_runs() -> Result<(), String> {
+        let _serial = serial();
         let made_folder = temporary()?;
         let made_outside = temporary()?;
         let folder = plain(made_folder.path())?;
@@ -819,6 +898,7 @@ mod tests {
     #[test]
     fn a_sibling_whose_name_only_starts_with_the_folder_and_a_space_is_not_under_it()
     -> Result<(), String> {
+        let _serial = serial();
         let made_root = temporary()?;
         let root = plain(made_root.path())?;
         let folder = made(root.join("harness"))?;
@@ -840,6 +920,10 @@ mod tests {
 
     /// One decision row: the working directory, the path parts and whether the host counts.
     type Case<'a> = (Option<&'a str>, Option<&'a [&'a str]>, bool);
+
+    /// One moved-host row: the working directory, the path part, whether the file is there
+    /// now, and whether the host counts.
+    type Moved<'a> = (Option<&'a str>, &'a str, bool, bool);
 
     /// A script host counts by where it works and by the path parts it names: a working
     /// directory in the folder, a part into it or naming it whole, relative or absolute, and
@@ -878,8 +962,59 @@ mod tests {
                     .map(|path| (*path).to_owned())
                     .collect::<Vec<_>>()
             });
-            let read = counted(directory, paths.as_deref(), &harness);
+            let read = counted(directory, paths.as_deref(), &harness, |_| true);
             assert_eq!(read, counts, "{directory:?} {paths:?}");
+        }
+    }
+
+    /// A relative script part counts unless it is an existing file outside every folder, so
+    /// a host that left the folder its script is in still counts; a part that names no
+    /// script and an absolute one are judged as before, and one on a share counts.
+    #[test]
+    fn a_relative_script_counts_unless_it_is_a_file_outside_now() {
+        let harness = [Spelling {
+            text: r"c:\tools\harness".to_owned(),
+            file: false,
+        }];
+        let cases: [Moved<'_>; 8] = [
+            (Some(r"c:\work\"), r".\cli.js", true, false),
+            (Some(r"c:\work\"), r".\cli.js", false, true),
+            (Some(r"c:\work\"), r".\cli.mjs", false, true),
+            (Some(r"c:\work\"), "60", false, false),
+            (Some(r"c:\work\"), r"c:\other\cli.js", false, false),
+            (Some(r"\\srv\share\work\"), r".\cli.js", true, true),
+            (Some(r"c:\work\"), r"..\tools\harness\cli.js", true, true),
+            (None, r".\cli.js", true, true),
+        ];
+        for (directory, path, present, counts) in cases {
+            let exists: fn(&str) -> bool = if present { |_| true } else { |_| false };
+            let paths = [path.to_owned()];
+            let read = counted(directory, Some(&paths[..]), &harness, exists);
+            assert_eq!(read, counts, "{directory:?} {path} present {present}");
+        }
+    }
+
+    /// A script is named by a host's extension, with a stem before it.
+    #[test]
+    fn a_script_is_named_by_its_extension() {
+        for path in [
+            r".\cli.js",
+            r"bin\x.mjs",
+            "x.ps1",
+            "run.cmd",
+            r"..\a.b\x.ts",
+        ] {
+            assert!(script(path), "{path}");
+        }
+        for path in [
+            r"bin\tool",
+            "x.js.txt",
+            ".js",
+            r"a.js\tool",
+            "60",
+            "127.0.0.1",
+        ] {
+            assert!(!script(path), "{path}");
         }
     }
 
