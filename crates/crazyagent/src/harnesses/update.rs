@@ -433,7 +433,7 @@ fn brew_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
 fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
     let bin = prefix.join("bin");
     Fixed {
-        program: bin.join("npm"),
+        program: bin.join(kernel_processes::install::NPM),
         args,
         search: vec![bin],
         prefix: Some(prefix.to_path_buf()),
