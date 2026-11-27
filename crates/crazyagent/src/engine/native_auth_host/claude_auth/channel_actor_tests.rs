@@ -84,11 +84,9 @@ fallback_allowed = false
         expected_config_id: config.id,
         expected_source_hash: source_hash,
     };
-    let mut packet = [0; 37];
-    packet[..4].copy_from_slice(b"CAO1");
-    packet[5..].copy_from_slice(&client.token);
+    let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &client.token);
     let admission = host.authority.authenticate(&packet).unwrap();
-    packet.fill(0);
+    drop(packet);
     let begun = host
         .engine
         .native_auth_job(|reply| {

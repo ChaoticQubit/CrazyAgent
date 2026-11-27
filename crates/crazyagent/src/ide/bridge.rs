@@ -928,7 +928,7 @@ fn register_extension(extensions: &Path, folder: &Path) -> Result<(), EngineErro
 /// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
     stream: Stream,
-    packet: [u8; 37],
+    packet: crate::engine::secret_frame::OwnerPacket,
     runtime: OwnerRuntimeHandle,
     deadline: Instant,
 ) {
@@ -940,7 +940,7 @@ pub(crate) async fn serve(
 /// Inputs: the stream, handshake packet, owner runtime, deadline and that time.
 async fn serve_within(
     mut stream: Stream,
-    packet: [u8; 37],
+    packet: crate::engine::secret_frame::OwnerPacket,
     runtime: OwnerRuntimeHandle,
     deadline: Instant,
     write_time: Duration,

@@ -174,13 +174,11 @@ async fn stored_servers(owner: &Usage, name: &str) -> Vec<String> {
 /// request passes before it reaches storage. Inputs: the runtime and the client.
 /// Output: the answer.
 fn admitted(runtime: &OwnerRuntimeHandle, client: &OwnerClient) -> bool {
-    let mut packet = [0; 37];
-    packet[..4].copy_from_slice(b"CAO1");
-    packet[4] = match client.kind {
-        OwnerClientKind::Tui => 0,
-        OwnerClientKind::Desktop => 1,
-    };
-    packet[5..].copy_from_slice(&client.token);
+    let packet = crate::engine::secret_frame::owner_packet(
+        b"CAO1",
+        crate::engine::secret_frame::client_tag(client.kind),
+        &client.token,
+    );
     runtime.authority.authenticate(&packet).is_ok()
 }
 

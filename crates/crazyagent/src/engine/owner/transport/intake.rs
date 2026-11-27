@@ -454,7 +454,7 @@ impl Intake {
         let task = tokio::spawn(run(
             Arc::clone(engine),
             Arc::clone(authority),
-            *packet,
+            crate::engine::secret_frame::OwnerPacket::new(*packet),
             a.clone(),
             Arc::clone(&job),
             asked.subject,
@@ -748,7 +748,7 @@ async fn restored(engine: &Engine, wait: Duration) -> Vec<(IntakeJob, PathBuf)> 
 async fn run(
     engine: Arc<Engine>,
     authority: Arc<Authority>,
-    packet: [u8; 37],
+    packet: crate::engine::secret_frame::OwnerPacket,
     a: Admission,
     job: Arc<IntakeJob>,
     subject: JobSubject,

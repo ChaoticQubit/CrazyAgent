@@ -140,10 +140,12 @@ impl Jobs {
 
     /// The packet the owner client sends and the admission it gets, for rows that serve a
     /// change the way a job does. Output: the packet and its admission.
-    fn admitted(&self) -> ([u8; 37], Admission) {
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAO1");
-        packet[5..].copy_from_slice(&self.owner.owner_client().unwrap().token);
+    fn admitted(&self) -> (crate::engine::secret_frame::OwnerPacket, Admission) {
+        let packet = crate::engine::secret_frame::owner_packet(
+            b"CAO1",
+            0,
+            &self.owner.owner_client().unwrap().token,
+        );
         let admission = self.authority().authenticate(&packet).unwrap();
         (packet, admission)
     }
