@@ -473,3 +473,29 @@ fn a_put_back_holds_engine_db_alone_from_its_copy_to_its_end() {
     );
     assert_eq!(read(&path), (vec!["two".to_owned()], 12));
 }
+
+#[test]
+fn a_put_back_keeps_damaged_live_data_byte_for_byte() {
+    let cut = |path: &Path| {
+        let bytes = std::fs::read(path).unwrap();
+        let page = usize::from(u16::from_be_bytes([bytes[16], bytes[17]]));
+        assert!(page >= 512 && bytes.len() >= 2 * page);
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len((bytes.len() - page / 2) as u64).unwrap();
+    };
+    let damages: [(&str, &dyn Fn(&Path)); 2] = [("a b-tree page", &damage), ("a cut page", &cut)];
+    for (kind, damaged) in damages {
+        let (_root, path, _kept) = broken(true);
+        damaged(&path);
+        let live = std::fs::read(&path).unwrap();
+
+        let saved = put_back(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read(saved.join(DATABASE)).unwrap(),
+            live,
+            "the put-back keeps live data with {kind} as it was"
+        );
+        assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+    }
+}
