@@ -550,3 +550,108 @@ fn a_later_sandbox_save_compiles_no_sql() {
     assert!(counts[0] > 0, "the first save compiles its statements");
     assert_eq!(counts[2], 0, "the third sandbox save compiled SQL again");
 }
+
+std::thread_local! {
+    static RAN: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps the text of each statement SQLite starts on this thread, skipping the trigger
+/// programs it reports with a leading `--`. Input: the trace event. Output: none.
+fn ran(event: rusqlite::trace::TraceEvent<'_>) {
+    if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event
+        && !sql.starts_with("--")
+    {
+        RAN.with(|ran| ran.borrow_mut().push(sql.to_owned()));
+    }
+}
+
+/// Runs three saves on a fresh store, each in its own committed request, and lists the
+/// statements SQLite ran during the third save alone, the first steady one. Inputs: the read,
+/// given the transaction, and the save, given the transaction, its revision and what was
+/// read. Output: the third save's statements in order.
+fn third_save_statements<T>(
+    read: impl Fn(&rusqlite::Transaction<'_>) -> T,
+    save: impl Fn(&rusqlite::Transaction<'_>, u64, T) -> Outcome,
+) -> Vec<String> {
+    let mut db = engine_store();
+    db.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(ran),
+    );
+    let mut third = Vec::new();
+    for save_index in 0..3 {
+        let tx = db.transaction().unwrap();
+        let revision = u64::try_from(moved(&tx).0).unwrap();
+        let read = read(&tx);
+        RAN.with(|ran| ran.borrow_mut().clear());
+        assert_eq!(save(&tx, revision, read), Outcome::Applied);
+        if save_index == 2 {
+            third = RAN.with(|ran| ran.borrow_mut().split_off(0));
+        }
+        tx.commit().unwrap();
+    }
+    db.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+    assert!(!third.is_empty(), "the third save ran its statements");
+    third
+}
+
+/// The statements a steady save must not run again: the log table's create, which the
+/// first append already ran, and a bare read of the revision the save's own move just set.
+/// Input: the statements. Output: the repeats among them.
+fn repeats(statements: &[String]) -> Vec<&String> {
+    statements
+        .iter()
+        .filter(|sql| {
+            sql.starts_with("CREATE TABLE IF NOT EXISTS state_log")
+                || sql.as_str() == "SELECT revision FROM state WHERE id=1"
+        })
+        .collect()
+}
+
+#[test]
+fn a_steady_quit_save_runs_eight_statements_and_no_repeat() {
+    let refusals = EngineRefusals::new();
+    let statements = third_save_statements(
+        |_| (),
+        |tx, revision, ()| {
+            save_quit_with(
+                agent_quit::save,
+                bundled_grants(),
+                &AllOn,
+                &refusals,
+                tx,
+                revision,
+                &stop_never_12(),
+            )
+            .unwrap()
+        },
+    );
+
+    assert!(
+        repeats(&statements).is_empty(),
+        "the steady quit save ran a repeat: {statements:#?}"
+    );
+    assert_eq!(
+        statements.len(),
+        8,
+        "the steady quit save ran: {statements:#?}"
+    );
+}
+
+#[test]
+fn a_steady_sandbox_save_runs_no_repeat() {
+    let statements = third_save_statements(
+        |tx| match crate::sandbox_settings::read(tx).unwrap() {
+            crate::engine::owner::OwnerData::SandboxSettings { settings, version } => {
+                Command::OwnerSandbox { settings, version }
+            }
+            other => panic!("the sandbox read answers sandbox settings, not {other:?}"),
+        },
+        |tx, revision, command| crate::settings_log::owner(tx, &command, revision).unwrap(),
+    );
+
+    assert!(
+        repeats(&statements).is_empty(),
+        "the steady sandbox save ran a repeat: {statements:#?}"
+    );
+}
