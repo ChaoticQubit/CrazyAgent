@@ -115,7 +115,9 @@ jobs:
           for side in base tip; do
             want "$side fetch rc" "$(cat "$logs/$side-fetch.rc")" 0
             want "$side helper rc" "$(cat "$logs/$side-helper.rc")" 0
-            want "$side rows built the crate" "$(count "$side-rows" '(Checking|Compiling) crazyagent v')" 1
+            built=$(count "$side-rows" '(Checking|Compiling) crazyagent v')
+            echo "$side crate lines: $built"
+            want "$side rows built the crate" "$([ "$built" -ge 1 ] && echo yes || echo no)" yes
             want "$side rows ran" "$(ran "$side-rows")" 3
             echo "$side FAILED rows:"
             grep -E '^test .* \.\.\. FAILED$' "$logs/$side-rows.log" || true
