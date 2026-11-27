@@ -1244,3 +1244,6 @@ mod use_tests;
 
 #[cfg(test)]
 mod configured_rcli_tests;
+
+#[cfg(test)]
+mod engine_fd_tests;
