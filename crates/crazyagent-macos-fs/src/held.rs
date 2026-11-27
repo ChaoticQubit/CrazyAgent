@@ -122,6 +122,17 @@ pub fn held_entry(entry: BorrowedFd<'_>) -> std::io::Result<HeldEntry> {
     held_reply(&reply)
 }
 
+/// Refuses a read by name that has no folder to start from: with no folder the name must be
+/// absolute, so `AT_FDCWD` never resolves it against this process's working folder. Inputs:
+/// the folder or none, and the name. Output: nothing, or `InvalidInput` before any call.
+fn named_from(parent: Option<BorrowedFd<'_>>, name: &CStr) -> std::io::Result<()> {
+    if parent.is_some() || name.to_bytes().first() == Some(&b'/') {
+        Ok(())
+    } else {
+        Err(std::io::ErrorKind::InvalidInput.into())
+    }
+}
+
 /// Reads one entry named by one part relative to an open folder, or by an absolute name with
 /// no folder, with one `getattrlistat` that follows no link, so a link there is read itself
 /// ([`HeldEntry`]). Safety contract of its unsafe call: `parent` is borrowed, so it stays open
@@ -130,7 +141,7 @@ pub fn held_entry(entry: BorrowedFd<'_>) -> std::io::Result<HeldEntry> {
 /// and the name. Output: the read, or an error for a call that failed or a reply out of shape.
 #[allow(unsafe_code)]
 pub fn held_entry_at(parent: Option<BorrowedFd<'_>>, name: &CStr) -> std::io::Result<HeldEntry> {
-    assert!(parent.is_some() || name.to_bytes().first() == Some(&b'/'));
+    named_from(parent, name)?;
     let mut list = held_list();
     let mut reply = [0u8; ENTRY_REPLY_BYTES];
     let done = unsafe {
@@ -196,7 +207,7 @@ pub fn held_volume_keeps_lists_at(
     name: &CStr,
     device: u64,
 ) -> std::io::Result<bool> {
-    assert!(parent.is_some() || name.to_bytes().first() == Some(&b'/'));
+    named_from(parent, name)?;
     let mut list = volume_list();
     let mut reply = [0u8; VOLUME_REPLY_BYTES];
     let done = unsafe {
