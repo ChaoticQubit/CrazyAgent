@@ -91,6 +91,98 @@ fn refused_before_any_copy(busy: Result<bool, StorageError>, code: &str) {
     assert_eq!(read(&path), (vec!["two".to_owned()], 12));
 }
 
+/// The env that names the engine.db a [`lock_probe`] child tries to write.
+const LOCK_PROBE_ENV: &str = "KERNEL_STORAGE_RESTORE_LOCK_PROBE";
+/// The exit code of a [`lock_probe`] child that took the write lock; not 0, which a run that
+/// matched no row also gives.
+const PROBE_GOT_LOCK: i32 = 5;
+/// The exit code of a [`lock_probe`] child refused as busy or locked.
+const PROBE_REFUSED: i32 = 3;
+
+/// Run as a child by [`probe_from_another_process`]: with [`LOCK_PROBE_ENV`] set, opens that
+/// engine.db with no wait and begins a write, exiting [`PROBE_GOT_LOCK`] when it got the
+/// lock, [`PROBE_REFUSED`] when it was busy or locked, and 4 on any other outcome; with the
+/// env unset it does nothing, so a plain ignored run passes.
+#[test]
+#[ignore = "run as a child process by probe_from_another_process"]
+fn lock_probe() {
+    let Some(path) = std::env::var_os(LOCK_PROBE_ENV) else {
+        return;
+    };
+    let code = match Connection::open(&path).and_then(|db| {
+        db.busy_timeout(Duration::ZERO)?;
+        db.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+    }) {
+        Ok(()) => PROBE_GOT_LOCK,
+        Err(rusqlite::Error::SqliteFailure(cause, _))
+            if matches!(
+                cause.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            PROBE_REFUSED
+        }
+        Err(other) => {
+            eprintln!("lock_probe_failed {other}");
+            4
+        }
+    };
+    std::process::exit(code);
+}
+
+/// Runs [`lock_probe`] in a child process of this test binary against one engine.db and
+/// waits for it. Input: the database path. Output: the child's exit code.
+fn probe_from_another_process(path: &Path) -> i32 {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "restore::tests::lock_probe",
+            "--exact",
+            "--ignored",
+            "--quiet",
+        ])
+        .env(LOCK_PROBE_ENV, path)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    status.code().expect("the probe child exits with a code")
+}
+
+/// While a restore runs, no other process can write engine.db, in WAL mode as the engine
+/// keeps it: a child refused right after the restore holds the database alone is refused
+/// again once the restore has copied the replaced data and written the pinned data back.
+#[test]
+fn a_restore_holds_engine_db_alone_from_its_copy_to_its_end() {
+    let (_root, path) = upgraded(true);
+    let mode: String = Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let held = Cell::new(None);
+    let ended = Cell::new(None);
+    let hooks = Hooks {
+        texts: &no_texts,
+        busy: &|_| {
+            held.set(Some(probe_from_another_process(&path)));
+            Ok(false)
+        },
+        after_restore: &|_, _, _| ended.set(Some(probe_from_another_process(&path))),
+    };
+
+    restore_pinned(&path, &hooks).unwrap();
+
+    assert_eq!(
+        held.get(),
+        Some(PROBE_REFUSED),
+        "the probe is refused once held"
+    );
+    assert_eq!(
+        ended.get(),
+        Some(PROBE_REFUSED),
+        "another process wrote engine.db while the restore held it"
+    );
+}
+
 #[test]
 fn a_restore_while_an_agent_runs_is_refused_before_any_copy() {
     refused_before_any_copy(Ok(true), RESTORE_AGENTS_RUNNING);
