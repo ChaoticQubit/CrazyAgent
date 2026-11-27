@@ -290,6 +290,7 @@ pub struct Asset {
     pub signature: String,
 }
 
+#[inline]
 fn version(text: &str) -> Result<semver::Version, UpdateError> {
     semver::Version::parse(text.trim_start_matches('v')).map_err(|_| {
         fail(
