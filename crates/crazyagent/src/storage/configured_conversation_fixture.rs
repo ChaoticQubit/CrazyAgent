@@ -51,20 +51,27 @@ pub(crate) struct ConfiguredInitialConversationFixture {
 }
 
 impl ConfiguredInitialConversationFixture {
-    /// Stops the fixture's owner, closes the storage actor and the row's connection.
-    /// Input: the fixture. Output: none, or the step that failed.
+    /// Stops the fixture's owner, closes the storage actor and the row's connection, then
+    /// removes the fixture folder. Input: the fixture. Output: none, or the step that failed.
     pub(crate) async fn close(self) -> Result<(), String> {
+        let Self {
+            db,
+            host,
+            storage,
+            root,
+            ..
+        } = self;
         let (send, receive) = oneshot::channel();
-        self.storage
+        storage
             .sender
-            .try_send(Job::OwnerStop(self.host, send))
+            .try_send(Job::OwnerStop(host, send))
             .map_err(|_| "the configured fixture's owner stop queue is unavailable".to_owned())?;
         named(
             named(receive.await, "receive the owner stop")?,
             "stop the owner",
         )?;
         let (send, receive) = oneshot::channel();
-        self.storage
+        storage
             .sender
             .try_send(Job::Close(send))
             .map_err(|_| "the configured fixture's actor close queue is unavailable".to_owned())?;
@@ -72,13 +79,27 @@ impl ConfiguredInitialConversationFixture {
             named(receive.await, "receive the actor close")?,
             "close the actor",
         )?;
-        named(
-            self.db.close().map_err(|(_, error)| error),
-            "close the row's connection",
-        )?;
-        assert!(self.root.path().is_dir());
-        Ok(())
+        drop(storage);
+        blocking("close the row's connection", move || {
+            named(
+                db.close().map_err(|(_, error)| error),
+                "close the row's connection",
+            )?;
+            assert!(root.path().is_dir());
+            named(root.close(), "remove the fixture folder")
+        })
+        .await
     }
+}
+
+/// Runs one stage of sync file or SQLite work on the blocking pool, so the async worker
+/// keeps serving the storage actor. Inputs: the stage's name and its work. Output: the
+/// work's value, its error, or the stage named with the panic or cancel that ended it.
+async fn blocking<T: Send + 'static>(
+    stage: &str,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    named(tokio::task::spawn_blocking(work).await, stage)?
 }
 
 /// A step's result with the step named in its error. Inputs: the result and the step.
@@ -178,12 +199,14 @@ fn private_folder(path: &Path) -> Result<(), String> {
     )
 }
 
-/// A real storage actor with one configured project whose master session holds a queued
-/// first turn and a registered rcli profile, ready for its first model attempt. Input: none.
-/// Output: the fixture, or the step that failed.
-pub(crate) async fn configured_initial_conversation_fixture()
--> Result<ConfiguredInitialConversationFixture, String> {
-    let base = named(std::fs::canonicalize("/tmp"), "canonicalize /tmp")?;
+/// Makes the fixture's private files: a 0700 root in the canonical temp folder holding the
+/// global config, and a 0700 configured home with its SDK config. Input: none. Output: the
+/// root, the global config path and the configured home, or the step that failed.
+fn setup() -> Result<(tempfile::TempDir, PathBuf, PathBuf), String> {
+    let base = named(
+        std::fs::canonicalize(std::env::temp_dir()),
+        "canonicalize the temp folder",
+    )?;
     let root = named(
         tempfile::Builder::new().prefix("ca-cgf-").tempdir_in(&base),
         format!("make a folder in {}", base.display()),
@@ -207,6 +230,51 @@ pub(crate) async fn configured_initial_conversation_fixture()
         "encode the SDK config",
     )?;
     private_file(&sdk.join("config.json"), &sdk_config)?;
+    Ok((root, global_path, profile_home))
+}
+
+/// Opens the row's own connection to the fixture database and checks that no attempt,
+/// auth operation or observation is stored yet and that no SDK key file exists. Inputs:
+/// the database path and the key file path. Output: the connection, or the failed check.
+fn empty_connection(database_path: &Path, keys: &Path) -> Result<Connection, String> {
+    let db = named(
+        Connection::open_with_flags(
+            database_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        ),
+        format!("open {}", database_path.display()),
+    )?;
+    named(
+        db.busy_timeout(std::time::Duration::from_secs(1)),
+        "set the busy timeout",
+    )?;
+    for table in [
+        "model_gateway_attempts",
+        "native_auth_operations",
+        "model_gateway_observations",
+    ] {
+        let rows = named(
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            }),
+            format!("count {table}"),
+        )?;
+        if rows != 0 {
+            return Err(format!("{table} holds {rows} rows"));
+        }
+    }
+    if keys.exists() {
+        return Err(format!("{} exists", keys.display()));
+    }
+    Ok(db)
+}
+
+/// A real storage actor with one configured project whose master session holds a queued
+/// first turn and a registered rcli profile, ready for its first model attempt. Input: none.
+/// Output: the fixture, or the step that failed.
+pub(crate) async fn configured_initial_conversation_fixture()
+-> Result<ConfiguredInitialConversationFixture, String> {
+    let (root, global_path, profile_home) = blocking("set up the fixture files", setup).await?;
     let database_path = root.path().join("engine.db");
     let (storage, config) = named(
         Storage::open_with_settings_sources(
@@ -379,31 +447,11 @@ pub(crate) async fn configured_initial_conversation_fixture()
         previous_attempt: None,
     };
     let generation = proof.generation;
-    let db = named(
-        Connection::open_with_flags(
-            &database_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        ),
-        format!("open {}", database_path.display()),
-    )?;
-    named(
-        db.busy_timeout(std::time::Duration::from_secs(1)),
-        "set the busy timeout",
-    )?;
-    for table in [
-        "model_gateway_attempts",
-        "native_auth_operations",
-        "model_gateway_observations",
-    ] {
-        let rows = named(
-            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get::<_, i64>(0)
-            }),
-            format!("count {table}"),
-        )?;
-        assert_eq!(rows, 0, "{table}");
-    }
-    assert!(!profile_home.join(".backboard/keys.json").exists());
+    let keys = profile_home.join(".backboard/keys.json");
+    let db = blocking("open the row's connection", move || {
+        empty_connection(&database_path, &keys)
+    })
+    .await?;
     Ok(ConfiguredInitialConversationFixture {
         db,
         config,
