@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { HELPER, check, packetLines } from "./owner-packets.mjs";
+import { HELPER, check, packetLines, tokenLines } from "./owner-packets.mjs";
 
 const script = fileURLToPath(new URL("./owner-packets.mjs", import.meta.url));
 
@@ -64,6 +64,41 @@ test("a hand-built packet fails in sources and integration tests, in every liter
 test("the helper call, a 4-byte length copy and a packet parameter type pass", () => {
   assert.deepEqual(packetLines(CLEAN), []);
   assert.deepEqual(check(new Map([["crates/crazyagent/src/engine.rs", CLEAN]])), []);
+});
+
+/** One plain owner token per line, in every form the token rule names. */
+const PLAIN_TOKENS = [
+  "    token: [u8; 32],",
+  "    spent: Option<[u8; 32]>,",
+  "async fn connect_pinned(input: &Path, mut token: [u8; 32]) {}",
+  "*current = Some(NativeAuthSlot { token: [0; 32] });",
+  "let mut observed = [0; 32];",
+  "let mut actual = [0_u8; 32];",
+  "let mut token = [0u8; TOKEN_BYTES];",
+].join("\n");
+
+/** Same-shaped arrays that hold no owner token, and tokens held in the wiping alias. */
+const NOT_TOKENS = [
+  "    digest: [u8; 32],",
+  "fn hash(file: &File, length: u64) -> Result<[u8; 32], EngineError> {}",
+  "let mut bytes = [0; 32];",
+  "fn watch(tokens: &[&[u8; 32]]) {}",
+  "    token: OwnerToken,",
+  "fn write_capability(path: &Path, token: &[u8; 32]) {}",
+  "let mut token = owner_token();",
+  "let mut token = [0; 320];",
+].join("\n");
+
+test("a plain owner token fails in every form the rule names", () => {
+  assert.deepEqual(tokenLines(PLAIN_TOKENS), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(check(new Map([["crates/crazyagent/tests/a.rs", "let mut token = [0; 32];"]])), [
+    "crates/crazyagent/tests/a.rs:1: hold the owner token in secret_frame::OwnerToken",
+  ]);
+});
+
+test("digests, public ids, borrows and the wiping alias pass the token rule", () => {
+  assert.deepEqual(tokenLines(NOT_TOKENS), []);
+  assert.deepEqual(check(new Map([["crates/crazyagent/src/engine.rs", NOT_TOKENS]])), []);
 });
 
 test("the helper file itself may lay out the packet", () => {

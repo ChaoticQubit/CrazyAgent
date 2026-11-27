@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -15,6 +16,14 @@ export const SCOPE = /^crates\/crazyagent\/(src|tests)\/.+\.rs$/;
  */
 export const PACKET = /\[\s*0(?:_?u8)?\s*;\s*(?:37|(?:\w+::)*OWNER_PACKET_BYTES)\s*\]/g;
 
+/**
+ * A plain 32-byte owner token held by name: a `token`, `observed`, `actual` or `spent`
+ * field, parameter or local typed or filled as `[u8; 32]`, by the literal length or by a
+ * `TOKEN_BYTES` constant, in place of `secret_frame::OwnerToken`, which wipes on drop.
+ */
+export const TOKEN =
+  /\b(?:token|observed|actual|spent)\b\s*(?::\s*(?:Option<\s*)?\[\s*u8\s*;\s*(?:32|(?:\w+::)*TOKEN_BYTES)\s*\]|[:=]\s*\[\s*0(?:_?u8)?\s*;\s*(?:32|(?:\w+::)*TOKEN_BYTES)\s*\])/g;
+
 /** The largest `git ls-files` listing read, far above the repository's size. */
 const LISTING_BYTES_MAX = 64 * 1024 * 1024;
 
@@ -23,15 +32,33 @@ const LISTING_BYTES_MAX = 64 * 1024 * 1024;
  * Input: the text. Output: the 1-based line numbers of the literals, in order.
  */
 export function packetLines(text) {
+  return matchLines(text, PACKET);
+}
+
+/**
+ * Finds the plain owner tokens in one file's text: each named 32-byte token array.
+ * Input: the text. Output: the 1-based line numbers of the arrays, in order.
+ */
+export function tokenLines(text) {
+  return matchLines(text, TOKEN);
+}
+
+/**
+ * The 1-based line of every match of a global pattern in a text.
+ * Inputs: the text and the pattern. Output: the line numbers, in order.
+ */
+function matchLines(text, pattern) {
+  assert(pattern.global);
   const lines = [];
-  for (const match of text.matchAll(PACKET)) {
+  for (const match of text.matchAll(pattern)) {
     lines.push(text.slice(0, match.index).split("\n").length);
   }
   return lines;
 }
 
 /**
- * Checks the files' texts: a packet literal anywhere but the helper file is a problem.
+ * Checks the files' texts: a packet literal or a plain token anywhere but the helper file
+ * is a problem.
  * Input: a map of repository path to text. Output: one problem line per literal.
  */
 export function check(files) {
@@ -42,6 +69,9 @@ export function check(files) {
     }
     for (const line of packetLines(text)) {
       problems.push(`${file}:${line}: build the owner packet with secret_frame::owner_packet`);
+    }
+    for (const line of tokenLines(text)) {
+      problems.push(`${file}:${line}: hold the owner token in secret_frame::OwnerToken`);
     }
   }
   return problems;
@@ -70,10 +100,10 @@ function main() {
   const problems = run(root);
   if (problems.length > 0) {
     console.error(problems.join("\n"));
-    console.error(`${problems.length} hand-built owner packet(s); use ${HELPER}`);
+    console.error(`${problems.length} hand-built owner packet(s) or plain token(s); use ${HELPER}`);
     process.exit(1);
   }
-  console.log("every owner packet is built by the helper");
+  console.log("every owner packet is built by the helper and every owner token wipes");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -28,6 +28,16 @@ pub fn owner_packet_buffer() -> OwnerPacket {
     Zeroizing::new([0; OWNER_PACKET_BYTES])
 }
 
+/// One 32-byte owner, runner, custody or IDE capability token, wiped when its holder
+/// drops it.
+pub type OwnerToken = Zeroizing<[u8; 32]>;
+
+/// A zeroed capability token, wiped when dropped, to generate or read a token into.
+/// Output: the token.
+pub fn owner_token() -> OwnerToken {
+    Zeroizing::new([0; 32])
+}
+
 /// The tag byte an owner client sends for its kind. Input: the kind. Output: 0 for the
 /// terminal client, 1 for the desktop app.
 pub fn client_tag(kind: OwnerClientKind) -> u8 {

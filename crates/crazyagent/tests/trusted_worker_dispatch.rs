@@ -292,7 +292,7 @@ fn generation(root: &Path) -> PathBuf {
     root.join(generation)
 }
 
-fn capability(path: &Path) -> [u8; 32] {
+fn capability(path: &Path) -> crazyagent::engine::secret_frame::OwnerToken {
     let file = std::fs::File::from(
         rustix::fs::open(
             path,
@@ -310,7 +310,7 @@ fn capability(path: &Path) -> [u8; 32] {
     let mut bytes = Vec::new();
     file.take(33).read_to_end(&mut bytes).unwrap();
     assert!(bytes.len() == 32, "capability length changed");
-    let mut token = [0; 32];
+    let mut token = crazyagent::engine::secret_frame::owner_token();
     token.copy_from_slice(&bytes);
     token
 }
@@ -553,7 +553,7 @@ async fn actual_capabilities_cannot_cross_runner_and_human_principals() {
             registration_id: prepared.registration_id().clone(),
             boot,
         };
-        let actual = exchange(&socket, Some((b"CAR1", prepared.slot(), &token)), &request)
+        let actual = exchange(&socket, Some((b"CAR1", prepared.slot(), &*token)), &request)
             .await
             .unwrap()
             .unwrap();
@@ -570,7 +570,7 @@ async fn actual_capabilities_cannot_cross_runner_and_human_principals() {
         assert!(
             exchange(
                 &socket,
-                Some((b"CAR1", prepared.slot(), &token)),
+                Some((b"CAR1", prepared.slot(), &*token)),
                 &owner_read
             )
             .await
@@ -583,19 +583,19 @@ async fn actual_capabilities_cannot_cross_runner_and_human_principals() {
         ] {
             let human = capability(&directory.join(name));
             assert!(
-                exchange(&socket, Some((b"CAR1", prepared.slot(), &human)), &request)
+                exchange(&socket, Some((b"CAR1", prepared.slot(), &*human)), &request)
                     .await
                     .unwrap()
                     .is_none()
             );
             assert!(
-                exchange(&socket, Some((b"CAO1", slot, &token)), &owner_read)
+                exchange(&socket, Some((b"CAO1", slot, &*token)), &owner_read)
                     .await
                     .unwrap()
                     .is_none()
             );
             assert!(
-                exchange(&socket, Some((b"CAO1", slot, &human)), &request)
+                exchange(&socket, Some((b"CAO1", slot, &*human)), &request)
                     .await
                     .unwrap()
                     .is_none()
@@ -887,7 +887,7 @@ async fn ready_rejects_a_different_boot_or_registration_without_poisoning_the_ac
             assert!(
                 exchange(
                     &directory.join("owner.sock"),
-                    Some((b"CAR1", prepared.slot(), &token)),
+                    Some((b"CAR1", prepared.slot(), &*token)),
                     &request
                 )
                 .await
@@ -897,7 +897,7 @@ async fn ready_rejects_a_different_boot_or_registration_without_poisoning_the_ac
         }
         let actual = exchange(
             &directory.join("owner.sock"),
-            Some((b"CAR1", prepared.slot(), &token)),
+            Some((b"CAR1", prepared.slot(), &*token)),
             &RunnerRequest::Ready {
                 protocol_version: PROTOCOL_VERSION,
                 registration_id: prepared.registration_id().clone(),
