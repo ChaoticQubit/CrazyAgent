@@ -112,3 +112,83 @@ fn others_answer_while_stalled(write: fn(&ConptyHost, &AgentId) -> Result<(), Ho
         assert_eq!(typed, Ok(()));
     });
 }
+
+/// How many input calls of `INPUT_BYTES_MAX` bytes the input leg types, well past what a
+/// pipe buffer holds.
+const INPUT_CALLS: usize = 300;
+
+/// A pane command whose app never reads its input: PING.EXE counting for minutes, named by
+/// its absolute path. Input: the folder it starts in. Output: the command.
+fn never_reads(cwd: &Path) -> PaneCommand {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("SystemRoot is set on Windows"));
+    PaneCommand {
+        argv: vec![
+            root.join("System32").join("PING.EXE").display().to_string(),
+            "-n".into(),
+            "600".into(),
+            "127.0.0.1".into(),
+        ],
+        cwd: cwd.to_path_buf(),
+        env: Vec::new(),
+    }
+}
+
+/// Runs one host call on its own thread and hands back its answer, so a call that blocks
+/// cannot hold the row past its bound. Inputs: the host, the terminal name and the call.
+/// Output: the end that receives the call's answer.
+fn answered<T: Send + 'static>(
+    host: &Arc<ConptyHost>,
+    agent: &AgentId,
+    call: fn(&ConptyHost, &AgentId) -> Result<T, HostError>,
+) -> Receiver<Result<T, HostError>> {
+    let (answer, answers) = channel();
+    let (host, agent) = (Arc::clone(host), agent.clone());
+    std::thread::spawn(move || {
+        let _ = answer.send(call(&host, &agent));
+    });
+    answers
+}
+
+/// A real ConPTY pane whose app never reads its input takes a paste of `PASTE_BYTES_MAX`
+/// keys, and another takes `INPUT_CALLS` full input calls, each answering within
+/// `ANSWER_MAX`; a kill of either pane then answers within `ANSWER_MAX` too, never waiting
+/// on a write.
+#[test]
+fn a_paste_into_an_app_that_never_reads_returns_and_a_kill_does_not_wait() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("a temp folder: {error}"));
+    let host = Arc::new(ConptyHost::new(|_, _| true));
+    let pasted = AgentId::team(1).unwrap_or_else(|error| panic!("team agent 1: {error:?}"));
+    let typed = AgentId::team(2).unwrap_or_else(|error| panic!("team agent 2: {error:?}"));
+    for agent in [&pasted, &typed] {
+        host.spawn(agent, &never_reads(temp.path()))
+            .unwrap_or_else(|error| panic!("spawn {agent}: {error:?}"));
+    }
+    let paste = answered(&host, &pasted, |host, agent| {
+        host.paste(agent, &vec![b'a'; PASTE_BYTES_MAX])
+    });
+    let input = answered(&host, &typed, |host, agent| {
+        for _ in 0..INPUT_CALLS {
+            host.input(agent, &[b'a'; INPUT_BYTES_MAX])?;
+        }
+        Ok(())
+    });
+    let paste_answer = paste.recv_timeout(ANSWER_MAX);
+    let input_answer = input.recv_timeout(ANSWER_MAX);
+    let killed = [&pasted, &typed]
+        .map(|agent| answered(&host, agent, |host, agent| host.kill(agent)))
+        .map(|kill| kill.recv_timeout(ANSWER_MAX));
+    eprintln!("paste {paste_answer:?} input {input_answer:?} kills {killed:?}");
+    assert_eq!(killed, [Ok(Ok(())), Ok(Ok(()))], "a kill waited on a write");
+    assert_eq!(
+        paste_answer,
+        Ok(Ok(())),
+        "the paste into an app that never reads"
+    );
+    assert_eq!(
+        input_answer,
+        Ok(Ok(())),
+        "the input into an app that never reads"
+    );
+}
