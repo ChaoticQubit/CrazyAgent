@@ -16,6 +16,7 @@ pub const SOURCE_BYTES_MAX: usize = 2048;
 pub const MEMBER_BYTES_MAX: usize = 256;
 
 const UV: &str = if cfg!(windows) { "uv.exe" } else { "uv" };
+const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
 const UV_RELEASE_PROGRAM: &str = "uv";
 const WINGET: &str = "winget.exe";
 
@@ -117,7 +118,7 @@ pub fn steps(recipe: &InstallRecipe, paths: &InstallPaths) -> Result<Vec<Step>, 
             flags,
             ..
         } => {
-            let npm = installer(paths, "npm")?;
+            let npm = installer(paths, NPM)?;
             let spec = if version.is_empty() {
                 package.clone()
             } else {
