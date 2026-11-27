@@ -19,6 +19,8 @@ const STATE: &str =
     CREATE TABLE master_sessions (id TEXT PRIMARY KEY, project TEXT NOT NULL,
         created INTEGER NOT NULL UNIQUE, version INTEGER NOT NULL, phase TEXT NOT NULL,
         body TEXT NOT NULL);
+    CREATE UNIQUE INDEX master_current_project ON master_sessions(project)
+        WHERE phase='configured';
     CREATE TABLE conversation_entries (project TEXT NOT NULL,
         event_cursor INTEGER NOT NULL UNIQUE, kind TEXT NOT NULL,
         brief_version INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (project, event_cursor));
@@ -320,6 +322,47 @@ fn every_marked_write_closes_into_events_whose_replay_equals_the_live_rows() {
         .query_row("SELECT phase FROM master_sessions", [], |row| row.get(0))
         .unwrap();
     assert_eq!(phase, "configured", "a skipped save shows the earlier one");
+}
+
+/// A renew's close, which parks a project's configured session and saves its new configured
+/// one, logs the parked save first whatever the ids' order, so a replay never holds two
+/// configured sessions of one project and equals the live tables.
+#[test]
+fn a_renew_logged_in_one_close_replays_without_two_configured_sessions() {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    put_session(&tx, &view("p1", "master-b", 1, "configured"), 1);
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
+    assert_eq!(close(&mut log).unwrap(), 1);
+    drop(log);
+    tx.commit().unwrap();
+
+    let tx = db.transaction().unwrap();
+    put_session(&tx, &view("p1", "master-b", 2, "parked"), 1);
+    put_session(&tx, &view("p1", "master-a", 2, "configured"), 2);
+    let mut log = crate::state_log::own(&tx, engine()).unwrap();
+    assert_eq!(close(&mut log).unwrap(), 2);
+    drop(log);
+    tx.commit().unwrap();
+
+    let saved: Vec<(String, String)> = bodies(&db, KIND_SESSION)
+        .iter()
+        .map(|body| {
+            (
+                body["session"].as_str().unwrap().to_owned(),
+                body["view"]["phase"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        saved,
+        [
+            ("master-b".to_owned(), "configured".to_owned()),
+            ("master-b".to_owned(), "parked".to_owned()),
+            ("master-a".to_owned(), "configured".to_owned()),
+        ]
+    );
+    replays_to_live(&mut db);
 }
 
 /// v2.5 L13 (L8 I1): a close at a revision another writer already logged logs nothing and
