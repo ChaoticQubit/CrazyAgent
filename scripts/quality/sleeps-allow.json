@@ -404,6 +404,7 @@
   "crates/kernel/processes/src/terminal/tmux/tests.rs": 23,
   "crates/kernel/processes/src/update/tests.rs": 1,
   "crates/kernel/sandbox/src/model_proxy/tests.rs": 3,
+  "crates/kernel/security/src/perf_tests/keychain.rs": 1,
   "scripts/rcli/host.test.ts": 1,
   "scripts/trial/report.test.mjs": 2,
   "scripts/trial/run.test.mjs": 3
