@@ -1,10 +1,10 @@
-mod freed_bytes_support;
-
 use crazyagent::tui::keys::Key;
 use crazyagent::tui::widgets::TextField;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+mod freed_bytes_support;
 
 const FIELD_CHARS: usize = 97;
 const FIELD_BYTES: usize = FIELD_CHARS * 4;
