@@ -63,8 +63,8 @@ fn phase<T>(
 
 /// A build shaped like a team launch walks the owner home, the harness homes and the owner
 /// secrets once, the engine secrets once when guarded, each granted root or file once, and
-/// every secret once more at install, so a launch costs those walks and no more. It prints
-/// the walks and the time in ns of each phase, and their sums.
+/// every secret and every granted root or file once more at install, so a launch costs those
+/// walks and no more. It prints the walks and the time in ns of each phase, and their sums.
 #[test]
 fn a_team_shaped_build_walks_each_list_once_and_each_candidate_once() {
     let scratch = tempfile::tempdir().unwrap();
@@ -126,7 +126,7 @@ fn a_team_shaped_build_walks_each_list_once_and_each_candidate_once() {
     let candidates = 3 + 1 + 3 + 1;
     assert_eq!(
         walked,
-        lists + candidates + secrets + engine,
+        lists + candidates + secrets + engine + candidates,
         "{walked} walks"
     );
 }
@@ -193,4 +193,42 @@ fn a_read_root_holding_a_guarded_engine_secret_is_refused() {
         matches!(&refused, Err(SandboxError::Invalid(reason)) if reason == SECRET_ROOT_REFUSED),
         "{refused:?}"
     );
+}
+
+/// Asserts that installing the sandbox's profile is refused as a granted root that changed
+/// since the build. Inputs: the sandbox and the scratch root.
+fn install_refused_as_changed(sandbox: &ProjectSandbox, root: &Path) {
+    let installed = sandbox.install(&root.join("agent.sb"));
+    let changed = "a granted path changed between the sandbox build and its install";
+    assert!(
+        matches!(&installed, Err(SandboxError::Invalid(reason)) if reason == changed),
+        "{installed:?}"
+    );
+}
+
+/// A granted read root renamed away after the build, with a link to the engine runtime left
+/// at its path, refuses the install: the profile grants by path, so the root is walked
+/// again and its new identity is not the one the build checked.
+#[test]
+fn a_granted_root_replaced_by_a_link_to_the_runtime_after_the_build_refuses_the_install() {
+    let (_scratch, root, _project, runtime, sandbox) = guarded();
+    let granted = root.join("granted");
+    fs::create_dir(&granted).unwrap();
+    let sandbox = sandbox.allow_read(&granted).unwrap();
+    fs::rename(&granted, root.join("granted.old")).unwrap();
+    symlink(&runtime, &granted).unwrap();
+    install_refused_as_changed(&sandbox, &root);
+}
+
+/// A granted read root renamed away after the build, with a new plain folder made at its
+/// path, refuses the install, since the folder the profile grants is not the one checked.
+#[test]
+fn a_granted_root_replaced_by_a_new_folder_after_the_build_refuses_the_install() {
+    let (_scratch, root, _project, _runtime, sandbox) = guarded();
+    let granted = root.join("granted");
+    fs::create_dir(&granted).unwrap();
+    let sandbox = sandbox.allow_read(&granted).unwrap();
+    fs::rename(&granted, root.join("granted.old")).unwrap();
+    fs::create_dir(&granted).unwrap();
+    install_refused_as_changed(&sandbox, &root);
 }
