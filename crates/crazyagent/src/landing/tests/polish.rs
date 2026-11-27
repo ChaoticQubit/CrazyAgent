@@ -796,14 +796,13 @@ fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_
     stand_in_cargo(
         &case,
         "",
-        &format!("/usr/bin/perl -e 'sleep 60' {token}"),
+        &format!(
+            "/usr/bin/perl -e 'open(my $f, \">\", \".tool-started\") or die; close($f); sleep 60' {token}"
+        ),
         Duration::from_secs(90),
     );
     let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while survivors(&token).is_empty() {
-        assert!(Instant::now() < deadline, "the stand-in tool never started");
-    }
+    tool_started(&case, &id, ".tool-started");
     crate::sandbox::access_store::hidden::save(
         &case.db,
         case.workspace.project.as_str(),
@@ -835,30 +834,14 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
     let token = token(&case);
     stand_in_cargo(
         &case,
-        &format!("/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; sleep 60' {token}"),
+        &format!(
+            "/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; open(my $f, \">\", \".version-started\") or die; close($f); sleep 60' {token}"
+        ),
         "",
         Duration::from_secs(90),
     );
-    let running = |token: &str| {
-        kernel_processes::spawn_gate::output(
-            Command::new("/usr/bin/pgrep")
-                .args(["-f", token])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap()
-        .status
-        .success()
-    };
     let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !running(&token) {
-        assert!(
-            Instant::now() < deadline,
-            "the stand-in version probe never started"
-        );
-    }
+    tool_started(&case, &id, ".version-started");
     crate::sandbox::access_store::hidden::save(
         &case.db,
         case.workspace.project.as_str(),
