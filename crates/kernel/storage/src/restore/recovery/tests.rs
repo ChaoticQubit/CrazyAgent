@@ -391,3 +391,189 @@ fn an_engine_db_that_is_itself_a_link_is_still_refused_before_any_write() {
     assert!(replaced(root.path()).is_empty());
     assert!(replaced(other.path()).is_empty());
 }
+
+/// What the child got: 5 when it took engine.db's write lock, 3 when SQLite was busy.
+const PROBE_GOT_LOCK: i32 = 5;
+const PROBE_REFUSED: i32 = 3;
+
+/// The child's answer during the put-back's check, or 0 before it runs.
+static PROBED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Runs in a child process: tries to take engine.db's write lock with no busy wait.
+/// Input: the database path in `KERNEL_STORAGE_PUT_BACK_LOCK_PROBE`. Output: exit code
+/// [`PROBE_GOT_LOCK`], [`PROBE_REFUSED`] when SQLite was busy, or 4 on anything else.
+#[test]
+#[ignore = "child of a_put_back_holds_engine_db_alone_from_its_copy_to_its_end"]
+fn put_back_lock_probe() {
+    let Some(path) = std::env::var_os("KERNEL_STORAGE_PUT_BACK_LOCK_PROBE") else {
+        return;
+    };
+    let db = Connection::open(path).unwrap();
+    db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let code = match db.execute_batch("BEGIN IMMEDIATE; ROLLBACK;") {
+        Ok(()) => PROBE_GOT_LOCK,
+        Err(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            PROBE_REFUSED
+        }
+        Err(_) => 4,
+    };
+    std::process::exit(code);
+}
+
+/// Runs [`put_back_lock_probe`] in a child process of this test binary against one
+/// database. Input: the database path. Output: the child's exit code.
+fn probed_from_another_process(path: &Path) -> i32 {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "restore::recovery::tests::put_back_lock_probe",
+            "--exact",
+            "--ignored",
+            "--quiet",
+        ])
+        .env("KERNEL_STORAGE_PUT_BACK_LOCK_PROBE", path)
+        .status()
+        .unwrap()
+        .code()
+        .unwrap()
+}
+
+/// The put-back's check with the probe in it: on the held connection, after the live
+/// copy is kept and the named copy restored, another process tries engine.db's write
+/// lock, then the real check runs. Inputs and output: as [`check_copy`].
+fn probing_check(db: &Connection, copy: &Path) -> Result<(), StorageError> {
+    let root = copy
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .unwrap();
+    let probed = probed_from_another_process(&root.join(DATABASE));
+    PROBED.store(probed, std::sync::atomic::Ordering::SeqCst);
+    crate::migrations::check_copy(db, copy)
+}
+
+#[test]
+fn a_put_back_holds_engine_db_alone_from_its_copy_to_its_end() {
+    let (_root, path, _kept) = broken(true);
+    let held = crate::restore::alone(&path).unwrap();
+    assert_eq!(
+        probed_from_another_process(&path),
+        PROBE_REFUSED,
+        "the probe sees a connection that holds engine.db alone"
+    );
+    drop(held);
+
+    put_back_with(&path, probing_check, |_| {}).unwrap();
+
+    assert_eq!(
+        PROBED.load(std::sync::atomic::Ordering::SeqCst),
+        PROBE_REFUSED,
+        "another process took engine.db's write lock while the put-back held it"
+    );
+    assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+}
+
+/// One way to damage engine.db in a test: its name and the step that damages the file at
+/// the path.
+type Damage<'a> = (&'a str, &'a dyn Fn(&Path));
+
+#[test]
+fn a_put_back_keeps_damaged_live_data_byte_for_byte() {
+    let cut = |path: &Path| {
+        let bytes = std::fs::read(path).unwrap();
+        let page = usize::from(u16::from_be_bytes([bytes[16], bytes[17]]));
+        assert!(page >= 512 && bytes.len() >= 2 * page);
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len((bytes.len() - page / 2) as u64).unwrap();
+    };
+    let damages: [Damage<'_>; 2] = [("a b-tree page", &damage), ("a cut page", &cut)];
+    for (kind, damaged) in damages {
+        let (_root, path, _kept) = broken(true);
+        damaged(&path);
+        let live = std::fs::read(&path).unwrap();
+
+        let saved = put_back(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read(saved.join(DATABASE)).unwrap(),
+            live,
+            "the put-back keeps live data with {kind} as it was"
+        );
+        assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+    }
+}
+
+/// Runs in a child process: tries to take engine.db out of WAL mode with no busy wait,
+/// which needs the exclusive lock on the database file itself. Input: the database path
+/// in `KERNEL_STORAGE_PUT_BACK_WAL_PROBE`. Output: exit code [`PROBE_GOT_LOCK`] when the
+/// mode changed, [`PROBE_REFUSED`] when SQLite was busy, or 4 on anything else.
+#[test]
+#[ignore = "child of a_busy_put_back_leaves_an_idle_wal_engine_db_held"]
+fn put_back_wal_probe() {
+    let Some(path) = std::env::var_os("KERNEL_STORAGE_PUT_BACK_WAL_PROBE") else {
+        return;
+    };
+    let db = Connection::open(path).unwrap();
+    db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let code = match db.query_row("PRAGMA journal_mode=DELETE", [], |row| {
+        row.get::<_, String>(0)
+    }) {
+        Ok(mode) if mode == "delete" => PROBE_GOT_LOCK,
+        Ok(_) => PROBE_REFUSED,
+        Err(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            PROBE_REFUSED
+        }
+        Err(_) => 4,
+    };
+    std::process::exit(code);
+}
+
+/// Runs [`put_back_wal_probe`] on engine.db from another process. Input: the database
+/// path. Output: the child's exit code.
+fn wal_probed_from_another_process(path: &Path) -> i32 {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "restore::recovery::tests::put_back_wal_probe",
+            "--exact",
+            "--ignored",
+            "--quiet",
+        ])
+        .env("KERNEL_STORAGE_PUT_BACK_WAL_PROBE", path)
+        .status()
+        .unwrap()
+        .code()
+        .unwrap()
+}
+
+#[test]
+fn a_busy_put_back_leaves_an_idle_wal_engine_db_held() {
+    let (_root, path, _kept) = broken(true);
+    let holder = Connection::open(&path).unwrap();
+    let mode: String = holder
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let rows: i64 = holder
+        .query_row("SELECT count(*) FROM kept", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert!(holder.is_autocommit());
+    assert_eq!(
+        wal_probed_from_another_process(&path),
+        PROBE_REFUSED,
+        "the probe sees the idle WAL connection's lock"
+    );
+
+    let refused = put_back(&path).unwrap_err().0;
+
+    assert!(refused.starts_with(PUTBACK_BUSY), "{refused}");
+    assert_eq!(
+        wal_probed_from_another_process(&path),
+        PROBE_REFUSED,
+        "another process took engine.db after a busy put-back"
+    );
+    drop(holder);
+}
