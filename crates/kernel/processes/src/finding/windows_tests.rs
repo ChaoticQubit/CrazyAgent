@@ -216,19 +216,16 @@ fn through_share(real: &Path) -> PathBuf {
 /// A script whose real file only a verbatim `\\?\` path names is refused before anything
 /// starts, since Node cannot start a main script named that way and a plain spelling of it
 /// could name another file: a folder with a reserved device name, a trailing dot or space,
-/// a plain path past what the plain form can hold, or a network share.
+/// or a plain path past what the plain form can hold.
 #[test]
 fn a_script_only_a_verbatim_path_names_is_refused_on_windows() {
     let (_folder, real, _places) = node_folder();
     let long = "l".repeat(120);
-    let shared = real.join("shared");
-    or_named(std::fs::create_dir_all(&shared), &shared);
     let folders = [
         real.join("AUX"),
         real.join("kept."),
         real.join("trail "),
         real.join(&long).join(&long),
-        through_share(&shared).join("npm"),
     ];
     for folder in folders {
         let command = npm_layout_in(&folder);
@@ -255,6 +252,28 @@ fn a_script_only_a_verbatim_path_names_is_refused_on_windows() {
             }
         }
     }
+}
+
+/// A script a network share path names has no plain drive spelling, so the one script
+/// constructor refuses it by its spelling alone, with no file read. A real file on this
+/// machine's administrative share is refused earlier, as a file other accounts can change,
+/// before any script is built: two refusals, each its own fact.
+#[test]
+fn a_share_script_is_refused_by_its_spelling_and_a_share_file_by_who_can_change_it() {
+    let (_folder, real, places) = node_folder();
+    let node = resolved_named(&real.join("node.exe"), &places);
+    let script = PathBuf::from(r"\\?\UNC\localhost\C$\shared\npm-cli.js");
+    let built = Resolved::script(real.join("npm.cmd"), script, node, Vec::new(), false);
+    assert_eq!(built, Err(Refusal::Verbatim));
+
+    let shared = real.join("shared");
+    or_named(std::fs::create_dir_all(&shared), &shared);
+    let folder = through_share(&shared).join("npm");
+    let command = npm_layout_in(&folder);
+    let places = stub_new(vec![or_named(folder.canonicalize(), &folder)], None);
+    let refused = refusal_of(&command, &places);
+    assert_eq!(refused.why, Refusal::OthersCanChange(command.clone()));
+    assert_eq!(refused.file, command);
 }
 
 /// npm's layout and an npm cmd-shim build their script themselves from the target's real
