@@ -36,26 +36,27 @@ fn a_server_reporting_an_old_tmux_is_refused_and_leaves_no_control_client() {
     let took = started.elapsed();
     eprintln!("old tmux refusal took {took:?}");
     let clients = || {
-        let listed = Command::new(&real)
-            .args(["-S"])
-            .arg(&socket)
-            .args(["list-clients", "-F", "#{client_control_mode}"])
-            .output()
-            .unwrap();
+        let listed = crate::spawn_gate::output(Command::new(&real).arg("-S").arg(&socket).args([
+            "list-clients",
+            "-F",
+            "#{client_control_mode}",
+        ]))
+        .unwrap();
         String::from_utf8_lossy(&listed.stdout)
             .lines()
             .filter(|line| *line == "1")
             .count()
     };
     let left = clients();
-    let mut seen = Command::new(&real)
-        .arg("-S")
-        .arg(&socket)
-        .args(["-C", "attach", "-t", SESSION])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut seen = crate::spawn_gate::spawn(
+        Command::new(&real)
+            .arg("-S")
+            .arg(&socket)
+            .args(["-C", "attach", "-t", SESSION])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped()),
+    )
+    .unwrap();
     let mut output = std::io::BufReader::new(seen.stdout.take().unwrap());
     let mut first = String::new();
     std::io::BufRead::read_line(&mut output, &mut first).unwrap();
@@ -63,11 +64,12 @@ fn a_server_reporting_an_old_tmux_is_refused_and_leaves_no_control_client() {
     drop(seen.stdin.take());
     drop(output);
     let _ = seen.wait();
-    let _ = Command::new(&real)
-        .arg("-S")
-        .arg(&socket)
-        .arg("kill-server")
-        .output();
+    let _ = crate::spawn_gate::output(
+        Command::new(&real)
+            .arg("-S")
+            .arg(&socket)
+            .arg("kill-server"),
+    );
     assert_eq!(
         refused.map(|_| ()).map_err(|problem| problem.0),
         Err("terminal_tmux_unsupported".to_owned())
@@ -76,6 +78,7 @@ fn a_server_reporting_an_old_tmux_is_refused_and_leaves_no_control_client() {
         took < CLOSE_TIME,
         "the refusal waited {took:?} on its client"
     );
+    assert_eq!(counted, 1, "the count sees an attached control-mode client");
     assert_eq!(
         left, 0,
         "a control-mode client of the refused connect is left"
