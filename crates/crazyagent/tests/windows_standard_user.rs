@@ -16,15 +16,17 @@ const JOB_TIME: Duration = Duration::from_secs(900);
 const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
-/// Makes a temporary engine root in the running user's own temporary folder, with the engine
-/// database and its harness update table in place. Output: the folder, kept until it drops,
-/// its path and the open database.
+/// Makes a throwaway engine root in the running user's local application data folder, where
+/// the engine's own root lives, never in a temp folder the harness search sets aside, with the
+/// engine database and its harness update table in place. Output: the folder, kept until it
+/// drops, its path in plain drive spelling and the open database.
 fn engine() -> (tempfile::TempDir, PathBuf, rusqlite::Connection) {
+    let local = std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA for this user");
     let disk = tempfile::Builder::new()
         .prefix("ca-standard-user-")
-        .tempdir()
+        .tempdir_in(local)
         .unwrap();
-    let root = disk.path().to_path_buf();
+    let root = kernel_sandbox::paths::canonical(disk.path()).unwrap();
     let db = crazyagent::landing::open(&root).unwrap();
     update::initialize(&db).unwrap();
     (disk, root, db)
