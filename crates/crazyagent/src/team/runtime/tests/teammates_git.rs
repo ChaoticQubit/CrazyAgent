@@ -130,3 +130,16 @@ fn a_linked_leads_teammates_setup_over_a_project_holding_the_engine_root_is_refu
     );
     assert!(!profile.exists());
 }
+
+/// A team launch with no engine root to guard is refused with the plain sandbox line and
+/// its own code, as `with_code` writes it, so the code reaches the owner unwithheld.
+#[test]
+fn a_launch_with_no_engine_root_names_its_own_code() {
+    assert_eq!(
+        crate::sandbox::NO_ENGINE_ROOT,
+        with_code(
+            "the agent sandbox could not be set up",
+            Some(crate::sandbox::ENGINE_ROOT_MISSING)
+        )
+    );
+}
