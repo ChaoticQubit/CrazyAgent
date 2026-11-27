@@ -1,3 +1,5 @@
+#[cfg(all(test, windows))]
+mod engine_shim_windows_tests;
 mod recipes;
 mod run;
 #[cfg(all(test, unix))]
