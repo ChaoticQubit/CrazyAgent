@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod freed_bytes_support;
+
 use crazyagent::config::resolve_config;
 use crazyagent::engine::Engine;
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerRuntimeHandle, OwnerServer};
