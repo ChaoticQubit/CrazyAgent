@@ -39,6 +39,8 @@ pub(crate) use events::{Changes, changes};
 use events::{events, persist_event, persist_event_ids};
 mod owner_fence;
 pub(crate) use owner_fence::{check_owner_admission, check_owner_host};
+mod owner_page;
+use owner_page::page_next;
 pub(crate) mod plugins;
 pub(crate) mod reinstall;
 pub(crate) mod setup;
@@ -4265,33 +4267,6 @@ fn read_owner_page(
     let next = page_next(config, a, view, revision, more, last)?;
     assert!(items.len() <= usize::from(limit));
     Ok(OwnerData::Page { items, next })
-}
-
-/// The cursor to an owner page's next page. Input: the config, admission, view and
-/// revision the page was read at, whether more rows follow, and the last id read. Output:
-/// the cursor past that id when more follow, none otherwise, or `owner_page_progress` when
-/// more follow but no id was read.
-fn page_next(
-    config: &EffectiveConfig,
-    a: &Admission,
-    view: OwnerView,
-    revision: u64,
-    more: bool,
-    last: Option<String>,
-) -> Result<Option<OwnerPageCursor>, EngineError> {
-    if !more {
-        return Ok(None);
-    }
-    Ok(Some(OwnerPageCursor {
-        db_instance: a.db_instance.clone(),
-        owner_id: a.owner_id.clone(),
-        engine_epoch: a.engine_epoch.clone(),
-        owner_epoch: a.owner_epoch,
-        config_id: config.id.clone(),
-        at_revision: Cursor::new(revision),
-        view,
-        after_id: last.ok_or_else(|| error("owner_page_progress"))?,
-    }))
 }
 
 #[cfg(all(test, unix))]
