@@ -75,10 +75,10 @@ fn a_linked_leads_teammates_setup_over_a_project_holding_an_engine_secret_is_ref
 }
 
 /// A linked lead's teammates setup git over a project folder that holds the engine root, its
-/// state folder inside the project, is refused and writes no setup profile. The refusal holds
-/// without the engine guard: the agent's home then sits in the project outside the setup's
-/// confinement, which `confinement_kept` in `crates/kernel/sandbox/src/profile/allows.rs`
-/// refuses at the end of `ProjectSandbox::confine_to_teammates_setup`.
+/// state folder inside the project, is refused and writes no setup profile. The setup's own
+/// confinement refuses it with no engine guard: `ProjectSandbox::confine_to_teammates_setup`
+/// ends in `confinement_kept`, which refuses the agent's home sitting in the project outside
+/// the confinement with its named reason.
 #[test]
 fn a_linked_leads_teammates_setup_over_a_project_holding_the_engine_root_is_refused() {
     use std::os::unix::fs::PermissionsExt;
@@ -101,6 +101,24 @@ fn a_linked_leads_teammates_setup_over_a_project_holding_the_engine_root_is_refu
     std::fs::write(engine.join("engine.db"), "engine secret\n").unwrap();
     let profile = agent_teammates_setup_profile(&runtime.state, id);
     assert!(!profile.exists());
+    let branch = crate::landing::agent_branch(&runtime.connection, &plan.working_dir, &git_dir)
+        .unwrap()
+        .unwrap();
+    let unguarded = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &kernel_sandbox::paths::one_spelling(repository.clone()),
+        &agent_home(&runtime.state, id),
+        &runtime.agent_folder(id).join("tmp"),
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .confine_to_teammates_setup(&plan.working_dir, &branch)
+    .map(|_| ());
+    let kept = "a writable root reaches the project outside the agent's confinement";
+    assert!(
+        matches!(&unguarded, Err(SandboxError::Invalid(reason)) if reason == kept),
+        "{unguarded:?}"
+    );
     let refused = runtime.teammates_git(&repository, &plan.working_dir, &git_dir, id);
     assert!(refused.is_err(), "{:?}", refused.map(|_| ()));
     assert!(!profile.exists());
