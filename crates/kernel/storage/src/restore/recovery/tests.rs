@@ -503,3 +503,77 @@ fn a_put_back_keeps_damaged_live_data_byte_for_byte() {
         assert_eq!(read(&path), (vec!["two".to_owned()], 12));
     }
 }
+
+/// Runs in a child process: tries to take engine.db out of WAL mode with no busy wait,
+/// which needs the exclusive lock on the database file itself. Input: the database path
+/// in `KERNEL_STORAGE_PUT_BACK_WAL_PROBE`. Output: exit code [`PROBE_GOT_LOCK`] when the
+/// mode changed, [`PROBE_REFUSED`] when SQLite was busy, or 4 on anything else.
+#[test]
+#[ignore = "child of a_busy_put_back_leaves_an_idle_wal_engine_db_held"]
+fn put_back_wal_probe() {
+    let Some(path) = std::env::var_os("KERNEL_STORAGE_PUT_BACK_WAL_PROBE") else {
+        return;
+    };
+    let db = Connection::open(path).unwrap();
+    db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let code = match db.query_row("PRAGMA journal_mode=DELETE", [], |row| {
+        row.get::<_, String>(0)
+    }) {
+        Ok(mode) if mode == "delete" => PROBE_GOT_LOCK,
+        Ok(_) => PROBE_REFUSED,
+        Err(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            PROBE_REFUSED
+        }
+        Err(_) => 4,
+    };
+    std::process::exit(code);
+}
+
+/// Runs [`put_back_wal_probe`] on engine.db from another process. Input: the database
+/// path. Output: the child's exit code.
+fn wal_probed_from_another_process(path: &Path) -> i32 {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "restore::recovery::tests::put_back_wal_probe",
+            "--exact",
+            "--ignored",
+            "--quiet",
+        ])
+        .env("KERNEL_STORAGE_PUT_BACK_WAL_PROBE", path)
+        .status()
+        .unwrap()
+        .code()
+        .unwrap()
+}
+
+#[test]
+fn a_busy_put_back_leaves_an_idle_wal_engine_db_held() {
+    let (_root, path, _kept) = broken(true);
+    let holder = Connection::open(&path).unwrap();
+    let mode: String = holder
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let rows: i64 = holder
+        .query_row("SELECT count(*) FROM kept", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert!(holder.is_autocommit());
+    assert_eq!(
+        wal_probed_from_another_process(&path),
+        PROBE_REFUSED,
+        "the probe sees the idle WAL connection's lock"
+    );
+
+    let refused = put_back(&path).unwrap_err().0;
+
+    assert!(refused.starts_with(PUTBACK_BUSY), "{refused}");
+    assert_eq!(
+        wal_probed_from_another_process(&path),
+        PROBE_REFUSED,
+        "another process took engine.db after a busy put-back"
+    );
+    drop(holder);
+}
