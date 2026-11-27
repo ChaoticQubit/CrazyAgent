@@ -456,7 +456,9 @@ fn scratch_idle_wal_lock_after_a_second_fd_closes() {
     let before = child();
     drop(std::fs::File::open(&path).unwrap());
     let after = child();
-    println!("IDLE-WAL before={before:?} after={after:?} (5 = the child took the lock, 3 = busy)");
+    println!(
+        "\nIDLE-WAL before={before:?} after={after:?} (5 = the child took the lock, 3 = busy)"
+    );
     drop(db);
 }
 
@@ -510,7 +512,7 @@ fn scratch_damaged_put_back_routes() {
             .map(|saved| std::fs::read(saved.join(DATABASE)).unwrap() == live);
         let put = put.map(|_| ()).map_err(|refused| refused.0);
         println!(
-            "DAMAGE {kind} live_bytes={} route_a_backup={route_a:?} put_back_byte_copy={put:?} kept_bytes_equal={kept_equal:?}",
+            "\nDAMAGE {kind} live_bytes={} route_a_backup={route_a:?} put_back_byte_copy={put:?} kept_bytes_equal={kept_equal:?}",
             live.len()
         );
     }
