@@ -21,6 +21,7 @@ const STATUS_OUTPUT: &str =
     "gui/501/dev.crazyagent.engine = {\n\tstate = running\n\tpid = 4242\n}\n";
 const TEXT: &str = "the engine service is not installed";
 const ON_IMAGE: &str = "/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent";
+const CONTROL_TEXT: &str = "a control text of one hundred and twenty bytes that both twins copy and format the same way, so a row shows the binary!.";
 
 /// Times each kind of call the held walk of a socket's path makes, alone, on the socket's
 /// own folder: an open for search and its close, a read through the held folder with its
@@ -147,6 +148,9 @@ fn old_copies(folder: &Path) -> (PathBuf, PathBuf) {
 /// Times every public call of the service module that does not register a job with
 /// launchd, on a stand-in service in a temporary home whose label launchd never knew.
 /// `install` and `start` get no row: each bootstraps a job into the owner's login session.
+/// Two control rows copy and format a fixed text the same way in both twins, so a gap they
+/// show is the test binary, not the service code; a NOTE line says whether the runner's own
+/// `~/.local/bin/crazyagent`, which `retire_old_copies` reads, is there.
 /// Prints one PERF line per call and asserts no time.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
@@ -185,6 +189,25 @@ fn service_calls() {
         link_cli(&service.executable, &bin).unwrap(),
         bin.join("crazyagent")
     );
+    let cli = std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/bin/crazyagent"));
+    let present = cli
+        .as_deref()
+        .is_some_and(|link| std::fs::symlink_metadata(link).is_ok());
+    println!(
+        "NOTE service.retire_old_copies home_link={}",
+        if present { "present" } else { "absent" }
+    );
+    assert_eq!(CONTROL_TEXT.len(), 120);
+    time(&row("service.control.string_from", FAST), SAMPLES, || {
+        black_box(String::from(black_box(CONTROL_TEXT)));
+    });
+    time(&row("service.control.format", FAST), SAMPLES, || {
+        black_box(format!(
+            "{}: {}",
+            black_box(ON_IMAGE),
+            black_box(CONTROL_TEXT)
+        ));
+    });
     time(&row("service.failure", FAST), SAMPLES, || {
         black_box(failure(black_box(TEXT)));
     });
