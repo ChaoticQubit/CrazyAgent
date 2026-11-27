@@ -45,10 +45,26 @@ fn install_refused(sandbox: &ProjectSandbox, root: &Path) {
     );
 }
 
+/// Runs one phase of a sandbox build and keeps its reading. Inputs: the phase name, the
+/// readings so far and the phase. Output: the phase's result, with the phase's name, walk
+/// count and time in ns pushed onto the readings.
+fn phase<T>(
+    name: &'static str,
+    readings: &mut Vec<(&'static str, usize, u128)>,
+    run: impl FnOnce() -> T,
+) -> T {
+    let walks = crate::paths::walks();
+    let started = std::time::Instant::now();
+    let out = run();
+    let spent = started.elapsed().as_nanos();
+    readings.push((name, crate::paths::walks() - walks, spent));
+    out
+}
+
 /// A build shaped like a team launch walks the owner home, the harness homes and the owner
 /// secrets once, the engine secrets once when guarded, each granted root or file once, and
 /// every secret once more at install, so a launch costs those walks and no more. It prints
-/// the walk count and the build time in ns.
+/// the walks and the time in ns of each phase, and their sums.
 #[test]
 fn a_team_shaped_build_walks_each_list_once_and_each_candidate_once() {
     let scratch = tempfile::tempdir().unwrap();
@@ -68,27 +84,43 @@ fn a_team_shaped_build_walks_each_list_once_and_each_candidate_once() {
     let harnesses = (STAND_IN.access.harness_folders)();
     let owner = owner_home().unwrap();
     let secrets = owner_secrets(&owner, &harnesses).count();
-    let started = std::time::Instant::now();
     let before = crate::paths::walks();
-    let sandbox = ProjectSandbox::new(
-        &STAND_IN,
-        &project,
-        &home,
-        &tmp,
-        SandboxNetwork::Only(Vec::new()),
-    )
-    .and_then(|sandbox| sandbox.guard_engine(&runtime))
-    .and_then(|sandbox| sandbox.allow_scratch(&short))
-    .and_then(|sandbox| sandbox.allow_read(&install))
-    .and_then(|sandbox| sandbox.allow_read(&one))
-    .and_then(|sandbox| sandbox.allow_read(&two))
-    .and_then(|sandbox| sandbox.allow_exec(&program))
+    let mut readings = Vec::new();
+    let sandbox = phase("new", &mut readings, || {
+        ProjectSandbox::new(
+            &STAND_IN,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+    })
     .unwrap();
-    sandbox.install(&root.join("agent.sb")).unwrap();
-    let walked = crate::paths::walks() - before;
-    let spent = started.elapsed().as_nanos();
+    let sandbox = phase("guard_engine", &mut readings, || {
+        sandbox.guard_engine(&runtime)
+    })
+    .unwrap();
+    let sandbox = phase("allow_scratch", &mut readings, || {
+        sandbox.allow_scratch(&short)
+    })
+    .unwrap();
+    let sandbox = phase("allow_read", &mut readings, || sandbox.allow_read(&install)).unwrap();
+    let sandbox = phase("allow_read", &mut readings, || sandbox.allow_read(&one)).unwrap();
+    let sandbox = phase("allow_read", &mut readings, || sandbox.allow_read(&two)).unwrap();
+    let sandbox = phase("allow_exec", &mut readings, || sandbox.allow_exec(&program)).unwrap();
+    phase("install", &mut readings, || {
+        sandbox.install(&root.join("agent.sb"))
+    })
+    .unwrap();
+    assert_eq!(readings.len(), 8);
+    let walked: usize = readings.iter().map(|reading| reading.1).sum();
+    let spent: u128 = readings.iter().map(|reading| reading.2).sum();
+    assert_eq!(walked, crate::paths::walks() - before);
     let engine = sandbox.secret_paths().len() - secrets;
     assert!(secrets > 0 && engine > 0);
+    for (name, walks, ns) in &readings {
+        eprintln!("team_shaped_build phase={name} walks={walks} ns={ns}");
+    }
     eprintln!("team_shaped_build walks={walked} build_ns={spent}");
     let lists = 1 + harnesses.len() + secrets + engine;
     let candidates = 3 + 1 + 3 + 1;
