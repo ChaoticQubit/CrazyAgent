@@ -109,6 +109,22 @@ pub fn shim_target(cmd: &Path) -> Option<PathBuf> {
     shim_parts(cmd).map(|(_, target)| target)
 }
 
+/// The file an npm cmd-shim starts, read from the shim already open, held by the caller,
+/// no further than one byte past the bound a cmd-shim can reach, as the parts it names
+/// joined below the shim's folder, links kept. Inputs: the shim's folder and the open shim.
+/// Output: the target, none for any other text.
+#[cfg(windows)]
+pub fn held_shim_target(folder: &Path, shim: impl std::io::Read) -> Option<PathBuf> {
+    let text = bounded_text(shim)?;
+    let (_, parts) = cmd_shim_target(&text)?;
+    assert!(!parts.is_empty());
+    Some(
+        parts
+            .iter()
+            .fold(folder.to_path_buf(), |at, part| at.join(part)),
+    )
+}
+
 /// The program an npm cmd-shim prefers, `<program>.exe` beside the shim, and the file it
 /// starts below that folder, links kept. Input: the shim's real file. Output: both, none
 /// for any other file.
@@ -180,11 +196,17 @@ pub fn npx_real(cmd: &Path) -> Option<(PathBuf, PathBuf)> {
 /// long.
 #[cfg(windows)]
 fn shim_file_text(file: &Path) -> Option<String> {
+    bounded_text(std::fs::File::open(file).ok()?)
+}
+
+/// The text of an open batch file, read up to one byte past the bound a cmd-shim can
+/// reach. Input: the reader. Output: the text, none when it cannot be read, is not UTF-8 or
+/// is too long.
+#[cfg(windows)]
+fn bounded_text(file: impl std::io::Read) -> Option<String> {
     use std::io::Read;
     let mut text = String::new();
-    std::fs::File::open(file)
-        .ok()?
-        .take(SHIM_BYTES_MAX as u64 + 1)
+    file.take(SHIM_BYTES_MAX as u64 + 1)
         .read_to_string(&mut text)
         .ok()?;
     (text.len() <= SHIM_BYTES_MAX).then_some(text)
@@ -291,6 +313,24 @@ mod tests {
             shim_text("node", r"node_modules\@openai\codex\bin\codex.js"),
             CODEX
         );
+    }
+
+    /// An open cmd-shim is read no further than one byte past the bound a cmd-shim can
+    /// reach: the text npm writes names its target joined below the folder given, and a
+    /// longer file names nothing after exactly that many bytes are read from it.
+    #[cfg(windows)]
+    #[test]
+    fn an_open_shim_is_read_only_up_to_the_cmd_shim_bound() {
+        use std::io::Read;
+        let folder = Path::new(r"C:\engine\npm");
+        assert_eq!(
+            held_shim_target(folder, CODEX.as_bytes()),
+            Some(folder.join(r"node_modules\@openai\codex\bin\codex.js"))
+        );
+        let offered = 10 * SHIM_BYTES_MAX as u64;
+        let mut long = CODEX.as_bytes().chain(std::io::repeat(b' ')).take(offered);
+        assert_eq!(held_shim_target(folder, &mut long), None);
+        assert_eq!(long.limit(), offered - SHIM_BYTES_MAX as u64 - 1);
     }
 
     /// A file name is a batch file as Windows reads it: `.cmd` or `.bat` in any case with
