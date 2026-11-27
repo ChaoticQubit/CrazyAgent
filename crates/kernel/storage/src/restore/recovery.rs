@@ -260,10 +260,12 @@ pub(super) fn put_back_with(
 /// device and inode as the held file taken before the hold. Inputs: the held file and the
 /// database path. Output: Ok, or `storage_restore_failed`.
 fn same_file(live: &std::fs::File, path: &Path) -> Result<(), StorageError> {
-    use std::os::unix::fs::MetadataExt;
-    let opened = live.metadata().map_err(restore_failed)?;
-    let named = std::fs::symlink_metadata(path).map_err(restore_failed)?;
-    if (opened.dev(), opened.ino()) != (named.dev(), named.ino()) || !named.is_file() {
+    let opened = rustix::fs::fstat(live).map_err(restore_failed)?;
+    let named = rustix::fs::statat(rustix::fs::CWD, path, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(restore_failed)?;
+    let regular =
+        rustix::fs::FileType::from_raw_mode(named.st_mode) == rustix::fs::FileType::RegularFile;
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) || !regular {
         return Err(restore_failed("engine.db was replaced before it was held"));
     }
     Ok(())
