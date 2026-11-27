@@ -1262,3 +1262,16 @@ fn the_custody_slot_is_held_behind_a_pointer() {
     let held = payload(|authority| &authority.native_auth);
     assert_eq!(held, size_of::<usize>());
 }
+
+/// Returns the size of one `Slot` field. Input: a function that picks the field. Output:
+/// the field's size in bytes.
+fn slot_field<T>(_: for<'a> fn(&'a Slot) -> &'a T) -> usize {
+    size_of::<T>()
+}
+
+/// An owner slot's token is held behind a pointer from birth, so moving the slot into the
+/// authority leaves no copy of the token on the stack or in a freed list.
+#[test]
+fn an_owner_slot_token_is_held_behind_a_pointer() {
+    assert_eq!(slot_field(|slot| &slot.token), size_of::<usize>());
+}
