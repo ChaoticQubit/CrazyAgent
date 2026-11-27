@@ -1,4 +1,4 @@
-import { eachComputer } from "./load-source.mjs";
+import { eachComputer, importOn } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -485,4 +485,12 @@ test("the page's purpose line offers install with npm and update on Windows, and
       : `CrazyAgent finds harnesses installed on ${computer}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
     assert.ok(shown.includes(`<p>${purpose}</p>`), `${os}: ${shown.slice(0, 400)}`);
   });
+});
+
+test("a Windows launch refused while its harness updates says to try again when it's done, on both copies", async () => {
+  const line = "This harness is updating. Try again when it's done.";
+  const updates = await importOn("windows", "../src/api-harness-updates.ts");
+  const window = await importOn("windows", "../src/api.ts");
+  assert.equal(updates.updateCopy("harness_launch_updating"), line);
+  assert.equal(window.plainError("harness_launch_updating"), line);
 });

@@ -30,6 +30,7 @@ pub const INSTALL_NOT_FOUND: &str = "harness_install_not_found";
 pub const INSTALL_FAILED: &str = "harness_install_failed";
 pub const INSTALL_LIST_INVALID: &str = "harness_install_list_invalid";
 pub const IN_USE: &str = "harness_update_in_use";
+pub const LAUNCH_UPDATING: &str = "harness_launch_updating";
 const UNAVAILABLE: &str = "harness_update_unavailable";
 
 const NO_VERSION: &str = "0";
@@ -398,6 +399,41 @@ fn unused(db: &Connection, id: &str) -> Result<(), &'static str> {
     if in_use(db, id)? { Err(IN_USE) } else { Ok(()) }
 }
 
+/// Reads whether a program runs from one of the folders or is one of the files: the Windows
+/// process snapshot in the engine, a stand-in in tests. Input: the folders. Output: whether
+/// one runs, or the Windows error code of a snapshot that could not be read.
+type Images = fn(&[PathBuf]) -> Result<bool, u32>;
+
+#[cfg(windows)]
+const IMAGES: Images = crazyagent_win_sandbox::runs_under;
+#[cfg(not(windows))]
+const IMAGES: Images = |_| Ok(false);
+
+/// Answers `harness_update_in_use` while a program runs from the folders an update changes or
+/// names a script there, as `node.exe` runs an npm harness, one CrazyAgent never started
+/// included, such as a harness run in a terminal pane. Inputs:
+/// the folders and the process reader. Output: Ok while none runs, else the code, or
+/// `harness_update_unavailable` when the processes cannot be read.
+fn not_running(watched: &[PathBuf], images: Images) -> Result<(), &'static str> {
+    match images(watched).map_err(|_| UNAVAILABLE)? {
+        true => Err(IN_USE),
+        false => Ok(()),
+    }
+}
+
+/// The folders whose running programs block an update: the ones its command changes, or,
+/// for a self-updater, which names none, the folder of the harness's real file. Inputs: the
+/// folders the command holds and the real file. Output: the folders, never empty.
+fn watched(held: &[PathBuf], real: &Path) -> Vec<PathBuf> {
+    let folders = match (held.is_empty(), real.parent()) {
+        (false, _) => held.to_vec(),
+        (true, Some(folder)) => vec![folder.to_path_buf()],
+        (true, None) => vec![real.to_path_buf()],
+    };
+    assert!(!folders.is_empty());
+    folders
+}
+
 /// Opens the engine database file again, read-only, for a job whose turn came after a wait,
 /// so it reads the sessions that started meanwhile. Input: the path the first read used,
 /// empty for a database held in memory. Output: the connection, or
@@ -620,6 +656,61 @@ pub struct Updates {
     reader: Reader,
 }
 
+/// The harnesses whose update or install job runs in this process, once per running job, and
+/// the launches between their update check and their process's start, once per launch, kept
+/// under one lock so a job and a launch of one harness never overlap.
+struct Gate {
+    updating: Vec<&'static str>,
+    launching: Vec<String>,
+}
+
+/// The process's one [`Gate`], where a launch, which holds no engine handle, meets the jobs.
+static GATE: Mutex<Gate> = Mutex::new(Gate {
+    updating: Vec::new(),
+    launching: Vec::new(),
+});
+
+/// A launch's hold on its harness from its update check until its process started, so an
+/// update or install job of the harness is refused meanwhile; dropping it frees the hold on
+/// every path. It holds nothing outside Windows.
+#[must_use]
+pub struct Launching(Option<String>);
+
+impl Drop for Launching {
+    fn drop(&mut self) {
+        let Some(id) = self.0.take() else { return };
+        let mut gate = gate();
+        let at = gate.launching.iter().position(|held| *held == id);
+        assert!(at.is_some(), "a held launch is in the process's list");
+        gate.launching.swap_remove(at.unwrap_or_default());
+    }
+}
+
+/// Refuses, on Windows, a launch of a harness whose update or install job runs in this
+/// process, since the job replaces the files the launch would run, and else holds the
+/// harness against a new job until the hold drops; elsewhere every launch goes on, holding
+/// nothing. Inputs: the harness name, an alias allowed, and whether this is Windows.
+/// Output: the hold, or `harness_launch_updating`.
+pub(crate) fn launchable(harness: &str, windows: bool) -> Result<Launching, &'static str> {
+    if !windows {
+        return Ok(Launching(None));
+    }
+    let id = harnesses::canonical(harness);
+    let mut gate = gate();
+    if gate.updating.contains(&id) {
+        return Err(LAUNCH_UPDATING);
+    }
+    gate.launching.push(id.to_owned());
+    assert!(gate.launching.iter().any(|held| held == id));
+    Ok(Launching(Some(id.to_owned())))
+}
+
+/// The process's [`GATE`], also after a job or a launch panicked while it held it. Output:
+/// the locked gate.
+fn gate() -> MutexGuard<'static, Gate> {
+    GATE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A running job's hold on its harness; dropping it frees the harness on every path.
 struct Running {
     updates: Arc<Updates>,
@@ -643,6 +734,10 @@ impl Drop for Running {
         let mut state = self.updates.state();
         state.running.retain(|running| *running != self.id);
         assert!(!state.running.contains(&self.id));
+        let mut gate = gate();
+        let at = gate.updating.iter().position(|job| *job == self.id);
+        assert!(at.is_some(), "a running job is in the process's list");
+        gate.updating.swap_remove(at.unwrap_or_default());
     }
 }
 
@@ -683,16 +778,22 @@ impl Updates {
         self.state().running.is_empty()
     }
 
-    /// Takes a harness for its one job; jobs of other harnesses may run beside it.
-    /// Input: its catalog id. Output: the hold, or `harness_update_busy` while an update or
-    /// install of the same harness runs.
+    /// Takes a harness for its one job; jobs of other harnesses may run beside it. A launch
+    /// hold is read and the job listed in one lock hold, so no launch starts in between.
+    /// Input: its catalog id. Output: the hold, `harness_update_busy` while an update or
+    /// install of the same harness runs, or `harness_update_in_use` while a launch holds it.
     fn begin(self: &Arc<Self>, id: &'static str) -> Result<Running, &'static str> {
         let mut state = self.state();
         if state.running.contains(&id) {
             return Err(BUSY);
         }
+        let mut gate = gate();
+        if gate.launching.iter().any(|held| held == id) {
+            return Err(IN_USE);
+        }
         state.running.push(id);
         assert!(state.running.len() <= harnesses::specs().len());
+        gate.updating.push(id);
         Ok(Running {
             updates: self.clone(),
             id,
@@ -914,13 +1015,19 @@ impl Updates {
             kernel_sandbox::paths::canonical(&executable).unwrap_or_else(|_| executable.clone());
         let fixed = update_command(id, &executable, &real, roots)?;
         let held = folders(&fixed, roots);
+        let watching = watched(&held, &real);
+        if cfg!(windows) {
+            not_running(&watching, IMAGES)?;
+        }
         let roots = roots.clone();
         Self::spawn(
             running,
             held,
             move || {
                 if cfg!(windows)
-                    && let Err(code) = reopened(&path).and_then(|db| unused(&db, id))
+                    && let Err(code) = reopened(&path)
+                        .and_then(|db| unused(&db, id))
+                        .and_then(|()| not_running(&watching, IMAGES))
                 {
                     return outcome(Err(code), UPDATE_FAILED, None, None);
                 }
@@ -1306,187 +1413,4 @@ mod windows_tests {
 }
 
 #[cfg(test)]
-mod in_use_tests {
-    use super::*;
-
-    /// Adds the team runtime tables and, when asked, a bare agent runs table to a database,
-    /// with one row per harness name and status. Inputs: the database, the team agents and
-    /// the agent runs. Output: none; a failed write panics.
-    fn fill(db: &Connection, agents: &[(&str, &str)], runs: Option<&[(&str, &str)]>) {
-        crate::team::initialize(db).unwrap();
-        for (harness, status) in agents {
-            db.execute(
-                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
-                 VALUES('p-1','sub_agent',?1,1,?2,1,1)",
-                rusqlite::params![harness, status],
-            )
-            .unwrap();
-        }
-        let Some(runs) = runs else { return };
-        db.execute_batch("CREATE TABLE agent_runs(harness TEXT NOT NULL, state TEXT NOT NULL)")
-            .unwrap();
-        for (harness, state) in runs {
-            db.execute(
-                "INSERT INTO agent_runs(harness,state) VALUES(?1,?2)",
-                rusqlite::params![harness, state],
-            )
-            .unwrap();
-        }
-    }
-
-    /// An in-memory database filled as [`fill`] does. Inputs: the team agents and the agent
-    /// runs. Output: the database.
-    fn live_db(agents: &[(&str, &str)], runs: Option<&[(&str, &str)]>) -> Connection {
-        let db = Connection::open_in_memory().unwrap();
-        fill(&db, agents, runs);
-        db
-    }
-
-    /// A team agent of a harness that is starting, idle or working runs it, whether it is
-    /// stored under the catalog id or an alias.
-    #[test]
-    fn a_live_team_agent_of_a_harness_by_its_id_or_an_alias_is_in_use() {
-        for status in ["starting", "idle", "working"] {
-            assert_eq!(
-                in_use(&live_db(&[("codex", status)], None), "codex"),
-                Ok(true)
-            );
-        }
-        let alias = live_db(&[("claude", "working")], None);
-        assert_eq!(in_use(&alias, "claude-code"), Ok(true));
-    }
-
-    /// A team agent that ended, or one of another harness, runs nothing the update replaces.
-    #[test]
-    fn an_ended_team_agent_or_another_harness_is_not_in_use() {
-        let ended = live_db(&[("codex", "stopped"), ("codex", "failed")], None);
-        assert_eq!(in_use(&ended, "codex"), Ok(false));
-        assert_eq!(
-            in_use(&live_db(&[("claude", "working")], None), "codex"),
-            Ok(false)
-        );
-    }
-
-    /// An agent run still running uses its harness; one that closed does not.
-    #[test]
-    fn a_running_agent_run_is_in_use_and_a_closed_one_is_not() {
-        assert_eq!(
-            in_use(&live_db(&[], Some(&[("codex", "running")])), "codex"),
-            Ok(true)
-        );
-        assert_eq!(
-            in_use(&live_db(&[], Some(&[("codex", "closed")])), "codex"),
-            Ok(false)
-        );
-    }
-
-    /// A database that never made the session tables holds no session, so it refuses
-    /// nothing; this is the Windows engine, which keeps no agent runs.
-    #[test]
-    fn a_database_without_the_session_tables_has_nothing_in_use() {
-        assert_eq!(
-            in_use(&Connection::open_in_memory().unwrap(), "codex"),
-            Ok(false)
-        );
-    }
-
-    /// A job whose turn came reads the sessions again from the database file: a live one
-    /// refuses with the in-use code, none lets it go on, and a database with no file to open
-    /// again refuses as unavailable.
-    #[test]
-    fn a_job_reads_the_sessions_again_from_the_database_file() {
-        let folder = tempfile::tempdir().unwrap();
-        let file = folder.path().join("engine.db");
-        let path = file.to_str().unwrap();
-        fill(
-            &Connection::open(&file).unwrap(),
-            &[("codex", "working")],
-            None,
-        );
-        assert_eq!(
-            reopened(path).and_then(|db| unused(&db, "codex")),
-            Err(IN_USE)
-        );
-        assert_eq!(
-            reopened(path).and_then(|db| unused(&db, "claude-code")),
-            Ok(())
-        );
-        assert!(matches!(reopened(""), Err(UNAVAILABLE)));
-        let missing = folder.path().join("missing.db");
-        assert!(matches!(
-            reopened(missing.to_str().unwrap()),
-            Err(UNAVAILABLE)
-        ));
-    }
-
-    /// A database with the update settings, the team runtime tables and Check and update on,
-    /// holding one team agent of a harness in a status. Inputs: the stored harness name and
-    /// the status. Output: the database.
-    fn sessions_db(harness: &str, status: &str) -> Connection {
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db).unwrap();
-        let settings = UpdateSettings {
-            mode: UpdateMode::CheckAndUpdate,
-            ..CLOSED
-        };
-        set_settings(&db, settings).unwrap();
-        fill(&db, &[(harness, status)], None);
-        db
-    }
-
-    /// The catalog entry of a harness, found at a file under a fresh folder, and roots with
-    /// no tool. Input: the catalog id. Output: the folder, which holds the file, the entry and
-    /// the roots.
-    fn found_entry(id: &str) -> (tempfile::TempDir, HarnessEntry, Roots) {
-        let folder = tempfile::tempdir().unwrap();
-        let mut entry = harnesses::catalog(&harnesses::Search::new(Vec::new(), None, Vec::new()))
-            .into_iter()
-            .find(|entry| entry.id == id)
-            .unwrap();
-        entry.executable = Some(folder.path().join(format!("{id}.exe")));
-        let roots = Roots {
-            home: folder.path().to_path_buf(),
-            brew_prefixes: Vec::new(),
-            casks: false,
-            npm: None,
-            places: crate::tools::tools_new(Vec::new(), None),
-            #[cfg(windows)]
-            elevated: false,
-        };
-        (folder, entry, roots)
-    }
-
-    /// On Windows an update of a harness that a live session runs, named by its catalog id
-    /// or by an alias, is refused before anything starts, since a running harness's image
-    /// cannot be replaced; a session that ended refuses nothing.
-    #[cfg(windows)]
-    #[test]
-    fn a_windows_update_of_a_harness_a_live_session_runs_is_refused() {
-        for (id, stored, status) in [
-            ("codex", "codex", "working"),
-            ("codex", "codex", "starting"),
-            ("claude-code", "claude", "idle"),
-        ] {
-            let (_folder, entry, roots) = found_entry(id);
-            let refused =
-                Updates::new().start(&sessions_db(stored, status), &entry, &roots, |_| {});
-            assert_eq!(refused, Err(IN_USE), "{id} {stored} {status}");
-        }
-        let (_folder, entry, roots) = found_entry("codex");
-        let ended = Updates::new().start(&sessions_db("codex", "stopped"), &entry, &roots, |_| {});
-        assert_ne!(ended, Err(IN_USE));
-        let other = Updates::new().start(&sessions_db("claude", "working"), &entry, &roots, |_| {});
-        assert_ne!(other, Err(IN_USE));
-    }
-
-    /// On macOS and Linux a live session refuses no update, as before: the system replaces
-    /// the file under a running harness, and refusing there is the owner's call.
-    #[cfg(not(windows))]
-    #[test]
-    fn an_update_outside_windows_is_not_refused_for_a_live_session() {
-        let (_folder, entry, roots) = found_entry("codex");
-        let started =
-            Updates::new().start(&sessions_db("codex", "working"), &entry, &roots, |_| {});
-        assert_ne!(started, Err(IN_USE));
-    }
-}
+mod in_use_tests;
