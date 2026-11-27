@@ -370,3 +370,6 @@ fn plain_member(member: &str) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
