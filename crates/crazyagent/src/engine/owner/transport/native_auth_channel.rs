@@ -485,7 +485,7 @@ impl NativeAuthCustodyLaunch {
     ) -> Result<(), EngineError> {
         use std::io::Write;
         self.delivered = true;
-        input.write_all(&*self.token).map_err(io_error)?;
+        input.write_all(&**self.token).map_err(io_error)?;
         drop(input);
         Ok(())
     }
@@ -499,7 +499,7 @@ impl Drop for NativeAuthCustodyLaunch {
             && let Ok(mut slot) = authority.native_auth.lock()
             && let Some(slot) = slot.as_mut()
             && !slot.attached
-            && bool::from(slot.token.ct_eq(&*self.token))
+            && bool::from(slot.token.ct_eq(&**self.token))
         {
             slot.attached = true;
             slot.live.store(false, Ordering::SeqCst);
@@ -1436,8 +1436,8 @@ impl Authority {
         let file = slot.held()?;
         self.root.verify_key(KEYS[index], file, slot.identity)?;
         let mut actual = owner_token();
-        file.read_exact_at(&mut *actual, 0).map_err(io_error)?;
-        if !bool::from(slot.token.ct_eq(&*actual)) || self.root.socket_identity()? != self.socket {
+        file.read_exact_at(&mut **actual, 0).map_err(io_error)?;
+        if !bool::from(slot.token.ct_eq(&**actual)) || self.root.socket_identity()? != self.socket {
             return Err(failure("owner_capability_content_changed"));
         }
         Ok(())
@@ -1473,14 +1473,14 @@ impl Authority {
             return Err(failure("native_auth_host_busy"));
         }
         let mut token = owner_token();
-        getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
+        getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
         if let Some(slot) = current.as_mut() {
-            slot.token = token.clone();
+            slot.token = owner_token_copy(&token);
             slot.dispatch = Some(Arc::new(dispatch));
             slot.attached = false;
         } else {
             *current = Some(Box::new(NativeAuthSlot {
-                token: token.clone(),
+                token: owner_token_copy(&token),
                 fact: dispatch.fact().clone(),
                 admission: dispatch.admission().clone(),
                 deadline: Instant::now() + operation_bound(dispatch.fact()),

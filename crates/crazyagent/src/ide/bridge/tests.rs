@@ -588,7 +588,7 @@ fn ide_frames_match_the_extension_fixture() {
     ))
     .unwrap();
     let digits = fixture["token"].as_str().unwrap();
-    let token = OwnerToken::new(unhex(digits).try_into().unwrap());
+    let token = owner_token_copy(&unhex(digits).try_into().unwrap());
     assert_eq!(
         hex(&packet(MAGIC, 0, &token)),
         fixture["handshake"].as_str().unwrap()
@@ -621,9 +621,9 @@ fn ide_frames_match_the_extension_fixture() {
     );
     assert_eq!(encode_frame(&request).unwrap(), frame);
     let digits = session["token"].as_str().unwrap();
-    let token = OwnerToken::new(unhex(digits).try_into().unwrap());
+    let token = owner_token_copy(&unhex(digits).try_into().unwrap());
     let reply = IdeReply::Ok {
-        data: json!({ "token": hex(&*token) }),
+        data: json!({ "token": hex(&**token) }),
     };
     assert_eq!(
         encode_frame(&reply).unwrap(),
