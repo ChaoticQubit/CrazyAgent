@@ -158,8 +158,8 @@ fn graph_with_the_engine_root(
         std::fs::create_dir_all(state.join(folder)).unwrap();
     }
     std::fs::write(engine.join("engine.db"), "engine secret\n").unwrap();
-    let graphify = scratch.join("tools").join("graphify");
-    std::fs::create_dir(graphify.parent().unwrap()).unwrap();
+    let graphify = scratch.join("tools").join("bin").join("graphify");
+    std::fs::create_dir_all(graphify.parent().unwrap()).unwrap();
     std::fs::write(&graphify, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&graphify, std::fs::Permissions::from_mode(0o755)).unwrap();
     let ending = graph::update(
