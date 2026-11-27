@@ -73,3 +73,33 @@ fn a_linked_leads_teammates_setup_over_a_project_holding_an_engine_secret_is_ref
     assert_eq!(refused.map(|_| ()), Err("lead_sandbox_unavailable"));
     assert!(!profile.exists());
 }
+
+/// A linked lead's teammates setup git over a project folder that holds the engine root
+/// itself, the engine's state folder kept inside the project, is refused before the setup
+/// profile is written, so no teammate setup grant reaches the engine's files.
+#[test]
+fn a_linked_leads_teammates_setup_over_a_project_holding_the_engine_root_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new(1);
+    let (mut runtime, id, plan) = native_lead_in(&fixture, Layout::Linked, false);
+    let link = std::fs::read_to_string(plan.working_dir.join(".git")).unwrap();
+    let git_dir = PathBuf::from(link.trim().strip_prefix("gitdir: ").unwrap());
+    let repository = fixture.base.join("project").canonicalize().unwrap();
+    let engine = repository.join("data");
+    runtime.state = engine.join("state");
+    let folders = [
+        agent_home(&runtime.state, id),
+        runtime.agent_folder(id).join("tmp"),
+        runtime.state.join("profiles"),
+    ];
+    for folder in &folders {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(engine.join("engine.db"), "engine secret\n").unwrap();
+    let profile = agent_teammates_setup_profile(&runtime.state, id);
+    assert!(!profile.exists());
+    let refused = runtime.teammates_git(&repository, &plan.working_dir, &git_dir, id);
+    assert_eq!(refused.map(|_| ()), Err("lead_sandbox_unavailable"));
+    assert!(!profile.exists());
+}
