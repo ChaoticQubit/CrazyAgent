@@ -12,15 +12,18 @@ export const ALLOWLIST = "scripts/quality/engine-guard-allow.json";
 /** The largest `git ls-files` listing read, far above the repository's size. */
 const LISTING_BYTES_MAX = 64 * 1024 * 1024;
 
-/** A file that names a sandbox type, the only files whose install calls are read. */
-const SANDBOX_FILE = /\b(?:ProjectSandbox|InstalledSandbox|WindowsSandbox)\b/;
-
 /** An install call: a method `install` or `install_with_grants`, or a sandbox type's own. */
 const SITE =
   /\.install(?:_with_grants)?\s*\(|\b(?:InstalledSandbox|WindowsSandbox)::install\w*\s*\(/g;
 
 /** A call that guards a sandbox against the engine root's secrets. */
 const GUARD = /\bguard_engine(?:_around)?\s*\(/;
+
+/** A file that names a sandbox type, the only files whose install calls are read. */
+const SANDBOX_FILE = /\b(?:ProjectSandbox|InstalledSandbox|WindowsSandbox)\b/;
+
+/** The most entries the allowlist may hold; it only shrinks, so this only comes down. */
+export const ALLOW_MAX = 8;
 
 /** A Rust function's first line; groups: indent, name. */
 const FN = /^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)/;
@@ -30,6 +33,9 @@ const COMMENT = /^\s*(?:\/\/|\/\*|\*)/;
 
 /** An allowlist guard that names a function: `path.rs#name`; any other text is a reason. */
 const NAMED = /^([\w./-]+\.rs)#(\w+)$/;
+
+/** A function a reason names, `path.rs#name`, which must still exist for the reason to hold. */
+const CITED = /([\w./-]+\.rs)#(\w+)/g;
 
 /**
  * The functions of a Rust file: each `fn` line to the first later line that is only `}` at
@@ -56,24 +62,29 @@ function functions(lines) {
 }
 
 /**
- * Whether a function's body calls a guard, outside comment lines. Inputs: the lines and the
- * function. Output: the answer.
+ * Whether a function calls a guard before a point in it, outside comment lines: on an earlier
+ * line, or earlier on the point's own line. Inputs: the lines, the function, and the point's
+ * line index and column, by default the function's end. Output: the answer.
  */
-function guards(lines, fn) {
-  return lines.slice(fn.start, fn.end + 1).some((line) => !COMMENT.test(line) && GUARD.test(line));
+function guards(lines, fn, index = fn.end, column = Infinity) {
+  assert.ok(fn.start <= index && index <= fn.end, "the point sits in the function");
+  return lines.slice(fn.start, index + 1).some((line, at) => {
+    const found = COMMENT.test(line) ? null : GUARD.exec(line);
+    return found !== null && (fn.start + at < index || found.index < column);
+  });
 }
 
 /**
- * Finds the install calls in the non-test code of one Rust file that names a sandbox type,
- * each with the innermost function holding it and whether that function guards, and which
- * of its non-test functions guard. Inputs: the path, the text and whether a test-only `mod`
+ * Finds which non-test functions of one Rust file guard and, in a file that names a sandbox
+ * type, its install calls, each with the innermost function holding it and whether that
+ * function guards before the call. Inputs: the path, the text and whether a test-only `mod`
  * declares it. Output: `{ sites, guarded }`, sites as `{ line, fn, guarded }` with 1-based
  * lines, and `guarded` a map of function name to whether every function of that name guards.
  */
 export function scan(file, text, whole = false) {
   assert.equal(typeof file, "string");
   assert.equal(typeof text, "string");
-  if (kindOf(file) !== "rust" || !SANDBOX_FILE.test(text)) {
+  if (kindOf(file) !== "rust") {
     return { sites: [], guarded: new Map() };
   }
   const lines = text.split("\n");
@@ -85,17 +96,18 @@ export function scan(file, text, whole = false) {
   }
   const sites = [];
   lines.forEach((line, index) => {
-    if (mask[index] || COMMENT.test(line)) {
+    if (mask[index] || COMMENT.test(line) || !SANDBOX_FILE.test(text)) {
       return;
     }
-    for (const _ of line.matchAll(SITE)) {
+    for (const call of line.matchAll(SITE)) {
       const holders = fns.filter((fn) => fn.start <= index && index <= fn.end);
       const fn = holders.reduce((inner, next) => (next.start > inner.start ? next : inner), {
         name: "?",
         start: -1,
         end: -1,
       });
-      sites.push({ line: index + 1, fn: fn.name, guarded: fn.start >= 0 && guards(lines, fn) });
+      const guarded = fn.start >= 0 && guards(lines, fn, index, call.index);
+      sites.push({ line: index + 1, fn: fn.name, guarded });
     }
   });
   assert.ok(sites.every((site) => site.line >= 1 && site.line <= lines.length));
@@ -103,16 +115,21 @@ export function scan(file, text, whole = false) {
 }
 
 /**
- * Judges scan results against the allowlist of `path#fn` to the guards that cover it, which
- * may only shrink: an unguarded install function needs an entry; an entry needs a non-empty
- * list, each a reason or a `path.rs#fn` whose functions all guard; an entry whose function
- * no longer holds an unguarded install must go. Inputs: a map of path to its `scan` result,
- * and the allowlist. Output: one line per problem, sorted; empty when the tree holds it.
+ * Judges scan results against the allowlist of `path#fn` to the guards that cover it, at most
+ * `ALLOW_MAX` entries: an unguarded install function needs an entry; an entry needs a list,
+ * each a `path.rs#fn` whose functions all guard, or a reason naming a `path.rs#fn` that still
+ * exists; an entry whose function holds no unguarded install must go. Inputs: a map of path
+ * to its `scan` result, and the allowlist. Output: one line per problem, sorted.
  */
 export function check(found, allow) {
   assert.ok(found instanceof Map, "results come as a map of path to scan result");
   assert.ok(allow !== null && typeof allow === "object" && !Array.isArray(allow));
   const problems = [];
+  const entries = Object.keys(allow).length;
+  if (entries > ALLOW_MAX) {
+    const over = `${entries} entries, at most ${ALLOW_MAX}`;
+    problems.push(`${ALLOWLIST}: ${over}; the allowlist only shrinks`);
+  }
   const unguarded = new Map();
   for (const [file, result] of found) {
     for (const site of result.sites.filter((site) => !site.guarded)) {
@@ -145,6 +162,13 @@ export function check(found, allow) {
         problems.push(`${key}: guard ${cover} names no function`);
       } else if (named !== null && !found.get(named[1]).guarded.get(named[2])) {
         problems.push(`${key}: guard ${cover} holds no guard_engine`);
+      } else if (named === null) {
+        const cited = Array.from(cover.matchAll(CITED));
+        const gone = cited.filter(([, file, fn]) => !found.get(file)?.guarded.has(fn));
+        if (cited.length === 0 || gone.length > 0) {
+          const names = gone.map(([name]) => name).join(", ") || "none";
+          problems.push(`${key}: reason names no function that still exists (${names})`);
+        }
       }
     }
   }

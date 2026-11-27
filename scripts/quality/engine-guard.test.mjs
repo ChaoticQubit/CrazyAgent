@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { ALLOWLIST, check, run, scan } from "./engine-guard.mjs";
+import { ALLOW_MAX, ALLOWLIST, check, run, scan } from "./engine-guard.mjs";
 
 const script = fileURLToPath(new URL("./engine-guard.mjs", import.meta.url));
 const FILE = "crates/a/src/launch.rs";
@@ -63,6 +63,49 @@ test("a guard_engine_around guard counts, a commented-out guard does not", () =>
   assert.equal(scan(FILE, commented).sites[0].guarded, false);
 });
 
+test("a guard after the install call in its function does not cover it", () => {
+  const late =
+    "pub fn launch(root: &Path, engine: &Path, profile: &Path) -> Result<(), Error> {\n" +
+    "    let sandbox = ProjectSandbox::new(&HOOKS, root, root, root, network())?;\n" +
+    "    sandbox.install(profile)?;\n" +
+    "    let later = sandbox.guard_engine(engine)?;\n" +
+    "    later.install(profile)?;\n" +
+    "    sandbox.guard_engine(engine)?.install(profile)?;\n" +
+    "    sandbox.install(profile).and(sandbox.guard_engine(engine))?;\n" +
+    "    Ok(())\n" +
+    "}\n";
+  assert.deepEqual(
+    scan(FILE, late).sites.map(({ line, guarded }) => [line, guarded]),
+    [
+      [3, false],
+      [5, true],
+      [6, true],
+      [7, true],
+    ],
+  );
+  const kept = late.split("\n").filter((_, at) => at < 4 || at > 6);
+  const alone = scan(FILE, kept.join("\n"));
+  assert.deepEqual(check(new Map([[FILE, alone]]), {}), [
+    `${FILE}:3: fn launch installs a sandbox with no guard_engine; ${ADVICE}`,
+  ]);
+  const same = kept.map((line, at) => (at === 3 ? late.split("\n")[6] : line));
+  assert.deepEqual(scan(FILE, same.join("\n")).sites[1], { line: 4, fn: "launch", guarded: false });
+});
+
+test("an allowlist past its most entries fails, at the most it passes", () => {
+  const found = new Map([[FILE, scan(FILE, builder("launch", true))]]);
+  const reasons = (count) =>
+    Object.fromEntries(
+      Array.from({ length: count }, (_, at) => [`${FILE}#gone${at}`, [`${FILE}#launch`]]),
+    );
+  const at = check(found, reasons(ALLOW_MAX));
+  assert.ok(at.every((line) => line.endsWith("holds no unguarded install; remove its entry")));
+  assert.equal(at.length, ALLOW_MAX);
+  const over = check(found, reasons(ALLOW_MAX + 1));
+  const refused = `${ALLOW_MAX + 1} entries, at most ${ALLOW_MAX}; the allowlist only shrinks`;
+  assert.ok(over.includes(`${ALLOWLIST}: ${refused}`), over.join("\n"));
+});
+
 test("test code and files naming no sandbox type are not read", () => {
   const planted = builder("planted", false).replaceAll("\n", "\n    ");
   const inline = `#[cfg(test)]\nmod tests {\n    ${planted}}\n`;
@@ -70,7 +113,7 @@ test("test code and files naming no sandbox type are not read", () => {
   assert.deepEqual(scan("crates/a/src/tests.rs", builder("planted", false)).sites, []);
   assert.deepEqual(scan(FILE, builder("planted", false), true).sites, []);
   const installer = "pub fn run(i: &Installer) {\n    i.install(dep, &pin);\n}\n";
-  assert.deepEqual(scan(FILE, installer), { sites: [], guarded: new Map() });
+  assert.deepEqual(scan(FILE, installer), { sites: [], guarded: new Map([["run", false]]) });
 });
 
 test("a type's own install call is a site, in the innermost function holding it", () => {
@@ -99,7 +142,13 @@ test("an allowlist entry needs a guarding function or a reason, and goes once gu
   ]);
   const key = `${FILE}#launch`;
   assert.deepEqual(check(found, { [key]: [`${guard}#guarding`] }), []);
-  assert.deepEqual(check(found, { [key]: ["installs what its caller built"] }), []);
+  assert.deepEqual(check(found, { [key]: [`installs what ${guard}#bare built`] }), []);
+  assert.deepEqual(check(found, { [key]: ["installs what its caller built"] }), [
+    `${key}: reason names no function that still exists (none)`,
+  ]);
+  assert.deepEqual(check(found, { [key]: [`installs what ${guard}#gone built`] }), [
+    `${key}: reason names no function that still exists (${guard}#gone)`,
+  ]);
   assert.deepEqual(check(found, { [key]: [`${guard}#bare`] }), [
     `${key}: guard ${guard}#bare holds no guard_engine`,
   ]);
@@ -111,7 +160,7 @@ test("an allowlist entry needs a guarding function or a reason, and goes once gu
     `${key}: guard " " is not a reason or a function`,
   ]);
   const fixed = new Map([[FILE, scan(FILE, builder("launch", true))]]);
-  assert.deepEqual(check(fixed, { [key]: ["a reason"] }), [
+  assert.deepEqual(check(fixed, { [key]: [`${FILE}#launch`] }), [
     `${key}: holds no unguarded install; remove its entry`,
   ]);
 });
