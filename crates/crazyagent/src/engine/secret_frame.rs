@@ -107,9 +107,9 @@ pub async fn read_profile_secret<S: AsyncRead + Unpin>(
 }
 
 /// Reads what a child's pipe holds now, up to eight reads of 1 KiB, into `bytes`, marking
-/// the end of the pipe. Inputs: the pipe, the buffer, the end mark and the most bytes the
-/// buffer may hold. Output: Ok, or `account_profile_outcome_unknown` past `maximum` or on a
-/// read error.
+/// the end of the pipe; the 1 KiB read buffer is wiped on every return. Inputs: the pipe,
+/// the buffer, the end mark and the most bytes the buffer may hold. Output: Ok, or
+/// `account_profile_outcome_unknown` past `maximum` or on a read error.
 #[cfg(unix)]
 pub fn drain(
     descriptor: &std::os::fd::OwnedFd,
@@ -118,9 +118,9 @@ pub fn drain(
     maximum: usize,
 ) -> Result<(), EngineError> {
     let unknown = || EngineError("account_profile_outcome_unknown".into());
-    let mut buffer = [0; 1024];
+    let mut buffer = Zeroizing::new([0; 1024]);
     for _ in 0..8 {
-        match rustix::io::read(descriptor, &mut buffer) {
+        match rustix::io::read(descriptor, &mut *buffer) {
             Ok(0) => {
                 *eof = true;
                 return Ok(());
