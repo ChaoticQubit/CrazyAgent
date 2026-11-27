@@ -19,14 +19,15 @@ export function readQuestionsShown(): QuestionsShown {
 
 /** Remembers where a waiting question shows on a project page and tells this window's
  * readers at once; other windows hear it through the storage event. Input: the choice.
- * Output: none. */
-export function saveQuestionsShown(choice: QuestionsShown): void {
+ * Output: true once stored; false when storage refused it, and then nobody is told. */
+export function saveQuestionsShown(choice: QuestionsShown): boolean {
   try {
     window.localStorage.setItem(QUESTIONS_SHOWN_KEY, choice);
   } catch {
-    return;
+    return false;
   }
   questionsHeard.tell();
+  return true;
 }
 
 /** Calls `listener` after each Questions show choice, made in this window or in another
