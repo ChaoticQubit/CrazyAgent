@@ -160,6 +160,10 @@ jobs:
           step fetch cargo fetch --locked
           step kclippy cargo clippy -p crazyagent-kernel-processes --tests --locked --offline --keep-going -- -D warnings
           step clippy cargo clippy -p crazyagent --tests --locked --offline --keep-going -- -D warnings
+          step helper cargo build -p crazyagent --bin crazyagent-landlock --locked --offline
+          mkdir -p target/debug/deps
+          cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock || echo "::error::helper copy"
+          step rows cargo test -p crazyagent --lib --locked --offline -- team::runtime::tests::start_line_tests::
           echo "== verdicts"
           bad=0
           want() { if [ "$2" = "$3" ]; then echo "ok $1"; else echo "::error::$1: got $2, want $3"; bad=1; fi; }
@@ -172,4 +176,12 @@ jobs:
           want "clippy checked the crate" "$(yes_if "$(count clippy '(Checking|Compiling) crazyagent v')")" yes
           want "kernel clippy rc" "$(cat "$logs/kclippy.rc")" 0
           want "kernel clippy checked the crate" "$(yes_if "$(count kclippy '(Checking|Compiling) crazyagent-kernel-processes v')")" yes
+          ran() { grep -E '^running [0-9]+ tests?$' "$logs/$1.log" | awk '{ s += $2 } END { print s + 0 }'; }
+          echo "rows FAILED:"
+          grep -E '^test .* \.\.\. FAILED$' "$logs/rows.log" || true
+          want "helper rc" "$(cat "$logs/helper.rc")" 0
+          want "rows rc" "$(cat "$logs/rows.rc")" 0
+          want "rows built the crate" "$(yes_if "$(count rows '(Checking|Compiling) crazyagent v')")" yes
+          want "rows ran" "$(ran rows)" 2
+          want "rows ok" "$(count rows '^test team::runtime::tests::start_line_tests::.* \.\.\. ok$')" 2
           exit "$bad"
