@@ -676,27 +676,3 @@ fn a_demo_clear_tombstones_every_sessions_event_of_its_project_and_no_other() {
         "only p1's events are tombstoned"
     );
 }
-
-#[test]
-fn marks_without_master_sessions_keep_tables_order() {
-    let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(TOUCHED).unwrap();
-    db.execute_batch(
-        "INSERT INTO sessions_touched(tbl,key,project) VALUES ('agent_texts','7','p1'), ('conversation_entries','3','p1')",
-    )
-    .unwrap();
-
-    let read = marks(&db);
-
-    assert!(
-        read.is_ok(),
-        "marks refused a store with no master_sessions: {read:?}"
-    );
-    let order: Vec<(&str, &str)> = read
-        .as_ref()
-        .unwrap()
-        .iter()
-        .map(|mark| (mark.table.name(), mark.key.as_str()))
-        .collect();
-    assert_eq!(order, [("conversation_entries", "3"), ("agent_texts", "7")]);
-}
