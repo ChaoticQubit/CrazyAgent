@@ -1,7 +1,9 @@
 use std::hint::black_box;
 
 use bus_gateway::{AllOn, Gateway, Grants, Refusals};
-use sdk::generated::{editor, net, process, sandbox, secrets, service, settings, update};
+use sdk::generated::{
+    editor, net, process, project_rows, sandbox, secrets, service, settings, update,
+};
 use sdk::{Capability, Refusal, Tier};
 
 use crate::perf_kit::{Row, SAMPLES, time};
@@ -56,6 +58,21 @@ impl editor::Provide for Noop {
     fn spawn(&self, _: &'static str, launch: editor::EditorLaunch) -> Result<u32, Refusal> {
         black_box(launch);
         Ok(PID)
+    }
+}
+
+impl project_rows::Provide for Noop {
+    fn page(
+        &self,
+        _: &'static str,
+        after: Option<String>,
+        limit: u16,
+    ) -> Result<project_rows::RowsPage, Refusal> {
+        black_box((after, limit));
+        Ok(project_rows::RowsPage {
+            rows: Vec::new(),
+            more: false,
+        })
     }
 }
 
@@ -223,6 +240,7 @@ fn capability_calls() {
         editor: &Noop,
         net: &Noop,
         process: &Noop,
+        project_rows: &Noop,
         sandbox: &Noop,
         secrets: &Noop,
         service: &Noop,

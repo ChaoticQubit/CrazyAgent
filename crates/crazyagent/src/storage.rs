@@ -4159,7 +4159,14 @@ fn read_owner_page(
     let after = cursor.map_or("", |c| c.after_id.as_str());
     let sql = match view {
         OwnerView::Projects => {
-            "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM projects WHERE id>?1 ORDER BY id LIMIT ?2"
+            let kept = crate::sdk_projects::rows(tx, after, u16::from(limit))?;
+            let last = kept.page.rows.last().map(|row| row.id.clone());
+            let next = page_next(config, a, view, revision, kept.page.more, last)?;
+            assert!(kept.items.len() <= usize::from(limit));
+            return Ok(OwnerData::Page {
+                items: kept.items,
+                next,
+            });
         }
         OwnerView::Tasks => {
             "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM tasks WHERE id>?1 ORDER BY id LIMIT ?2"
@@ -4196,20 +4203,7 @@ fn read_owner_page(
             .ok_or_else(|| error("owner_row_bounds"))?;
         RequestId::new(id.clone()).map_err(error)?;
         let item = match view {
-            OwnerView::Projects => {
-                let p: StoredProject = serde_json::from_str(&body).map_err(error)?;
-                if p.project_id.as_str() != id
-                    || p.spec.name.len() > 256
-                    || p.spec.repositories.len() > 64
-                {
-                    return Err(error("owner_row_invalid"));
-                }
-                OwnerSummary::Project {
-                    project_id: p.project_id,
-                    name: p.spec.name,
-                    repository_count: p.spec.repositories.len(),
-                }
-            }
+            OwnerView::Projects => unreachable!("the projects page returns before this loop"),
             OwnerView::Tasks => {
                 let t: ExecutionContext = serde_json::from_str(&body).map_err(error)?;
                 if t.task_id.as_str() != id {
@@ -4268,22 +4262,36 @@ fn read_owner_page(
         }
         last = Some(id);
     }
-    let next = if more {
-        Some(OwnerPageCursor {
-            db_instance: a.db_instance.clone(),
-            owner_id: a.owner_id.clone(),
-            engine_epoch: a.engine_epoch.clone(),
-            owner_epoch: a.owner_epoch,
-            config_id: config.id.clone(),
-            at_revision: Cursor::new(revision),
-            view,
-            after_id: last.ok_or_else(|| error("owner_page_progress"))?,
-        })
-    } else {
-        None
-    };
+    let next = page_next(config, a, view, revision, more, last)?;
     assert!(items.len() <= usize::from(limit));
     Ok(OwnerData::Page { items, next })
+}
+
+/// The cursor to an owner page's next page. Input: the config, admission, view and
+/// revision the page was read at, whether more rows follow, and the last id read. Output:
+/// the cursor past that id when more follow, none otherwise, or `owner_page_progress` when
+/// more follow but no id was read.
+fn page_next(
+    config: &EffectiveConfig,
+    a: &Admission,
+    view: OwnerView,
+    revision: u64,
+    more: bool,
+    last: Option<String>,
+) -> Result<Option<OwnerPageCursor>, EngineError> {
+    if !more {
+        return Ok(None);
+    }
+    Ok(Some(OwnerPageCursor {
+        db_instance: a.db_instance.clone(),
+        owner_id: a.owner_id.clone(),
+        engine_epoch: a.engine_epoch.clone(),
+        owner_epoch: a.owner_epoch,
+        config_id: config.id.clone(),
+        at_revision: Cursor::new(revision),
+        view,
+        after_id: last.ok_or_else(|| error("owner_page_progress"))?,
+    }))
 }
 
 #[cfg(all(test, unix))]

@@ -1,7 +1,7 @@
 use kernel_security::error::StoreError;
 use kernel_security::net as kernel_net;
 use kernel_security::secrets::Secrets;
-use sdk::generated::{editor, sandbox, service, update};
+use sdk::generated::{editor, project_rows, sandbox, service, update};
 use sdk::secrets::Secret;
 use sdk::settings::QuitSettings;
 use sdk::{Refusal, net, process, secrets, settings};
@@ -225,6 +225,17 @@ impl service::Provide for Absent {
     }
 
     fn uninstall(&self, _: &'static str) -> Result<(), Refusal> {
+        Err(absent())
+    }
+}
+
+impl project_rows::Provide for Absent {
+    fn page(
+        &self,
+        _: &'static str,
+        _: Option<String>,
+        _: u16,
+    ) -> Result<project_rows::RowsPage, Refusal> {
         Err(absent())
     }
 }
