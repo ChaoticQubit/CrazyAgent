@@ -1019,13 +1019,13 @@ mod owner_git_rows {
     #[test]
     fn owner_git_refuses_a_project_that_is_the_engine_root_before_any_profile() {
         let made = made();
-        fs::write(made.root.join("engine.db"), "engine secret").unwrap();
+        fs::write(made.project.join("engine.db"), "engine secret").unwrap();
         let helper = std::env::current_exe().unwrap();
         match OwnerGit::install(
             &crate::test_hooks::STAND_IN,
-            &made.root,
+            &made.project,
             &made.folder,
-            &made.root,
+            &made.project,
             &made.git,
             &helper,
             &made.grants,
@@ -1036,7 +1036,7 @@ mod owner_git_rows {
             other => panic!("expected the engine root refusal, got {other:?}"),
         }
         let folder = canonical(&made.folder).unwrap();
-        assert!(!places(&folder, &made.root).profile.exists());
+        assert!(!places(&folder, &made.project).profile.exists());
     }
 
     /// Lays out a stand-in Git for Windows under `root`: each relative file is written empty
