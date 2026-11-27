@@ -185,8 +185,8 @@ fn counted(
     paths.iter().any(|path| match resolved(directory, path) {
         None => true,
         Some(made) => {
-            let _ = (shared, exists);
             names(&format!("{made}\\"), spellings)
+                || (!absolute(path) && script(path) && (shared || !exists(&made)))
         }
     })
 }
