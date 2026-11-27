@@ -12635,16 +12635,6 @@ fn owner_notes_within(case: &Case, within: Duration) -> Vec<String> {
     }
 }
 
-/// What the owner reads once a set they heard waits in Changes went back to its agent.
-/// Input: the set. Output: the note.
-#[cfg(target_os = "macos")]
-fn went_back_note(set: &ChangeSetView) -> String {
-    format!(
-        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
-        set.agent.label
-    )
-}
-
 /// The agent adds a dev-dependency of `app` and the owner then adds a dependency of `app` on
 /// crate `a` on main, each with its own Cargo.lock, so the lockfile alone clashes. Inputs:
 /// the case, the agent's manifest line and the name it locks. Output: the agent's change
@@ -13238,7 +13228,7 @@ fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_e
     );
     assert_eq!(
         owner_notes_within(&case, OWNER_NOTE_WITHIN),
-        vec![went_back_note(&set)],
+        vec![polish::went_back_note(&set, "tool")],
         "the owner, told the edits wait in Changes, hears they went back"
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
@@ -13430,7 +13420,7 @@ fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
     );
     assert_eq!(
         owner_notes_within(&case, OWNER_NOTE_WITHIN),
-        vec![went_back_note(&set)]
+        vec![polish::went_back_note(&set, "tool")]
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }

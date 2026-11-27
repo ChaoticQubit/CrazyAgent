@@ -818,6 +818,10 @@ fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_
         ChangeState::Updating,
         "the hide stops the tool and the agent fixes the clash"
     );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set, "hidden")]
+    );
     assert!(!regenerated(&case, &set), "nothing was committed");
     assert_eq!(survivors(&token), Vec::<String>::new());
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
@@ -889,7 +893,64 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
         ChangeState::Updating,
         "the late hide refuses the set and the agent fixes the clash"
     );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set, "hidden")]
+    );
     assert_eq!(survivors(&token), Vec::<String>::new());
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// What the owner reads once a set they heard waits in Changes went back to its agent, with
+/// the sentence on why cargo did not rewrite its Cargo.lock. Inputs: the set and that reason.
+#[cfg(target_os = "macos")]
+pub(super) fn went_back_note(set: &ChangeSetView, why: &str) -> String {
+    format!(
+        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet. {}",
+        set.agent.label,
+        cargo_lock_because(why, set)
+    )
+}
+
+/// The sentence the owner reads after the went-back note when the engine did not rewrite a
+/// set's Cargo.lock with cargo: `tool` when cargo failed or ran out of time, `hidden` when a
+/// folder was hidden during the run and `outside` when cargo changed other files. Inputs:
+/// the reason and the set. Output: the sentence.
+#[cfg(target_os = "macos")]
+pub(super) fn cargo_lock_because(why: &str, set: &ChangeSetView) -> String {
+    let agent = &set.agent.label;
+    match why {
+        "tool" => format!(
+            "Cargo.lock could not be updated automatically because cargo failed or took too long, so {agent} will fix them itself."
+        ),
+        "hidden" => "Cargo.lock were not updated automatically because you hid a folder while cargo was running, so nothing it wrote was kept.".to_owned(),
+        "outside" => "Cargo.lock were not updated automatically because cargo also changed other files, so nothing it wrote was kept.".to_owned(),
+        other => panic!("no owner sentence for {other}"),
+    }
+}
+
+/// A lockfile tool that also writes a file other than the lockfiles lands nothing: the set
+/// goes back to its agent and the owner reads that cargo changed other files.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lockfile_tool_that_writes_another_file_tells_the_owner_why_the_set_went_back() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", ": > stray.txt", Duration::from_secs(60));
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating
+    });
+    assert_eq!(
+        set.state,
+        ChangeState::Updating,
+        "a tool that changes another file lands nothing and the agent fixes the clash"
+    );
+    assert!(!regenerated(&case, &set), "nothing was committed");
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set, "outside")]
+    );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
