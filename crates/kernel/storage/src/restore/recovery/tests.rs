@@ -391,3 +391,127 @@ fn an_engine_db_that_is_itself_a_link_is_still_refused_before_any_write() {
     assert!(replaced(root.path()).is_empty());
     assert!(replaced(other.path()).is_empty());
 }
+
+/// Runs in a child process: tries to take engine.db out of WAL mode with no busy wait,
+/// which needs SQLite's exclusive lock. Input: the database path in
+/// `SCRATCH_IDLE_WAL_DB`. Output: exit code 5 when the mode changed, 3 when SQLite was
+/// busy, 4 on anything else.
+#[test]
+#[ignore = "child of scratch_idle_wal_lock_after_a_second_fd_closes"]
+fn scratch_idle_wal_child() {
+    let Some(path) = std::env::var_os("SCRATCH_IDLE_WAL_DB") else {
+        return;
+    };
+    let db = Connection::open(path).unwrap();
+    db.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let code = match db.query_row("PRAGMA journal_mode=DELETE", [], |row| {
+        row.get::<_, String>(0)
+    }) {
+        Ok(mode) if mode == "delete" => 5,
+        Ok(_) => 3,
+        Err(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            3
+        }
+        Err(_) => 4,
+    };
+    std::process::exit(code);
+}
+
+/// Prints whether an idle WAL connection still keeps another process from taking the
+/// exclusive lock, before and after this process opens and closes a second descriptor of
+/// the same file. Input: none. Output: one `IDLE-WAL` line.
+#[test]
+fn scratch_idle_wal_lock_after_a_second_fd_closes() {
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = root.path().join(DATABASE);
+    let db = Connection::open(&path).unwrap();
+    let mode: String = db
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    db.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
+        .unwrap();
+    let rows: i64 = db
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert!(db.is_autocommit());
+    let child = || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "restore::recovery::tests::scratch_idle_wal_child",
+                "--exact",
+                "--ignored",
+                "--quiet",
+            ])
+            .env("SCRATCH_IDLE_WAL_DB", &path)
+            .status()
+            .unwrap()
+            .code()
+    };
+    let before = child();
+    drop(std::fs::File::open(&path).unwrap());
+    let after = child();
+    println!("IDLE-WAL before={before:?} after={after:?} (5 = the child took the lock, 3 = busy)");
+    drop(db);
+}
+
+/// Damages engine.db one way. Inputs: the kind (d1 a b-tree page, d2 page 1's cells past
+/// the header, d3 the file cut mid-page, d4 the header) and the path. Output: none.
+fn scratch_damaged(kind: &str, path: &Path) {
+    let bytes = std::fs::read(path).unwrap();
+    let page = usize::from(u16::from_be_bytes([bytes[16], bytes[17]]));
+    assert!(page >= 512 && bytes.len() >= 2 * page);
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    let at = |file: &mut std::fs::File, offset: usize, data: &[u8]| {
+        std::io::Seek::seek(file, std::io::SeekFrom::Start(offset as u64)).unwrap();
+        std::io::Write::write_all(file, data).unwrap();
+    };
+    match kind {
+        "d1" => {
+            drop(file);
+            damage(path);
+        }
+        "d2" => at(&mut file, page - 64, &[0xaa; 64]),
+        "d3" => file.set_len((bytes.len() - page / 2) as u64).unwrap(),
+        "d4" => at(&mut file, 0, &[0; 16]),
+        other => panic!("no damage {other}"),
+    }
+}
+
+/// Prints, for each damage, what the backup API makes of engine.db and what today's
+/// put-back (a byte copy, then the backup over it) does. Input: none. Output: one
+/// `DAMAGE` line per kind.
+#[test]
+fn scratch_damaged_put_back_routes() {
+    for kind in ["d1", "d2", "d3", "d4"] {
+        let (root, path, _kept) = broken(true);
+        scratch_damaged(kind, &path);
+        let live = std::fs::read(&path).unwrap();
+        let out = root.path().join("route-a.db");
+        let route_a = Connection::open(&path)
+            .and_then(|source| {
+                let mut target = Connection::open(&out)?;
+                rusqlite::backup::Backup::new(&source, &mut target)?.run_to_completion(
+                    64,
+                    std::time::Duration::ZERO,
+                    None,
+                )
+            })
+            .map(|()| std::fs::read(&out).unwrap() == live);
+        let put = put_back(&path);
+        let kept_equal = put
+            .as_ref()
+            .ok()
+            .map(|saved| std::fs::read(saved.join(DATABASE)).unwrap() == live);
+        let put = put.map(|_| ()).map_err(|refused| refused.0);
+        println!(
+            "DAMAGE {kind} live_bytes={} route_a_backup={route_a:?} put_back_byte_copy={put:?} kept_bytes_equal={kept_equal:?}",
+            live.len()
+        );
+    }
+}
