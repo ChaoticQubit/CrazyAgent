@@ -138,7 +138,9 @@ fn release_tar(folder: &Path) -> PathBuf {
 /// temporary data root, a loopback HTTP server for `download`, a freshly signed archive, a
 /// gzip tar of a stand-in engine and shell scripts that answer `--version` and
 /// `service <action>` as the engine does. One-shot calls (`unpack`, `swap`) take a fresh
-/// folder per call, made before timing. Prints one PERF line per call, asserts no time.
+/// folder per call, made before timing. `update.control.curl_version` spawns
+/// `curl --version` through the spawn gate the same way in both twins, as the control for
+/// `update.download`. Prints one PERF line per call, asserts no time.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn update_calls() {
@@ -234,6 +236,16 @@ fn update_calls() {
     });
     time(&row("update.system_tool", FILES), SAMPLES, || {
         black_box(system_tool(black_box("curl")));
+    });
+    let curl = system_tool("curl");
+    time(&row("update.control.curl_version", ONE), SAMPLES, || {
+        let mut command = Command::new(&curl);
+        command
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+        assert!(child.wait().unwrap().success());
     });
     time(&row("update.download", ONE), SAMPLES, || {
         let mut fetched = Vec::with_capacity(body.len());
