@@ -11,24 +11,33 @@ import sys
 AA = "2.5-aa"
 
 
+WHOLE = ({"p50_ns", "p95_ns", "n"}, {"p50", "p95", "n"})
+
+
 def runs_of(path):
-    """Reads the measures of a raw log in order. Input: the path. Output: a list of
-    (header dict, {row key: (p50 ns, p95 ns)})."""
+    """Reads the measures of a raw log in order, skipping a PERF line cut before its p95 or
+    n, as a killed run leaves its last line. Input: the path. Output: a list of
+    (header dict, {row key: (p50 ns, p95 ns)}) and the count of cut lines."""
     runs = []
-    for raw in open(path, encoding="utf-8"):
+    cut = 0
+    for raw in open(path, encoding="utf-8", errors="replace"):
         line = raw.rstrip("\n")
         if line.startswith("PERF-RUN "):
-            header = dict(pair.split("=", 1) for pair in line.split()[1:])
+            header = dict(pair.split("=", 1) for pair in line.split()[1:] if "=" in pair)
             runs.append((header, {}))
         elif line.startswith("PERF ") and runs:
             words = line.split()
-            values = dict(pair.split("=", 1) for pair in words[4:])
+            values = dict(pair.split("=", 1) for pair in words[4:] if "=" in pair)
+            if len(words) < 5 or not any(need <= set(values) for need in WHOLE):
+                cut += 1
+                continue
             if "p50_ns" in values:
                 p50, p95 = int(values["p50_ns"]), int(values["p95_ns"])
             else:
                 p50, p95 = int(values["p50"]) * 1000, int(values["p95"]) * 1000
             runs[-1][1][" ".join(words[1:4])] = (p50, p95)
-    return runs
+    assert cut >= 0
+    return runs, cut
 
 
 def blocks_of(runs):
@@ -51,8 +60,9 @@ def median_of(runs, label, key, field):
 def main(reading, condition, new, base, path):
     """Prints the table. Inputs: the reading name, the condition, the new and base labels
     and the raw log path. Output: none; it exits 1 when the log is not a whole plan."""
-    runs = runs_of(path)
+    runs, cut = runs_of(path)
     assert runs, f"{path}: no measures"
+    print(f"SITTING cut_lines={cut}")
     size, blocks = blocks_of(runs)
     labels = {header["build"] for header, _ in runs}
     assert labels == {new, base, AA}, f"labels {sorted(labels)}"
@@ -84,6 +94,9 @@ def main(reading, condition, new, base, path):
             f"gap={gap * 100:+.1f}% aa_gap={aa_gap * 100:.1f}% slower_blocks={slower_blocks}/{len(blocks)} "
             f"block_new={[round(v) for v in per_new]} block_base={[round(v) for v in per_base]} rule={rule} strict={strict}"
         )
+    for key in [key for key in runs[0][1] if key not in keys]:
+        if all(key in rows for header, rows in runs if header["build"] in (new, AA)):
+            print(f"NEW-ONLY {key} new_p50={median_of(runs, new, key, 0):.0f} new_p95={median_of(runs, new, key, 1):.0f} aa_p95={median_of(runs, AA, key, 1):.0f}")
     print(f"VERDICT reading={reading} condition={condition} rows={len(keys)} slower_rule={'FAIL' if slower else 'PASS'} slower_rows={slower} strict_fail_rows={strict_fail}")
 
 

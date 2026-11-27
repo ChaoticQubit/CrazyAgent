@@ -54,77 +54,16 @@ defaults:
     shell: bash
 
 jobs:
-  sitting-pod-c-a:
-    name: Pod C perf sitting reading A on one macos-15 runner
-    runs-on: macos-15
-    timeout-minutes: 330
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the macOS runner
-        run: |
-          set -euo pipefail
-          df -h /
-          case "${ANDROID_HOME:-}" in "$HOME"/?*) rm -rf "$ANDROID_HOME" ;; *) echo "no Android SDK under $HOME" ;; esac
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Install Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Set up the sides, the A/A link and the sitting folder
-        timeout-minutes: 10
-        run: bash scripts/perf/sitting.sh setup
-      - name: Build reading A's 2.5 side (a)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 90
-        run: bash scripts/perf/sitting.sh build a crazyagent-kernel-processes
-      - name: Build reading A's 2.4.4 side (twin)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 90
-        run: bash scripts/perf/sitting.sh build twin crazyagent
-      - name: Reading A quiet, ABBA 2.5 2.4.4 2.5-aa x4
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: bash scripts/perf/sitting.sh phase A quiet "$RUNNER_TEMP/sitting/a=2.5 $RUNNER_TEMP/sitting/twin=2.4.4 $RUNNER_TEMP/sitting/a-aa=2.5-aa" "$RUNNER_TEMP/sitting/a" "$RUNNER_TEMP/sitting/twin" "$RUNNER_TEMP/sitting/a-aa"
-      - name: Start the parallel workspace build for reading A loaded
-        if: ${{ !cancelled() }}
-        timeout-minutes: 10
-        run: bash scripts/perf/sitting.sh load-start
-      - name: Reading A loaded, ABBA 2.5 2.4.4 2.5-aa x4
-        if: ${{ !cancelled() }}
-        timeout-minutes: 90
-        run: bash scripts/perf/sitting.sh phase A loaded "$RUNNER_TEMP/sitting/a=2.5 $RUNNER_TEMP/sitting/twin=2.4.4 $RUNNER_TEMP/sitting/a-aa=2.5-aa" "$RUNNER_TEMP/sitting/a" "$RUNNER_TEMP/sitting/twin" "$RUNNER_TEMP/sitting/a-aa"
-      - name: Stop the parallel build after reading A
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/perf/sitting.sh load-stop
-      - name: Print reading A's verdict per condition
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/perf/sitting.sh summary A
-      - name: Keep reading A's raw runs and summary
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: sitting-pod-c-reading-a
-          path: ${{ runner.temp }}/sitting/logs
-          retention-days: 7
-      - name: Fail on any step that did not succeed
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/perf/sitting.sh verdict
-
   sitting-pod-c-b:
-    name: Pod C perf sitting reading B on one macos-15 runner
+    name: Pod C perf sitting reading B filtered to service_calls on one macos-15 runner
     runs-on: macos-15
-    timeout-minutes: 330
+    timeout-minutes: 300
+    env:
+      PERF_PACKAGES: crazyagent-kernel-processes
+      PERF_FILTER: perf_tests::service::service_calls
+      PERF_EXACT: "1"
+      PERF_MEASURE_SECS: "120"
+      PHASE_SECS: "1800"
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -145,20 +84,135 @@ jobs:
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Write the ratio reader
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/ratios.py" <<'EOF'
+          import re, statistics, sys
+          
+          UNIT_NS = {"p50_ns": 1, "p50": 1000}
+          P95_OF = {"p50_ns": "p95_ns", "p50": "p95"}
+          
+          
+          def parse(log):
+              """Reads a sitting log into runs, every row's p50 and p95 in ns whatever unit perf_kit
+              printed. Input: the log path. Output: a list of runs, each a dict with build, label,
+              block, the p50 rows and the p95 rows as {(module, name): ns} and the units seen.
+              """
+              runs = []
+              for line in open(log, errors="replace"):
+                  head = re.match(r"PERF-RUN build=(\S+) label=(\S+) .* block=(\S+) load1=(\S+)", line)
+                  if head:
+                      runs.append({"build": head.group(1), "label": head.group(2), "block": head.group(3), "rows": {}, "p95": {}, "units": {}})
+                      continue
+                  row = re.match(r"PERF \d+ (\S+) (\S+) (p50_ns|p50)=(\d+) (p95_ns|p95)=(\d+)", line)
+                  if row and runs:
+                      key = (row.group(1), row.group(2))
+                      runs[-1]["rows"][key] = int(row.group(4)) * UNIT_NS[row.group(3)]
+                      assert row.group(5) == P95_OF[row.group(3)], line
+                      runs[-1]["p95"][key] = int(row.group(6)) * UNIT_NS[row.group(3)]
+                      runs[-1]["units"][key] = row.group(3)
+              for run in runs:
+                  assert set(run["rows"]) == set(run["units"]) == set(run["p95"])
+              return runs
+          
+          
+          def median(runs, build=None, block=None, label=None, field="rows"):
+              """Takes the median ns per row over the runs that match. Inputs: the runs, the build,
+              block and label to keep (none for any) and the field, p50 rows or p95. Output:
+              {(module, name): median ns}."""
+              out = {}
+              for r in runs:
+                  if build and r["build"] != build:
+                      continue
+                  if block and r["block"] != block:
+                      continue
+                  if label and r["label"] != label:
+                      continue
+                  for key, value in r[field].items():
+                      out.setdefault(key, []).append(value)
+              return {key: statistics.median(values) for key, values in out.items()}
+          
+          
+          def report(runs, new="2.5", old="2.4.4", aa=None):
+              """Builds the RATIOS lines, every value in ns, a row SLOWER only when the new build is
+              slower in every scored block. Inputs: the parsed runs, the new and old build names and
+              the build of an A/A copy of the new build timed inside the blocks, if any; with none
+              the A/A gap reads the aa block's A1 and A2 runs. Output: the lines and the slower count."""
+              assert new != old and aa not in (new, old)
+              blocks = sorted({r["block"] for r in runs if r["block"] not in ("aa", "warmup")})
+              scored = [r for r in runs if r["block"] in blocks]
+              new_all, old_all = median(scored, new), median(scored, old)
+              new_95, old_95 = median(scored, new, field="p95"), median(scored, old, field="p95")
+              per_block = {b: (median(runs, new, b), median(runs, old, b)) for b in blocks}
+              if aa is None:
+                  a1, a2 = median(runs, new, "aa", "A1"), median(runs, new, "aa", "A2")
+              else:
+                  a1, a2 = new_all, median(scored, aa)
+              units = {}
+              for r in runs:
+                  for key, unit in r["units"].items():
+                      units.setdefault(key, set()).add(unit)
+              lines = [f"RATIOS unit=ns runs={len(runs)} scored={len(scored)} blocks={','.join(blocks)}"]
+              slower = 0
+              for key in sorted(set(new_all) | set(old_all)):
+                  n, o = new_all.get(key), old_all.get(key)
+                  cells = []
+                  for b in blocks:
+                      bn, bo = per_block[b][0].get(key), per_block[b][1].get(key)
+                      verdict = "-" if bn is None or bo is None else ("slow" if bn > bo else "fast" if bn < bo else "eq")
+                      cells.append(f"B{b}{verdict} {bn}/{bo}")
+                  gap = f"{a2[key] / a1[key]:.2f}" if a1.get(key) and key in a2 else "-"
+                  ratio = "-" if n is None or not o else f"{n / o:.2f}"
+                  n95, o95 = new_95.get(key), old_95.get(key)
+                  ratio95 = "-" if n95 is None or not o95 else f"{n95 / o95:.2f}"
+                  flag = ""
+                  if cells and all(c.split(" ")[0].endswith("slow") for c in cells):
+                      flag = " SLOWER"
+                      slower += 1
+                  mixed = " units=" + "+".join(sorted(units[key])) if len(units[key]) > 1 else ""
+                  lines.append(f"ROW {'.'.join(key)} {new}={n}ns {old}={o}ns ratio={ratio} p95 {new}={n95}ns {old}={o95}ns p95_ratio={ratio95} {' | '.join(cells)} aa_gap={gap}{flag}{mixed}")
+              lines.append(f"SLOWER-ROWS {slower}")
+              return lines, slower
+          
+          
+          def arguments(words):
+              """Reads the command line: the log, then `--pair NEW,OLD` and `--aa BUILD`, each at most
+              once. Input: the words after the script. Output: the log and the report keywords."""
+              log, options = words[0], {}
+              rest = words[1:]
+              while rest:
+                  flag, value, rest = rest[0], rest[1], rest[2:]
+                  assert flag in ("--pair", "--aa") and flag not in options, flag
+                  options[flag] = value
+              keywords = {}
+              if "--pair" in options:
+                  keywords["new"], keywords["old"] = options["--pair"].split(",")
+              if "--aa" in options:
+                  keywords["aa"] = options["--aa"]
+              return log, keywords
+          
+          
+          if __name__ == "__main__":
+              log, keywords = arguments(sys.argv[1:])
+              for line in report(parse(log), **keywords)[0]:
+                  print(line)
+          EOF
+          python3 -I -m py_compile "$RUNNER_TEMP/ratios.py"
       - name: Set up the sides, the A/A link and the sitting folder
         timeout-minutes: 10
         run: bash scripts/perf/sitting.sh setup
       - name: Build reading B's 2.5 side (b-after)
         if: ${{ !cancelled() }}
-        timeout-minutes: 90
+        timeout-minutes: 60
         run: bash scripts/perf/sitting.sh build b-after crazyagent-kernel-processes
       - name: Build reading B's 2.5-before side (b-before)
         if: ${{ !cancelled() }}
-        timeout-minutes: 90
+        timeout-minutes: 60
         run: bash scripts/perf/sitting.sh build b-before crazyagent-kernel-processes
       - name: Reading B quiet, ABBA 2.5 2.5-before 2.5-aa x4
         if: ${{ !cancelled() }}
-        timeout-minutes: 60
+        timeout-minutes: 35
         run: bash scripts/perf/sitting.sh phase B quiet "$RUNNER_TEMP/sitting/b-after=2.5 $RUNNER_TEMP/sitting/b-before=2.5-before $RUNNER_TEMP/sitting/b-after-aa=2.5-aa" "$RUNNER_TEMP/sitting/b-after" "$RUNNER_TEMP/sitting/b-before" "$RUNNER_TEMP/sitting/b-after-aa"
       - name: Start the parallel workspace build for reading B loaded
         if: ${{ !cancelled() }}
@@ -166,13 +220,13 @@ jobs:
         run: bash scripts/perf/sitting.sh load-start
       - name: Reading B loaded, ABBA 2.5 2.5-before 2.5-aa x4
         if: ${{ !cancelled() }}
-        timeout-minutes: 90
+        timeout-minutes: 35
         run: bash scripts/perf/sitting.sh phase B loaded "$RUNNER_TEMP/sitting/b-after=2.5 $RUNNER_TEMP/sitting/b-before=2.5-before $RUNNER_TEMP/sitting/b-after-aa=2.5-aa" "$RUNNER_TEMP/sitting/b-after" "$RUNNER_TEMP/sitting/b-before" "$RUNNER_TEMP/sitting/b-after-aa"
       - name: Stop the parallel build after reading B
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/perf/sitting.sh load-stop
-      - name: Print reading B's verdict per condition
+      - name: Print reading B's verdict and ratios per condition
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/perf/sitting.sh summary B
@@ -187,3 +241,125 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/perf/sitting.sh verdict
+
+  probe-remount-key:
+    name: Probe whether the held read's volume key tells two mounts apart on macos-15
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - name: Attach two APFS images in turn on one mount point and read each key
+        timeout-minutes: 10
+        run: |
+          set -uo pipefail
+          P="$RUNNER_TEMP/remount"
+          mkdir -p "$P/m"
+          cat > "$P/key.py" <<'EOF'
+          import ctypes, os, platform, struct, sys
+          
+          ATTR_BIT_MAP_COUNT = 5
+          ATTR_CMN_DEVID = 0x00000002
+          ATTR_CMN_FSID = 0x00000004
+          STATFS_FSID_OFFSET = 48
+          
+          
+          class AttrList(ctypes.Structure):
+              """The attribute list `getattrlist` takes, as sys/attr.h lays it out."""
+              _fields_ = [
+                  ("bitmapcount", ctypes.c_ushort),
+                  ("reserved", ctypes.c_ushort),
+                  ("commonattr", ctypes.c_uint),
+                  ("volattr", ctypes.c_uint),
+                  ("dirattr", ctypes.c_uint),
+                  ("fileattr", ctypes.c_uint),
+                  ("forkattr", ctypes.c_uint),
+              ]
+          
+          
+          def attr_key(libc, path):
+              """Reads the device and file system id `getattrlist` returns for a path, as a held read
+              would ask for them. Inputs: the C library and the path. Output: (dev, (fsid0, fsid1))."""
+              wanted = AttrList(ATTR_BIT_MAP_COUNT, 0, ATTR_CMN_DEVID | ATTR_CMN_FSID, 0, 0, 0, 0)
+              reply = ctypes.create_string_buffer(64)
+              if libc.getattrlist(path.encode(), ctypes.byref(wanted), reply, len(reply), 0) != 0:
+                  raise OSError(ctypes.get_errno(), f"getattrlist {path}")
+              length, dev, fsid0, fsid1 = struct.unpack_from("<Iiii", reply.raw, 0)
+              assert length == 16, length
+              return dev, (fsid0, fsid1)
+          
+          
+          def statfs_fsid(libc, path):
+              """Reads `statfs` f_fsid for a path (arm64 layout). Inputs: the C library and the path.
+              Output: (fsid0, fsid1)."""
+              reply = ctypes.create_string_buffer(4096)
+              if libc.statfs(path.encode(), reply) != 0:
+                  raise OSError(ctypes.get_errno(), f"statfs {path}")
+              return struct.unpack_from("<ii", reply.raw, STATFS_FSID_OFFSET)
+          
+          
+          def main(path, image):
+              """Prints one KEY line for the volume mounted at a path. Inputs: the mount point and the
+              image name. Output: none."""
+              assert platform.machine() == "arm64", platform.machine()
+              libc = ctypes.CDLL("/usr/lib/libc.dylib", use_errno=True)
+              dev, fsid = attr_key(libc, path)
+              st_dev = os.stat(path).st_dev
+              assert dev == st_dev, (dev, st_dev)
+              print(f"KEY image={image} st_dev={st_dev} attr_dev={dev} attr_fsid={fsid[0]},{fsid[1]} statfs_fsid={','.join(map(str, statfs_fsid(libc, path)))}")
+          
+          
+          main(sys.argv[1], sys.argv[2])
+          EOF
+          cat > "$P/verdict.py" <<'EOF'
+          import sys
+          
+          
+          def main(log):
+              """Reads the KEY lines of the attaches in order and says whether the key e would cache
+              by tells two volumes apart that came up under the same device id. Input: the log path.
+              Output: none; exits 1 when an attach printed no key."""
+              keys = []
+              for line in open(log, errors="replace"):
+                  if line.startswith("KEY "):
+                      keys.append(dict(word.split("=", 1) for word in line.split()[1:]))
+              print(f"attaches with a key: {len(keys)}")
+              if len(keys) != 3:
+                  print("VERDICT-E INCONCLUSIVE: an attach printed no key")
+                  sys.exit(1)
+              pairs = [(keys[i], keys[i + 1]) for i in range(len(keys) - 1) if keys[i]["image"] != keys[i + 1]["image"]]
+              reused = [(a, b) for a, b in pairs if a["st_dev"] == b["st_dev"]]
+              for a, b in pairs:
+                  print(f"PAIR {a['image']}->{b['image']} dev_repeated={'yes' if a['st_dev'] == b['st_dev'] else 'no'} key_differs={'yes' if (a['attr_dev'], a['attr_fsid']) != (b['attr_dev'], b['attr_fsid']) else 'no'}")
+              if not reused:
+                  print("VERDICT-E INCONCLUSIVE: no device id repeated across two volumes, so e is not proven safe and stays out")
+              elif all((a["attr_dev"], a["attr_fsid"]) != (b["attr_dev"], b["attr_fsid"]) for a, b in reused):
+                  print("VERDICT-E SAFE: a repeated device id came with a differing (dev, fsid) key")
+              else:
+                  print("VERDICT-E UNSAFE: a repeated device id came with the same (dev, fsid) key, so e is dropped")
+          
+          
+          main(sys.argv[1])
+          EOF
+          detach() { hdiutil detach "$P/m" -force > /dev/null 2>&1 || true; }
+          trap detach EXIT
+          log="$P/keys.log"
+          : > "$log"
+          for name in a b; do
+            hdiutil create -quiet -size 16m -fs APFS -volname "rk$name" "$P/$name.dmg"
+            echo "create $name rc $?"
+          done
+          for name in a b a; do
+            hdiutil attach -quiet -nobrowse -mountpoint "$P/m" "$P/$name.dmg"
+            echo "attach $name rc $?"
+            python3 -I "$P/key.py" "$P/m" "$name" | tee -a "$log"
+            echo "key $name rc ${PIPESTATUS[0]}"
+            diskutil info -plist "$P/m" > "$P/info.plist"
+            echo "diskutil $name rc $?"
+            echo "volume uuid $name $(plutil -extract VolumeUUID raw "$P/info.plist" 2> /dev/null || echo none) disk $(plutil -extract DeviceIdentifier raw "$P/info.plist" 2> /dev/null || echo none)"
+            hdiutil detach -quiet "$P/m"
+            echo "detach $name rc $?"
+          done
+          python3 -I "$P/verdict.py" "$log"

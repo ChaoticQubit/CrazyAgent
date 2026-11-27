@@ -59,19 +59,47 @@ load_one() {
 }
 
 measure() {
-  local dir=$1 sprint=$2 order=$3 build load1 others condition=loaded
-  local -a packages
+  local dir=$1 sprint=$2 order=$3 block=$4 build load1 others condition=loaded rc=0 pid watcher
+  local -a packages filter
   local word
   packages=()
-  while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
+  if [ -n "${PERF_PACKAGES:-}" ]; then
+    for word in $PERF_PACKAGES; do packages+=(-p "$word"); done
+  else
+    while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
+  fi
+  filter=("${PERF_FILTER:-perf_tests}")
+  [ -n "${PERF_EXACT:-}" ] && filter+=(--exact)
   build=$(build_of "$dir")
   load1=$(load_one)
   others=$(($(busy_slots "$sprint") - 1))
   [ "$others" -ge 0 ] || others=0
   awk -v l="$load1" 'BEGIN { exit !(l < 4) }' && [ "$others" -eq 0 ] && condition=quiet
-  echo "PERF-RUN build=$build commit=$(git -C "$dir" rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition load1=$load1 slots=$others runs=1 order=$order"
-  (cd -P "$dir" && CARGO_TARGET_DIR="$PWD/.local-state/target" cargo test --release "${packages[@]}" --lib perf_tests -- --ignored --nocapture --test-threads=1 2>&1) | sed -E 's/^test [^ ]+ \.\.\. (PERF )/\1/'
-  return "${PIPESTATUS[0]}"
+  echo "RUN build=$build block=$block start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+  echo "PERF-RUN build=$build label=$build commit=$(git -C "$dir" rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition block=$block load1=$load1 slots=$others runs=1 order=$order"
+  python3 -I -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash -c 'cd -P "$1" && shift && CARGO_TARGET_DIR="$PWD/.local-state/target" cargo test --release "$@" -- --ignored --nocapture --test-threads=1 2>&1 | sed -E "s/^test [^ ]+ \.\.\. (PERF )/\1/"; exit "${PIPESTATUS[0]}"' \
+    _ "$dir" "${packages[@]}" --lib "${filter[@]}" &
+  pid=$!
+  [ -z "${PERF_PGID_FILE:-}" ] || echo "$pid" >> "$PERF_PGID_FILE"
+  watcher=""
+  if [ "${PERF_MEASURE_SECS:-0}" -gt 0 ]; then
+    (
+      trap 'kill "$nap" 2> /dev/null; exit 0' TERM
+      sleep "$PERF_MEASURE_SECS" &
+      nap=$!
+      wait "$nap"
+      kill -TERM -- "-$pid" 2> /dev/null && echo "PERF-TIMEOUT build=$build block=$block after=${PERF_MEASURE_SECS}s" >&2
+    ) &
+    watcher=$!
+  fi
+  wait "$pid" || rc=$?
+  if [ -n "$watcher" ]; then
+    kill "$watcher" 2> /dev/null || true
+    wait "$watcher" 2> /dev/null || true
+  fi
+  echo "RUN build=$build block=$block end=$(date -u +%Y-%m-%dT%H:%M:%SZ) rc=$rc" >&2
+  return "$rc"
 }
 
 median() {
@@ -146,14 +174,14 @@ if [ "${1:-}" = "--inner" ]; then
   order=${planned[0]#order=}
   ordered=("${planned[@]:1}")
   for dir in "${ordered[@]}"; do
-    measure "$dir" "$sprint" "$order" > /dev/null
+    measure "$dir" "$sprint" "$order" warmup > /dev/null
   done
-  for _ in $(seq 1 "$blocks"); do
+  for at in $(seq 1 "$blocks"); do
     for dir in "${ordered[@]}"; do
-      measure "$dir" "$sprint" "$order" >> "$log"
+      measure "$dir" "$sprint" "$order" "$at" >> "$log"
     done
     for ((index = ${#ordered[@]} - 1; index >= 0; index--)); do
-      measure "${ordered[$index]}" "$sprint" "$order" >> "$log"
+      measure "${ordered[$index]}" "$sprint" "$order" "$at" >> "$log"
     done
   done
   median "$log" $((blocks * 2))

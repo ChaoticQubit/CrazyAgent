@@ -227,3 +227,44 @@ test("a run refuses a load reader that prints text that is not a number and writ
     rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test("each measured run names its label and block where the ratio reader looks, and prints a start line", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const { checkout, env } = standIns(folder, {});
+    const sprint = path.join(folder, "sprint");
+    mkdirSync(sprint);
+    const log = path.join(folder, "runs.log");
+    const result = spawnSync("bash", [script, "--inner", sprint, "2", log, checkout], { env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const heads = readFileSync(log, "utf8").split("\n").filter((line) => line.startsWith("PERF-RUN "));
+    assert.equal(heads.length, 4);
+    const blocks = heads.map((line) => line.match(/^PERF-RUN build=(\S+) label=(\S+) .* block=(\S+) load1=\S+/));
+    assert.ok(blocks.every(Boolean), heads.join("\n"));
+    assert.deepEqual(blocks.map((head) => [head[1], head[2], head[3]]), [["2.5", "2.5", "1"], ["2.5", "2.5", "1"], ["2.5", "2.5", "2"], ["2.5", "2.5", "2"]]);
+    assert.equal((result.stderr.match(/^RUN build=2\.5 block=(warmup|1|2) start=/gm) || []).length, 5);
+    assert.equal((result.stderr.match(/^RUN build=2\.5 block=(warmup|1|2) end=\S+ rc=0$/gm) || []).length, 5);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a measure past its deadline is stopped with its own process group and names its block", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const marker = `perf-deadline-${process.pid}`;
+    const { checkout, env } = standIns(folder, { cargo: `exec /bin/sh -c 'sleep 30; :' ${marker}` });
+    const sprint = path.join(folder, "sprint");
+    mkdirSync(sprint);
+    const log = path.join(folder, "runs.log");
+    const started = Date.now();
+    const result = spawnSync("bash", [script, "--inner", sprint, "1", log, checkout], { env: { ...env, PERF_MEASURE_SECS: "1" }, encoding: "utf8", timeout: 20000 });
+    assert.ok(Date.now() - started < 15000, `took ${Date.now() - started} ms`);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /^PERF-TIMEOUT build=2\.5 block=warmup after=1s$/m);
+    const left = spawnSync("pgrep", ["-f", marker], { encoding: "utf8" });
+    assert.equal(left.stdout.trim(), "", "the hung measure outlived its deadline");
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});

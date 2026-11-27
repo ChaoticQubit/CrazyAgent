@@ -50,7 +50,7 @@ case "$1" in
     echo "image ${ImageOS:-?} ${ImageVersion:-?} run ${GITHUB_RUN_ID:-?} attempt ${GITHUB_RUN_ATTEMPT:-?} ref ${GITHUB_REF:-?} sha ${GITHUB_SHA:-?}"
     sw_vers || true
     sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string || true
-    for pair in a=49bf8c2c01 twin=05a762238c b-after=68721ffb41 b-before=c6f1398838 load=008adcd803; do
+    for pair in b-after=2735d10968 b-before=c6f1398838 load=008adcd803; do
       name=${pair%%=*}
       rev=${pair#*=}
       rc=0
@@ -58,7 +58,6 @@ case "$1" in
       note_rc "worktree-$name" "$rc"
       echo "side $name commit $(git -C "$T/$name" rev-parse --short=10 HEAD)"
     done
-    ln -s "$T/a" "$T/a-aa"
     ln -s "$T/b-after" "$T/b-after-aa"
     echo "run.sh --inner skips only what the outer run.sh does around it: the slot.sh wrap of each --no-run build and of --inner, and PERF_WAIT_QUIET. The build step runs the outer's own cargo command per side; --inner keeps its warm run per side, its ABBA plan and its --median count and commit asserts."
     stamp setup
@@ -68,7 +67,11 @@ case "$1" in
     crate=$3
     dir="$T/$name"
     packages=()
-    while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
+    if [ -n "${PERF_PACKAGES:-}" ]; then
+      for word in $PERF_PACKAGES; do packages+=(-p "$word"); done
+    else
+      while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
+    fi
     echo "build $name packages ${packages[*]}"
     stamp "build-$name-start"
     run_logged "build-$name" bash -c 'cd -P "$1" && shift && CARGO_TARGET_DIR="$PWD/.local-state/target" cargo test --release --locked "$@" --lib --no-run' _ "$dir" "${packages[@]}"
@@ -123,9 +126,61 @@ case "$1" in
       note_rc "phase-$reading-$condition" 1
       exit 0
     fi
+    groups="$T/phase-$reading-$condition.groups"
+    alive() {
+      local group
+      for group in $(cat "$@" 2> /dev/null); do
+        kill -0 -- "-$group" 2> /dev/null && return 0
+      done
+      return 1
+    }
+    for earlier in "$T"/phase-*.groups; do
+      [ -e "$earlier" ] || continue
+      if alive "$earlier"; then
+        echo "::error::$reading $condition: the phase of $(basename "$earlier") still runs"
+        note_rc "phase-$reading-$condition" 1
+        exit 0
+      fi
+    done
+    : > "$groups"
     stamp "phase-$reading-$condition-start"
     rc=0
-    PERF_LABELS="$labels" bash scripts/perf/run.sh --inner "$T/sprint" 4 "$log" "$@" > "$T/logs/median-$reading-$condition.log" 2>&1 || rc=$?
+    PERF_PGID_FILE="$groups" PERF_LABELS="$labels" python3 -I -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+      bash scripts/perf/run.sh --inner "$T/sprint" 4 "$log" "$@" > "$T/logs/median-$reading-$condition.log" &
+    lead=$!
+    echo "$lead" >> "$groups"
+    stop_phase() {
+      local group
+      for group in $(cat "$groups"); do kill -TERM -- "-$group" 2> /dev/null || true; done
+      alive "$groups" && sleep 5
+      for group in $(cat "$groups"); do kill -KILL -- "-$group" 2> /dev/null || true; done
+      return 0
+    }
+    trap 'echo "::error::$reading $condition: stopped by a signal"; stop_phase; note_rc "phase-$reading-$condition" 143; exit 143' TERM INT HUP
+    watch=""
+    if [ "${PHASE_SECS:-0}" -gt 0 ]; then
+      (
+        trap 'kill "$nap" 2> /dev/null; exit 0' TERM
+        sleep "$PHASE_SECS" &
+        nap=$!
+        wait "$nap"
+        echo "::error::$reading $condition: past its deadline of ${PHASE_SECS}s"
+        for group in $(cat "$groups"); do kill -TERM -- "-$group" 2> /dev/null; done
+      ) &
+      watch=$!
+    fi
+    wait "$lead" || rc=$?
+    if [ -n "$watch" ]; then
+      kill "$watch" 2> /dev/null || true
+      wait "$watch" 2> /dev/null || true
+    fi
+    trap - TERM INT HUP
+    stop_phase
+    if alive "$groups"; then
+      echo "::error::$reading $condition: a process of the phase outlived it"
+      rc=1
+    fi
+    echo "phase groups: $(wc -l < "$groups" | tr -d ' ')"
     cat "$T/logs/median-$reading-$condition.log"
     note_rc "phase-$reading-$condition" "$rc"
     stamp "phase-$reading-$condition-end"
@@ -145,6 +200,9 @@ case "$1" in
       log="$T/logs/raw-$1-$2.log"
       if [ -s "$log" ]; then
         run_logged "summary-$1-$2" python3 -I scripts/perf/sitting_summary.py "$1" "$2" "$3" "$4" "$log"
+        if [ -f "$RUNNER_TEMP/ratios.py" ]; then
+          run_logged "ratios-$1-$2" python3 -I "$RUNNER_TEMP/ratios.py" "$log" --pair "$3,$4" --aa 2.5-aa
+        fi
       else
         echo "::error::no raw log for reading $1 $2"
         note_rc "summary-$1-$2" 1
