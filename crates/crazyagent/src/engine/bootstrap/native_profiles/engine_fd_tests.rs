@@ -36,18 +36,19 @@ fn engine_fd_child() {
 /// Runs the child on engine.db from another process and returns its exit code.
 /// Input: the database path. Output: 5, 3 or 4, as `engine_fd_child` exits.
 fn child(path: &Path) -> i32 {
-    std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "engine::bootstrap::native_profiles::engine_fd_tests::engine_fd_child",
-            "--exact",
-            "--ignored",
-            "--quiet",
-        ])
-        .env(CHILD_DATABASE, path)
-        .status()
-        .unwrap()
-        .code()
-        .unwrap()
+    kernel_processes::spawn_gate::status(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "engine::bootstrap::native_profiles::engine_fd_tests::engine_fd_child",
+                "--exact",
+                "--ignored",
+                "--quiet",
+            ])
+            .env(CHILD_DATABASE, path),
+    )
+    .unwrap()
+    .code()
+    .unwrap()
 }
 
 struct IdleWal {
