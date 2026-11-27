@@ -1,11 +1,25 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
-/// A private temporary folder named through the `/var` link, as macOS names its temporary
-/// folders. Output: the folder's guard and its path through `/var`, or the error a read
-/// of the temporary folder or `/var` gave.
+/// A private temporary folder named through the `/var` link, made in this user's own
+/// temporary folder as the system names it (`getconf DARWIN_USER_TEMP_DIR`), never as
+/// `TMPDIR` names it, so a run with another `TMPDIR` reads the same folders. Output: the
+/// folder's guard and its path through `/var`, or the error a read of the temporary folder,
+/// `getconf` or `/var` gave.
 fn home_through_var() -> std::io::Result<(tempfile::TempDir, PathBuf)> {
-    let home = tempfile::tempdir()?;
+    let answer = crate::spawn_gate::collected(
+        std::process::Command::new("/usr/bin/getconf")
+            .arg("DARWIN_USER_TEMP_DIR")
+            .env_remove("TMPDIR"),
+    )?;
+    if !answer.status.success() {
+        return Err(std::io::Error::other(format!(
+            "getconf DARWIN_USER_TEMP_DIR: {}",
+            answer.status
+        )));
+    }
+    let user_temp = String::from_utf8(answer.stdout).map_err(std::io::Error::other)?;
+    let home = tempfile::Builder::new().tempdir_in(user_temp.trim_end_matches('\n'))?;
     let real = std::fs::canonicalize(home.path())?;
     let rest = real
         .strip_prefix("/private/var")
@@ -45,8 +59,8 @@ fn shut(path: &Path) -> std::io::Result<Shut> {
 }
 
 /// A home whose setup fails after a folder in it is shut is gone once the failure unwinds.
-/// Input: none. Output: none; it panics when the home is left behind, after removing it
-/// itself.
+/// Input: none. Output: none; it panics when the setup broke before its planned panic, or
+/// when the home is left behind, after removing it itself.
 #[test]
 fn a_home_with_a_shut_folder_is_gone_after_a_failed_setup() {
     let mut made = None;
@@ -59,14 +73,23 @@ fn a_home_with_a_shut_folder_is_gone_after_a_failed_setup() {
             let _shut = shut(&home.join("locked"))?;
             panic!("the setup fails");
         }));
-    assert!(failed.is_err());
-    let home = made.expect("the setup made its home");
+    let home = made.unwrap_or_else(|| panic!("the setup made no home: {failed:?}"));
     let left = home.exists();
     if left {
         let _ =
             std::fs::set_permissions(home.join("locked"), std::fs::Permissions::from_mode(0o700));
         let _ = std::fs::remove_dir_all(&home);
     }
+    let payload = match failed {
+        Err(payload) => payload,
+        Ok(Ok(())) => unreachable!("the setup ends in its planned panic"),
+        Ok(Err(error)) => panic!("the setup failed before its planned panic: {error}"),
+    };
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"the setup fails"),
+        "the setup failed before its planned panic"
+    );
     assert!(!left, "the failed setup left {} behind", home.display());
 }
 
