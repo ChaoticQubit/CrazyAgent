@@ -205,7 +205,8 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_fr
             "launch_environment_refused",
             "{harness}"
         );
-        let (routed, relay) = route(request(harness, home.path(), work.path(), keyed())).unwrap();
+        let (routed, relay, _launching) =
+            route(request(harness, home.path(), work.path(), keyed())).unwrap();
         let relay = relay.unwrap();
         assert!(is_placeholder(relay.token()));
         let built = command(&routed).unwrap();
@@ -240,7 +241,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_fr
                 Some(&format!("http://127.0.0.1:{}", relay.port()))
             );
         }
-        let (again, none) = route(routed).unwrap();
+        let (again, none, _again) = route(routed).unwrap();
         assert!(none.is_none());
         assert_eq!(
             environment(&command(&again).unwrap()),
@@ -298,7 +299,7 @@ fn no_launch_command_kind_carries_a_relay_token_or_a_provider_key() {
                 },
             );
             keyed.tools = tools;
-            let (routed, relay) = route(keyed).unwrap();
+            let (routed, relay, _launching) = route(keyed).unwrap();
             let relay = relay.unwrap();
             let piped = command(&routed).unwrap();
             no_key_in(

@@ -393,7 +393,7 @@ fn agent_launch(
     let mut extra = Vec::new();
     let mut relay_kept = None;
     let built = if kind == "api_key" {
-        let (routed, relay) = route(request(roots, harness, kind, tools)).unwrap();
+        let (routed, relay, _launching) = route(request(roots, harness, kind, tools)).unwrap();
         let relay = relay.unwrap();
         extra = relay_placeholders(relay.token(), relay.port());
         let built = command(&routed);
@@ -426,7 +426,7 @@ fn terminal_launch(
     let mut launch_request = request(roots, harness, kind, tools);
     let mut key_file = None;
     if kind == "api_key" {
-        let (routed, relay) = route(launch_request).unwrap();
+        let (routed, relay, _launching) = route(launch_request).unwrap();
         let relay = relay.unwrap();
         extra = relay_placeholders(relay.token(), relay.port());
         key_file = Some(
