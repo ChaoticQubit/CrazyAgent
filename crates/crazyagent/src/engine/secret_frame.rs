@@ -158,3 +158,15 @@ pub fn drain_errors(
     *count += bytes.len();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::OwnerToken;
+
+    /// An owner token lives behind a pointer, so moving any holder of one copies only the
+    /// pointer and leaves no copy of the token's bytes behind.
+    #[test]
+    fn owner_token_is_a_pointer() {
+        assert_eq!(size_of::<OwnerToken>(), size_of::<usize>());
+    }
+}
