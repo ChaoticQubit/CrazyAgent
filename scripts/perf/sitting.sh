@@ -146,7 +146,7 @@ case "$1" in
     stamp "phase-$reading-$condition-start"
     rc=0
     PERF_PGID_FILE="$groups" PERF_LABELS="$labels" python3 -I -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
-      bash scripts/perf/run.sh --inner "$T/sprint" 4 "$log" "$@" > "$T/logs/median-$reading-$condition.log" &
+      bash scripts/perf/run.sh --inner "$T/sprint" "${PHASE_BLOCKS:-4}" "$log" "$@" > "$T/logs/median-$reading-$condition.log" &
     lead=$!
     echo "$lead" >> "$groups"
     stop_phase() {

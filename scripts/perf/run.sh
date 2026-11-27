@@ -59,8 +59,8 @@ load_one() {
 }
 
 measure() {
-  local dir=$1 sprint=$2 order=$3 block=$4 build load1 others condition=loaded rc=0 pid watcher
-  local -a packages filter
+  local dir=$1 sprint=$2 order=$3 block=$4 build load1 others condition=loaded rc=0 pid watcher out
+  local -a packages filter binary
   local word
   packages=()
   if [ -n "${PERF_PACKAGES:-}" ]; then
@@ -69,7 +69,9 @@ measure() {
     while IFS= read -r word; do packages+=("$word"); done < <(packages_of "$dir")
   fi
   filter=("${PERF_FILTER:-perf_tests}")
-  [ -n "${PERF_EXACT:-}" ] && filter+=(--exact)
+  binary=(--ignored --nocapture --test-threads=1)
+  [ -n "${PERF_EXACT:-}" ] && binary+=(--exact)
+  out=$(mktemp)
   build=$(build_of "$dir")
   load1=$(load_one)
   others=$(($(busy_slots "$sprint") - 1))
@@ -78,8 +80,8 @@ measure() {
   echo "RUN build=$build block=$block start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
   echo "PERF-RUN build=$build label=$build commit=$(git -C "$dir" rev-parse --short HEAD) date=$(date +%Y-%m-%dT%H:%M) condition=$condition block=$block load1=$load1 slots=$others runs=1 order=$order"
   python3 -I -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' \
-    bash -c 'cd -P "$1" && shift && CARGO_TARGET_DIR="$PWD/.local-state/target" cargo test --release "$@" -- --ignored --nocapture --test-threads=1 2>&1 | sed -E "s/^test [^ ]+ \.\.\. (PERF )/\1/"; exit "${PIPESTATUS[0]}"' \
-    _ "$dir" "${packages[@]}" --lib "${filter[@]}" &
+    bash -c 'cd -P "$1" && shift && CARGO_TARGET_DIR="$PWD/.local-state/target" cargo test --release "$@" 2>&1 | sed -E "s/^test [^ ]+ \.\.\. (PERF )/\1/"; exit "${PIPESTATUS[0]}"' \
+    _ "$dir" "${packages[@]}" --lib "${filter[@]}" -- "${binary[@]}" > "$out" &
   pid=$!
   [ -z "${PERF_PGID_FILE:-}" ] || echo "$pid" >> "$PERF_PGID_FILE"
   watcher=""
@@ -98,7 +100,10 @@ measure() {
     kill "$watcher" 2> /dev/null || true
     wait "$watcher" 2> /dev/null || true
   fi
+  cat "$out"
   echo "RUN build=$build block=$block end=$(date -u +%Y-%m-%dT%H:%M:%SZ) rc=$rc" >&2
+  [ "$rc" -eq 0 ] || tail -n 30 "$out" | sed "s/^/MEASURE-FAIL build=$build block=$block /" >&2
+  rm -f "$out"
   return "$rc"
 }
 

@@ -268,3 +268,43 @@ test("a measure past its deadline is stopped with its own process group and name
     rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test("an exact filter reaches the test binary after the --, where cargo takes no --exact", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const cargo = [
+      'seen=""; for word in "$@"; do',
+      '  [ "$word" = "--" ] && { seen=1; continue; }',
+      '  [ "$word" = "--exact" ] && [ -z "$seen" ] && { echo "error: unexpected argument \'--exact\' found"; exit 1; }',
+      '  [ "$word" = "--exact" ] && exact=1',
+      "done",
+      '[ -n "$exact" ] || { echo "no exact flag for the test binary"; exit 1; }',
+      'echo "test perf_tests::rows ... PERF 1 storage stand.in p50_ns=5 p95_ns=6 n=200 batch=1000"',
+    ].join("\n");
+    const { checkout, env } = standIns(folder, { cargo });
+    const sprint = path.join(folder, "sprint");
+    mkdirSync(sprint);
+    const log = path.join(folder, "runs.log");
+    const result = spawnSync("bash", [script, "--inner", sprint, "1", log, checkout], { env: { ...env, PERF_FILTER: "perf_tests::rows", PERF_EXACT: "1" }, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal((readFileSync(log, "utf8").match(/^PERF 1 storage stand\.in /gm) || []).length, 2);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a failed warm-up measure prints the tail of its own output on stderr", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "perf-run-"));
+  try {
+    const { checkout, env } = standIns(folder, { cargo: 'echo "error: the stand-in refused its arguments"; exit 1' });
+    const sprint = path.join(folder, "sprint");
+    mkdirSync(sprint);
+    const log = path.join(folder, "runs.log");
+    const result = spawnSync("bash", [script, "--inner", sprint, "1", log, checkout], { env, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /^RUN build=2\.5 block=warmup end=\S+ rc=1$/m);
+    assert.match(result.stderr, /^MEASURE-FAIL build=2\.5 block=warmup error: the stand-in refused its arguments$/m);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
