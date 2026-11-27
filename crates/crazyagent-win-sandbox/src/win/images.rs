@@ -838,6 +838,9 @@ mod tests {
         Ok(())
     }
 
+    /// One decision row: the working directory, the path parts and whether the host counts.
+    type Case<'a> = (Option<&'a str>, Option<&'a [&'a str]>, bool);
+
     /// A script host counts by where it works and by the path parts it names: a working
     /// directory in the folder, a part into it or naming it whole, relative or absolute, and
     /// a relative part it cannot resolve, as with an unread working directory, an unsplit
@@ -848,7 +851,7 @@ mod tests {
             text: r"c:\tools\harness".to_owned(),
             file: false,
         }];
-        let cases: [(Option<&str>, Option<&[&str]>, bool); 14] = [
+        let cases: [Case<'_>; 14] = [
             (Some(r"c:\tools\harness\x\"), Some(&[]), true),
             (Some(r"c:\work\"), Some(&[]), false),
             (Some(r"c:\tools\"), Some(&[r"harness\cli.js"]), true),
