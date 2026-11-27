@@ -4,7 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 
 /// A tmux that answers `-V` as 3.8 but whose server reports 3.1 to the engine's version
 /// read is refused at connect with `terminal_tmux_unsupported`, within `CLOSE_TIME`, and
-/// no control-mode client of the refused connect is left on its server.
+/// no control-mode client of the refused connect is left on its server, while the same count
+/// sees a control-mode client attached afterwards.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_server_reporting_an_old_tmux_is_refused_and_leaves_no_control_client() {
@@ -46,11 +47,22 @@ fn a_server_reporting_an_old_tmux_is_refused_and_leaves_no_control_client() {
             .filter(|line| *line == "1")
             .count()
     };
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while clients() > 0 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
     let left = clients();
+    let mut seen = Command::new(&real)
+        .arg("-S")
+        .arg(&socket)
+        .args(["-C", "attach", "-t", SESSION])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(seen.stdout.take().unwrap());
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut output, &mut first).unwrap();
+    let counted = clients();
+    drop(seen.stdin.take());
+    drop(output);
+    let _ = seen.wait();
     let _ = Command::new(&real)
         .arg("-S")
         .arg(&socket)
