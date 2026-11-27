@@ -162,14 +162,14 @@ const CARGO_KEPT: &[(&str, Kept)] = &[("registry", Kept::Link), ("git", Kept::Li
 /// packages npx installed, which it runs as they are.
 const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Cache)];
 const TOO_LARGE: &str = "agent_instructions_too_large_";
-const SKILLS_FOLDER: &str = "agent-skills";
-const FILES_FOLDER: &str = "agent-instruction-files";
-const GIVEN_FOLDER: &str = "agent-instructions-given";
-const LEVELS_FOLDER: &str = "agent-home-levels";
+pub(crate) const SKILLS_FOLDER: &str = "agent-skills";
+pub(crate) const FILES_FOLDER: &str = "agent-instruction-files";
+pub(crate) const GIVEN_FOLDER: &str = "agent-instructions-given";
+pub(crate) const LEVELS_FOLDER: &str = "agent-home-levels";
 /// The folder in the engine data root keeping, for each project folder, the SHA-256 of the
 /// project instructions text the engine last wrote there, which launches give as it is
 /// (SA vid 7 residual, leader 14:22 A).
-const WRITTEN_FOLDER: &str = "project-instructions-written";
+pub(crate) const WRITTEN_FOLDER: &str = "project-instructions-written";
 const WRITTEN_RECORD_BYTES: usize = 64;
 const FILES_RECORD_BYTES_MAX: usize =
     crate::instruction_files::FILES_MAX * ("unreadable\t18446744073709551615\t\n".len() + 32);

@@ -211,6 +211,13 @@ pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
     answer_part_suffix: crate::team::tool::ANSWER_PART_SUFFIX,
     key_folders: &crate::storage::accounts::KEY_FOLDERS,
     engine_secret_folders: ENGINE_SECRET_FOLDERS,
+    plain_record_folders: &[
+        crate::agent_home::SKILLS_FOLDER,
+        crate::agent_home::FILES_FOLDER,
+        crate::agent_home::GIVEN_FOLDER,
+        crate::agent_home::LEVELS_FOLDER,
+        crate::agent_home::WRITTEN_FOLDER,
+    ],
     #[cfg(target_os = "windows")]
     windows_agent_command: windows_agent_command_hook,
     #[cfg(target_os = "windows")]

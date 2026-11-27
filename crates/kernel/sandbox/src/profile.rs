@@ -141,6 +141,10 @@ pub struct ProfileHooks {
     pub key_folders: &'static [&'static str],
     /// The engine runtime folders that are engine secrets as a whole.
     pub engine_secret_folders: &'static [&'static str],
+    /// The engine runtime folders that hold only the engine's own plain records, never a
+    /// socket: one is not searched for sockets while it is a real folder of the engine's user
+    /// that no group or other may write.
+    pub plain_record_folders: &'static [&'static str],
     /// Builds a Windows agent's command through the engine's boundary helper. Inputs: the
     /// installed profile, the absolute program, the base and the harness variables (None
     /// removes one). Output: the command, or the engine's refusal.

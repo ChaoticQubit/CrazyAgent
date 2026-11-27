@@ -85,3 +85,24 @@ fn a_record_named_link_is_checked_as_any_entry() {
         "{secrets:?}"
     );
 }
+
+/// The refusal of a full engine folder gives a launch its own code and tells the owner the
+/// folder and the step to take; any other invalid sandbox keeps the plain code and line.
+#[test]
+fn a_full_engine_folder_names_its_own_code_and_the_owner_s_step() {
+    let (_scratch, root) = engine_root();
+    filled(&root.join("full"), 0o700, 1025);
+    let refused = engine_secrets_in(&STAND_IN, &root).unwrap_err();
+    assert_eq!(crate::lines::invalid_code(&refused), "engine_folder_full");
+    assert_eq!(
+        crate::lines::launch_refused_line(&refused),
+        "The engine folder full holds more than 1024 entries, so agents cannot start. Remove \
+         entries you no longer need from it, then start again."
+    );
+    let other = crate::error::invalid("engine folder full of agents");
+    assert_eq!(crate::lines::invalid_code(&other), "sandbox_refused");
+    assert_eq!(
+        crate::lines::launch_refused_line(&other),
+        "the agent sandbox could not be set up"
+    );
+}

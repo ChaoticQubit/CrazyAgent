@@ -32,6 +32,60 @@ pub fn model_loopback_windows(error: &SandboxError) -> bool {
     matches!(error, SandboxError::Unavailable(reason) if reason == MODEL_LOOPBACK_WINDOWS_LINE)
 }
 
+/// The engine refusal code of a launch whose engine folder is past its entry bound.
+pub const ENGINE_FOLDER_FULL: &str = "engine_folder_full";
+
+/// How the refusal of an engine folder past its entry bound starts, before the folder's name.
+const FOLDER_FULL_START: &str = "engine folder ";
+
+/// How that refusal ends, after the folder's name. Input: none. Output: the words and the bound.
+fn folder_full_end() -> String {
+    format!(
+        " holds more than {} entries",
+        crate::profile::consts::RUNTIME_ENTRIES_MAX
+    )
+}
+
+/// Why a launch is refused when one engine folder holds more entries than the engine reads:
+/// the folder's name and the bound. Input: the folder's name. Output: the line.
+pub fn engine_folder_full_line(name: &str) -> String {
+    format!("{FOLDER_FULL_START}{name}{}", folder_full_end())
+}
+
+/// The folder named by an engine folder refusal ([`engine_folder_full_line`]). Input: the
+/// refusal. Output: the folder's name, or none for any other refusal.
+fn full_folder(error: &SandboxError) -> Option<&str> {
+    let SandboxError::Invalid(reason) = error else {
+        return None;
+    };
+    reason
+        .strip_prefix(FOLDER_FULL_START)?
+        .strip_suffix(folder_full_end().as_str())
+}
+
+/// The engine refusal code of an invalid sandbox: [`ENGINE_FOLDER_FULL`] for an engine
+/// folder past its entry bound, else the plain refusal. Input: the refusal. Output: the code.
+pub fn invalid_code(error: &SandboxError) -> &'static str {
+    match full_folder(error) {
+        Some(_) => ENGINE_FOLDER_FULL,
+        None => "sandbox_refused",
+    }
+}
+
+/// The line a launch whose sandbox step failed tells the owner: for an engine folder past
+/// its entry bound, the folder and the step they can take, else the plain line. Input: the
+/// refusal. Output: the line.
+pub fn launch_refused_line(error: &SandboxError) -> String {
+    match full_folder(error) {
+        Some(name) => format!(
+            "The engine folder {name} holds more than {} entries, so agents cannot start. \
+             Remove entries you no longer need from it, then start again.",
+            crate::profile::consts::RUNTIME_ENTRIES_MAX
+        ),
+        None => "the agent sandbox could not be set up".to_owned(),
+    }
+}
+
 /// What a launch tells the owner in the agent's messages when this Linux nests agents but could not
 /// give this one the network of its own its ports allow: why it has none, the AppArmor profile and
 /// root included, and what that leaves open.

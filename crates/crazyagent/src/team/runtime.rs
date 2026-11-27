@@ -9085,7 +9085,7 @@ impl TeamRuntime {
             .native_team(&socket, &mates_socket, &callers, &tmux, &mates_home)
             .map_err(|e| {
                 with_code(
-                    "the agent sandbox could not be set up",
+                    &kernel_sandbox::lines::launch_refused_line(&e),
                     Some(sandbox_code(&e)),
                 )
             })?;
@@ -9133,7 +9133,7 @@ impl TeamRuntime {
         }
         let sandboxed = |e: SandboxError| {
             with_code(
-                "the agent sandbox could not be set up",
+                &kernel_sandbox::lines::launch_refused_line(&e),
                 Some(sandbox_code(&e)),
             )
         };
@@ -13611,7 +13611,7 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
 /// The plain code for a failed agent sandbox step. Input: the error. Output: the code.
 fn sandbox_code(error: &SandboxError) -> &'static str {
     match error {
-        SandboxError::Invalid(_) => "sandbox_refused",
+        SandboxError::Invalid(_) => kernel_sandbox::lines::invalid_code(error),
         SandboxError::Unavailable(_) if kernel_sandbox::lines::model_loopback_windows(error) => {
             kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS
         }

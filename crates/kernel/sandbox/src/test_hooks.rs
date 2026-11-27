@@ -196,6 +196,7 @@ pub(crate) static STAND_IN: ProfileHooks = ProfileHooks {
     answer_part_suffix: ".stand-in-part",
     key_folders: &["stand-in-keys"],
     engine_secret_folders: &["stand-in-secrets"],
+    plain_record_folders: &["stand-in-records"],
     #[cfg(target_os = "windows")]
     windows_agent_command: helper_command,
     #[cfg(target_os = "windows")]

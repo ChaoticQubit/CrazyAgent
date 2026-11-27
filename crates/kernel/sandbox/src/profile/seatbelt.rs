@@ -312,8 +312,9 @@ pub fn credential_places(hooks: &ProfileHooks) -> impl Iterator<Item = &'static 
 
 /// The engine runtime's secrets: the fixed secret files and folders, plus every Unix socket
 /// directly in the runtime and every runtime folder that directly holds one (owner
-/// generations, runner roots, the terminal server). Inputs: the profile hooks and the canonical runtime folder.
-/// Output: the secret paths, or a refusal for a runtime or folder over the entry bound.
+/// generations, runner roots, the terminal server); the engine's plain record folders are not
+/// searched ([`plain_record_folder`]). Inputs: the profile hooks and the canonical runtime
+/// folder. Output: the secret paths, or a refusal naming a folder over the entry bound.
 pub fn engine_secrets_in(
     hooks: &ProfileHooks,
     runtime: &Path,
@@ -325,23 +326,29 @@ pub fn engine_secrets_in(
         .map(|name| runtime.join(name))
         .collect();
     for entry in bounded_entries(runtime)? {
-        if !secrets.contains(&entry) && engine_socket_place(&entry)? {
+        if !secrets.contains(&entry) && engine_socket_place(hooks, &entry)? {
             secrets.push(entry);
         }
     }
     Ok(secrets)
 }
 
+/// Tells whether a runtime entry is or directly holds a Unix socket. A link is never
+/// followed, and a plain record folder of the engine is not searched. Inputs: the profile
+/// hooks and the entry. Output: the answer, or a refusal for a folder over the entry bound.
 #[cfg(unix)]
-fn engine_socket_place(path: &Path) -> Result<bool, SandboxError> {
+fn engine_socket_place(hooks: &ProfileHooks, path: &Path) -> Result<bool, SandboxError> {
     use std::os::unix::fs::FileTypeExt;
-    let Some(kind) = present_kind(path)? else {
-        return Ok(false);
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
     };
+    let kind = metadata.file_type();
     if kind.is_socket() {
         return Ok(true);
     }
-    if !kind.is_dir() {
+    if !kind.is_dir() || plain_record_folder(hooks, path, &metadata) {
         return Ok(false);
     }
     let entries = match bounded_entries(path) {
@@ -367,8 +374,25 @@ fn present_kind(path: &Path) -> Result<Option<fs::FileType>, SandboxError> {
     }
 }
 
+/// One of the engine's plain record folders: named exactly as the hooks list it, a real
+/// folder (its own entry, not a link), owned by the engine's user, with no group or other
+/// write bit, so no agent and no other user can have put a socket in it. Inputs: the hooks,
+/// the entry and its own metadata. Output: the answer.
+#[cfg(unix)]
+fn plain_record_folder(hooks: &ProfileHooks, path: &Path, metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let named = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| hooks.plain_record_folders.contains(&name));
+    named
+        && metadata.file_type().is_dir()
+        && metadata.uid() == rustix::process::geteuid().as_raw()
+        && metadata.mode() & 0o022 == 0
+}
+
 #[cfg(not(unix))]
-fn engine_socket_place(_path: &Path) -> Result<bool, SandboxError> {
+fn engine_socket_place(_hooks: &ProfileHooks, _path: &Path) -> Result<bool, SandboxError> {
     Ok(false)
 }
 
@@ -376,7 +400,10 @@ fn bounded_entries(folder: &Path) -> Result<Vec<PathBuf>, SandboxError> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(folder)? {
         if entries.len() == RUNTIME_ENTRIES_MAX {
-            return Err(invalid("engine runtime folder has too many entries"));
+            let name = folder.file_name().unwrap_or(folder.as_os_str());
+            return Err(invalid(&crate::lines::engine_folder_full_line(
+                &name.to_string_lossy(),
+            )));
         }
         entries.push(entry?.path());
     }
