@@ -77,3 +77,49 @@ fn a_file_that_replaces_the_link_after_the_check_is_kept() -> TestResult {
     assert_eq!(names(&bin)?, vec!["crazyagent"]);
     Ok(())
 }
+
+/// A link removed after the check leaves the name absent, and the next round makes the
+/// link there in place, with nothing staged left behind.
+#[test]
+fn a_link_removed_after_the_check_is_made_again_in_place() -> TestResult {
+    let (_temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    cli_link::before_publish(|link| std::fs::remove_file(link).unwrap());
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    assert_eq!(names(&bin)?, vec!["crazyagent"]);
+    Ok(())
+}
+
+/// A regular file at the staged name keeps its bytes, the link already there is left
+/// as it was, and the publish is refused.
+#[test]
+fn a_file_at_the_staged_name_is_kept_and_the_link_there_is_left() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    let staged = bin.join(format!(".crazyagent.link.{}", std::process::id()));
+    at(&staged, std::fs::write(&staged, "user file"))?;
+    let newer = temp.path().join("app/crazyagent-newer");
+    at(&newer, std::fs::write(&newer, "#!/bin/sh\n"))?;
+    let error = link_cli(&newer, &bin).unwrap_err();
+    assert!(error.0.contains(&staged.display().to_string()), "{error}");
+    assert_eq!(at(&staged, std::fs::read_to_string(&staged))?, "user file");
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    Ok(())
+}
+
+/// A link left at the staged name by an earlier run is replaced, and the publish goes on
+/// with nothing staged left behind.
+#[test]
+fn a_link_left_at_the_staged_name_is_replaced_and_the_publish_goes_on() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    let staged = bin.join(format!(".crazyagent.link.{}", std::process::id()));
+    at(&staged, std::os::unix::fs::symlink("/nowhere", &staged))?;
+    let newer = temp.path().join("app/crazyagent-newer");
+    at(&newer, std::fs::write(&newer, "#!/bin/sh\n"))?;
+    assert_eq!(link_cli(&newer, &bin).unwrap(), link);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, newer);
+    assert_eq!(names(&bin)?, vec!["crazyagent"]);
+    Ok(())
+}

@@ -3,8 +3,8 @@ use super::*;
 /// Links the running `crazyagent` into a folder on the user's PATH so a shell finds it:
 /// `~/.local/bin/crazyagent` on macOS and Linux. An absent name gets the link made in
 /// place, which never replaces a file that arrived first; a link already there is swapped
-/// for the new one in one step ([`replace_link`]); any other file is refused and kept.
-/// Inputs: the executable and the bin folder. Output: the link.
+/// for the new one in one step ([`replace_link`]) without a make tried first; any other
+/// file is refused and kept. Inputs: the executable and the bin folder. Output: the link.
 #[cfg(unix)]
 pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> {
     let fail = |path: &Path, error: std::io::Error| failure(format!("{}: {error}", path.display()));
@@ -17,11 +17,11 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
     persisted(executable)?;
     std::fs::create_dir_all(bin).map_err(|error| fail(bin, error))?;
     let link = bin.join("crazyagent");
-    if let Ok(metadata) = std::fs::symlink_metadata(&link)
-        && !metadata.file_type().is_symlink()
-    {
-        return Err(not_a_link(&link));
-    }
+    let mut there = match std::fs::symlink_metadata(&link) {
+        Ok(metadata) if !metadata.file_type().is_symlink() => return Err(not_a_link(&link)),
+        Ok(_) => true,
+        Err(_) => false,
+    };
     #[cfg(test)]
     BEFORE_PUBLISH.with(|step| {
         if let Some(step) = step.borrow_mut().take() {
@@ -29,14 +29,17 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
         }
     });
     for _ in 0..PUBLISH_ROUNDS_MAX {
-        match std::os::unix::fs::symlink(executable, &link) {
-            Ok(()) => return Ok(link),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(fail(&link, error)),
+        if !there {
+            match std::os::unix::fs::symlink(executable, &link) {
+                Ok(()) => return Ok(link),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(fail(&link, error)),
+            }
         }
         if replace_link(executable, &link)? {
             return Ok(link);
         }
+        there = false;
     }
     Err(not_a_link(&link))
 }
@@ -62,7 +65,9 @@ fn not_a_link(link: &Path) -> ServiceError {
 /// `RENAME_EXCHANGE` on Linux), then reads what came out: a link is removed, anything else
 /// is swapped back and refused, so a file another installer wrote is never lost; when the
 /// swap back fails, the error names where that file now sits. A file system that cannot
-/// swap refuses with the staged link removed. Inputs: the executable and the link's name.
+/// swap refuses with the staged link removed. A link left at the staged name is removed
+/// only when the staged make finds the name taken, and anything else there is kept and
+/// refused. Inputs: the executable and the link's name.
 /// Output: true when published, false when the name went away before the swap, or the
 /// refusal.
 #[cfg(unix)]
@@ -79,8 +84,14 @@ fn replace_link(executable: &Path, link: &Path) -> Result<bool, ServiceError> {
             let _ = std::fs::remove_file(&staged);
         }
     };
-    drop_staged();
-    std::os::unix::fs::symlink(executable, &staged).map_err(|error| fail(&staged, error))?;
+    let made = match std::os::unix::fs::symlink(executable, &staged) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            drop_staged();
+            std::os::unix::fs::symlink(executable, &staged)
+        }
+        made => made,
+    };
+    made.map_err(|error| fail(&staged, error))?;
     match renameat_with(CWD, &staged, CWD, link, RenameFlags::EXCHANGE) {
         Ok(()) => {}
         Err(Errno::NOENT) => {
