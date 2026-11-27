@@ -36,11 +36,15 @@ fn a_server_reporting_an_old_tmux_is_refused_and_leaves_no_control_client() {
     let took = started.elapsed();
     eprintln!("old tmux refusal took {took:?}");
     let clients = || {
-        let listed = crate::spawn_gate::output(Command::new(&real).arg("-S").arg(&socket).args([
-            "list-clients",
-            "-F",
-            "#{client_control_mode}",
-        ]))
+        let listed = crate::spawn_gate::output(
+            Command::new(&real)
+                .arg("-S")
+                .arg(&socket)
+                .args(["list-clients", "-F", "#{client_control_mode}"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+        )
         .unwrap();
         String::from_utf8_lossy(&listed.stdout)
             .lines()
