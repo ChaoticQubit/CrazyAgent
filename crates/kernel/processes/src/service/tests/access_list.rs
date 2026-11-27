@@ -188,7 +188,7 @@ fn a_tool_folder_staff_may_change_through_its_access_list_is_changeable() {
                 .arg(rule)
                 .arg(&folder),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("chmod +a {rule} on {folder:?}: {error}"));
         assert!(status.success(), "{rule}");
     };
     chmod("user:nobody deny add_file");
@@ -217,7 +217,9 @@ fn now_secs() -> i64 {
 #[cfg(target_os = "macos")]
 fn changed_secs(entry: &Path) -> i64 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::symlink_metadata(entry).unwrap().ctime()
+    std::fs::symlink_metadata(entry)
+        .unwrap_or_else(|error| panic!("lstat {entry:?}: {error}"))
+        .ctime()
 }
 
 /// Waits, at most 1.5 s, until the clock is in a later second than every entry last
@@ -285,18 +287,20 @@ fn an_entry_changed_while_its_access_list_is_read_gets_no_answer() {
                 .arg("group:staff allow read")
                 .arg(entry),
         )
-        .unwrap();
-        assert!(status.success());
+        .unwrap_or_else(|error| panic!("chmod +a on {entry:?}: {error}"));
+        assert!(status.success(), "chmod +a on {entry:?}");
     }
     settle(&[&still, &swapped]);
     let read = |entry: &Path| {
-        let metadata = std::fs::symlink_metadata(entry).unwrap();
+        let metadata = std::fs::symlink_metadata(entry)
+            .unwrap_or_else(|error| panic!("lstat {entry:?}: {error}"));
         acl::shared_all(&[(entry, &metadata)])
     };
     assert_eq!(read(&still), vec![Some(false)]);
     let moved = swapped.clone();
     acl::after_next_listing(move || {
-        std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("chmod 600 {moved:?}: {error}"));
     });
     assert_eq!(read(&swapped), vec![None]);
 }
@@ -463,7 +467,9 @@ fn a_deny_only_access_list_as_a_home_folder_carries_is_not_changeable() {
     assert!(status.success(), "chmod +a on {folder:?}");
     assert_eq!(changeable_by_others(&tool), None);
     drop(stripped);
-    temp.close().unwrap();
+    let removed = temp.path().to_path_buf();
+    temp.close()
+        .unwrap_or_else(|error| panic!("remove {removed:?}: {error}"));
 }
 
 /// A world-writable folder above a tool reads as the changeable part of the tool's path,
@@ -512,7 +518,7 @@ fn chmod_entry(args: &[&str], entry: &Path) {
             .args(args)
             .arg(entry),
     )
-    .unwrap();
+    .unwrap_or_else(|error| panic!("chmod {args:?} {entry:?}: {error}"));
     assert!(status.success(), "chmod {args:?} {entry:?}");
 }
 
@@ -520,7 +526,8 @@ fn chmod_entry(args: &[&str], entry: &Path) {
 /// Input: the entry. Output: the answer.
 #[cfg(target_os = "macos")]
 fn read_alone(entry: &Path) -> Option<bool> {
-    let metadata = std::fs::symlink_metadata(entry).unwrap();
+    let metadata =
+        std::fs::symlink_metadata(entry).unwrap_or_else(|error| panic!("lstat {entry:?}: {error}"));
     acl::shared_all(&[(entry, &metadata)])[0]
 }
 
@@ -537,18 +544,20 @@ fn a_mode_000_entry_has_its_access_list_read() {
     let folder = temp.path().join("folder");
     write_mode(&file, "", 0o644);
     write_mode(&plain, "", 0o644);
-    std::fs::create_dir(&folder).unwrap();
+    std::fs::create_dir(&folder).unwrap_or_else(|error| panic!("mkdir {folder:?}: {error}"));
     chmod_entry(&["+a", "group:staff allow write"], &file);
     chmod_entry(&["+a", "group:staff allow add_file"], &folder);
     for entry in [&file, &plain, &folder] {
-        std::fs::set_permissions(entry, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(entry, std::fs::Permissions::from_mode(0o000))
+            .unwrap_or_else(|error| panic!("chmod 000 {entry:?}: {error}"));
     }
     let read: Vec<Option<bool>> = [&file, &plain, &folder]
         .into_iter()
         .map(|entry| read_alone(entry))
         .collect();
     for entry in [&file, &plain, &folder] {
-        std::fs::set_permissions(entry, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(entry, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("chmod 700 {entry:?}: {error}"));
     }
     assert_eq!(read, vec![Some(true), Some(false), Some(true)]);
 }
@@ -561,8 +570,13 @@ fn a_mode_000_entry_has_its_access_list_read() {
 fn the_root_a_system_volume_folder_and_a_data_volume_folder_are_not_changeable() {
     assert_eq!(changeable_by_others(Path::new("/")), None);
     assert_eq!(changeable_by_others(Path::new("/usr/bin")), None);
-    let beside = std::env::current_exe().unwrap();
-    let temp = tempfile::tempdir_in(beside.parent().unwrap()).unwrap();
+    let beside =
+        std::env::current_exe().unwrap_or_else(|error| panic!("the test binary's path: {error}"));
+    let parent = beside
+        .parent()
+        .unwrap_or_else(|| panic!("{beside:?} has no parent folder"));
+    let temp = tempfile::tempdir_in(parent)
+        .unwrap_or_else(|error| panic!("a temp folder in {parent:?}: {error}"));
     assert_eq!(changeable_by_others(temp.path()), None);
 }
 
@@ -596,7 +610,7 @@ fn an_entry_on_a_volume_without_access_lists_reads_unknown() {
     let temp = durable_folder();
     let image = temp.path().join("fat.dmg");
     let mount = temp.path().join("mount");
-    std::fs::create_dir(&mount).unwrap();
+    std::fs::create_dir(&mount).unwrap_or_else(|error| panic!("mkdir {mount:?}: {error}"));
     let hdiutil = |args: &[&str], paths: &[&Path]| {
         crate::spawn_gate::status(
             std::process::Command::new("/usr/bin/hdiutil")
@@ -619,7 +633,7 @@ fn an_entry_on_a_volume_without_access_lists_reads_unknown() {
     }
     let mounted = Mounted(mount.clone());
     let file = mount.join("file");
-    std::fs::write(&file, "").unwrap();
+    std::fs::write(&file, "").unwrap_or_else(|error| panic!("write {file:?}: {error}"));
     let read = [read_alone(&file), read_alone(&mount)];
     drop(mounted);
     eprintln!("RAN: the MS-DOS image was mounted and read");
@@ -637,8 +651,10 @@ fn an_entry_swapped_after_its_lstat_reads_none() {
     write_mode(&entry, "", 0o644);
     write_mode(&other, "", 0o644);
     settle(&[&entry, &other]);
-    let judged = std::fs::symlink_metadata(&entry).unwrap();
-    std::fs::rename(&other, &entry).unwrap();
+    let judged = std::fs::symlink_metadata(&entry)
+        .unwrap_or_else(|error| panic!("lstat {entry:?}: {error}"));
+    std::fs::rename(&other, &entry)
+        .unwrap_or_else(|error| panic!("rename {other:?} to {entry:?}: {error}"));
     assert_eq!(acl::shared_all(&[(&entry, &judged)]), vec![None]);
 }
 
@@ -650,9 +666,10 @@ fn allow_entries_for_this_user_and_the_admin_group_do_not_read_shared() {
     let temp = durable_folder();
     let entry = temp.path().join("entry");
     write_mode(&entry, "", 0o644);
-    let me = nix::unistd::User::from_uid(nix::unistd::getuid())
-        .unwrap()
-        .unwrap()
+    let uid = nix::unistd::getuid();
+    let me = nix::unistd::User::from_uid(uid)
+        .unwrap_or_else(|error| panic!("the user record of uid {uid}: {error}"))
+        .unwrap_or_else(|| panic!("no user record for uid {uid}"))
         .name;
     chmod_entry(&["+a", &format!("user:{me} allow write,delete")], &entry);
     chmod_entry(&["+a", "group:admin allow write,writesecurity"], &entry);
@@ -669,12 +686,13 @@ fn allow_entries_for_this_user_and_the_admin_group_do_not_read_shared() {
 fn a_trailing_slash_never_makes_the_read_follow_a_link() {
     let temp = durable_folder();
     let folder = temp.path().join("folder");
-    std::fs::create_dir(&folder).unwrap();
+    std::fs::create_dir(&folder).unwrap_or_else(|error| panic!("mkdir {folder:?}: {error}"));
     chmod_entry(&["+a", "group:staff allow add_file"], &folder);
     let slashed = PathBuf::from(format!("{}/", folder.display()));
     assert_eq!(read_alone(&slashed), Some(true));
     let link = temp.path().join("link");
-    std::os::unix::fs::symlink(&folder, &link).unwrap();
+    std::os::unix::fs::symlink(&folder, &link)
+        .unwrap_or_else(|error| panic!("symlink {link:?} to {folder:?}: {error}"));
     let slashed_link = PathBuf::from(format!("{}/", link.display()));
     assert_eq!(read_alone(&slashed_link), None);
 }
