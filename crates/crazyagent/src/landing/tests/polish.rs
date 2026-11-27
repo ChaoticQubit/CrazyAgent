@@ -876,5 +876,27 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
+/// Waits until a set's stand-in tool has written its start mark in the regeneration's
+/// worktree, for at most `REGENERATED_WITHIN`. A regeneration that ends before the mark
+/// fails the row at once, naming the set's state, since its tool can no longer start.
+/// Inputs: the case, the set and the mark's file name. Output: none; panics on either.
+#[cfg(target_os = "macos")]
+pub(super) fn tool_started(case: &Case, id: &ChangeSetId, mark: &str) {
+    let started = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{}", id.as_str()))
+        .join(mark);
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while !started.exists() {
+        assert!(
+            lockfiles::is_running(id) || started.exists(),
+            "the regeneration ended before its tool wrote {mark}: the set is {:?}",
+            case.view(id).state
+        );
+        assert!(Instant::now() < deadline, "the tool never wrote {mark}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[path = "prune_rows.rs"]
 mod prune_rows;
