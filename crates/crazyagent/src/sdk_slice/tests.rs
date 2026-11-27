@@ -462,3 +462,89 @@ fn the_quit_save_of_an_off_plugin_is_refused_and_queues_no_missing_permission() 
     assert_eq!(refusals.count(QUIT), 1);
     assert_eq!(refusals.pending_len(), 0);
 }
+
+/// An in-memory store opened as the engine opens its database, through
+/// [`crate::storage::initialize_authority_schemas`], with one active host started in this
+/// process. Output: the connection.
+fn engine_store() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::state_log::fence::seed(&db);
+    db
+}
+
+/// Counts every statement SQLite compiles on a connection from now on: its authorizer runs
+/// only while a statement is compiled, never when a cached statement runs again. Input: the
+/// connection. Output: the running count.
+fn compiled(db: &Connection) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&count);
+    db.authorizer(Some(move |_: rusqlite::hooks::AuthContext<'_>| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        rusqlite::hooks::Authorization::Allow
+    }))
+    .unwrap();
+    count
+}
+
+/// Runs two saves, each in its own committed request, and counts what SQLite compiled
+/// during each save alone, not during the read before it. Inputs: the read, given the
+/// transaction, and the save, given the transaction, its revision and what was read.
+/// Output: the two counts.
+fn compiled_per_save<T>(
+    read: impl Fn(&rusqlite::Transaction<'_>) -> T,
+    save: impl Fn(&rusqlite::Transaction<'_>, u64, T) -> Outcome,
+) -> [usize; 2] {
+    let mut db = engine_store();
+    let count = compiled(&db);
+    let mut counts = [0_usize; 2];
+    for slot in &mut counts {
+        let tx = db.transaction().unwrap();
+        let revision = u64::try_from(moved(&tx).0).unwrap();
+        let read = read(&tx);
+        let before = count.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(save(&tx, revision, read), Outcome::Applied);
+        *slot = count.load(std::sync::atomic::Ordering::Relaxed) - before;
+        tx.commit().unwrap();
+    }
+    counts
+}
+
+#[test]
+fn a_second_quit_save_compiles_no_sql() {
+    let refusals = EngineRefusals::new();
+    let counts = compiled_per_save(
+        |_| (),
+        |tx, revision, ()| {
+            save_quit_with(
+                agent_quit::save,
+                bundled_grants(),
+                &AllOn,
+                &refusals,
+                tx,
+                revision,
+                &stop_never_12(),
+            )
+            .unwrap()
+        },
+    );
+
+    assert!(counts[0] > 0, "the first save compiles its statements");
+    assert_eq!(counts[1], 0, "the second quit save compiled SQL again");
+}
+
+#[test]
+fn a_second_sandbox_save_compiles_no_sql() {
+    let counts = compiled_per_save(
+        |tx| match crate::sandbox_settings::read(tx).unwrap() {
+            crate::engine::owner::OwnerData::SandboxSettings { settings, version } => {
+                Command::OwnerSandbox { settings, version }
+            }
+            other => panic!("the sandbox read answers sandbox settings, not {other:?}"),
+        },
+        |tx, revision, command| crate::settings_log::owner(tx, &command, revision).unwrap(),
+    );
+
+    assert!(counts[0] > 0, "the first save compiles its statements");
+    assert_eq!(counts[1], 0, "the second sandbox save compiled SQL again");
+}
