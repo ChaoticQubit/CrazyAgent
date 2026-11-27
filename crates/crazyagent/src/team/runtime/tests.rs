@@ -2623,57 +2623,6 @@ fn a_turn_ended_at_an_engine_bound_leaves_its_code_on_the_agent() {
     assert_eq!(turn_problem(TurnEnd::Interrupted, None), None);
 }
 
-#[test]
-fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
-    assert_eq!(
-        launch_end(LaunchError("launch_deadline".into(), None)),
-        (TurnEnd::TimedOut, Some("launch_deadline".to_owned()))
-    );
-    let (end, cause) = launch_end(LaunchError("launch_protocol_failed".into(), None));
-    assert_eq!(end, TurnEnd::Closed);
-    assert_eq!(
-        with_code(PROCESS_CLOSED, cause.as_deref()),
-        "The agent process closed. (launch_protocol_failed)"
-    );
-    assert_eq!(
-        with_code(
-            "The agent could not start",
-            Some("No such file: /Users/mira/key")
-        ),
-        "The agent could not start. (engine_text_withheld)"
-    );
-    assert_eq!(with_code(PROCESS_CLOSED, None), PROCESS_CLOSED);
-    assert_eq!(
-        with_code(
-            "The master stopped before it replied.",
-            Some("launch_input_closed")
-        ),
-        "The master stopped before it replied. (launch_input_closed)"
-    );
-    let fixture = Fixture::new(1);
-    let mut team = fixture.runtime();
-    fixture
-        .connection
-        .execute(
-            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Write the page','running',1)",
-            [PROJECT],
-        )
-        .unwrap();
-    let task = fixture.connection.last_insert_rowid();
-    team.finish_task(task, "", TurnEnd::Closed, Some("launch_input_closed"))
-        .unwrap();
-    let problem: String = fixture
-        .connection
-        .query_row("SELECT error FROM team_tasks WHERE id=?1", [task], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        problem,
-        "The sub-agent stopped unexpectedly. (launch_input_closed)"
-    );
-}
-
 /// The owner stops a sub-agent while its harness has not drawn its screen yet, which a
 /// slow first launch, an update check or a sign-in screen can make last up to the whole
 /// ready wait. The stop ends the agent, its pane and its process group within one bound,
@@ -34943,3 +34892,5 @@ mod status_log;
 #[cfg(target_os = "macos")]
 #[path = "tests/teammates_git.rs"]
 mod teammates_git;
+#[path = "tests/launch_codes.rs"]
+mod launch_codes;

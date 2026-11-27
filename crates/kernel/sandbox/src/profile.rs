@@ -972,6 +972,8 @@ impl Checkout {
     }
 }
 
+#[cfg(all(test, unix))]
+mod engine_entries_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod interpreter_tests;
 #[cfg(all(test, target_os = "macos"))]
