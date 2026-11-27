@@ -41,7 +41,7 @@ fn a_context_less_launch_with_tools_keeps_its_empty_mcp_list() -> TestResult {
             git_identity: None,
             limits: LaunchLimits::default(),
         };
-        let built = super::lone_command(&request);
+        let built = super::super::lone_command(&request);
         assert!(built.is_ok(), "{harness}: {:?}", built.as_ref().err());
         let (command, _lock) = built.unwrap();
         assert!(
