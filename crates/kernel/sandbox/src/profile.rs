@@ -716,10 +716,11 @@ impl ProjectSandbox {
             .collect()
     }
 
-    /// Checks, as the install writes the profile, that no path this build granted holds or
-    /// sits in a secret it was checked against, each secret walked again now, so a secret
-    /// made, moved or swapped after its check is judged as it is when the agent starts.
-    /// Output: unit, or `Invalid` with [`crate::paths::SECRET_ROOT_REFUSED`].
+    /// Checks, as the install writes the profile, that each path this build granted is the
+    /// one it checked and holds or sits in no secret it was checked against, every path and
+    /// secret walked again now, so one made, moved or swapped since is judged as it is then.
+    /// Output: unit, or `Invalid` with [`crate::paths::GRANT_CHANGED`] or
+    /// [`crate::paths::SECRET_ROOT_REFUSED`].
     pub(crate) fn secrets_still_clear(&self) -> Result<(), SandboxError> {
         self.kept.recheck()
     }

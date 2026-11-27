@@ -244,6 +244,11 @@ pub const SYSTEM_SECRET_PATHS: &[&str] = &[
 /// cannot carve the secret back out of a granted root.
 pub const SECRET_ROOT_REFUSED: &str = "sandbox roots must not hold or sit in a secret path";
 
+/// Why an install is refused when a path its build granted reads with other identities at
+/// install, such as a root renamed away and replaced by a link or a new folder: the profile
+/// grants by path, so it would grant what no check saw.
+pub const GRANT_CHANGED: &str = "a granted path changed between the sandbox build and its install";
+
 /// The owner's secret names relative to the home, in order: the fixed ones before the
 /// harness folders, the harness folders as given, then the fixed ones after. Input: the
 /// harness folders, relative to the home. Output: the names.
@@ -743,9 +748,9 @@ struct Checked {
 /// What one sandbox build keeps from its start until its install: the walks of the owner
 /// home, the harness homes and each secret path, each taken once, and each path it granted
 /// with that path's walk and the secrets it was checked against. A build never shares it
-/// with another, so no walk serves two launches; its install walks every secret again
-/// ([`Kept::recheck`]), so a secret that moved, appeared or was swapped after the build is
-/// judged as it is then.
+/// with another, so no walk serves two launches; its install walks every secret and every
+/// granted path again ([`Kept::recheck`]), so a secret or a root that moved, appeared or was
+/// swapped after the build is judged as it is then.
 #[derive(Debug, Clone)]
 pub(crate) struct Kept {
     walked: Walked,
@@ -792,10 +797,11 @@ impl Kept {
         Ok(())
     }
 
-    /// Walks again every secret a kept path was checked against, each once, sharing the
-    /// reads, and checks each kept path's walk from its grant against the new walks of the
-    /// secrets it was checked against. The kept paths are not read again. Output: unit, or
-    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a kept path now holds or sits in one.
+    /// Walks again every kept path and every secret one was checked against, each once,
+    /// sharing the reads; a kept path must read with the identities its grant kept, then its
+    /// new walk is checked against the secrets' new walks. Output: unit, `Invalid` with
+    /// [`GRANT_CHANGED`] for a kept path that changed, or with [`SECRET_ROOT_REFUSED`] when a
+    /// kept path now holds or sits in a secret.
     pub(crate) fn recheck(&self) -> Result<(), SandboxError> {
         let mut reads = Reads::default();
         let mut fresh: Vec<Walk> = Vec::new();
@@ -807,10 +813,14 @@ impl Kept {
             }
         }
         for checked in &self.checked {
+            let now = Walk::read(&checked.walk.path, &mut reads)?;
+            if now.ids != checked.walk.ids || now.reached != checked.walk.reached {
+                return Err(invalid(GRANT_CHANGED));
+            }
             let against = fresh
                 .iter()
                 .filter(|walk| checked.against.contains(&walk.path));
-            clear_of_walked(&checked.walk, against)?;
+            clear_of_walked(&now, against)?;
         }
         Ok(())
     }
