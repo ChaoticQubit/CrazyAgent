@@ -153,8 +153,13 @@ fn a_standard_user_installs_checks_and_updates_an_npm_harness_into_the_engine_pr
     assert_eq!(checked.refusal, None, "{checked:?}");
     assert!(checked.command.is_some(), "{checked:?}");
 
-    let mut pin = Command::new(&npm.program);
-    pin.args(["install", "--global", "--prefix"])
+    let launch = kernel_processes::finding::resolve_entry(&npm.program, &roots.places)
+        .unwrap_or_else(|missing| panic!("the engine's npm did not resolve: {missing:?}"));
+    let words = launch.argv();
+    assert!(words.len() >= 2, "{words:?}");
+    let mut pin = Command::new(&words[0]);
+    pin.args(&words[1..])
+        .args(["install", "--global", "--prefix"])
         .arg(&npm.prefix)
         .arg(format!("{PACKAGE}@{OLDER}"));
     let search = npm.search.iter().cloned();
