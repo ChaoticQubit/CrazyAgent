@@ -115,10 +115,10 @@ function masked(text) {
 }
 
 /**
- * The body of one function in masked text: the offset just inside its first `{`, its closing
- * offset, the brace depth at each offset relative to the body (1 directly in it), and its
- * statements at depth 1 as `{ start, end }` offsets. Inputs: the masked text, the line start
- * offsets and the function. Output: the body, or null for a declaration with no body.
+ * The body of one function in masked text: the offset just inside its first `{` and its
+ * closing one, the brace depth at each offset (1 directly in the body), its blocks as
+ * `{ open, close, header }` (header: where the statement opening it starts) and its statements
+ * at every depth as `{ start, end, block }`. Output: the body, or null for a declaration.
  */
 function body(text, starts, fn) {
   const from = starts[fn.start];
@@ -129,32 +129,41 @@ function body(text, starts, fn) {
   }
   const depth = new Map();
   const statements = [];
+  const blocks = [{ open, close: to, header: from }];
+  const stack = [0];
+  const begun = [null, open + 1];
+  const push = (start, end) => {
+    if (text.slice(start, end).trim() !== "") {
+      statements.push({ start, end, block: stack.at(-1) });
+    }
+  };
   let level = 1;
-  let begun = open + 1;
   let at = open + 1;
   for (; at < to && level > 0; at += 1) {
     const char = text[at];
     depth.set(at, level);
     if (char === "{") {
+      blocks.push({ open: at, close: to, header: begun[level] });
+      stack.push(blocks.length - 1);
       level += 1;
+      begun[level] = at + 1;
     } else if (char === "}") {
+      push(begun[level], at);
+      blocks[stack.pop()].close = at;
       level -= 1;
       const next = /\S/.exec(text.slice(at + 1, at + 80));
       const goes = next !== null && /^[.?),]|^else\b/.test(text.slice(at + 1 + next.index));
-      if (level === 1 && !goes) {
-        statements.push({ start: begun, end: at + 1 });
-        begun = at + 1;
+      if (level >= 1 && !goes) {
+        push(begun[level], at + 1);
+        begun[level] = at + 1;
       }
-    } else if (char === ";" && level === 1) {
-      statements.push({ start: begun, end: at + 1 });
-      begun = at + 1;
+    } else if (char === ";") {
+      push(begun[level], at + 1);
+      begun[level] = at + 1;
     }
   }
-  if (text.slice(begun, at - 1).trim() !== "") {
-    statements.push({ start: begun, end: at - 1 });
-  }
-  const kept = statements.filter((s) => text.slice(s.start, s.end).trim() !== "");
-  return { open, close: at - 1, depth, statements: kept };
+  assert.ok(stack.length === 0 || level > 0, "the body's blocks close in order");
+  return { open, close: at - 1, depth, blocks, statements };
 }
 
 /**
@@ -175,74 +184,123 @@ function topGuards(text, fnBody) {
 }
 
 /** A statement's binding: `let [mut] name`, `let (a, b)`, a bare `name` or `(a, b)`, then `=`. */
-const BINDING = /^\s*(?:let\s+)?(?:mut\s+)?(\(?[\w\s,]*?\)?)\s*(?::[^=]*)?=(?![=>])/;
+const BINDING = /^\s*(let\s+)?(?:mut\s+)?(\(?[\w\s,]*?\)?)\s*(?::[^=]*)?=(?![=>])/;
 
-/** The identifier a chain starts with: a name followed by a method call or a `?`. */
-const HEAD = /^\s*(\w+)\s*(?:\?\s*)?\./;
+/** A block header opened by `if` or `while`, whose `let` parts bind names for the block. */
+const CONDITION = /^\s*(?:if|while)\b/;
+
+/** One `let` part of a block header: its pattern and the expression it reads, to a next `&&`. */
+const LET_PART = /\blet\s+([^=]*?)=(?![=>])((?:(?!&&)[^{])*)/g;
+
+/** Names a value is read from: identifiers not after `.` or `::` nor before `(`, `::` or `!`. */
+const NAMES = /(?<![\w.:])([A-Za-z_]\w*)\b(?!\s*(?:\(|::|!))/g;
+
+/** Words that name no sandbox a value could be read from. */
+const KEYWORDS = new Set(["self", "Self", "Some", "Ok", "Err", "None", "mut", "move", "ref"]);
 
 /**
- * Whether a name holds a sandbox guarded against the engine root at a point of a function:
- * the last statement at depth 1 that binds it before the point guards there, or builds it
- * from itself while it was guarded, or from another guarded name's chain. Inputs: the masked
- * text, the body, the guard offsets, the name and the point. Output: the answer.
+ * Whether a name holds a sandbox guarded against the engine root at a point: walking, in
+ * order, the statements before it that bind it in a block holding the point, the `if let`
+ * headers of those blocks, and its plain assignments in other blocks, which only clear it.
+ * Each read is at an earlier point, so it ends. Inputs: the masked text, the body, the depth-1
+ * guards, the name, the point and the answers so far by `name@point`. Output: the answer.
  */
-function holdsGuard(text, fnBody, guardAt, name, point, seen = new Set()) {
-  if (seen.has(name)) {
-    return false;
+function holdsGuard(text, fnBody, guardAt, name, point, memo = new Map()) {
+  const key = `${name}@${point}`;
+  if (memo.has(key)) {
+    return memo.get(key);
   }
-  seen.add(name);
+  memo.set(key, false);
   const word = new RegExp(`\\b${name}\\b`);
-  let guarded = false;
+  const holds = (block) => block.open < point && point <= block.close;
+  const events = [];
   for (const statement of fnBody.statements.filter((s) => s.end <= point)) {
     const source = text.slice(statement.start, statement.end);
     const bound = BINDING.exec(source);
-    if (bound === null || !word.test(bound[1]) || /^\s*(?:if|while|for|match)\b/.test(source)) {
+    if (bound === null || !word.test(bound[2]) || /^\s*(?:if|while|for|match)\b/.test(source)) {
       continue;
     }
-    const value = source.slice(bound[0].length);
-    const head = HEAD.exec(value);
-    if (guardAt.some((at) => at >= statement.start && at < statement.end)) {
-      guarded = true;
-    } else if (!word.test(value)) {
-      const at = statement.start;
-      guarded = head !== null && holdsGuard(text, fnBody, guardAt, head[1], at, new Set(seen));
+    const visible = holds(fnBody.blocks[statement.block]);
+    if (visible || bound[1] === undefined) {
+      events.push({ ...statement, value: source.slice(bound[0].length), visible });
     }
   }
+  for (const block of fnBody.blocks.filter((b) => holds(b) && b.header < b.open)) {
+    const header = text.slice(block.header, block.open);
+    for (const part of CONDITION.test(header) ? header.matchAll(LET_PART) : []) {
+      if (word.test(part[1])) {
+        const start = block.header + part.index;
+        events.push({ start, end: block.open, value: part[2], header: true });
+      }
+    }
+  }
+  let guarded = false;
+  for (const event of events.sort((a, b) => a.start - b.start)) {
+    const fresh = /\bProjectSandbox::new\s*\(/.test(event.value);
+    const read = () => !fresh && fromGuarded(text, fnBody, guardAt, event.value, event.start, memo);
+    if (event.header) {
+      guarded = read();
+    } else if (!event.visible) {
+      guarded = guarded && (word.test(event.value) || read());
+    } else if (guardAt.some((at) => at >= event.start && at < event.end)) {
+      guarded = true;
+    } else if (/^\s*None\s*;?\s*$/.test(event.value)) {
+      guarded = true;
+    } else if (!word.test(event.value) || fresh) {
+      guarded = read();
+    }
+  }
+  memo.set(key, guarded);
   return guarded;
 }
 
 /**
- * Whether an install call is guarded: its receiver, a name or a type's install's first
- * argument, holds a guarded sandbox ([`holdsGuard`]); a call on a chain (a call's result, a
- * closure's argument, a field) when its statement guards before it at depth 1 or its chain
- * starts from such a name. Inputs: the masked text, the body, the call offset and its text.
- * Output: the answer.
+ * Whether a value is read from a sandbox guarded at a point: some name it reads holds one
+ * ([`holdsGuard`]). Inputs: the masked text, the body, the depth-1 guards, the value's text,
+ * the point and the answers so far. Output: the answer.
+ */
+function fromGuarded(text, fnBody, guardAt, value, point, memo) {
+  const names = Array.from(value.matchAll(NAMES), (found) => found[1]);
+  return names
+    .filter((name) => !KEYWORDS.has(name))
+    .some((name) => holdsGuard(text, fnBody, guardAt, name, point, memo));
+}
+
+/**
+ * Whether an install call is guarded: its statement guards before it at depth 1, or what it
+ * installs (a type's install's first argument, the name it is called on, else its chain) is
+ * read from a guarded sandbox ([`fromGuarded`]). Inputs: the masked text, the body, the call
+ * offset and its text. Output: the answer.
  */
 function guardedCall(text, fnBody, at, call) {
   const guardAt = topGuards(text, fnBody);
-  const statement = fnBody.statements.find((s) => s.start <= at && at < s.end);
-  if (statement === undefined) {
+  const statement = fnBody.statements
+    .filter((s) => s.start <= at && at < s.end)
+    .reduce((inner, next) => (inner === null || next.start > inner.start ? next : inner), null);
+  if (statement === null) {
     return false;
-  }
-  let name = null;
-  if (!call.startsWith(".")) {
-    const first = /^\s*(\w+)\s*[,)]/.exec(text.slice(at + call.length, at + call.length + 200));
-    name = first === null ? null : first[1];
-  } else {
-    const before = /(?:^|[^\w.:])(\w+)\s*$/.exec(text.slice(statement.start, at));
-    name = before === null ? null : before[1];
-  }
-  const lead = text.slice(statement.start, at);
-  const closure = name !== null && new RegExp(`\\|[\\w\\s,]*\\b${name}\\b[\\w\\s,]*\\|`).test(lead);
-  if (name !== null && !closure) {
-    return holdsGuard(text, fnBody, guardAt, name, statement.start);
   }
   if (guardAt.some((g) => g >= statement.start && g < at)) {
     return true;
   }
+  const lead = text.slice(statement.start, at);
   const bound = BINDING.exec(lead);
-  const head = HEAD.exec(bound === null ? lead : lead.slice(bound[0].length));
-  return head !== null && holdsGuard(text, fnBody, guardAt, head[1], statement.start);
+  const chain = bound === null ? lead : lead.slice(bound[0].length);
+  let value = chain;
+  if (!call.startsWith(".")) {
+    const rest = text.slice(at + call.length, statement.end);
+    let level = 0;
+    let end = 0;
+    for (; end < rest.length && !(level === 0 && /[,)]/.test(rest[end])); end += 1) {
+      level += rest[end] === "(" ? 1 : rest[end] === ")" ? -1 : 0;
+    }
+    value = rest.slice(0, end);
+  } else {
+    const before = /(?:^|[^\w.:])(\w+)\s*$/.exec(lead);
+    const closure = before !== null && new RegExp(`\\|[\\w\\s,:]*\\b${before[1]}\\b`).test(lead);
+    value = before === null || closure ? chain : before[1];
+  }
+  return fromGuarded(text, fnBody, guardAt, value, statement.start, new Map());
 }
 
 /** A return type that hands back a sandbox by value, not a reference to one. */

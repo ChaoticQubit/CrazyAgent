@@ -187,6 +187,36 @@ test("an install on a guarded chain, a closure argument or a split argument is g
   assert.equal(lastGuarded(split.replace("sandbox = sandbox.guard_engine(engine)?;", "")), false);
 });
 
+test("a guarded sandbox carried through a tuple, an Option or an if let stays guarded", () => {
+  const carried = [
+    "sandbox = sandbox.guard_engine(engine)?;",
+    "let mut mates = None;",
+    "if wanted {",
+    "    let (lead, teammates) = split(sandbox)?;",
+    "    sandbox = lead;",
+    "    mates = Some(teammates);",
+    "}",
+    "if let Some(mates) = &mates {",
+    "    mates.install(other)?;",
+    "}",
+    "if let Some(link) = &link",
+    "    && let Ok(linked) = sandbox.clone().allow_read_link(link)",
+    "{",
+    "    sandbox = linked;",
+    "}",
+  ];
+  const sites = (lines) => scan(FILE, installing(lines)).sites.map(({ guarded }) => guarded);
+  assert.deepEqual(sites(carried), [true, true]);
+  const swapped = carried.map((line) =>
+    line === "    sandbox = lead;" ? "    sandbox = ProjectSandbox::new(&H, a, a, a, n)?;" : line,
+  );
+  assert.deepEqual(sites(swapped), [true, false]);
+  const made = carried.map((line) =>
+    line === "    mates = Some(teammates);" ? "    mates = Some(make(&lead_root)?);" : line,
+  );
+  assert.deepEqual(sites(made), [false, true]);
+});
+
 test("a guard written in a string or a block comment does not count", () => {
   const quoted = ['let note = "sandbox = sandbox.guard_engine(engine)?;";'];
   assert.equal(lastGuarded(installing(quoted)), false);
