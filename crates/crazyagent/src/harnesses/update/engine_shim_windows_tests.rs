@@ -1,18 +1,47 @@
 use super::*;
 use rusqlite::Connection;
 
-/// An engine whose npm prefix is made private as an install into it makes it, under this
-/// user's profile so no temp folder rule applies. Output: the folder kept for the row and
-/// the engine's roots with the npm the places find.
-fn engine() -> (tempfile::TempDir, Roots) {
-    let home = state::home_folder().unwrap();
-    let folder = tempfile::tempdir_in(&home).unwrap();
-    let engine_root = kernel_sandbox::paths::canonical(folder.path()).unwrap();
-    let roots = Roots::engine(&engine_root);
-    let npm = roots.npm.clone().expect("a usable Node on this machine");
+/// A stand-in Node, as the engine npm rows make one: the curl Windows ships as `node.exe`,
+/// npm's own script below it with the first line npm writes, and `npm.cmd` beside it.
+/// Input: the folder, made here. Output: none.
+fn stand_in_node(folder: &Path) {
+    let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("curl.exe");
+    let cli = folder.join("node_modules").join("npm").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::fs::copy(&curl, folder.join("node.exe")).unwrap();
+    std::fs::write(cli.join("npm-cli.js"), "#!/usr/bin/env node\n").unwrap();
+    std::fs::write(folder.join("npm.cmd"), "@ECHO off\r\n").unwrap();
+}
+
+/// An engine at a root whose npm is the one beside the Node given, with its prefix made
+/// private as an install into it makes it. Inputs: the engine root and the Node folder.
+/// Output: the engine's roots.
+fn engine_at(engine_root: &Path, node: &Path) -> Roots {
+    let places = crate::tools::tools_new(vec![node.to_path_buf()], None);
+    let npm = state::engine_npm_at(engine_root, &places).expect("the stand-in Node");
     for made in [npm.prefix.clone(), npm.prefix.join("node_modules")] {
         crate::paths::private_folder(&made).unwrap();
     }
+    Roots {
+        home: state::home_folder().unwrap(),
+        brew_prefixes: Vec::new(),
+        casks: false,
+        npm: Some(npm),
+        places,
+        elevated: false,
+    }
+}
+
+/// An engine with a stand-in Node, under this user's profile so no temp folder rule
+/// applies. Output: the folder kept for the row and the engine's roots.
+fn engine() -> (tempfile::TempDir, Roots) {
+    let home = state::home_folder().unwrap();
+    let folder = tempfile::tempdir_in(&home).unwrap();
+    let root = kernel_sandbox::paths::canonical(folder.path()).unwrap();
+    stand_in_node(&root.join("node"));
+    let roots = engine_at(&root.join("engine"), &root.join("node"));
     (folder, roots)
 }
 
@@ -92,12 +121,8 @@ fn a_windows_shim_outside_the_engine_prefix_or_its_modules_stays_an_unknown_inst
     }
     unknown(&codex_in(&other, kernel_processes::batch::CODEX));
 
-    let at_root = root.join("at-root");
-    let at_root_roots = Roots::engine(&at_root);
+    let at_root_roots = engine_at(&root.join("at-root"), &root.join("node"));
     let at_root_npm = at_root_roots.npm.clone().unwrap().prefix;
-    for made in [at_root_npm.clone(), at_root_npm.join("node_modules")] {
-        crate::paths::private_folder(&made).unwrap();
-    }
     let beside = kernel_processes::batch::CODEX.replace(r"node_modules\@openai\codex\bin\", "");
     assert_ne!(beside, kernel_processes::batch::CODEX);
     std::fs::write(at_root_npm.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
