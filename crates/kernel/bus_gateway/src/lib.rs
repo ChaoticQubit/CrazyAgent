@@ -16,6 +16,8 @@ mod perf_kit;
 #[cfg(test)]
 mod perf_tests;
 #[cfg(test)]
+mod serve_tests;
+#[cfg(test)]
 mod table_tests;
 #[cfg(test)]
 mod tests;
