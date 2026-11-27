@@ -1335,6 +1335,12 @@ mod launchd;
 /// Output: none.
 mod cli_link_publish;
 
+/// The retire rows of the command line link: a relative link, a chain of links and a link
+/// to another hard link of the old copy are pointed at the kept copy, and a link to an
+/// unrelated file or past an old copy that is a link is left. Inputs: real folders and
+/// links. Output: none.
+mod retire_links;
+
 /// The Windows link rows: a junction chain through a folder others can change is
 /// changeable though both its ends are private, and a link's target walks from a drive root
 /// or counts as changeable. Inputs: real junctions made with mklink and literal targets.
