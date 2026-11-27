@@ -50,7 +50,7 @@ case "$1" in
     echo "image ${ImageOS:-?} ${ImageVersion:-?} run ${GITHUB_RUN_ID:-?} attempt ${GITHUB_RUN_ATTEMPT:-?} ref ${GITHUB_REF:-?} sha ${GITHUB_SHA:-?}"
     sw_vers || true
     sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string || true
-    for pair in a=b64fa71aff twin=05a762238c b-after=68721ffb41 b-before=c6f1398838 load=440a06cf32; do
+    for pair in a=49bf8c2c01 twin=05a762238c b-after=68721ffb41 b-before=c6f1398838 load=008adcd803; do
       name=${pair%%=*}
       rev=${pair#*=}
       rc=0
