@@ -371,8 +371,8 @@ mod steps;
 #[cfg(unix)]
 pub use steps::run;
 pub use steps::{
-    ARCHIVE_BYTES_MAX, CURL, DOWNLOAD_SECS, InstallPaths, MEMBER_BYTES_MAX, SOURCE_BYTES_MAX, Step,
-    TAR, steps,
+    ARCHIVE_BYTES_MAX, CURL, DOWNLOAD_SECS, InstallPaths, MEMBER_BYTES_MAX, NPM, SOURCE_BYTES_MAX,
+    Step, TAR, steps,
 };
 
 #[cfg(test)]
