@@ -1475,12 +1475,12 @@ impl Authority {
         let mut token = owner_token();
         getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
         if let Some(slot) = current.as_mut() {
-            slot.token = owner_token_copy(&token);
+            slot.token = crate::engine::secret_frame::owner_token_copy(&token);
             slot.dispatch = Some(Arc::new(dispatch));
             slot.attached = false;
         } else {
             *current = Some(Box::new(NativeAuthSlot {
-                token: owner_token_copy(&token),
+                token: crate::engine::secret_frame::owner_token_copy(&token),
                 fact: dispatch.fact().clone(),
                 admission: dispatch.admission().clone(),
                 deadline: Instant::now() + operation_bound(dispatch.fact()),

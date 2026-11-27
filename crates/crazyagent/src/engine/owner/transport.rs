@@ -22,7 +22,7 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
-use crate::engine::secret_frame::{OwnerToken, owner_token, owner_token_copy};
+use crate::engine::secret_frame::{OwnerToken, owner_token};
 use crate::engine::{
     Engine, io_error, owner_trace as trace, read_frame, verify_client, verify_server,
 };
