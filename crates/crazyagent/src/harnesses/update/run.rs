@@ -761,28 +761,40 @@ mod windows_tests {
 
     /// A copy of the grandchild holder in a fresh folder under the profile, which only this
     /// user, SYSTEM and the administrators may change, so the program trust check passes it
-    /// whatever the build folder allows. Output: the folder guard, the copy and its arguments.
-    fn own_holder() -> (tempfile::TempDir, PathBuf, [&'static str; 5]) {
+    /// whatever the build folder allows. Output: the folder guard, the copy and its arguments,
+    /// or the error that stopped the copy, naming the path it was about.
+    fn own_holder()
+    -> Result<(tempfile::TempDir, PathBuf, [&'static str; 5]), Box<dyn std::error::Error>> {
         use crate::plugins::check::windows_tests::grandchild_holder;
         let (holder, args) = grandchild_holder();
-        let folder = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
-        let own = kernel_sandbox::paths::canonical(folder.path()).unwrap();
-        let copy = own.join(holder.file_name().unwrap());
-        std::fs::copy(&holder, &copy).unwrap();
-        (folder, copy, args)
+        let profile = std::env::var_os("USERPROFILE").ok_or("the USERPROFILE variable is unset")?;
+        let folder = tempfile::tempdir_in(&profile)?;
+        let own = kernel_sandbox::paths::canonical(folder.path())?;
+        let name = holder
+            .file_name()
+            .ok_or_else(|| format!("{} has no file name", holder.display()))?;
+        let copy = own.join(name);
+        std::fs::copy(&holder, &copy)
+            .map_err(|error| format!("{} to {}: {error}", holder.display(), copy.display()))?;
+        Ok((folder, copy, args))
     }
 
     /// An update run that passes its limit ends as timed out, and the process it started ends
     /// with its job, so no child of an installer outlives its run. The command is the
     /// grandchild holder, asked through a request file in the run's home.
     #[test]
-    fn an_update_run_past_its_limit_ends_with_every_process_it_started() {
+    fn an_update_run_past_its_limit_ends_with_every_process_it_started()
+    -> Result<(), Box<dyn std::error::Error>> {
         use crate::plugins::check::windows_tests::HOLDER_REQUEST;
-        let (_own, holder, args) = own_holder();
-        let folder = tempfile::tempdir().unwrap();
-        let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
-        std::fs::write(home.join(HOLDER_REQUEST), "").unwrap();
-        let search = holder.parent().unwrap().to_path_buf();
+        let (_own, holder, args) = own_holder()?;
+        let folder = tempfile::tempdir()?;
+        let home = kernel_sandbox::paths::canonical(folder.path())?;
+        let request = home.join(HOLDER_REQUEST);
+        std::fs::write(&request, "").map_err(|error| format!("{}: {error}", request.display()))?;
+        let search = holder
+            .parent()
+            .ok_or_else(|| format!("{} has no folder", holder.display()))?
+            .to_path_buf();
         let fixed = Fixed {
             program: holder,
             args: args.to_vec(),
@@ -792,13 +804,16 @@ mod windows_tests {
         let places = crate::tools::tools_new(vec![search], None);
         let ran = run_raw_as(&fixed, &places, &home, Duration::from_secs(20), false);
         assert_eq!(ran.err(), Some(TIMEOUT));
-        let pid: u32 = std::fs::read_to_string(home.join("grandchild.pid"))
-            .unwrap()
+        let written = home.join("grandchild.pid");
+        let text = std::fs::read_to_string(&written)
+            .map_err(|error| format!("{}: {error}", written.display()))?;
+        let pid: u32 = text
             .trim()
             .parse()
-            .unwrap();
+            .map_err(|error| format!("{} holds {text:?}: {error}", written.display()))?;
         assert!(pid > 4);
         assert!(ended(pid), "the update run's child {pid} outlived it");
+        Ok(())
     }
 
     /// An npm command's run gets npm's global prefix pinned in its environment, here read
