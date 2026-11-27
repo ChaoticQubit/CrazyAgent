@@ -976,3 +976,5 @@ impl Checkout {
 mod interpreter_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+#[cfg(all(test, target_os = "macos"))]
+mod walk_tests;
