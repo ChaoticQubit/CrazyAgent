@@ -1,4 +1,6 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 const CHILD_TOOK_LOCK: i32 = 5;
 const CHILD_REFUSED: i32 = 3;
@@ -145,7 +147,7 @@ fn a_held_engine_db_is_closed_on_exec() {
     else {
         panic!("custody over a private engine.db");
     };
-    let flags = rustix::io::fcntl_getfd(&*custody.database).unwrap();
+    let flags = rustix::io::fcntl_getfd(&custody.database).unwrap();
     assert!(
         flags.contains(rustix::io::FdFlags::CLOEXEC),
         "a held engine.db descriptor would pass into a child process"
