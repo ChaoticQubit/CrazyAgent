@@ -61,7 +61,7 @@ fn a_record_named_folder_others_may_write_is_still_searched_for_sockets() {
     let (_scratch, root) = engine_root();
     let records = root.join(RECORDS);
     filled(&records, 0o770, 1);
-    let _socket = std::os::unix::net::UnixListener::bind(records.join("s")).unwrap();
+    let _socket = kernel_processes::spawn_gate::bind_unix_std(records.join("s")).unwrap();
     let secrets = engine_secrets_in(&STAND_IN, &root);
     assert!(
         matches!(&secrets, Ok(secrets) if secrets.contains(&records)),
@@ -76,7 +76,7 @@ fn a_record_named_link_is_checked_as_any_entry() {
     let (_scratch, root) = engine_root();
     let target = root.parent().unwrap().join("elsewhere");
     filled(&target, 0o700, 1);
-    let _socket = std::os::unix::net::UnixListener::bind(target.join("s")).unwrap();
+    let _socket = kernel_processes::spawn_gate::bind_unix_std(target.join("s")).unwrap();
     let records = root.join(RECORDS);
     std::os::unix::fs::symlink(&target, &records).unwrap();
     let secrets = engine_secrets_in(&STAND_IN, &root);
