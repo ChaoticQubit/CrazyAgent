@@ -257,6 +257,36 @@ fn a_script_only_a_verbatim_path_names_is_refused_on_windows() {
     }
 }
 
+/// npm's layout and an npm cmd-shim build their script themselves from the target's real
+/// file, and a target with no first line resolves as a program, never through the first-line
+/// path. Such a target that only a verbatim path names is refused too, before any launch
+/// word is built, so no launch of it can fail or end the engine.
+#[test]
+fn a_batch_target_with_no_first_line_only_a_verbatim_path_names_is_refused_on_windows() {
+    let (_folder, real, _places) = node_folder();
+    let layout = real.join("AUX");
+    let command = npm_layout_in(&layout);
+    let cli = layout
+        .join("node_modules")
+        .join("npm")
+        .join("bin")
+        .join("npm-cli.js");
+    or_named(std::fs::write(&cli, "require('../lib/cli.js')\n"), &cli);
+    let beside = real.join("kept.");
+    or_named(std::fs::create_dir_all(&beside), &beside);
+    copy_named(&shipped_where(), &beside.join("node.exe"));
+    let (shim, script) = shim_beside_node(&beside);
+    or_named(
+        std::fs::write(&script, "require('../lib/codex.js')\n"),
+        &script,
+    );
+    for (file, folder) in [(command, layout), (shim, beside)] {
+        let places = stub_new(vec![or_named(folder.canonicalize(), &folder)], None);
+        let refused = refusal_of(&file, &places);
+        assert_eq!(refused.why, Refusal::Verbatim, "{}", file.display());
+    }
+}
+
 /// npm's `npx.cmd` runs by its layout when its folder is off the engine's
 /// PATH, as a portable Node is, since `npx-cli.js` looks its `node` up beside npx.cmd only.
 #[test]
