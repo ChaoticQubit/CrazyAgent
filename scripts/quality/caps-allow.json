@@ -88,7 +88,7 @@
   "crates/crazyagent/src/questions/tests.rs": 2296,
   "crates/crazyagent/src/research/runner.rs": 7748,
   "crates/crazyagent/src/scheduling/tests.rs": 1970,
-  "crates/crazyagent/src/storage.rs": 4320,
+  "crates/crazyagent/src/storage.rs": 4318,
   "crates/crazyagent/src/storage/master_session.rs": 5655,
   "crates/crazyagent/src/storage/master_session/sessions_tests.rs": 2204,
   "crates/crazyagent/src/storage/native_auth.rs": 2005,
