@@ -498,3 +498,26 @@ pub fn npm_shims(prefix: &Path) -> PathBuf {
         prefix.join("bin")
     }
 }
+
+/// Whether a folder is in one of the temp folders given, as written and with its links
+/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the hooks, the
+/// folder and the temp folders. Output: the answer.
+pub fn in_temp_of(hooks: &FindingHooks, folder: &Path, temps: &[PathBuf]) -> bool {
+    if temps.is_empty() {
+        return false;
+    }
+    let real = folder.canonicalize().ok();
+    std::iter::once(folder)
+        .chain(real.as_deref())
+        .any(|folder| under_temp(hooks, folder, temps))
+}
+
+/// The word an interpreter is handed for a script's real file: on Windows the plain drive
+/// spelling of its verbatim path, which Node needs to start a main script, kept only when it
+/// names the same file ([`dunce::simplified`]); elsewhere the file as it is. Input: the real
+/// file. Output: the word, none when only the verbatim `\\?\` form names the file.
+pub(super) fn script_word(program: &Path) -> Option<&Path> {
+    let plain = dunce::simplified(program);
+    let verbatim = plain.as_os_str().as_encoded_bytes().starts_with(br"\\?\");
+    (!verbatim).then_some(plain)
+}
