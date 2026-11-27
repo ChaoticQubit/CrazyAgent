@@ -181,7 +181,9 @@ pub(super) fn adopt_root(
 /// Removes the skills an earlier Codex run left in a held home, whatever their owner, links
 /// as themselves, and makes an empty `skills` again with the home's inheritable list.
 /// Input: the held home. Output: Ok, or [`SKILLS_KEPT`] when anything stays.
-fn remove_copies_held(root: &crate::engine::bootstrap::held::Folder) -> Result<(), LaunchError> {
+pub(super) fn remove_copies_held(
+    root: &crate::engine::bootstrap::held::Folder,
+) -> Result<(), LaunchError> {
     use crate::engine::bootstrap::held::{HeldError, Name, TREE_NAMES_MAX};
     let skills = Name::constant("skills");
     match root.remove_tree_unjudged(&skills, TREE_NAMES_MAX) {
@@ -191,19 +193,6 @@ fn remove_copies_held(root: &crate::engine::bootstrap::held::Folder) -> Result<(
     root.make_dir_inherited(&skills)
         .map(drop)
         .map_err(|_| failure(SKILLS_KEPT))
-}
-
-/// Removes an earlier Codex run's skills for a lock taken without an install: the home is
-/// held again as itself and judged, refused unless it is the object `held` first held, so a
-/// link above the home moved between the two opens reaches nothing. Inputs: the home and the
-/// first hold. Output: Ok, `launch_context_unsafe`, another held code or [`SKILLS_KEPT`].
-pub(super) fn codex_copies(home: &Path, held: &File) -> Result<(), LaunchError> {
-    use crate::engine::bootstrap::held::Folder;
-    let root = Folder::root_judged_by(home, held_home_judge).map_err(held_failure)?;
-    if !crazyagent_win_sandbox::private::same(held, root.file()).unwrap_or(false) {
-        return Err(failure("launch_context_unsafe"));
-    }
-    remove_copies_held(&root)
 }
 
 /// Writes one file made in the held launch folder, create-only, with the folder's

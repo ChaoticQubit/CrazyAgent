@@ -2958,6 +2958,8 @@ pub(crate) fn listed_home(harness: &str) -> bool {
 /// lock guard, a `launch_account_home_*` refusal, `launch_manifest_invalid`,
 /// `launch_home_busy` or [`SKILLS_KEPT`].
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
+    #[cfg(windows)]
+    let mut held = None;
     let (lock, environment) = if listed_home(harness) {
         let listed = crate::harnesses::registry::registry()
             .get(harness)
@@ -2971,17 +2973,15 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         (lock, asked.environment(home))
     } else {
         #[cfg(windows)]
-        let held = crate::harnesses::launch::hold_home(home)?;
-        #[cfg(windows)]
-        crate::harnesses::launch::validate_held_home(home, &held)?;
+        let root = held.insert(windows::adopt_root(home)?);
         #[cfg(unix)]
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         #[cfg(windows)]
-        locked_in(&lock, &held)?;
+        locked_in(&lock, root.file())?;
         #[cfg(windows)]
         if drivers::piped(harness) == Ok(Piped::Codex) {
-            windows::codex_copies(home, &held)?;
+            windows::remove_copies_held(root)?;
         }
         (lock, Vec::new())
     };
@@ -3007,7 +3007,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         tool_home: None,
         _lock: lock,
         #[cfg(windows)]
-        held: None,
+        held,
     })
 }
 

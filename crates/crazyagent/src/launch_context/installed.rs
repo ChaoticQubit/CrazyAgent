@@ -37,6 +37,13 @@ impl Installed {
     pub fn home_or<'a>(installed: Option<&'a Self>, home: &'a Path) -> &'a Path {
         installed.and_then(Self::home_place).unwrap_or(home)
     }
+
+    /// Whether this launch wrote a context into its home, as an install does, rather than
+    /// only taking the home's lock as [`super::lock_only`] does: only then do its arguments
+    /// replace the empty MCP list a launch is built with. Output: the answer.
+    pub fn wrote_context(&self) -> bool {
+        self.files.is_some()
+    }
 }
 
 impl Drop for Installed {

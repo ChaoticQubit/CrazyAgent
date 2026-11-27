@@ -987,51 +987,6 @@ fn home_with_skill(folder: &Path, bytes: &str) -> PathBuf {
     home
 }
 
-/// A junction above the home pointed at another folder between the first hold and the
-/// Codex skills removal makes the second open reach another home: it is refused with
-/// `launch_context_unsafe`, both homes' `skills` keep every byte, and no lock stays held.
-#[test]
-fn a_windows_codex_skills_removal_refuses_a_home_swapped_after_the_hold() {
-    let (_temp, base) = base();
-    let first = private_home(&base, "first");
-    let second = private_home(&base, "second");
-    let first_home = home_with_skill(&first, "first");
-    let second_home = home_with_skill(&second, "second");
-    let link = base.join("link");
-    junction(&link, &first);
-    let home = link.join("home");
-    let held = crate::harnesses::launch::hold_home(&home).unwrap();
-    std::fs::remove_dir(&link).unwrap();
-    junction(&link, &second);
-    assert_eq!(
-        windows::codex_copies(&home, &held).unwrap_err().0,
-        "launch_context_unsafe"
-    );
-    for (folder, bytes) in [(&first_home, "first"), (&second_home, "second")] {
-        assert_eq!(
-            std::fs::read_to_string(folder.join("skills").join("kept.md")).unwrap(),
-            bytes
-        );
-    }
-    drop(held);
-    drop(lock_only(&second_home, "claude-code").unwrap());
-}
-
-/// With no swap, the Codex skills removal after the first hold takes the same home: the
-/// earlier run's `skills` goes, a junction in it as itself, and an empty one is made.
-#[test]
-fn a_windows_codex_skills_removal_after_the_hold_takes_the_held_home() {
-    let (_temp, base) = base();
-    let home = private_home(&base, "home");
-    let target = outside(&base, "target");
-    plant_skills(&home, &target);
-    let held = crate::harnesses::launch::hold_home(&home).unwrap();
-    windows::codex_copies(&home, &held).unwrap();
-    assert!(skills_empty(&home));
-    assert_untouched(&target, "target");
-    drop(held);
-}
-
 /// A junction above the home repointed after a Claude Code install leaves the launch's
 /// arguments naming the files in the home it held, by its final path, never the folder the
 /// junction names now, whose own launch folder keeps every byte.

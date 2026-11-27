@@ -678,17 +678,13 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
 }
 
 /// Builds a context-less durable launch's command under its agent home's lock
-/// ([`crate::launch_context::lock_only`]): a listed harness's, on the drivers that lock reads
-/// as listed, with the variables its home block sets, Codex's and Claude Code's as
-/// [`command`] builds them.
-/// Input: the routed request. Output: the command and the lock guard, or the refusal.
+/// ([`crate::launch_context::lock_only`]), on the home that lock holds: a listed harness's
+/// with the variables its home block sets, Codex's and Claude Code's with the empty MCP list
+/// [`command`] builds them with. Input: the routed request. Output: the command and the
+/// lock guard, or the refusal.
 fn lone_command(request: &LaunchRequest) -> Result<(Command, Installed), LaunchError> {
     let installed = crate::launch_context::lock_only(request.account.home(), &request.harness)?;
-    let listed = matches!(
-        drivers::piped(&request.harness),
-        Ok(Piped::Acp | Piped::JsonlTurn | Piped::TextTurn)
-    );
-    let command = build(request, listed.then_some(&installed))?;
+    let command = build(request, Some(&installed))?;
     Ok((command, installed))
 }
 
@@ -1134,7 +1130,11 @@ pub(super) fn codex_launch_settings(
 ) -> Vec<String> {
     let native = installed.is_some_and(Installed::native_threads);
     assert!(!native || request.tools);
-    let mut settings = codex_configuration(request, installed.is_some(), key_file);
+    let mut settings = codex_configuration(
+        request,
+        installed.is_some_and(Installed::wrote_context),
+        key_file,
+    );
     if native {
         settings.retain(|setting| setting != CODEX_MULTI_AGENT_V2_OFF);
     }
@@ -1284,7 +1284,7 @@ fn claude_invocation(
             }
         })
         .collect();
-    match installed {
+    match installed.filter(|installed| installed.wrote_context()) {
         Some(installed) => arguments.extend(installed.arguments().iter().cloned()),
         None => arguments.extend(CLAUDE_NO_MCP.iter().map(OsString::from)),
     }
