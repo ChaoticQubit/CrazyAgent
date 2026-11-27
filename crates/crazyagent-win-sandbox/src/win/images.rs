@@ -254,129 +254,228 @@ fn names(text: &str, spellings: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{HOSTS, host, lowered, runs_under, scan};
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::process::CommandExt;
-    use std::path::PathBuf;
-    use std::process::{Command, Stdio};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
 
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    /// The real spelling of a folder as the engine passes it: long names, without the
-    /// verbatim prefix. Input: the folder. Output: the spelling.
-    fn plain(folder: &std::path::Path) -> PathBuf {
-        let real = std::fs::canonicalize(folder).unwrap();
-        let text = real.to_str().unwrap();
-        PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+    /// A started child that is killed and waited for once it goes out of scope, so a failed
+    /// assert leaves no suspended process behind; errors there are ignored, since a child
+    /// that already ended is no failure.
+    struct Held(Child);
+
+    impl Held {
+        /// Ends the child now and waits for it, for a row that checks what follows its end.
+        /// Output: Ok, or the error naming the step and the process.
+        fn end(&mut self) -> Result<(), String> {
+            let id = self.0.id();
+            self.0
+                .kill()
+                .map_err(|error| format!("kill {id}: {error}"))?;
+            self.0
+                .wait()
+                .map(drop)
+                .map_err(|error| format!("wait {id}: {error}"))
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A fresh temporary folder, removed when the returned guard drops.
+    /// Output: the folder, or the error naming the step.
+    fn temporary() -> Result<tempfile::TempDir, String> {
+        tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))
+    }
+
+    /// The System32 folder of this Windows. Output: the folder, or the error naming the
+    /// variable that is not set.
+    fn system32() -> Result<PathBuf, String> {
+        let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?;
+        Ok(PathBuf::from(root).join("System32"))
+    }
+
+    /// The engine's spelling of a canonical path: a verbatim UNC path as `\\server\share`,
+    /// another verbatim path without its prefix, and a plain path as it is, in native units.
+    /// Input: the path. Output: the spelling.
+    fn plain_text(path: &Path) -> PathBuf {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+        let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
+        let kept: Vec<u16> = match wide.strip_prefix(unc.as_slice()) {
+            Some(rest) => r"\\".encode_utf16().chain(rest.iter().copied()).collect(),
+            None => wide
+                .strip_prefix(verbatim.as_slice())
+                .unwrap_or(&wide)
+                .to_vec(),
+        };
+        PathBuf::from(OsString::from_wide(&kept))
+    }
+
+    /// The real spelling of a folder as the engine passes it: long names, in
+    /// [`plain_text`]'s spelling. Input: the folder. Output: the spelling, or the error.
+    fn plain(folder: &Path) -> Result<PathBuf, String> {
+        std::fs::canonicalize(folder)
+            .map(|real| plain_text(&real))
+            .map_err(|error| format!("canonicalize {}: {error}", folder.display()))
+    }
+
+    /// Starts a program held suspended, so it never reads its arguments or its language
+    /// files. Inputs: the program and its arguments. Output: the held child, or the error.
+    fn held(program: &Path, arguments: &[&OsStr]) -> Result<Held, String> {
+        Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+            .spawn()
+            .map(Held)
+            .map_err(|error| format!("spawn {}: {error}", program.display()))
+    }
+
+    /// Starts the System32 ping held suspended with one more argument, so it never reads it.
+    /// Input: the argument. Output: the held child, or the error.
+    fn naming(argument: &OsStr) -> Result<Held, String> {
+        let ping = system32()?.join("PING.EXE");
+        held(&ping, &[OsStr::new("-n"), OsStr::new("60"), argument])
+    }
+
+    /// A path respelled unit by unit, kept in native units. Inputs: the path and the change
+    /// of one UTF-16 unit. Output: the spelling.
+    fn respelled(path: &Path, change: fn(u16) -> u16) -> OsString {
+        let units: Vec<u16> = path.as_os_str().encode_wide().map(change).collect();
+        OsString::from_wide(&units)
+    }
+
+    /// One UTF-16 unit with an ASCII lower-case letter put in upper case.
+    /// Input: the unit. Output: the unit, changed only for such a letter.
+    fn upper(unit: u16) -> u16 {
+        match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii_lowercase() => u16::from(byte.to_ascii_uppercase()),
+            _ => unit,
+        }
+    }
+
+    /// One UTF-16 unit with a backslash put as a forward slash.
+    /// Input: the unit. Output: the unit, changed only for a backslash.
+    fn slashed(unit: u16) -> u16 {
+        if unit == u16::from(b'\\') {
+            u16::from(b'/')
+        } else {
+            unit
+        }
+    }
+
+    /// The short (8.3) spelling of a folder, or the folder itself where the volume keeps no
+    /// short names. Input: the folder. Output: the spelling, or the Windows error.
+    fn short(folder: &Path) -> Result<PathBuf, String> {
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let wide: Vec<u16> = folder.as_os_str().encode_wide().chain([0]).collect();
+        let mut units = vec![0u16; 32768];
+        let len = unsafe { GetShortPathNameW(wide.as_ptr(), units.as_mut_ptr(), 32768) };
+        if len == 0 || len as usize >= units.len() {
+            let error = std::io::Error::last_os_error();
+            return Err(format!("short name of {}: {error}", folder.display()));
+        }
+        Ok(PathBuf::from(OsString::from_wide(&units[..len as usize])))
+    }
+
+    /// A verbatim path from canonicalize reads as the engine names it: a UNC share as
+    /// `\\server\share`, a drive path without its prefix, a plain path unchanged.
+    #[test]
+    fn a_canonical_path_reads_in_the_spelling_the_engine_passes() {
+        for (canonical, spelled) in [
+            (r"\\?\UNC\server\share\x", r"\\server\share\x"),
+            (r"\\?\C:\x", r"C:\x"),
+            (r"C:\x", r"C:\x"),
+        ] {
+            let read = plain_text(Path::new(canonical));
+            assert_eq!(read, PathBuf::from(spelled), "{canonical}");
+        }
     }
 
     /// A program started from a folder outside any runtime, held suspended so it never needs
     /// its language files, runs under that folder and as that file, not under another
     /// folder, and under none once it has ended.
     #[test]
-    fn a_program_started_from_a_folder_runs_under_it_until_it_ends() {
-        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-        let made = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let folder = plain(made.path());
+    fn a_program_started_from_a_folder_runs_under_it_until_it_ends() -> Result<(), String> {
+        let made = temporary()?;
+        let other = temporary()?;
+        let folder = plain(made.path())?;
+        let ping = system32()?.join("PING.EXE");
         let copy = folder.join("PING.EXE");
-        std::fs::copy(system.join("PING.EXE"), &copy).unwrap();
-        let mut child = Command::new(&copy)
-            .args(["-n", "60", "127.0.0.1"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
-            .spawn()
-            .unwrap();
+        std::fs::copy(&ping, &copy)
+            .map_err(|error| format!("copy {} to {}: {error}", ping.display(), copy.display()))?;
+        let arguments = [OsStr::new("-n"), OsStr::new("60"), OsStr::new("127.0.0.1")];
+        let mut child = held(&copy, &arguments)?;
         let here = [folder.clone()];
         assert_eq!(runs_under(&here), Ok(true));
         assert_eq!(runs_under(std::slice::from_ref(&copy)), Ok(true));
-        assert_eq!(runs_under(&[plain(other.path())]), Ok(false));
-        child.kill().unwrap();
-        child.wait().unwrap();
+        assert_eq!(runs_under(&[plain(other.path())?]), Ok(false));
+        child.end()?;
         drop(child);
         assert_eq!(runs_under(&here), Ok(false));
-    }
-
-    /// The short (8.3) spelling of a folder, or the folder itself where the volume keeps no
-    /// short names. Input: the folder. Output: the spelling.
-    fn short(folder: &std::path::Path) -> PathBuf {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
-        let wide: Vec<u16> = folder.as_os_str().encode_wide().chain([0]).collect();
-        let mut units = vec![0u16; 32768];
-        let len = unsafe { GetShortPathNameW(wide.as_ptr(), units.as_mut_ptr(), 32768) };
-        assert!(
-            len > 0 && (len as usize) < units.len(),
-            "{}",
-            folder.display()
-        );
-        PathBuf::from(std::ffi::OsString::from_wide(&units[..len as usize]))
-    }
-
-    /// Starts the System32 ping held suspended with one more argument, so it never reads it.
-    /// Input: the argument. Output: the child.
-    fn naming(argument: &str) -> std::process::Child {
-        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-        Command::new(system.join("PING.EXE"))
-            .args(["-n", "60", argument])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
-            .spawn()
-            .unwrap()
+        Ok(())
     }
 
     /// A program whose file lies elsewhere runs under a folder while its command line names a
     /// file there, as `node.exe` runs a script, in any case, with forward slashes or in the
     /// folder's short spelling; a sibling folder whose name only starts the same does not.
     #[test]
-    fn a_program_whose_command_line_names_a_file_under_a_folder_runs_under_it() {
-        let made = tempfile::tempdir().unwrap();
-        let folder = plain(made.path());
+    fn a_program_whose_command_line_names_a_file_under_a_folder_runs_under_it() -> Result<(), String>
+    {
+        let made = temporary()?;
+        let folder = plain(made.path())?;
         let script = folder.join("node_modules").join("tool").join("cli.js");
-        let text = script.to_str().unwrap().to_owned();
-        let shortened = short(&folder)
+        let shortened = short(&folder)?
             .join("node_modules")
             .join("tool")
             .join("cli.js");
         let here = [folder.clone()];
         for named in [
-            text.clone(),
-            text.to_uppercase(),
-            text.replace('\\', "/"),
-            shortened.to_str().unwrap().to_owned(),
+            script.clone().into_os_string(),
+            respelled(&script, upper),
+            respelled(&script, slashed),
+            shortened.into_os_string(),
         ] {
-            let mut child = naming(&named);
-            assert_eq!(runs_under(&here), Ok(true), "{named}");
-            child.kill().unwrap();
-            child.wait().unwrap();
+            let mut child = naming(&named)?;
+            assert_eq!(runs_under(&here), Ok(true), "{}", named.display());
+            child.end()?;
         }
-        let mut sibling = naming(&format!("{}old\\cli.js", folder.display()));
+        let mut sibling = folder.into_os_string();
+        sibling.push(r"old\cli.js");
+        let _sibling = naming(&sibling)?;
         assert_eq!(runs_under(&here), Ok(false));
-        sibling.kill().unwrap();
-        sibling.wait().unwrap();
+        Ok(())
     }
 
     /// A program that named a folder and has ended counts as running it no more while its
     /// handle is still held, scanned many times so a process that only sometimes counts is
     /// named with why.
     #[test]
-    fn an_ended_program_whose_handle_is_held_runs_under_nothing() {
-        let made = tempfile::tempdir().unwrap();
-        let folder = plain(made.path());
+    fn an_ended_program_whose_handle_is_held_runs_under_nothing() -> Result<(), String> {
+        let made = temporary()?;
+        let folder = plain(made.path())?;
         let script = folder.join("node_modules").join("tool").join("cli.js");
-        let mut child = naming(script.to_str().unwrap());
-        let mine = child.id();
-        child.kill().unwrap();
-        child.wait().unwrap();
+        let mut child = naming(script.as_os_str())?;
+        let mine = child.0.id();
+        child.end()?;
         let here = [folder.clone()];
         for round in 0..50 {
             let hit = scan(&here);
             assert_eq!(hit, Ok(None), "round {round}, ended child {mine}");
         }
         drop(child);
+        Ok(())
     }
 
     /// An unread command line counts only for a script host, its file name read in any case,
