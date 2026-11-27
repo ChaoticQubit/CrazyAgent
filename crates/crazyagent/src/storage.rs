@@ -1917,7 +1917,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
     crate::app_plugins::initialize(connection)?;
-    kernel_storage::namespace::initialize(connection)?;
+    crate::state_log::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
     setup::initialize(connection)?;

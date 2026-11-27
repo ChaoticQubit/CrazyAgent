@@ -230,11 +230,14 @@ pub fn check(draft: &Draft<'_>) -> Result<(), StorageError> {
 }
 
 /// Creates the log table inside the caller's transaction when it is absent, so it
-/// commits or rolls back with that transaction. Input: the connection. Output: any
-/// SQLite failure.
+/// commits or rolls back with that transaction. The statement is built once and kept in
+/// the connection's statement cache, since every append runs it. Input: the connection.
+/// Output: any SQLite failure.
 pub fn ensure(db: &Connection) -> Result<(), StorageError> {
-    db.execute_batch(&format!(
-        "CREATE TABLE IF NOT EXISTS state_log (
+    static CREATE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let create = CREATE.get_or_init(|| {
+        format!(
+            "CREATE TABLE IF NOT EXISTS state_log (
             seq INTEGER PRIMARY KEY,
             revision INTEGER NOT NULL CHECK(revision >= 1),
             aggregate TEXT NOT NULL,
@@ -242,8 +245,12 @@ pub fn ensure(db: &Connection) -> Result<(), StorageError> {
             schema INTEGER NOT NULL CHECK(schema >= 1),
             at_ms INTEGER NOT NULL CHECK(at_ms >= 0),
             body BLOB NOT NULL CHECK(length(body) <= {BODY_BYTES_MAX}))"
-    ))
-    .map_err(error)
+        )
+    });
+    db.prepare_cached(create)
+        .and_then(|mut statement| statement.execute([]))
+        .map(|_| ())
+        .map_err(error)
 }
 
 /// Where a writer reads the time it stamps on an event: the system clock, or a manual one a

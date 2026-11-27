@@ -323,7 +323,8 @@ pub fn record(
 /// Inputs: the connection and the event. Output: Ok, or the store's refusal of the row.
 pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
     let count = match event {
-        Event::Sandbox(row) => db.execute(
+        Event::Sandbox(row) => cached(
+            db,
             "INSERT INTO sandbox_settings(singleton,linux_sockets,linux_supervisor,linux_strict) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET linux_sockets=excluded.linux_sockets, linux_supervisor=excluded.linux_supervisor, linux_strict=excluded.linux_strict",
             params![
                 word(row.settings.linux_sockets)?,
@@ -331,11 +332,13 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
                 word(row.settings.linux_strict)?
             ],
         ),
-        Event::Cleanup(row) => db.execute(
+        Event::Cleanup(row) => cached(
+            db,
             "INSERT INTO agent_cleanup_settings(singleton,mode,days) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET mode=excluded.mode, days=excluded.days",
             params![word(row.settings.mode)?, row.settings.days],
         ),
-        Event::Quit(row) => db.execute(
+        Event::Quit(row) => cached(
+            db,
             "INSERT INTO agent_quit_settings(singleton,on_quit,left_running,hours) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET on_quit=excluded.on_quit, left_running=excluded.left_running, hours=excluded.hours",
             params![
                 word(row.settings.on_quit)?,
@@ -343,11 +346,13 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
                 row.settings.hours
             ],
         ),
-        Event::Retry(row) => db.execute(
+        Event::Retry(row) => cached(
+            db,
             "INSERT INTO provider_retry_settings(singleton,choice) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
             [word(row.settings)?],
         ),
-        Event::HarnessUpdate(row) => db.execute(
+        Event::HarnessUpdate(row) => cached(
+            db,
             "INSERT INTO harness_update_settings(id,mode,check_when,online,install) VALUES(1,?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode, check_when=excluded.check_when, online=excluded.online, install=excluded.install",
             params![
                 word(row.settings.mode)?,
@@ -356,11 +361,13 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
                 word(row.settings.install)?
             ],
         ),
-        Event::InstructionApp(row) => db.execute(
+        Event::InstructionApp(row) => cached(
+            db,
             "INSERT INTO agent_instruction_app_settings(singleton, edit_with_ai) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET edit_with_ai=excluded.edit_with_ai",
             params![i64::from(row.settings.edit_with_ai)],
         ),
-        Event::Instruction(row) => db.execute(
+        Event::Instruction(row) => cached(
+            db,
             "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits, repeated, edit_with_ai) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits, repeated=excluded.repeated, edit_with_ai=excluded.edit_with_ai",
             params![
                 row.project.as_str(),
@@ -371,23 +378,28 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
                 i64::from(row.settings.edit_with_ai)
             ],
         ),
-        Event::Roadmap(row) => db.execute(
+        Event::Roadmap(row) => cached(
+            db,
             "INSERT INTO roadmap_status_settings(project,refresh) VALUES(?1,?2) ON CONFLICT(project) DO UPDATE SET refresh=excluded.refresh",
             params![row.project.as_str(), row.settings.name()],
         ),
-        Event::Steps(row) => db.execute(
+        Event::Steps(row) => cached(
+            db,
             "INSERT INTO configured_master_steps(singleton,step_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET step_limit=excluded.step_limit",
             [word(row.settings.limit)?],
         ),
-        Event::Time(row) => db.execute(
+        Event::Time(row) => cached(
+            db,
             "INSERT INTO configured_master_time(singleton,time_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET time_limit=excluded.time_limit",
             [word(row.settings.limit)?],
         ),
-        Event::Frames(row) => db.execute(
+        Event::Frames(row) => cached(
+            db,
             "INSERT INTO configured_master_frames(singleton,frame_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET frame_limit=excluded.frame_limit",
             [word(row.settings.limit)?],
         ),
-        Event::Compaction(row) => db.execute(
+        Event::Compaction(row) => cached(
+            db,
             "INSERT INTO log_compaction_settings(singleton,choice) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
             [word(row.settings)?],
         ),
@@ -764,6 +776,13 @@ pub(crate) fn save_quit_at(
     Ok(Outcome::Applied)
 }
 
+/// Runs one fixed statement through the connection's statement cache, so a statement every
+/// save runs is compiled once per connection. Inputs: the connection, the SQL and its
+/// parameters. Output: the changed row count, or SQLite's refusal.
+fn cached(db: &Connection, sql: &str, params: impl rusqlite::Params) -> rusqlite::Result<usize> {
+    db.prepare_cached(sql)?.execute(params)
+}
+
 /// Writes one settings event inside an owner request whose next revision is already signed:
 /// moves `state` from one before it to it, then applies and logs the event there through
 /// `owner`, so the request's own `events` row at next covers the change. Inputs: the
@@ -772,15 +791,15 @@ pub(crate) fn save_quit_at(
 fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Result<(), EngineError> {
     let stale = || error("state_log_revision_stale");
     let before = next.checked_sub(1).ok_or_else(stale)?;
-    let moved = tx
-        .execute(
-            "UPDATE state SET revision=?1 WHERE id=1 AND revision=?2",
-            params![
-                i64::try_from(next).map_err(error)?,
-                i64::try_from(before).map_err(error)?
-            ],
-        )
-        .map_err(error)?;
+    let moved = cached(
+        tx,
+        "UPDATE state SET revision=?1 WHERE id=1 AND revision=?2",
+        params![
+            i64::try_from(next).map_err(error)?,
+            i64::try_from(before).map_err(error)?
+        ],
+    )
+    .map_err(error)?;
     if moved != 1 {
         return Err(stale());
     }
