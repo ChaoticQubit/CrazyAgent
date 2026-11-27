@@ -796,14 +796,13 @@ fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_
     stand_in_cargo(
         &case,
         "",
-        &format!("/usr/bin/perl -e 'sleep 60' {token}"),
+        &format!(
+            "/usr/bin/perl -e 'open(my $f, \">\", \".tool-started\") or die; close($f); sleep 60' {token}"
+        ),
         Duration::from_secs(90),
     );
     let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while survivors(&token).is_empty() {
-        assert!(Instant::now() < deadline, "the stand-in tool never started");
-    }
+    tool_started(&case, &id, ".tool-started");
     crate::sandbox::access_store::hidden::save(
         &case.db,
         case.workspace.project.as_str(),
@@ -839,30 +838,14 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
     let token = token(&case);
     stand_in_cargo(
         &case,
-        &format!("/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; sleep 60' {token}"),
+        &format!(
+            "/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; open(my $f, \">\", \".version-started\") or die; close($f); sleep 60' {token}"
+        ),
         "",
         Duration::from_secs(90),
     );
-    let running = |token: &str| {
-        kernel_processes::spawn_gate::output(
-            Command::new("/usr/bin/pgrep")
-                .args(["-f", token])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap()
-        .status
-        .success()
-    };
     let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !running(&token) {
-        assert!(
-            Instant::now() < deadline,
-            "the stand-in version probe never started"
-        );
-    }
+    tool_started(&case, &id, ".version-started");
     crate::sandbox::access_store::hidden::save(
         &case.db,
         case.workspace.project.as_str(),
@@ -978,6 +961,28 @@ fn a_control_character_in_a_lockfile_folder_reads_replaced_and_the_note_stays_bo
     assert!(!note.contains(char::is_control), "{note}");
     assert!(note.contains(" more could not be updated automatically because cargo failed"));
     assert!(note.len() <= crate::team::NOTE_BYTES_MAX, "{}", note.len());
+}
+
+/// Waits until a set's stand-in tool has written its start mark in the regeneration's
+/// worktree, for at most `REGENERATED_WITHIN`. A regeneration that ends before the mark
+/// fails the row at once, naming the set's state, since its tool can no longer start.
+/// Inputs: the case, the set and the mark's file name. Output: none; panics on either.
+#[cfg(target_os = "macos")]
+pub(super) fn tool_started(case: &Case, id: &ChangeSetId, mark: &str) {
+    let started = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{}", id.as_str()))
+        .join(mark);
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while !started.exists() {
+        assert!(
+            lockfiles::is_running(id) || started.exists(),
+            "the regeneration ended before its tool wrote {mark}: the set is {:?}",
+            case.view(id).state
+        );
+        assert!(Instant::now() < deadline, "the tool never wrote {mark}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[path = "prune_rows.rs"]
