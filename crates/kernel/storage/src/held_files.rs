@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -12,7 +11,7 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 /// descriptor of engine.db drops every POSIX lock this process holds on it, those of its
 /// live SQLite connections included.
 struct Held {
-    files: BTreeMap<(u64, u64), Arc<File>>,
+    files: BTreeMap<(rustix::fs::Dev, u64), Arc<File>>,
     spares: Vec<File>,
 }
 
@@ -30,7 +29,7 @@ pub fn held_file(parent: impl AsFd, name: &Path) -> Result<Arc<File>, std::io::E
     let parent = parent.as_fd();
     let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
     if let Ok(named) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
-        && let Some(file) = held.files.get(&(device(&named), named.st_ino))
+        && let Some(file) = held.files.get(&(named.st_dev, named.st_ino))
     {
         return Ok(Arc::clone(file));
     }
@@ -40,14 +39,14 @@ pub fn held_file(parent: impl AsFd, name: &Path) -> Result<Arc<File>, std::io::E
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )?);
-    let opened = match file.metadata() {
+    let opened = match rustix::fs::fstat(&file) {
         Ok(opened) => opened,
         Err(cause) => {
             held.spares.push(file);
-            return Err(cause);
+            return Err(cause.into());
         }
     };
-    let key = (opened.dev(), opened.ino());
+    let key = (opened.st_dev, opened.st_ino);
     assert!(key.1 != 0);
     if let Some(kept) = held.files.get(&key) {
         let kept = Arc::clone(kept);
@@ -57,20 +56,6 @@ pub fn held_file(parent: impl AsFd, name: &Path) -> Result<Arc<File>, std::io::E
     let file = Arc::new(file);
     held.files.insert(key, Arc::clone(&file));
     Ok(file)
-}
-
-/// The device of a stat as the u64 that `MetadataExt::dev` gives, where the platform
-/// keeps it as a narrower signed type. Input: the stat. Output: the device.
-#[cfg(target_os = "macos")]
-fn device(stat: &rustix::fs::Stat) -> u64 {
-    stat.st_dev as u64
-}
-
-/// The device of a stat, already the u64 that `MetadataExt::dev` gives on this platform.
-/// Input: the stat. Output: the device.
-#[cfg(not(target_os = "macos"))]
-fn device(stat: &rustix::fs::Stat) -> u64 {
-    stat.st_dev
 }
 
 #[cfg(test)]
