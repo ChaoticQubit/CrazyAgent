@@ -1694,9 +1694,10 @@ impl Installed {
             let root = held.insert(windows::adopt_root(&files.home)?);
             #[cfg(unix)]
             crate::harnesses::launch::validate_home(&files.home)?;
+            #[cfg(unix)]
             let lock = lock(&files.home)?;
             #[cfg(windows)]
-            locked_in(&lock, root.file())?;
+            let lock = windows::lock_held(root, false)?;
             lock
         };
         Ok(Self {
@@ -2976,13 +2977,10 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         let root = held.insert(windows::adopt_root(home)?);
         #[cfg(unix)]
         crate::harnesses::launch::validate_home(home)?;
+        #[cfg(unix)]
         let lock = lock(home)?;
         #[cfg(windows)]
-        locked_in(&lock, root.file())?;
-        #[cfg(windows)]
-        if drivers::piped(harness) == Ok(Piped::Codex) {
-            windows::remove_copies_held(root)?;
-        }
+        let lock = windows::lock_held(root, drivers::piped(harness) == Ok(Piped::Codex))?;
         (lock, Vec::new())
     };
     #[cfg(unix)]
@@ -3559,4 +3557,4 @@ mod installed;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-use windows::{lock, locked_in};
+use windows::lock;

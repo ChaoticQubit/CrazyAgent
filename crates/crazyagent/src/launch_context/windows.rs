@@ -48,6 +48,26 @@ pub(super) fn lock(home: &Path) -> Result<File, LaunchError> {
     }
 }
 
+/// Opens and locks the launch lock in a held home at the place read again from its handle,
+/// so a junction above the home repointed after the hold reaches nothing, confirms the lock
+/// is the held home's own, then for Codex clears an earlier run's copies through the hold.
+/// Inputs: the held home and Codex. Output: the locked file, `launch_context_unsafe`,
+/// `launch_home_busy` or [`SKILLS_KEPT`].
+pub(super) fn lock_held(
+    root: &crate::engine::bootstrap::held::Folder,
+    codex: bool,
+) -> Result<File, LaunchError> {
+    let place = root
+        .place_now()
+        .map_err(|_| failure("launch_context_unsafe"))?;
+    let lock = lock(place)?;
+    locked_in(&lock, root.file())?;
+    if codex {
+        remove_copies_held(root)?;
+    }
+    Ok(lock)
+}
+
 /// Installs a Claude Code or Codex launch with tools off in a home `validate_home` passed,
 /// every write held: the home is held and judged as itself, the lock must sit in it, Codex's
 /// skills, the launch folder and a process's home are cleared through it, links as
@@ -64,11 +84,7 @@ pub(super) fn install(
         return Err(failure("launch_context_unavailable"));
     }
     let root = Folder::root_judged_by(home, held_home_judge).map_err(held_failure)?;
-    let lock = lock(home)?;
-    locked_in(&lock, root.file())?;
-    if codex {
-        remove_copies_held(&root)?;
-    }
+    let lock = lock_held(&root, codex)?;
     let state = Name::constant(STATE);
     match root.remove_tree_unjudged(&state, TREE_NAMES_MAX) {
         Ok(()) | Err(HeldError::Missing) => {}
@@ -181,9 +197,7 @@ pub(super) fn adopt_root(
 /// Removes the skills an earlier Codex run left in a held home, whatever their owner, links
 /// as themselves, and makes an empty `skills` again with the home's inheritable list.
 /// Input: the held home. Output: Ok, or [`SKILLS_KEPT`] when anything stays.
-pub(super) fn remove_copies_held(
-    root: &crate::engine::bootstrap::held::Folder,
-) -> Result<(), LaunchError> {
+fn remove_copies_held(root: &crate::engine::bootstrap::held::Folder) -> Result<(), LaunchError> {
     use crate::engine::bootstrap::held::{HeldError, Name, TREE_NAMES_MAX};
     let skills = Name::constant("skills");
     match root.remove_tree_unjudged(&skills, TREE_NAMES_MAX) {

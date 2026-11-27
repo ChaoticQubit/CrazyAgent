@@ -1,3 +1,4 @@
+use super::windows::locked_in;
 use super::*;
 use crazyagent_win_sandbox::private;
 use kernel_sandbox::policy::HomeCaches;
@@ -1393,8 +1394,7 @@ fn a_windows_launch_lock_taken_after_a_junction_repoint_stays_in_the_held_home()
     let root = windows::adopt_root(&link.join("home")).unwrap();
     std::fs::remove_dir(&link).unwrap();
     junction(&link, &second);
-    let taken =
-        lock(&link.join("home")).and_then(|lock| locked_in(&lock, root.file()).map(|()| lock));
+    let taken = windows::lock_held(&root, false);
     assert!(!other.join(LOCK).exists());
     let lock = taken.unwrap();
     assert!(held_home.join(LOCK).is_file());
