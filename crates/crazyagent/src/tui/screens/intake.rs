@@ -373,11 +373,7 @@ mod tests {
 
     #[test]
     fn the_tui_add_warnings_match_the_desktop_map_word_for_word() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/desktop/src/api-intake.ts"
-        ))
-        .unwrap();
+        let source = include_str!("../../../../../apps/desktop/src/api-intake.ts");
         let start = source.find("export const ADD_WARNINGS = {").unwrap();
         let body = &source[start..];
         let body = &body[..body.find("\n} as const;").unwrap()];
@@ -441,11 +437,7 @@ mod tests {
 
     #[test]
     fn the_publish_judge_refusals_read_the_same_in_the_tui_and_the_desktop() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/desktop/src/api-intake.ts"
-        ))
-        .unwrap();
+        let source = include_str!("../../../../../apps/desktop/src/api-intake.ts");
         for code in [
             "github_publish_nested_repository",
             "github_publish_not_plain_repo",
