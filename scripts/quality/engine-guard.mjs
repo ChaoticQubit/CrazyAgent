@@ -115,11 +115,11 @@ export function scan(file, text, whole = false) {
 }
 
 /**
- * Judges scan results against the allowlist of `path#fn` to the guards that cover it, at most
- * `ALLOW_MAX` entries: an unguarded install function needs an entry; an entry needs a list,
- * each a `path.rs#fn` whose functions all guard, or a reason naming a `path.rs#fn` that still
- * exists; an entry whose function holds no unguarded install must go. Inputs: a map of path
- * to its `scan` result, and the allowlist. Output: one line per problem, sorted.
+ * Judges scan results against the allowlist of `path#fn` to `{ sites, guards }`, at most
+ * `ALLOW_MAX` entries: an unguarded install function needs an entry pinning its count of
+ * unguarded installs; each guard is a `path.rs#fn` whose functions all guard, or a reason
+ * naming a `path.rs#fn` that still exists. Inputs: a map of path to its `scan` result, and
+ * the allowlist. Output: one line per problem, sorted; empty when the tree holds it.
  */
 export function check(found, allow) {
   assert.ok(found instanceof Map, "results come as a map of path to scan result");
@@ -146,13 +146,20 @@ export function check(found, allow) {
       );
     }
   }
-  for (const [key, covers] of Object.entries(allow)) {
-    if (!Array.isArray(covers) || covers.length === 0) {
-      problems.push(`${key}: entry ${JSON.stringify(covers)} is not a list of guards`);
+  for (const [key, entry] of Object.entries(allow)) {
+    const covers = entry?.guards;
+    const pinned = entry?.sites;
+    const shaped = Number.isInteger(pinned) && pinned >= 1 && Array.isArray(covers);
+    if (!shaped || covers.length === 0 || Object.keys(entry).length !== 2) {
+      problems.push(`${key}: entry ${JSON.stringify(entry)} is not { sites, guards }`);
       continue;
     }
-    if (!unguarded.has(key)) {
+    const count = unguarded.get(key)?.length ?? 0;
+    if (count === 0) {
       problems.push(`${key}: holds no unguarded install; remove its entry`);
+    } else if (count !== pinned) {
+      const lines = unguarded.get(key).join(",");
+      problems.push(`${key}: ${count} unguarded installs (lines ${lines}), entry pins ${pinned}`);
     }
     for (const cover of covers) {
       const named = typeof cover === "string" ? NAMED.exec(cover) : null;
@@ -177,12 +184,12 @@ export function check(found, allow) {
 
 /**
  * Reads the allowlist of a repository. Input: the repository root.
- * Output: the object of `path#fn` to guards; throws when it is not a JSON object.
+ * Output: the object of `path#fn` to entries; throws when it is not a JSON object.
  */
 function readAllowlist(root) {
   const allow = JSON.parse(readFileSync(path.join(root, ALLOWLIST), "utf8"));
   if (allow === null || typeof allow !== "object" || Array.isArray(allow)) {
-    throw new Error(`${ALLOWLIST} must be a JSON object of path#fn to guards`);
+    throw new Error(`${ALLOWLIST} must be a JSON object of path#fn to { sites, guards }`);
   }
   return allow;
 }
@@ -237,7 +244,7 @@ function main() {
     for (const line of problems) {
       process.stderr.write(`${line}\n`);
     }
-    process.stderr.write(`${problems.length} unguarded sandbox install(s) (${ALLOWLIST})\n`);
+    process.stderr.write(`${problems.length} engine guard problem(s) (${ALLOWLIST})\n`);
     process.exit(1);
   }
   process.stdout.write("every sandbox install is guarded against the engine root\n");

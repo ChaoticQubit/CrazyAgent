@@ -44,6 +44,14 @@ function repository(files, allow) {
   return root;
 }
 
+/**
+ * An allowlist entry for a function with one unguarded install. Input: its guards.
+ * Output: the entry.
+ */
+function pin(guards) {
+  return { sites: 1, guards };
+}
+
 test("an unguarded sandbox install fails with its line; a guarded one passes", () => {
   const bare = scan(FILE, builder("launch", false));
   assert.deepEqual(bare.sites, [{ line: 4, fn: "launch", guarded: false }]);
@@ -96,7 +104,7 @@ test("an allowlist past its most entries fails, at the most it passes", () => {
   const found = new Map([[FILE, scan(FILE, builder("launch", true))]]);
   const reasons = (count) =>
     Object.fromEntries(
-      Array.from({ length: count }, (_, at) => [`${FILE}#gone${at}`, [`${FILE}#launch`]]),
+      Array.from({ length: count }, (_, at) => [`${FILE}#gone${at}`, pin([`${FILE}#launch`])]),
     );
   const at = check(found, reasons(ALLOW_MAX));
   assert.ok(at.every((line) => line.endsWith("holds no unguarded install; remove its entry")));
@@ -141,28 +149,61 @@ test("an allowlist entry needs a guarding function or a reason, and goes once gu
     [guard, scan(guard, builder("guarding", true) + builder("bare", false).replace("ins", "x"))],
   ]);
   const key = `${FILE}#launch`;
-  assert.deepEqual(check(found, { [key]: [`${guard}#guarding`] }), []);
-  assert.deepEqual(check(found, { [key]: [`installs what ${guard}#bare built`] }), []);
-  assert.deepEqual(check(found, { [key]: ["installs what its caller built"] }), [
+  assert.deepEqual(check(found, { [key]: pin([`${guard}#guarding`]) }), []);
+  assert.deepEqual(check(found, { [key]: pin([`installs what ${guard}#bare built`]) }), []);
+  assert.deepEqual(check(found, { [key]: pin(["installs what its caller built"]) }), [
     `${key}: reason names no function that still exists (none)`,
   ]);
-  assert.deepEqual(check(found, { [key]: [`installs what ${guard}#gone built`] }), [
+  assert.deepEqual(check(found, { [key]: pin([`installs what ${guard}#gone built`]) }), [
     `${key}: reason names no function that still exists (${guard}#gone)`,
   ]);
-  assert.deepEqual(check(found, { [key]: [`${guard}#bare`] }), [
+  assert.deepEqual(check(found, { [key]: pin([`${guard}#bare`]) }), [
     `${key}: guard ${guard}#bare holds no guard_engine`,
   ]);
-  assert.deepEqual(check(found, { [key]: [`${guard}#gone`] }), [
+  assert.deepEqual(check(found, { [key]: pin([`${guard}#gone`]) }), [
     `${key}: guard ${guard}#gone names no function`,
   ]);
-  assert.deepEqual(check(found, { [key]: [] }), [`${key}: entry [] is not a list of guards`]);
-  assert.deepEqual(check(found, { [key]: [" "] }), [
+  const empty = { sites: 1, guards: [] };
+  assert.deepEqual(check(found, { [key]: empty }), [
+    `${key}: entry ${JSON.stringify(empty)} is not { sites, guards }`,
+  ]);
+  assert.deepEqual(check(found, { [key]: [`${guard}#guarding`] }), [
+    `${key}: entry ["${guard}#guarding"] is not { sites, guards }`,
+  ]);
+  assert.deepEqual(check(found, { [key]: pin([" "]) }), [
     `${key}: guard " " is not a reason or a function`,
   ]);
   const fixed = new Map([[FILE, scan(FILE, builder("launch", true))]]);
-  assert.deepEqual(check(fixed, { [key]: [`${FILE}#launch`] }), [
+  assert.deepEqual(check(fixed, { [key]: pin([`${FILE}#launch`]) }), [
     `${key}: holds no unguarded install; remove its entry`,
   ]);
+});
+
+test("a new install in an allowlisted function changes its pinned count and fails", () => {
+  const guard = "crates/a/src/context_mode.rs";
+  const wrap = "crates/a/src/context_mode/unix.rs";
+  const reason = "crates/a/src/runner.rs";
+  const once = builder("npm_wrap", false);
+  const twice = once.replace("    Ok(())\n", "    sandbox.install(other)?;\n    Ok(())\n");
+  const tree = (wrapped, launched) =>
+    new Map([
+      [guard, scan(guard, builder("npm_command", true))],
+      [wrap, scan(wrap, wrapped)],
+      [reason, scan(reason, launched.replaceAll("npm_wrap", "launch_leased"))],
+    ]);
+  const allow = {
+    [`${wrap}#npm_wrap`]: pin([`${guard}#npm_command`]),
+    [`${reason}#launch_leased`]: pin([`installs a launch context: ${guard}#npm_command`]),
+  };
+  assert.deepEqual(check(tree(once, once), allow), []);
+  assert.deepEqual(check(tree(twice, once), allow), [
+    `${wrap}#npm_wrap: 2 unguarded installs (lines 4,5), entry pins 1`,
+  ]);
+  assert.deepEqual(check(tree(once, twice), allow), [
+    `${reason}#launch_leased: 2 unguarded installs (lines 4,5), entry pins 1`,
+  ]);
+  const both = { ...allow, [`${wrap}#npm_wrap`]: { sites: 2, guards: [`${guard}#npm_command`] } };
+  assert.deepEqual(check(tree(twice, once), both), []);
 });
 
 test("a guard name shared by two functions guards only when both do", () => {
@@ -172,7 +213,7 @@ test("a guard name shared by two functions guards only when both do", () => {
     [FILE, scan(FILE, builder("launch", false))],
     [guard, scan(guard, twice)],
   ]);
-  assert.deepEqual(check(found, { [`${FILE}#launch`]: [`${guard}#prepare`] }), [
+  assert.deepEqual(check(found, { [`${FILE}#launch`]: pin([`${guard}#prepare`]) }), [
     `${guard}:11: fn prepare installs a sandbox with no guard_engine; ${ADVICE}`,
     `${FILE}#launch: guard ${guard}#prepare holds no guard_engine`,
   ]);
@@ -213,7 +254,7 @@ test("the command exits 1 with the problems on a planted builder and 0 on a clea
     const failed = spawnSync(process.execPath, [script, root], { encoding: "utf8" });
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /fn launch installs a sandbox with no guard_engine/);
-    assert.match(failed.stderr, /1 unguarded sandbox install\(s\)/);
+    assert.match(failed.stderr, /1 engine guard problem\(s\)/);
     writeFileSync(path.join(root, FILE), builder("launch", true));
     const passed = spawnSync(process.execPath, [script, root], { encoding: "utf8" });
     assert.equal(passed.status, 0, passed.stderr);

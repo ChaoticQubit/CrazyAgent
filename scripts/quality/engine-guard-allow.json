@@ -1,27 +1,51 @@
 {
-  "crates/crazyagent/src/context_mode/unix.rs#npm_wrap": [
-    "crates/crazyagent/src/context_mode.rs#npm_command"
-  ],
-  "crates/crazyagent/src/context_mode/windows.rs#npm_wrap": [
-    "crates/crazyagent/src/context_mode.rs#npm_command"
-  ],
-  "crates/crazyagent/src/harnesses/launch.rs#command_with_context": [
-    "installs a launch context, no sandbox: crates/crazyagent/src/launch_context.rs#install"
-  ],
-  "crates/crazyagent/src/research/runner.rs#add_worktree_at": [
-    "crates/crazyagent/src/research/runner.rs#launch_leased",
-    "crates/crazyagent/src/team/runtime.rs#prepare"
-  ],
-  "crates/crazyagent/src/research/runner.rs#launch_leased": [
-    "installs a launch context, no sandbox: crates/crazyagent/src/launch_context.rs#install"
-  ],
-  "crates/kernel/sandbox/src/profile/installed.rs#install": [
-    "installs the sandbox its caller built, through crates/kernel/sandbox/src/profile/rules.rs#install; each InstalledSandbox::install call is its own site"
-  ],
-  "crates/kernel/sandbox/src/profile/installed.rs#install_with_grants": [
-    "installs the sandbox its caller built, through crates/kernel/sandbox/src/windows/profile.rs#install; each InstalledSandbox::install call is its own site"
-  ],
-  "crates/kernel/sandbox/src/windows/owner_git.rs#install": [
-    "crates/kernel/sandbox/src/windows/owner_git.rs#policy"
-  ]
+  "crates/crazyagent/src/context_mode/unix.rs#npm_wrap": {
+    "sites": 2,
+    "guards": [
+      "crates/crazyagent/src/context_mode.rs#npm_command"
+    ]
+  },
+  "crates/crazyagent/src/context_mode/windows.rs#npm_wrap": {
+    "sites": 1,
+    "guards": [
+      "crates/crazyagent/src/context_mode.rs#npm_command"
+    ]
+  },
+  "crates/crazyagent/src/harnesses/launch.rs#command_with_context": {
+    "sites": 1,
+    "guards": [
+      "installs a launch context, no sandbox: crates/crazyagent/src/launch_context.rs#install"
+    ]
+  },
+  "crates/crazyagent/src/research/runner.rs#add_worktree_at": {
+    "sites": 1,
+    "guards": [
+      "crates/crazyagent/src/research/runner.rs#launch_leased",
+      "crates/crazyagent/src/team/runtime.rs#prepare"
+    ]
+  },
+  "crates/crazyagent/src/research/runner.rs#launch_leased": {
+    "sites": 1,
+    "guards": [
+      "installs a launch context, no sandbox: crates/crazyagent/src/launch_context.rs#install"
+    ]
+  },
+  "crates/kernel/sandbox/src/profile/installed.rs#install": {
+    "sites": 1,
+    "guards": [
+      "installs the sandbox its caller built, through crates/kernel/sandbox/src/profile/rules.rs#install; each InstalledSandbox::install call is its own site"
+    ]
+  },
+  "crates/kernel/sandbox/src/profile/installed.rs#install_with_grants": {
+    "sites": 1,
+    "guards": [
+      "installs the sandbox its caller built, through crates/kernel/sandbox/src/windows/profile.rs#install; each InstalledSandbox::install call is its own site"
+    ]
+  },
+  "crates/kernel/sandbox/src/windows/owner_git.rs#install": {
+    "sites": 1,
+    "guards": [
+      "crates/kernel/sandbox/src/windows/owner_git.rs#policy"
+    ]
+  }
 }
