@@ -4,6 +4,7 @@ pub mod permission_fix;
 mod places;
 pub use places::{in_temp_of, npm_shims};
 pub mod probe;
+mod script;
 #[cfg(test)]
 pub(crate) mod stub;
 #[cfg(any(test, feature = "test-support"))]
@@ -529,8 +530,14 @@ pub enum Kind {
         interpreter: Box<Resolved>,
         arguments: Vec<String>,
         by_name: bool,
+        word: ScriptWord,
     },
 }
+
+/// The word a script's interpreter is handed for it, made only by [`Resolved::script`], so no
+/// script holds a word its interpreter cannot start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptWord(OsString);
 
 /// One tool the resolver found: the entry as found, the real file it names and how it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -560,12 +567,12 @@ impl Resolved {
             Kind::Script {
                 interpreter,
                 arguments,
+                word,
                 ..
             } => {
                 let mut words = interpreter.argv();
                 words.extend(arguments.iter().map(OsString::from));
-                let script = places::script_word(&self.program);
-                words.push(script.expect("a resolved script has a plain word").into());
+                words.push(word.0.clone());
                 words
             }
         };
@@ -988,18 +995,16 @@ pub(crate) fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Re
     if real_name.is_some_and(launches_by_name) || launches_by_name(&interpreter_name) {
         return Err(refused(program.as_path(), Refusal::FirstLine));
     }
-    if places::script_word(&program).is_none() {
-        return Err(refused(program.as_path(), Refusal::Verbatim));
-    }
-    Ok(Resolved {
-        entry: entry.to_path_buf(),
-        program,
-        kind: Kind::Script {
-            interpreter: Box::new(interpreter),
-            arguments: shebang.arguments,
-            by_name: shebang.by_name.is_some() || through_shim,
-        },
-    })
+    let by_name = shebang.by_name.is_some() || through_shim;
+    let entry = entry.to_path_buf();
+    Resolved::script(
+        entry,
+        program.clone(),
+        interpreter,
+        shebang.arguments,
+        by_name,
+    )
+    .map_err(|why| refused(program.as_path(), why))
 }
 
 /// A step a row runs once in `entry_at` between reading an entry's real file and checking

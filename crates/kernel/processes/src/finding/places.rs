@@ -511,13 +511,3 @@ pub fn in_temp_of(hooks: &FindingHooks, folder: &Path, temps: &[PathBuf]) -> boo
         .chain(real.as_deref())
         .any(|folder| under_temp(hooks, folder, temps))
 }
-
-/// The word an interpreter is handed for a script's real file: on Windows the plain drive
-/// spelling of its verbatim path, which Node needs to start a main script, kept only when it
-/// names the same file ([`dunce::simplified`]); elsewhere the file as it is. Input: the real
-/// file. Output: the word, none when only the verbatim `\\?\` form names the file.
-pub(super) fn script_word(program: &Path) -> Option<&Path> {
-    let plain = dunce::simplified(program);
-    let verbatim = plain.as_os_str().as_encoded_bytes().starts_with(br"\\?\");
-    (!verbatim).then_some(plain)
-}

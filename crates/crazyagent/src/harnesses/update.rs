@@ -594,6 +594,7 @@ fn vetted(
             interpreter,
             arguments,
             by_name,
+            ..
         } = at.kind
         else {
             return Ok(program);
