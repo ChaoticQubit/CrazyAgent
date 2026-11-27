@@ -451,6 +451,7 @@ fn a_live_master_s_merge_lands_on_the_land_on_branch_through_the_engine_binary()
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = root.path().canonicalize().unwrap();
+    let _owner = owner_support::owner_on(&base, &base);
     let mut connection = Connection::open(base.join("engine.db")).unwrap();
     crazyagent::team::initialize(&connection).unwrap();
     crazyagent::coord::ensure(&connection).unwrap();
@@ -500,7 +501,6 @@ fn a_live_master_s_merge_lands_on_the_land_on_branch_through_the_engine_binary()
     let master = agent(&connection, "master", "working");
     let harness = agent(&connection, "sub", "stopped");
     let label = named(&connection, &project, harness, "docs-writer");
-    let _owner = owner_support::owner_on(&base, &base);
     let db = crazyagent::landing::open(&base).unwrap();
     let worktree = base.join(format!("agent-{harness}"));
     let branch = crazyagent::landing::claim_task_branch(&db, &folder, &worktree, "docs").unwrap();
