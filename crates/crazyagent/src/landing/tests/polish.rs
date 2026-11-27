@@ -921,10 +921,10 @@ pub(super) fn cargo_lock_because(why: &str, set: &ChangeSetView) -> String {
     let agent = &set.agent.label;
     match why {
         "tool" => format!(
-            "Cargo.lock could not be updated automatically because cargo failed or took too long, so {agent} will fix them itself."
+            "Cargo.lock could not be updated automatically because cargo failed or took too long, so {agent} will fix it itself."
         ),
-        "hidden" => "Cargo.lock were not updated automatically because you hid a folder while cargo was running, so nothing it wrote was kept.".to_owned(),
-        "outside" => "Cargo.lock were not updated automatically because cargo also changed other files, so nothing it wrote was kept.".to_owned(),
+        "hidden" => "Cargo.lock was not updated automatically because you hid a folder while cargo was running, so nothing it wrote was kept.".to_owned(),
+        "outside" => "Cargo.lock was not updated automatically because cargo also changed other files, so nothing it wrote was kept.".to_owned(),
         other => panic!("no owner sentence for {other}"),
     }
 }
@@ -956,7 +956,7 @@ fn a_lockfile_tool_that_writes_another_file_tells_the_owner_why_the_set_went_bac
 
 /// Asserts the last regeneration on this thread refused for `why`. Input: the reason.
 /// Output: none.
-pub(super) fn assert_refused(why: lockfiles::Why) {
+pub(super) fn assert_refused(why: went_back::Why) {
     assert_eq!(lockfiles::REFUSED.get(), Some(why));
 }
 
@@ -967,13 +967,13 @@ pub(super) fn assert_refused(why: lockfiles::Why) {
 fn a_control_character_in_a_lockfile_folder_reads_replaced_and_the_note_stays_bounded() {
     let mut files = vec!["sub\u{7}dir/Cargo.lock".to_owned()];
     files.extend((1..16).map(|n| format!("{}{n}/Cargo.lock", "d".repeat(300))));
-    let refusal = lockfiles::Refusal {
-        why: lockfiles::Why::Tool,
+    let refusal = went_back::Refusal {
+        why: went_back::Why::Tool,
         tool: "cargo",
         files,
     };
     let agent = "a".repeat(crate::agents::LABEL_BYTES_MAX);
-    let note = lockfiles::went_back_note(&agent, Some(&refusal));
+    let note = went_back::went_back_note(&agent, Some(&refusal));
     assert!(note.contains("sub\u{fffd}dir/Cargo.lock, "), "{note}");
     assert!(!note.contains(char::is_control), "{note}");
     assert!(note.contains(" more could not be updated automatically because cargo failed"));

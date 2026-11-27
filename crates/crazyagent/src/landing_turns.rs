@@ -151,7 +151,7 @@ fn catch_up_with(
 fn after_regeneration(
     db: &Connection,
     id: &ChangeSetId,
-    refusal: Option<&landing::lockfiles::Refusal>,
+    refusal: Option<&landing::went_back::Refusal>,
     settings: Option<&(PathBuf, PathBuf)>,
 ) {
     let after = refusal
@@ -175,11 +175,11 @@ fn after_regeneration(
 fn tell_owner_it_went_back(
     db: &Connection,
     id: &ChangeSetId,
-    refusal: Option<&landing::lockfiles::Refusal>,
+    refusal: Option<&landing::went_back::Refusal>,
 ) -> Result<(), EngineError> {
     let project = set_project(db, id)?;
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
-    let note = landing::lockfiles::went_back_note(&set.agent.label, refusal);
+    let note = landing::went_back::went_back_note(&set.agent.label, refusal);
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     crate::team::append_message(
         &tx,

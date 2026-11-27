@@ -25,7 +25,7 @@ mod hold;
 #[cfg(unix)]
 pub(crate) mod ide;
 #[cfg(unix)]
-pub(crate) mod lockfiles;
+mod lockfiles;
 #[cfg(unix)]
 mod merges;
 #[cfg(unix)]
@@ -43,6 +43,7 @@ mod store;
 mod subagent;
 #[cfg(all(test, unix))]
 mod tests;
+pub(crate) mod went_back;
 
 /// How long a discarded change set stays restorable before its ref is deleted.
 pub const RESTORE_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -1825,11 +1826,10 @@ pub(crate) fn conflicts_with_main(
 }
 
 /// What runs after a lockfile regeneration that landed nothing, on its own thread with its
-/// own store: the set, the refusal that hands the clash to the agent, or None when the set
-/// or main moved meanwhile and another regeneration may start, and the owner's settings
-/// files the regeneration was given.
+/// own store: the set, the refusal that hands the clash to the agent or None when the set or
+/// main moved and another may start, and the owner's settings files it was given.
 pub(crate) type AfterRegeneration =
-    fn(&Connection, &ChangeSetId, Option<&lockfiles::Refusal>, Option<&(PathBuf, PathBuf)>);
+    fn(&Connection, &ChangeSetId, Option<&went_back::Refusal>, Option<&(PathBuf, PathBuf)>);
 
 /// Moves a sub-agent whose turn just ended and left nothing pending onto the tip of its
 /// Land on branch when its linked worktree carries only landed work (DEC-147.6); a step
