@@ -353,59 +353,6 @@ impl Manifest {
     }
 }
 
-/// The engine.db files this process has opened for custody, by device and inode, and
-/// any second descriptor of one of them opened in a race. None is ever closed: closing
-/// any descriptor of engine.db drops every POSIX lock this process holds on it, those of
-/// its live SQLite connections included.
-struct HeldDatabases {
-    files: BTreeMap<(u64, u64), std::sync::Arc<File>>,
-    spares: Vec<File>,
-}
-
-static HELD_DATABASES: std::sync::Mutex<HeldDatabases> = std::sync::Mutex::new(HeldDatabases {
-    files: BTreeMap::new(),
-    spares: Vec::new(),
-});
-
-/// Gives the custody's engine.db as a file this process keeps open for its whole life:
-/// the one already held for the inode the name now has, or a new read-only open without
-/// following a link, kept under its own device and inode before any check, so no capture,
-/// a refused one included, ever closes a descriptor of engine.db. Inputs: the folder and
-/// the name. Output: the shared file, or `native_profile_custody_unsafe`.
-fn held_database(parent: &File, name: &OsStr) -> Result<std::sync::Arc<File>, EngineError> {
-    let mut held = HELD_DATABASES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Ok(named) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
-        && let Some(file) = held.files.get(&(named.st_dev as u64, named.st_ino))
-    {
-        return Ok(std::sync::Arc::clone(file));
-    }
-    let file = File::from(
-        rustix::fs::openat(
-            parent,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(unsafe_custody)?,
-    );
-    let Ok(opened) = file.metadata() else {
-        held.spares.push(file);
-        return Err(failure("native_profile_custody_unsafe"));
-    };
-    let key = (opened.dev(), opened.ino());
-    assert!(key.1 != 0);
-    if let Some(kept) = held.files.get(&key) {
-        let kept = std::sync::Arc::clone(kept);
-        held.spares.push(file);
-        return Ok(kept);
-    }
-    let file = std::sync::Arc::new(file);
-    held.files.insert(key, std::sync::Arc::clone(&file));
-    Ok(file)
-}
-
 pub(crate) struct NativeProfileCustody {
     anchor: Anchor,
     database: std::sync::Arc<File>,
@@ -611,7 +558,9 @@ impl NativeProfileCustody {
             .file_name()
             .ok_or_else(|| failure("native_profile_custody_unsafe"))?
             .to_owned();
-        let database = held_database(&anchor.directory, &database_name)?;
+        let database =
+            kernel_storage::held_files::held_file(&anchor.directory, Path::new(&database_name))
+                .map_err(unsafe_custody)?;
         let custody = Self {
             anchor,
             database,
