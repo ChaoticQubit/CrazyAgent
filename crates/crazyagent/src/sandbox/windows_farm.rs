@@ -112,6 +112,7 @@ pub(crate) fn installed(place: &Path, project: &Path, git: &Path) -> OwnerGit {
     std::fs::create_dir_all(&grants).unwrap();
     let owner = OwnerGit::install(
         &crate::sandbox::PROFILE_HOOKS,
+        place,
         &place.join(OWNER_GIT_FOLDER),
         project,
         git,

@@ -853,6 +853,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         OwnerGit::install(
             &crate::test_hooks::STAND_IN,
+            &made.root,
             &made.folder,
             project,
             &made.git,
@@ -956,6 +957,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         let owner = OwnerGit::install(
             &crate::test_hooks::STAND_IN,
+            &made.root,
             &made.folder,
             &made.project,
             &verbatim,
@@ -995,6 +997,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         match OwnerGit::install(
             &crate::test_hooks::STAND_IN,
+            &made.root,
             &made.folder,
             &made.project,
             &loose,
@@ -1008,6 +1011,32 @@ mod owner_git_rows {
         }
         let folder = canonical(&made.folder).unwrap();
         assert!(!places(&folder, &made.project).profile.exists());
+    }
+
+    /// Owner git for a project folder that is the engine root itself, as after the owner moves
+    /// the engine's data folder onto a project, is refused before any profile, since the
+    /// boundary would grant git write over the engine's files.
+    #[test]
+    fn owner_git_refuses_a_project_that_is_the_engine_root_before_any_profile() {
+        let made = made();
+        fs::write(made.root.join("engine.db"), "engine secret").unwrap();
+        let helper = std::env::current_exe().unwrap();
+        match OwnerGit::install(
+            &crate::test_hooks::STAND_IN,
+            &made.root,
+            &made.folder,
+            &made.root,
+            &made.git,
+            &helper,
+            &made.grants,
+        ) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert_eq!(reason, crate::paths::SECRET_ROOT_REFUSED)
+            }
+            other => panic!("expected the engine root refusal, got {other:?}"),
+        }
+        let folder = canonical(&made.folder).unwrap();
+        assert!(!places(&folder, &made.root).profile.exists());
     }
 
     /// Lays out a stand-in Git for Windows under `root`: each relative file is written empty
@@ -1036,6 +1065,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         match OwnerGit::install(
             &crate::test_hooks::STAND_IN,
+            &made.root,
             folder,
             project,
             git,
@@ -1079,6 +1109,7 @@ mod owner_git_rows {
             let helper = std::env::current_exe().unwrap();
             let owner = OwnerGit::install(
                 &crate::test_hooks::STAND_IN,
+                &made.root,
                 &made.folder,
                 &project,
                 &git,

@@ -149,11 +149,12 @@ pub struct OwnerGit {
 impl OwnerGit {
     /// Makes the project's places under `folder` and writes its boundary profile there for
     /// `git` in its plain form ([`plain_program`]), bound to `helper` and recording grants in
-    /// `grants`. Inputs: the owner-git folder, the project, git's absolute program, the helper
-    /// and the grants folder. Output: owner git, or the refusal: a project or git no boundary
-    /// can hold, or a missing helper.
+    /// `grants`. Inputs: the hooks, the engine root, the owner-git folder, the project, git's
+    /// absolute program, the helper and the grants folder. Output: owner git, or the refusal:
+    /// a project or git no boundary can hold, or a missing helper.
     pub fn install(
         hooks: &'static ProfileHooks,
+        _engine: &Path,
         folder: &Path,
         project: &Path,
         git: &Path,

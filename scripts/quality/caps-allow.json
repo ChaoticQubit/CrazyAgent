@@ -106,7 +106,7 @@
   "crates/crazyagent/src/team/master.rs": 2535,
   "crates/crazyagent/src/team/master/tests.rs": 6911,
   "crates/crazyagent/src/team/runtime.rs": 14708,
-  "crates/crazyagent/src/team/runtime/tests.rs": 34993,
+  "crates/crazyagent/src/team/runtime/tests.rs": 34945,
   "crates/crazyagent/src/team/tests.rs": 8277,
   "crates/crazyagent/src/team/tool.rs": 2363,
   "crates/crazyagent/src/team/tool/tests.rs": 1956,

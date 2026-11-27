@@ -53,6 +53,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         OwnerGit::install(
             &crate::sandbox::PROFILE_HOOKS,
+            &made.root,
             &made.folder,
             project,
             &made.git,
