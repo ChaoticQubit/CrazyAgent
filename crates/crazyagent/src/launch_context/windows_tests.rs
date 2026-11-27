@@ -1385,3 +1385,40 @@ fn a_windows_adopted_home_swapped_for_a_junction_is_refused() {
     );
     assert!(!target.join(LOCK).exists());
 }
+
+/// A context-less lock holds the home itself for as long as its guard lives: the guard
+/// names the home's held place, and the home cannot be renamed while it is held.
+#[test]
+fn a_windows_lock_only_guard_holds_its_home_while_it_lives() {
+    let (_temp, base) = base();
+    let home = private_home(&base, "home");
+    let guard = lock_only(&home, "codex").unwrap();
+    assert_eq!(guard.home_place(), Some(home.as_path()));
+    assert!(std::fs::rename(&home, base.join("aside")).is_err());
+    drop(guard);
+    std::fs::rename(&home, base.join("aside")).unwrap();
+}
+
+/// A context-less Codex lock taken through a junction above the home removes the earlier
+/// run's copies in the home it holds: once the junction is repointed, that home's `skills`
+/// is empty and the folder the junction names now keeps every byte of its own.
+#[test]
+fn a_windows_codex_lock_only_removes_copies_through_its_held_home_after_a_repoint() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let second = private_home(&base, "second");
+    let first_home = home_with_skill(&first, "first");
+    let second_home = home_with_skill(&second, "second");
+    let link = base.join("link");
+    junction(&link, &first);
+    let guard = lock_only(&link.join("home"), "codex").unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    assert!(skills_empty(&first_home));
+    assert_eq!(
+        std::fs::read_to_string(second_home.join("skills").join("kept.md")).unwrap(),
+        "second"
+    );
+    drop(guard);
+    drop(lock_only(&second_home, "claude-code").unwrap());
+}

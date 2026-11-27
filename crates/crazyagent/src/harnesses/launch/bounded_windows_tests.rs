@@ -1,6 +1,6 @@
 use super::{
     AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest, build,
-    claude_invocation, codex_invocation, listed_command,
+    claude_invocation, codex_invocation, listed_command, lone_command,
 };
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -550,5 +550,103 @@ fn a_windows_launch_through_another_spelling_of_a_legit_home_builds_on_its_held_
             .map(|(_, value)| value.clone());
         assert_eq!(config, Some(case.home.clone().into_os_string()));
         drop(held);
+    }
+}
+
+/// A junction above the home repointed after a context-less Codex launch took its lock
+/// leaves `CODEX_HOME` naming the home the lock holds, by its final path, never the folder
+/// the junction names now.
+#[test]
+fn a_windows_lone_codex_launch_names_its_held_home_after_a_repoint() {
+    let case = case();
+    let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+    let moved = linked_agent(&case);
+    let held = crate::launch_context::lock_only(&case.home, "codex").unwrap();
+    repoint_agent(&case);
+    let request = request(
+        &case,
+        "codex",
+        LaunchBoundary::Installed(boundary),
+        &case.home,
+        false,
+    );
+    let (_, environment) = codex_invocation(&request, Some(&held), None).unwrap();
+    let home = environment.iter().find(|(key, _)| *key == "CODEX_HOME");
+    assert_eq!(
+        home.map(|(_, value)| value.clone()),
+        Some(moved.into_os_string())
+    );
+    drop(held);
+}
+
+/// The same for a context-less Claude Code launch: its three home variables name the home
+/// its lock holds after the junction above it is repointed.
+#[test]
+fn a_windows_lone_claude_launch_names_its_held_home_after_a_repoint() {
+    let case = case();
+    let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+    let moved = linked_agent(&case);
+    let held = crate::launch_context::lock_only(&case.home, "claude-code").unwrap();
+    repoint_agent(&case);
+    let launch = LaunchBoundary::Installed(boundary);
+    let request = request(&case, "claude-code", launch, &case.home, false);
+    let (_, environment) = claude_invocation(&request, Some(&held), None);
+    for name in [
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "CLAUDE_CODE_TMPDIR",
+    ] {
+        let value = environment.iter().find(|(key, _)| *key == name);
+        assert_eq!(
+            value.map(|(_, value)| value.clone()),
+            Some(moved.clone().into_os_string()),
+            "{name}"
+        );
+    }
+    drop(held);
+}
+
+/// A context-less launch builds on the home its lock holds: with no junction it builds, and
+/// through a junction moved in after its boundary was installed it is refused at the
+/// boundary, since the held home is not the folder the sandbox grants.
+#[test]
+fn a_windows_lone_launch_builds_on_the_home_its_lock_holds() {
+    for harness in ["codex", "claude-code"] {
+        let plain = case();
+        let boundary = installed(&plain, &plain.project, &plain.home, "agent.sb");
+        let launch = LaunchBoundary::Installed(boundary);
+        let plain_request = request(&plain, harness, launch, &plain.home, false);
+        drop(lone_command(&plain_request).unwrap());
+        let case = case();
+        let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+        linked_agent(&case);
+        let launch = LaunchBoundary::Installed(boundary);
+        let linked_request = request(&case, harness, launch, &case.home, false);
+        assert_eq!(
+            lone_command(&linked_request).err().map(|error| error.0),
+            Some("launch_environment_refused"),
+            "{harness}"
+        );
+    }
+}
+
+/// A context-less launch with tools on keeps the empty MCP list it is built with, Codex's
+/// `mcp_servers={}` and Claude Code's empty `--mcp-config`, since its lock wrote no context.
+#[test]
+fn a_windows_lone_launch_with_tools_keeps_its_empty_mcp_list() {
+    for (harness, empty) in [
+        ("codex", "mcp_servers={}"),
+        ("claude-code", "{\"mcpServers\":{}}"),
+    ] {
+        let case = case();
+        let boundary = installed(&case, &case.project, &case.home, "agent.sb");
+        let launch = LaunchBoundary::Installed(boundary);
+        let tools_request = request(&case, harness, launch, &case.home, true);
+        let (command, lock) = lone_command(&tools_request).unwrap();
+        assert!(
+            command.get_args().any(|argument| argument == empty),
+            "{harness}"
+        );
+        drop(lock);
     }
 }
