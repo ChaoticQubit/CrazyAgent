@@ -5,10 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 
-/// Makes a temporary engine folder whose `engine.db` is in WAL, written in it and run by an
-/// engine host, as a running engine leaves it: macOS SQLite refuses a rollback-journal writer
-/// while a reader holds a read and readers on a WAL file never written in WAL, and settings
-/// saves are logged only behind a running host. Output: the folder's guard and canonical path.
+/// Makes a temporary engine folder whose `engine.db` is in WAL, holds the schemas every engine
+/// open makes and is run by an engine host, as a running engine leaves it: macOS SQLite
+/// refuses a rollback-journal writer while a reader holds a read and readers on a WAL file
+/// never written in WAL, and settings saves are logged only behind a running host. Output:
+/// the folder's guard and canonical path.
 fn root() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
@@ -20,6 +21,7 @@ fn root() -> (tempfile::TempDir, PathBuf) {
     database
         .execute_batch("CREATE TABLE written_in_wal(x); DROP TABLE written_in_wal;")
         .unwrap();
+    crate::storage::initialize_authority_schemas(&database).unwrap();
     crate::ide::log::seed(&database);
     (directory, root)
 }
