@@ -51,6 +51,33 @@ impl<'a, 'c> Appender<'a, 'c> {
         Self::begin(tx, revision, fence, known)
     }
 
+    /// Starts appending in an owner request's transaction whose signed next revision is not
+    /// yet in `state`: after the fence, it moves `state` from the revision before it to it in
+    /// one statement, refusing a store at any other revision, then opens at it, so the
+    /// revision the move just set is not read back. Inputs: the transaction, the next
+    /// revision, the fence and the name check. Output: the appender, the fence's refusal,
+    /// `state_log_revision_stale` or `state_log_revision_not_newer`.
+    pub fn owner_moving(
+        tx: &'a Transaction<'c>,
+        next: u64,
+        fence: FenceCheck,
+        known: KnownName,
+    ) -> Result<Self, StorageError> {
+        fence(tx)?;
+        let stale = || error("state_log_revision_stale");
+        let before = next.checked_sub(1).ok_or_else(stale)?;
+        let next_value = i64::try_from(next).map_err(error)?;
+        let before_value = i64::try_from(before).map_err(error)?;
+        let moved = tx
+            .prepare_cached("UPDATE state SET revision=?1 WHERE id=1 AND revision=?2")
+            .and_then(|mut statement| statement.execute(params![next_value, before_value]))
+            .map_err(error)?;
+        if moved != 1 {
+            return Err(stale());
+        }
+        Self::open(tx, next, fence, known)
+    }
+
     /// Starts appending in a transaction of a writer on its own connection, moving the
     /// `state` revision once for it after its fence is checked, and writing that revision's
     /// `events` row so clients see the change. The engine builds the row's body for the new
@@ -122,15 +149,22 @@ impl<'a, 'c> Appender<'a, 'c> {
         fence: FenceCheck,
         known: KnownName,
     ) -> Result<Self, StorageError> {
-        ensure(tx)?;
         if revision != state_revision(tx)? {
             return Err(error("state_log_revision_stale"));
         }
-        let last: Option<i64> = tx
-            .prepare_cached("SELECT revision FROM state_log ORDER BY seq DESC LIMIT 1")
-            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
-            .optional()
-            .map_err(error)?;
+        Self::open(tx, revision, fence, known)
+    }
+
+    /// Opens the appender at a revision already known to be the `state` revision: it must be
+    /// newer than the last logged one. Inputs: the transaction, the revision, the fence and
+    /// the name check. Output: the appender, or `state_log_revision_not_newer`.
+    fn open(
+        tx: &'a Transaction<'c>,
+        revision: u64,
+        fence: FenceCheck,
+        known: KnownName,
+    ) -> Result<Self, StorageError> {
+        let last = last_logged(tx)?;
         if revision == 0 || last.is_some_and(|last| revision <= last as u64) {
             return Err(error("state_log_revision_not_newer"));
         }
@@ -241,6 +275,35 @@ impl<'a, 'c> Appender<'a, 'c> {
         self.appended += 1;
         Ok(seq as u64)
     }
+}
+
+/// Reads the revision of the last logged event, creating the log table first only when the
+/// store has none, so a store that has one runs a single statement. Input: the connection.
+/// Output: the revision, none for an empty log, or the store's refusal.
+fn last_logged(db: &Connection) -> Result<Option<i64>, StorageError> {
+    let tail = || {
+        db.prepare_cached("SELECT revision FROM state_log ORDER BY seq DESC LIMIT 1")
+            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
+            .optional()
+    };
+    match tail() {
+        Err(failed) if log_missing(&failed) => {
+            ensure(db)?;
+            tail().map_err(error)
+        }
+        read => read.map_err(error),
+    }
+}
+
+/// Whether a refusal is SQLite's answer for a store with no `state_log` table. Input: the
+/// refusal. Output: true for that answer only.
+fn log_missing(failed: &rusqlite::Error) -> bool {
+    matches!(
+        failed,
+        rusqlite::Error::SqliteFailure(code, Some(message))
+            if code.extended_code == rusqlite::ffi::SQLITE_ERROR
+                && message == "no such table: state_log"
+    )
 }
 
 /// Reads the store's `state` revision. Input: the connection. Output: the revision.

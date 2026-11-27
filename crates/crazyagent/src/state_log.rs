@@ -107,6 +107,18 @@ pub fn owner<'a, 'c>(
     Ok(Appender::owner(tx, revision, hook(fence), known)?)
 }
 
+/// Starts appending in an owner request whose signed next revision is not yet in `state`:
+/// the kernel checks the fence, moves `state` from the revision before it to it and opens
+/// there. Inputs: the transaction, the next revision and the fence. Output: the appender, a
+/// fence refusal, `state_log_revision_stale` or `state_log_revision_not_newer`.
+pub(crate) fn owner_moving<'a, 'c>(
+    tx: &'a Transaction<'c>,
+    next: u64,
+    fence: Fence,
+) -> Result<Appender<'a, 'c>, EngineError> {
+    Ok(Appender::owner_moving(tx, next, hook(fence), known)?)
+}
+
 /// Starts appending in a transaction of a writer on its own connection: the kernel moves
 /// the `state` revision once after the fence and writes that revision's `events` row with
 /// the engine's body, so clients see the change. Inputs: the transaction and the fence.

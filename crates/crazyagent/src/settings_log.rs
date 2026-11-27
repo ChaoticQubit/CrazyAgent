@@ -784,27 +784,14 @@ fn cached(db: &Connection, sql: &str, params: impl rusqlite::Params) -> rusqlite
 }
 
 /// Writes one settings event inside an owner request whose next revision is already signed:
-/// moves `state` from one before it to it, then applies and logs the event there through
-/// `owner`, so the request's own `events` row at next covers the change. Inputs: the
+/// behind the store's fence, the kernel moves `state` from one before it to it, then the
+/// event is applied and logged there, so the request's own `events` row at next covers the
+/// change. Inputs: the
 /// request's transaction, its next revision and the event. Output: Ok,
 /// `state_log_revision_stale` when `state` is not one before next, or the first refusal.
 fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Result<(), EngineError> {
-    let stale = || error("state_log_revision_stale");
-    let before = next.checked_sub(1).ok_or_else(stale)?;
-    let moved = cached(
-        tx,
-        "UPDATE state SET revision=?1 WHERE id=1 AND revision=?2",
-        params![
-            i64::try_from(next).map_err(error)?,
-            i64::try_from(before).map_err(error)?
-        ],
-    )
-    .map_err(error)?;
-    if moved != 1 {
-        return Err(stale());
-    }
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = crate::state_log::owner(tx, next, fence)?;
+    let mut appender = crate::state_log::owner_moving(tx, next, fence)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     assert!(seq > 0, "a recorded event has a seq");
     assert_eq!(appender.revision(), next);
