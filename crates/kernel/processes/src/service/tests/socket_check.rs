@@ -210,3 +210,37 @@ fn the_held_walk_reads_every_part_as_lstat_does() -> std::io::Result<()> {
     }
     Ok(())
 }
+
+/// A held walk's volume table answers a device it already asked about without asking again,
+/// keeps at most its fixed count of devices, and asks again for a device past them, giving
+/// that answer. Inputs: none. Output: none.
+#[test]
+fn a_held_walk_asks_each_volume_once_until_its_table_is_full() {
+    let mut volumes = changeable::Volumes::default();
+    let mut asked = 0;
+    for device in 0..changeable::VOLUMES_MAX as u64 {
+        assert_eq!(
+            volumes.keeps(device, |_| {
+                asked += 1;
+                device % 2 == 0
+            }),
+            device % 2 == 0
+        );
+    }
+    assert_eq!(
+        (asked, volumes.len),
+        (changeable::VOLUMES_MAX, changeable::VOLUMES_MAX)
+    );
+    assert!(volumes.keeps(2, |_| panic!("a kept device is asked again")));
+    assert!(!volumes.keeps(3, |_| panic!("a kept device is asked again")));
+    for _ in 0..2 {
+        assert!(volumes.keeps(100, |_| {
+            asked += 1;
+            true
+        }));
+    }
+    assert_eq!(
+        (asked, volumes.len),
+        (changeable::VOLUMES_MAX + 2, changeable::VOLUMES_MAX)
+    );
+}
