@@ -50,7 +50,7 @@ case "$1" in
     echo "image ${ImageOS:-?} ${ImageVersion:-?} run ${GITHUB_RUN_ID:-?} attempt ${GITHUB_RUN_ATTEMPT:-?} ref ${GITHUB_REF:-?} sha ${GITHUB_SHA:-?}"
     sw_vers || true
     sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string || true
-    for pair in b-after=2735d10968 b-before=c6f1398838 load=008adcd803; do
+    for pair in b-after=382dc76b5c b-before=c6f1398838 load=008adcd803; do
       name=${pair%%=*}
       rev=${pair#*=}
       rc=0
@@ -202,6 +202,17 @@ case "$1" in
         run_logged "summary-$1-$2" python3 -I scripts/perf/sitting_summary.py "$1" "$2" "$3" "$4" "$log"
         if [ -f "$RUNNER_TEMP/ratios.py" ]; then
           run_logged "ratios-$1-$2" python3 -I "$RUNNER_TEMP/ratios.py" "$log" --pair "$3,$4" --aa 2.5-aa
+          out="$T/logs/ratios-$1-$2.log"
+          runs=$(sed -nE 's/^RATIOS .* runs=([0-9]+) .*/\1/p' "$out" | head -1)
+          scored=$(sed -nE 's/^RATIOS .* scored=([0-9]+) .*/\1/p' "$out" | head -1)
+          socket=$(grep -c '^ROW processes\.service\.changeable\.changeable_above_socket ' "$out" || true)
+          echo "ratios gate $1 $2: runs=${runs:-none} scored=${scored:-none} socket_rows=$socket"
+          if [ "${runs:-0}" -gt 0 ] && [ "${scored:-0}" -gt 0 ] && [ "$socket" -eq 1 ]; then
+            note_rc "ratios-gate-$1-$2" 0
+          else
+            echo "::error::ratios for $1 $2 scored nothing or lack the socket row"
+            note_rc "ratios-gate-$1-$2" 1
+          fi
         fi
       else
         echo "::error::no raw log for reading $1 $2"
