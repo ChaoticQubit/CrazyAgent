@@ -21,6 +21,7 @@ const STATUS_OUTPUT: &str =
     "gui/501/dev.crazyagent.engine = {\n\tstate = running\n\tpid = 4242\n}\n";
 const TEXT: &str = "the engine service is not installed";
 const ON_IMAGE: &str = "/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent";
+const CONTROL_TEXT: &str = "a control text of one hundred and twenty bytes that both twins copy and format the same way, so a row shows the binary!.";
 
 fn row(name: &'static str, batch: usize) -> Row {
     Row {
@@ -73,7 +74,10 @@ fn old_copies(folder: &Path) -> (Layout, PathBuf) {
 /// stand-in service in a temporary home whose label launchd never knew. 2.4.4 had no
 /// engine hooks, so `repair`, `may_replace`, `persistable` and `retire_old_copies` call the
 /// engine's own checks, and `changeable_above_socket` times `sandbox::grants::socket_fit`,
-/// the 2.4.4 check of a granted socket. Prints one PERF line per call, asserts no time.
+/// the 2.4.4 check of a granted socket. Two control rows copy and format a fixed text the
+/// same way in both twins, so a gap they show is the test binary, not the service code; a
+/// NOTE line says whether the runner's own `~/.local/bin/crazyagent`, which
+/// `retire_old_copies` reads, is there. Prints one PERF line per call, asserts no time.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn service_calls() {
@@ -113,6 +117,25 @@ fn service_calls() {
         bin.join("crazyagent")
     );
     assert!(socket_fit(&socket).is_ok());
+    let cli = std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/bin/crazyagent"));
+    let present = cli
+        .as_deref()
+        .is_some_and(|link| std::fs::symlink_metadata(link).is_ok());
+    println!(
+        "NOTE service.retire_old_copies home_link={}",
+        if present { "present" } else { "absent" }
+    );
+    assert_eq!(CONTROL_TEXT.len(), 120);
+    time(&row("service.control.string_from", FAST), SAMPLES, || {
+        black_box(String::from(black_box(CONTROL_TEXT)));
+    });
+    time(&row("service.control.format", FAST), SAMPLES, || {
+        black_box(format!(
+            "{}: {}",
+            black_box(ON_IMAGE),
+            black_box(CONTROL_TEXT)
+        ));
+    });
     time(&row("service.failure", FAST), SAMPLES, || {
         black_box(failure(black_box(TEXT)));
     });
