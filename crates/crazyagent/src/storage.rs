@@ -4161,7 +4161,7 @@ fn read_owner_page(
     let after = cursor.map_or("", |c| c.after_id.as_str());
     let sql = match view {
         OwnerView::Projects => {
-            let kept = crate::sdk_projects::rows(tx, after, u16::from(limit))?;
+            let kept = crate::sdk_projects::page(tx, after, u16::from(limit))?;
             let last = kept.page.rows.last().map(|row| row.id.clone());
             let next = page_next(config, a, view, revision, kept.page.more, last)?;
             assert!(kept.items.len() <= usize::from(limit));

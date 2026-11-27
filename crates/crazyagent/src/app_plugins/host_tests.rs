@@ -175,7 +175,10 @@ fn the_owner_read_lists_plugin_grants() {
         .iter()
         .map(|grants| grants.plugin.as_str())
         .collect();
-    assert_eq!(ids, ["agent-quit", "ollama", "openai", "voyage"]);
+    assert_eq!(
+        ids,
+        ["agent-quit", "ollama", "openai", "projects", "voyage"]
+    );
     assert_eq!(plugins[0].capabilities[0].name, "settings.save_quit");
 }
 
