@@ -5,8 +5,8 @@ mod grants;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use gateway::AllOn;
-pub use gateway::{Caller, Gateway, Refusals, Switches};
-pub use grants::{Grants, PERMISSIONS_MAX, PLUGINS_MAX};
+pub use gateway::{Caller, Gateway, HOPS_MAX, Refusals, Switches};
+pub use grants::{Grants, PERMISSIONS_MAX, PLUGINS_MAX, SERVED_STEMS_MAX};
 
 #[cfg(test)]
 mod core_tests;
