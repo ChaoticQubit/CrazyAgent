@@ -303,7 +303,7 @@ pub(super) fn read_parts(entries: &[&Path]) -> Vec<Part> {
 /// already made. Output: the reads, in order.
 #[cfg(target_os = "macos")]
 pub(super) fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> Vec<Part> {
-    let mut volumes: Volumes = Vec::new();
+    let mut volumes = Volumes::default();
     let parts: Vec<Part> = entries
         .iter()
         .map(|entry| {
@@ -316,7 +316,7 @@ pub(super) fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> 
             })
         })
         .collect();
-    assert!(volumes.len() <= parts.len());
+    assert!(volumes.len <= VOLUMES_MAX && volumes.len <= parts.len());
     assert_eq!(parts.len(), entries.len());
     parts
 }
