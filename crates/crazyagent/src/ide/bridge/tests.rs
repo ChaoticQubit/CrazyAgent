@@ -111,7 +111,7 @@ fn token(path: &Path) -> [u8; 32] {
         text.bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
-    unhex(&text).try_into().unwrap()
+    unhex(&text).try_into().expect("a 32-byte fixture token")
 }
 
 /// Swaps a capability file's token for its session token, as the extension does first,
@@ -588,7 +588,7 @@ fn ide_frames_match_the_extension_fixture() {
     ))
     .unwrap();
     let digits = fixture["token"].as_str().unwrap();
-    let token = owner_token_copy(&unhex(digits).try_into().unwrap());
+    let token = owner_token_copy(&unhex(digits).try_into().expect("a 32-byte fixture token"));
     assert_eq!(
         hex(&packet(MAGIC, 0, &token)),
         fixture["handshake"].as_str().unwrap()
@@ -621,7 +621,7 @@ fn ide_frames_match_the_extension_fixture() {
     );
     assert_eq!(encode_frame(&request).unwrap(), frame);
     let digits = session["token"].as_str().unwrap();
-    let token = owner_token_copy(&unhex(digits).try_into().unwrap());
+    let token = owner_token_copy(&unhex(digits).try_into().expect("a 32-byte fixture token"));
     let reply = IdeReply::Ok {
         data: json!({ "token": hex(&**token) }),
     };
