@@ -1,31 +1,57 @@
 use super::*;
 
+/// A step's result with the step named in its error, for the fixtures below. Inputs: the
+/// result and the step. Output: the value, or the named error.
+fn named<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    step: impl std::fmt::Display,
+) -> Result<T, String> {
+    result.map_err(|error| format!("{step}: {error}"))
+}
+
+/// A private folder under the canonical system temp folder, so the no-follow open accepts
+/// what it holds. Input: none. Output: the folder, or the step that failed.
+fn temp_root() -> Result<tempfile::TempDir, String> {
+    let base = named(
+        std::fs::canonicalize(std::env::temp_dir()),
+        "canonicalize the temp folder",
+    )?;
+    named(
+        tempfile::Builder::new().tempdir_in(&base),
+        format!("make a folder in {}", base.display()),
+    )
+}
+
 /// The P5 fixture upgraded by the probe step at a time, then given 2.5 data the way an owner
 /// would after the upgrade: a second probe row. Every connection is closed on return, as the
-/// restore needs. Input: the upgrade time. Output: the root and the 2.4 fixture's rows.
-fn upgraded(at: SystemTime) -> (Root, BTreeMap<String, Vec<String>>) {
+/// restore needs. Input: the upgrade time. Output: the root and the 2.4 fixture's rows, or
+/// the step that failed.
+fn upgraded(at: SystemTime) -> Result<(Root, BTreeMap<String, Vec<String>>), String> {
     let (root, _) = fixture();
     let before = rows(&root.connection());
     let sources = sources(&root);
     let mut db = root.connection();
-    upgrade_at(
-        &mut db,
-        &root.database(),
-        Some(&sources),
-        &steps(&[probe]),
-        at,
-        backup,
-    )
-    .unwrap();
-    let written = db
-        .execute(
+    named(
+        upgrade_at(
+            &mut db,
+            &root.database(),
+            Some(&sources),
+            &steps(&[probe]),
+            at,
+            backup,
+        ),
+        "upgrade the fixture by the probe step",
+    )?;
+    let written = named(
+        db.execute(
             "INSERT INTO migration_probe VALUES (?1)",
             [latest(STEPS) + 2],
-        )
-        .unwrap();
+        ),
+        "write the 2.5 probe row",
+    )?;
     assert_eq!(written, 1);
     assert_eq!(names(&root).len(), 1);
-    (root, before)
+    Ok((root, before))
 }
 
 /// The rows each table holds. Input: every row by table. Output: the count by table.
@@ -35,21 +61,27 @@ fn counts(rows: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, usize> {
         .collect()
 }
 
-/// The copies restores kept under backups/, oldest first. Input: the root. Output: the folders.
-fn replaced(root: &Root) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(root.path().join(BACKUPS)) else {
-        return Vec::new();
+/// The copies restores kept under backups/, oldest first. Input: the root. Output: the
+/// folders, none for a missing backups folder, or the listing step that failed.
+fn replaced(root: &Root) -> Result<Vec<PathBuf>, String> {
+    let folder = root.path().join(BACKUPS);
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return Ok(Vec::new());
     };
     let prefix = format!("{REPLACED}-");
-    let mut found: Vec<PathBuf> = entries
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            let name = path.file_name().unwrap().to_str().unwrap();
-            name.starts_with(&prefix)
-        })
-        .collect();
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = named(entry, format!("list {}", folder.display()))?.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("{} has no UTF-8 name", path.display()))?;
+        if name.starts_with(&prefix) {
+            found.push(path);
+        }
+    }
     found.sort();
-    found
+    Ok(found)
 }
 
 /// Restores the root's pinned backup at a time, as the engine does once it has stopped.
@@ -60,9 +92,9 @@ fn restored(root: &Root, at: SystemTime) -> Result<PathBuf, EngineError> {
 }
 
 #[test]
-fn a_restore_after_thirty_days_is_refused_and_changes_nothing() {
+fn a_restore_after_thirty_days_is_refused_and_changes_nothing() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, _) = upgraded(start);
+    let (root, _) = upgraded(start)?;
     let after = rows(&root.connection());
     let taken = stamp_time(backup_time(&names(&root)[0]).unwrap()).unwrap();
     let late = taken + DAY * PINNED_DAYS;
@@ -79,14 +111,15 @@ fn a_restore_after_thirty_days_is_refused_and_changes_nothing() {
 
     assert!(refused.starts_with(RESTORE_UNAVAILABLE), "{refused}");
     assert_eq!(rows(&root.connection()), after);
-    assert!(replaced(&root).is_empty());
+    assert!(replaced(&root)?.is_empty());
     assert_eq!(names(&root).len(), 1);
+    Ok(())
 }
 
 #[test]
-fn a_restore_is_refused_while_an_agent_runs() {
+fn a_restore_is_refused_while_an_agent_runs() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, _) = upgraded(start);
+    let (root, _) = upgraded(start)?;
     let db = root.connection();
     crate::team::initialize(&db).unwrap();
     drop(crate::research::jobs::ResearchJobs::open(&root.database()).unwrap());
@@ -103,7 +136,7 @@ fn a_restore_is_refused_while_an_agent_runs() {
 
     assert!(refused.starts_with(RESTORE_AGENTS_RUNNING), "{refused}");
     assert_eq!(rows(&root.connection()), after);
-    assert!(replaced(&root).is_empty());
+    assert!(replaced(&root)?.is_empty());
     let db = root.connection();
     db.execute(
         "UPDATE team_agents SET status = 'stopped' WHERE project = 'restore-project'",
@@ -119,14 +152,15 @@ fn a_restore_is_refused_while_an_agent_runs() {
     drop(db);
     let refused = restored(&root, start + HOUR).unwrap_err().0;
     assert!(refused.starts_with(RESTORE_AGENTS_RUNNING), "{refused}");
-    assert!(replaced(&root).is_empty());
+    assert!(replaced(&root)?.is_empty());
     assert!(probed(&root.connection()));
+    Ok(())
 }
 
 #[test]
-fn a_restore_is_refused_while_another_connection_is_open() {
+fn a_restore_is_refused_while_another_connection_is_open() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, _) = upgraded(start);
+    let (root, _) = upgraded(start)?;
     let after = rows(&root.connection());
     let reader = root.connection();
     reader.execute_batch("BEGIN").unwrap();
@@ -141,15 +175,16 @@ fn a_restore_is_refused_while_another_connection_is_open() {
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
     assert_eq!(rows(&root.connection()), after);
-    assert!(replaced(&root).is_empty());
+    assert!(replaced(&root)?.is_empty());
     restored(&root, start + HOUR).unwrap();
     assert_eq!(version(&root.connection()).unwrap(), V24_VERSION_MAX);
+    Ok(())
 }
 
 #[test]
-fn a_restore_brings_back_the_2_4_2_counts() {
+fn a_restore_brings_back_the_2_4_2_counts() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, before) = upgraded(start);
+    let (root, before) = upgraded(start)?;
 
     restored(&root, start + HOUR).unwrap();
 
@@ -159,19 +194,20 @@ fn a_restore_brings_back_the_2_4_2_counts() {
     let now = rows(&db);
     assert_eq!(counts(&now), counts(&before));
     assert_eq!(now, before);
+    Ok(())
 }
 
 #[test]
-fn a_restore_keeps_one_dated_private_copy_of_the_2_5_data_it_replaces() {
+fn a_restore_keeps_one_dated_private_copy_of_the_2_5_data_it_replaces() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, _) = upgraded(start);
+    let (root, _) = upgraded(start)?;
     let replaced_rows = rows(&root.connection());
     assert_eq!(replaced_rows["migration_probe"].len(), 2);
     let at = start + HOUR;
 
     let copy = restored(&root, at).unwrap();
 
-    assert_eq!(replaced(&root), vec![copy.clone()]);
+    assert_eq!(replaced(&root)?, vec![copy.clone()]);
     let name = copy.file_name().unwrap().to_str().unwrap();
     assert_eq!(name, format!("{REPLACED}-{}", stamp(at).unwrap()));
     assert_eq!(backup_time(name), None);
@@ -187,12 +223,13 @@ fn a_restore_keeps_one_dated_private_copy_of_the_2_5_data_it_replaces() {
     let project = std::fs::read_to_string(copy.join("project.toml")).unwrap();
     assert_eq!(project, PROJECT);
     assert_eq!(names(&root).len(), 1);
+    Ok(())
 }
 
 #[test]
-fn a_later_upgrades_rotation_leaves_the_restore_copy() {
+fn a_later_upgrades_rotation_leaves_the_restore_copy() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, _) = upgraded(start);
+    let (root, _) = upgraded(start)?;
     let copy = restored(&root, start + HOUR).unwrap();
     let sources = sources(&root);
     let mut db = root.connection();
@@ -213,15 +250,16 @@ fn a_later_upgrades_rotation_leaves_the_restore_copy() {
 
     let names = names(&root);
     assert_eq!(names.len(), BACKUPS_KEPT + 1, "{names:?}");
-    assert_eq!(replaced(&root), vec![copy.clone()]);
+    assert_eq!(replaced(&root)?, vec![copy.clone()]);
     assert!(copy.join(CHECKED).is_file());
     assert!(copy.join(DATABASE).is_file());
+    Ok(())
 }
 
 #[test]
-fn a_second_restore_brings_back_the_2_4_data_written_after_the_first() {
+fn a_second_restore_brings_back_the_2_4_data_written_after_the_first() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, _) = upgraded(start);
+    let (root, _) = upgraded(start)?;
     restored(&root, start + HOUR).unwrap();
     let mut db = root.connection();
     let removed = db
@@ -251,13 +289,14 @@ fn a_second_restore_brings_back_the_2_4_data_written_after_the_first() {
     assert_eq!(version(&db).unwrap(), V24_VERSION_MAX);
     assert!(!probed(&db));
     assert_eq!(rows(&db), used);
-    assert_eq!(replaced(&root).len(), 2);
+    assert_eq!(replaced(&root)?.len(), 2);
+    Ok(())
 }
 
 #[test]
-fn a_failed_restore_changes_nothing_and_keeps_no_copy() {
+fn a_failed_restore_changes_nothing_and_keeps_no_copy() -> Result<(), String> {
     let start = SystemTime::now();
-    let (root, _) = upgraded(start);
+    let (root, _) = upgraded(start)?;
     let after = rows(&root.connection());
     let pin = root.backups()[0].join(DATABASE);
     let opened = Connection::open(&pin).unwrap();
@@ -272,22 +311,32 @@ fn a_failed_restore_changes_nothing_and_keeps_no_copy() {
     assert!(!refused.contains("stays in"), "{refused}");
     assert_eq!(rows(&root.connection()), after);
     assert!(probed(&root.connection()));
-    assert!(replaced(&root).is_empty());
+    assert!(replaced(&root)?.is_empty());
     assert_eq!(names(&root).len(), 1);
+    Ok(())
 }
 
 /// The names one key folder holds, in the engine root or in a restore's dated copy, sorted.
 /// Inputs: the folder holding the key folders and the key folder. Output: the names, none
-/// for a missing folder.
-fn key_files(base: &Path, folder: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(base.join(folder)) else {
-        return Vec::new();
+/// for a missing folder, or the listing step that failed.
+fn key_files(base: &Path, folder: &str) -> Result<Vec<String>, String> {
+    let listed = base.join(folder);
+    let Ok(entries) = std::fs::read_dir(&listed) else {
+        return Ok(Vec::new());
     };
-    let mut names: Vec<String> = entries
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
+    let mut names = Vec::new();
+    for entry in entries {
+        let name = named(entry, format!("list {}", listed.display()))?.file_name();
+        let name = name.into_string().map_err(|name| {
+            format!(
+                "{} holds a name that is not UTF-8: {name:?}",
+                listed.display()
+            )
+        })?;
+        names.push(name);
+    }
     names.sort();
-    names
+    Ok(names)
 }
 
 /// V250-L5-N5: a restore moves every key file only 2.5 rows named, a plugin key a 2.5
@@ -297,7 +346,8 @@ fn key_files(base: &Path, folder: &str) -> Vec<String> {
 /// stays where it is. A key no row of either copy names, left by a removal, is deleted, not
 /// kept in the copy (leader 05:05).
 #[test]
-fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_accounts_key() {
+fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_accounts_key()
+-> Result<(), String> {
     use crate::storage::accounts::{self, ACCOUNT_KEYS, KEY_FOLDERS, PLUGIN_KEYS};
     let start = SystemTime::now();
     let (root, _) = fixture();
@@ -349,7 +399,7 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     assert_eq!(
-        key_files(root.path(), PLUGIN_KEYS),
+        key_files(root.path(), PLUGIN_KEYS)?,
         [
             ".replace-restore",
             "plugin-key-orphan",
@@ -357,7 +407,7 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         ]
     );
     assert_eq!(
-        key_files(root.path(), ACCOUNT_KEYS),
+        key_files(root.path(), ACCOUNT_KEYS)?,
         [
             ".replace-restore",
             "restore-new-key",
@@ -369,11 +419,11 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
     let copy = restored(&root, start + HOUR).unwrap();
 
     assert_eq!(version(&root.connection()).unwrap(), V24_VERSION_MAX);
-    assert!(key_files(root.path(), PLUGIN_KEYS).is_empty());
-    assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["restore-old-key"]);
+    assert!(key_files(root.path(), PLUGIN_KEYS)?.is_empty());
+    assert_eq!(key_files(root.path(), ACCOUNT_KEYS)?, ["restore-old-key"]);
     assert_eq!(mode(&root.path().join(PLUGIN_KEYS)), 0o700);
-    assert_eq!(key_files(&copy, PLUGIN_KEYS), ["plugin-key-restore"]);
-    assert_eq!(key_files(&copy, ACCOUNT_KEYS), ["restore-new-key"]);
+    assert_eq!(key_files(&copy, PLUGIN_KEYS)?, ["plugin-key-restore"]);
+    assert_eq!(key_files(&copy, ACCOUNT_KEYS)?, ["restore-new-key"]);
     for (folder, name) in [
         (PLUGIN_KEYS, "plugin-key-restore"),
         (ACCOUNT_KEYS, "restore-new-key"),
@@ -388,32 +438,43 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
     let name = copy.file_name().unwrap().to_str().unwrap().to_owned();
     let finished = finish_restore(&root.database(), Some(&settings)).unwrap();
     assert_eq!(finished, name, "the second sweep runs over the same copy");
-    assert!(key_files(root.path(), PLUGIN_KEYS).is_empty());
-    assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["restore-old-key"]);
-    assert_eq!(key_files(&copy, PLUGIN_KEYS), ["plugin-key-restore"]);
-    assert_eq!(key_files(&copy, ACCOUNT_KEYS), ["restore-new-key"]);
+    assert!(key_files(root.path(), PLUGIN_KEYS)?.is_empty());
+    assert_eq!(key_files(root.path(), ACCOUNT_KEYS)?, ["restore-old-key"]);
+    assert_eq!(key_files(&copy, PLUGIN_KEYS)?, ["plugin-key-restore"]);
+    assert_eq!(key_files(&copy, ACCOUNT_KEYS)?, ["restore-new-key"]);
     assert_eq!(
         kernel_storage::restore::read_restore_record(root.path()),
         Some(format!("restored {name}"))
     );
+    Ok(())
 }
 
 /// Saves one account row as the accounts store writes it: a local connection with the given
 /// authentication, and its details. Inputs: the database, the id and the authentication.
-fn save_account(db: &Connection, id: &str, auth: crate::config::ModelAuthentication) {
-    let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+/// Output: none, or the step that failed.
+fn save_account(
+    db: &Connection,
+    id: &str,
+    auth: crate::config::ModelAuthentication,
+) -> Result<(), String> {
+    let reference = |value: &str| {
+        named(
+            crate::protocol::CredentialRef::new(value),
+            format!("make the reference {value}"),
+        )
+    };
     let account = crate::config::ModelConnection {
-        id: reference(id),
-        provider: reference("openai-compatible"),
-        harness: reference("rcli"),
-        protocol: reference("openai-chat"),
-        account_ref: reference("local-account"),
+        id: reference(id)?,
+        provider: reference("openai-compatible")?,
+        harness: reference("rcli")?,
+        protocol: reference("openai-chat")?,
+        account_ref: reference("local-account")?,
         endpoint: crate::config::ModelEndpoint::Http {
             url: "http://127.0.0.1:8000/v1".into(),
         },
         model: crate::config::ModelReference {
             id: "m".into(),
-            author: reference("openai-compatible"),
+            author: reference("openai-compatible")?,
         },
         auth,
     };
@@ -421,13 +482,18 @@ fn save_account(db: &Connection, id: &str, auth: crate::config::ModelAuthenticat
         name: "Lab".into(),
         provider: crate::accounts::Provider::OpenaiCompatible,
     };
-    let body = serde_json::to_vec(&serde_json::json!({"connection": account, "details": details}))
-        .unwrap();
-    db.execute(
-        "INSERT INTO accounts (id, body) VALUES (?1, ?2)",
-        rusqlite::params![id, body],
-    )
-    .unwrap();
+    let body = named(
+        serde_json::to_vec(&serde_json::json!({"connection": account, "details": details})),
+        "encode the account body",
+    )?;
+    named(
+        db.execute(
+            "INSERT INTO accounts (id, body) VALUES (?1, ?2)",
+            rusqlite::params![id, body],
+        ),
+        format!("save the account {id}"),
+    )?;
+    Ok(())
 }
 
 /// The folder name the engine gives an account's profile slot or generated home: the
@@ -440,15 +506,26 @@ fn slot_name(reference: &str) -> String {
 }
 
 /// Makes one private file holding a dummy secret, its 0700 folders included. Input: the
-/// file. Output: none.
-fn private_secret(file: &Path) {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(file.parent().unwrap())
-        .unwrap();
-    std::fs::write(file, "secret-dummy").unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+/// file. Output: none, or the step that failed.
+fn private_secret(file: &Path) -> Result<(), String> {
+    let parent = file
+        .parent()
+        .ok_or_else(|| format!("{} has no folder", file.display()))?;
+    named(
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent),
+        format!("make {}", parent.display()),
+    )?;
+    named(
+        std::fs::write(file, "secret-dummy"),
+        format!("write {}", file.display()),
+    )?;
+    named(
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)),
+        format!("make {} private", file.display()),
+    )
 }
 
 /// V250-L5-N5B: a restore moves the generated SDK home holding the key of an API key account
@@ -458,7 +535,8 @@ fn private_secret(file: &Path) {
 /// only the replaced data's trash still notes, of an account the owner removed in 2.5, is
 /// deleted, not kept in the copy.
 #[test]
-fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_copy() {
+fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_copy()
+-> Result<(), String> {
     use crate::config::ModelAuthentication;
     let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
     let start = SystemTime::now();
@@ -468,7 +546,7 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
     let old_key = ModelAuthentication::ApiKey {
         credential_ref: reference("restore-old-key"),
     };
-    save_account(&old, "restore-old", old_key);
+    save_account(&old, "restore-old", old_key)?;
     drop(old);
     let sources = sources(&root);
     let mut db = root.connection();
@@ -484,11 +562,11 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
     let new_key = ModelAuthentication::ApiKey {
         credential_ref: reference("restore-new-key"),
     };
-    save_account(&db, "restore-new", new_key);
+    save_account(&db, "restore-new", new_key)?;
     let native = ModelAuthentication::NativeManaged {
         profile_ref: reference("restore-new-profile"),
     };
-    save_account(&db, "restore-native", native);
+    save_account(&db, "restore-native", native)?;
     crate::storage::trash::initialize(&db).unwrap();
     crate::storage::trash::put(&db, "generated_home", "restore-gone-key").unwrap();
     drop((db, sources));
@@ -497,8 +575,8 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
     let new_home = homes.join(slot_name("restore-new-key"));
     let gone_home = homes.join(slot_name("restore-gone-key"));
     for home in [&kept_home, &new_home, &gone_home] {
-        private_secret(&home.join(".backboard/config.json"));
-        private_secret(&home.join(".backboard/keys.json"));
+        private_secret(&home.join(".backboard/config.json"))?;
+        private_secret(&home.join(".backboard/keys.json"))?;
     }
     let slot = root
         .path()
@@ -511,7 +589,7 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
     ];
     let identity = slot.join("identity.json");
     for file in sign_ins.iter().chain([&identity]) {
-        private_secret(file);
+        private_secret(file)?;
     }
 
     let copy = restored(&root, start + HOUR).unwrap();
@@ -541,79 +619,89 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
         assert_eq!(mode(&file), 0o600, "{}", file.display());
         assert_eq!(std::fs::read(&file).unwrap(), b"secret-dummy");
     }
+    Ok(())
 }
 
 /// A kept copy in WAL mode, checkpointed and with its -wal and -shm files gone, as Apple's
 /// SQLite can leave one, in a canonical private folder so the no-follow open accepts it.
-/// Input: none. Output: the folder, holding engine.db with one row in `kept`.
-fn kept_wal_copy() -> tempfile::TempDir {
-    let copy = tempfile::Builder::new()
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
+/// Input: none. Output: the folder, holding engine.db with one row in `kept`, or the step
+/// that failed.
+fn kept_wal_copy() -> Result<tempfile::TempDir, String> {
+    let copy = temp_root()?;
     let path = copy.path().join(DATABASE);
-    let made = Connection::open(&path).unwrap();
-    made.execute_batch(
-        "PRAGMA journal_mode = WAL; CREATE TABLE kept (value TEXT); \
-         INSERT INTO kept VALUES ('one'); PRAGMA wal_checkpoint(TRUNCATE);",
-    )
-    .unwrap();
+    let made = named(Connection::open(&path), format!("open {}", path.display()))?;
+    named(
+        made.execute_batch(
+            "PRAGMA journal_mode = WAL; CREATE TABLE kept (value TEXT); \
+             INSERT INTO kept VALUES ('one'); PRAGMA wal_checkpoint(TRUNCATE);",
+        ),
+        "write the kept row in WAL mode",
+    )?;
     drop(made);
+    let bytes = named(std::fs::read(&path), format!("read {}", path.display()))?;
     assert_eq!(
-        &std::fs::read(&path).unwrap()[18..20],
-        &[2, 2],
+        bytes.get(18..20),
+        Some(&[2u8, 2][..]),
         "the copy is in WAL mode"
     );
     for side in ["engine.db-wal", "engine.db-shm"] {
         let side = copy.path().join(side);
         if side.exists() {
-            std::fs::remove_file(&side).unwrap();
+            named(
+                std::fs::remove_file(&side),
+                format!("remove {}", side.display()),
+            )?;
         }
     }
-    copy
+    Ok(copy)
 }
 
 /// A kept WAL copy whose `-wal` still holds a committed frame no checkpoint moved into
-/// engine.db, as a crash between a write and the close leaves it. Output: the folder.
-fn kept_copy_with_a_leftover_wal() -> tempfile::TempDir {
-    let made = tempfile::Builder::new()
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
+/// engine.db, as a crash between a write and the close leaves it. Output: the folder, or the
+/// step that failed.
+fn kept_copy_with_a_leftover_wal() -> Result<tempfile::TempDir, String> {
+    let made = temp_root()?;
     let path = made.path().join(DATABASE);
-    let writer = Connection::open(&path).unwrap();
-    writer
-        .execute_batch(
+    let writer = named(Connection::open(&path), format!("open {}", path.display()))?;
+    named(
+        writer.execute_batch(
             "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; \
              CREATE TABLE kept (value TEXT); INSERT INTO kept VALUES ('one'); \
              PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO kept VALUES ('two');",
-        )
-        .unwrap();
-    let copy = tempfile::Builder::new()
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
+        ),
+        "write a frame no checkpoint moves",
+    )?;
+    let copy = temp_root()?;
     for name in [DATABASE, "engine.db-wal"] {
-        std::fs::copy(made.path().join(name), copy.path().join(name)).unwrap();
+        named(
+            std::fs::copy(made.path().join(name), copy.path().join(name)),
+            format!("copy {name}"),
+        )?;
     }
     drop(writer);
-    let frames = std::fs::metadata(copy.path().join("engine.db-wal"))
-        .unwrap()
-        .len();
+    let wal = copy.path().join("engine.db-wal");
+    let frames = named(std::fs::metadata(&wal), format!("stat {}", wal.display()))?.len();
     assert!(frames > 0, "the copy's -wal holds a frame");
-    copy
+    Ok(copy)
 }
 
 /// What the sweep must leave on disk: engine.db's bytes and the `-wal` length, if any.
-/// Input: the copy's folder. Output: the two.
-fn on_disk(copy: &Path) -> (Vec<u8>, Option<u64>) {
+/// Input: the copy's folder. Output: the two, or the read that failed.
+fn on_disk(copy: &Path) -> Result<(Vec<u8>, Option<u64>), String> {
     let wal = std::fs::metadata(copy.join("engine.db-wal"))
         .ok()
         .map(|found| found.len());
-    (std::fs::read(copy.join(DATABASE)).unwrap(), wal)
+    let path = copy.join(DATABASE);
+    Ok((
+        named(std::fs::read(&path), format!("read {}", path.display()))?,
+        wal,
+    ))
 }
 
 #[test]
-fn the_sweep_leaves_a_kept_copy_with_a_leftover_wal_unchanged_on_disk() {
-    let copy = kept_copy_with_a_leftover_wal();
-    let before = on_disk(copy.path());
+fn the_sweep_leaves_a_kept_copy_with_a_leftover_wal_unchanged_on_disk() -> Result<(), String> {
+    let copy = kept_copy_with_a_leftover_wal()?;
+    let before = on_disk(copy.path())?;
 
     let db = replaced_database(copy.path()).unwrap();
     let rows: i64 = db
@@ -622,12 +710,13 @@ fn the_sweep_leaves_a_kept_copy_with_a_leftover_wal_unchanged_on_disk() {
     drop(db);
 
     assert_eq!(rows, 2, "the sweep reads the leftover frame");
-    assert_eq!(on_disk(copy.path()), before);
+    assert_eq!(on_disk(copy.path())?, before);
+    Ok(())
 }
 
 #[test]
-fn the_sweep_leaves_a_clean_kept_copys_engine_db_unchanged() {
-    let copy = kept_wal_copy();
+fn the_sweep_leaves_a_clean_kept_copys_engine_db_unchanged() -> Result<(), String> {
+    let copy = kept_wal_copy()?;
     let before = std::fs::read(copy.path().join(DATABASE)).unwrap();
 
     let db = replaced_database(copy.path()).unwrap();
@@ -638,11 +727,12 @@ fn the_sweep_leaves_a_clean_kept_copys_engine_db_unchanged() {
 
     assert_eq!(rows, 1);
     assert_eq!(std::fs::read(copy.path().join(DATABASE)).unwrap(), before);
+    Ok(())
 }
 
 #[test]
-fn the_sweep_reads_a_kept_wal_copy_that_has_no_wal_or_shm_file() {
-    let copy = kept_wal_copy();
+fn the_sweep_reads_a_kept_wal_copy_that_has_no_wal_or_shm_file() -> Result<(), String> {
+    let copy = kept_wal_copy()?;
 
     let rows: i64 = replaced_database(copy.path())
         .and_then(|db| {
@@ -652,11 +742,12 @@ fn the_sweep_reads_a_kept_wal_copy_that_has_no_wal_or_shm_file() {
         .unwrap();
 
     assert_eq!(rows, 1);
+    Ok(())
 }
 
 #[test]
-fn the_sweep_connection_refuses_a_write_to_the_kept_copy() {
-    let copy = kept_wal_copy();
+fn the_sweep_connection_refuses_a_write_to_the_kept_copy() -> Result<(), String> {
+    let copy = kept_wal_copy()?;
     let db = replaced_database(copy.path()).unwrap();
 
     let refused = db
@@ -671,6 +762,7 @@ fn the_sweep_connection_refuses_a_write_to_the_kept_copy() {
         .query_row("SELECT COUNT(*) FROM kept", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 1);
+    Ok(())
 }
 
 /// A kept copy of replaced 2.5 data at `folder`, private, whose rows name one plugin key
@@ -724,10 +816,16 @@ fn second_restore(older_is_link: bool) -> Result<(Root, PathBuf), Box<dyn std::e
     let newest = backups.join(format!("{REPLACED}-20261102T000000000Z"));
     naming_copy(&newest, "plugin-key-newest", "account-key-newest")?;
     for folder in KEY_FOLDERS {
-        let kind = folder.split('-').next().unwrap();
+        let kind = folder
+            .split('-')
+            .next()
+            .ok_or_else(|| format!("the key folder {folder} has no kind"))?;
         for which in ["older", "newest", "orphan"] {
             let name = format!("{kind}-key-{which}");
-            let reference = crate::protocol::CredentialRef::new(&name).unwrap();
+            let reference = named(
+                crate::protocol::CredentialRef::new(&name),
+                format!("make the reference {name}"),
+            )?;
             accounts::replace_key_in(root.path(), folder, &reference, b"sk-kept".to_vec())?;
         }
     }
@@ -750,8 +848,8 @@ fn a_plugin_key_only_an_older_replaced_copy_names_stays_after_a_later_restore()
 
     sweep_second_restore(&root, &newest);
 
-    assert_eq!(key_files(root.path(), PLUGIN_KEYS), ["plugin-key-older"]);
-    assert_eq!(key_files(&newest, PLUGIN_KEYS), ["plugin-key-newest"]);
+    assert_eq!(key_files(root.path(), PLUGIN_KEYS)?, ["plugin-key-older"]);
+    assert_eq!(key_files(&newest, PLUGIN_KEYS)?, ["plugin-key-newest"]);
     Ok(())
 }
 
@@ -762,10 +860,10 @@ fn a_replaced_link_naming_a_key_does_not_keep_it() -> Result<(), Box<dyn std::er
 
     sweep_second_restore(&root, &newest);
 
-    assert!(key_files(root.path(), PLUGIN_KEYS).is_empty());
-    assert!(key_files(root.path(), ACCOUNT_KEYS).is_empty());
-    assert_eq!(key_files(&newest, PLUGIN_KEYS), ["plugin-key-newest"]);
-    assert_eq!(key_files(&newest, ACCOUNT_KEYS), ["account-key-newest"]);
+    assert!(key_files(root.path(), PLUGIN_KEYS)?.is_empty());
+    assert!(key_files(root.path(), ACCOUNT_KEYS)?.is_empty());
+    assert_eq!(key_files(&newest, PLUGIN_KEYS)?, ["plugin-key-newest"]);
+    assert_eq!(key_files(&newest, ACCOUNT_KEYS)?, ["account-key-newest"]);
     Ok(())
 }
 
@@ -777,8 +875,8 @@ fn an_account_key_only_an_older_replaced_copy_names_stays_after_a_later_restore(
 
     sweep_second_restore(&root, &newest);
 
-    assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["account-key-older"]);
-    assert_eq!(key_files(&newest, ACCOUNT_KEYS), ["account-key-newest"]);
+    assert_eq!(key_files(root.path(), ACCOUNT_KEYS)?, ["account-key-older"]);
+    assert_eq!(key_files(&newest, ACCOUNT_KEYS)?, ["account-key-newest"]);
     Ok(())
 }
 
@@ -805,8 +903,8 @@ fn an_unlisted_backups_folder_keeps_every_key() -> Result<(), Box<dyn std::error
     );
     for (folder, kind) in [(PLUGIN_KEYS, "plugin"), (ACCOUNT_KEYS, "account")] {
         let all = ["newest", "older", "orphan"].map(|which| format!("{kind}-key-{which}"));
-        assert_eq!(key_files(root.path(), folder), all, "{folder}");
-        assert!(key_files(&newest, folder).is_empty(), "{folder}");
+        assert_eq!(key_files(root.path(), folder)?, all, "{folder}");
+        assert!(key_files(&newest, folder)?.is_empty(), "{folder}");
     }
     Ok(())
 }

@@ -51,34 +51,74 @@ pub(crate) struct ConfiguredInitialConversationFixture {
 }
 
 impl ConfiguredInitialConversationFixture {
-    pub(crate) async fn close(self) {
+    /// Stops the fixture's owner, closes the storage actor and the row's connection.
+    /// Input: the fixture. Output: none, or the step that failed.
+    pub(crate) async fn close(self) -> Result<(), String> {
         let (send, receive) = oneshot::channel();
         self.storage
             .sender
             .try_send(Job::OwnerStop(self.host, send))
-            .unwrap_or_else(|_| panic!("actual configured fixture owner stop queue unavailable"));
-        receive.await.unwrap().unwrap();
+            .map_err(|_| "the configured fixture's owner stop queue is unavailable".to_owned())?;
+        named(
+            named(receive.await, "receive the owner stop")?,
+            "stop the owner",
+        )?;
         let (send, receive) = oneshot::channel();
         self.storage
             .sender
             .try_send(Job::Close(send))
-            .unwrap_or_else(|_| panic!("actual configured fixture actor close queue unavailable"));
-        receive.await.unwrap().unwrap();
-        self.db.close().map_err(|(_, error)| error).unwrap();
+            .map_err(|_| "the configured fixture's actor close queue is unavailable".to_owned())?;
+        named(
+            named(receive.await, "receive the actor close")?,
+            "close the actor",
+        )?;
+        named(
+            self.db.close().map_err(|(_, error)| error),
+            "close the row's connection",
+        )?;
         assert!(self.root.path().is_dir());
+        Ok(())
     }
 }
 
-fn reference(value: &str) -> CredentialRef {
-    CredentialRef::new(value).unwrap()
+/// A step's result with the step named in its error. Inputs: the result and the step.
+/// Output: the value, or the named error.
+fn named<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    step: impl std::fmt::Display,
+) -> Result<T, String> {
+    result.map_err(|error| format!("{step}: {error}"))
 }
 
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+/// A credential reference from a fixed fixture word. Input: the word. Output: the
+/// reference, or why the word is refused.
+fn reference(value: &str) -> Result<CredentialRef, String> {
+    named(
+        CredentialRef::new(value),
+        format!("make the reference {value}"),
+    )
 }
 
-async fn read(storage: &Storage, started: &Started, query: OwnerRead) -> OwnerReadReply {
+/// Writes a private 0600 file. Inputs: the path and the bytes. Output: none, or the step
+/// that failed.
+fn private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    named(
+        std::fs::write(path, bytes),
+        format!("write {}", path.display()),
+    )?;
+    named(
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)),
+        format!("make {} private", path.display()),
+    )
+}
+
+/// Reads one owner view through the storage actor. Inputs: the storage, the started owner
+/// and the query. Output: the reply, or the step that failed.
+async fn read(
+    storage: &Storage,
+    started: &Started,
+    query: OwnerRead,
+) -> Result<OwnerReadReply, String> {
     let (send, receive) = oneshot::channel();
     storage
         .sender
@@ -87,12 +127,23 @@ async fn read(storage: &Storage, started: &Started, query: OwnerRead) -> OwnerRe
             query,
             send,
         ))
-        .unwrap_or_else(|_| panic!("actual configured fixture owner read queue unavailable"));
-    receive.await.unwrap().unwrap()
+        .map_err(|_| "the configured fixture's owner read queue is unavailable".to_owned())?;
+    named(
+        named(receive.await, "receive the owner read")?,
+        "read the owner view",
+    )
 }
 
-async fn apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMutation) {
-    let basis = read(storage, started, OwnerRead::Capabilities).await;
+/// Applies one owner mutation at the current revision and checks it is applied. Inputs:
+/// the storage, the started owner, the request id and the mutation. Output: none, or the
+/// step that failed.
+async fn apply(
+    storage: &Storage,
+    started: &Started,
+    id: &str,
+    mutation: OwnerMutation,
+) -> Result<(), String> {
+    let basis = read(storage, started, OwnerRead::Capabilities).await?;
     let (send, receive) = oneshot::channel();
     storage
         .sender
@@ -100,51 +151,82 @@ async fn apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMu
             started.owners[0].admission.clone(),
             OwnerRequest {
                 protocol_version: PROTOCOL_VERSION,
-                request_id: RequestId::new(id).unwrap(),
+                request_id: named(RequestId::new(id), format!("make the request id {id}"))?,
                 expected_revision: basis.revision,
                 operation: OwnerOperation::Apply { mutation },
             },
             send,
         ))
-        .unwrap_or_else(|_| panic!("actual configured fixture owner mutation queue unavailable"));
-    assert_eq!(receive.await.unwrap().unwrap().result, OwnerResult::Applied);
+        .map_err(|_| "the configured fixture's owner mutation queue is unavailable".to_owned())?;
+    let applied = named(
+        named(receive.await, format!("receive the owner apply {id}"))?,
+        format!("apply {id}"),
+    )?;
+    assert_eq!(applied.result, OwnerResult::Applied);
+    Ok(())
 }
 
-pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredInitialConversationFixture
-{
-    let root = tempfile::Builder::new()
-        .prefix("ca-cgf-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let global_path = root.path().join("global.toml");
-    private_file(&global_path, CONFIG.as_bytes());
-    let profile_home = root.path().join("configured-home");
-    std::fs::create_dir(&profile_home).unwrap();
-    std::fs::set_permissions(&profile_home, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let sdk = profile_home.join(".backboard");
-    std::fs::create_dir(&sdk).unwrap();
-    std::fs::set_permissions(&sdk, std::fs::Permissions::from_mode(0o700)).unwrap();
-    private_file(&sdk.join("config.json"), &serde_json::to_vec(&serde_json::json!({
-        "model": { "provider": "local-provider", "model": "local-model" },
-        "providers": [{"id": "local-provider", "name": "Local provider", "protocol": "openai-chat",
-            "baseUrl": "http://127.0.0.1:11434/v1", "auth": { "type": "none" }}]
-    })).unwrap());
-    let database_path = root.path().join("engine.db");
-    let (storage, config) = Storage::open_with_settings_sources(
-        &database_path,
-        &global_path,
-        &root.path().join("project.toml"),
+/// Makes a private 0700 folder. Input: the path. Output: none, or the step that failed.
+fn private_folder(path: &Path) -> Result<(), String> {
+    named(
+        std::fs::create_dir(path),
+        format!("make {}", path.display()),
+    )?;
+    named(
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)),
+        format!("make {} private", path.display()),
     )
-    .await
-    .unwrap();
+}
+
+/// A real storage actor with one configured project whose master session holds a queued
+/// first turn and a registered rcli profile, ready for its first model attempt. Input: none.
+/// Output: the fixture, or the step that failed.
+pub(crate) async fn configured_initial_conversation_fixture()
+-> Result<ConfiguredInitialConversationFixture, String> {
+    let base = named(std::fs::canonicalize("/tmp"), "canonicalize /tmp")?;
+    let root = named(
+        tempfile::Builder::new().prefix("ca-cgf-").tempdir_in(&base),
+        format!("make a folder in {}", base.display()),
+    )?;
+    named(
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)),
+        "make the fixture root private",
+    )?;
+    let global_path = root.path().join("global.toml");
+    private_file(&global_path, CONFIG.as_bytes())?;
+    let profile_home = root.path().join("configured-home");
+    private_folder(&profile_home)?;
+    let sdk = profile_home.join(".backboard");
+    private_folder(&sdk)?;
+    let sdk_config = named(
+        serde_json::to_vec(&serde_json::json!({
+            "model": { "provider": "local-provider", "model": "local-model" },
+            "providers": [{"id": "local-provider", "name": "Local provider", "protocol": "openai-chat",
+                "baseUrl": "http://127.0.0.1:11434/v1", "auth": { "type": "none" }}]
+        })),
+        "encode the SDK config",
+    )?;
+    private_file(&sdk.join("config.json"), &sdk_config)?;
+    let database_path = root.path().join("engine.db");
+    let (storage, config) = named(
+        Storage::open_with_settings_sources(
+            &database_path,
+            &global_path,
+            &root.path().join("project.toml"),
+        )
+        .await,
+        "open the storage",
+    )?;
     let (send, receive) = oneshot::channel();
     storage
         .sender
         .try_send(Job::OwnerStart(send))
-        .unwrap_or_else(|_| panic!("actual configured fixture owner start queue unavailable"));
-    let started = receive.await.unwrap().unwrap();
-    let project = ProjectId::new("configured-project").unwrap();
+        .map_err(|_| "the configured fixture's owner start queue is unavailable".to_owned())?;
+    let started = named(
+        named(receive.await, "receive the owner start")?,
+        "start the owner",
+    )?;
+    let project = named(ProjectId::new("configured-project"), "make the project id")?;
     apply(
         &storage,
         &started,
@@ -157,7 +239,7 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
             },
         },
     )
-    .await;
+    .await?;
     let basis = read(
         &storage,
         &started,
@@ -167,9 +249,9 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
             limit: 1,
         },
     )
-    .await;
+    .await?;
     let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
-        panic!("actual configured fixture source basis missing");
+        return Err("the configured fixture's source basis is missing".to_owned());
     };
     apply(
         &storage,
@@ -182,21 +264,21 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
                 expected_source_hash: source_hash,
                 selection: Box::new(MasterSelection {
                     backend: MasterBackend::Rcli,
-                    pool_ref: reference("configured-pool"),
-                    target_profile_ref: reference("configured-profile"),
+                    pool_ref: reference("configured-pool")?,
+                    target_profile_ref: reference("configured-profile")?,
                     route: RouteRequest {
-                        preferred_target: Some(reference("configured-profile")),
-                        required_target: Some(reference("configured-profile")),
+                        preferred_target: Some(reference("configured-profile")?),
+                        required_target: Some(reference("configured-profile")?),
                         required_capabilities: vec![],
-                        account_ref: reference("configured-account"),
-                        budget_ref: reference("conversation-budget"),
+                        account_ref: reference("configured-account")?,
+                        budget_ref: reference("conversation-budget")?,
                         resources: ResourceBudget::unit(),
                     },
                 }),
             },
         },
     )
-    .await;
+    .await?;
     let state = read(
         &storage,
         &started,
@@ -204,12 +286,12 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
             project_id: project.clone(),
         },
     )
-    .await;
+    .await?;
     let OwnerData::ProjectMaster {
         session: Some(session),
     } = state.data
     else {
-        panic!("actual configured fixture committed session missing");
+        return Err("the configured fixture's committed session is missing".to_owned());
     };
     let session = *session;
     apply(
@@ -224,7 +306,7 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
             },
         },
     )
-    .await;
+    .await?;
     let state = read(
         &storage,
         &started,
@@ -232,12 +314,12 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
             project_id: project.clone(),
         },
     )
-    .await;
+    .await?;
     let OwnerData::ProjectMaster {
         session: Some(session),
     } = state.data
     else {
-        panic!("actual configured fixture queued session missing");
+        return Err("the configured fixture's queued session is missing".to_owned());
     };
     let session = *session;
     let (send, receive) = oneshot::channel();
@@ -252,9 +334,13 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
             }),
             send,
         ))
-        .unwrap_or_else(|_| panic!("actual configured fixture registration queue unavailable"));
-    let MasterRuntimeResult::ConfiguredProfile(proof) = receive.await.unwrap().unwrap() else {
-        panic!("actual configured fixture persisted registration missing");
+        .map_err(|_| "the configured fixture's registration queue is unavailable".to_owned())?;
+    let registered = named(
+        named(receive.await, "receive the profile registration")?,
+        "register the rcli profile",
+    )?;
+    let MasterRuntimeResult::ConfiguredProfile(proof) = registered else {
+        return Err("the configured fixture's persisted registration is missing".to_owned());
     };
     let proof = *proof;
     assert_eq!(proof.database_instance, started.host.db_instance);
@@ -272,13 +358,19 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
         connection: proof.connection.clone(),
         custody_id: proof.custody_id.clone(),
     };
+    let turn = session
+        .current_turn
+        .as_ref()
+        .ok_or_else(|| "the configured fixture's session has no current turn".to_owned())?;
     let request = AttemptRequest {
-        id: RequestId::new("configured-gateway-first-attempt").unwrap(),
-        task_id: master_session::turn_task_id(
-            &session.session_id,
-            session.current_turn.as_ref().unwrap(),
-        )
-        .unwrap(),
+        id: named(
+            RequestId::new("configured-gateway-first-attempt"),
+            "make the attempt id",
+        )?,
+        task_id: named(
+            master_session::turn_task_id(&session.session_id, turn),
+            "derive the turn task id",
+        )?,
         project_id: project,
         role: crate::coordination::Role::ProjectLeader,
         pool_ref: session.selection.pool_ref.clone(),
@@ -287,35 +379,32 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
         previous_attempt: None,
     };
     let generation = proof.generation;
-    let db = Connection::open_with_flags(
-        &database_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .unwrap();
-    db.busy_timeout(std::time::Duration::from_secs(1)).unwrap();
-    assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM model_gateway_attempts", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT COUNT(*) FROM model_gateway_observations",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
+    let db = named(
+        Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        ),
+        format!("open {}", database_path.display()),
+    )?;
+    named(
+        db.busy_timeout(std::time::Duration::from_secs(1)),
+        "set the busy timeout",
+    )?;
+    for table in [
+        "model_gateway_attempts",
+        "native_auth_operations",
+        "model_gateway_observations",
+    ] {
+        let rows = named(
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            }),
+            format!("count {table}"),
+        )?;
+        assert_eq!(rows, 0, "{table}");
+    }
     assert!(!profile_home.join(".backboard/keys.json").exists());
-    ConfiguredInitialConversationFixture {
+    Ok(ConfiguredInitialConversationFixture {
         db,
         config,
         request,
@@ -328,5 +417,5 @@ pub(crate) async fn configured_initial_conversation_fixture() -> ConfiguredIniti
         profile_home,
         storage,
         root,
-    }
+    })
 }
