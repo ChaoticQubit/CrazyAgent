@@ -4,7 +4,8 @@ NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates script
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
 ENGINE_TESTS := $(filter-out $(ENGINE_TESTS_EXCLUDE),$(basename $(notdir $(wildcard crates/crazyagent/tests/*.rs))))
 ROWS = $(foreach test,$(1),$(if $(findstring ::,$(test)),$(test),$(if $(findstring /,$(test)),$(notdir $(test)))))
-ENGINE_ROWS_EXCLUDE := $(call ROWS,$(ENGINE_TESTS_EXCLUDE))
+MODEL_SERVER_ROW := every_model_server_scenario_matches_its_2_4_2_capture
+ENGINE_ROWS_EXCLUDE := $(call ROWS,$(ENGINE_TESTS_EXCLUDE)) $(MODEL_SERVER_ROW)
 DESKTOP_TESTS := $(filter-out $(DESKTOP_TESTS_EXCLUDE),$(basename $(notdir $(wildcard apps/desktop/src-tauri/tests/*.rs))))
 DESKTOP_ROWS_EXCLUDE := $(call ROWS,$(DESKTOP_TESTS_EXCLUDE))
 BUN ?= $(shell command -v bun)
@@ -27,7 +28,7 @@ lint: desktop-dist
 	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
 test: desktop-dist engine-bins
-	cargo test --workspace --locked --offline
+	cargo test --workspace --locked --offline -- --exact --skip $(MODEL_SERVER_ROW)
 	$(MAKE) test-node
 	$(MAKE) test-bun
 

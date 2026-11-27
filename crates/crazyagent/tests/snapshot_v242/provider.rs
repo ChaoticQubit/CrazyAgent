@@ -52,6 +52,19 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         scenario("account-drafts", account_drafts),
         scenario("account-draft-refusals", account_draft_refusals),
         scenario("endpoint-base-url", endpoint_base_url),
+    ]
+}
+
+/// Lists the provider scenarios that talk to the real model servers the release suite's
+/// model-server job starts: Ollama, a keyless llama-server and a keyed one. Output: the
+/// scenarios in order.
+pub(super) fn server_scenarios() -> Vec<Scenario> {
+    let scenario = |name: &'static str, capture: fn(&Path) -> Result<Value, String>| Scenario {
+        kind: "provider",
+        name,
+        capture,
+    };
+    vec![
         scenario("request-local-models", request_local_models),
         scenario(
             "request-local-models-fallback",
@@ -60,6 +73,15 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         scenario("request-check-compatible-key", request_check_compatible_key),
     ]
 }
+
+/// The variable naming the real Ollama's loopback address.
+const OLLAMA_URL: &str = "CRAZYAGENT_TEST_OLLAMA_URL";
+
+/// The variable naming the loopback address of a llama-server that takes no key.
+const LLAMA_URL: &str = "CRAZYAGENT_TEST_LLAMA_URL";
+
+/// The variable naming the loopback address of a llama-server that requires the dummy key.
+const LLAMA_KEYED_URL: &str = "CRAZYAGENT_TEST_LLAMA_KEYED_URL";
 
 /// Ollama's own address, the preset of a Local account; its port is masked in the catalog,
 /// so the catalog capture states whether the preset is still exactly this.
@@ -328,10 +350,69 @@ fn read_head(stream: &mut std::net::TcpStream) -> String {
     String::from_utf8_lossy(&head).into_owned()
 }
 
+/// The loopback address a variable names, once a connect to it succeeds. Input: the
+/// variable. Output: the address, or `server unavailable` with the variable and why.
+fn upstream(variable: &str) -> Result<std::net::SocketAddr, String> {
+    let unavailable = |why: String| format!("server unavailable: {variable} {why}");
+    let url = std::env::var(variable).map_err(|_| unavailable("is unset".to_owned()))?;
+    let address = url
+        .strip_prefix("http://")
+        .and_then(|rest| {
+            rest.trim_end_matches('/')
+                .parse::<std::net::SocketAddr>()
+                .ok()
+        })
+        .filter(|address| address.ip().is_loopback())
+        .ok_or_else(|| unavailable(format!("is not a loopback http address: {url}")))?;
+    kernel_processes::spawn_gate::connect_tcp_std_timeout(&address, HEAD_WAIT)
+        .map_err(|error| unavailable(format!("at {url} refused the connect: {error}")))?;
+    Ok(address)
+}
+
+/// Sends one request head on to the real server and its whole reply back, until the server
+/// closes the connection, as the engine's `Connection: close` asks. An empty head, a connect
+/// that only closed, is not sent on. Inputs: the client, the server address and the head.
+fn relay(client: &mut std::net::TcpStream, upstream: std::net::SocketAddr, head: &str) {
+    if head.is_empty() {
+        return;
+    }
+    let Ok(mut server) = kernel_processes::spawn_gate::connect_tcp_std(upstream) else {
+        return;
+    };
+    let _ = server.set_read_timeout(Some(HEAD_WAIT));
+    if server.write_all(head.as_bytes()).is_ok() {
+        let _ = std::io::copy(&mut server, client);
+    }
+}
+
 impl Recorder {
     /// Starts the recorder on a free loopback port. Input: whether `/api/tags` answers.
     /// Output: the recorder, or why its port could not be opened.
     pub(super) fn start(tags: bool) -> Result<Self, String> {
+        Self::serve(move |stream, head| {
+            let (record, reply) = heard(head, tags);
+            let _ = stream.write_all(reply.as_bytes());
+            record
+        })
+    }
+
+    /// Starts a recorder that answers nothing itself: it records each request as
+    /// [`Recorder::start`] does and relays it to the real server a variable names.
+    /// Input: the variable. Output: the recorder, or `server unavailable` with why.
+    fn proxy(variable: &str) -> Result<Self, String> {
+        let server = upstream(variable)?;
+        Self::serve(move |stream, head| {
+            relay(stream, server, head);
+            heard(head, false).0
+        })
+    }
+
+    /// Listens on a free loopback port and hands each connection's request head to the
+    /// handler, keeping the record it returns. Input: the handler. Output: the recorder, or
+    /// why its port could not be opened.
+    fn serve(
+        handler: impl Fn(&mut std::net::TcpStream, &str) -> Value + Send + 'static,
+    ) -> Result<Self, String> {
         let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0")
             .map_err(|error| error.to_string())?;
         let port = listener
@@ -345,11 +426,11 @@ impl Recorder {
             {
                 let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(HEAD_WAIT));
-                let (record, reply) = heard(&read_head(&mut stream), tags);
+                let head = read_head(&mut stream);
+                let record = handler(&mut stream, &head);
                 kept.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(record);
-                let _ = stream.write_all(reply.as_bytes());
             }
         });
         assert!(port > 0);
@@ -434,11 +515,12 @@ where
     })
 }
 
-/// Captures the requests the engine sends to list a local model server's models and the
-/// models it reads back. Inputs: the scratch folder and whether `/api/tags` answers, so the
-/// second request shape shows. Output: the answer and the requests heard.
-fn local_models(scratch: &Path, tags: bool) -> Result<Value, String> {
-    let recorder = Recorder::start(tags)?;
+/// Captures the requests the engine sends to list a real local model server's models and
+/// the models it reads back. Inputs: the scratch folder and the variable naming the server:
+/// Ollama answers `/api/tags`, llama-server does not, so the second request shape shows.
+/// Output: the answer and the requests heard.
+fn local_models(scratch: &Path, server: &str) -> Result<Value, String> {
+    let recorder = Recorder::proxy(server)?;
     let engine = engine(scratch, None)?;
     let url = format!("http://127.0.0.1:{}", recorder.port);
     let answer = with_owner(&engine, |owner| async move {
@@ -452,18 +534,19 @@ fn local_models(scratch: &Path, tags: bool) -> Result<Value, String> {
 }
 
 fn request_local_models(scratch: &Path) -> Result<Value, String> {
-    local_models(scratch, true)
+    local_models(scratch, OLLAMA_URL)
 }
 
 fn request_local_models_fallback(scratch: &Path) -> Result<Value, String> {
-    local_models(scratch, false)
+    local_models(scratch, LLAMA_URL)
 }
 
 /// Captures what adding an OpenAI-compatible account with a key at a loopback address
 /// stores and the request its check sends, with the key's place and scheme but never the
-/// key. Input: the scratch folder. Output: the added account, the check and the requests.
+/// key, against the real llama-server that requires that key. Input: the scratch folder.
+/// Output: the added account, the check and the requests.
 fn request_check_compatible_key(scratch: &Path) -> Result<Value, String> {
-    let recorder = Recorder::start(false)?;
+    let recorder = Recorder::proxy(LLAMA_KEYED_URL)?;
     let engine = engine(scratch, None)?;
     let draft = AccountDraft {
         provider: Provider::OpenaiCompatible,
