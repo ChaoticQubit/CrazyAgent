@@ -41,7 +41,7 @@ async fn native_auth_custodian_entry_codex_digest_mismatch_never_retires_without
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let before = case.snapshot();
         let error = crate::engine::native_auth_host::entry::run_with_codex(
-            &case.root, bootstrap_input(&case.token()), &executable, &"0".repeat(64), &[],
+            &case.root, bootstrap_input(&*case.token()), &executable, &"0".repeat(64), &[],
         ).await.unwrap_err();
         assert_eq!(error.0, "native_auth_host_executable_changed");
         let after = case.snapshot();
@@ -59,7 +59,7 @@ async fn native_auth_custodian_entry_run_retires_real_committed_work_and_preserv
     channel_case(|case| async move {
         let (committed, launch) = case.launch("entry-run-sign-in").await;
         let token = case.token();
-        let actual = run(&case.root, bootstrap_input(&token)).await.unwrap();
+        let actual = run(&case.root, bootstrap_input(&*token)).await.unwrap();
         assert_no_effect_fact(&actual, &committed);
         let after = case.snapshot();
         assert_eq!(after.facts, vec![actual.clone()]);
@@ -76,7 +76,7 @@ async fn native_auth_custodian_entry_run_retires_real_committed_work_and_preserv
         assert_eq!(replay.fact, actual);
         assert!(replay.account.is_none());
         assert!(replay.challenge.is_none());
-        assert!(run(&case.root, bootstrap_input(&token)).await.is_err());
+        assert!(run(&case.root, bootstrap_input(&*token)).await.is_err());
         assert_eq!(case.snapshot(), after);
         drop(launch);
     })
@@ -98,7 +98,7 @@ async fn native_auth_custodian_entry_run_logout_preserves_actual_action_and_repl
             .prepare_native_auth_custody(begun.work.unwrap())
             .await
             .unwrap();
-        let actual = run(&case.root, bootstrap_input(&case.token())).await.unwrap();
+        let actual = run(&case.root, bootstrap_input(&*case.token())).await.unwrap();
         assert_no_effect_fact(&actual, &committed);
         let replay = case
             .client(OwnerClientKind::Tui)
@@ -120,7 +120,7 @@ async fn native_auth_custodian_entry_run_retains_physical_guard_through_commit_a
     channel_case(|case| async move {
         let (committed, launch) = case.launch("entry-run-commit-ack").await;
         let mut checkpoint = retirement_checkpoint(&case, &committed);
-        let input = bootstrap_input(&case.token());
+        let input = bootstrap_input(&*case.token());
         let mut future = Box::pin(run(&case.root, input));
         retirement_write_started(&mut future, &mut checkpoint).await;
         let probe = case.probe();
@@ -190,7 +190,7 @@ async fn native_auth_custodian_entry_run_rejects_occupied_physical_profile_witho
         let (committed, launch) = case.launch("entry-run-occupied-profile").await;
         let retained = case.guard(&committed, NativeProfileUsePurpose::Authentication);
         let before = case.snapshot();
-        assert!(run(&case.root, bootstrap_input(&case.token())).await.is_err());
+        assert!(run(&case.root, bootstrap_input(&*case.token())).await.is_err());
         assert_eq!(case.snapshot().fences, before.fences);
         assert_ne!(case.snapshot().facts[0].phase, NativeAuthPhase::Unavailable);
         let probe = case.probe();
@@ -220,7 +220,7 @@ async fn native_auth_custodian_entry_run_honors_committed_cancel_before_attachme
             .unwrap();
         assert_eq!(cancelled.fact.phase, NativeAuthPhase::Cancelling);
         assert_eq!(case.snapshot().fences.len(), 1);
-        let actual = run(&case.root, bootstrap_input(&case.token())).await.unwrap();
+        let actual = run(&case.root, bootstrap_input(&*case.token())).await.unwrap();
         assert_cancelled_without_effect(&actual, &committed);
         assert_eq!(case.snapshot().facts, vec![actual]);
         assert!(case.snapshot().fences.is_empty());

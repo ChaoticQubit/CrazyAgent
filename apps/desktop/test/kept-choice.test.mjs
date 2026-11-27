@@ -10,7 +10,7 @@ const fixture = await bundle(new URL("./fixtures/settings-access-layout.mjs", im
 const onProfile = tabRunner(fixture);
 const NOT_KEPT = "CrazyAgent couldn't keep this choice, so it stays as it was. Try again.";
 const THEME_NOT_KEPT = "This theme shows now, but CrazyAgent couldn't keep it, so the next start uses the one before. Try again.";
-const FULL = `Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: () => null, setItem: () => { throw new Error("full"); }, removeItem: () => { throw new Error("full"); } } }); true`;
+const DENIED = `(() => { try { return window.localStorage.length < 0; } catch (error) { return error.name === "SecurityError"; } })()`;
 const lineOf = (label) => `document.querySelector('[data-setting="${label}"]')`;
 const checked = (label) => `[...${lineOf(label)}.querySelectorAll('[role=radiogroup] button[aria-checked="true"]')].map((button) => button.textContent.trim())`;
 const said = (label, words) => `${lineOf(label)}.nextElementSibling?.querySelector('[role=alert]')?.textContent.includes(${JSON.stringify(words)}) ?? false`;
@@ -47,7 +47,7 @@ test("each choice kept in this app says whether it was stored: true after the wr
 
 test("a Questions show, Terminal input or Terminal renderer choice the app cannot keep stays on the kept one and says so on its line", async () => {
   const seen = await onProfile({ tab: "profile" }, async (page) => {
-    await page.evaluate(FULL);
+    assert.equal(await page.evaluate(DENIED), true, "the page's own storage refuses, as a browser that keeps no site data does");
     const lines = [];
     for (const label of ["Questions show", "Terminal input", "Terminal renderer"]) {
       const wanted = await page.evaluate(other(label));
@@ -64,7 +64,7 @@ test("a Questions show, Terminal input or Terminal renderer choice the app canno
 
 test("a Theme the app cannot keep shows now and its line says the next start uses the one before", async () => {
   const seen = await onProfile({ tab: "profile" }, async (page) => {
-    await page.evaluate(FULL);
+    assert.equal(await page.evaluate(DENIED), true, "the page's own storage refuses, as a browser that keeps no site data does");
     await press(page, '[data-setting="Theme"] [role=radiogroup] button', "Dark");
     return {
       theme: await page.evaluate("document.documentElement.dataset.theme"),

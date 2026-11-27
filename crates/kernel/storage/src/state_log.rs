@@ -123,7 +123,7 @@ pub fn snapshot_bodies(
 /// The chunk a snapshot chunk body carries, when the body names `aggregate`, for a projection
 /// rebuilding from a snapshot run. Inputs: the aggregate's stored name and the body. Output:
 /// the chunk, or None for a body that is not a chunk of that aggregate.
-pub fn read_chunk(aggregate: &str, body: &[u8]) -> Option<Chunk> {
+pub(crate) fn read_chunk(aggregate: &str, body: &[u8]) -> Option<Chunk> {
     let chunk = serde_json::from_slice::<SnapshotChunk>(body).ok()?;
     (chunk.aggregate == aggregate).then_some(Chunk {
         table: chunk.table,
@@ -207,7 +207,7 @@ pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), StorageError> {
 /// Refuses a draft out of the log's bounds: a body over [`BODY_BYTES_MAX`] or equal to
 /// [`TOMBSTONE`], a kind that is not 1 to [`KIND_BYTES_MAX`] ASCII letters and digits,
 /// schema 0, or a time past the largest `i64`. Input: the draft. Output: Ok, or the refusal.
-pub fn check(draft: &Draft<'_>) -> Result<(), StorageError> {
+pub(crate) fn check(draft: &Draft<'_>) -> Result<(), StorageError> {
     if draft.body.len() > BODY_BYTES_MAX {
         return Err(error("state_log_body_bounds"));
     }
@@ -233,7 +233,7 @@ pub fn check(draft: &Draft<'_>) -> Result<(), StorageError> {
 /// commits or rolls back with that transaction. The statement is built once and kept in
 /// the connection's statement cache, since every append runs it. Input: the connection.
 /// Output: any SQLite failure.
-pub fn ensure(db: &Connection) -> Result<(), StorageError> {
+pub(crate) fn ensure(db: &Connection) -> Result<(), StorageError> {
     static CREATE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let create = CREATE.get_or_init(|| {
         format!(
