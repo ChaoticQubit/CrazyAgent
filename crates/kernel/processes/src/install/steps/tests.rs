@@ -311,14 +311,20 @@ fn self_update_runs_todays_argument_vector() {
 }
 
 /// An installer program whose name is not the variant's installer is refused, so an npm
-/// recipe never runs another program.
+/// recipe never runs another program, and Windows Node's `npm.cmd` is not npm here.
 #[test]
 fn a_program_that_is_not_the_variants_installer_is_refused() {
-    let paths = InstallPaths {
-        program: at("/e/setup/bin/node"),
-        ..npm_paths()
-    };
-    assert_eq!(steps(&npm("", &[]), &paths), Err(TEMPLATE_MISMATCH));
+    for name in ["/e/setup/bin/node", "/e/setup/bin/npm.cmd"] {
+        let paths = InstallPaths {
+            program: at(name),
+            ..npm_paths()
+        };
+        assert_eq!(
+            steps(&npm("", &[]), &paths),
+            Err(TEMPLATE_MISMATCH),
+            "{name}"
+        );
+    }
     let recipe = InstallRecipe::SelfUpdate {
         program: "codex".to_owned(),
         args: vec!["update".to_owned()],
