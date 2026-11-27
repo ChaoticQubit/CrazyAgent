@@ -44,7 +44,10 @@ fn stand_in_command(root: &Path, mode: &str) -> Command {
     command
         .args(STAND_IN_ARGS)
         .current_dir(root)
-        .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
+        .env(
+            "SystemRoot",
+            std::env::var_os("SystemRoot").expect("SystemRoot is not set"),
+        )
         .env(STAND_IN, mode);
     command
 }
@@ -487,12 +490,13 @@ async fn a_windows_harness_whose_output_fills_the_queue_is_waited_for_without_sp
 /// starts ping for two minutes, writes its id to the [`STAND_IN_PID`] file, then waits;
 /// `turn` answers one input line with [`TURN_STARTED`], then waits; `yes` writes lines until
 /// it is ended; `flood-then-count` writes [`FLOOD_BYTES`] bytes, then reads its input to the
-/// end and writes how many bytes it read.
+/// end and writes how many bytes it read. `holder` fails naming the variable when SystemRoot
+/// is not set.
 #[test]
 #[ignore]
-fn codex_host_stand_in() {
+fn codex_host_stand_in() -> Result<(), String> {
     let Ok(mode) = std::env::var(STAND_IN) else {
-        return;
+        return Ok(());
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(MARK).unwrap();
@@ -518,9 +522,10 @@ fn codex_host_stand_in() {
         }
         "holder" => {
             let marker = PathBuf::from(std::env::var_os(STAND_IN_PID).unwrap());
-            let ping = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-                .join("System32")
-                .join("PING.EXE");
+            let ping =
+                PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?)
+                    .join("System32")
+                    .join("PING.EXE");
             let mut command = Command::new(ping);
             command
                 .args(["-n", "120", "127.0.0.1"])
