@@ -120,6 +120,13 @@ fn a_linked_leads_teammates_setup_over_a_project_holding_the_engine_root_is_refu
         "{unguarded:?}"
     );
     let refused = runtime.teammates_git(&repository, &plan.working_dir, &git_dir, id);
-    assert!(refused.is_err(), "{:?}", refused.map(|_| ()));
+    let refused = refused.map(|_| ());
+    assert!(
+        matches!(
+            refused,
+            Err("teammates_setup_unavailable" | "lead_sandbox_unavailable")
+        ),
+        "{refused:?}"
+    );
     assert!(!profile.exists());
 }
