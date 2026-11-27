@@ -126,11 +126,11 @@ fn read_roots(graphify: &Path) -> (Vec<PathBuf>, Option<PathBuf>) {
     (roots, link)
 }
 
-/// Runs the free, AST-only `graphify update .` in `repo` under a sandbox with
-/// no network that may read the project but not its engine files in `.crazyagent/`,
-/// the hidden folders, nor any secret-like or git-ignored path (MAP-2), which stay out
-/// of the graph, and graphify's install, and write only `repo/graphify-out`, its own
-/// home and temp dirs; without git's answer no graph is built, and nothing is made or
+/// Runs the free, AST-only `graphify update .` in `repo` under a sandbox with no network,
+/// guarded against the engine root's secrets, that may read the project but not its engine
+/// files in `.crazyagent/`, the hidden folders, nor any secret-like or git-ignored path,
+/// which stay out of the graph, and graphify's install, and write only `repo/graphify-out`,
+/// its own home and temp dirs; without git's answer no graph is built, and nothing is made or
 /// removed before every check passes. A graph without the current [`KEPT_OUT_MARK`] is
 /// removed first, so it is rebuilt from nothing, and a built graph is marked. Takes the
 /// graphify executable, the project folder, the engine state folder, a unique run name,
@@ -208,6 +208,9 @@ pub(crate) fn update(
     private_directory(&home)?;
     let tmp = agent.join("tmp");
     private_directory(&tmp)?;
+    let engine = state
+        .parent()
+        .ok_or_else(|| RunError::Invalid("the engine state folder has no engine root".into()))?;
     let mut sandbox = ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &out,
@@ -215,6 +218,7 @@ pub(crate) fn update(
         &tmp,
         SandboxNetwork::Only(Vec::new()),
     )?
+    .guard_engine(engine)?
     .allow_read(repo)?;
     let (roots, link) = read_roots(&graphify);
     for root in &roots {

@@ -72,12 +72,14 @@ pub fn install_root(git: &Path) -> Option<&Path> {
 }
 
 /// The policy owner git runs under for one project: no network, the project and its own home
-/// and temp folder writable, nothing guarded, since publish's `git init` makes `.git` there, and
-/// Git for Windows' install folder readable once it holds the markers ([`marked`]) and neither
-/// is nor holds the project or owner git's folder (the owner home is `allow_read`'s check).
-/// Inputs: the canonical project, git's program and the places. Output: the policy, or why not.
+/// and temp folder writable, since publish's `git init` makes `.git` there, the engine root's
+/// secrets guarded, and Git for Windows' install folder readable once it holds the markers
+/// ([`marked`]) and neither is nor holds the project or owner git's folder (the owner home is
+/// `allow_read`'s check). Inputs: the hooks, the engine root, the canonical project, git's
+/// program and the places. Output: the policy, or why not.
 pub fn policy(
     hooks: &'static ProfileHooks,
+    engine: &Path,
     project: &Path,
     git: &Path,
     places: &OwnerGitPlaces,
@@ -99,6 +101,7 @@ pub fn policy(
         SandboxNetwork::Only(Vec::new()),
     )?
     .as_job_folder()
+    .guard_engine(engine)?
     .allow_read(&root)
 }
 
@@ -154,7 +157,7 @@ impl OwnerGit {
     /// a project or git no boundary can hold, or a missing helper.
     pub fn install(
         hooks: &'static ProfileHooks,
-        _engine: &Path,
+        engine: &Path,
         folder: &Path,
         project: &Path,
         git: &Path,
@@ -168,7 +171,7 @@ impl OwnerGit {
         fs::create_dir_all(&places.home)?;
         fs::create_dir_all(&places.tmp)?;
         let git = plain_program(git)?;
-        let policy = policy(hooks, &project, &git, &places)?;
+        let policy = policy(hooks, engine, &project, &git, &places)?;
         let boundary = WindowsSandbox::install(policy, helper, &places.profile, grants)?;
         assert_eq!(boundary.profile(), places.profile);
         Ok(Self {

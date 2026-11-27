@@ -8363,10 +8363,10 @@ impl TeamRuntime {
     }
 
     /// The sandbox and installed profile the engine's git runs under to make a lead's native
-    /// teammates' worktrees: the lead's own launch profile for its own clone, or for a
-    /// linked lead its teammates' setup profile on the lead's recorded branch, installed
-    /// now (OP-9b, AGENT-REF-ALLOW-NARROW). Takes the project folder, the lead's worktree,
-    /// its git folder and the lead. Returns both, or the plain cause.
+    /// teammates' worktrees, guarded against the engine root's secrets as a launch is: the
+    /// lead's own launch profile for its own clone, or for a linked lead its teammates' setup
+    /// profile on the lead's recorded branch, installed now. Takes the project folder, the
+    /// lead's worktree, its git folder and the lead. Returns both, or the plain cause.
     fn teammates_git(
         &self,
         repository: &Path,
@@ -8374,18 +8374,18 @@ impl TeamRuntime {
         git_dir: &Path,
         lead: i64,
     ) -> Result<(ProjectSandbox, PathBuf), &'static str> {
-        let unavailable = |_| "lead_sandbox_unavailable";
+        let refused = "lead_sandbox_unavailable";
+        let engine = self.state.parent().ok_or(refused)?;
+        let root = repository.canonicalize().map_err(|_| refused)?;
         let sandbox = ProjectSandbox::new(
             &crate::sandbox::PROFILE_HOOKS,
-            &repository
-                .canonicalize()
-                .map(kernel_sandbox::paths::one_spelling)
-                .map_err(|_| "lead_sandbox_unavailable")?,
+            &kernel_sandbox::paths::one_spelling(root),
             &agent_home(&self.state, lead),
             &self.agent_folder(lead).join("tmp"),
             SandboxNetwork::Only(Vec::new()),
         )
-        .map_err(unavailable)?;
+        .and_then(|sandbox| sandbox.guard_engine(engine))
+        .map_err(|_| refused)?;
         if git_dir == crate::agent_git::git_dir(worktree) {
             return Ok((sandbox, agent_profile(&self.state, lead)));
         }
