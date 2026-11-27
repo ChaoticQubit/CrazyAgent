@@ -169,12 +169,19 @@ pub fn drain_errors(
 
 #[cfg(test)]
 mod tests {
-    use super::OwnerToken;
+    use super::{OwnerPacket, OwnerToken};
 
     /// An owner token lives behind a pointer, so moving any holder of one copies only the
     /// pointer and leaves no copy of the token's bytes behind.
     #[test]
     fn owner_token_is_a_pointer() {
         assert_eq!(size_of::<OwnerToken>(), size_of::<usize>());
+    }
+
+    /// An owner packet lives behind a pointer, so moving any holder of one copies only the
+    /// pointer and leaves no copy of the token it carries behind.
+    #[test]
+    fn owner_packet_is_a_pointer() {
+        assert_eq!(size_of::<OwnerPacket>(), size_of::<usize>());
     }
 }
