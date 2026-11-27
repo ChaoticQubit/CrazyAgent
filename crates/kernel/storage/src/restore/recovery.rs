@@ -294,7 +294,11 @@ fn keep_live(live: &std::fs::File, root: &Path, now: SystemTime) -> Result<PathB
             let mut buffer = vec![0_u8; 64 * 1024];
             let mut offset = 0_u64;
             loop {
-                let read = live.read_at(&mut buffer, offset)?;
+                let read = match live.read_at(&mut buffer, offset) {
+                    Ok(read) => read,
+                    Err(cause) if cause.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(cause) => return Err(cause),
+                };
                 if read == 0 {
                     break;
                 }

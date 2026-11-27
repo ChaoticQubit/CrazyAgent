@@ -47,7 +47,13 @@ pub fn held_file(parent: impl AsFd, name: &Path) -> Result<Arc<File>, std::io::E
         }
     };
     let key = (opened.st_dev, opened.st_ino);
-    assert!(key.1 != 0);
+    if key.1 == 0 {
+        held.spares.push(file);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a held file has no inode",
+        ));
+    }
     if let Some(kept) = held.files.get(&key) {
         let kept = Arc::clone(kept);
         held.spares.push(file);
