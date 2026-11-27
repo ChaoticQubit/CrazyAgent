@@ -937,10 +937,16 @@ fn a_lockfile_tool_that_writes_another_file_tells_the_owner_why_the_set_went_bac
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
-/// Asserts the last regeneration on this thread refused for `why`. Input: the reason.
-/// Output: none.
+/// Asserts the last regeneration on this thread refused for `why` on macOS, the one OS that
+/// regenerates lockfiles, and for `Why::Other` on every other OS. Input: the reason. Output:
+/// none.
 pub(super) fn assert_refused(why: went_back::Why) {
-    assert_eq!(lockfiles::REFUSED.get(), Some(why));
+    let expected = if cfg!(target_os = "macos") {
+        why
+    } else {
+        went_back::Why::Other
+    };
+    assert_eq!(lockfiles::REFUSED.get(), Some(expected));
 }
 
 /// A lockfile folder name with a control character reads with U+FFFD in the owner's note,
