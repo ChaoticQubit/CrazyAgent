@@ -1,8 +1,8 @@
 use crate::StorageError;
 use crate::migrations::{
     BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
-    V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, created, error,
-    file_digest, flush, mark_checked, pinned, private_file, schema, stamp, stamp_time, write_texts,
+    V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, checked_copy, error,
+    file_digest, flush, pinned, private_file, schema, stamp, stamp_time,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
@@ -127,7 +127,7 @@ fn restore_pinned_at(
         });
         let live = version(&db).and_then(|found| {
             let rows = schema(&db)?;
-            let kept = keep_replaced(&db, path, &folder, hooks.texts, now)?;
+            let kept = keep_replaced(&db, &folder, hooks.texts, now)?;
             Ok((found, rows, kept))
         });
         let checked = checking
@@ -268,14 +268,15 @@ fn alone(path: &Path) -> Result<Connection, StorageError> {
     Ok(db)
 }
 
-/// Keeps one dated copy of the data a restore replaces: engine.db copied in one pass and the
-/// settings texts, in a new 0700 `replaced-<UTC time>` folder under backups/, checked and
-/// marked as an upgrade backup is, with every flush a barrier, since the restore record's
-/// flush follows. Inputs: the held connection, its path, the backups folder, the settings
-/// texts and the time. Output: the folder; a copy that fails its check is removed.
+/// Keeps one dated copy of the data a restore replaces: engine.db through the SQLite backup
+/// API on the held connection, so no other descriptor of engine.db is ever opened or closed
+/// and the connection's lock holds, and the settings texts, in a new 0700
+/// `replaced-<UTC time>` folder under backups/. The copy is hashed beside its check and
+/// marked as an upgrade backup is, every flush a barrier, since the restore record's flush
+/// follows. Inputs: the held connection, the backups folder, the settings texts and the
+/// time. Output: the folder; a copy that fails its check is removed.
 fn keep_replaced(
     db: &Connection,
-    path: &Path,
     folder: &Path,
     texts: Texts<'_>,
     now: SystemTime,
@@ -288,52 +289,13 @@ fn keep_replaced(
         .mode(0o700)
         .create(&target)
         .map_err(restore_failed)?;
-    let made = copy_alone(db, path, &target).and_then(|digest| {
-        write_texts(&target, texts)?;
-        check_copy(db, &target.join(DATABASE))?;
-        mark_checked(folder, &target, &digest, Flush::Barrier)
-    });
+    let made = checked_copy(db, folder, &target, texts, check_copy, Flush::Barrier);
     if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);
         return Err(restore_failed(cause.0));
     }
     Ok(target)
 }
-
-/// Copies engine.db, held alone, into a new backup folder in one pass: the WAL is moved into
-/// the file first, so the file holds every committed write and no writer can start while the
-/// connection holds it, then each block is hashed as it is written, so the digest costs no
-/// second read. Inputs: the held connection, its path and the folder. Output: the copy's
-/// sha256 in lowercase hex, once the copy is behind a barrier.
-fn copy_alone(db: &Connection, path: &Path, target: &Path) -> Result<String, StorageError> {
-    use sha2::{Digest, Sha256};
-    use std::io::{Read, Write};
-    recovery::settled(db)?;
-    let mut from = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
-        .map_err(restore_failed)?;
-    let mut to = created(&target.join(DATABASE))?;
-    let mut hasher = Sha256::new();
-    let mut block = vec![0_u8; COPY_BLOCK_BYTES];
-    let mut copied: u64 = 0;
-    loop {
-        let read = from.read(&mut block).map_err(restore_failed)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&block[..read]);
-        to.write_all(&block[..read]).map_err(restore_failed)?;
-        copied += read as u64;
-    }
-    assert_eq!(copied, from.metadata().map_err(restore_failed)?.len());
-    flush(&to, Flush::Barrier).map_err(restore_failed)?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-/// The bytes one read of the replaced engine.db moves into its copy.
-const COPY_BLOCK_BYTES: usize = 1 << 20;
 
 /// The version and schema rows of the pinned copy, which the restored database must read.
 /// The copy is opened as `check_copy` opens it; one with no digest must also pass
