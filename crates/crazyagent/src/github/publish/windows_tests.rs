@@ -216,9 +216,10 @@ fn ide_git(git: &Path, project: &Path, home: &Path, path: &str) -> Command {
 /// and `dev\null\<hook>.exe`, the project, a folder first on the path), publish's git, a
 /// stage init, a commit, a signature check per armor (also with the owner's temp folder,
 /// which it needs to start a program) and the IDE's git run none, and every git ends well.
+/// Fails naming the variable when USERPROFILE is not set.
 #[test]
 #[ignore = "plants programs under the drive roots: the farm runs it by name (V244-WIN-GIT-SAFE-PROGRAM-PATH)"]
-fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
+fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() -> Result<(), String> {
     let engine_path = std::env::var_os("PATH").unwrap();
     let git = clone::git_program(Some(engine_path.as_os_str())).expect("git on the PATH");
     let publish_git = PublishGit::plain(git.clone());
@@ -226,7 +227,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
     let elsewhere = std::env::var_os("RUNNER_TEMP")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let profile = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+    let profile = PathBuf::from(std::env::var_os("USERPROFILE").ok_or("USERPROFILE is not set")?);
     let bases = [
         tempfile::Builder::new()
             .prefix("ca-plant")
@@ -423,4 +424,5 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         failures.is_empty(),
         "a Windows git ran a planted program or ended wrong: {failures:#?}"
     );
+    Ok(())
 }
