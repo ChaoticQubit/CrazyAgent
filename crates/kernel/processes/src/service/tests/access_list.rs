@@ -345,12 +345,12 @@ fn a_folder_gaining_files_during_every_listing_does_not_read_changeable() {
     assert_eq!(changeable_by_lstat(&tool), None);
 }
 
-/// Makes one new file in the folder now and after every later access listing on this
-/// thread, and opens the folder to another user's writes right after the fourth listing of
-/// the folder alone, once three relistings have all seen it move. Inputs: the folder, the
-/// files made so far and the listings of the folder alone so far.
+/// Makes one new file in the folder now and after every later access read on this thread,
+/// and runs the change on the folder once, right after its read alone number `at`: reads 1
+/// to 3 are the relistings, 4 and 5 the two last reads. Inputs: the folder, the files made
+/// so far, the reads of the folder alone so far, the read to change it after and the change.
 #[cfg(target_os = "macos")]
-fn churn_then_open(folder: PathBuf, made: u32, alone: u32) {
+fn churn_then(folder: PathBuf, made: u32, alone: u32, at: u32, change: fn(&Path)) {
     assert!(
         made < 64,
         "the churn ran past every listing a read may make"
@@ -359,17 +359,53 @@ fn churn_then_open(folder: PathBuf, made: u32, alone: u32) {
     std::fs::write(&made_file, "").unwrap_or_else(|error| panic!("write {made_file:?}: {error}"));
     let listed_alone = acl::last_listing() == [folder.clone()];
     let alone = alone + u32::from(listed_alone);
-    if listed_alone && alone == 4 {
-        let status = crate::spawn_gate::status(
-            std::process::Command::new("/bin/chmod")
-                .arg("+a")
-                .arg("user:nobody allow add_file,write")
-                .arg(&folder),
-        )
-        .unwrap_or_else(|error| panic!("chmod +a on {folder:?}: {error}"));
-        assert!(status.success(), "chmod +a on {folder:?}");
+    if listed_alone && alone == at {
+        change(&folder);
     }
-    acl::after_next_listing(move || churn_then_open(folder, made + 1, alone));
+    acl::after_next_listing(move || churn_then(folder, made + 1, alone, at, change));
+}
+
+/// Adds an access-list entry that lets another user write in the folder. Input: the folder.
+#[cfg(target_os = "macos")]
+fn open_to_nobody(folder: &Path) {
+    chmod_entry(&["+a", "user:nobody allow add_file,write"], folder);
+}
+
+/// Adds a deny-only access-list entry, which leaves the folder private but changes its
+/// list. Input: the folder.
+#[cfg(target_os = "macos")]
+fn deny_nobody(folder: &Path) {
+    chmod_entry(&["+a", "user:nobody deny add_file"], folder);
+}
+
+/// Changes the folder's mode to one that is still private, so only the mode change itself
+/// can make the read count as changeable. Input: the folder.
+#[cfg(target_os = "macos")]
+fn private_mode(folder: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o750))
+        .unwrap_or_else(|error| panic!("chmod 750 {folder:?}: {error}"));
+}
+
+/// Whether the tool in a folder that keeps gaining files through every read, and gets the
+/// change right after its read alone number `at`, reads its folder as changeable by others.
+/// Inputs: the read to change it after and the change. Output: the folder named, or none.
+#[cfg(target_os = "macos")]
+fn busy_folder_changed_at(at: u32, change: fn(&Path)) -> Option<PathBuf> {
+    let temp = durable_folder();
+    let folder = temp.path().join("busy");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    settle(&[&folder, &tool]);
+    acl::take_listings();
+    let busy = folder.clone();
+    acl::after_next_listing(move || churn_then(busy, 0, 0, at, change));
+    let read = changeable_by_lstat(&tool);
+    assert!(
+        read.as_ref().is_none_or(|named| *named == folder),
+        "{read:?} names a part other than {folder:?}"
+    );
+    read
 }
 
 /// A folder whose access list lets another user add files, and which keeps gaining files
@@ -412,15 +448,34 @@ fn a_shared_folder_gaining_files_through_every_listing_reads_changeable() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_access_list_added_after_the_relistings_of_a_busy_folder_still_reads_changeable() {
-    let temp = durable_folder();
-    let folder = temp.path().join("busy");
-    let tool = folder.join("tmux");
-    write_mode(&tool, "#!/bin/sh\n", 0o755);
-    settle(&[&folder, &tool]);
-    acl::take_listings();
-    let busy = folder.clone();
-    acl::after_next_listing(move || churn_then_open(busy, 0, 0));
-    assert_eq!(changeable_by_lstat(&tool), Some(folder.clone()));
+    assert!(busy_folder_changed_at(4, open_to_nobody).is_some());
+}
+
+/// A busy folder whose mode changes right after its last read, to a mode that is still
+/// private, reads as changeable by others: the `lstat` after the last reads must find the
+/// mode the caller judged.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mode_change_after_the_last_read_of_a_busy_folder_reads_changeable() {
+    assert!(busy_folder_changed_at(5, private_mode).is_some());
+}
+
+/// A busy folder whose mode changes between its two last reads, to a mode that is still
+/// private, reads as changeable by others: each last read must find the mode the caller
+/// judged.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mode_change_between_the_last_reads_of_a_busy_folder_reads_changeable() {
+    assert!(busy_folder_changed_at(4, private_mode).is_some());
+}
+
+/// A busy folder that gains a deny-only access-list entry between its two last reads reads
+/// as changeable by others: both last reads read it as not shared, but from two different
+/// lists, so neither answer holds.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_busy_folder_whose_list_differs_between_its_last_reads_reads_changeable() {
+    assert!(busy_folder_changed_at(4, deny_nobody).is_some());
 }
 
 /// An access list that lets another user write, added while the folder's list is read,
