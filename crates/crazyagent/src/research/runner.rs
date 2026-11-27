@@ -19,6 +19,7 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
+use crate::sandbox::NO_RESEARCH_ENGINE_ROOT;
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
@@ -1335,9 +1336,8 @@ impl ResearchRunner {
         let mut sandbox =
             ProjectSandbox::new(&crate::sandbox::PROFILE_HOOKS, &root, &home, &tmp, network)?
                 .keep_ports(&kept)?;
-        if let Some(runtime) = self.state.parent() {
-            sandbox = sandbox.guard_engine(runtime)?;
-        }
+        let runtime = self.state.parent().ok_or(NO_RESEARCH_ENGINE_ROOT)?;
+        sandbox = sandbox.guard_engine(runtime)?;
         let extra = jobs
             .read_paths(&project)
             .map_err(|_| RunError::Invalid("project read-only folders unreadable".into()))?;

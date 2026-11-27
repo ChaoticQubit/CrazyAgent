@@ -88,7 +88,7 @@ test("a guard after the install call in its function does not cover it", () => {
       [3, false],
       [5, true],
       [6, true],
-      [7, true],
+      [7, false],
     ],
   );
   const kept = late.split("\n").filter((_, at) => at < 4 || at > 6);
@@ -98,6 +98,161 @@ test("a guard after the install call in its function does not cover it", () => {
   ]);
   const same = kept.map((line, at) => (at === 3 ? late.split("\n")[6] : line));
   assert.deepEqual(scan(FILE, same.join("\n")).sites[1], { line: 4, fn: "launch", guarded: false });
+});
+
+/**
+ * A function that makes a sandbox, then runs the given lines, then installs `sandbox`.
+ * Input: the lines between, each without its indent. Output: the function's text.
+ */
+function installing(lines) {
+  return (
+    "pub fn launch(state: &Path, engine: &Path, profile: &Path) -> Result<(), Error> {\n" +
+    "    let mut sandbox = ProjectSandbox::new(&HOOKS, root, root, root, network())?;\n" +
+    lines.map((line) => `    ${line}\n`).join("") +
+    "    sandbox.install(profile)?;\n" +
+    "    Ok(())\n" +
+    "}\n"
+  );
+}
+
+/** Whether the last install site of a function's text is guarded. Input: the text. */
+function lastGuarded(text) {
+  const { sites } = scan(FILE, text);
+  assert.ok(sites.length > 0, text);
+  return sites.at(-1).guarded;
+}
+
+test("a guard counts only on the install's receiver, never on another sandbox", () => {
+  assert.equal(lastGuarded(installing(["sandbox = sandbox.guard_engine(engine)?;"])), true);
+  assert.equal(lastGuarded(installing(["let other = sandbox.guard_engine(engine)?;"])), false);
+  const other = ["let guarded = ProjectSandbox::new(&HOOKS, a, a, a, n)?.guard_engine(e)?;"];
+  assert.equal(lastGuarded(installing(other)), false);
+  const remade = [
+    "sandbox = sandbox.guard_engine(engine)?;",
+    "let sandbox = ProjectSandbox::new(&HOOKS, root, root, root, network())?;",
+  ];
+  assert.equal(lastGuarded(installing(remade)), false);
+  const derived = [
+    "sandbox = sandbox.guard_engine(engine)?;",
+    "(sandbox, _) = sandbox.allow_tools(&t)?;",
+  ];
+  assert.equal(lastGuarded(installing(derived)), true);
+});
+
+test("a guard in an if branch does not cover an install; the same guard unconditional does", () => {
+  const branch = [
+    "if let Some(runtime) = state.parent() {",
+    "    sandbox = sandbox.guard_engine(runtime)?;",
+    "}",
+  ];
+  assert.equal(lastGuarded(installing(branch)), false);
+  const matched = [
+    "match state.parent() {",
+    "    Some(runtime) => sandbox = sandbox.guard_engine(runtime)?,",
+    "    None => {}",
+    "}",
+  ];
+  assert.equal(lastGuarded(installing(matched)), false);
+  const plain = [
+    "let runtime = state.parent().ok_or(Error::Unparented)?;",
+    "sandbox = sandbox.guard_engine(runtime)?;",
+  ];
+  assert.equal(lastGuarded(installing(plain)), true);
+});
+
+test("a guard in a closure block does not cover an install; a bare closure step does", () => {
+  const block = ["sandbox = Ok(sandbox).and_then(|s| { s.guard_engine(engine) })?;"];
+  assert.equal(lastGuarded(installing(block)), false);
+  const kept = ["let guard = |s: ProjectSandbox| s.guard_engine(engine);"];
+  assert.equal(lastGuarded(installing(kept)), false);
+  const step = ["sandbox = Ok(sandbox).and_then(|s| s.guard_engine(engine))?;"];
+  assert.equal(lastGuarded(installing(step)), true);
+});
+
+test("an install on a guarded chain, a closure argument or a split argument is guarded", () => {
+  const chained =
+    "pub fn launch(engine: &Path, profile: &Path) -> Result<InstalledSandbox, Error> {\n" +
+    "    ProjectSandbox::new(&HOOKS, root, root, root, network())\n" +
+    "        .and_then(|sandbox| sandbox.guard_engine(engine))\n" +
+    "        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))\n" +
+    "}\n";
+  assert.deepEqual(scan(FILE, chained).sites, [{ line: 4, fn: "launch", guarded: true }]);
+  const bare = chained.replace("        .and_then(|sandbox| sandbox.guard_engine(engine))\n", "");
+  assert.deepEqual(scan(FILE, bare).sites, [{ line: 3, fn: "launch", guarded: false }]);
+  const split = installing(["sandbox = sandbox.guard_engine(engine)?;"]).replace(
+    "    sandbox.install(profile)?;\n",
+    "    let boundary = InstalledSandbox::install(\n        sandbox,\n        profile,\n    )?;\n",
+  );
+  assert.equal(lastGuarded(split), true);
+  assert.equal(lastGuarded(split.replace("sandbox = sandbox.guard_engine(engine)?;", "")), false);
+});
+
+test("a guarded sandbox carried through a tuple, an Option or an if let stays guarded", () => {
+  const carried = [
+    "sandbox = sandbox.guard_engine(engine)?;",
+    "let mut mates = None;",
+    "if wanted {",
+    "    let (lead, teammates) = split(sandbox)?;",
+    "    sandbox = lead;",
+    "    mates = Some(teammates);",
+    "}",
+    "if let Some(mates) = &mates {",
+    "    mates.install(other)?;",
+    "}",
+    "if let Some(link) = &link",
+    "    && let Ok(linked) = sandbox.clone().allow_read_link(link)",
+    "{",
+    "    sandbox = linked;",
+    "}",
+  ];
+  const sites = (lines) => scan(FILE, installing(lines)).sites.map(({ guarded }) => guarded);
+  assert.deepEqual(sites(carried), [true, true]);
+  const swapped = carried.map((line) =>
+    line === "    sandbox = lead;" ? "    sandbox = ProjectSandbox::new(&H, a, a, a, n)?;" : line,
+  );
+  assert.deepEqual(sites(swapped), [true, false]);
+  const made = carried.map((line) =>
+    line === "    mates = Some(teammates);" ? "    mates = Some(make(&lead_root)?);" : line,
+  );
+  assert.deepEqual(sites(made), [false, true]);
+});
+
+test("a guard written in a string or a block comment does not count", () => {
+  const quoted = ['let note = "sandbox = sandbox.guard_engine(engine)?;";'];
+  assert.equal(lastGuarded(installing(quoted)), false);
+  const commented = ["/* sandbox = sandbox.guard_engine(engine)?; */"];
+  assert.equal(lastGuarded(installing(commented)), false);
+});
+
+test("a builder must guard a sandbox it made; one passing a sandbox on need not", () => {
+  const made =
+    "pub fn policy(engine: &Path) -> Result<ProjectSandbox, SandboxError> {\n" +
+    "    ProjectSandbox::new(&HOOKS, root, root, root, network())?\n" +
+    "        .guard_engine(engine)?\n" +
+    "        .allow_read(root)\n" +
+    "}\n";
+  assert.deepEqual(scan(FILE, made).sites, []);
+  const bare = made.replace("        .guard_engine(engine)?\n", "");
+  assert.deepEqual(scan(FILE, bare).sites, [
+    { line: 1, fn: "policy", guarded: false, returns: true },
+  ]);
+  assert.deepEqual(check(new Map([[FILE, scan(FILE, bare)]]), {}), [
+    `${FILE}:1: fn policy returns a sandbox it built with no guard_engine; ${ADVICE}`,
+  ]);
+  const pinned = { [`${FILE}#policy`]: pin(["a reason naming crates/a/src/launch.rs#policy"]) };
+  assert.deepEqual(check(new Map([[FILE, scan(FILE, bare)]]), pinned), []);
+  const tuple = bare.replace("Result<ProjectSandbox,", "Result<(ProjectSandbox, Hidden),");
+  assert.equal(scan(FILE, tuple).sites.length, 1);
+  const passing =
+    "pub fn apply(sandbox: ProjectSandbox, root: &Path) -> Result<ProjectSandbox, Error> {\n" +
+    "    sandbox.allow_read(root)\n" +
+    "}\n";
+  assert.deepEqual(scan(FILE, passing).sites, []);
+  const maker = "    ProjectSandbox::new(&HOOKS, root, root, root, n())\n";
+  const swapped = passing.replace("    sandbox.allow_read(root)\n", maker);
+  assert.equal(scan(FILE, swapped).sites.length, 1);
+  const borrowed = "pub fn sandbox(&self) -> &ProjectSandbox {\n    &self.sandbox\n}\n";
+  assert.deepEqual(scan(FILE, borrowed).sites, []);
 });
 
 test("an allowlist past its most entries fails, at the most it passes", () => {

@@ -170,6 +170,18 @@ pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
     untracked: access_untracked,
 };
 
+/// The refusal code of a launch whose engine state folder has no parent, so there is no
+/// engine root to guard its sandbox against.
+pub(crate) const ENGINE_ROOT_MISSING: &str = "engine_root_missing";
+
+/// A team launch's line for [`ENGINE_ROOT_MISSING`]: the plain sandbox line with that code.
+pub(crate) const NO_ENGINE_ROOT: &str =
+    "the agent sandbox could not be set up. (engine_root_missing)";
+
+/// A research launch's refusal for [`ENGINE_ROOT_MISSING`], as its setup step's code.
+pub(crate) const NO_RESEARCH_ENGINE_ROOT: crate::research::runner::RunError =
+    crate::research::runner::RunError::Setup(ENGINE_ROOT_MISSING);
+
 /// The engine's real profile hooks, the only [`ProfileHooks`] production code passes: its
 /// access and toolchain hooks, and the engine's own folder and file names, agent home lists
 /// and checks the Seatbelt rules name.

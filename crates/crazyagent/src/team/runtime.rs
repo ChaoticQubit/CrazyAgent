@@ -36,6 +36,7 @@ use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
+use crate::sandbox::NO_ENGINE_ROOT;
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
@@ -9343,9 +9344,8 @@ impl TeamRuntime {
             ProjectSandbox::new(&crate::sandbox::PROFILE_HOOKS, &root, &home, &tmp, network)
                 .and_then(|sandbox| sandbox.keep_ports(&kept))
                 .map_err(sandboxed)?;
-        if let Some(runtime) = self.state.parent() {
-            sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
-        }
+        let runtime = self.state.parent().ok_or(NO_ENGINE_ROOT)?;
+        sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         let extra =
             crate::sandbox::access_store::read::load(&self.connection, stored.project_id.as_str())
                 .map_err(|_| {
