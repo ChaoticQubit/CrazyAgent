@@ -1399,9 +1399,9 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
         .prefix("ca-state-")
         .tempdir_in("/tmp")
         .unwrap();
-    let state = scratch.path().canonicalize().unwrap();
+    let state = scratch.path().canonicalize().unwrap().join("research");
     for folder in ["agents", "profiles"] {
-        std::fs::create_dir(state.join(folder)).unwrap();
+        std::fs::create_dir_all(state.join(folder)).unwrap();
     }
 
     let ending = graph::update(
@@ -1457,9 +1457,9 @@ fn run_graph(repo: &Path, graphify: &Path, hidden: &[std::path::PathBuf]) -> gra
         .prefix("ca-state-")
         .tempdir_in("/tmp")
         .unwrap();
-    let state = scratch.path().canonicalize().unwrap();
+    let state = scratch.path().canonicalize().unwrap().join("research");
     for folder in ["agents", "profiles"] {
-        std::fs::create_dir(state.join(folder)).unwrap();
+        std::fs::create_dir_all(state.join(folder)).unwrap();
     }
     graph::update(
         graphify,

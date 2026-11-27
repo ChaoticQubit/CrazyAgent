@@ -129,30 +129,37 @@ fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_with_the_graph_off()
     assert_hidden_out_of_the_prompt(&repo, &hidden);
 }
 
-/// A graph build over a repository that holds the engine's data folder, as after the owner
-/// moves that folder into a project, is refused before its profile is written, so graphify
-/// never reads the engine's database or keys.
+/// Runs a graph build with a stand-in graphify over a fresh git repository whose engine
+/// root, holding `engine.db`, sits inside the repository or beside it. Input: whether the
+/// engine root sits inside. Output: how the build ended and whether its profile was written.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_graph_update_over_a_repo_holding_the_engine_root_is_refused_before_install() {
+fn graph_with_the_engine_root(
+    inside: bool,
+) -> (
+    Result<graph::GraphEnding, crate::research::runner::RunError>,
+    bool,
+) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::Builder::new()
         .prefix("ca-graph-")
         .tempdir_in("/tmp")
         .unwrap();
-    let repo = dir.path().canonicalize().unwrap();
+    let scratch = dir.path().canonicalize().unwrap();
+    let repo = scratch.join("repo");
+    std::fs::create_dir(&repo).unwrap();
     git_init(&repo);
-    let engine = repo.join("data").join("engine");
+    let engine = if inside {
+        repo.join("data")
+    } else {
+        scratch.join("data")
+    };
     let state = engine.join("research");
     for folder in ["agents", "profiles"] {
         std::fs::create_dir_all(state.join(folder)).unwrap();
     }
     std::fs::write(engine.join("engine.db"), "engine secret\n").unwrap();
-    let tools = tempfile::Builder::new()
-        .prefix("ca-graphify-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let graphify = tools.path().canonicalize().unwrap().join("graphify");
+    let graphify = scratch.join("tools").join("graphify");
+    std::fs::create_dir(graphify.parent().unwrap()).unwrap();
     std::fs::write(&graphify, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&graphify, std::fs::Permissions::from_mode(0o755)).unwrap();
     let ending = graph::update(
@@ -164,14 +171,36 @@ fn a_graph_update_over_a_repo_holding_the_engine_root_is_refused_before_install(
         std::time::Duration::from_secs(60),
         &|| false,
     );
+    let written = state.join("profiles").join("onboard-g-engine.sb").exists();
+    (ending, written)
+}
+
+/// A graph build over a repository that holds the engine's data folder, as after the owner
+/// moves that folder into a project, is refused before its profile is written, so graphify
+/// never reads the engine's database or keys.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_graph_update_over_a_repo_holding_the_engine_root_is_refused_before_install() {
+    use crate::research::runner::RunError;
+    use kernel_sandbox::error::SandboxError;
+    let (ending, written) = graph_with_the_engine_root(true);
     assert!(
         matches!(
             &ending,
-            Err(crate::research::runner::RunError::Sandbox(
-                kernel_sandbox::error::SandboxError::Invalid(reason)
-            )) if reason == kernel_sandbox::paths::SECRET_ROOT_REFUSED
+            Err(RunError::Sandbox(SandboxError::Invalid(reason)))
+                if reason == kernel_sandbox::paths::SECRET_ROOT_REFUSED
         ),
         "{ending:?}"
     );
-    assert!(!state.join("profiles").join("onboard-g-engine.sb").exists());
+    assert!(!written);
+}
+
+/// The same graph build with the engine root beside the repository installs its profile
+/// and runs, so the refusal above is the engine root's place and nothing else.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_graph_update_with_the_engine_root_beside_the_repo_installs_its_profile() {
+    let (ending, written) = graph_with_the_engine_root(false);
+    assert!(ending.is_ok(), "{ending:?}");
+    assert!(written);
 }

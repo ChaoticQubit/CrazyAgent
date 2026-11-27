@@ -72,6 +72,45 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
     crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
 }
 
+/// An IDE project folder that holds the engine data root, as after the owner moves that
+/// folder into a project, gets no profile, so the server never reads the engine's files.
+#[test]
+fn an_ide_profile_refuses_a_project_holding_the_engine_data_root() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = fs::canonicalize(scratch.path()).unwrap();
+    let data = root.join("engine");
+    let home = data.join("ide").join("p1").join("server");
+    let build = data.join("ide").join("builds").join("v1");
+    for path in [&home, &build] {
+        folder(path);
+    }
+    let tmp = crate::toolchains::make_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let refused = profile(
+        &crate::test_hooks::STAND_IN,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    );
+    crate::toolchains::remove_tmp(crate::test_hooks::STAND_IN.toolchain, &home).unwrap();
+    assert_eq!(refused.unwrap_err(), "ide_sandbox_invalid");
+}
+
 /// A project folder named with long runs of `s` and `f` still gets an IDE profile holding its agent
 /// folders rule under the folder's spelled name, rather than a panic while that name is spelled.
 #[test]
