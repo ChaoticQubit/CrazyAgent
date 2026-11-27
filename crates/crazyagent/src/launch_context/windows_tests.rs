@@ -1377,3 +1377,28 @@ fn a_windows_codex_lock_only_removes_copies_through_its_held_home_after_a_repoin
     drop(guard);
     drop(lock_only(&second_home, "claude-code").unwrap());
 }
+
+/// A launch lock taken after a junction above the held home is repointed sits in the held
+/// home: the folder the junction names now gets no lock file, and the lock is the held
+/// home's own, busy for a second taker while it lives.
+#[test]
+fn a_windows_launch_lock_taken_after_a_junction_repoint_stays_in_the_held_home() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(&base, "second");
+    let other = private_home(&second, "home");
+    let link = base.join("link");
+    junction(&link, &first);
+    let root = windows::adopt_root(&link.join("home")).unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    junction(&link, &second);
+    let taken =
+        lock(&link.join("home")).and_then(|lock| locked_in(&lock, root.file()).map(|()| lock));
+    assert!(!other.join(LOCK).exists());
+    let lock = taken.unwrap();
+    assert!(held_home.join(LOCK).is_file());
+    assert_eq!(super::lock(&held_home).unwrap_err().0, "launch_home_busy");
+    drop(lock);
+    drop(root);
+}
