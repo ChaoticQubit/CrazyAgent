@@ -3,7 +3,9 @@ use super::{HandedWord, RegisteredNativeAuthHost};
 use crate::engine::bootstrap::runner_binding;
 use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyChannel;
 use crate::engine::owner::{HostStamp, NativeAuthFact};
+use crate::engine::secret_frame::{OwnerToken, owner_token};
 use crate::engine::{EngineError, io_error};
+use kernel_security::secret::Zeroizing;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
@@ -18,7 +20,7 @@ const CHECK_RENEWAL_WAIT: Duration = Duration::from_secs(90);
 pub(super) async fn read_bootstrap(
     input: &OwnedFd,
     deadline: Instant,
-) -> Result<[u8; 32], EngineError> {
+) -> Result<OwnerToken, EngineError> {
     let entered = Instant::now();
     if entered >= deadline {
         return Err(EngineError("native_auth_bootstrap_timeout".to_owned()));
@@ -28,7 +30,7 @@ pub(super) async fn read_bootstrap(
     fcntl_setfl(input, flags | OFlags::NONBLOCK).map_err(io_error)?;
     let input = AsyncFd::with_interest(input.as_fd(), Interest::READABLE).map_err(io_error)?;
     let expires = tokio::time::Instant::from_std(deadline);
-    let mut buffer = [0; TOKEN_BYTES + 1];
+    let mut buffer = Zeroizing::new([0; TOKEN_BYTES + 1]);
     let mut used = 0;
     loop {
         assert!(used <= TOKEN_BYTES);
@@ -47,7 +49,7 @@ pub(super) async fn read_bootstrap(
         });
         match read {
             Ok(Ok(0)) if used == TOKEN_BYTES => {
-                let mut token = [0; TOKEN_BYTES];
+                let mut token = owner_token();
                 token.copy_from_slice(&buffer[..TOKEN_BYTES]);
                 return Ok(token);
             }

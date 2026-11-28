@@ -1,9 +1,12 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api-intake.ts");
+const { thisComputer } = await import("../src/ui/keys.ts");
 
 const failed = (code, message = "Something went wrong. Try again.") => ({ kind: "error", code, message });
 
@@ -143,9 +146,9 @@ test("each Move anyway and Copy anyway warning reads exactly as the owner asked"
   assert.deepEqual(api.ADD_WARNINGS, {
     close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
     old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
-    across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
+    across_disks: `This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If ${thisComputer()} sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.`,
     same_disk: "This is a rename on the same disk; it is quick.",
-    copy_all: "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.",
+    copy_all: `This copies every file into your projects folder. It can take a long time and needs as much free space again. If ${thisComputer()} sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.`,
     large: "This folder is very large.",
     unmeasured: "CrazyAgent couldn't measure it.",
     too_many: "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time.",
@@ -191,4 +194,19 @@ test("a started onboarding's kept change guesses no project from the folder name
   const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
   assert.match(bridge, /OwnerMutation::StartOnboarding \{ \.\. \} => \("start_onboarding", None, None\)/);
   assert.ok(!bridge.includes("onboarded_project("), "no folder-name guess is left in the bridge");
+});
+
+test("the GitHub sign-in store lines name each computer's store, and macOS keeps saying your keychain", async () => {
+  const kept = (os, store) => (os === "mac" ? "your keychain" : store);
+  await eachComputer("../src/api-intake.ts", (each, { os, store }) => {
+    assert.equal(each.intakeCopy("credential_missing"), `The saved GitHub sign-in is gone from ${kept(os, store)}. Sign in again.`, os);
+    const lead = os === "mac" ? "Your system keychain" : store[0].toUpperCase() + store.slice(1);
+    assert.equal(each.intakeCopy("credential_store_unavailable"), `${lead} can't be used right now.`, os);
+  });
+  await eachComputer("../src/screens/intake/clone.tsx", (clone, { os, store }) => {
+    const noop = () => {};
+    const html = renderToStaticMarkup(createElement(clone.GitHubSignInView, { device: null, now: 0, busy: false, problem: "", tokenOpen: true, tokenRef: { current: null },
+      onDevice: noop, onCli: noop, onTokenOpen: noop, onToken: noop, onOpenPage: noop }));
+    assert.ok(html.includes(`It goes to ${kept(os, store)} and isn`), `${os}: ${html}`);
+  });
 });

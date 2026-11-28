@@ -4,7 +4,7 @@ import { intakeCopy, loadProjectsHome, setProjectsHome } from "../../api-intake"
 import { receiptState } from "../../api-projects";
 import type { ProjectsHome } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Skeleton } from "../../ui";
+import { Button, Skeleton, fileManager } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
@@ -35,7 +35,7 @@ export function HomeFolderView({ home, picked, busy, problem, onChoose, onSave, 
   </div>;
   const current = home.value.path;
   return <div className="pj-stack-s">
-    <p className="pj-secondary">CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with Finder and it shows up on Home.</p>
+    <p className="pj-secondary">{`CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with ${fileManager()} and it shows up on Home.`}</p>
     {current && !picked && <p>Your projects folder is <span className="pj-mono" title={current}>{displayText(folderLabel(current))}</span>.</p>}
     {picked && <p>Use <span className="pj-mono" title={picked}>{displayText(folderLabel(picked))}</span>
       {current ? ". Projects already in the old folder stay there." : "."}</p>}

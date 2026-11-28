@@ -6,7 +6,7 @@ import { accountLabels, namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterActivityLine, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
-import { isMac } from "../../ui/keys";
+import { isMac, thisComputer } from "../../ui/keys";
 
 
 /** Formats a duration the way the design writes elapsed time.
@@ -776,8 +776,8 @@ export function replyingTurn(turns: MasterTurn[]): MasterTurn | null {
  * Output: the line, or null when the harness can run or is unknown. */
 export function masterMissingLine(harnesses: HarnessEntry[] | null, master: string): string | null {
   const entry = harnesses?.find((harness) => harness.id === master);
-  if (entry?.status.kind === "not_installed") return `${entry.name} isn't installed on this Mac.`;
-  if (entry?.status.kind === "cant_run") return `${entry.name} can't run on this Mac. Pick another harness.`;
+  if (entry?.status.kind === "not_installed") return `${entry.name} isn't installed on ${thisComputer()}.`;
+  if (entry?.status.kind === "cant_run") return `${entry.name} can't run on ${thisComputer()}. Pick another harness.`;
   return null;
 }
 

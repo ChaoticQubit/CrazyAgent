@@ -158,15 +158,13 @@ impl OwnerClient {
             let mut stream = self
                 .connect_checked(|_| failure("account_profile_owner_unavailable"))
                 .await?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
             stream
-                .write_all(&packet)
+                .write_all(&*packet)
                 .await
                 .map_err(|_| failure("account_profile_owner_unavailable"))?;
             stream
@@ -190,17 +188,12 @@ impl OwnerClient {
                 if self.root.socket_identity().ok() != Some(self.socket) {
                     return Err(unknown());
                 }
-                let mut bytes = secret.map(AccountSecret::into_bytes).unwrap_or_default();
                 committed = true;
                 let write = async {
-                    stream
-                        .write_all(&(bytes.len() as u32).to_be_bytes())
-                        .await?;
-                    stream.write_all(&bytes).await?;
+                    crate::engine::secret_frame::write_secret_frame(&mut stream, secret).await?;
                     stream.shutdown().await
                 }
                 .await;
-                kernel_security::secret::wipe(&mut bytes);
                 write.map_err(|_| unknown())?;
                 let result = read_wire(self, &mut stream, None).await?;
                 if reply_epoch(&result).is_some_and(|value| value != engine_epoch) {
@@ -591,36 +584,10 @@ async fn receive_secret(
     stream: &mut Stream,
     present: bool,
 ) -> Result<Option<AccountSecret>, EngineError> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut size = [0; 4];
-        stream
-            .read_exact(&mut size)
-            .await
-            .map_err(|_| failure("account_profile_secret_frame_invalid"))?;
-        let size = u32::from_be_bytes(size) as usize;
-        if size > 8192 || (present && size == 0) || (!present && size != 0) {
-            return Err(failure("account_profile_secret_frame_invalid"));
-        }
-        let mut bytes = vec![0; size];
-        stream
-            .read_exact(&mut bytes)
-            .await
-            .map_err(|_| failure("account_profile_secret_frame_invalid"))?;
-        let mut extra = [0; 1];
-        if stream
-            .read(&mut extra)
-            .await
-            .map_err(|_| failure("account_profile_secret_frame_invalid"))?
-            != 0
-        {
-            return Err(failure("account_profile_secret_frame_invalid"));
-        }
-        if present {
-            AccountSecret::new(bytes).map(Some)
-        } else {
-            Ok(None)
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::engine::secret_frame::read_profile_secret(stream, present),
+    )
     .await
     .map_err(|_| failure("account_profile_secret_frame_invalid"))?
 }

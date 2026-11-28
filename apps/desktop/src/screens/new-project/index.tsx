@@ -8,7 +8,7 @@ import {
 import type { PoolChoice, ProjectCatalog, ProjectSetup, ProjectSpec } from "../../api-projects";
 import type { IntakeJob } from "../../engine-client";
 import { SessionContext } from "../../state";
-import { Button, ConfirmDialog, Icon, Notice, PageHeader } from "../../ui";
+import { Button, ConfirmDialog, Icon, Notice, PageHeader, thisComputer } from "../../ui";
 import { displayText } from "../conversation";
 import { jobActions, jobLine, setupFollow } from "../intake/intake";
 import { flash, go } from "../project/flash";
@@ -338,7 +338,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
             {picker === "missing" && <NotReady what="the file picker isn't in this build. Add a file by its full path below." />}
           </div>
           {picker !== "ready" && <div className="pj-field">
-            <label htmlFor="np-doc-path">Full path of a file on this Mac</label>
+            <label htmlFor="np-doc-path">Full path of a file on {thisComputer()}</label>
             <div className="pj-row">
               <input className="pj-input" id="np-doc-path" value={docPath} onChange={(event) => setDocPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addPath(); } }} />
               <button type="button" className="btn" disabled={!docPath.trim() || !catalogValue} onClick={addPath}>Add file</button>

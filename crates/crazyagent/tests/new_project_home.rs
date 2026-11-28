@@ -991,6 +991,88 @@ async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
     engine.stop().await;
 }
 
+/// Whether a file holds the bytes, a missing file holding none. Inputs: the path and the
+/// bytes. Output: the answer.
+#[cfg(target_os = "macos")]
+fn file_holds(path: &Path, bytes: &[u8]) -> bool {
+    fs::read(path).is_ok_and(|held| held.windows(bytes.len()).any(|window| window == bytes))
+}
+
+/// A demo made again leaves no old body of the earlier demo's events in engine.db or its
+/// WAL: the clear's tombstones are checkpointed into the file and the WAL is emptied after
+/// the Create demo commits, as a removal's are. The old event is a sessions event naming the
+/// demo at its top level, planted after the Delete.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demo_made_again_leaves_no_old_event_body_in_the_database_files() {
+    use crazyagent::demo::{NAME, PROJECT_ID};
+    use crazyagent::protocol::CredentialRef;
+    const MARKER: &str = "old-demo-session-body-7f3a9c";
+    let engine = Engine::with_settings(DEMO_POOL).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    sign_in(engine.root.path(), "profile-codex");
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let pool = CredentialRef::new("pool-codex").unwrap();
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let response = owner.create_demo(pool.clone(), next()).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let demo = ProjectId::new(PROJECT_ID).unwrap();
+    let response = owner
+        .delete_project(demo, NAME.into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let file = engine.root.path().join("engine.db");
+    let wal = engine.root.path().join("engine.db-wal");
+    let db = rusqlite::Connection::open(&file).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let body = format!(r#"{{"project":"{PROJECT_ID}","marker":"{MARKER}"}}"#);
+    let planted = db
+        .execute(
+            "INSERT INTO state_log(seq,revision,aggregate,kind,schema,at_ms,body)
+             SELECT max(seq)+1, max(revision), 'sessions', ?1, 1, 0, CAST(?2 AS BLOB)
+             FROM state_log",
+            rusqlite::params![crazyagent::sessions_log::KIND_SESSION, body],
+        )
+        .unwrap();
+    assert_eq!(planted, 1);
+    drop(db);
+    assert!(
+        file_holds(&file, MARKER.as_bytes()) || file_holds(&wal, MARKER.as_bytes()),
+        "the planted body is on disk before the clear"
+    );
+
+    let response = owner.create_demo(pool, next()).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+
+    for path in [&file, &wal] {
+        assert!(
+            !file_holds(path, MARKER.as_bytes()),
+            "{} still holds the old body",
+            path.display()
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}
+
 /// A pool that still lists an earlier demo's id, as one does after that demo was removed
 /// from the dashboard, or deleted when taking it out of its pools failed.
 #[cfg(target_os = "macos")]

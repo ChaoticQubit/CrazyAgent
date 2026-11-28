@@ -254,3 +254,26 @@ fn a_swept_ignored_name_with_a_control_character_is_shown_replaced() {
         )]
     );
 }
+
+/// A swept worktree whose note the store refuses stays removed and its refused note is one
+/// failure line, so the pass reports both outcomes for that agent and goes on without a stop.
+#[test]
+fn a_swept_worktree_whose_note_the_store_refuses_stays_removed_with_one_failure() {
+    let case = Case::new();
+    ignoring(&case, ".env.local\n");
+    case.agent(1, "sub", "stopped");
+    write(&case.worktree(1).join(".env.local"), b"TOKEN=stand-in\n");
+    case.db
+        .execute_batch(
+            "CREATE TRIGGER refuse_note BEFORE INSERT ON team_messages
+             BEGIN SELECT RAISE(ABORT, 'note refused'); END;",
+        )
+        .unwrap();
+    let pass = case.sweep(CleanupMode::OnceLanded, 1, 0, NOW);
+    assert!(!case.worktree(1).exists());
+    assert_eq!(pass.removed, [1]);
+    assert_eq!(pass.kept, Vec::<String>::new());
+    assert_eq!(pass.failures, ["agent=1 cause=engine_text_withheld"]);
+    assert_eq!(pass.after, 0);
+    assert_eq!(notes(&case), Vec::<String>::new());
+}

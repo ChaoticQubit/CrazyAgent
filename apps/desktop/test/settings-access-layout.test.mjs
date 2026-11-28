@@ -262,7 +262,7 @@ test("signed in, GitHub account has one line: who and how left, Sign out right",
   const [line] = section.rows;
   assert.equal(section.rows.length, 1);
   assert.equal(line.label, "Signed in to GitHub as mira.");
-  assert.match(line.help, /keeps this sign-in in your Mac's keychain/);
+  assert.ok(line.help.includes(`keeps this sign-in in ${{ darwin: "your Mac's keychain", win32: "Windows Credential Manager" }[process.platform] ?? "your system keyring"}`), line.help);
   assert.deepEqual(line.buttons, ["Sign out of GitHub"]);
   assert.ok(line.controlLeft > line.labelRight, JSON.stringify(line));
 });
@@ -506,7 +506,7 @@ test("V243-TERMINAL-SETTINGS-PLACE: Settings lists Terminal under App, and its s
     app: await page.evaluate(`[...document.querySelectorAll('.settings-nav [role=group]')].filter((group) => group.querySelector('.settings-nav-title')?.textContent.trim() === "App").flatMap((group) => [...group.querySelectorAll('.settings-nav-item')].map((item) => [item.textContent.trim(), item.getAttribute("aria-current")]))`),
   }));
   assert.equal(seen.top?.heading, "Terminal", JSON.stringify(seen));
-  assert.deepEqual(seen.app, [["Sandbox", null], ["Team alerts", null], ["Terminal", "page"]]);
+  assert.deepEqual(seen.app.filter(([, current]) => current === "page").map(([label]) => label), ["Terminal"], JSON.stringify(seen.app));
   assert.deepEqual(seen.sections.map((section) => section.heading), ["Terminal"]);
   assert.deepEqual(seen.sections[0].rows.map((row) => row.label), ["Terminal input", "Terminal renderer"]);
   const by = Object.fromEntries(seen.sections[0].rows.map((row) => [row.label, row]));

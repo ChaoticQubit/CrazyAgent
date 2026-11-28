@@ -2,6 +2,7 @@ pub mod permission_fix;
 /// The methods of [`Places`]: how the places are built, which folders they keep and which
 /// paths agents can write.
 mod places;
+pub use places::npm_shims;
 pub mod probe;
 #[cfg(test)]
 pub(crate) mod stub;
@@ -424,12 +425,13 @@ pub fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
 }
 
 /// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
-/// then its npm harness prefix's `bin` ([`FindingHooks::harness_prefix`]). Input: the engine
-/// root and the hooks. Output: the two folders in that order.
+/// then the folder its npm harness prefix ([`FindingHooks::harness_prefix`]) keeps their
+/// entries in ([`npm_shims`]). Input: the engine root and the hooks. Output: the two folders
+/// in that order.
 fn engine_folders(hooks: &FindingHooks, root: &Path) -> [PathBuf; 2] {
     [
         root.join("setup").join("bin"),
-        (hooks.harness_prefix)(root).join("bin"),
+        npm_shims(&(hooks.harness_prefix)(root)),
     ]
 }
 
@@ -1383,7 +1385,7 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
         ),
         Refusal::Batch => format!(
-            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npm.cmd or npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
         ),
     }
 }

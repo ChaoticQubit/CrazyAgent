@@ -10,7 +10,7 @@
     ✧ Gemini API              Pay-as-you-go Google Gemini API key                                                       
     ⇄ OpenRouter              One API key for models from many companies                                                
     ⌁ OpenAI-compatible URL   Any server that speaks the OpenAI API                                                     
-    ⌂ Local model             Ollama, LM Studio or another server on this Mac                                           
+    ⌂ Local model             Ollama, LM Studio or a server on this computer                                            
                                                                                                                         
   Add as many accounts as you like. One pool can mix providers.                                                         
                                                                                                                         

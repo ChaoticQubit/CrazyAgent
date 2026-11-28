@@ -9,11 +9,13 @@ mod tests;
 mod turn;
 pub(crate) use turn::{Turns, wait_max};
 
+#[cfg(not(windows))]
+pub use run::run;
 pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
-    UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
+    UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user,
 };
-pub(crate) use state::needs;
+pub use state::Launching;
 #[cfg(test)]
 pub use state::set_settings;
 pub use state::{
@@ -21,6 +23,7 @@ pub use state::{
     INSTALL_NOT_FOUND, INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS,
     UPDATE_FAILED, UPDATE_OFF, Updates, initialize, settings,
 };
+pub(crate) use state::{launchable, needs};
 
 use crate::harnesses;
 use kernel_processes::install::{InstallPaths, InstallRecipe, Verb};
@@ -215,8 +218,8 @@ pub struct UpdateSettings {
 /// The folders an install is recognized by: the owner's home, the Homebrew prefixes in the
 /// order they are tried, whether Homebrew casks can be installed on this platform, the npm
 /// that installs npm harnesses into the engine's own prefix, when a usable Node is found, and
-/// the tool resolver's places a harness runs from. Tests pass temp folders; the engine
-/// passes the real ones.
+/// the tool resolver's places a harness runs from and, on Windows, whether the engine's token
+/// is elevated. Tests pass temp folders; the engine passes the real ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub home: PathBuf,
@@ -224,11 +227,14 @@ pub struct Roots {
     pub casks: bool,
     pub npm: Option<NpmInstall>,
     pub places: kernel_processes::finding::Places,
+    #[cfg(windows)]
+    pub elevated: bool,
 }
 
-/// The npm an npm harness installs with and the node entry it runs, found by the one
-/// Node test of setup (`crate::setup::node::usable`), the folders its run puts first (Node's
-/// own, then the prefix's `bin`) and the engine-owned prefix it installs into, never global.
+/// The npm an npm harness installs with and the node entry it runs, found by the one Node
+/// test of setup (`crate::setup::node_usable::usable`), the folders its run puts first
+/// (Node's own, then the folder the prefix keeps its entries in) and the engine-owned prefix
+/// it installs into, never global.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpmInstall {
     pub node: PathBuf,
@@ -436,12 +442,25 @@ fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
 }
 
 /// The npm command for one npm prefix: the engine's npm with its search folders when the
-/// prefix is the engine's own, else the npm in that prefix's `bin`. Inputs: the prefix, the
-/// roots and the arguments. Output: the command, not yet checked.
+/// prefix is the engine's own; on Windows, where npm keeps no npm in a prefix, the engine's
+/// npm with that prefix pinned and searched after Node's folder; else the npm in that
+/// prefix's `bin`. Inputs: the prefix, the roots and the arguments. Output: the command.
 fn npm_for(prefix: &Path, roots: &Roots, args: Vec<&'static str>) -> Fixed {
-    match roots.npm.as_ref().filter(|engine| engine.prefix == prefix) {
-        Some(engine) => engine_npm_fixed(engine, args),
-        None => npm_fixed(prefix, args),
+    match roots.npm.as_ref() {
+        Some(engine) if engine.prefix == prefix => engine_npm_fixed(engine, args),
+        Some(engine) if cfg!(windows) => Fixed {
+            program: engine.program.clone(),
+            args,
+            search: engine
+                .node
+                .parent()
+                .map(Path::to_path_buf)
+                .into_iter()
+                .chain([prefix.to_path_buf()])
+                .collect(),
+            prefix: Some(prefix.to_path_buf()),
+        },
+        _ => npm_fixed(prefix, args),
     }
 }
 
@@ -647,6 +666,20 @@ fn taken_copy(
     Ok(Some(taken))
 }
 
+/// Refuses every harness command on Windows while the engine's token is elevated, the twin
+/// of the Unix refusal to run an updater as root ([`refused_user`]): once the install is
+/// known and before any tool is checked, so an elevated owner never reads that an update
+/// needs an administrator. Input: the roots. Output: Ok, or `AS_ROOT`.
+fn refused_here(roots: &Roots) -> Result<(), &'static str> {
+    #[cfg(windows)]
+    if let Some(code) = run::refused_token(roots.elevated) {
+        return Err(code);
+    }
+    #[cfg(not(windows))]
+    let _ = roots;
+    Ok(())
+}
+
 /// Builds the one update command of an installed harness: its own updater, or the Homebrew
 /// or npm that installed it, by absolute path. A self-update runs the PATH entry, the
 /// launcher the vendor's updater repoints, never the versioned real file, and only while
@@ -659,7 +692,9 @@ pub fn update_command(
     real: &Path,
     roots: &Roots,
 ) -> Result<Fixed, &'static str> {
-    match found(id, real, roots)? {
+    let found = found(id, real, roots)?;
+    refused_here(roots)?;
+    match found {
         Found::Own(own) => {
             let folder = entry.parent().ok_or(TOOL_MISSING)?;
             if kernel_sandbox::paths::canonical(entry).ok().as_deref() != Some(real) {
@@ -707,7 +742,11 @@ pub fn update_command(
 /// Inputs: the harness id, the real path and the roots. Output: the command, None for an
 /// install that updates itself (it has no check-only command), or the refusal code.
 pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixed>, &'static str> {
-    match found(id, real, roots)? {
+    let found = found(id, real, roots)?;
+    if !matches!(found, Found::Own(_)) {
+        refused_here(roots)?;
+    }
+    match found {
         Found::Own(_) => Ok(None),
         Found::Brew { prefix, brew } => {
             let args = match brew.kind {
@@ -730,6 +769,7 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
 /// An untrusted tool is skipped; an npm harness with no usable Node is refused as needing
 /// Node. Inputs: the harness id and the roots. Output: the command, or the refusal code.
 pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
+    refused_here(roots)?;
     let id = harnesses::canonical(id);
     if id == BUNDLED {
         return Err(WITH_APP);
@@ -805,9 +845,22 @@ fn trusted(program: &Path) -> Result<(), &'static str> {
     if safe { Ok(()) } else { Err(TOOL_UNSAFE) }
 }
 
+/// Checks that a program is safe to start as this user on Windows: a plain file that only
+/// SYSTEM, the administrators, TrustedInstaller and this user can change, nor any folder
+/// above it as written or at its real place ([`crazyagent_win_sandbox::program_trusted`]).
+/// Input: the absolute program path. Output: Ok, `TOOL_MISSING` for a relative or missing
+/// program, or `TOOL_UNSAFE`.
+#[cfg(windows)]
+fn trusted(program: &Path) -> Result<(), &'static str> {
+    if !program.is_absolute() || std::fs::metadata(program).is_err() {
+        return Err(TOOL_MISSING);
+    }
+    crazyagent_win_sandbox::program_trusted(program).map_err(|_| TOOL_UNSAFE)
+}
+
 /// Refuses every tool where the engine has no safe way to check and start one.
 /// Input: the program path, unused. Output: the refusal code.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn trusted(_program: &Path) -> Result<(), &'static str> {
     Err(UNSUPPORTED_HERE)
 }
@@ -822,9 +875,36 @@ fn owned(folder: &Path) -> bool {
     })
 }
 
+/// Tells whether this user owns a folder on Windows, read from a handle opened without
+/// following a link, so a global npm install there needs no administrator. Input: the
+/// folder. Output: true only for a folder that exists, is no link or junction and whose
+/// owner is this user's SID.
+#[cfg(windows)]
+fn owned(folder: &Path) -> bool {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let Ok(held) = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(folder)
+    else {
+        return false;
+    };
+    let folder_read = held.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let facts = crazyagent_win_sandbox::private::facts(&held);
+    let user = crazyagent_win_sandbox::private::user_sid();
+    match (facts, user) {
+        (Ok(facts), Ok(user)) => folder_read && !facts.reparse && facts.owner == user,
+        _ => false,
+    }
+}
+
 /// Reports no folder as this user's where ownership cannot be read.
 /// Input: the folder, unused. Output: false.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn owned(_folder: &Path) -> bool {
     false
 }
@@ -1069,17 +1149,18 @@ pub fn latest_from_pointer(pointer: &Pointer, body: &[u8], installed: &str) -> L
 mod windows_tests {
     use super::*;
 
-    /// W1 (leader 01:25, DEC-194): on Windows a harness installed under a drive path is
-    /// named by how it was installed, as on Unix, while its update and its check stay refused
-    /// as unsupported here. A verbatim, UNC or forward-slash path names no install.
+    /// On Windows a harness installed under a drive path is named by how it was installed, as
+    /// on Unix, and its update and its check are refused as missing their tool while the npm
+    /// they would run is not there. A verbatim, UNC or forward-slash path names no install.
     #[test]
-    fn a_windows_npm_install_is_named_and_its_update_and_check_stay_refused() {
+    fn a_windows_npm_install_is_named_and_its_missing_npm_is_refused() {
         let roots = Roots {
             home: PathBuf::from(r"C:\Users\unit"),
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
             places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1091,9 +1172,9 @@ mod windows_tests {
         );
         assert_eq!(
             update_command("codex", real, real, &roots),
-            Err(UNSUPPORTED_HERE)
+            Err(TOOL_MISSING)
         );
-        assert_eq!(check_command("codex", real, &roots), Err(UNSUPPORTED_HERE));
+        assert_eq!(check_command("codex", real, &roots), Err(TOOL_MISSING));
         for refused in [
             r"\\?\C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js",
             r"\\server\share\npm\node_modules\@openai\codex\bin\codex.js",
@@ -1106,28 +1187,184 @@ mod windows_tests {
             );
         }
     }
-    /// V243-W1-VERSION-READ: with the engine's home now the profile folder on Windows, a
-    /// harness that installed itself under it is named as self-updating, and its update
-    /// stays refused as unsupported here.
+    /// On Windows an npm install outside the engine prefix, such as the owner's own
+    /// `%APPDATA%\npm`, is checked and updated in place by the engine's npm with its own prefix
+    /// pinned, since npm puts no npm of its own in a prefix there; the engine prefix keeps the
+    /// engine's search.
     #[test]
-    fn a_windows_self_updating_install_is_named_and_its_update_stays_refused() {
+    fn a_windows_npm_install_outside_the_engine_prefix_runs_the_engine_npm_with_its_prefix() {
+        let node = PathBuf::from(r"C:\Program Files\nodejs");
+        let engine = NpmInstall {
+            node: node.join("node.exe"),
+            program: node.join("npm.cmd"),
+            search: vec![node.clone(), PathBuf::from(r"C:\engine\setup\harnesses")],
+            prefix: PathBuf::from(r"C:\engine\setup\harnesses"),
+        };
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: Some(engine.clone()),
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let owner = PathBuf::from(r"C:\Users\unit\AppData\Roaming\npm");
+        let args = vec!["view", "@openai/codex", "version"];
+        assert_eq!(
+            npm_for(&owner, &roots, args.clone()),
+            Fixed {
+                program: engine.program.clone(),
+                args: args.clone(),
+                search: vec![node.clone(), owner.clone()],
+                prefix: Some(owner.clone()),
+            }
+        );
+        assert_eq!(
+            npm_for(&engine.prefix, &roots, args.clone()),
+            Fixed {
+                program: engine.program.clone(),
+                args,
+                search: engine.search.clone(),
+                prefix: Some(engine.prefix.clone()),
+            }
+        );
+    }
+    /// With the engine's home the profile folder on Windows, a harness that installed itself
+    /// under it is named as self-updating, and its update is refused as unsafe once the users
+    /// group may write the file, whatever the resolver would say about it.
+    #[test]
+    fn a_windows_self_updating_install_is_named_and_one_others_may_write_is_refused() {
         let folder = tempfile::tempdir().unwrap();
         let home = kernel_sandbox::paths::canonical(folder.path()).unwrap();
         let installed = home.join(".codex").join("packages").join("standalone");
         std::fs::create_dir_all(&installed).unwrap();
         let entry = installed.join("codex.exe");
         std::fs::write(&entry, "").unwrap();
+        icacls(&entry, &["/grant", "*S-1-5-32-545:(W)"]);
         let roots = Roots {
             home,
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
             places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
         };
         assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
         assert_eq!(
             update_command("codex", &entry, &entry, &roots),
-            Err(UNSUPPORTED_HERE)
+            Err(TOOL_UNSAFE)
         );
+    }
+
+    /// An elevated engine is refused once the install is known and before any tool is
+    /// checked: an update, a check and an install all answer that the engine runs as an
+    /// administrator, where the same roots unelevated answer as before. The engine's own
+    /// roots carry the token's real elevation.
+    #[test]
+    fn an_elevated_engine_is_refused_before_every_other_answer() {
+        let mut roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: None,
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let real =
+            Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
+        assert_eq!(install_command("codex", &roots), Err(NEEDS_NODE));
+        roots.elevated = true;
+        assert_eq!(update_command("codex", real, real, &roots), Err(AS_ROOT));
+        assert_eq!(check_command("codex", real, &roots), Err(AS_ROOT));
+        assert_eq!(install_command("codex", &roots), Err(AS_ROOT));
+        assert_eq!(
+            Roots::system().elevated,
+            crazyagent_win_sandbox::elevated().unwrap()
+        );
+    }
+
+    /// Runs icacls on one path and asserts it succeeded, with its error output when not.
+    /// Inputs: the path and the icacls arguments.
+    /// Output: none.
+    fn icacls(path: &Path, change: &[&str]) {
+        let mut command = std::process::Command::new("icacls");
+        command.arg(path).args(change);
+        let done = kernel_processes::spawn_gate::collected(&mut command).unwrap();
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+
+    /// The owner the trust check reads for a folder, opened without following a link, as raw
+    /// SID bytes and whether it is TrustedInstaller. Input: the folder. Output: the line the
+    /// owned row prints.
+    fn windows_owner(folder: &Path) -> String {
+        use crate::platform::FILE_FLAG_BACKUP_SEMANTICS;
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(folder);
+        let owner = held.and_then(|held| crazyagent_win_sandbox::private::facts(&held));
+        match owner {
+            Ok(facts) => format!(
+                "{} owner {:?} trusted_installer={}",
+                folder.display(),
+                facts.owner,
+                facts.owner == crazyagent_win_sandbox::dacl::TRUSTED_INSTALLER
+            ),
+            Err(error) => format!("{} owner unread: {error}", folder.display()),
+        }
+    }
+
+    /// A tool the engine would start passes the Windows trust check when only the system and
+    /// this user may change it, as the curl Windows ships; a relative or missing tool is
+    /// missing, and one the users group may write is unsafe. Fails naming the variable when
+    /// SystemRoot or USERPROFILE is not set.
+    #[test]
+    fn a_windows_tool_is_trusted_only_while_no_other_account_may_change_it() -> Result<(), String> {
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?)
+            .join("System32")
+            .join("curl.exe");
+        assert_eq!(trusted(&shipped), Ok(()));
+        assert_eq!(trusted(Path::new("curl.exe")), Err(TOOL_MISSING));
+        let profile = std::env::var_os("USERPROFILE").ok_or("USERPROFILE is not set")?;
+        let folder = tempfile::tempdir_in(profile).unwrap();
+        let tool = folder.path().join("tool.exe");
+        assert_eq!(trusted(&tool), Err(TOOL_MISSING));
+        std::fs::write(&tool, "").unwrap();
+        assert_eq!(trusted(&tool), Ok(()));
+        icacls(&tool, &["/grant", "*S-1-5-32-545:(W)"]);
+        assert_eq!(trusted(&tool), Err(TOOL_UNSAFE));
+        Ok(())
+    }
+
+    /// A global npm install needs no administrator only in a folder this user owns: a folder
+    /// whose owner is set to this user is owned, the Windows folder (TrustedInstaller's) is
+    /// not, and neither is a file or a missing path. The Windows folder's owner is printed,
+    /// so a runner image where another account owns it shows why the row fails; a missing
+    /// SystemRoot or USERPROFILE fails naming the variable.
+    #[test]
+    fn a_windows_folder_is_owned_only_when_this_user_owns_it() -> Result<(), String> {
+        let profile = std::env::var_os("USERPROFILE").ok_or("USERPROFILE is not set")?;
+        let folder = tempfile::tempdir_in(profile).unwrap();
+        let modules = folder.path().join("node_modules");
+        std::fs::create_dir(&modules).unwrap();
+        let me = kernel_processes::spawn_gate::collected(&mut std::process::Command::new("whoami"))
+            .unwrap();
+        let me = String::from_utf8(me.stdout).unwrap();
+        icacls(&modules, &["/setowner", me.trim()]);
+        assert!(owned(&modules));
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?);
+        let seen = windows_owner(&windows);
+        eprintln!("{seen}");
+        assert!(!owned(&windows), "{seen}");
+        let file = folder.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(!owned(&file));
+        assert!(!owned(&folder.path().join("gone")));
+        Ok(())
     }
 }

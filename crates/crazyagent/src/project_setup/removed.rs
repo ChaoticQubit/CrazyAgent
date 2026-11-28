@@ -385,6 +385,30 @@ fn suffixed(base: &ProjectId, n: u32) -> Result<ProjectId, EngineError> {
     ProjectId::new(id).map_err(|problem| failure(&problem.0))
 }
 
+/// Empties the WAL after an owner request committed old event bodies to tombstones: a
+/// removal that redacted events, or an applied Create demo, whose clear tombstones an earlier
+/// demo's. A WAL a reader still holds is left and `state_log_redact_checkpoint_busy` printed.
+/// Inputs: the connection, the removal's redaction count, whether the request changed the
+/// store and its operation. Output: none.
+pub(crate) fn checkpoint_after(
+    db: &Connection,
+    redacted: usize,
+    changed: bool,
+    operation: &crate::engine::owner::OwnerOperation,
+) {
+    use crate::engine::owner::{OwnerMutation, OwnerOperation};
+    let demo = matches!(
+        operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::CreateDemo { .. }
+        }
+    );
+    assert!(redacted == 0 || changed, "only an applied removal redacts");
+    if (redacted > 0 || (changed && demo)) && !kernel_storage::state_log::replay::checkpoint(db) {
+        eprintln!("state_log_redact_checkpoint_busy");
+    }
+}
+
 /// Moves this id's token counts to Removed projects, forgets its ide rows and tombstones its
 /// ide, admission, settings (L10), landing (L9) and sessions (L13) events (rv-sec2 L7 r2 N1,
 /// #345 N4), then deletes its other rows in every project-keyed table, removal record and

@@ -110,7 +110,8 @@ pub(crate) fn read_key_in(
 /// made with its store label when missing, the twin of the Unix 0600 `O_EXCL` write.
 /// Inputs: the engine root, the key's credential reference and the key, 1 to
 /// `KEY_BYTES_MAX` bytes. Output: the folder synced; `account_key_store_unavailable` when a
-/// key is already saved under that reference or the write fails, which leaves no file.
+/// key is already saved under that reference, or when the write or the folder sync fails,
+/// which removes the new file again; a file it cannot remove stays, named by no account.
 #[cfg(windows)]
 pub(crate) fn store_key_file(
     root: &Path,
@@ -119,9 +120,13 @@ pub(crate) fn store_key_file(
 ) -> Result<(), EngineError> {
     let (_held, folder) = key_folder(root, ACCOUNT_KEYS, credential.as_str(), true)?
         .ok_or_else(|| error("account_key_store_unavailable"))?;
-    write_secret(&folder.join(credential.as_str()), key)?;
-    crazyagent_win_sandbox::private::sync_folder(&folder)
-        .map_err(|_| error("account_key_store_unavailable"))
+    let path = folder.join(credential.as_str());
+    write_secret(&path, key)?;
+    if synced(&folder).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(error("account_key_store_unavailable"));
+    }
+    Ok(())
 }
 
 /// Swaps the saved key of one credential for a new one on Windows: the new key is written to
@@ -129,7 +134,8 @@ pub(crate) fn store_key_file(
 /// file never holds a partial key and keeps the secret file's own list and label. A reader
 /// holding the old key shares no delete, so the rename then fails. Inputs: the engine root,
 /// the credential reference and the new key, 1 to `KEY_BYTES_MAX` bytes. Output: the folder
-/// synced; on `account_key_store_unavailable` the old key stays and nothing is staged.
+/// synced, or `account_key_store_unavailable` with nothing staged: before the rename the old
+/// key stays; after it the new key may be in place, and a retry writes it again.
 #[cfg(windows)]
 pub(crate) fn replace_key_file(
     root: &Path,
@@ -142,8 +148,8 @@ pub(crate) fn replace_key_file(
 /// Saves or replaces one key in one of the engine root's private key folders, made with its
 /// store label when missing. The key is checked to be 1 to `KEY_BYTES_MAX` bytes and wiped
 /// on every path. Inputs: the engine root, a folder from [`KEY_FOLDERS`], the key's
-/// reference and the key. Output: Ok with the folder synced; on
-/// `account_key_store_unavailable` the old key stays and nothing is staged.
+/// reference and the key. Output: Ok with the folder synced, or the refusals of
+/// [`replace_key_file`], after which the old or the new key is in place.
 pub(crate) fn replace_key_in(
     root: &Path,
     folder: &str,
@@ -162,7 +168,8 @@ pub(crate) fn replace_key_in(
 /// The disk work of [`replace_key_file`] and [`replace_key_in`]: a staged secret file in the
 /// held folder renamed over the key. Inputs: the engine root, a folder from
 /// [`KEY_FOLDERS`], the reference and the key, 1 to `KEY_BYTES_MAX` bytes. Output: Ok with
-/// the folder synced, or `account_key_store_unavailable` with the old key kept.
+/// the folder synced, or `account_key_store_unavailable`; a failed folder sync after the
+/// rename leaves the new key in place.
 fn replace_in(
     root: &Path,
     folder: &str,
@@ -179,7 +186,17 @@ fn replace_in(
         let _ = std::fs::remove_file(&staged);
         return Err(error("account_key_store_unavailable"));
     }
-    crazyagent_win_sandbox::private::sync_folder(&folder)
+    synced(&folder)
+}
+
+/// Syncs one held key folder through W1 so a rename or removal in it reaches the disk.
+/// Input: the folder path. Output: Ok, or `account_key_store_unavailable`.
+fn synced(folder: &Path) -> Result<(), EngineError> {
+    #[cfg(test)]
+    if sync_refused() {
+        return Err(error("account_key_store_unavailable"));
+    }
+    crazyagent_win_sandbox::private::sync_folder(folder)
         .map_err(|_| error("account_key_store_unavailable"))
 }
 

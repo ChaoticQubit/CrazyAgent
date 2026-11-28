@@ -225,14 +225,16 @@ mod tests {
     }
 
     #[test]
-    fn the_follow_choice_is_saved_as_follow_system_and_the_old_word_still_reads() {
-        let folder = tempfile::tempdir().unwrap();
+    fn the_follow_choice_is_saved_as_follow_system_and_the_old_word_still_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let folder = tempfile::tempdir()?;
         let path = folder.path().join("tui-colors");
-        save_colors(&path, Colors::default()).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "follow-system");
+        save_colors(&path, Colors::default())?;
+        assert_eq!(std::fs::read_to_string(&path)?, "follow-system");
         assert_eq!(load_colors(&path), Colors::default());
-        std::fs::write(&path, "follow-macos").unwrap();
+        std::fs::write(&path, "follow-macos")?;
         assert_eq!(load_colors(&path), Colors::default());
+        Ok(())
     }
 
     #[test]

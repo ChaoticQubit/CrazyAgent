@@ -75,7 +75,7 @@ test("only the main window mirrors: the wall boot skips it and Profile chooses t
   const main = source("main.tsx");
   assert.match(main, /const wall = wallRoute\(window\.location\.hash\);\napplyTheme\(readTheme\(\)\);\nif \(wall === null\) mirrorTheme\(readTheme\(\)\);\n/);
   const profile = source("screens/settings/profile.tsx");
-  assert.match(profile, /onValue=\{\(value\) => \{ setTheme\(value\); chooseTheme\(value\); \}\}/);
+  assert.match(profile, /onValue=\{\(value\) => \{ setTheme\(value\); setThemeKept\(chooseTheme\(value\)\); \}\}/);
   assert.doesNotMatch(profile, /applyTheme/);
   const kept = source("state.ts");
   assert.match(kept, /^import \{ invoke \} from "@tauri-apps\/api\/core";$/m, "the mirror skips bridgeCall's retries and reply reports");

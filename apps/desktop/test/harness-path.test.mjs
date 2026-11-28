@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { HOST, eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -16,13 +16,14 @@ const CODES = ["harness_path_unknown_harness", "harness_path_invalid", "harness_
   "harness_path_shim", "harness_path_changeable", "harness_path_unreadable", "native_auth_host_executable_unsafe", "native_auth_host_executable_changed",
   "native_auth_host_unavailable", "native_auth_host_registration_frozen", "owner_runtime_stale", "harness_path_refused"];
 
-test("each refusal of a harness file has its own sentence, and an unknown code reads as a plain refusal", () => {
+test("each refusal of a harness file has its own sentence, and an unknown code reads as a plain refusal", async () => {
   const lines = CODES.map((code) => api.pathCopy(code));
   assert.equal(new Set(lines).size, CODES.length);
   for (const code of CODES) assert.equal(api.isPathCode(code), true, code);
   assert.equal(api.isPathCode("engine_unreachable"), false);
   assert.equal(api.pathCopy("something_new"), api.pathCopy("harness_path_refused"));
-  assert.equal(api.pathCopy("harness_path_not_executable"), "That file isn't a program this Mac can run.");
+  await eachComputer("../src/api-harness-path.ts", (paths, { os, computer }) =>
+    assert.equal(paths.pathCopy("harness_path_not_executable"), `That file isn't a program ${computer} can run.`, os));
 });
 
 test("only Codex and Claude Code have a file to choose, named as the owner finds it", () => {
@@ -59,7 +60,7 @@ test("the looked list never shows more than the engine's bound", () => {
 
 test("a refused file names the file with home as ~ and the reason, and offers to forget a chosen file", () => {
   const html = block({ found: { kind: "refused", path: "/Users/someone/tools/codex", code: "harness_path_not_executable" } });
-  assert.match(html, /CrazyAgent won't use ~\/tools\/codex\. That file isn't a program this Mac can run\./);
+  assert.ok(html.replaceAll("&#x27;", "'").includes(`CrazyAgent won't use ~/tools/codex. That file isn't a program ${HOST.computer} can run.`), html);
   assert.doesNotMatch(html, /but won't use it/);
   assert.match(html, />Forget the chosen file<\/button>/);
   assert.match(html, />Choose the codex file<\/button>/);

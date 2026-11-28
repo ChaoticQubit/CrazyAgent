@@ -522,14 +522,24 @@ pub(crate) const REPLACED_SCAN_MAX: usize = 64;
 
 /// Opens the database of the dated copy of the replaced 2.5 data without following a link:
 /// read-write like `shape`, so a WAL copy with no -wal or -shm file opens on Apple's SQLite,
-/// then `query_only`, so the sweep can never write the kept copy. Input: the copy's folder.
-/// Output: the connection, or the failure.
+/// with no checkpoint on close and `query_only`, so engine.db's bytes and a leftover -wal stay
+/// as they are; -wal and -shm files may be made beside it. Input: the copy's folder. Output:
+/// the connection, or the failure.
 #[cfg(unix)]
 fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let opened = Connection::open_with_flags(copy.join(DATABASE), flags).map_err(error)?;
+    let kept = opened
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map_err(error)?;
+    if !kept {
+        return Err(error("replaced_database_checkpoint_on_close"));
+    }
     opened
         .execute_batch("PRAGMA query_only = ON")
         .map_err(error)?;

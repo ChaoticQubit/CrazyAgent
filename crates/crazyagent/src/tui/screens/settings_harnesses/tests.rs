@@ -922,17 +922,11 @@ fn the_version_line_has_the_desktop_sentences() {
 
 #[test]
 fn every_update_sentence_is_the_desktop_sentence_and_no_two_are_alike() {
-    let desktop = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../apps/desktop/src/api-harness-updates.ts"
-    ))
-    .unwrap();
+    let desktop = include_str!("../../../../../../apps/desktop/src/api-harness-updates.ts");
     let mut seen = std::collections::BTreeSet::new();
     for (code, sentence) in COPY {
-        assert!(
-            desktop.contains(&format!("{code}: \"{sentence}\",")),
-            "{code}"
-        );
+        let shown = super::super::desktop_entry(desktop, code);
+        assert_eq!(shown.as_deref(), Some(sentence), "{code}");
         assert!(seen.insert(sentence), "{code}");
         assert_eq!(update_copy(code), sentence);
     }

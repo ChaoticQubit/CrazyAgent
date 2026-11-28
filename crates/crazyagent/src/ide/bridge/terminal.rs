@@ -48,7 +48,7 @@ pub(super) struct Terminals {
 /// handshake packet, the owner runtime, the project, the size and the level asked for.
 pub(super) async fn serve(
     mut stream: Stream,
-    packet: [u8; 37],
+    packet: crate::engine::secret_frame::OwnerPacket,
     runtime: OwnerRuntimeHandle,
     project: ProjectId,
     size: (u16, u16),

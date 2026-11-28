@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, GrantLogRow, HomeCaches, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
 import { desktopPlatform } from "../../api-ide";
 import { Switch } from "../../ui";
+import { isWindows } from "../../ui/keys";
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -456,6 +457,13 @@ export function SharedFoldersChoices({ prefix, value, secretsText, local, access
   </fieldset>;
 }
 
+/** The sentence saying which toolchains agents find on their own: Homebrew is named on macOS and
+ * Linux, not on Windows. Input: none, the window's computer. Output: the sentence. */
+export function toolchainsFound(): string {
+  const found = isWindows() ? "Rust, Node and Python" : "Rust, Node, Python and Homebrew";
+  return `Agents find the toolchains this project uses (${found}) on their own and can read them, never change them.`;
+}
+
 /** One switch per detected toolchain family. Inputs: the id prefix, the engine's view, the
  * switches and the change handler. Output: the fieldset. */
 export function ToolchainSwitches({ prefix, view, allowed, onChange }: {
@@ -463,7 +471,7 @@ export function ToolchainSwitches({ prefix, view, allowed, onChange }: {
 }) {
   return <fieldset className="pj-field">
     <legend>Toolchains agents may use</legend>
-    <p className="pj-help">Agents read these from your home folder and never change them or download into them. Homebrew tools stay readable.</p>
+    <p className="pj-help">Agents read these from your home folder and never change them or download into them.{isWindows() ? "" : " Homebrew tools stay readable."}</p>
     {view.toolchains.length === 0 && <p className="pj-muted">No toolchains found in your home folder or this project.</p>}
     <div className="pj-switch-list">{view.toolchains.map((row, index) => <div className="pj-switch-item" key={row.toolchain}>
       <span><strong>{row.label}</strong><span className="pj-secondary">{toolchainNote(row)}</span></span>

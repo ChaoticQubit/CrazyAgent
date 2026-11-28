@@ -670,6 +670,11 @@ fn closed_words(code: &str) -> (&'static str, &'static str) {
             "Terminals need tmux, and it isn't ready on this computer.",
             "Install tmux with your package manager, then run setup again from Settings.",
         ),
+        #[cfg(windows)]
+        "terminal_unavailable" => (
+            "The engine couldn't open this terminal.",
+            "Enter on the agent opens it again.",
+        ),
         NOT_READY => (
             "Not ready yet.",
             "This engine cannot stream agent terminals yet.",

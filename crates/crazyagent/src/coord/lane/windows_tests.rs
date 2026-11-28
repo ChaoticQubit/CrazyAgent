@@ -10,7 +10,7 @@ fn planted() -> tempfile::TempDir {
         .prefix("crazyagent-lane-")
         .tempdir_in(&root)
         .unwrap();
-    let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+    let shell = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is not set"))
         .join("System32")
         .join("cmd.exe");
     std::fs::copy(shell, folder.path().join("probe.exe")).unwrap();

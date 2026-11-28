@@ -4,7 +4,7 @@ use crazyagent::assets::AssetAction;
 use crazyagent::config::resolve_config;
 use crazyagent::coordination::OwnerAction;
 use crazyagent::engine::owner::*;
-use crazyagent::engine::{Client, Engine, Server};
+use crazyagent::engine::{Client, Engine, Server, secret_frame::owner_packet};
 use crazyagent::memory::{HumanReview, KnowledgeAction};
 use crazyagent::protocol::*;
 use crazyagent::verification::OwnerVerification;
@@ -799,16 +799,14 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
     let mut wrong = kernel_processes::spawn_gate::connect_unix(root.path().join("owner.sock"))
         .await
         .unwrap();
-    let mut packet = [0; 37];
-    packet[..4].copy_from_slice(b"CAO1");
-    packet[4] = 0;
-    wrong.write_all(&packet).await.unwrap();
+    let packet = owner_packet(b"CAO1", 0, &[0; 32]);
+    wrong.write_all(&*packet).await.unwrap();
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(1), wrong.read(&mut byte)).await,
         Ok(Ok(0)) | Ok(Err(_))
     ));
     let token = std::fs::read(root.path().join("owner-tui.cap")).unwrap();
-    packet[5..].copy_from_slice(&token);
+    let packet = owner_packet(b"CAO1", 0, &token.as_slice().try_into().unwrap());
     for bytes in [
         vec![0, 0],
         ((FRAME_BYTES_MAX + 1) as u32).to_be_bytes().to_vec(),
@@ -816,7 +814,7 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
         let mut stream = kernel_processes::spawn_gate::connect_unix(root.path().join("owner.sock"))
             .await
             .unwrap();
-        stream.write_all(&packet).await.unwrap();
+        stream.write_all(&*packet).await.unwrap();
         stream.write_all(&bytes).await.unwrap();
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte)).await,

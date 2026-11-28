@@ -1,4 +1,4 @@
-pub(super) const GITHUB_CODES: [&str; 71] = [
+pub(super) const GITHUB_CODES: [&str; 73] = [
     "github_not_signed_in",
     "github_token_invalid",
     "github_token_refused",
@@ -49,6 +49,8 @@ pub(super) const GITHUB_CODES: [&str; 71] = [
     "github_publish_secret_in_history",
     "github_publish_step_invalid",
     "github_publish_too_large",
+    "github_publish_tree_too_large",
+    "github_publish_nested_repository",
     "github_publish_workflow_scope",
     "github_repo_name_taken",
     "github_repo_create_refused",

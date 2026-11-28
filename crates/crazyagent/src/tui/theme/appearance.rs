@@ -1,4 +1,5 @@
 use super::Appearance;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -7,6 +8,7 @@ const GSETTINGS: &str = "/usr/bin/gsettings";
 const WINDOWS_ROOT: &str = r"C:\Windows";
 const PERSONALIZE: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 const KDEGLOBALS_BYTES_MAX: u64 = 256 * 1024;
+const DARK_LUMINANCE_BELOW: f64 = 0.179_128_784_747_792;
 
 /// The system whose light or dark setting the reader asks.
 /// Input: none. Output: one of the three desktop systems CrazyAgent runs on.
@@ -141,15 +143,28 @@ fn kdeglobals(var: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
         .map(|folder| folder.join("kdeglobals"))
 }
 
-/// Reads a small regular file.
-/// Input: the path. Output: its text, or None when it is missing, not a regular file,
-/// larger than the cap or not UTF-8.
+/// Reads a small regular file through one open handle, so a file swapped or grown after
+/// the check is never read whole. Input: the path. Output: its text, or None when it is
+/// missing, not a regular file, larger than the cap (checked on the handle and again on the
+/// bytes read) or not UTF-8. On Unix the open does not wait on a pipe planted at the path.
 fn read_bounded(path: &Path) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
     if !metadata.is_file() || metadata.len() > KDEGLOBALS_BYTES_MAX {
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    let mut bytes = Vec::new();
+    file.take(KDEGLOBALS_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).ok()? > KDEGLOBALS_BYTES_MAX {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 fn from_defaults(out: &[u8]) -> Appearance {
@@ -171,18 +186,60 @@ fn from_reg(out: &[u8]) -> Appearance {
     dark_when(value == Some("0x0"))
 }
 
-/// Reads `ColorScheme=` in the `[General]` section of kdeglobals.
-/// Input: the file text. Output: Dark when the scheme's name holds "dark", otherwise Light.
+/// Reads the applied KDE scheme from kdeglobals: `BackgroundNormal=r,g,b` in
+/// `[Colors:Window]` first, else `ColorScheme=` in `[General]`.
+/// Input: the file text. Output: Dark when the window background is dark (see
+/// `dark_background`); with no well-formed background, Dark when the scheme's name holds
+/// "dark"; otherwise Light.
 fn from_kdeglobals(text: &str) -> Appearance {
-    let mut general = false;
+    let mut section = "";
+    let mut scheme = None;
+    let mut background = None;
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
-            general = line == "[General]";
-        } else if let Some(scheme) = line.strip_prefix("ColorScheme=").filter(|_| general) {
-            return dark_when(scheme.to_ascii_lowercase().contains("dark"));
+            section = line;
+        } else if section == "[General]" {
+            scheme = line.strip_prefix("ColorScheme=").or(scheme);
+        } else if section == "[Colors:Window]" {
+            background = line
+                .strip_prefix("BackgroundNormal=")
+                .map(rgb)
+                .unwrap_or(background);
         }
     }
-    Appearance::Light
+    match (background, scheme) {
+        (Some(color), _) => dark_when(dark_background(color)),
+        (None, Some(name)) => dark_when(name.to_ascii_lowercase().contains("dark")),
+        (None, None) => Appearance::Light,
+    }
+}
+
+/// Parses a KDE colour value. Input: the text after `=`. Output: three integers 0 to 255
+/// separated by commas, or None for anything else (two or four parts, a part out of range,
+/// empty or not a number).
+fn rgb(value: &str) -> Option<[u8; 3]> {
+    let mut parts = value.split(',').map(|part| part.trim().parse::<u8>().ok());
+    let color = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(color)
+}
+
+/// Whether a window background is dark: its WCAG relative luminance
+/// L = 0.2126 R + 0.7152 G + 0.0722 B, each channel c/255 linearised as c/12.92 when at
+/// most 0.04045, else ((c + 0.055) / 1.055)^2.4, is below sqrt(0.0525) - 0.05 (about
+/// 0.1791), the luminance where white and black text have the same contrast on it.
+/// Input: the colour. Output: true when white text reads better.
+fn dark_background(color: [u8; 3]) -> bool {
+    let linear = |channel: u8| {
+        let c = f64::from(channel) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance =
+        0.2126 * linear(color[0]) + 0.7152 * linear(color[1]) + 0.0722 * linear(color[2]);
+    luminance < DARK_LUMINANCE_BELOW
 }
 
 fn dark_when(dark: bool) -> Appearance {

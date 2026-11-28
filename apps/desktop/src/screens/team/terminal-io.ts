@@ -411,11 +411,13 @@ const END_COPY: Record<string, string> = {
  * package manager comes first. */
 const LINUX_NO_TMUX = "Terminals need tmux, and it isn't ready on this computer. Install tmux with your package manager, then run setup again from Settings.";
 
-/** Plain words for why a terminal view ended. Inputs: the engine's plain code, and whether
- * this is Linux, by default when the window is neither macOS nor Windows. Output: one
- * sentence; unknown codes get a generic one. */
-export function endCopy(code: string, linux: boolean = !isMac() && !isWindows()): string {
+/** Plain words for why a terminal view ended. Inputs: the engine's plain code, whether this is
+ * Linux, by default when the window is neither macOS nor Windows, and whether this is Windows,
+ * where terminals need no tmux and the code means the engine couldn't open the terminal.
+ * Output: one sentence; unknown codes get a generic one. */
+export function endCopy(code: string, linux: boolean = !isMac() && !isWindows(), windows: boolean = isWindows()): string {
   if (linux && code === "terminal_unavailable") return LINUX_NO_TMUX;
+  if (windows && code === "terminal_unavailable") return END_COPY.terminal_attach_failed;
   return END_COPY[code] ?? "This terminal closed.";
 }
 

@@ -3,7 +3,7 @@ import { cloneRepo, gitHubSignIn, gitHubToken, gitHubUseCli, intakeCopy, loadGit
 import { openLink } from "../../api-projects";
 import type { GitHubDeviceCode, GitHubRepo, GitHubStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, Icon, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, navigate } from "../../ui";
+import { Button, Icon, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, isMac, navigate, signInStore } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { GITHUB_POLL_MS, REPO_PAGES_MAX, accountLine, deviceLine, devicePolling, gitHubPage, oneAtATime, repoMatches, repoMeta } from "./intake";
@@ -36,7 +36,7 @@ export function GitHubSignInView({ device, now, busy, problem, tokenOpen, tokenR
   const page = device ? gitHubPage(device.code.verification_uri) : null;
   return <section className="pj-stack-s in-panel" aria-label="Sign in to GitHub">
     <h2>Sign in to GitHub</h2>
-    <p className="pj-secondary">CrazyAgent keeps the GitHub sign-in in your Mac's keychain and uses it only to list and clone. Agents never get it; they commit locally and you push.</p>
+    <p className="pj-secondary">CrazyAgent keeps the GitHub sign-in in {signInStore()} and uses it only to list and clone. Agents never get it; they commit locally and you push.</p>
     {device && timing && !timing.expired && <div className="pj-stack-s">
       <p className="in-code" aria-label="Your GitHub code">{displayText(device.code.user_code)}</p>
       <p role="status">{timing.text}</p>
@@ -54,7 +54,7 @@ export function GitHubSignInView({ device, now, busy, problem, tokenOpen, tokenR
     </span>}
     {tokenOpen && !device && <form className="pj-stack-s" onSubmit={(event) => { event.preventDefault(); onToken(); }}>
       <SecretField id="gh-token" label="GitHub token" inputRef={tokenRef} maxLength={255}
-        helper="A fine-grained token that can read the repositories you want to clone. It goes to your keychain and isn't shown again." />
+        helper={`A fine-grained token that can read the repositories you want to clone. It goes to ${isMac() ? "your keychain" : signInStore()} and isn't shown again.`} />
       <span><Button type="submit" icon="key-round" disabled={busy}>Save token</Button></span>
     </form>}
     {problem && <p className="pj-error" role="alert">{displayText(problem)}</p>}

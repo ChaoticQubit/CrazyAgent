@@ -42,13 +42,15 @@ impl AddWarning {
             Self::OldPlace => {
                 "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working."
             }
-            Self::AcrossDisks => {
-                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left."
-            }
+            Self::AcrossDisks => on_this_computer!(
+                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If ",
+                " sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left."
+            ),
             Self::SameDisk => "This is a rename on the same disk; it is quick.",
-            Self::CopyAll => {
-                "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete."
-            }
+            Self::CopyAll => on_this_computer!(
+                "This copies every file into your projects folder. It can take a long time and needs as much free space again. If ",
+                " sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete."
+            ),
             Self::Large => "This folder is very large.",
             Self::Unmeasured => "CrazyAgent couldn't measure it.",
             Self::TooMany => {
@@ -371,24 +373,19 @@ mod tests {
 
     #[test]
     fn the_tui_add_warnings_match_the_desktop_map_word_for_word() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/desktop/src/api-intake.ts"
-        ))
-        .unwrap();
+        let source = include_str!("../../../../../apps/desktop/src/api-intake.ts");
         let start = source.find("export const ADD_WARNINGS = {").unwrap();
         let body = &source[start..];
         let body = &body[..body.find("\n} as const;").unwrap()];
-        let mut desktop: std::collections::BTreeMap<&str, &str> = body
+        let mut desktop: std::collections::BTreeMap<&str, String> = body
             .lines()
             .skip(1)
             .map(|line| {
                 let (key, text) = line.trim().split_once(": ").unwrap();
                 let text = text.strip_suffix(',').unwrap_or(text);
-                (
-                    key,
-                    text.strip_prefix('"').unwrap().strip_suffix('"').unwrap(),
-                )
+                let shown = super::super::desktop_literal(text)
+                    .unwrap_or_else(|| panic!("{key}: not one quoted literal"));
+                (key, shown)
             })
             .collect();
         assert_eq!(desktop.len(), 17, "{desktop:#?}");
@@ -414,7 +411,7 @@ mod tests {
             AddWarning::LinkedCheckout => "linked_checkout",
             AddWarning::NoGit => "no_git",
         };
-        let tui: std::collections::BTreeMap<&str, &str> = [
+        let tui: std::collections::BTreeMap<&str, String> = [
             AddWarning::CloseApps,
             AddWarning::OldPlace,
             AddWarning::AcrossDisks,
@@ -433,18 +430,14 @@ mod tests {
             AddWarning::NoGit,
         ]
         .into_iter()
-        .map(|warning| (key(warning), warning.text()))
+        .map(|warning| (key(warning), warning.text().to_owned()))
         .collect();
         assert_eq!(tui, desktop);
     }
 
     #[test]
     fn the_publish_judge_refusals_read_the_same_in_the_tui_and_the_desktop() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/desktop/src/api-intake.ts"
-        ))
-        .unwrap();
+        let source = include_str!("../../../../../apps/desktop/src/api-intake.ts");
         for code in [
             "github_publish_nested_repository",
             "github_publish_not_plain_repo",

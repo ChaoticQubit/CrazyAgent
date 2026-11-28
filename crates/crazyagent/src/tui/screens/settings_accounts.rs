@@ -697,7 +697,7 @@ pub fn plain(code: &str) -> &'static str {
         }
         "account_secret_invalid" => "This key cannot be saved. Paste the whole key on one line.",
         "account_url_invalid" | "account_url_bounds" => {
-            "Use an https address. Plain http works only on this Mac."
+            on_this_computer!("Use an https address. Plain http works only on ", ".")
         }
         "account_url_port_refused" => {
             "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there."

@@ -81,6 +81,11 @@ impl fmt::Debug for SecretString {
     }
 }
 
+/// A secret buffer that is wiped with the same `zeroize` writes when it is dropped, on
+/// every path out of the code that holds it, a cancelled future or an early return
+/// included. Input: the buffer, by `Zeroizing::new`. Output: the buffer behind a deref.
+pub use zeroize::Zeroizing;
+
 /// Overwrites a secret buffer with zeros through `zeroize`, whose volatile writes the
 /// compiler may not drop as dead stores before the buffer is freed. Every secret buffer is
 /// wiped here. Input: the buffer, of bytes or of wider units. Output: none; its length stays.

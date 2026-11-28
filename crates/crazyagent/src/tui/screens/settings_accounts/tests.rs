@@ -105,7 +105,7 @@ pub(crate) fn every_hint_once(rows: &[String], hints: &[String], size: &str) {
 }
 
 pub(crate) fn fixture(name: &str, swaps: &[(&str, &str)]) -> Vec<String> {
-    let path = format!("{}/src/tui/frames/{name}.txt", env!("CARGO_MANIFEST_DIR"));
+    let path = crate::tui::screens::frame_path(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing fixture {path}"));
     text.lines()
         .map(|row| {

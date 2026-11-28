@@ -18,6 +18,39 @@ fn copy_named(from: &Path, to: &Path) {
     }
 }
 
+/// Resolves an entry a row expects to start, or panics naming the file and what was missing.
+/// Inputs: the entry and the places. Output: what it resolved to.
+fn resolved_named(entry: &Path, places: &Places) -> Resolved {
+    match resolve_entry(entry, places) {
+        Ok(resolved) => resolved,
+        Err(missing) => panic!("{} did not resolve: {missing:?}", entry.display()),
+    }
+}
+
+/// The refusal for an entry a row expects refused, or a panic naming the file when it
+/// resolved or came back missing with no refusal. Inputs: the entry and the places. Output:
+/// the refusal.
+fn refusal_of(entry: &Path, places: &Places) -> Refused {
+    match resolve_entry(entry, places) {
+        Ok(resolved) => panic!("{} resolved, not refused: {resolved:?}", entry.display()),
+        Err(Missing {
+            refused: Some(refused),
+            ..
+        }) => *refused,
+        Err(missing) => panic!("{} missing with no refusal: {missing:?}", entry.display()),
+    }
+}
+
+/// On Windows the engine looks for the harnesses it installed with npm at its npm prefix's
+/// root, where npm writes their `.cmd` shims, since a Windows npm prefix has no `bin`.
+#[test]
+fn the_engine_looks_for_its_npm_harnesses_at_the_prefix_root() {
+    let root = PathBuf::from(r"C:\engine");
+    let [setup, harnesses] = engine_folders(&STUB_HOOKS, &root);
+    assert_eq!(setup, root.join("setup").join("bin"));
+    assert_eq!(harnesses, (STUB_HOOKS.harness_prefix)(&root));
+}
+
 /// A folder with a stand-in `node.exe` (a copy of the `where.exe` Windows ships, a real
 /// program) and places that look there. Input: none. Output: the folder guard, its real
 /// spelling and the places.
@@ -46,7 +79,7 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
     let shim = real.join("codex.cmd");
     or_named(std::fs::write(&shim, crate::batch::CODEX), &shim);
 
-    let resolved = resolve_entry(&shim, &places).unwrap();
+    let resolved = resolved_named(&shim, &places);
     assert_eq!(resolved.entry, shim);
     assert_eq!(
         resolved.program,
@@ -76,7 +109,7 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     or_named(std::fs::write(&written, "#!/usr/bin/env node\n"), &written);
     let npx = real.join("npx.cmd");
     or_named(std::fs::write(&npx, "@ECHO off\r\ncalc.exe\r\n"), &npx);
-    let resolved = resolve_entry(&npx, &places).unwrap();
+    let resolved = resolved_named(&npx, &places);
     assert_eq!(
         resolved.argv(),
         vec![
@@ -101,10 +134,50 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     let script = other.join("tool.BAT");
     or_named(std::fs::write(&script, "@ECHO off\r\n"), &script);
     for file in [lone_npx, tool, script] {
-        let missing = resolve_entry(&file, &places).unwrap_err();
-        let refused = missing.refused.unwrap();
+        let refused = refusal_of(&file, &places);
         assert_eq!(refused.why, Refusal::Batch, "{file:?}");
         assert_eq!(refused.file, or_named(file.canonicalize(), &file));
+    }
+}
+
+/// npm's own `npm.cmd` runs as the `node.exe` and `npm-cli.js` beside it, whatever its text
+/// says, so the engine installs and updates through npm with no command shell. An `npm.cmd`
+/// with only npx's script beside it, or with no node beside it, is refused as a batch file,
+/// and npx's own mapping never takes an `npm.cmd`.
+#[test]
+fn npm_runs_by_its_layout_and_only_with_its_own_script() {
+    let (_folder, real, places) = node_folder();
+    let npm = real.join("node_modules").join("npm").join("bin");
+    or_named(std::fs::create_dir_all(&npm), &npm);
+    let cli = npm.join("npm-cli.js");
+    or_named(std::fs::write(&cli, "#!/usr/bin/env node\n"), &cli);
+    let command = real.join("npm.cmd");
+    or_named(
+        std::fs::write(&command, "@ECHO off\r\ncalc.exe\r\n"),
+        &command,
+    );
+    let resolved = resolved_named(&command, &places);
+    let real_of = |file: &Path| or_named(file.canonicalize(), file).into_os_string();
+    assert_eq!(
+        resolved.argv(),
+        vec![real_of(&real.join("node.exe")), real_of(&cli)]
+    );
+    assert_eq!(crate::batch::npx_real(&command), None);
+
+    let (_npx_only, npx_folder, npx_places) = node_folder();
+    let npx_bin = npx_folder.join("node_modules").join("npm").join("bin");
+    or_named(std::fs::create_dir_all(&npx_bin), &npx_bin);
+    let npx_cli = npx_bin.join("npx-cli.js");
+    or_named(std::fs::write(&npx_cli, "#!/usr/bin/env node\n"), &npx_cli);
+    let without_cli = npx_folder.join("npm.cmd");
+    copy_named(&command, &without_cli);
+    let other = or_named(tempfile::tempdir(), &std::env::temp_dir());
+    let other = or_named(other.path().canonicalize(), other.path());
+    let lone = other.join("npm.cmd");
+    copy_named(&command, &lone);
+    for (file, places) in [(without_cli, &npx_places), (lone, &places)] {
+        let refused = refusal_of(&file, places);
+        assert_eq!(refused.why, Refusal::Batch, "{file:?}");
     }
 }
 
@@ -120,7 +193,7 @@ fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
     let npx = real.join("npx.cmd");
     or_named(std::fs::write(&npx, "@ECHO off\r\n"), &npx);
     let elsewhere = stub_new(Vec::new(), None);
-    let resolved = resolve_entry(&npx, &elsewhere).unwrap();
+    let resolved = resolved_named(&npx, &elsewhere);
     let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(
         resolved.argv(),
@@ -155,7 +228,7 @@ fn a_cmd_shim_off_the_engine_s_path_runs_with_the_node_beside_it() {
     let (_folder, real, _places) = node_folder();
     let (shim, script) = shim_beside_node(&real);
     let elsewhere = stub_new(Vec::new(), None);
-    let resolved = resolve_entry(&shim, &elsewhere).unwrap();
+    let resolved = resolved_named(&shim, &elsewhere);
     let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(resolved.entry, shim);
     assert_eq!(
@@ -171,7 +244,7 @@ fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
     let (_path_folder, _path_real, path_places) = node_folder();
     let (_folder, real, _places) = node_folder();
     let (shim, script) = shim_beside_node(&real);
-    let resolved = resolve_entry(&shim, &path_places).unwrap();
+    let resolved = resolved_named(&shim, &path_places);
     let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(
         resolved.argv(),
@@ -190,8 +263,7 @@ fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
     let script = real.join("tool.js");
     or_named(std::fs::write(&script, "#!/usr/bin/env Env\n"), &script);
     let places = stub_new(vec![real.clone()], None);
-    let missing = resolve_entry(&script, &places).unwrap_err();
-    assert_eq!(missing.refused.unwrap().why, Refusal::FirstLine);
+    assert_eq!(refusal_of(&script, &places).why, Refusal::FirstLine);
     for name in ["env.exe", "ENV.EXE", "BusyBox.exe", "nice"] {
         assert!(launches_by_name(name), "{name}");
     }

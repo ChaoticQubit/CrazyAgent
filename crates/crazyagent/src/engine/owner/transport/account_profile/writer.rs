@@ -1,5 +1,6 @@
 use super::*;
 use crate::engine::native_auth_host::RegisteredNativeAuthHost;
+use crate::engine::secret_frame::{drain, drain_errors};
 use crate::storage::account_profile::Work;
 use rustix::fs::{Mode, OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
@@ -279,50 +280,6 @@ fn bounded_file(file: &File, maximum: usize) -> Result<Vec<u8>, EngineError> {
     let mut bytes = vec![0; size];
     file.read_exact_at(&mut bytes, 0).map_err(|_| unknown())?;
     Ok(bytes)
-}
-
-fn drain(
-    descriptor: &OwnedFd,
-    bytes: &mut Vec<u8>,
-    eof: &mut bool,
-    maximum: usize,
-) -> Result<(), EngineError> {
-    let mut buffer = [0; 1024];
-    for _ in 0..8 {
-        match rustix::io::read(descriptor, &mut buffer) {
-            Ok(0) => {
-                *eof = true;
-                return Ok(());
-            }
-            Ok(size) => {
-                if size > maximum.saturating_sub(bytes.len()) {
-                    return Err(unknown());
-                }
-                bytes.extend_from_slice(&buffer[..size]);
-            }
-            Err(rustix::io::Errno::AGAIN) => return Ok(()),
-            Err(rustix::io::Errno::INTR) => {}
-            Err(_) => return Err(unknown()),
-        }
-    }
-    Ok(())
-}
-
-fn drain_errors(
-    descriptor: &OwnedFd,
-    count: &mut usize,
-    eof: &mut bool,
-) -> Result<(), EngineError> {
-    let mut bytes = Vec::new();
-    drain(
-        descriptor,
-        &mut bytes,
-        eof,
-        4096usize.saturating_sub(*count),
-    )?;
-    *count += bytes.len();
-    kernel_security::secret::wipe(&mut bytes);
-    Ok(())
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]

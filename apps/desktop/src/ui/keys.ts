@@ -18,6 +18,20 @@ export function thisComputer(mac: boolean = isMac()): string {
   return mac ? "this Mac" : "this computer";
 }
 
+/** What a sentence calls the system's file browser: Finder on macOS, "your file manager" on
+ * Windows and Linux. Input: whether this is macOS, by default the window's. Output: the words. */
+export function fileManager(mac: boolean = isMac()): string {
+  return mac ? "Finder" : "your file manager";
+}
+
+/** Where the system keeps the GitHub sign-in, in a sentence's words: the Mac's keychain on
+ * macOS, Windows Credential Manager on Windows, the system keyring on Linux. Inputs: whether
+ * this is macOS and whether it is Windows, by default the window's. Output: the words. */
+export function signInStore(mac: boolean = isMac(), windows: boolean = isWindows()): string {
+  if (mac) return "your Mac's keychain";
+  return windows ? "Windows Credential Manager" : "your system keyring";
+}
+
 /** The help under Profile's Theme choice, naming what System follows on this computer: the
  * Mac on macOS, the computer's own light or dark setting on Windows and Linux. Input: whether
  * this is macOS, by default the window's. Output: the help sentence. */

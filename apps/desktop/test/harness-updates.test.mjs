@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { eachComputer, importOn } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api-harness-updates.ts");
 const view = await import("../src/screens/settings/harnesses.tsx");
+const step = await import("../src/screens/first-run/harnesses.ts");
 
 const entry = (id, name, status) => ({ id, name, status, status_label: "", executable: status.kind === "not_installed" ? null : `/opt/homebrew/bin/${id}`,
   headless: `${id} -p`, tools: { kind: "switchable" }, model_selection: true, account_kinds: ["subscription"], team: { kind: "lead" }, aliases: [] });
@@ -125,7 +126,7 @@ test("changing the online lookup keeps the other two settings", async () => {
 });
 
 test("every update refusal has its own plain sentence", () => {
-  const codes = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_tool_missing", "harness_update_tool_unsafe", "harness_update_needs_admin", "harness_update_as_root", "harness_update_off", "harness_update_check_only", "harness_update_busy", "harness_update_not_installed", "harness_update_timeout", "harness_update_failed", "harness_update_unsupported_here", "harness_update_lookup_failed", "harness_update_check_unreadable", "harness_update_check_failed", "harness_update_start_failed", "harness_update_settings_unreadable", "harness_update_unavailable"];
+  const codes = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_tool_missing", "harness_update_tool_unsafe", "harness_update_needs_admin", "harness_update_as_root", "harness_update_off", "harness_update_check_only", "harness_update_busy", "harness_update_in_use", "harness_update_not_installed", "harness_update_timeout", "harness_update_failed", "harness_update_unsupported_here", "harness_update_lookup_failed", "harness_update_check_unreadable", "harness_update_check_failed", "harness_update_start_failed", "harness_update_settings_unreadable", "harness_update_unavailable"];
   assert.equal(new Set(codes.map(api.updateCopy)).size, codes.length);
   for (const code of codes) assert.doesNotMatch(api.updateCopy(code), /harness_|\u2014/, code);
 });
@@ -215,7 +216,14 @@ test("another harness installed some other way says to use its own installer and
 
 test("the page lists the install setting with both options, and changing it keeps the other three", async () => {
   const html = page({ mode: "check_and_update", when: "on_button", online: "on", install: "on" });
-  for (const word of ["Install from the app", "Offer Install for harnesses that are not installed", "Don't offer Install", "Install runs Homebrew when it is on this Mac, else npm\\. It never uses sudo or a script from a website\\."]) assert.match(html, new RegExp(word));
+  for (const word of ["Install from the app", "Offer Install for harnesses that are not installed", "Don't offer Install"]) assert.match(html, new RegExp(word));
+  await eachComputer("../src/screens/settings/harnesses.tsx", (settings, { os, computer }) => {
+    const shown = markup(createElement(settings.UpdateSettingsView, { settings: { mode: "check_and_update", when: "on_button", online: "on", install: "on" }, save: () => Promise.resolve({ kind: "ok", value: undefined }) }));
+    const help = os === "windows"
+      ? "Install runs npm with the Node CrazyAgent sets up. It never runs as an administrator or a script from a website."
+      : `Install runs Homebrew when it is on ${computer}, else npm. It never uses sudo or a script from a website.`;
+    assert.ok(shown.includes(help), `${os}: ${shown}`);
+  });
   const sent = [];
   await view.chooseInstall({ mode: "check_only", when: "on_open", online: "off", install: "on" }, "off", (settings) => { sent.push(settings); return Promise.resolve({ kind: "ok", value: undefined }); });
   assert.deepEqual(sent, [{ mode: "check_only", when: "on_open", online: "off", install: "off" }]);
@@ -238,6 +246,10 @@ test("an update whose old version could not be read is not called an install", (
 
 test("a second job on the same harness says it is already updating or installing", () => {
   assert.equal(api.updateCopy("harness_update_busy"), "This harness is already updating or installing.");
+});
+
+test("an update a live session blocks says to close those sessions first", () => {
+  assert.equal(api.updateCopy("harness_update_in_use"), "Close the sessions that use it, then update.");
 });
 
 test("a job held behind another harness's job says which one it waits for, with no error and its buttons off", () => {
@@ -449,4 +461,36 @@ test("the page reads Node as installing while a job on Node runs over an old fai
   const busy = (state) => ({ dependencies: [{ name: "node", label: "Node.js", state, busy: true, waiting: "setup" }], pack: [], running: true, version: 1 });
   assert.deepEqual(view.pageNode(["codex"], reads, busy({ state: "failed", reason: NODE_FAILED })), { kind: "installing" });
   assert.equal(view.pageNodeReads(["codex"], reads, busy({ state: "failed", reason: NODE_FAILED })), true);
+});
+
+test("update and first-run words name this Mac on macOS and this computer on Windows and Linux", async () => {
+  await eachComputer("../src/api-harness-updates.ts", (updates, { os, computer }) => {
+    for (const [code, line] of [["harness_update_tool_missing", `The tool that updates it is no longer on ${computer}.`],
+      ["harness_update_not_installed", `It isn't installed on ${computer}.`], ["harness_install_already", `It's already installed on ${computer}.`],
+      ["harness_install_needs_node", `CrazyAgent installs this one with npm, and Node.js isn't on ${computer} yet.`]]) {
+      assert.equal(updates.updateCopy(code), line, `${os} ${code}`);
+    }
+  });
+  await eachComputer("../src/screens/first-run/harnesses.ts", (first, { os, computer }) => {
+    assert.equal(first.HARNESS_WORDS.installed, `Already on ${computer}.`, os);
+    assert.equal(first.HARNESS_WORDS.reading, `Reading what's on ${computer}.`, os);
+  });
+});
+
+test("the page's purpose line offers install with npm and update on Windows, and keeps its words elsewhere", async () => {
+  await eachComputer("../src/screens/settings/harnesses.tsx", (settings, { os, computer }) => {
+    const shown = markup(createElement(settings.HarnessesView, { catalog: { kind: "loading" }, onCheck: quiet }));
+    const purpose = os === "windows"
+      ? "Agents run inside these tools. CrazyAgent finds them on this computer. It can install one with npm and update one with that harness's own updater, each only when you choose it."
+      : `CrazyAgent finds harnesses installed on ${computer}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
+    assert.ok(shown.includes(`<p>${purpose}</p>`), `${os}: ${shown.slice(0, 400)}`);
+  });
+});
+
+test("a Windows launch refused while its harness updates says to try again when it's done, on both copies", async () => {
+  const line = "This harness is updating. Try again when it's done.";
+  const updates = await importOn("windows", "../src/api-harness-updates.ts");
+  const window = await importOn("windows", "../src/api.ts");
+  assert.equal(updates.updateCopy("harness_launch_updating"), line);
+  assert.equal(window.plainError("harness_launch_updating"), line);
 });

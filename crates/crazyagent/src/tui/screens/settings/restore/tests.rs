@@ -312,3 +312,85 @@ fn restore_page_shows_the_compaction_row_only_in_a_dev_build() {
     );
     assert!(HELP.starts_with("Dev builds only."));
 }
+
+/// The owner event a compaction read or save answers with. Input: the event. Output: the
+/// arrival the page gets.
+fn compaction(event: AppSetupEvent) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::AppSetup(event),
+    ))))
+}
+
+/// The compaction choices the page sent since the last look. Input: the context. Output: the
+/// choices of the saves, and how many reads were sent.
+fn compaction_jobs(ctx: &mut Ctx) -> (Vec<LogCompaction>, usize) {
+    let mut saves = Vec::new();
+    let mut reads = 0;
+    for job in jobs(ctx) {
+        match job {
+            AppSetupJob::SetLogCompaction { choice, .. } => saves.push(choice),
+            AppSetupJob::LogCompaction => reads += 1,
+            _ => {}
+        }
+    }
+    (saves, reads)
+}
+
+#[test]
+fn a_second_switch_waits_for_the_refreshed_choice_and_then_sends_off() {
+    let mut ctx = ctx(100, 30);
+    let mut page = offered();
+    let shown = |choice| {
+        compaction(AppSetupEvent::LogCompaction(Ok(LogCompactionView {
+            choice,
+            dev_build: true,
+        })))
+    };
+    page.arrive(&shown(LogCompaction::Off), &mut ctx);
+    page.key(&Key::Char('c'), &mut ctx);
+    assert_eq!(compaction_jobs(&mut ctx), (vec![LogCompaction::On], 0));
+
+    page.arrive(
+        &compaction(AppSetupEvent::LogCompactionSet(Ok(()))),
+        &mut ctx,
+    );
+    assert_eq!(
+        compaction_jobs(&mut ctx),
+        (vec![], 1),
+        "the save asks for the refresh"
+    );
+    assert!(matches!(page.key(&Key::Char('c'), &mut ctx), Flow::Ignored));
+    assert_eq!(
+        compaction_jobs(&mut ctx),
+        (vec![], 0),
+        "no second save before the refreshed choice"
+    );
+    assert!(!page.hints(&ctx).iter().any(|hint| hint.key == "c"));
+
+    page.arrive(&shown(LogCompaction::On), &mut ctx);
+    page.key(&Key::Char('c'), &mut ctx);
+    assert_eq!(compaction_jobs(&mut ctx), (vec![LogCompaction::Off], 0));
+
+    page.arrive(
+        &compaction(AppSetupEvent::LogCompactionSet(Ok(()))),
+        &mut ctx,
+    );
+    assert_eq!(compaction_jobs(&mut ctx), (vec![], 1));
+    page.arrive(
+        &compaction(AppSetupEvent::LogCompaction(
+            Err("owner_read_failed".into()),
+        )),
+        &mut ctx,
+    );
+    assert!(matches!(page.key(&Key::Char('c'), &mut ctx), Flow::Ignored));
+    assert!(
+        ctx.message().is_none(),
+        "a failed refresh says nothing, as a failed read does"
+    );
+    page.shown(&mut ctx);
+    assert_eq!(
+        compaction_jobs(&mut ctx),
+        (vec![], 1),
+        "a failed refresh lets the next look read again"
+    );
+}

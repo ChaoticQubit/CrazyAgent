@@ -174,7 +174,7 @@ pub(crate) async fn desktop_log_compaction(
     state: State<'_, NativeState>,
 ) -> Result<crazyagent::log_compaction::LogCompactionView, BridgeError> {
     main_window(&webview)?;
-    lock(&state).await?.log_compaction().await
+    state.0.log_compaction().await
 }
 
 #[tauri::command]

@@ -22,6 +22,7 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
+use crate::engine::secret_frame::{OwnerToken, owner_token};
 use crate::engine::{
     Engine, io_error, owner_trace as trace, read_frame, verify_client, verify_server,
 };
@@ -38,13 +39,12 @@ use deferral::Deferral;
 use dispatch_fs::{dispatch_directory, dispatch_file};
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
-use std::fs::File;
-use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{fs::File, io::Read};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
@@ -603,7 +603,7 @@ impl Root {
 
 struct Slot {
     registration: Registration,
-    token: [u8; 32],
+    token: Box<OwnerToken>,
     file: Option<File>,
     identity: Identity,
     closed: u64,
@@ -728,7 +728,7 @@ impl PinnedBootstrap {
 struct RunnerKey {
     file: File,
     identity: Identity,
-    token: [u8; 32],
+    token: OwnerToken,
 }
 
 struct RunnerSlot {
@@ -778,9 +778,9 @@ impl RunnerSlot {
                 &key.file,
                 key.identity,
             )?;
-            let mut observed = [0; 32];
-            key.file.read_exact_at(&mut observed, 0).map_err(io_error)?;
-            if !bool::from(key.token.ct_eq(&observed)) {
+            let mut found = owner_token();
+            key.file.read_exact_at(&mut *found, 0).map_err(io_error)?;
+            if !bool::from(key.token.ct_eq(&*found)) {
                 return Err(failure("runner_capability_content_changed"));
             }
         }
@@ -799,7 +799,7 @@ struct Authority {
     host: HostStamp,
     slots: Mutex<[Slot; 2]>,
     runners: Mutex<Vec<Option<RunnerSlot>>>,
-    native_auth: Mutex<Option<NativeAuthSlot>>,
+    native_auth: Mutex<Option<Box<NativeAuthSlot>>>,
     native_auth_host: Mutex<NativeAuthHostRegistration>,
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
@@ -961,8 +961,8 @@ impl Authority {
             return Err(failure("runner_control_socket_replaced"));
         }
         if slot.key.is_none() {
-            let mut token = [0; 32];
-            getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
+            let mut token = owner_token();
+            getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
             let file = self
                 .root
                 .open_key(&format!("r{:02x}.cap", prepared.slot), true)?;
@@ -972,7 +972,7 @@ impl Authority {
                 token,
             });
             let key = slot.key.as_ref().unwrap();
-            key.file.write_all_at(&key.token, 0).map_err(io_error)?;
+            key.file.write_all_at(&*key.token, 0).map_err(io_error)?;
             key.file.sync_all().map_err(io_error)?;
             self.root.sync()?;
         }
@@ -1150,9 +1150,9 @@ impl Authority {
         let slot = &slots[i];
         let file = slot.held()?;
         self.root.verify_key(KEYS[i], file, slot.identity)?;
-        let mut observed = [0; 32];
-        file.read_exact_at(&mut observed, 0).map_err(io_error)?;
-        if !bool::from(slot.token.ct_eq(&observed)) {
+        let mut observed = owner_token();
+        file.read_exact_at(&mut *observed, 0).map_err(io_error)?;
+        if !bool::from(slot.token.ct_eq(&*observed)) {
             return Err(failure("owner_capability_content_changed"));
         }
         if self.root.socket_identity()? != self.socket {
@@ -1199,11 +1199,11 @@ impl Authority {
         let result = (|| {
             slot.registration.active = false;
             if registration.active {
-                let mut token = [0; 32];
-                getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
+                let mut token = Box::new(owner_token());
+                getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 let file = slot.held()?;
                 self.root.verify_key(KEYS[i], file, slot.identity)?;
-                file.write_all_at(&token, 0).map_err(io_error)?;
+                file.write_all_at(&**token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
                 self.root.verify_key(KEYS[i], file, slot.identity)?;
                 slot.token = token;
@@ -1650,9 +1650,9 @@ impl OwnerServer {
                     Identity::of_file(&file)?,
                     file.try_clone().map_err(io_error)?,
                 ));
-                let mut token = [0; 32];
-                getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
-                file.write_all_at(&token, 0).map_err(io_error)?;
+                let mut token = Box::new(owner_token());
+                getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
+                file.write_all_at(&**token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
                 let identity = Identity::of_file(&file)?;
                 root.verify_key(KEYS[i], &file, identity)?;
@@ -1778,7 +1778,7 @@ impl OwnerServer {
     fn accept_owner_handshake(
         &self,
         stream: Stream,
-        auth: [u8; 37],
+        auth: crate::engine::secret_frame::OwnerPacket,
         deadline: Instant,
         tasks: &mut Tasks,
     ) {
@@ -1823,11 +1823,12 @@ impl OwnerServer {
             let engine = self.engine.clone();
             let authority = Arc::downgrade(&self.authority);
             let timeout = self.timeout;
+            let tracked = auth.clone();
             let task = tasks.custody.spawn(async move {
                 native_auth_channel::serve(stream, auth, engine, authority, timeout, deadline)
                     .await;
             });
-            self.authority.track_native_auth(&auth, task);
+            self.authority.track_native_auth(&tracked, task);
         } else {
             while let Some(result) = tasks.clients.try_join_next() {
                 log_panic(&result, "owner_client_panicked");
@@ -1856,7 +1857,7 @@ impl OwnerServer {
     fn refuse_busy(
         &self,
         stream: Stream,
-        handshake: Option<([u8; 37], Instant)>,
+        handshake: Option<(crate::engine::secret_frame::OwnerPacket, Instant)>,
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
         while let Some(result) = refusals.try_join_next() {
@@ -1893,7 +1894,7 @@ impl OwnerServer {
     fn refuse_terminal(
         &self,
         stream: Stream,
-        auth: [u8; 37],
+        auth: crate::engine::secret_frame::OwnerPacket,
         deadline: Instant,
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
@@ -2476,12 +2477,12 @@ impl Engine {
 async fn read_owner_handshake(
     mut stream: Stream,
     timeout: Duration,
-) -> Option<(Stream, [u8; 37], Instant)> {
+) -> Option<(Stream, crate::engine::secret_frame::OwnerPacket, Instant)> {
     let deadline = Instant::now() + timeout;
     let exchange = async {
         verify_client(&stream)?;
-        let mut auth = [0; 37];
-        stream.read_exact(&mut auth).await.map_err(io_error)?;
+        let mut auth = crate::engine::secret_frame::owner_packet_buffer();
+        stream.read_exact(&mut *auth).await.map_err(io_error)?;
         Ok::<_, EngineError>(auth)
     };
     match tokio::time::timeout_at(deadline, exchange).await {
@@ -2510,7 +2511,7 @@ async fn serve_owner(
 /// the stream and the stream is closed.
 async fn serve_authenticated_owner(
     mut stream: Stream,
-    auth: [u8; 37],
+    auth: crate::engine::secret_frame::OwnerPacket,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     deadline: Instant,
@@ -3528,8 +3529,8 @@ impl RunnerClient {
             let file = generation.open_key(&name, false)?;
             let identity = Identity::of_file(&file)?;
             generation.verify_key(&name, &file, identity)?;
-            let mut token = [0; 32];
-            file.read_exact_at(&mut token, 0).map_err(io_error)?;
+            let mut token = owner_token();
+            file.read_exact_at(&mut *token, 0).map_err(io_error)?;
             let socket = generation.socket_identity()?;
             let mut stream = crate::ipc::owner_connect(generation.path.join(SOCKET))
                 .await
@@ -3541,11 +3542,9 @@ impl RunnerClient {
             bootstrap.verify(&runtime)?;
             binding.verify()?;
             generation.verify_key(&name, &file, identity)?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAR1");
-            packet[4] = bootstrap.value.slot;
-            packet[5..].copy_from_slice(&token);
-            stream.write_all(&packet).await.map_err(io_error)?;
+            let packet =
+                crate::engine::secret_frame::owner_packet(b"CAR1", bootstrap.value.slot, &token);
+            stream.write_all(&*packet).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("runner_request_bounds"))?)
                 .await
@@ -3560,9 +3559,9 @@ impl RunnerClient {
             bootstrap.verify(&runtime)?;
             binding.verify()?;
             generation.verify_key(&name, &file, identity)?;
-            let mut observed = [0; 32];
-            file.read_exact_at(&mut observed, 0).map_err(io_error)?;
-            if !bool::from(token.ct_eq(&observed)) || generation.socket_identity()? != socket {
+            let mut observed = owner_token();
+            file.read_exact_at(&mut *observed, 0).map_err(io_error)?;
+            if !bool::from(token.ct_eq(&*observed)) || generation.socket_identity()? != socket {
                 return Err(failure("runner_capability_changed"));
             }
             if let RunnerReply::Ready { identity: ready } = &reply
@@ -3696,7 +3695,7 @@ impl RunnerClient {
 pub struct OwnerClient {
     root: Root,
     kind: OwnerClientKind,
-    token: [u8; 32],
+    token: OwnerToken,
     socket: SocketIdentity,
     timeout: Duration,
     engine_timeout: Duration,
@@ -3722,8 +3721,8 @@ impl OwnerClient {
         let file = root.open_key(KEYS[i], false)?;
         let identity = Identity::of_file(&file)?;
         root.verify_key(KEYS[i], &file, identity)?;
-        let mut token = [0; 32];
-        file.read_exact_at(&mut token, 0).map_err(io_error)?;
+        let mut token = owner_token();
+        file.read_exact_at(&mut *token, 0).map_err(io_error)?;
         root.verify_key(KEYS[i], &file, identity)?;
         let socket = root.socket_identity()?;
         Ok(Self {
@@ -3788,14 +3787,12 @@ impl OwnerClient {
         request.validate()?;
         tokio::time::timeout(self.timeout, async {
             let mut stream = self.connect_checked(io_error).await?;
-            let mut auth = [0; 37];
-            auth[..4].copy_from_slice(b"CAO1");
-            auth[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            auth[5..].copy_from_slice(&self.token);
-            stream.write_all(&auth).await.map_err(io_error)?;
+            let auth = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
+            stream.write_all(&*auth).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("owner_request_bounds"))?)
                 .await
@@ -4402,10 +4399,13 @@ fallback_allowed = false
             .unwrap();
         nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize)
             .unwrap();
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAO1");
-        packet[5..].copy_from_slice(&std::fs::read(root.path().join(KEYS[0])).unwrap());
-        client.write_all(&packet).await.unwrap();
+        let key = std::fs::read(root.path().join(KEYS[0])).unwrap();
+        let packet = crate::engine::secret_frame::owner_packet(
+            b"CAO1",
+            0,
+            &key.as_slice().try_into().unwrap(),
+        );
+        client.write_all(&*packet).await.unwrap();
         let req = OwnerRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new("large-read").unwrap(),
