@@ -395,3 +395,50 @@ fn a_plugin_that_reads_another_page_is_invalid() {
     );
     assert_eq!(provider.calls.get(), 0);
 }
+
+/// The page a fresh, uncached statement gives for the same arguments: the rows past
+/// `after`, at most `limit`, and whether one more exists. Inputs: the transaction, the id
+/// to read past and the limit. Output: the expected engine items and SDK page.
+fn fresh(tx: &rusqlite::Transaction<'_>, after: &str, limit: u16) -> (Vec<OwnerSummary>, RowsPage) {
+    let mut stmt = tx.prepare(super::SQL).unwrap();
+    let found: Vec<(String, String)> = stmt
+        .query_map(rusqlite::params![after, i64::from(limit) + 1], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let more = found.len() > usize::from(limit);
+    let kept = &found[..found.len().min(usize::from(limit))];
+    let mut items = Vec::new();
+    let mut rows = Vec::new();
+    for (id, body) in kept {
+        let p: StoredProject = serde_json::from_str(body).unwrap();
+        let count = p.spec.repositories.len();
+        items.push(item(id, &p.spec.name, count));
+        rows.push(row(id, &p.spec.name, u16::try_from(count).unwrap()));
+    }
+    (items, RowsPage { rows, more })
+}
+
+/// On one transaction, page reads with changing arguments each give exactly the page a
+/// fresh statement gives: no stale binding and no unreset statement carries over between
+/// calls.
+#[test]
+fn the_cached_page_read_rebinds_each_call() {
+    let mut db = engine_store();
+    for (n, id) in ["alpha", "beta", "gamma"].iter().enumerate() {
+        put(&db, id, &body(id, &format!("Project {id}"), n + 1));
+    }
+    let tx = db.transaction().unwrap();
+    let first = rows(&tx, "", 1).unwrap();
+    assert_eq!(first.page.rows.len(), 1);
+    let after_first = first.page.rows[0].id.clone();
+    for (after, limit) in [("", 1), (after_first.as_str(), 2), ("", 32), ("", 1)] {
+        let got = rows(&tx, after, limit).unwrap();
+        let (items, page) = fresh(&tx, after, limit);
+        assert!(!page.rows.is_empty());
+        assert_eq!(got.items, items, "items after {after:?} limit {limit}");
+        assert_eq!(got.page, page, "page after {after:?} limit {limit}");
+    }
+}
