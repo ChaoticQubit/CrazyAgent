@@ -2,7 +2,7 @@
 
 mod poll_support;
 
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -17,14 +17,7 @@ fn an_engine_start_refused_by_a_broken_restore_exits_0_and_names_the_refusal() {
     ] {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut record = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(root.path().join("restore-record"))
-            .unwrap();
-        std::io::Write::write_all(&mut record, text.as_bytes()).unwrap();
-        drop(record);
+        kernel_storage::restore::write_restore_record(root.path(), text).unwrap();
 
         let mut child = kernel_processes::spawn_gate::spawn(
             std::process::Command::new(env!("CARGO_BIN_EXE_crazyagent"))

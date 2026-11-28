@@ -1,5 +1,5 @@
 use super::{
-    RECORD_FAILED, RECORD_RESTORED, RECORD_RESTORING, REPLACED, RESTORE_BUSY, RESTORE_RECORD_FILE,
+    RECORD_FAILED, RECORD_RESTORED, RECORD_RESTORING, REPLACED, RESTORE_BUSY,
     RESTORE_ROLLBACK_FAILED, alone, read_restore_record, real_database, restore_failed,
     write_restore_record,
 };
@@ -299,13 +299,10 @@ pub(super) fn settled(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Removes the restore record and fully flushes its folder. Input: the root. Output: Ok once
-/// gone.
+/// Empties the restore record with a fully flushed write of an empty slot. Input: the root.
+/// Output: Ok once on disk.
 fn clear(root: &Path) -> Result<(), StorageError> {
-    std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).map_err(restore_failed)?;
-    std::fs::File::open(root)
-        .and_then(|folder| flush(&folder, Flush::Full))
-        .map_err(restore_failed)
+    super::record::write(root, "", true, super::record::place)
 }
 
 /// Carries on with the 2.5 data after a restore stopped before it changed anything: under the

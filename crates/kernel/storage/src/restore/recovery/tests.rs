@@ -1,8 +1,9 @@
 use super::*;
 use crate::restore::tests::{always_fails, damage, idle, no_texts, read, replaced, upgraded};
 use crate::restore::{
-    Hooks, RECORD_FAILED, RECORD_RESTORED, RECORD_RESTORING, RESTORE_ROLLBACK_FAILED,
-    read_restore_record, refuse_broken, restore_pinned, restore_pinned_at, write_restore_record,
+    Hooks, RECORD_FAILED, RECORD_RESTORED, RECORD_RESTORING, RESTORE_RECORD_FILE,
+    RESTORE_ROLLBACK_FAILED, read_restore_record, refuse_broken, restore_pinned, restore_pinned_at,
+    write_restore_record,
 };
 use std::cell::Cell;
 use std::time::SystemTime;
@@ -441,4 +442,28 @@ fn put_back_keeps_the_writes_still_in_the_wal_in_its_copy_of_engine_db() {
 
     assert_eq!(read(&saved.join(DATABASE)), (vec!["four".to_owned()], 12));
     assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+}
+
+#[test]
+fn a_restore_a_finish_and_a_put_back_each_end_on_a_fully_flushed_record_write() {
+    let (root, path) = upgraded(true);
+    write_restore_record(root.path(), crate::restore::RECORD_PENDING).unwrap();
+    crate::restore::record::take_writes();
+    restore_pinned(&path, &quiet_hooks()).unwrap();
+    let pinned = crate::restore::record::take_writes();
+    finish(&path, &|_, _, _| {}).unwrap();
+    let finished = crate::restore::record::take_writes();
+    let (_broken_root, broken_path, _kept) = broken(true);
+    crate::restore::record::take_writes();
+    put_back(&broken_path).unwrap();
+    let put = crate::restore::record::take_writes();
+
+    for (action, writes) in [
+        ("restore_pinned", pinned),
+        ("finish", finished),
+        ("put_back", put),
+    ] {
+        assert!(!writes.is_empty(), "{action}");
+        assert!(writes.iter().all(|flushed| *flushed), "{action} {writes:?}");
+    }
 }

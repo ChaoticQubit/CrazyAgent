@@ -2,14 +2,15 @@ use crate::StorageError;
 use crate::migrations::{
     BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, Flush, PINNED_DAYS, Texts,
     V24_VERSION_MAX, backup_time, backups_folder, backups_in, check_copy, checked_copy, error,
-    file_digest, flush, pinned, private_file, schema, stamp, stamp_time,
+    file_digest, pinned, schema, stamp, stamp_time,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+mod record;
 pub mod recovery;
 #[cfg(test)]
 mod tests;
@@ -53,6 +54,8 @@ pub const RESTORE_AGENTS_RUNNING: &str = "storage_restore_agents_running";
 pub const RESTORE_BUSY: &str = "storage_restore_busy";
 /// The code any other failed restore starts with.
 pub const RESTORE_FAILED: &str = "storage_restore_failed";
+/// Another write held the restore record's lock for longer than a write waits.
+pub const RESTORE_RECORD_BUSY: &str = "storage_restore_record_busy";
 /// The code a restore starts with when it wrote engine.db, failed, and could not bring the
 /// replaced data back either, so engine.db holds neither copy for sure.
 pub const RESTORE_ROLLBACK_FAILED: &str = "storage_restore_rollback_failed";
@@ -325,7 +328,8 @@ fn shape(copy: &Path, pin: PinCheck) -> Result<(i64, Vec<String>), StorageError>
 
 /// The private file beside engine.db that says how the owner's last restore stands, so a
 /// client can say so while no engine answers: `pending`, `restored <copy>` or
-/// `failed <code>`.
+/// `failed <code>`. It holds two 4 KiB slots written in turn, each a seq, the line and its
+/// sha256, and the newer valid slot is the record.
 pub const RESTORE_RECORD_FILE: &str = "restore-record";
 /// The record of a restore the engine stops for.
 pub const RECORD_PENDING: &str = "pending";
@@ -342,46 +346,21 @@ pub const RECORD_FAILED: &str = "failed";
 /// The most a restore record holds.
 const RESTORE_RECORD_BYTES_MAX: usize = 512;
 
-/// Replaces the restore record of the engine at `root` with one line: the line goes to a private
-/// temp file beside it behind a barrier, which is then renamed over the record, and the folder
-/// is fully flushed, so a failure at any step leaves the old record whole. Inputs: the root
-/// and the line. Output: Ok once it is on disk.
+/// Replaces the restore record of the engine at `root` with one line, under the record lock:
+/// the older of its two slots is written in place and fully flushed, so a failure or a torn
+/// block leaves the other slot whole. The first write of a root makes the file whole by a
+/// rename. Callers: the restore request, the restore after the stop, `restore_pinned` and
+/// `finish`. Inputs: the root and the line. Output: Ok once it is on disk.
 pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError> {
-    write_record_with(root, line, |temp, bytes| {
-        private_file(temp, bytes, Flush::Barrier)
-    })
+    write_record_with(root, line, record::place)
 }
 
-/// The temp file a record write fills before it renames it over the record.
-const RESTORE_RECORD_TEMP: &str = "restore-record.new";
-
-/// [`write_restore_record`] with the private file writer given, so a row can fail it. A temp
-/// file left by an earlier crash is removed first, and the temp file is removed after any
-/// failure before the rename. Inputs: the root, the line and the writer. Output: as
-/// [`write_restore_record`].
-fn write_record_with(
-    root: &Path,
-    line: &str,
-    write: fn(&Path, &[u8]) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
+/// [`write_restore_record`] with the slot writer given, so a row can tear it. Inputs: the
+/// root, the line and the slot writer. Output: as [`write_restore_record`].
+fn write_record_with(root: &Path, line: &str, put: record::Place) -> Result<(), StorageError> {
     assert!(!line.is_empty());
     assert!(line.len() <= RESTORE_RECORD_BYTES_MAX);
-    let record = root.join(RESTORE_RECORD_FILE);
-    let temp = root.join(RESTORE_RECORD_TEMP);
-    match std::fs::remove_file(&temp) {
-        Ok(()) => {}
-        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
-        Err(cause) => return Err(restore_failed(cause)),
-    }
-    let renamed = write(&temp, line.as_bytes())
-        .and_then(|()| std::fs::rename(&temp, &record).map_err(restore_failed));
-    if let Err(cause) = renamed {
-        let _ = std::fs::remove_file(&temp);
-        return Err(restore_failed(cause.0));
-    }
-    std::fs::File::open(root)
-        .and_then(|folder| flush(&folder, Flush::Full))
-        .map_err(restore_failed)
+    record::write(root, line, true, put)
 }
 
 /// Refuses an engine start while the restore record says a restore wrote engine.db and could
@@ -392,7 +371,7 @@ pub(crate) fn refuse_broken(path: &Path) -> Result<(), StorageError> {
     let Some(root) = path.parent() else {
         return Ok(());
     };
-    let refused = match read_record_strict(root) {
+    let refused = match record::read(root) {
         Ok(None) => false,
         Ok(Some(line)) => {
             let words: Vec<&str> = line.split(' ').collect();
@@ -416,41 +395,14 @@ pub(crate) fn refuse_broken(path: &Path) -> Result<(), StorageError> {
 /// a link: only a private regular file of this user counts. Input: the root. Output: its line,
 /// or none, for a missing record and for one that cannot be read alike.
 pub fn read_restore_record(root: &Path) -> Option<String> {
-    read_record_strict(root).ok().flatten()
+    record::read(root).ok().flatten()
 }
 
-/// [`read_restore_record`] that tells a missing record from one that exists but cannot be
-/// read as a private regular file of this user. Input: the root. Output: Ok(None) when
-/// it is missing, Ok(Some) with its line, or Err for any other failure.
-fn read_record_strict(root: &Path) -> Result<Option<String>, ()> {
-    use std::io::Read;
-    let opened = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(root.join(RESTORE_RECORD_FILE));
-    let file = match opened {
-        Ok(file) => file,
-        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(()),
-    };
-    let metadata = file.metadata().map_err(|_| ())?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(());
-    }
-    let mut text = String::new();
-    let limit = u64::try_from(RESTORE_RECORD_BYTES_MAX).map_err(|_| ())?;
-    file.take(limit).read_to_string(&mut text).map_err(|_| ())?;
-    assert!(text.len() <= RESTORE_RECORD_BYTES_MAX);
-    Ok(Some(text))
-}
-
-/// Removes a pending or restored record as the engine starts, so a stale one never keeps a
-/// client from starting the engine after a crash or a return to 2.5; a failed or restoring
-/// one stays for the restore screen until the next request. Input: the database path. Output: none; a
-/// record that cannot be removed is logged.
+/// Empties a pending or restored record as the engine starts, with no flush, so a stale one
+/// never keeps a client from starting the engine after a crash or a return to 2.5; a lost
+/// empty write is made again by the next start. A failed or restoring one stays for the
+/// restore screen until the next request. Input: the database path. Output: none; a record
+/// that cannot be emptied is logged.
 pub(crate) fn forget_restore(path: &Path) {
     let Some(root) = path.parent() else {
         return;
@@ -462,7 +414,7 @@ pub(crate) fn forget_restore(path: &Path) {
     if first == Some(RECORD_RESTORING) || first == Some(RECORD_FAILED) {
         return;
     }
-    if std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).is_err() {
+    if record::write(root, "", false, record::place).is_err() {
         eprintln!("storage_restore_record_kept");
     }
 }

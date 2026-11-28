@@ -409,16 +409,12 @@ async fn a_start_ask_without_the_default_engine_only_reconnects() {
 /// reconnect starts nothing.
 #[tokio::test]
 async fn a_plain_reconnect_names_a_restore_that_brought_the_data_back() {
-    use std::os::unix::fs::OpenOptionsExt;
     let root = private_folder("ca-tui-held-");
-    let mut record = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(root.path().join("restore-record"))
-        .unwrap();
-    std::io::Write::write_all(&mut record, b"restored replaced-20261117T020000Z").unwrap();
-    drop(record);
+    kernel_storage::restore::write_restore_record(
+        root.path(),
+        "restored replaced-20261117T020000Z",
+    )
+    .unwrap();
     let layout = crate::paths::Layout::new(root.path().to_path_buf()).unwrap();
     let login = idle_service(root.path(), &layout, PathBuf::from("/usr/bin/false"));
     let client = Client::new(layout.socket(), Duration::from_secs(1)).unwrap();

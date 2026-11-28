@@ -523,12 +523,7 @@ fn a_start_while_a_restore_still_copies_refuses_and_leaves_the_engine_process_ru
         "launchd runs the stand-in for the copying engine process"
     );
     let pid = pid.unwrap();
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut record = options.open(layout.root().join("restore-record")).unwrap();
-    std::io::Write::write_all(&mut record, b"pending").unwrap();
-    drop(record);
+    kernel_storage::restore::write_restore_record(layout.root(), "pending").unwrap();
     assert!(!crazyagent::service::answering(&layout.socket()));
 
     let outcome = runtime().block_on(crazyagent::service::ensure_running(

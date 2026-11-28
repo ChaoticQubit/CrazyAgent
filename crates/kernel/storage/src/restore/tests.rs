@@ -1,7 +1,7 @@
 use super::*;
 use crate::migrations::{BACKUPS, DATABASE, backup};
 use std::cell::Cell;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 /// No settings texts. Input: none. Output: an empty list.
 pub(super) fn no_texts() -> Result<Vec<(&'static str, String)>, StorageError> {
@@ -284,7 +284,7 @@ fn the_restore_record_reads_back_only_from_a_private_file_and_a_start_forgets_al
         Some(RECORD_PENDING)
     );
     forget_restore(&path);
-    assert!(!record.exists());
+    assert_eq!(read_restore_record(root.path()), None);
 
     let failed = format!("{RECORD_FAILED} {RESTORE_BUSY}");
     write_restore_record(root.path(), &failed).unwrap();
@@ -398,42 +398,39 @@ fn a_pinned_copy_the_shape_check_refuses_leaves_no_replaced_copy() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-/// A writer that leaves a partial file behind and fails. Inputs: the path and the bytes.
-/// Output: `write_forced`.
-fn fails_after_a_partial_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    std::fs::write(path, &bytes[..1]).unwrap();
-    Err(error("write_forced"))
+/// A slot writer that writes the slot's first 20 bytes, its header and part of its line,
+/// and fails before any flush, as a crash mid-write leaves it. Inputs: the file, the offset and the bytes. Output: an error.
+fn tears(file: &std::fs::File, offset: u64, bytes: &[u8]) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(file, &bytes[..20], offset)?;
+    Err(std::io::Error::other("write_forced"))
 }
 
 #[test]
-fn a_record_write_that_fails_keeps_the_old_record_and_leaves_no_temp_file() {
-    let root = tempfile::Builder::new()
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
+fn a_record_write_torn_before_its_flush_keeps_the_other_slot_and_the_next_write_goes_on() {
+    let root = record_root();
     write_restore_record(root.path(), RECORD_PENDING).unwrap();
-    let before = std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap();
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
 
-    let refused = write_record_with(
-        root.path(),
-        "restored replaced-x",
-        fails_after_a_partial_write,
-    )
-    .unwrap_err()
-    .0;
+    let refused = write_record_with(root.path(), "restored replaced-x", tears)
+        .unwrap_err()
+        .0;
 
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
     assert!(refused.contains("write_forced"), "{refused}");
     assert_eq!(
-        std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap(),
-        before
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_RESTORING)
     );
-    let names = std::fs::read_dir(root.path())
+    let mut names = std::fs::read_dir(root.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(names, [RESTORE_RECORD_FILE]);
+    names.sort();
+    assert_eq!(names, [RESTORE_RECORD_FILE, record::RECORD_LOCK]);
+    write_restore_record(root.path(), "restored replaced-y").unwrap();
     assert_eq!(
         read_restore_record(root.path()).as_deref(),
-        Some(RECORD_PENDING)
+        Some("restored replaced-y")
     );
 }
 
@@ -614,13 +611,13 @@ fn a_bare_database_name_is_the_database_in_the_working_folder() {
 }
 
 #[test]
-fn a_restore_record_write_makes_one_full_flush() {
+fn the_first_record_write_of_a_root_makes_two_full_flushes_and_no_barrier() {
     let (root, _path) = upgraded(false);
     crate::migrations::take_flushes();
 
     write_restore_record(root.path(), RECORD_PENDING).unwrap();
 
-    assert_eq!(crate::migrations::take_flushes().0, 1);
+    assert_eq!(crate::migrations::take_flushes(), (2, 0));
     assert_eq!(
         read_restore_record(root.path()),
         Some(RECORD_PENDING.to_owned())
@@ -635,6 +632,7 @@ fn a_pinned_restore_makes_one_full_flush() {
         busy: &idle,
         after_restore: &|_, _, _| {},
     };
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
     crate::migrations::take_flushes();
 
     let restored = restore_pinned(&path, &hooks).unwrap();
@@ -773,4 +771,215 @@ fn an_old_one_file_record_is_still_read_and_the_next_write_replaces_it_whole() {
         Some(RECORD_PENDING)
     );
     assert!(refuse_broken(&root.path().join(DATABASE)).is_ok());
+}
+
+#[test]
+fn a_record_write_after_a_seq_wrap_reads_the_wrapped_slot_and_writes_over_the_older() {
+    let root = record_root();
+    let mut bytes = record::encoded(u64::MAX, "restoring a");
+    bytes.extend(record::encoded(0, "restoring b"));
+    raw_record(root.path(), &bytes);
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some("restoring b")
+    );
+
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+
+    let after = std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap();
+    assert_eq!(
+        after[..record::SLOT_BYTES],
+        record::encoded(1, RECORD_PENDING)[..]
+    );
+    assert_eq!(after[record::SLOT_BYTES..], bytes[record::SLOT_BYTES..]);
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+}
+
+#[test]
+fn a_slot_over_the_line_limit_with_a_matching_digest_is_not_a_record() {
+    use sha2::Digest;
+    let root = record_root();
+    let mut long = b"CARR\x01".to_vec();
+    long.extend(9_u64.to_le_bytes());
+    long.extend(513_u16.to_le_bytes());
+    long.extend([b'r'; 513]);
+    let digest = sha2::Sha256::digest(&long);
+    long.extend(digest);
+    long.resize(record::SLOT_BYTES, 0);
+    long.extend(record::encoded(1, RECORD_PENDING));
+    raw_record(root.path(), &long);
+
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+}
+
+/// Both slots torn leave a record that cannot be read: the start is refused with the same
+/// `engine_restore_broken` text as any unreadable record, and a write is refused, never a
+/// repair that would hide a torn `restoring`.
+#[test]
+fn a_record_with_both_slots_torn_refuses_the_start_and_every_write() {
+    let root = record_root();
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
+    write_restore_record(root.path(), "restoring replaced-x").unwrap();
+    lose_block(root.path(), 0);
+    lose_block(root.path(), 1);
+    let torn = std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap();
+
+    assert_eq!(read_restore_record(root.path()), None);
+    let refused = refuse_broken(&root.path().join(DATABASE)).unwrap_err().0;
+    assert_eq!(
+        refused,
+        format!(
+            "{ENGINE_RESTORE_BROKEN}: the engine data did not pass its check after a failed \
+             restore; the replaced 2.5 data stays in the {BACKUPS} folder"
+        )
+    );
+    let written = write_restore_record(root.path(), RECORD_PENDING)
+        .unwrap_err()
+        .0;
+    assert_eq!(written, format!("{RESTORE_FAILED}: {}", record::UNREADABLE));
+    forget_restore(&root.path().join(DATABASE));
+    assert_eq!(
+        std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap(),
+        torn
+    );
+}
+
+#[test]
+fn a_start_forgets_a_pending_record_with_no_flush_and_keeps_a_restoring_one() {
+    let root = record_root();
+    let path = root.path().join(DATABASE);
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    crate::migrations::take_flushes();
+
+    forget_restore(&path);
+
+    assert_eq!(crate::migrations::take_flushes(), (0, 0));
+    assert_eq!(read_restore_record(root.path()), None);
+    assert!(refuse_broken(&path).is_ok());
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
+    forget_restore(&path);
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_RESTORING)
+    );
+}
+
+#[test]
+fn the_record_lock_is_close_on_exec_and_free_again_while_a_copy_of_it_lives() {
+    let root = record_root();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    let lock = record::locked(root.path()).unwrap();
+    let flags = rustix::io::fcntl_getfd(&lock.0).unwrap();
+    assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+    let copy = lock.0.try_clone().unwrap();
+
+    drop(lock);
+
+    let started = std::time::Instant::now();
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
+    assert!(started.elapsed() < record::LOCK_WAIT);
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_RESTORING)
+    );
+    drop(copy);
+}
+
+#[test]
+fn a_record_lock_held_for_good_refuses_the_write_as_busy_within_its_wait() {
+    let root = record_root();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    let holder = std::fs::File::open(root.path().join(record::RECORD_LOCK)).unwrap();
+    rustix::fs::flock(&holder, rustix::fs::FlockOperation::LockExclusive).unwrap();
+
+    let started = std::time::Instant::now();
+    let refused = write_restore_record(root.path(), RECORD_RESTORING)
+        .unwrap_err()
+        .0;
+    let waited = started.elapsed();
+
+    assert_eq!(refused, RESTORE_RECORD_BUSY);
+    assert!(waited >= record::LOCK_WAIT, "{waited:?}");
+    assert!(
+        waited < record::LOCK_WAIT + std::time::Duration::from_millis(1500),
+        "{waited:?}"
+    );
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+}
+
+#[test]
+fn a_record_lock_that_is_a_link_or_not_private_refuses_the_write() {
+    let root = record_root();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    let lock = root.path().join(record::RECORD_LOCK);
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let open = write_restore_record(root.path(), RECORD_RESTORING)
+        .unwrap_err()
+        .0;
+    assert!(open.starts_with(RESTORE_FAILED), "{open}");
+
+    std::fs::remove_file(&lock).unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::write(&elsewhere, b"").unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &lock).unwrap();
+    let linked = write_restore_record(root.path(), RECORD_RESTORING)
+        .unwrap_err()
+        .0;
+    assert!(linked.starts_with(RESTORE_FAILED), "{linked}");
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+}
+
+#[test]
+fn two_threads_writing_one_record_never_leave_it_unreadable() {
+    let root = record_root();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    let lines: Vec<String> = (0..2)
+        .flat_map(|writer| (0..40).map(move |n| format!("restoring w{writer}-{n}")))
+        .chain([RECORD_PENDING.to_owned()])
+        .collect();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..2)
+            .map(|writer| {
+                let root = root.path();
+                scope.spawn(move || {
+                    for n in 0..40 {
+                        write_restore_record(root, &format!("restoring w{writer}-{n}")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let reader = scope.spawn(|| {
+            let mut reads = 0;
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let line = read_restore_record(root.path()).expect("readable");
+                assert!(lines.contains(&line), "{line}");
+                reads += 1;
+            }
+            reads
+        });
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(reader.join().unwrap() > 0);
+    });
+    let last = read_restore_record(root.path()).unwrap();
+    assert!(
+        last == "restoring w0-39" || last == "restoring w1-39",
+        "{last}"
+    );
 }

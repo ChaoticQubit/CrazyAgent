@@ -7,7 +7,7 @@ use crate::tui::frame::Tone;
 use crate::tui::screens::settings::{sections, tabs};
 use crate::tui::screens::settings_accounts::tests::ctx;
 use crate::tui::seam::Request;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 const UNTIL_MS: i64 = 1_797_500_000_000;
 const NOW_MS: i64 = UNTIL_MS - 10 * 86_400_000;
@@ -218,14 +218,8 @@ fn the_restore_tab_shows_only_for_an_engine_with_a_2_4_backup_or_a_restore_recor
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(!offered_at(root.path()), "no backup and no record, no tab");
-    let mut record = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(root.path().join("restore-record"))
+    kernel_storage::restore::write_restore_record(root.path(), "failed storage_restore_busy")
         .unwrap();
-    std::io::Write::write_all(&mut record, b"failed storage_restore_busy").unwrap();
-    drop(record);
     assert!(offered_at(root.path()), "a restore record shows the tab");
 }
 
@@ -255,15 +249,7 @@ fn an_unanswered_restore_counts_as_sent_and_drops_the_connection_and_a_refusal_k
 }
 
 fn write_record(root: &std::path::Path, line: &str) {
-    let path = root.join("restore-record");
-    let _ = std::fs::remove_file(&path);
-    let mut record = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .unwrap();
-    std::io::Write::write_all(&mut record, line.as_bytes()).unwrap();
+    kernel_storage::restore::write_restore_record(root, line).unwrap();
 }
 
 /// L5 F1: a failed connect to the TUI's own engine names the restore that holds it, as the

@@ -11,17 +11,23 @@ fn root() -> tempfile::TempDir {
     dir
 }
 
-/// Writes the restore record as a file of a mode. Inputs: the root, the text and the mode.
+/// Writes the restore record through the kernel's own writer, then gives it a mode; an
+/// empty text, which that writer never takes, is an empty file. Inputs: the root, the text
+/// and the mode.
 fn record(root: &Path, text: &str, mode: u32) {
     let path = root.join("restore-record");
     let _ = std::fs::remove_file(&path);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(&path)
-        .unwrap();
-    std::io::Write::write_all(&mut file, text.as_bytes()).unwrap();
+    if text.is_empty() {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&path)
+            .unwrap();
+        drop(file);
+    } else {
+        kernel_storage::restore::write_restore_record(root, text).unwrap();
+    }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
