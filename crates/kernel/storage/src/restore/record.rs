@@ -74,6 +74,20 @@ pub(super) fn fail_next_folder_flush() {
     FAIL_FOLDER_FLUSH.with(|fail| fail.set(true));
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// How many slots this thread fully checked (digest, tail and line) since the last take.
+    static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Takes how many slots this thread fully checked (digest, tail and line) and starts the count
+/// again from zero, so a row can tell a read that checks one slot from one that checks both.
+/// Input: none. Output: the count.
+#[cfg(test)]
+pub(super) fn take_checks() -> usize {
+    CHECKS.with(|checks| checks.replace(0))
+}
+
 /// Takes the list of this thread's record writes, each true when it ended on its own full
 /// flush, and starts a new one. Output: the list.
 #[cfg(test)]
@@ -131,6 +145,8 @@ fn decoded(slot: &[u8]) -> Option<(u64, String)> {
         return None;
     }
     let end = HEADER_BYTES + length;
+    #[cfg(test)]
+    CHECKS.with(|checks| checks.set(checks.get() + 1));
     let digest = Sha256::digest(&slot[..end]);
     if slot[end..end + DIGEST_BYTES] != digest[..] {
         return None;

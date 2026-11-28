@@ -818,6 +818,123 @@ fn a_slot_over_the_line_limit_with_a_matching_digest_is_not_a_record() {
     );
 }
 
+/// A slot of `seq` and `line` with one line byte changed, so its header reads but its
+/// digest does not match. Inputs: the seq and the line. Output: the slot's bytes.
+fn torn_slot(seq: u64, line: &str) -> Vec<u8> {
+    let mut slot = record::encoded(seq, line);
+    slot[15] ^= 0x01;
+    slot
+}
+
+/// The record file's bytes from its two slots, slot A first. Inputs: both slots. Output: the
+/// bytes.
+fn two_slots(first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
+    let mut bytes = first;
+    bytes.extend(second);
+    assert_eq!(bytes.len(), record::RECORD_BYTES);
+    bytes
+}
+
+#[test]
+fn a_good_newest_slot_is_the_only_slot_a_read_checks() {
+    let cases = [
+        (
+            record::encoded(4, "restoring a"),
+            record::encoded(5, "restoring b"),
+            "restoring b",
+        ),
+        (
+            record::encoded(6, "restoring a"),
+            record::encoded(5, "restoring b"),
+            "restoring a",
+        ),
+        (
+            record::encoded(u64::MAX, "restoring a"),
+            record::encoded(0, "restoring b"),
+            "restoring b",
+        ),
+    ];
+    for (first, second, line) in cases {
+        let root = record_root();
+        raw_record(root.path(), &two_slots(first, second));
+        record::take_checks();
+        assert_eq!(read_restore_record(root.path()).as_deref(), Some(line));
+        assert_eq!(record::take_checks(), 1, "{line}");
+    }
+}
+
+#[test]
+fn a_torn_newest_slot_falls_back_to_the_other_after_checking_both() {
+    for older_first in [true, false] {
+        let root = record_root();
+        let older = record::encoded(4, "restoring a");
+        let newer = torn_slot(5, "restoring b");
+        let bytes = if older_first {
+            two_slots(older, newer)
+        } else {
+            two_slots(newer, older)
+        };
+        raw_record(root.path(), &bytes);
+        record::take_checks();
+        assert_eq!(
+            read_restore_record(root.path()).as_deref(),
+            Some("restoring a")
+        );
+        assert_eq!(record::take_checks(), 2, "older first {older_first}");
+    }
+}
+
+#[test]
+fn two_torn_slots_are_not_a_record_after_checking_both() {
+    let root = record_root();
+    raw_record(
+        root.path(),
+        &two_slots(torn_slot(4, "restoring a"), torn_slot(5, "restoring b")),
+    );
+    record::take_checks();
+    assert_eq!(read_restore_record(root.path()), None);
+    assert_eq!(record::take_checks(), 2);
+    assert!(refuse_broken(&root.path().join(DATABASE)).is_err());
+}
+
+#[test]
+fn two_valid_slots_with_one_seq_are_not_a_record() {
+    let root = record_root();
+    raw_record(
+        root.path(),
+        &two_slots(
+            record::encoded(5, "restoring a"),
+            record::encoded(5, "restoring b"),
+        ),
+    );
+    record::take_checks();
+    assert_eq!(read_restore_record(root.path()), None);
+    assert_eq!(record::take_checks(), 2);
+    assert!(refuse_broken(&root.path().join(DATABASE)).is_err());
+}
+
+#[test]
+fn a_newest_slot_with_a_bad_header_reads_the_other_and_checks_only_it() {
+    let mut bad_magic = record::encoded(5, "restoring b");
+    bad_magic[0] = b'X';
+    let mut too_long = record::encoded(5, "restoring b");
+    too_long[13..15].copy_from_slice(&513_u16.to_le_bytes());
+    for (name, newer) in [("magic", bad_magic), ("length", too_long)] {
+        let root = record_root();
+        raw_record(
+            root.path(),
+            &two_slots(record::encoded(4, "restoring a"), newer),
+        );
+        record::take_checks();
+        assert_eq!(
+            read_restore_record(root.path()).as_deref(),
+            Some("restoring a"),
+            "{name}"
+        );
+        assert_eq!(record::take_checks(), 1, "{name}");
+    }
+}
+
 /// Both slots torn leave a record that cannot be read: the start is refused with the same
 /// `engine_restore_broken` text as any unreadable record, and a write is refused, never a
 /// repair that would hide a torn `restoring`.
