@@ -48,6 +48,21 @@ std::thread_local! {
     static WRITES: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Whether the next first write of a root on this thread fails its folder flush after
+    /// the rename; the write that reads it sets it back to false.
+    static FAIL_FOLDER_FLUSH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the next first write of a root on this thread fail its folder flush after the
+/// rename, so a row can meet a renamed record whose folder entry is not on disk. Input:
+/// none. Output: none.
+#[cfg(test)]
+pub(super) fn fail_next_folder_flush() {
+    FAIL_FOLDER_FLUSH.with(|fail| fail.set(true));
+}
+
 /// Takes the list of this thread's record writes, each true when it ended on its own full
 /// flush, and starts a new one. Output: the list.
 #[cfg(test)]
@@ -320,6 +335,10 @@ fn first(root: &Path, line: &str) -> Result<(), StorageError> {
     if let Err(cause) = made {
         let _ = std::fs::remove_file(&temp);
         return Err(restore_failed(cause.0));
+    }
+    #[cfg(test)]
+    if FAIL_FOLDER_FLUSH.with(|fail| fail.replace(false)) {
+        return Err(restore_failed("the record folder flush failed"));
     }
     File::open(root)
         .and_then(|folder| flush(&folder, Flush::Full))

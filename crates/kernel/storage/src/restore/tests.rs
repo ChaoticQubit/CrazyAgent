@@ -983,3 +983,28 @@ fn two_threads_writing_one_record_never_leave_it_unreadable() {
         "{last}"
     );
 }
+
+#[test]
+fn a_flushed_write_after_a_failed_folder_flush_flushes_the_folder_before_it_returns_ok() {
+    let root = record_root();
+    record::fail_next_folder_flush();
+    let failed = write_restore_record(root.path(), RECORD_PENDING)
+        .unwrap_err()
+        .0;
+    assert!(failed.contains("folder flush failed"), "{failed}");
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+    crate::migrations::take_flushes();
+
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
+
+    assert_eq!(crate::migrations::take_flushes(), (2, 0));
+    write_restore_record(root.path(), "restored replaced-x").unwrap();
+    assert_eq!(crate::migrations::take_flushes(), (1, 0));
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some("restored replaced-x")
+    );
+}
