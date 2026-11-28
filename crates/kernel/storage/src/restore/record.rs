@@ -1,6 +1,6 @@
-use super::{RESTORE_RECORD_BUSY, RESTORE_RECORD_FILE, restore_failed};
+use super::{RESTORE_RECORD_FILE, restore_failed};
 use crate::StorageError;
-use crate::migrations::{Flush, created, error, flush};
+use crate::migrations::{Flush, created, flush};
 use rustix::fs::{FlockOperation, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -34,6 +34,8 @@ pub(super) const RECORD_LOCK: &str = "restore-record.lock";
 pub(super) const LOCK_WAIT: Duration = Duration::from_secs(2);
 /// How long a write sleeps between two tries of the lock.
 const LOCK_POLL: Duration = Duration::from_millis(10);
+/// The cause a write gives when another write held the record lock for all of its wait.
+pub(super) const LOCK_HELD: &str = "the restore record lock is held by another write";
 /// The cause a read or write of a record that cannot be read gives.
 pub(super) const UNREADABLE: &str = "the restore record cannot be read";
 
@@ -205,8 +207,8 @@ impl Drop for RecordLock {
 
 /// Takes the record lock of the engine at `root`: opens the lock file close-on-exec without
 /// following a link, refuses one that is not a private regular file of this user, then waits
-/// for the lock. Input: the root. Output: the lock, `storage_restore_record_busy`, or a
-/// failure.
+/// for the lock. Input: the root. Output: the lock, or `storage_restore_failed` naming the
+/// held lock or the failure.
 pub(super) fn locked(root: &Path) -> Result<RecordLock, StorageError> {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -231,7 +233,7 @@ pub(super) fn locked(root: &Path) -> Result<RecordLock, StorageError> {
 
 /// Tries the exclusive lock until it is taken or [`LOCK_WAIT`] has passed, so a process that
 /// holds it for good refuses the write instead of hanging the start. Input: the lock file.
-/// Output: Ok once locked, `storage_restore_record_busy`, or a failure.
+/// Output: Ok once locked, or `storage_restore_failed` naming the held lock or the failure.
 fn waited(file: &File) -> Result<(), StorageError> {
     let started = Instant::now();
     loop {
@@ -240,7 +242,7 @@ fn waited(file: &File) -> Result<(), StorageError> {
             Err(Errno::INTR) => {}
             Err(Errno::WOULDBLOCK) => {
                 if started.elapsed() >= LOCK_WAIT {
-                    return Err(error(RESTORE_RECORD_BUSY));
+                    return Err(restore_failed(LOCK_HELD));
                 }
                 std::thread::sleep(LOCK_POLL);
             }

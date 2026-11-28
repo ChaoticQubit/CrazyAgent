@@ -892,7 +892,7 @@ fn the_record_lock_is_close_on_exec_and_free_again_while_a_copy_of_it_lives() {
 }
 
 #[test]
-fn a_record_lock_held_for_good_refuses_the_write_as_busy_within_its_wait() {
+fn a_record_lock_held_for_good_fails_the_write_naming_the_lock_within_its_wait() {
     let root = record_root();
     write_restore_record(root.path(), RECORD_PENDING).unwrap();
     let holder = std::fs::File::open(root.path().join(record::RECORD_LOCK)).unwrap();
@@ -904,7 +904,7 @@ fn a_record_lock_held_for_good_refuses_the_write_as_busy_within_its_wait() {
         .0;
     let waited = started.elapsed();
 
-    assert_eq!(refused, RESTORE_RECORD_BUSY);
+    assert_eq!(refused, format!("{RESTORE_FAILED}: {}", record::LOCK_HELD));
     assert!(waited >= record::LOCK_WAIT, "{waited:?}");
     assert!(
         waited < record::LOCK_WAIT + std::time::Duration::from_millis(1500),

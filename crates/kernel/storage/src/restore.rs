@@ -54,8 +54,6 @@ pub const RESTORE_AGENTS_RUNNING: &str = "storage_restore_agents_running";
 pub const RESTORE_BUSY: &str = "storage_restore_busy";
 /// The code any other failed restore starts with.
 pub const RESTORE_FAILED: &str = "storage_restore_failed";
-/// Another write held the restore record's lock for longer than a write waits.
-pub const RESTORE_RECORD_BUSY: &str = "storage_restore_record_busy";
 /// The code a restore starts with when it wrote engine.db, failed, and could not bring the
 /// replaced data back either, so engine.db holds neither copy for sure.
 pub const RESTORE_ROLLBACK_FAILED: &str = "storage_restore_rollback_failed";
