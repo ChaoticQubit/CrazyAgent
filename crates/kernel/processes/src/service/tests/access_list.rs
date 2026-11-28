@@ -272,6 +272,21 @@ fn one_access_listing_reads_a_whole_path_and_a_grant_reads_changeable_on_the_nex
 /// An entry whose mode changes while its access list is read gets no answer, which counts as
 /// changeable; an entry with the same read-only access list, left alone, reads as not
 /// shared. A move of the change time alone is read again instead (the relisting rows).
+/// Access reads on a thread that never asked to record its listings keep none, so a row or a
+/// timing run of many reads holds no growing record.
+#[cfg(target_os = "macos")]
+#[test]
+fn unrecorded_access_reads_keep_no_listings() {
+    let temp = durable_folder();
+    let entry = temp.path().join("tool");
+    write_mode(&entry, "#!/bin/sh\n", 0o755);
+    let metadata = std::fs::symlink_metadata(&entry).unwrap();
+    for _ in 0..10_000 {
+        assert_eq!(acl::shared_all(&[(&entry, &metadata)]).len(), 1);
+    }
+    assert_eq!(acl::take_listings(), Vec::<Vec<PathBuf>>::new());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_entry_changed_while_its_access_list_is_read_gets_no_answer() {
