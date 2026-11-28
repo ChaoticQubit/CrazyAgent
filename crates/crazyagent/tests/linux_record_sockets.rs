@@ -123,6 +123,7 @@ fn a_linux_agent_makes_no_unix_socket_in_any_engine_record_folder() {
             assert_eq!(inside, "socket=13", "{network:?} {kind}");
             assert!(fs::symlink_metadata(&socket).is_err(), "{network:?} {kind}");
             let outside = bind(None, &socket, &project);
+            println!("{network:?} {kind} outside {outside}");
             assert_eq!(outside, "bound", "{network:?} {kind}");
             fs::remove_file(&socket).unwrap();
         }
