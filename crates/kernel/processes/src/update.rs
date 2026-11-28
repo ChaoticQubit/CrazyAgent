@@ -737,7 +737,7 @@ fn regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-fn run_bounded(
+pub(crate) fn run_bounded(
     command: &mut Command,
     timeout: Duration,
     code: &'static str,
