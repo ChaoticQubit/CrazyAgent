@@ -478,7 +478,7 @@ pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError
 /// user ([`own_folder`]) named `<from>-to-<to>-<UTC time>` count; anything else, another
 /// account's folder included, is neither counted nor removed. Inputs: the backups folder,
 /// the new backup and the time now. Output: Ok once the older backups are gone.
-fn prune(folder: &Path, made: &Path, now: SystemTime) -> Result<(), StorageError> {
+pub(crate) fn prune(folder: &Path, made: &Path, now: SystemTime) -> Result<(), StorageError> {
     let found = backups_in(folder)?;
     let pinned = pinned(folder, &found, now);
     let made_pinned = pinned.is_some_and(|index| folder.join(&found[index].1) == made);

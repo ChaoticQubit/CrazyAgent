@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use super::{at, row};
 use crate::migrations::{
-    BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS, CHECKED, backup_failure, backups_in, pinned, stamp,
+    BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS, CHECKED, backup_failure, backups_in, pinned,
+    prune, stamp,
 };
 use crate::perf_kit::{SAMPLES, time};
 use crate::restore::{
@@ -56,9 +57,9 @@ pub(crate) fn engine_root(temp: &Path) -> PathBuf {
 }
 
 /// Times the storage calls that read or write the engine root's own files without an
-/// engine: the backup failure record, the backup listing and pin, how long a restore stays
-/// possible, and the restore record. Checks each answer once first. Prints one PERF line
-/// per call.
+/// engine: the backup failure record, a backup's prune with the pinned one just made, the
+/// backup listing and pin, how long a restore stays possible, and the restore record.
+/// Checks each answer once first; the prune removes nothing. Prints one PERF line per call.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn storage_root_file_calls() {
@@ -69,6 +70,9 @@ fn storage_root_file_calls() {
     assert_eq!(found.len(), OLDER.len() + 1);
     assert_eq!(backup_failure(&root), Some(BACKUP_FAILED));
     assert_eq!(pinned(&backups, &found, at()), Some(OLDER.len()));
+    let made = backups.join(&found[OLDER.len()].1);
+    prune(&backups, &made, at()).expect("prune");
+    assert_eq!(backups_in(&backups).expect("backups"), found);
     assert!(restorable_until(&root, at()).is_some());
     assert_eq!(read_restore_record(&root).as_deref(), Some(RECORD));
     write_restore_record(&root, RECORD).expect("record");
@@ -81,8 +85,19 @@ fn storage_root_file_calls() {
         },
     );
     time(&row("migrations.backups_in", READ_BATCH), SAMPLES, || {
-        let _ = black_box(backups_in(black_box(&backups)));
+        let _ = black_box(prune(
+            black_box(&backups),
+            black_box(&made),
+            black_box(at()),
+        ));
     });
+    time(
+        &row("migrations.backups_in.list", READ_BATCH),
+        SAMPLES,
+        || {
+            let _ = black_box(backups_in(black_box(&backups)));
+        },
+    );
     time(&row("migrations.pinned", READ_BATCH), SAMPLES, || {
         black_box(pinned(
             black_box(&backups),
