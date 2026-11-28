@@ -203,7 +203,18 @@ fn engine_store() -> rusqlite::Connection {
 /// generated host, the gateway and the settings provider, writing one event in the
 /// request's transaction on an in-memory store with the engine's full schema, committed after
 /// each call.
+/// With the flame mode set, a run that names another row still calls the save, untimed, as
+/// often as timing would, and one that names this row calls it alone between the FLAME
+/// lines, timing only the save.
 fn settings_save_quit() {
+    let quit = row("provider.settings.save_quit", 1);
+    let setting = |key: &str| std::env::var(key).ok();
+    let plan = crate::perf_kit::plan(
+        setting("CRAZYAGENT_PERF_FLAME").as_deref(),
+        setting("CRAZYAGENT_PERF_FLAME_CALLS").as_deref(),
+        setting("CRAZYAGENT_PERF_FLAME_SECS").as_deref(),
+        quit.name,
+    );
     let mut db = engine_store();
     let mut saved = 0_usize;
     let mut step = || {
@@ -216,13 +227,31 @@ fn settings_save_quit() {
         tx.commit().unwrap();
         ns
     };
+    if let crate::perf_kit::Plan::Flame { calls, secs } = plan {
+        let head = format!("{} {} {}", quit.layer, quit.module, quit.name);
+        println!("FLAME-START {head}");
+        let limit = std::time::Duration::from_secs(secs);
+        let started = Instant::now();
+        let mut made = 0_u64;
+        let mut ns = 0_u64;
+        while calls.map_or_else(|| started.elapsed() < limit, |calls| made < calls) {
+            ns += step();
+            made += 1;
+        }
+        assert!(calls.is_none_or(|calls| made == calls));
+        println!("FLAME-END {head} calls={made} ns={ns}");
+        return;
+    }
+    if plan == crate::perf_kit::Plan::Skip {
+        for _ in 0..SAMPLES / 10 + SAMPLES {
+            step();
+        }
+        return;
+    }
     for _ in 0..SAMPLES / 10 {
         step();
     }
-    print_ns(
-        &row("provider.settings.save_quit", 1),
-        (0..SAMPLES).map(|_| step()).collect(),
-    );
+    print_ns(&quit, (0..SAMPLES).map(|_| step()).collect());
 }
 
 /// Times the two sandbox settings calls through the generated host and the gateway to
