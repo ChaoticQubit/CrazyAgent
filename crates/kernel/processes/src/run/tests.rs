@@ -263,6 +263,26 @@ fn powershell() -> std::path::PathBuf {
         .join("powershell.exe")
 }
 
+/// On Windows, a setup command past its limit with no report kept is ended at the limit and
+/// reaped once through its watch, not waited on until its own exit 5 s later.
+#[cfg(windows)]
+#[test]
+fn a_setup_command_past_its_limit_is_ended_and_reaped_once_on_windows() {
+    use crate::exit_wait::tests::hooks;
+    let root = std::env::var_os("SystemRoot").expect("the SystemRoot variable is set");
+    let ping = std::path::PathBuf::from(root).join("System32").join("PING.EXE");
+    let (before, _) = hooks::reaps();
+    let started = Instant::now();
+    let stopped = run_bounded(
+        Command::new(ping).args(["-n", "6", "127.0.0.1"]),
+        Duration::from_millis(200),
+        false,
+    );
+    assert_eq!(stopped, Err(InstallError("setup_timeout")));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(hooks::reaps().0 - before, 1);
+}
+
 /// On Windows, a process a setup command starts that holds the report past the limit is
 /// ended with the command: the call returns `setup_timeout` and the holder, a `PING.EXE`
 /// that inherits the report pipe, is gone soon after, not left to run out its 60 s. A
