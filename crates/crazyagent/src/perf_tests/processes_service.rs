@@ -92,6 +92,7 @@ fn service_calls() {
     write_definition(&service.definition, &text, Platform::MacOs).unwrap();
     let other = executable(&home.join("other").join("crazyagent"));
     let bin = home.join("local-bin");
+    let repointed = executable(&home.join("app-other").join("crazyagent"));
     std::fs::create_dir_all(home.join("socket-folder")).unwrap();
     let socket = home.join("socket-folder").join("engine.sock");
     let _listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
@@ -293,7 +294,6 @@ fn service_calls() {
     time(&row("service.cli_link.link_cli", ONE), SAMPLES, || {
         black_box(link_cli(&service.executable, &bin).unwrap());
     });
-    let repointed = executable(&home.join("app-other").join("crazyagent"));
     let mut flip = false;
     time(
         &row("service.cli_link.link_cli_repoint", ONE),
