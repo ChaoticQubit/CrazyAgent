@@ -66,9 +66,8 @@ impl<'a, 'c> Appender<'a, 'c> {
     ) -> Result<Self, StorageError> {
         fence(tx)?;
         let current: Option<i64> = tx
-            .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
-                row.get(0)
-            })
+            .prepare_cached("SELECT revision FROM state WHERE id=1")
+            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
             .optional()
             .map_err(error)?;
         let Some(next) = current
@@ -83,10 +82,8 @@ impl<'a, 'c> Appender<'a, 'c> {
             return Err(error("state_log_body_bounds"));
         }
         let moved = tx
-            .execute(
-                "UPDATE state SET revision=revision+1 WHERE id=1 AND revision<?1",
-                [i64::MAX],
-            )
+            .prepare_cached("UPDATE state SET revision=revision+1 WHERE id=1 AND revision<?1")
+            .and_then(|mut statement| statement.execute([i64::MAX]))
             .map_err(error)?;
         if moved != 1 {
             return Err(error("state_log_revision_exhausted"));
@@ -130,11 +127,8 @@ impl<'a, 'c> Appender<'a, 'c> {
             return Err(error("state_log_revision_stale"));
         }
         let last: Option<i64> = tx
-            .query_row(
-                "SELECT revision FROM state_log ORDER BY seq DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT revision FROM state_log ORDER BY seq DESC LIMIT 1")
+            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
             .optional()
             .map_err(error)?;
         if revision == 0 || last.is_some_and(|last| revision <= last as u64) {
@@ -217,7 +211,7 @@ impl<'a, 'c> Appender<'a, 'c> {
         }
         let (previous, revision): (i64, i64) = self
             .tx
-            .prepare(
+            .prepare_cached(
                 "SELECT COALESCE(MAX(seq), 0), (SELECT revision FROM state WHERE id=1) FROM state_log",
             )
             .and_then(|mut statement| {
@@ -231,7 +225,7 @@ impl<'a, 'c> Appender<'a, 'c> {
             .checked_add(1)
             .ok_or_else(|| error("state_log_seq_exhausted"))?;
         self.tx
-            .prepare("INSERT INTO state_log VALUES (?1,?2,?3,?4,?5,?6,?7)")
+            .prepare_cached("INSERT INTO state_log VALUES (?1,?2,?3,?4,?5,?6,?7)")
             .and_then(|mut statement| {
                 statement.execute(params![
                     seq,
@@ -252,9 +246,8 @@ impl<'a, 'c> Appender<'a, 'c> {
 /// Reads the store's `state` revision. Input: the connection. Output: the revision.
 fn state_revision(db: &Connection) -> Result<u64, StorageError> {
     let revision: i64 = db
-        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
-            row.get(0)
-        })
+        .prepare_cached("SELECT revision FROM state WHERE id=1")
+        .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
         .map_err(error)?;
     u64::try_from(revision).map_err(error)
 }
@@ -269,12 +262,11 @@ fn publish(tx: &Transaction<'_>, revision: u64, body: &str) -> Result<(), Storag
         "the body is bounded before the write"
     );
     let cursor = i64::try_from(revision).map_err(error)?;
-    tx.execute("INSERT INTO events VALUES (?1,?2)", params![cursor, body])
+    tx.prepare_cached("INSERT INTO events VALUES (?1,?2)")
+        .and_then(|mut statement| statement.execute(params![cursor, body]))
         .map_err(error)?;
-    tx.execute(
-        "DELETE FROM events WHERE cursor<=?1",
-        [cursor.saturating_sub(EVENTS_KEPT_MAX)],
-    )
-    .map_err(error)?;
+    tx.prepare_cached("DELETE FROM events WHERE cursor<=?1")
+        .and_then(|mut statement| statement.execute([cursor.saturating_sub(EVENTS_KEPT_MAX)]))
+        .map_err(error)?;
     Ok(())
 }

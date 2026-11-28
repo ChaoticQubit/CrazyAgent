@@ -601,17 +601,18 @@ fn forget_admissions(db: &Connection, project: &str) -> Result<(), EngineError> 
 /// whose owner runtime never started or is not active.
 pub(crate) fn store_fence(tx: &Transaction<'_>) -> Result<Fence, EngineError> {
     let host = tx
-        .query_row(
+        .prepare_cached(
             "SELECT db_instance, engine_epoch FROM owner_meta
              WHERE singleton=1 AND runtime_state='active'",
-            [],
-            |row| {
+        )
+        .and_then(|mut statement| {
+            statement.query_row([], |row| {
                 Ok(HostStamp {
                     db_instance: row.get(0)?,
                     engine_epoch: row.get(1)?,
                 })
-            },
-        )
+            })
+        })
         .optional()
         .map_err(|failed| {
             if owner_table_missing(&failed) {
