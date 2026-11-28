@@ -272,21 +272,6 @@ pub fn owner_secrets(owner: &Path, harnesses: &[&'static str]) -> impl Iterator<
         .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
 }
 
-/// Refuses a root that equals, holds or sits inside one of `secrets`, comparing entries on
-/// the volume ([`Walk::sits_in`]) so another spelling of a secret's folder is refused too.
-/// Inputs: the root and the secret paths. Output: unit, or `Invalid` with
-/// [`SECRET_ROOT_REFUSED`], also when a metadata read on either path fails other than not
-/// found.
-pub fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
-    let mut reads = Reads::default();
-    let root = Walk::read(root, &mut reads)?;
-    let secrets = secrets
-        .iter()
-        .map(|secret| Walk::read(secret, &mut reads))
-        .collect::<Result<Vec<_>, _>>()?;
-    clear_of_walked(&root, &secrets)
-}
-
 /// The identity of one entry on its volume: device and inode on unix, volume serial number
 /// and file index on Windows.
 type Identity = (u64, u64);
@@ -346,9 +331,8 @@ const DANGLING_LINK_HOPS: usize = 16;
 
 /// The reads one walk of a list takes, kept by exact path, so a folder several walks of that
 /// list pass through, such as the owner home above most secrets, is read once. It is built
-/// and dropped inside one [`Walked::of`], one [`clear_of_secrets`] call or one extension or
-/// re-walk of a [`Kept`] list, so no read outlives the moment its answer is used, and only a
-/// read that succeeded is kept.
+/// and dropped inside one [`Walked::of`] or one extension or re-walk of a [`Kept`] list, so
+/// no read outlives the moment its answer is used, and only a read that succeeded is kept.
 #[derive(Default)]
 struct Reads {
     identities: std::collections::HashMap<PathBuf, Option<Identity>>,
@@ -580,20 +564,6 @@ fn plain_name(part: Component<'_>) -> Option<&str> {
     }
 }
 
-/// Checks a root a sandbox may grant: absolute, plain and at least two folders deep, not
-/// holding the owner home, not inside a harness folder of it, clear of `secrets`, and an
-/// existing canonical directory. Inputs: the root, the owner home, the secret paths and the
-/// harness folders relative to the home. Output: unit, or `Invalid` naming the rule.
-pub fn granted_root(
-    root: &Path,
-    owner: &Path,
-    secrets: &[PathBuf],
-    harnesses: &[&'static str],
-) -> Result<(), SandboxError> {
-    let homes = harness_homes(owner, harnesses);
-    granted_walked(root, &Walked::of(owner, &homes, secrets)?)
-}
-
 /// The owner's harness homes: each harness folder name joined to the owner home. Inputs:
 /// the owner home and the folder names. Output: the folders, in the names' order.
 pub(crate) fn harness_homes(owner: &Path, harnesses: &[&'static str]) -> Vec<PathBuf> {
@@ -649,7 +619,7 @@ impl Walked {
         Ok(WalkedRoot(walk))
     }
 
-    /// Judges a root [`Walked::walk_clear`] walked by the rest of [`granted_root`]'s rules,
+    /// Judges a root [`Walked::walk_clear`] walked by the rest of [`granted_walk`]'s rules,
     /// with no second walk. Inputs: the root and its walk. Output: unit, or `Invalid` naming
     /// the rule.
     pub(crate) fn grant_walked(
@@ -687,18 +657,10 @@ fn deep_plain(root: &Path) -> Result<(), SandboxError> {
     Ok(())
 }
 
-/// Checks a root as [`granted_root`] does, against the owner home, harness homes and secrets
-/// one [`Walked`] holds, walking only the root itself, once. Inputs: the root and the walks.
-/// Output: unit, or `Invalid` naming the rule.
-pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), SandboxError> {
-    deep_plain(root)?;
-    granted_walk(root, &Walk::of(root)?, walked, walked.secrets.iter())
-}
-
-/// The rules of [`granted_root`] after the plain-path rule, on a root already walked: not
-/// holding the owner home, not inside a harness home, clear of the given secret walks and
-/// an existing canonical directory. Inputs: the root, its walk, the walked owner and
-/// harness homes and the secret walks. Output: unit, or `Invalid` naming the rule.
+/// The rules a granted root meets after the plain-path rule ([`deep_plain`]), on a root
+/// already walked: not holding the owner home, not inside a harness home, clear of the given
+/// secret walks and an existing canonical directory. Inputs: the root, its walk, the walked
+/// owner and harness homes and the secret walks. Output: unit, or `Invalid` naming the rule.
 fn granted_walk<'w>(
     root: &Path,
     walk: &Walk,
@@ -722,8 +684,9 @@ fn granted_walk<'w>(
     Ok(())
 }
 
-/// Refuses a walked root that equals, holds or sits inside one of the walked secrets, as
-/// [`clear_of_secrets`] does. Inputs: the root's walk and the secrets' walks. Output: unit,
+/// Refuses a walked root that equals, holds or sits inside one of the walked secrets,
+/// comparing entries on the volume ([`Walk::sits_in`]), so another spelling of a secret's
+/// folder is refused too. Inputs: the root's walk and the secrets' walks. Output: unit,
 /// or `Invalid` with [`SECRET_ROOT_REFUSED`].
 fn clear_of_walked<'w>(
     root: &Walk,
@@ -772,7 +735,7 @@ impl Kept {
         })
     }
 
-    /// Checks a root by the rules of [`granted_root`] against `secrets`, walking only the
+    /// Checks a root by [`deep_plain`] and [`granted_walk`] against `secrets`, walking only the
     /// root, or reusing its walk when this build checked it already, and any of `secrets`
     /// not walked yet, then keeps the root. `secrets` must hold every harness home, so the
     /// install's [`Kept::recheck`] judges them again. Inputs: the root and the secret
@@ -793,7 +756,7 @@ impl Kept {
         Ok(())
     }
 
-    /// Checks a path as [`clear_of_secrets`] does against `secrets`, walking only the path,
+    /// Checks a path by [`clear_of_walked`] against `secrets`, walking only the path,
     /// or reusing its walk when this build checked it already, and any of `secrets` not
     /// walked yet, then keeps the path. Inputs: the path and the secret paths. Output: unit,
     /// or `Invalid` with [`SECRET_ROOT_REFUSED`], keeping nothing.
