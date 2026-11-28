@@ -115,3 +115,91 @@ fn the_log_after_a_retry_shows_the_new_run_not_the_older_higher_attempt() {
     assert_eq!(log(), ["after the retry"]);
     drop(listening);
 }
+
+/// A job handed back before its run folder is made, here a managed account that is not
+/// ready, keeps the run name its record had: its log still shows the earlier run that
+/// exists, not a folder that was never made.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_job_refused_before_its_run_folder_is_made_keeps_the_log_of_its_earlier_run() {
+    let root = engine_root();
+    let folder = root.base.join("repo");
+    fs::create_dir(&folder).unwrap();
+    repository_git(&folder, &["init", "-q"]);
+    repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+    register_project(&root.database, "alpha", &folder);
+    let codex = root.base.join("bin").join("codex");
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(&codex, "#!/bin/sh\necho 'first attempt' >&2\nexit 1\n").unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+    let pinned = codex.clone();
+    let runner = ResearchRunner::without_codex(
+        &root.database,
+        &root.state,
+        ResearchLimits {
+            wall_time: Duration::from_secs(20),
+            ..ResearchLimits::default()
+        },
+    )
+    .unwrap()
+    .with_harness_lookup(Arc::new(move |harness: &str| {
+        (harness == "codex").then(|| pinned.clone())
+    }));
+    let listening = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let endpoint = ResearchProject {
+        id: "alpha",
+        root: &folder,
+        account: Some(ResearchAccount::Endpoint {
+            base_url: format!(
+                "http://127.0.0.1:{}/v1",
+                listening.local_addr().unwrap().port()
+            ),
+            model: "local-model".into(),
+            key: None,
+        }),
+    };
+    let jobs = ResearchJobs::open(&root.database).unwrap();
+    let id = jobs
+        .enqueue("alpha", "market_research", "codex", false)
+        .unwrap();
+    let log = || {
+        let mut connection = rusqlite::Connection::open(&root.database).unwrap();
+        let tx = connection.transaction().unwrap();
+        crate::project_setup::research_job_log(&tx, &root.database, id).unwrap()
+    };
+    let run_name = || -> String {
+        rusqlite::Connection::open(&root.database)
+            .unwrap()
+            .query_row(
+                "SELECT run_name FROM research_jobs WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let run = runner.run_once(&endpoint).unwrap().unwrap();
+    assert_eq!((run.job, run.status), (id, ResearchStatus::Queued));
+    assert_eq!(run_name(), format!("job-{id}-1"));
+    assert_eq!(log(), ["first attempt"]);
+    let managed = ResearchProject {
+        id: "alpha",
+        root: &folder,
+        account: Some(ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        }),
+    };
+    let run = runner.run_once(&managed).unwrap().unwrap();
+    assert_eq!((run.job, run.status), (id, ResearchStatus::Queued));
+    assert_eq!(run.process_group, None);
+    assert!(
+        !root
+            .state
+            .join("agents")
+            .join(format!("job-{id}-2"))
+            .exists()
+    );
+    assert_eq!(run_name(), format!("job-{id}-1"));
+    assert_eq!(log(), ["first attempt"]);
+    drop(listening);
+}
