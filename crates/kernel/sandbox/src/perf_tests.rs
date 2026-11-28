@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod elf;
 mod grants;
+mod path_parts;
 mod paths;
 mod policy;
 
