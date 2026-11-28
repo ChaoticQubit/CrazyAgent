@@ -380,13 +380,19 @@ const WIRING_CAPS: [(&str, &str); 3] = [
     ),
 ];
 
+/// A provider `Cargo.toml` naming the package in its `[package]` table. Input: the package
+/// name. Output: the manifest text.
+fn cargo_manifest(package: &str) -> String {
+    format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n")
+}
+
 /// Runs the served wiring emitter over [`WIRING_CAPS`] and a plugins folder whose plugin
-/// folders each hold a `Cargo.toml` with the given package name. Inputs: a name unique to
-/// the row and (plugin id, served stems list text, package name) triples, every plugin t1.
-/// Output: the result.
+/// folders each hold the given `Cargo.toml` text. Inputs: a name unique to the row and
+/// (plugin id, served stems list text, manifest text) triples, every plugin t1. Output:
+/// the result.
 fn wiring(
     name: &str,
-    plugins_in: &[(&str, &str, &str)],
+    plugins_in: &[(&str, &str, String)],
 ) -> Result<Vec<(String, String)>, CapgenError> {
     let files: Vec<(&str, File)> = WIRING_CAPS
         .iter()
@@ -407,12 +413,9 @@ fn wiring(
         .map(|((plugin, _, _), text)| ("t1", *plugin, text.as_str()))
         .collect();
     let root = plugins(&format!("wiring-{name}"), &manifests);
-    for (plugin, _, package) in plugins_in {
-        fs::write(
-            root.join("t1").join(plugin).join("Cargo.toml"),
-            format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
-        )
-        .expect("the Cargo.toml writes");
+    for (plugin, _, text) in plugins_in {
+        fs::write(root.join("t1").join(plugin).join("Cargo.toml"), text)
+            .expect("the Cargo.toml writes");
     }
     let result = served_wiring(&files, &root);
     fs::remove_dir_all(&root).expect("the folder is removed");
@@ -424,8 +427,16 @@ fn a_fixture_plugins_folder_writes_one_field_per_served_stem_from_its_provider_c
     let files = wiring(
         "fields",
         &[
-            ("echo-plugin", "[\"echo\"]", "crazyagent-plugin-echo-plugin"),
-            ("tick-plugin", "[\"tick\"]", "crazyagent-plugin-tick-plugin"),
+            (
+                "echo-plugin",
+                "[\"echo\"]",
+                cargo_manifest("crazyagent-plugin-echo-plugin"),
+            ),
+            (
+                "tick-plugin",
+                "[\"tick\"]",
+                cargo_manifest("crazyagent-plugin-tick-plugin"),
+            ),
         ],
     )
     .expect("the wiring generates");
@@ -448,25 +459,54 @@ fn a_fixture_plugins_folder_writes_one_field_per_served_stem_from_its_provider_c
 
 #[test]
 fn capgen_provider_crate() {
-    for package in [
-        "crazyagent-plugin-other",
-        "echo-plugin",
-        "crazyagent-plugin-echo-plugin-extra",
+    let line = "name = \"crazyagent-plugin-echo-plugin\"";
+    for text in [
+        cargo_manifest("crazyagent-plugin-other"),
+        cargo_manifest("echo-plugin"),
+        cargo_manifest("crazyagent-plugin-echo-plugin-extra"),
+        format!("[package]\nname = \"other\"\n[dependencies]\n{line}\n"),
+        format!("[package]\nname = \"other\"\n[lib]\n{line}\n"),
+        format!("{line}\n[package]\nname = \"other\"\n"),
     ] {
         let error = wiring(
             "crate",
             &[
-                ("echo-plugin", "[\"echo\"]", package),
-                ("tick-plugin", "[\"tick\"]", "crazyagent-plugin-tick-plugin"),
+                ("echo-plugin", "[\"echo\"]", text.clone()),
+                (
+                    "tick-plugin",
+                    "[\"tick\"]",
+                    cargo_manifest("crazyagent-plugin-tick-plugin"),
+                ),
             ],
         )
         .expect_err("a provider crate named unlike its plugin is refused");
-        assert_eq!(error.code, "capgen_provider_crate", "{package}");
+        assert_eq!(error.code, "capgen_provider_crate", "{text}");
         assert!(
             Path::new(&error.file).ends_with("t1/echo-plugin/Cargo.toml"),
             "{error:?}"
         );
     }
+}
+
+/// A provider whose `plugin.toml` id breaks the plugin id grammar is refused by the
+/// manifest reader before the served wiring splices the id into a Rust path, so no
+/// `served.rs` is written.
+#[test]
+fn capgen_served_refuses_a_bad_plugin_id() {
+    let error = wiring(
+        "bad-id",
+        &[(
+            "Echo_Plugin",
+            "[\"echo\"]",
+            cargo_manifest("crazyagent-plugin-Echo_Plugin"),
+        )],
+    )
+    .expect_err("a plugin id outside the grammar is refused");
+    assert_eq!(error.code, "plugin_id_invalid", "{error:?}");
+    assert!(
+        Path::new(&error.file).ends_with("t1/Echo_Plugin/plugin.toml"),
+        "{error:?}"
+    );
 }
 
 /// The engine's served wiring equals what capgen writes from the prod caps and plugins:
@@ -516,4 +556,37 @@ fn every_bundled_served_stem_has_one_field_from_its_provider_crate() {
         }
     }
     assert_eq!(flat.matches(":&crazyagent_plugin_").count(), stems);
+}
+
+/// Every bundled plugin that serves a stem is the engine's dependency under its own crate
+/// name, by one inline line pointing at its plugin folder with no `package =` rename, so
+/// the ident the wiring names resolves to that folder's code and no other crate.
+#[test]
+fn every_engine_plugin_dependency_points_at_its_provider_folder() {
+    use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
+    let engine = fs::read_to_string(repo("crates/crazyagent/Cargo.toml")).expect("reads");
+    let mut providers = 0;
+    for grant in BUNDLED_GRANTS
+        .iter()
+        .filter(|grant| !grant.capabilities.is_empty())
+    {
+        let name = format!("crazyagent-plugin-{}", grant.plugin);
+        let tier = format!("{:?}", grant.tier).to_ascii_lowercase();
+        let want = format!(
+            "{name} = {{ path = \"../../plugins/{tier}/{}\" }}",
+            grant.plugin
+        );
+        let named: Vec<&str> = engine
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(&name))
+            .collect();
+        assert_eq!(named, [want.as_str()], "{name}");
+        providers += 1;
+    }
+    let served = BUNDLED_GRANTS
+        .iter()
+        .filter(|grant| !grant.capabilities.is_empty())
+        .count();
+    assert_eq!(providers, served);
 }

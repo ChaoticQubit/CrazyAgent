@@ -172,7 +172,9 @@ fn served(files: &[(&str, File)], grants: &[Grant]) -> Result<(), CapgenError> {
 /// plugin serving it. Inputs: the parsed `.cap` files after every check the permissions
 /// mode runs, and the plugins folder. Output: the one file, none when no stem is served,
 /// or the first refusal, `capgen_provider_crate` for a provider folder whose `Cargo.toml`
-/// does not name the package `crazyagent-plugin-<id>`.
+/// does not name the package `crazyagent-plugin-<id>` inside its `[package]` table.
+/// Each id reaches the Rust path only after `manifest::read` refused any id outside the
+/// plugin id grammar (`is_plugin_id`, plugin_host `manifest.rs`).
 pub(crate) fn served_wiring(
     files: &[(&str, File)],
     plugins: &Path,
@@ -184,10 +186,8 @@ pub(crate) fn served_wiring(
     for grant in grants.iter().filter(|grant| !grant.capabilities.is_empty()) {
         let package = format!("crazyagent-plugin-{}", grant.plugin);
         let manifest = Path::new(&grant.file).with_file_name("Cargo.toml");
-        let named = fs::read_to_string(&manifest).is_ok_and(|text| {
-            text.lines()
-                .any(|line| line.trim() == format!("name = \"{package}\""))
-        });
+        let named = fs::read_to_string(&manifest)
+            .is_ok_and(|text| package_named(&text, &format!("name = \"{package}\"")));
         if !named {
             return Err(CapgenError {
                 file: manifest.display().to_string(),
@@ -217,6 +217,19 @@ pub(crate) fn served_wiring(
         body.join(", ")
     );
     Ok(vec![("served.rs".to_owned(), text)])
+}
+
+/// Whether a `Cargo.toml` text holds the given `name` line inside its `[package]` table,
+/// tracking table headers line by line. Inputs: the manifest text and the exact line.
+/// Output: true when the line sits under `[package]` and nowhere else decides it.
+fn package_named(text: &str, line: &str) -> bool {
+    let mut table = "";
+    text.lines().map(str::trim).any(|entry| {
+        if entry.starts_with('[') {
+            table = entry;
+        }
+        table == "[package]" && entry == line
+    })
 }
 
 /// The plugin_host tier of a `.cap` tier. Input: the tier. Output: the same tier.
