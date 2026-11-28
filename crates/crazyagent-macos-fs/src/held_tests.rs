@@ -1,4 +1,7 @@
-use super::{HELD_REPLY_FIXED, HELD_REQUIRED, held_entry, held_entry_at, held_reply, open_search};
+use super::{
+    HELD_REPLY_FIXED, HELD_REQUIRED, held_entry, held_entry_at, held_reply,
+    held_volume_keeps_lists_at, open_search,
+};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -151,4 +154,22 @@ fn held_reads_match_lstat_for_a_folder_a_file_and_a_link() -> Result<(), Box<dyn
     }
     assert!(open_search(Some(folder.as_fd()), c"link", false).is_err());
     Ok(())
+}
+
+/// Both reads by name refuse a name that is not absolute when no folder is given, as an
+/// invalid input and before any call, for a relative and an empty name alike. Inputs: none.
+/// Output: the refusal kinds.
+#[test]
+fn a_read_by_name_with_no_folder_refuses_a_name_that_is_not_absolute() {
+    for name in [c"file", c"", c"./file"] {
+        let entry = held_entry_at(None, name).map(|_| ());
+        let volume = held_volume_keeps_lists_at(None, name, 0).map(|_| ());
+        for read in [entry, volume] {
+            assert_eq!(
+                read.map_err(|error| error.kind()),
+                Err(std::io::ErrorKind::InvalidInput),
+                "{name:?}"
+            );
+        }
+    }
 }
