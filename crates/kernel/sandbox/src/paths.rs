@@ -339,9 +339,14 @@ pub(crate) fn home_fallbacks() -> usize {
     HOME_FALLBACKS.with(std::cell::Cell::get)
 }
 
-/// Whether `secrets` holds `home`, compared as paths, so another spelling of the same path
-/// counts. Inputs: the secret paths and the home. Output: the answer.
+/// Whether `secrets` holds `home`: an entry with the same bytes first, then a `Path`
+/// compare only when none has them, so another spelling of the same path still counts.
+/// Inputs: the secret paths and the home. Output: the answer.
 fn holds_home(secrets: &[PathBuf], home: &Path) -> bool {
+    let bytes = home.as_os_str();
+    if secrets.iter().any(|secret| secret.as_os_str() == bytes) {
+        return true;
+    }
     #[cfg(test)]
     HOME_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
     secrets.iter().any(|secret| secret == home)
