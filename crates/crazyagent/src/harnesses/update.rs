@@ -434,7 +434,7 @@ fn brew_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
 fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
     let bin = prefix.join("bin");
     Fixed {
-        program: bin.join("npm"),
+        program: bin.join(kernel_processes::install::NPM),
         args,
         search: vec![bin],
         prefix: Some(prefix.to_path_buf()),
@@ -1188,6 +1188,38 @@ mod windows_tests {
             );
         }
     }
+    /// On Windows the engine's npm is Node's `npm.cmd` and the kernel's npm template takes it,
+    /// so a harness install into the engine prefix and an update of one in the owner's own
+    /// prefix both build their one step with it.
+    #[test]
+    fn a_windows_npm_install_and_update_pass_the_kernel_template_with_the_npm_cmd() {
+        let node = PathBuf::from(r"C:\Program Files\nodejs");
+        let engine = NpmInstall {
+            node: node.join("node.exe"),
+            program: node.join("npm.cmd"),
+            search: vec![node.clone(), PathBuf::from(r"C:\engine\setup\harnesses")],
+            prefix: PathBuf::from(r"C:\engine\setup\harnesses"),
+        };
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: Some(engine.clone()),
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let npm = recipe("codex")
+            .and_then(|codex| codex.npm.as_ref())
+            .expect("codex installs with npm");
+        let install = npm_recipe(npm, Verb::Install).expect("codex's npm install recipe");
+        let built = matched(engine_npm_fixed(&engine, npm_install_args(npm)), &install);
+        assert_eq!(built.map(|fixed| fixed.program), Ok(engine.program.clone()));
+        let update = npm_recipe(npm, Verb::Update).expect("codex's npm update recipe");
+        let owner = PathBuf::from(r"C:\Users\unit\AppData\Roaming\npm");
+        let built = matched(npm_for(&owner, &roots, npm_install_args(npm)), &update);
+        assert_eq!(built.map(|fixed| fixed.program), Ok(engine.program.clone()));
+    }
+
     /// On Windows an npm install outside the engine prefix, such as the owner's own
     /// `%APPDATA%\npm`, is checked and updated in place by the engine's npm with its own prefix
     /// pinned, since npm puts no npm of its own in a prefix there; the engine prefix keeps the

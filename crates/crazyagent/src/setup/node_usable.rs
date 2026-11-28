@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 const NODE: &str = if cfg!(windows) { "node.exe" } else { "node" };
-const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
 
 /// A Node the tool resolver finds whole in one folder: the `node` entry and the `npm` entry
 /// beside it, whose own interpreter resolves too, as found on the places before any link is
@@ -20,7 +19,11 @@ pub struct Usable {
 pub fn usable(places: &kernel_processes::finding::Places) -> Option<Usable> {
     let found = places.folders().iter().find_map(|folder| {
         let node = kernel_processes::finding::resolve_entry(&folder.join(NODE), places).ok()?;
-        let npm = kernel_processes::finding::resolve_entry(&folder.join(NPM), places).ok()?;
+        let npm = kernel_processes::finding::resolve_entry(
+            &folder.join(kernel_processes::install::NPM),
+            places,
+        )
+        .ok()?;
         Some((node, npm))
     });
     let Some((node, npm)) = found else {
