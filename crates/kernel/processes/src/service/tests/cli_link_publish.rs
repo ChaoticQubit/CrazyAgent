@@ -217,9 +217,28 @@ fn a_link_with_an_access_list_for_others_is_swapped_for_a_new_one() -> TestResul
     );
     assert!(at(&link, status)?.success());
     let before = stamp_of(&link)?;
+    let reads = cli_link::acl_reads();
     assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(cli_link::acl_reads() - reads, 1);
     assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
     assert_ne!(stamp_of(&link)?.0, before.0);
+    Ok(())
+}
+
+/// A link that names another executable is swapped without its access list read: the
+/// bytes differ, so the keep rule says no before any list is read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_naming_another_executable_is_swapped_with_no_access_list_read() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let other = temp.path().join("app/other");
+    at(&other, std::fs::write(&other, "#!/bin/sh\n"))?;
+    let link = bin.join("crazyagent");
+    at(&link, std::os::unix::fs::symlink(&other, &link))?;
+    let reads = cli_link::acl_reads();
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(cli_link::acl_reads() - reads, 0);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
     Ok(())
 }
 

@@ -94,7 +94,20 @@ pub(super) fn keeps(
 /// Output: the answer, none when it cannot be read.
 #[cfg(target_os = "macos")]
 fn link_shared(link: &Path, metadata: &std::fs::Metadata) -> Option<bool> {
+    #[cfg(test)]
+    ACL_READS.with(|reads| reads.set(reads.get() + 1));
     super::acl::shared_all(&[(link, metadata)])[0]
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static ACL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many link access lists [`link_cli`] has read on this test thread. Output: the count.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn acl_reads() -> usize {
+    ACL_READS.with(std::cell::Cell::get)
 }
 
 /// Whether a link's own access list lets another user change it. Linux keeps no access
