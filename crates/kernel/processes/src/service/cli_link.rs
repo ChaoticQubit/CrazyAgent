@@ -1,14 +1,18 @@
 use super::*;
 
 /// Links the running `crazyagent` into a folder on the user's PATH so a shell finds it:
-/// `~/.local/bin/crazyagent` on macOS and Linux. An absent name gets the link made in
-/// place, which never replaces a file that arrived first; a link already there is kept
-/// unwritten when it is this user's own and names the executable ([`kept_link`]), else
-/// swapped for the new one in one step ([`replace_link`]) without a make tried first; any
-/// other file is refused and kept. Inputs: the executable and the bin folder. Output: the
-/// link.
+/// `~/.local/bin/crazyagent` on macOS and Linux. The bin folder is opened once, following a
+/// link only at that open, and every later step names its entries relative to that one
+/// descriptor, following nothing, so a folder swapped meanwhile never redirects a step. An
+/// absent name gets the link made in place, which never replaces a file that arrived first;
+/// a link already there is kept unwritten when it is this user's own and names the
+/// executable ([`kept_link`]), else swapped for the new one in one step ([`replace_link`])
+/// without a make tried first; any other file is refused and kept. Inputs: the executable and
+/// the bin folder. Output: the link.
 #[cfg(unix)]
 pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::io::Errno;
     let fail = |path: &Path, error: std::io::Error| failure(format!("{}: {error}", path.display()));
     if !executable.is_absolute() || !executable.is_file() {
         return Err(failure(format!(
@@ -18,12 +22,18 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
     }
     persisted(executable)?;
     std::fs::create_dir_all(bin).map_err(|error| fail(bin, error))?;
-    let link = bin.join("crazyagent");
-    let found = std::fs::symlink_metadata(&link);
+    let link = bin.join(LINK_NAME);
+    let folder = rustix::fs::open(
+        bin,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| fail(bin, error.into()))?;
+    let found = link_stat(&folder, LINK_NAME);
     let mut there = match &found {
-        Ok(metadata) if !metadata.file_type().is_symlink() => return Err(not_a_link(&link)),
-        Ok(_) => true,
-        Err(_) => false,
+        Some(Err(())) => return Err(not_a_link(&link)),
+        Some(Ok(_)) => true,
+        None => false,
     };
     #[cfg(test)]
     BEFORE_PUBLISH.with(|step| {
@@ -31,20 +41,20 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
             step(&link);
         }
     });
-    if let Ok(metadata) = &found
-        && kept_link(&link, metadata, executable)
+    if let Some(Ok(stat)) = &found
+        && kept_link(&folder, stat, executable)
     {
         return Ok(link);
     }
     for _ in 0..PUBLISH_ROUNDS_MAX {
         if !there {
-            match std::os::unix::fs::symlink(executable, &link) {
+            match rustix::fs::symlinkat(executable, &folder, LINK_NAME) {
                 Ok(()) => return Ok(link),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(fail(&link, error)),
+                Err(Errno::EXIST) => {}
+                Err(error) => return Err(fail(&link, error.into())),
             }
         }
-        if replace_link(executable, &link)? {
+        if replace_link(&folder, executable, &link)? {
             return Ok(link);
         }
         there = false;
@@ -52,30 +62,45 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
     Err(not_a_link(&link))
 }
 
-/// Whether the link already at the name may stay as it is: read without following it, it
-/// names the executable by the same bytes, and `lstat` found it this user's own with no
-/// access list that lets another user change it ([`keeps`]). The bytes are compared first,
-/// so a link naming another executable is swapped with no access list read. Any read that fails says no,
-/// so the link is swapped as before. Inputs: the link, what `lstat` read of it, and the
+/// The name of the command line link in its bin folder.
+#[cfg(unix)]
+const LINK_NAME: &str = "crazyagent";
+
+/// What `fstatat` reads of one name in the held folder without following it: none when
+/// nothing is there or it cannot be read, a refusal when it is not a link, else the read.
+/// Inputs: the folder and the name. Output: the answer.
+#[cfg(unix)]
+fn link_stat(folder: &std::os::fd::OwnedFd, name: &str) -> Option<Result<rustix::fs::Stat, ()>> {
+    let stat = rustix::fs::statat(folder, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).ok()?;
+    let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode.into());
+    Some(if kind == rustix::fs::FileType::Symlink {
+        Ok(stat)
+    } else {
+        Err(())
+    })
+}
+
+/// Whether the link already at the name may stay as it is: read in the held folder without
+/// following it, it names the executable by the same bytes, and it is this user's own with
+/// no access list that lets another user change it ([`keeps`]). The bytes are compared
+/// first, so a link naming another executable is swapped with no access list read. Any read
+/// that fails, or one that finds another object than `fstatat` did, says no, so the link is
+/// swapped as before. Inputs: the folder, what `fstatat` read of the link, and the
 /// executable. Output: the answer.
 #[cfg(unix)]
-fn kept_link(link: &Path, metadata: &std::fs::Metadata, executable: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    assert!(metadata.file_type().is_symlink());
-    let named = std::fs::read_link(link).ok();
-    if !named
-        .as_deref()
-        .is_some_and(|named| named.as_os_str() == executable.as_os_str())
-    {
+fn kept_link(folder: &std::os::fd::OwnedFd, stat: &rustix::fs::Stat, executable: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(named) = rustix::fs::readlinkat(folder, LINK_NAME, Vec::new()) else {
+        return false;
+    };
+    let named = Path::new(std::ffi::OsStr::from_bytes(named.as_bytes()));
+    if named.as_os_str() != executable.as_os_str() {
         return false;
     }
-    keeps(
-        metadata.uid(),
-        current_uid(),
-        link_shared(link, metadata),
-        named.as_deref(),
-        executable,
-    )
+    let Some((owner, shared)) = link_owner_shared(folder, stat) else {
+        return false;
+    };
+    keeps(owner, current_uid(), shared, Some(named), executable)
 }
 
 /// The rule [`kept_link`] applies to what it read: the link's owner is this user, its
@@ -96,21 +121,32 @@ pub(super) fn keeps(
         && named.is_some_and(|named| named.as_os_str() == executable.as_os_str())
 }
 
-/// Whether a link's own access list lets another user change it, read without following
-/// the link ([`super::acl::shared_all`]). Input: the link and what `lstat` read of it.
-/// Output: the answer, none when it cannot be read.
+/// The link's owner and whether its own access list lets another user change it, both from
+/// one `getattrlistat` in the held folder that follows no link, taken only when that call
+/// read the same link `fstatat` did ([`super::acl::held_shared`]). Inputs: the folder and
+/// what `fstatat` read. Output: the owner and the answer, none when it cannot be read.
 #[cfg(target_os = "macos")]
-fn link_shared(link: &Path, metadata: &std::fs::Metadata) -> Option<bool> {
+fn link_owner_shared(
+    folder: &std::os::fd::OwnedFd,
+    stat: &rustix::fs::Stat,
+) -> Option<(u32, Option<bool>)> {
+    use std::os::fd::AsFd;
     #[cfg(test)]
     ACL_READS.with(|reads| reads.set(reads.get() + 1));
-    super::acl::shared_all(&[(link, metadata)])[0]
+    let read = crazyagent_macos_fs::held_entry_at(Some(folder.as_fd()), c"crazyagent").ok()?;
+    let same =
+        read.link() && read.device == u64::try_from(stat.st_dev).ok()? && read.inode == stat.st_ino;
+    same.then(|| (read.owner, super::acl::held_shared(&read, true)))
 }
 
-/// Whether a link's own access list lets another user change it. Linux keeps no access
-/// list on a link, so the answer is always no. Inputs: unused. Output: the answer.
+/// The link's owner from what `fstatat` read; Linux keeps no access list on a link, so the
+/// answer is always no. Inputs: unused folder and the read. Output: the owner and the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn link_shared(_link: &Path, _metadata: &std::fs::Metadata) -> Option<bool> {
-    Some(false)
+fn link_owner_shared(
+    _folder: &std::os::fd::OwnedFd,
+    stat: &rustix::fs::Stat,
+) -> Option<(u32, Option<bool>)> {
+    Some((stat.st_uid, Some(false)))
 }
 
 /// The most rounds [`link_cli`] tries to publish when the name keeps going away between
@@ -130,38 +166,59 @@ fn not_a_link(link: &Path) -> ServiceError {
     ))
 }
 
-/// Swaps a new link for whatever is at `link` in one step (`RENAME_SWAP` on macOS,
+/// Swaps a new link for whatever is at the link's name in one step (`RENAME_SWAP` on macOS,
 /// `RENAME_EXCHANGE` on Linux), then reads what came out: a link is removed, anything else
 /// is swapped back and refused, so a file another installer wrote is never lost; when the
-/// swap back fails, the error names where that file now sits. A file system that cannot
-/// swap refuses with the staged link removed. A link left at the staged name is removed
-/// only when the staged make finds the name taken, and anything else there is kept and
-/// refused. Inputs: the executable and the link's name.
-/// Output: true when published, false when the name went away before the swap, or the
-/// refusal.
+/// swap back fails, the error names where that file now sits. Every step names its entry
+/// relative to the held folder and follows nothing. A file system that cannot swap refuses
+/// with the staged link removed. A link left at the staged name is removed only when the
+/// staged make finds the name taken, and anything else there is kept and refused. Inputs:
+/// the folder, the executable and the link's full name, for messages. Output: true when
+/// published, false when the name went away before the swap, or the refusal.
 #[cfg(unix)]
-fn replace_link(executable: &Path, link: &Path) -> Result<bool, ServiceError> {
-    use rustix::fs::{CWD, RenameFlags, renameat_with};
+fn replace_link(
+    folder: &std::os::fd::OwnedFd,
+    executable: &Path,
+    link: &Path,
+) -> Result<bool, ServiceError> {
+    use rustix::fs::{AtFlags, RenameFlags, renameat_with, symlinkat, unlinkat};
     use rustix::io::Errno;
-    let folder = link.parent().expect("a link name has a folder");
-    let staged = folder.join(format!(".crazyagent.link.{}", std::process::id()));
-    let fail = |path: &Path, error: std::io::Error| failure(format!("{}: {error}", path.display()));
+    let staged_name = format!(".crazyagent.link.{}", std::process::id());
+    let staged = link
+        .parent()
+        .expect("a link name has a folder")
+        .join(&staged_name);
+    let fail = |path: &Path, error: Errno| {
+        failure(format!(
+            "{}: {}",
+            path.display(),
+            std::io::Error::from(error)
+        ))
+    };
+    let staged_is_link = || matches!(link_stat(folder, &staged_name), Some(Ok(_)));
     let drop_staged = || {
-        if std::fs::symlink_metadata(&staged)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            let _ = std::fs::remove_file(&staged);
+        if staged_is_link() {
+            let _ = unlinkat(folder, staged_name.as_str(), AtFlags::empty());
         }
     };
-    let made = match std::os::unix::fs::symlink(executable, &staged) {
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+    let made = match symlinkat(executable, folder, staged_name.as_str()) {
+        Err(Errno::EXIST) => {
             drop_staged();
-            std::os::unix::fs::symlink(executable, &staged)
+            symlinkat(executable, folder, staged_name.as_str())
         }
         made => made,
     };
     made.map_err(|error| fail(&staged, error))?;
-    match renameat_with(CWD, &staged, CWD, link, RenameFlags::EXCHANGE) {
+    let swap = || {
+        renameat_with(
+            folder,
+            staged_name.as_str(),
+            folder,
+            LINK_NAME,
+            RenameFlags::EXCHANGE,
+        )
+    };
+    match swap() {
         Ok(()) => {}
         Err(Errno::NOENT) => {
             drop_staged();
@@ -176,15 +233,15 @@ fn replace_link(executable: &Path, link: &Path) -> Result<bool, ServiceError> {
         }
         Err(errno) => {
             drop_staged();
-            return Err(fail(link, errno.into()));
+            return Err(fail(link, errno));
         }
     }
-    let old = std::fs::symlink_metadata(&staged);
-    if old.is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        std::fs::remove_file(&staged).map_err(|error| fail(&staged, error))?;
+    if staged_is_link() {
+        unlinkat(folder, staged_name.as_str(), AtFlags::empty())
+            .map_err(|error| fail(&staged, error))?;
         return Ok(true);
     }
-    match renameat_with(CWD, &staged, CWD, link, RenameFlags::EXCHANGE) {
+    match swap() {
         Ok(()) => {
             drop_staged();
             Err(not_a_link(link))

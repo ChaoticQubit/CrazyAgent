@@ -349,3 +349,21 @@ fn a_bin_folder_replaced_by_a_link_after_the_open_is_not_followed() -> TestResul
     );
     Ok(())
 }
+
+/// A bin folder that is itself a link to a real folder, as a dotfiles setup makes it, still
+/// gets the link: the one open follows it, and the link lands in the folder it names.
+#[test]
+fn a_bin_folder_that_is_a_link_to_a_real_folder_still_publishes() -> TestResult {
+    let (temp, executable, _) = setup()?;
+    let real = temp.path().join("dotfiles/bin");
+    at(&real, std::fs::create_dir_all(&real))?;
+    let bin = temp.path().join("home/.local/bin-linked");
+    at(&bin, std::os::unix::fs::symlink(&real, &bin))?;
+    assert_eq!(link_cli(&executable, &bin).unwrap(), bin.join("crazyagent"));
+    assert_eq!(names(&real)?, vec!["crazyagent".to_string()]);
+    assert_eq!(
+        at(&real, std::fs::read_link(real.join("crazyagent")))?,
+        executable
+    );
+    Ok(())
+}
