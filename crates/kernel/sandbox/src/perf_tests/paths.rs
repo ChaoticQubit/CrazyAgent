@@ -19,7 +19,7 @@ const POSIX_TEXT: &str = "/Users/perf/project";
 
 /// The stand-in access hooks with the harness folders above, so the secret checks walk the
 /// same list on both builds. Output: the hooks.
-fn hooks() -> AccessHooks {
+pub(super) fn hooks() -> AccessHooks {
     AccessHooks {
         owner_git: ACCESS.owner_git,
         harness_folders: || HARNESSES.to_vec(),

@@ -1,14 +1,11 @@
+use super::paths::hooks;
 use super::{fixture, row};
 use crate::access::AccessHooks;
 use crate::paths::{Walked, canonical, harness_homes, owner_home, owner_secrets};
 use crate::perf_kit::{SAMPLES, time};
-use crate::test_hooks::ACCESS;
 use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
-
-/// The harness folders the disk_paths row walks, so the parts read the same list.
-const HARNESSES: [&str; 3] = [".codex", ".claude", ".claude.json"];
 
 /// The owner's walks one extra-folder list takes, as `extra_paths::checked_in` builds them.
 /// Inputs: the owner home and the hooks. Output: the walks.
@@ -31,12 +28,7 @@ fn extra_path_parts() {
     let data = root.join("data");
     fs::create_dir_all(&shared).unwrap();
     fs::create_dir_all(&data).unwrap();
-    let hooks = AccessHooks {
-        owner_git: ACCESS.owner_git,
-        harness_folders: || HARNESSES.to_vec(),
-        state_folder: ACCESS.state_folder,
-        untracked: ACCESS.untracked,
-    };
+    let hooks = hooks();
     let typed = [shared.clone(), project.clone()];
     let real: Vec<PathBuf> = typed.iter().map(|path| canonical(path).unwrap()).collect();
     let owner = owner_home().unwrap();
