@@ -231,14 +231,15 @@ pub(crate) fn entry(
             Err(missing) => return Some(Err(missing)),
         };
         let beside = places.only_in(folder);
-        return Some(entry_at(&cli, &beside, depth + 1).map(|script| Resolved {
-            entry: entry.to_path_buf(),
-            program: script.program,
-            kind: Kind::Script {
-                interpreter: Box::new(node),
-                arguments: Vec::new(),
-                by_name: false,
-            },
+        return Some(entry_at(&cli, &beside, depth + 1).and_then(|script| {
+            Resolved::script(
+                entry.to_path_buf(),
+                script.program.clone(),
+                node,
+                Vec::new(),
+                false,
+            )
+            .map_err(|why| refused(&script.program, why))
         }));
     }
     let Some((beside, target)) = crate::batch::shim_parts(program) else {
@@ -252,14 +253,16 @@ pub(crate) fn entry(
         };
         let only_beside = places.only_in(folder);
         return Some(
-            entry_at(&target, &only_beside, depth + 1).map(|script| Resolved {
-                entry: entry.to_path_buf(),
-                program: script.program,
-                kind: Kind::Script {
-                    interpreter: Box::new(interpreter),
-                    arguments: Vec::new(),
-                    by_name: false,
-                },
+            entry_at(&target, &only_beside, depth + 1).and_then(|script| {
+                let program = script.program.clone();
+                Resolved::script(
+                    entry.to_path_buf(),
+                    script.program,
+                    interpreter,
+                    Vec::new(),
+                    false,
+                )
+                .map_err(|why| refused(&program, why))
             }),
         );
     }

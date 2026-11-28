@@ -917,7 +917,7 @@ impl OwnerClient {
                 crate::engine::secret_frame::client_tag(self.kind),
                 &self.token,
             );
-            stream.write_all(&*packet).await.map_err(unavailable)?;
+            stream.write_all(&**packet).await.map_err(unavailable)?;
             stream.write_all(&frame).await.map_err(unavailable)?;
             if let Some(text) = &text {
                 stream

@@ -20,11 +20,14 @@ fn junction(link: &Path, target: &Path) {
 
 /// A junction in a private folder that leads through a junction in a folder Users may
 /// write, back to a private folder, is changeable at that shared folder, as whoever writes
-/// it can swap the middle junction; the private end alone is not.
+/// it can swap the middle junction; the private end alone is not. Fails naming the variable
+/// when USERPROFILE is not set.
 #[test]
-fn a_junction_chain_through_a_shared_folder_is_changeable_though_both_ends_are_private() {
+fn a_junction_chain_through_a_shared_folder_is_changeable_though_both_ends_are_private()
+-> Result<(), String> {
     let users = "*S-1-5-32-545";
-    let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    let profile = std::env::var_os("USERPROFILE").ok_or("USERPROFILE is not set")?;
+    let directory = tempfile::tempdir_in(profile).unwrap();
     let private = directory.path().join("private");
     let real = private.join("real");
     std::fs::create_dir_all(&real).unwrap();
@@ -42,6 +45,7 @@ fn a_junction_chain_through_a_shared_folder_is_changeable_though_both_ends_are_p
     assert_eq!(real_alone, None);
     assert_eq!(by_others, Some(shared.clone()));
     assert_eq!(past_sticky, Some(shared));
+    Ok(())
 }
 
 /// A link's target walks from its drive's root, from the current drive's root for a target

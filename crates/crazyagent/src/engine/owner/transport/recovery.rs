@@ -201,7 +201,7 @@ impl OwnerClient {
                 &self.token,
             );
             stream
-                .write_all(&*packet)
+                .write_all(&**packet)
                 .await
                 .map_err(|_| failure("recovery_unavailable"))?;
             stream

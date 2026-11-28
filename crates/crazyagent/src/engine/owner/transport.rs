@@ -779,8 +779,8 @@ impl RunnerSlot {
                 key.identity,
             )?;
             let mut found = owner_token();
-            key.file.read_exact_at(&mut *found, 0).map_err(io_error)?;
-            if !bool::from(key.token.ct_eq(&*found)) {
+            key.file.read_exact_at(&mut **found, 0).map_err(io_error)?;
+            if !bool::from(key.token.ct_eq(&**found)) {
                 return Err(failure("runner_capability_content_changed"));
             }
         }
@@ -799,7 +799,7 @@ struct Authority {
     host: HostStamp,
     slots: Mutex<[Slot; 2]>,
     runners: Mutex<Vec<Option<RunnerSlot>>>,
-    native_auth: Mutex<Option<NativeAuthSlot>>,
+    native_auth: Mutex<Option<Box<NativeAuthSlot>>>,
     native_auth_host: Mutex<NativeAuthHostRegistration>,
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
@@ -962,7 +962,7 @@ impl Authority {
         }
         if slot.key.is_none() {
             let mut token = owner_token();
-            getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
+            getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
             let file = self
                 .root
                 .open_key(&format!("r{:02x}.cap", prepared.slot), true)?;
@@ -972,7 +972,7 @@ impl Authority {
                 token,
             });
             let key = slot.key.as_ref().unwrap();
-            key.file.write_all_at(&*key.token, 0).map_err(io_error)?;
+            key.file.write_all_at(&**key.token, 0).map_err(io_error)?;
             key.file.sync_all().map_err(io_error)?;
             self.root.sync()?;
         }
@@ -1151,8 +1151,8 @@ impl Authority {
         let file = slot.held()?;
         self.root.verify_key(KEYS[i], file, slot.identity)?;
         let mut observed = owner_token();
-        file.read_exact_at(&mut *observed, 0).map_err(io_error)?;
-        if !bool::from(slot.token.ct_eq(&*observed)) {
+        file.read_exact_at(&mut **observed, 0).map_err(io_error)?;
+        if !bool::from(slot.token.ct_eq(&**observed)) {
             return Err(failure("owner_capability_content_changed"));
         }
         if self.root.socket_identity()? != self.socket {
@@ -1200,10 +1200,10 @@ impl Authority {
             slot.registration.active = false;
             if registration.active {
                 let mut token = owner_token();
-                getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
+                getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 let file = slot.held()?;
                 self.root.verify_key(KEYS[i], file, slot.identity)?;
-                file.write_all_at(&*token, 0).map_err(io_error)?;
+                file.write_all_at(&**token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
                 self.root.verify_key(KEYS[i], file, slot.identity)?;
                 slot.token = token;
@@ -1651,8 +1651,8 @@ impl OwnerServer {
                     file.try_clone().map_err(io_error)?,
                 ));
                 let mut token = owner_token();
-                getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
-                file.write_all_at(&*token, 0).map_err(io_error)?;
+                getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
+                file.write_all_at(&**token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
                 let identity = Identity::of_file(&file)?;
                 root.verify_key(KEYS[i], &file, identity)?;
@@ -2482,7 +2482,7 @@ async fn read_owner_handshake(
     let exchange = async {
         verify_client(&stream)?;
         let mut auth = crate::engine::secret_frame::owner_packet_buffer();
-        stream.read_exact(&mut *auth).await.map_err(io_error)?;
+        stream.read_exact(&mut **auth).await.map_err(io_error)?;
         Ok::<_, EngineError>(auth)
     };
     match tokio::time::timeout_at(deadline, exchange).await {
@@ -3530,7 +3530,7 @@ impl RunnerClient {
             let identity = Identity::of_file(&file)?;
             generation.verify_key(&name, &file, identity)?;
             let mut token = owner_token();
-            file.read_exact_at(&mut *token, 0).map_err(io_error)?;
+            file.read_exact_at(&mut **token, 0).map_err(io_error)?;
             let socket = generation.socket_identity()?;
             let mut stream = crate::ipc::owner_connect(generation.path.join(SOCKET))
                 .await
@@ -3544,7 +3544,7 @@ impl RunnerClient {
             generation.verify_key(&name, &file, identity)?;
             let packet =
                 crate::engine::secret_frame::owner_packet(b"CAR1", bootstrap.value.slot, &token);
-            stream.write_all(&*packet).await.map_err(io_error)?;
+            stream.write_all(&**packet).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("runner_request_bounds"))?)
                 .await
@@ -3560,8 +3560,8 @@ impl RunnerClient {
             binding.verify()?;
             generation.verify_key(&name, &file, identity)?;
             let mut observed = owner_token();
-            file.read_exact_at(&mut *observed, 0).map_err(io_error)?;
-            if !bool::from(token.ct_eq(&*observed)) || generation.socket_identity()? != socket {
+            file.read_exact_at(&mut **observed, 0).map_err(io_error)?;
+            if !bool::from(token.ct_eq(&**observed)) || generation.socket_identity()? != socket {
                 return Err(failure("runner_capability_changed"));
             }
             if let RunnerReply::Ready { identity: ready } = &reply
@@ -3722,7 +3722,7 @@ impl OwnerClient {
         let identity = Identity::of_file(&file)?;
         root.verify_key(KEYS[i], &file, identity)?;
         let mut token = owner_token();
-        file.read_exact_at(&mut *token, 0).map_err(io_error)?;
+        file.read_exact_at(&mut **token, 0).map_err(io_error)?;
         root.verify_key(KEYS[i], &file, identity)?;
         let socket = root.socket_identity()?;
         Ok(Self {
@@ -3792,7 +3792,7 @@ impl OwnerClient {
                 crate::engine::secret_frame::client_tag(self.kind),
                 &self.token,
             );
-            stream.write_all(&*auth).await.map_err(io_error)?;
+            stream.write_all(&**auth).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("owner_request_bounds"))?)
                 .await
@@ -4405,7 +4405,7 @@ fallback_allowed = false
             0,
             &key.as_slice().try_into().unwrap(),
         );
-        client.write_all(&*packet).await.unwrap();
+        client.write_all(&**packet).await.unwrap();
         let req = OwnerRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new("large-read").unwrap(),

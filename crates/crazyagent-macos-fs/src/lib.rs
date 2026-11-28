@@ -787,6 +787,17 @@ fn volume_keeps_lists(reply: &[u8], device: u64, root: Option<(u64, u64)>) -> bo
         && set & valid & libc::VOL_CAP_INT_EXTENDED_SECURITY != 0
 }
 
+/// Reads of entries through open folder handles, one `getattrlist` per entry for its type,
+/// owner, group, mode, identity and access list, so a walk down a path never looks a name
+/// up twice.
+#[cfg(target_os = "macos")]
+mod held;
+#[cfg(target_os = "macos")]
+pub use held::{
+    HeldEntry, held_entry, held_entry_at, held_volume_keeps_lists, held_volume_keeps_lists_at,
+    open_search,
+};
+
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 unsafe extern "C" {
@@ -1015,7 +1026,8 @@ mod tests {
 
     /// A scratch folder whose setup fails part way, with a shut folder inside and a file whose
     /// list denies reading it, is gone once the failure unwinds. Input: none. Output: none; it
-    /// panics when the folder is left behind, after removing it itself.
+    /// panics when the setup broke before its planned panic, or when the folder is left
+    /// behind, after removing it itself.
     #[test]
     fn a_scratch_folder_is_gone_after_a_failed_setup() {
         use std::os::unix::fs::PermissionsExt;
@@ -1032,14 +1044,19 @@ mod tests {
             std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
             panic!("the setup fails");
         }));
-        assert!(failed.is_err());
-        let made = made.unwrap();
+        let payload = failed.expect_err("the setup panics");
+        let made = made.expect("the scratch folder was made before the setup failed");
         let left = made.exists();
         if left {
             chmod(&["-R", "-P", "u+rwx"], &made);
             chmod(&["-R", "-P", "-N"], &made);
             std::fs::remove_dir_all(&made).unwrap();
         }
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"the setup fails"),
+            "the setup failed before its planned panic"
+        );
         assert!(!left, "the failed setup left {made:?} behind");
     }
 
