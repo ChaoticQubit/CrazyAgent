@@ -36,8 +36,8 @@ use crate::host::LinuxHost;
 use crate::lines::*;
 use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{
-    Kept, any_case, at_or_below, canonical, clean_absolute, harness_homes, owner_home,
-    owner_secrets, sits_in_folder,
+    Kept, any_case, at_or_below, canonical, clean_absolute, fold_case, harness_homes, owner_home,
+    owner_secrets, plain_top, regex_escape, sits_in_folder,
 };
 use crate::ports::{
     BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
