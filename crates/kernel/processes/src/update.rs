@@ -25,7 +25,6 @@ const OUTPUT_BYTES_MAX: u64 = 16 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const UNPACK_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(60);
-const POLL: Duration = Duration::from_millis(20);
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 const KEY_PLACEHOLDER: &str = "REPLACE_WITH_LEADER_PUBKEY";
 const DESKTOP_CONFIG: &str = include_str!("../../../../apps/desktop/src-tauri/tauri.conf.json");
@@ -751,21 +750,18 @@ fn run_bounded(
         .map_err(|error| fail(code, format!("Can't start {command:?}: {error}")))?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < timeout => std::thread::sleep(POLL),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(fail(
-                    code,
-                    format!("{command:?} did not finish within {} s.", timeout.as_secs()),
-                ));
-            }
-            Err(error) => return Err(fail(code, format!("{command:?} failed: {error}"))),
-        }
+    let deadline = Instant::now() + timeout;
+    let failed = |error: std::io::Error| fail(code, format!("{command:?} failed: {error}"));
+    let mut watch = crate::exit_wait::watch(&mut child).map_err(failed)?;
+    let status = if watch.exited_by(&child, deadline).map_err(failed)? {
+        watch.reap(&mut child).map_err(failed)?
+    } else {
+        let _ = child.kill();
+        let _ = watch.reap(&mut child);
+        return Err(fail(
+            code,
+            format!("{command:?} did not finish within {} s.", timeout.as_secs()),
+        ));
     };
     let deadline = Instant::now() + PIPE_GRACE;
     Ok(Output {
