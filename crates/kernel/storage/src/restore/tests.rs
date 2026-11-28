@@ -644,3 +644,133 @@ fn a_pinned_restore_makes_one_full_flush() {
     assert_eq!(read(&path), (vec!["one".to_owned()], 11));
     assert_eq!(replaced(root.path()), vec![restored.kept]);
 }
+
+/// A private engine root in the canonical temp folder. Output: the folder.
+fn record_root() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap()
+}
+
+/// Writes `bytes` as the restore record file itself, private to this user. Inputs: the
+/// root and the bytes. Output: none.
+fn raw_record(root: &Path, bytes: &[u8]) {
+    let path = root.join(RESTORE_RECORD_FILE);
+    let _ = std::fs::remove_file(&path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, bytes).unwrap();
+}
+
+/// Overwrites one whole 4 KiB block of the record file with 0xff. Inputs: the root and
+/// the block. Output: none.
+fn lose_block(root: &Path, block: u64) {
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join(RESTORE_RECORD_FILE))
+        .unwrap();
+    file.write_all_at(&[0xff; 4096], block * 4096).unwrap();
+}
+
+#[test]
+fn a_record_write_over_a_record_makes_one_full_flush_and_no_barrier() {
+    let root = record_root();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    crate::migrations::take_flushes();
+
+    write_restore_record(root.path(), RECORD_RESTORING).unwrap();
+
+    assert_eq!(crate::migrations::take_flushes(), (1, 0));
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_RESTORING)
+    );
+}
+
+#[test]
+fn a_whole_block_lost_in_either_slot_leaves_the_other_record_readable() {
+    for (block, left) in [(0, "restoring a"), (1, RECORD_PENDING)] {
+        let root = record_root();
+        write_restore_record(root.path(), RECORD_PENDING).unwrap();
+        write_restore_record(root.path(), "restoring a").unwrap();
+
+        lose_block(root.path(), block);
+        assert_eq!(read_restore_record(root.path()).as_deref(), Some(left));
+        assert_eq!(
+            refuse_broken(&root.path().join(DATABASE)).is_err(),
+            left != RECORD_PENDING
+        );
+
+        write_restore_record(root.path(), "restored b").unwrap();
+        assert_eq!(
+            read_restore_record(root.path()).as_deref(),
+            Some("restored b")
+        );
+        lose_block(root.path(), block);
+        assert_eq!(
+            read_restore_record(root.path()).as_deref(),
+            Some(left),
+            "block {block}"
+        );
+    }
+}
+
+#[test]
+fn a_record_of_any_other_size_or_a_short_one_marked_as_slots_is_refused_and_refuses_the_start() {
+    let mut cases: Vec<Vec<u8>> = [0, 513, 4096, 8191, 8193, 16384]
+        .into_iter()
+        .map(|size| vec![b'p'; size])
+        .collect();
+    let mut marked = b"CARR".to_vec();
+    marked.resize(400, b' ');
+    cases.push(marked);
+    for bytes in cases {
+        let root = record_root();
+        raw_record(root.path(), &bytes);
+
+        assert_eq!(read_restore_record(root.path()), None, "{}", bytes.len());
+        let refused = refuse_broken(&root.path().join(DATABASE)).unwrap_err().0;
+        assert!(refused.starts_with(ENGINE_RESTORE_BROKEN), "{refused}");
+        assert!(
+            write_restore_record(root.path(), RECORD_PENDING).is_err(),
+            "{}",
+            bytes.len()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap(),
+            bytes
+        );
+    }
+}
+
+/// A record left in the one-file format of earlier builds is read as its line on purpose,
+/// so a restore that stopped mid-way still refuses the start after an update.
+#[test]
+fn an_old_one_file_record_is_still_read_and_the_next_write_replaces_it_whole() {
+    let root = record_root();
+    raw_record(root.path(), b"restoring replaced-x");
+
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some("restoring replaced-x")
+    );
+    assert!(refuse_broken(&root.path().join(DATABASE)).is_err());
+
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    assert_eq!(
+        std::fs::metadata(root.path().join(RESTORE_RECORD_FILE))
+            .unwrap()
+            .len(),
+        8192
+    );
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+    assert!(refuse_broken(&root.path().join(DATABASE)).is_ok());
+}
