@@ -848,8 +848,8 @@ fn a_folder_swapped_for_a_link_into_a_secret_between_two_grants_is_refused() {
     let (folder, home, secrets, x) = two_roots_under_one_folder();
     let mut kept = granted_build(&home, &secrets, &x.join("a"));
     std::fs::rename(&x, folder.path().join("x-old")).unwrap();
-    std::fs::create_dir_all(home.join(".claude").join("b")).unwrap();
-    std::os::unix::fs::symlink(home.join(".claude"), &x).unwrap();
+    std::fs::create_dir_all(home.join(".ssh").join("b")).unwrap();
+    std::os::unix::fs::symlink(home.join(".ssh"), &x).unwrap();
     let refused = match kept.grant(&x.join("b"), &secrets) {
         Err(SandboxError::Invalid(reason)) => reason,
         Err(other) => panic!("{other:?}"),
