@@ -45,8 +45,10 @@ impl Drop for Shut {
     /// failing. Input: none. Output: none.
     fn drop(&mut self) {
         let opened = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
-        if !std::thread::panicking() {
-            opened.expect("the shut folder opens again");
+        if let Err(error) = opened
+            && !std::thread::panicking()
+        {
+            panic!("the shut folder {} opens again: {error}", self.0.display());
         }
     }
 }
@@ -213,18 +215,20 @@ fn the_held_walk_reads_every_part_as_lstat_does() -> std::io::Result<()> {
         "loop/x/sock",
         "locked/in/sock",
     ];
-    let seen: Vec<Seen> = paths
+    let seen = paths
         .iter()
-        .map(|path| {
+        .map(|path| -> std::io::Result<Seen> {
             let path = home.join(path);
-            let mut walked = changeable::held_parts(&path).expect("a plain chain of names");
+            let mut walked = changeable::held_parts(&path).ok_or_else(|| {
+                std::io::Error::other(format!("no walk from / read {}", path.display()))
+            })?;
             walked.reverse();
             let entries: Vec<&Path> = path.ancestors().collect();
             let read = changeable::read_parts(&entries);
             let by_name = changeable::read_parts_known(&entries, &[]);
-            (path, shape(walked), shape(read), shape(by_name))
+            Ok((path, shape(walked), shape(read), shape(by_name)))
         })
-        .collect();
+        .collect::<std::io::Result<Vec<Seen>>>()?;
     drop(locked);
     assert_eq!(seen.len(), paths.len());
     for (path, walked, read, by_name) in seen {
