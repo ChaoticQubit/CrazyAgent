@@ -127,3 +127,30 @@ fn a_scratch_named_as_a_record_folder_trips_the_assert() {
     let (_guard, engine) = engine();
     let _ = EngineScratch::make(&STAND_IN, &engine, &[], "stand-in-records");
 }
+
+/// On Windows a made scratch and each part made for it are judged private by W1, in an
+/// engine folder made as the engine makes its data root: no account but this user, SYSTEM
+/// and the administrators holds any right on them, so the inherited list is owner-only.
+#[cfg(windows)]
+#[test]
+fn a_windows_scratch_is_judged_private_by_w1_in_a_private_engine_folder() {
+    use crazyagent_win_sandbox::private;
+    let scratch = tempfile::tempdir().unwrap();
+    let engine = scratch.path().join("engine");
+    drop(private::dir(&engine).unwrap());
+    let engine = canonical(&engine).unwrap();
+    fs::write(engine.join("engine.db"), "engine secret\n").unwrap();
+    let made =
+        EngineScratch::make(&STAND_IN, &engine, &["mcp-checks", "server"], "project").unwrap();
+    for folder in [
+        "mcp-checks",
+        "mcp-checks/server",
+        "mcp-checks/server/project",
+    ] {
+        drop(private::open_dir(&engine.join(folder)).unwrap());
+    }
+    assert_eq!(
+        made.path(),
+        engine.join("mcp-checks").join("server").join("project")
+    );
+}

@@ -132,10 +132,11 @@ fn private_part(path: &Path, fresh: bool) -> Result<(), SandboxError> {
     Ok(())
 }
 
-/// Makes a folder in the engine folder, or with `fresh` false judges one already there: a
-/// real folder, never a link or junction, taking the engine folder's own list as the
-/// engine's check and install folders do, so a container granted on it still reads it. A
-/// fresh folder already there is refused. Inputs: the path and whether it must be new.
+/// Makes a folder in the engine folder, or with `fresh` false judges one already there, then
+/// judges it as W1 judges a private folder ([`crazyagent_win_sandbox::private::open_dir`]):
+/// no link or junction, owned by this user, and no account but this user, SYSTEM and the
+/// administrators with any right on it. It takes the engine folder's own list, with no label,
+/// so a container granted on it still reads it. Inputs: the path and whether it must be new.
 /// Output: unit, or the refusal.
 #[cfg(windows)]
 fn private_part(path: &Path, fresh: bool) -> Result<(), SandboxError> {
@@ -147,11 +148,11 @@ fn private_part(path: &Path, fresh: bool) -> Result<(), SandboxError> {
         }
         Err(error) => return Err(SandboxError::Io(error)),
     }
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(invalid("engine scratch folder is not private to this user"));
+    match crazyagent_win_sandbox::private::open_dir(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(SandboxError::Io(error)),
+        Err(_) => Err(invalid("engine scratch folder is not private to this user")),
     }
-    Ok(())
 }
 
 #[cfg(test)]
