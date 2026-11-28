@@ -220,7 +220,7 @@ fn settings_save_quit() {
     let mut revision = u64::try_from(moved(&db).0).unwrap();
     let mut step = || {
         let tx = db.transaction().unwrap();
-        if saved % 10_000 == 0 {
+        if saved.is_multiple_of(10_000) {
             assert_eq!(revision, u64::try_from(moved(&tx).0).unwrap());
         }
         let settings = QUIT[saved % QUIT.len()];
