@@ -267,6 +267,14 @@ pub fn owner_secrets(owner: &Path, harnesses: &[&'static str]) -> impl Iterator<
         .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
 }
 
+/// Tells whether a root equals or sits inside a folder, comparing entries on the volume
+/// ([`Walk::sits_in`]) so another spelling of the folder or a link on the way counts too.
+/// Inputs: the root and the folder. Output: the answer, or the error of a metadata read
+/// that fails other than not found.
+pub(crate) fn sits_in_folder(root: &Path, folder: &Path) -> Result<bool, SandboxError> {
+    Ok(Walk::of(root)?.sits_in(&Walk::of(folder)?))
+}
+
 /// Refuses a root that equals, holds or sits inside one of `secrets`, comparing entries on
 /// the volume ([`Walk::sits_in`]) so another spelling of a secret's folder is refused too.
 /// Inputs: the root and the secret paths. Output: unit, or `Invalid` with

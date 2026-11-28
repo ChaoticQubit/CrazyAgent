@@ -63,19 +63,52 @@ fn full_folder(error: &SandboxError) -> Option<&str> {
         .strip_suffix(folder_full_end().as_str())
 }
 
+/// The engine refusal code of a launch whose project folder equals or sits in the engine
+/// folder, which would let its agents write the engine's own state.
+pub const PROJECT_IN_ENGINE_FOLDER: &str = "project_in_engine_folder";
+
+/// How the refusal of a project folder in the engine folder starts, before that folder.
+const PROJECT_IN_ENGINE_START: &str = "the project folder sits in the engine folder ";
+
+/// Why a launch is refused when its project folder equals or sits in the engine folder: that
+/// folder. Input: the engine folder. Output: the line.
+pub fn project_in_engine_line(engine: &std::path::Path) -> String {
+    format!("{PROJECT_IN_ENGINE_START}{}", engine.display())
+}
+
+/// The engine folder named by a project folder refusal ([`project_in_engine_line`]). Input:
+/// the refusal. Output: the folder as text, or none for any other refusal.
+fn engine_of_project(error: &SandboxError) -> Option<&str> {
+    let SandboxError::Invalid(reason) = error else {
+        return None;
+    };
+    reason.strip_prefix(PROJECT_IN_ENGINE_START)
+}
+
 /// The engine refusal code of an invalid sandbox: [`ENGINE_FOLDER_FULL`] for an engine
-/// folder past its entry bound, else the plain refusal. Input: the refusal. Output: the code.
+/// folder past its entry bound, [`PROJECT_IN_ENGINE_FOLDER`] for a project folder in the
+/// engine folder, else the plain refusal. Input: the refusal. Output: the code.
 pub fn invalid_code(error: &SandboxError) -> &'static str {
-    match full_folder(error) {
-        Some(_) => ENGINE_FOLDER_FULL,
+    if full_folder(error).is_some() {
+        return ENGINE_FOLDER_FULL;
+    }
+    match engine_of_project(error) {
+        Some(_) => PROJECT_IN_ENGINE_FOLDER,
         None => "sandbox_refused",
     }
 }
 
 /// The line a launch whose sandbox step failed tells the owner: for an engine folder past
-/// its entry bound, the folder and the step they can take, else the plain line. Input: the
-/// refusal. Output: the line.
+/// its entry bound, or a project folder in the engine folder, the folder and the step they
+/// can take, else the plain line. Input: the refusal. Output: the line.
 pub fn launch_refused_line(error: &SandboxError) -> String {
+    if let Some(engine) = engine_of_project(error) {
+        return format!(
+            "This project folder is inside CrazyAgent's own engine folder ({engine}), so \
+             agents cannot start in it. Move the project to a folder outside it, then start \
+             again."
+        );
+    }
     match full_folder(error) {
         Some(name) => format!(
             "The engine folder {name} holds more than {} entries, so agents cannot start. \
