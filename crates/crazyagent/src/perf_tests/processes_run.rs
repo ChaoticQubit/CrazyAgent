@@ -74,3 +74,27 @@ fn run_calls() {
         black_box(format!("{}: {}", black_box("run"), black_box(CONTROL_TEXT)));
     });
 }
+
+/// Times the update helper's `run_bounded` from the spawn to the reaped exit, its output
+/// kept: a command that exits at once and one that sleeps 20 ms (Unix). Output: none; prints
+/// one PERF line per row.
+#[test]
+#[ignore = "timing row: run through scripts/perf/run.sh"]
+fn update_run_calls() {
+    time(&row("update.run_bounded.exit_now", ONE), SAMPLES, || {
+        black_box(
+            crate::update::run_bounded(&mut exit_now(), LIMIT, "update_service_failed").unwrap(),
+        );
+    });
+    #[cfg(unix)]
+    time(&row("update.run_bounded.exit_20ms", ONE), SAMPLES, || {
+        black_box(
+            crate::update::run_bounded(
+                Command::new("/bin/sleep").arg("0.02"),
+                LIMIT,
+                "update_service_failed",
+            )
+            .unwrap(),
+        );
+    });
+}
