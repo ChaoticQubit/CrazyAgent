@@ -840,9 +840,10 @@ fn a_folder_swapped_between_two_grants_of_one_build_refuses_the_install() {
     }
 }
 
-/// A folder swapped for a link into a secret between two grants of one build is refused:
-/// by the second grant, under any of its rules, or else by the install, which reads it
-/// again and refuses with [`SECRET_ROOT_REFUSED`] or [`GRANT_CHANGED`].
+/// A folder swapped for a link into a secret between two grants of one build: the second
+/// grant's walk reads the folder from the build's reads and so misses the secret, but its
+/// fresh canonical form differs from the path, so the grant refuses it as not canonical,
+/// and the install, reading the first grant's folder again, refuses with [`GRANT_CHANGED`].
 #[cfg(unix)]
 #[test]
 fn a_folder_swapped_for_a_link_into_a_secret_between_two_grants_is_refused() {
@@ -852,14 +853,16 @@ fn a_folder_swapped_for_a_link_into_a_secret_between_two_grants_is_refused() {
     std::fs::create_dir_all(home.join(".ssh").join("b")).unwrap();
     std::os::unix::fs::symlink(home.join(".ssh"), &x).unwrap();
     match kept.grant(&x.join("b"), &secrets) {
-        Err(SandboxError::Invalid(_)) => {}
-        Err(other) => panic!("{other:?}"),
-        Ok(()) => match kept.recheck() {
-            Err(SandboxError::Invalid(reason)) => assert!(
-                reason == SECRET_ROOT_REFUSED || reason == GRANT_CHANGED,
-                "{reason}"
-            ),
-            other => panic!("{other:?}"),
-        },
+        Err(SandboxError::Invalid(reason)) => {
+            assert_eq!(
+                reason,
+                "sandbox roots must be existing canonical directories"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+    match kept.recheck() {
+        Err(SandboxError::Invalid(reason)) => assert_eq!(reason, GRANT_CHANGED),
+        other => panic!("{other:?}"),
     }
 }
