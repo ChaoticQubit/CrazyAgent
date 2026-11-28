@@ -589,7 +589,7 @@ test("the test farm runs on a pushed integration batch or on demand, never for a
   assert.deepEqual(block(farm, 0, "permissions").filter(Boolean), ["permissions:", "  contents: read"]);
   assert.doesNotMatch(farm, /^ {4}permissions:/m, "no job widens the token");
   const jobs = jobsOf(farm).map(({ name }) => name);
-  assert.deepEqual(jobs, [...FARM_OS.map((os) => `build-${os}`), ...FARM_OS.map((os) => `rust-${os}`), "rust-model-servers", "node", "typecheck", "report"]);
+  assert.deepEqual(jobs, [...FARM_OS.map((os) => `build-${os}`), ...FARM_OS.map((os) => `rust-${os}`), "windows-standard-user", "rust-model-servers", "node", "typecheck", "report"]);
   for (const job of jobs) {
     const [first] = steps(farm, job);
     assert(first.startsWith("      - name: Refuse a runner that is not GitHub-hosted\n"), job);
