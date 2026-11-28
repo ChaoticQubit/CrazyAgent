@@ -951,16 +951,25 @@ fn a_root_granted_again_with_a_respelled_secret_keeps_one_entry_for_it() {
 
 /// A secret one grant names with a doubled slash and another names plainly is judged at
 /// install for both: made a link to the second grant's root after the build, the install
-/// refuses. A build whose lists all have the same bytes rechecks with one [`Path`] compare
-/// per secret, its first sight in the install's fresh walks, and none in its filter.
+/// refuses. On a build whose lists all have the same bytes, the changed compares make no
+/// [`Path`] compare: a new root's secret walks, a root granted again and the install's
+/// secret filter, each counted and printed on its own.
 #[cfg(unix)]
 #[test]
 fn a_secret_respelled_in_a_second_grant_is_still_judged_at_install() {
     let (folder, home, secrets, x) = two_roots_under_one_folder();
-    let plain = granted_build(&home, &secrets, &x.join("a"));
+    let mut plain = granted_build(&home, &secrets, &x.join("a"));
+    let before = path_fallbacks();
+    plain.grant(&x.join("b"), &secrets).unwrap();
+    let new_root = path_fallbacks() - before;
+    let before = path_fallbacks();
+    plain.grant(&x.join("a"), &secrets).unwrap();
+    let same_root = path_fallbacks() - before;
     let before = path_fallbacks();
     assert!(plain.recheck().is_ok());
-    assert_eq!(path_fallbacks() - before, plain.checked[0].against.len());
+    let install = path_fallbacks() - before;
+    eprintln!("PATH-PASSES new_root {new_root} same_root {same_root} install {install}");
+    assert_eq!((new_root, same_root, install), (0, 0, 0));
     let secret = canonical(folder.path()).unwrap().join("s");
     std::fs::create_dir_all(&secret).unwrap();
     let mut first = secrets.clone();

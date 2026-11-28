@@ -917,7 +917,7 @@ impl Kept {
         let mut fresh: Vec<Walk> = Vec::new();
         for checked in &self.checked {
             for secret in &checked.against {
-                if !holds_path(fresh.iter().map(|walk| walk.path.as_path()), secret) {
+                if !fresh.iter().any(|walk| walk.path == *secret) {
                     fresh.push(Walk::read(secret, &mut reads)?);
                 }
             }
