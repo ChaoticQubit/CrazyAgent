@@ -887,8 +887,7 @@ impl Updates {
         runs: bool,
     ) -> HarnessVersions {
         let id = spec.id;
-        let real = kernel_sandbox::paths::canonical(executable)
-            .unwrap_or_else(|_| executable.to_path_buf());
+        let real = super::install_real(executable, roots);
         let method = method(id, &real, roots);
         let command = update_command(id, executable, &real, roots);
         let off = settings.mode == UpdateMode::Off;
@@ -1011,8 +1010,7 @@ impl Updates {
         }
         let path = db.path().unwrap_or_default().to_owned();
         let running = self.begin(id)?;
-        let real =
-            kernel_sandbox::paths::canonical(&executable).unwrap_or_else(|_| executable.clone());
+        let real = super::install_real(&executable, roots);
         let fixed = update_command(id, &executable, &real, roots)?;
         let held = folders(&fixed, roots);
         let watching = watched(&held, &real);

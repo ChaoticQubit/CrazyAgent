@@ -1,3 +1,7 @@
+#[cfg(windows)]
+mod engine_shim;
+#[cfg(all(test, windows))]
+mod engine_shim_windows_tests;
 mod recipes;
 mod run;
 #[cfg(all(test, unix))]
@@ -397,6 +401,25 @@ fn npm_folders(npm: &Npm, real: &Path) -> Option<(PathBuf, PathBuf)> {
     assert!(modules.starts_with(&prefix));
     assert!(modules.ends_with(MODULES));
     Some((prefix, modules))
+}
+
+/// The real file an installed harness's method is read from: its PATH entry's canonical
+/// path, or, for npm's cmd-shim in the engine prefix on Windows, the script it starts below
+/// that prefix's `node_modules`, as npm's link resolves on macOS and Linux. Inputs: the
+/// PATH entry and the roots. Output: the real file, the entry itself when it can't be read.
+pub(crate) fn install_real(executable: &Path, roots: &Roots) -> PathBuf {
+    let real =
+        kernel_sandbox::paths::canonical(executable).unwrap_or_else(|_| executable.to_path_buf());
+    shim_target(&real, roots).unwrap_or(real)
+}
+
+#[cfg(windows)]
+use engine_shim::target as shim_target;
+
+/// Reads no shim where npm writes links, not cmd-shims. Inputs: unused. Output: none.
+#[cfg(not(windows))]
+fn shim_target(_real: &Path, _roots: &Roots) -> Option<PathBuf> {
+    None
 }
 
 /// Tells how a harness was installed from the real path of its PATH entry alone.
