@@ -225,7 +225,7 @@ impl OwnerClient {
                 &self.token,
             );
             stream
-                .write_all(&*packet)
+                .write_all(&**packet)
                 .await
                 .map_err(|_| unavailable())?;
             stream.write_all(&frame).await.map_err(|_| unavailable())?;

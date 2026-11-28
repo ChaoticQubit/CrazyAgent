@@ -454,7 +454,7 @@ impl Intake {
         let task = tokio::spawn(run(
             Arc::clone(engine),
             Arc::clone(authority),
-            crate::engine::secret_frame::OwnerPacket::new(*packet),
+            crate::engine::secret_frame::owner_packet_copy(packet),
             a.clone(),
             Arc::clone(&job),
             asked.subject,

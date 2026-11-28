@@ -2482,7 +2482,7 @@ async fn read_owner_handshake(
     let exchange = async {
         verify_client(&stream)?;
         let mut auth = crate::engine::secret_frame::owner_packet_buffer();
-        stream.read_exact(&mut *auth).await.map_err(io_error)?;
+        stream.read_exact(&mut **auth).await.map_err(io_error)?;
         Ok::<_, EngineError>(auth)
     };
     match tokio::time::timeout_at(deadline, exchange).await {
@@ -3544,7 +3544,7 @@ impl RunnerClient {
             generation.verify_key(&name, &file, identity)?;
             let packet =
                 crate::engine::secret_frame::owner_packet(b"CAR1", bootstrap.value.slot, &token);
-            stream.write_all(&*packet).await.map_err(io_error)?;
+            stream.write_all(&**packet).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("runner_request_bounds"))?)
                 .await
@@ -3792,7 +3792,7 @@ impl OwnerClient {
                 crate::engine::secret_frame::client_tag(self.kind),
                 &self.token,
             );
-            stream.write_all(&*auth).await.map_err(io_error)?;
+            stream.write_all(&**auth).await.map_err(io_error)?;
             stream
                 .write_all(&encode_frame(&request).map_err(|_| failure("owner_request_bounds"))?)
                 .await
@@ -4405,7 +4405,7 @@ fallback_allowed = false
             0,
             &key.as_slice().try_into().unwrap(),
         );
-        client.write_all(&*packet).await.unwrap();
+        client.write_all(&**packet).await.unwrap();
         let req = OwnerRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new("large-read").unwrap(),

@@ -8,8 +8,9 @@ const PROFILE_SECRET_MAX: usize = 8192;
 /// The bytes of an owner packet: four magic bytes, a tag byte and a 32-byte token.
 pub const OWNER_PACKET_BYTES: usize = 37;
 
-/// An owner packet in a buffer wiped when dropped, so no hop copies the token out of it.
-pub type OwnerPacket = Zeroizing<[u8; OWNER_PACKET_BYTES]>;
+/// An owner packet in a buffer on the heap from its birth, wiped when dropped, so moving a
+/// holder copies only the pointer and no hop copies the token out of it.
+pub type OwnerPacket = Box<Zeroizing<[u8; OWNER_PACKET_BYTES]>>;
 
 /// Lays out one owner packet, the magic, the tag (a client kind, a runner slot or 0) and
 /// the token, in a buffer wiped when dropped, on a write error or a cancel too. Inputs: the
@@ -25,7 +26,16 @@ pub fn owner_packet(magic: &[u8; 4], tag: u8, token: &[u8; 32]) -> OwnerPacket {
 /// A zeroed owner packet buffer, wiped when dropped, for a server to read a client's packet
 /// into. Output: the buffer.
 pub fn owner_packet_buffer() -> OwnerPacket {
-    Zeroizing::new([0; OWNER_PACKET_BYTES])
+    Box::new(Zeroizing::new([0; OWNER_PACKET_BYTES]))
+}
+
+/// A second holder's copy of an owner packet, allocated first and then filled from the
+/// borrowed bytes, so the packet never passes through a stack value. Input: the packet.
+/// Output: the copy.
+pub fn owner_packet_copy(packet: &[u8; OWNER_PACKET_BYTES]) -> OwnerPacket {
+    let mut copy = owner_packet_buffer();
+    copy.copy_from_slice(packet);
+    copy
 }
 
 /// One 32-byte owner, runner, custody or IDE capability token, held on the heap from its
@@ -169,12 +179,19 @@ pub fn drain_errors(
 
 #[cfg(test)]
 mod tests {
-    use super::OwnerToken;
+    use super::{OwnerPacket, OwnerToken};
 
     /// An owner token lives behind a pointer, so moving any holder of one copies only the
     /// pointer and leaves no copy of the token's bytes behind.
     #[test]
     fn owner_token_is_a_pointer() {
         assert_eq!(size_of::<OwnerToken>(), size_of::<usize>());
+    }
+
+    /// An owner packet lives behind a pointer, so moving any holder of one copies only the
+    /// pointer and leaves no copy of the token it carries behind.
+    #[test]
+    fn owner_packet_is_a_pointer() {
+        assert_eq!(size_of::<OwnerPacket>(), size_of::<usize>());
     }
 }

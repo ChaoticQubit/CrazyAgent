@@ -1,3 +1,5 @@
+mod freed_bytes_support;
+
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::usage::extras::Adapter;
 use crazyagent::usage::poll::poll_balance;
@@ -32,11 +34,15 @@ unsafe impl GlobalAlloc for FreeScan {
         unsafe { System.alloc_zeroed(layout) }
     }
 
+    /// Checks a freed block through a [`freed_bytes_support::Copied`] copy, so the scan reads
+    /// no uninitialized byte, then frees it. Inputs: the block and its layout. Safety: the
+    /// block is valid for reads of the layout's size, as `GlobalAlloc::dealloc` guarantees.
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
         if WATCHING.load(Ordering::SeqCst) && layout.align() == 1 {
             let key = KEYS[WATCHED.load(Ordering::SeqCst)];
             if layout.size() >= key.len() {
-                let bytes = unsafe { std::slice::from_raw_parts(block, layout.size()) };
+                let copied = unsafe { freed_bytes_support::Copied::new(block, layout.size()) };
+                let bytes = copied.bytes();
                 if bytes.windows(key.len()).any(|window| window == key) {
                     FREED_WITH_KEY.fetch_add(1, Ordering::SeqCst);
                 }

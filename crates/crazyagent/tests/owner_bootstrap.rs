@@ -907,7 +907,7 @@ async fn cli_owner_transport_rejects_wrong_authentication() {
         .await
         .unwrap();
     let packet = crazyagent::engine::secret_frame::owner_packet(b"CAO1", 0, &[0; 32]);
-    stream.write_all(&*packet).await.unwrap();
+    stream.write_all(&**packet).await.unwrap();
     let mut byte = [0; 1];
     let result = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
         .await
