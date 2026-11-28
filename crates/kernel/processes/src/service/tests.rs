@@ -1346,11 +1346,27 @@ mod windows_links;
 /// references. Inputs: the user's stored PATH, restored after each row. Output: none.
 mod windows_user_path;
 
+/// The socket check rows: each path shape under the `/var` link names the part it names now,
+/// the folder named is the one nearest the socket, and only the socket's and its folder's
+/// write bits are set aside. Inputs: real folders, links and sockets. Output: none.
+#[cfg(target_os = "macos")]
+mod socket_check;
+
 #[test]
 fn service_labels_are_unchanged() {
     assert_eq!(LAUNCHD_LABEL, "dev.crazyagent.engine");
     assert_eq!(SYSTEMD_UNIT, "crazyagent-engine.service");
     assert_eq!(WINDOWS_TASK, "CrazyAgent Engine");
+}
+
+/// A text with none of the five characters XML reserves is borrowed as it is, and each of
+/// them is escaped to its entity.
+#[test]
+fn xml_borrows_a_plain_text_and_escapes_each_reserved_character() {
+    let plain = xml("/Users/owner/Library/CrazyAgent/engine");
+    assert!(matches!(plain, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(plain, "/Users/owner/Library/CrazyAgent/engine");
+    assert_eq!(xml("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
 }
 
 /// The definition each manager reads is byte for byte the text kept in
