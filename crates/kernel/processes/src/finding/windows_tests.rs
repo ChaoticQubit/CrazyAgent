@@ -54,6 +54,19 @@ fn refusal_of(entry: &Path, places: &Places) -> Refused {
     }
 }
 
+/// The plain drive spelling of a file's real path, the word Node is handed for a script, since
+/// it cannot start a main script named by a `\\?\` path. Input: the file. Output: its real
+/// path with the verbatim prefix dropped.
+fn plain_of(file: &Path) -> OsString {
+    let real = or_named(file.canonicalize(), file);
+    let text = real.to_str().expect("a row's path is Unicode");
+    let plain = text
+        .strip_prefix(r"\\?\")
+        .expect("a real path is verbatim on Windows");
+    assert!(plain.as_bytes().get(1) == Some(&b':'), "{plain}");
+    OsString::from(plain)
+}
+
 /// On Windows the engine looks for the harnesses it installed with npm at its npm prefix's
 /// root, where npm writes their `.cmd` shims, since a Windows npm prefix has no `bin`.
 #[test]
@@ -105,7 +118,7 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
         resolved.argv(),
         vec![
             or_named(real.join("node.exe").canonicalize(), &real.join("node.exe")).into_os_string(),
-            resolved.program.clone().into_os_string(),
+            plain_of(&written),
         ]
     );
 }
@@ -130,11 +143,7 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
             vec![
                 or_named(real.join("node.exe").canonicalize(), &real.join("node.exe"))
                     .into_os_string(),
-                or_named(
-                    npm.join("npx-cli.js").canonicalize(),
-                    &npm.join("npx-cli.js")
-                )
-                .into_os_string(),
+                plain_of(&npm.join("npx-cli.js")),
             ],
             "{head:?}"
         );
@@ -181,7 +190,7 @@ fn npm_runs_by_its_layout_and_only_with_its_own_script() {
             .unwrap_or_else(|missing| panic!("npm with {head:?} did not resolve: {missing:?}"));
         assert_eq!(
             resolved.argv(),
-            vec![real_of(&real.join("node.exe")), real_of(&cli)],
+            vec![real_of(&real.join("node.exe")), plain_of(&cli)],
             "{head:?}"
         );
     }
@@ -226,6 +235,122 @@ fn a_carriage_return_anywhere_but_before_the_first_newline_is_refused_on_windows
     }
 }
 
+/// npm's layout in a folder made for a row: a stand-in `node.exe`, npm's script below it
+/// and `npm.cmd` beside it. Input: the folder, made here. Output: the `npm.cmd`.
+fn npm_layout_in(folder: &Path) -> PathBuf {
+    let bin = folder.join("node_modules").join("npm").join("bin");
+    or_named(std::fs::create_dir_all(&bin), &bin);
+    copy_named(&shipped_where(), &folder.join("node.exe"));
+    let cli = bin.join("npm-cli.js");
+    or_named(std::fs::write(&cli, "#!/usr/bin/env node\n"), &cli);
+    let command = folder.join("npm.cmd");
+    or_named(std::fs::write(&command, "@ECHO off\r\n"), &command);
+    command
+}
+
+/// The same folder reached through this machine's administrative share, which the system
+/// spells `\\?\UNC\localhost\<drive>$\...` once resolved. Input: a real drive path.
+/// Output: the share path.
+fn through_share(real: &Path) -> PathBuf {
+    let plain = plain_of(real);
+    let plain = plain.to_str().expect("a row's path is Unicode");
+    let drive = &plain[..1];
+    PathBuf::from(format!(r"\\localhost\{drive}$\{}", &plain[3..]))
+}
+
+/// A script whose real file only a verbatim `\\?\` path names is refused before anything
+/// starts, since Node cannot start a main script named that way and a plain spelling of it
+/// could name another file: a folder with a reserved device name, a trailing dot or space,
+/// or a plain path past what the plain form can hold.
+#[test]
+fn a_script_only_a_verbatim_path_names_is_refused_on_windows() {
+    let (_folder, real, _places) = node_folder();
+    let long = "l".repeat(120);
+    let folders = [
+        real.join("AUX"),
+        real.join("kept."),
+        real.join("trail "),
+        real.join(&long).join(&long),
+    ];
+    for folder in folders {
+        let command = npm_layout_in(&folder);
+        let places = stub_new(vec![or_named(folder.canonicalize(), &folder)], None);
+        match resolve_entry(&command, &places) {
+            Ok(resolved) => panic!("{} resolved: {resolved:?}", command.display()),
+            Err(missing) => {
+                let why = missing
+                    .refused
+                    .as_ref()
+                    .map(|refused| format!("{:?}", refused.why));
+                assert_eq!(
+                    missing.reason,
+                    Reason::Refused,
+                    "{}: {missing:?}",
+                    command.display()
+                );
+                assert_eq!(
+                    why.as_deref(),
+                    Some("Verbatim"),
+                    "{}: {missing:?}",
+                    command.display()
+                );
+            }
+        }
+    }
+}
+
+/// A script a network share path names has no plain drive spelling, so the one script
+/// constructor refuses it by its spelling alone, with no file read. A real file on this
+/// machine's administrative share is refused earlier, as a file other accounts can change,
+/// before any script is built: two refusals, each its own fact.
+#[test]
+fn a_share_script_is_refused_by_its_spelling_and_a_share_file_by_who_can_change_it() {
+    let (_folder, real, places) = node_folder();
+    let node = resolved_named(&real.join("node.exe"), &places);
+    let script = PathBuf::from(r"\\?\UNC\localhost\C$\shared\npm-cli.js");
+    let built = Resolved::script(real.join("npm.cmd"), script, node, Vec::new(), false);
+    assert_eq!(built, Err(Refusal::Verbatim));
+
+    let shared = real.join("shared");
+    or_named(std::fs::create_dir_all(&shared), &shared);
+    let folder = through_share(&shared).join("npm");
+    let command = npm_layout_in(&folder);
+    let places = stub_new(vec![or_named(folder.canonicalize(), &folder)], None);
+    let refused = refusal_of(&command, &places);
+    assert_eq!(refused.why, Refusal::OthersCanChange(command.clone()));
+    assert_eq!(refused.file, command);
+}
+
+/// npm's layout and an npm cmd-shim build their script themselves from the target's real
+/// file, and a target with no first line resolves as a program, never through the first-line
+/// path. Such a target that only a verbatim path names is refused too, before any launch
+/// word is built, so no launch of it can fail or end the engine.
+#[test]
+fn a_batch_target_with_no_first_line_only_a_verbatim_path_names_is_refused_on_windows() {
+    let (_folder, real, _places) = node_folder();
+    let layout = real.join("AUX");
+    let command = npm_layout_in(&layout);
+    let cli = layout
+        .join("node_modules")
+        .join("npm")
+        .join("bin")
+        .join("npm-cli.js");
+    or_named(std::fs::write(&cli, "require('../lib/cli.js')\n"), &cli);
+    let beside = real.join("kept.");
+    or_named(std::fs::create_dir_all(&beside), &beside);
+    copy_named(&shipped_where(), &beside.join("node.exe"));
+    let (shim, script) = shim_beside_node(&beside);
+    or_named(
+        std::fs::write(&script, "require('../lib/codex.js')\n"),
+        &script,
+    );
+    for (file, folder) in [(command, layout), (shim, beside)] {
+        let places = stub_new(vec![or_named(folder.canonicalize(), &folder)], None);
+        let refused = refusal_of(&file, &places);
+        assert_eq!(refused.why, Refusal::Verbatim, "{}", file.display());
+    }
+}
+
 /// npm's `npx.cmd` runs by its layout when its folder is off the engine's
 /// PATH, as a portable Node is, since `npx-cli.js` looks its `node` up beside npx.cmd only.
 #[test]
@@ -244,7 +369,7 @@ fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
         resolved.argv(),
         vec![
             real_of(real.join("node.exe")),
-            real_of(npm.join("npx-cli.js"))
+            plain_of(&npm.join("npx-cli.js"))
         ]
     );
 }
@@ -278,7 +403,7 @@ fn a_cmd_shim_off_the_engine_s_path_runs_with_the_node_beside_it() {
     assert_eq!(resolved.entry, shim);
     assert_eq!(
         resolved.argv(),
-        vec![real_of(real.join("node.exe")), real_of(script)]
+        vec![real_of(real.join("node.exe")), plain_of(&script)]
     );
 }
 
@@ -293,7 +418,7 @@ fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
     let real_of = |file: PathBuf| or_named(file.canonicalize(), &file).into_os_string();
     assert_eq!(
         resolved.argv(),
-        vec![real_of(real.join("node.exe")), real_of(script)]
+        vec![real_of(real.join("node.exe")), plain_of(&script)]
     );
 }
 
