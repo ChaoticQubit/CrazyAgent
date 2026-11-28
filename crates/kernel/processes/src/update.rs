@@ -752,8 +752,23 @@ fn run_bounded(
     let stderr = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;
     let failed = |error: std::io::Error| fail(code, format!("{command:?} failed: {error}"));
-    let mut watch = crate::exit_wait::watch(&mut child).map_err(failed)?;
-    let status = if watch.exited_by(&child, deadline).map_err(failed)? {
+    let mut watch = match crate::exit_wait::watch(&mut child) {
+        Ok(watch) => watch,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(failed(error));
+        }
+    };
+    let exited = match watch.exited_by(&child, deadline) {
+        Ok(exited) => exited,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = watch.reap(&mut child);
+            return Err(failed(error));
+        }
+    };
+    let status = if exited {
         watch.reap(&mut child).map_err(failed)?
     } else {
         let _ = child.kill();
