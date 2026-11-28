@@ -205,6 +205,26 @@ fn twice(host: &dyn sdk::Host, after: Option<String>, limit: u16) -> Result<Rows
     project_rows::page(host, after, limit)
 }
 
+/// A list entry that reads past `z` in place of the page it was asked for. Inputs: as the
+/// plugin's list. Output: the page it read.
+fn substituted_after(
+    host: &dyn sdk::Host,
+    _: Option<String>,
+    limit: u16,
+) -> Result<RowsPage, Refusal> {
+    project_rows::page(host, Some("z".to_owned()), limit)
+}
+
+/// A list entry that reads one row in place of the limit it was asked for. Inputs: as the
+/// plugin's list. Output: the page it read.
+fn substituted_limit(
+    host: &dyn sdk::Host,
+    after: Option<String>,
+    _: u16,
+) -> Result<RowsPage, Refusal> {
+    project_rows::page(host, after, 1)
+}
+
 /// Reads one page through a plugin entry with the bundled grants in a fresh transaction.
 /// Inputs: the store, the entry, the switches, the sink, the id to read past and the limit.
 /// Output: the page or its error.
@@ -325,7 +345,7 @@ fn rows_provider_refuses_any_caller_but_projects() {
     let mut db = engine_store();
     put(&db, "alpha", &body("alpha", "Alpha", 0));
     let tx = db.transaction().unwrap();
-    let provider = RowsProvider::new(&tx);
+    let provider = RowsProvider::new(&tx, "", 16);
     assert_eq!(
         provider.page("agent-quit", None, 16),
         Err(Refusal::Rejected {
@@ -337,4 +357,41 @@ fn rows_provider_refuses_any_caller_but_projects() {
     assert_eq!(served.rows, vec![row("alpha", "Alpha", 0)]);
     assert!(!served.more);
     assert_eq!(provider.calls.get(), 1);
+}
+
+/// A plugin that reads another cursor or limit than the engine asked for gets no page:
+/// the read is invalid, never the substituted page.
+#[test]
+fn a_plugin_that_reads_another_page_is_invalid() {
+    let mut db = engine_store();
+    put(&db, "alpha", &body("alpha", "Alpha", 0));
+    put(&db, "beta", &body("beta", "Beta", 1));
+    for entry in [substituted_after as ListEntry, substituted_limit] {
+        assert_eq!(
+            code(through(
+                &mut db,
+                entry,
+                &AllOn,
+                &EngineRefusals::new(),
+                "",
+                32
+            )),
+            "plugin_call_invalid"
+        );
+    }
+    let tx = db.transaction().unwrap();
+    let provider = RowsProvider::new(&tx, "", 32);
+    assert_eq!(
+        provider.page(PROJECTS_PLUGIN, Some("z".to_owned()), 32),
+        Err(Refusal::Rejected {
+            code: "project_rows_request".to_owned()
+        })
+    );
+    assert_eq!(
+        provider.page(PROJECTS_PLUGIN, None, 1),
+        Err(Refusal::Rejected {
+            code: "project_rows_request".to_owned()
+        })
+    );
+    assert_eq!(provider.calls.get(), 0);
 }

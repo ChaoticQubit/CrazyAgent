@@ -18,6 +18,10 @@ pub(crate) const PROJECTS_PLUGIN: &str = "projects";
 /// The refusal a `project_rows.page` call from any plugin but the projects plugin gets.
 const CALLER_REFUSED: &str = "project_rows_caller";
 
+/// The refusal a `project_rows.page` call gets when its cursor or limit is not the one the
+/// engine asked the plugin for.
+const REQUEST_REFUSED: &str = "project_rows_request";
+
 /// The projects page read: one page of rows past an id, each id and body bounded in SQL so
 /// an oversized row reads as NULL.
 const SQL: &str = "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM projects WHERE id>?1 ORDER BY id LIMIT ?2";
@@ -162,7 +166,7 @@ pub(crate) fn page_with(
     after: &str,
     limit: u16,
 ) -> Result<Kept, EngineError> {
-    let provider = RowsProvider::new(tx);
+    let provider = RowsProvider::new(tx, after, limit);
     let record = CallRecord {
         sink: refusals,
         refused: Cell::new(false),
@@ -211,21 +215,27 @@ fn same(items: &[OwnerSummary], more: bool, page: &RowsPage) -> bool {
         })
 }
 
-/// The `project_rows.page` provider for one read: it answers only the projects plugin, runs
-/// the engine's page read in the read transaction, counts every call, and keeps the engine
-/// items and `more`, or the error, for the caller; the SDK rows move out to the plugin.
-struct RowsProvider<'t, 'c> {
+/// The `project_rows.page` provider for one read: it answers only the projects plugin and
+/// only the cursor and limit the engine asked for, runs the engine's page read in the read
+/// transaction, counts every call it serves, and keeps the engine items and `more`, or the
+/// error, for the caller; the SDK rows move out to the plugin.
+struct RowsProvider<'t, 'c, 'a> {
     tx: &'t Transaction<'c>,
+    after: &'a str,
+    limit: u16,
     calls: Cell<u32>,
     kept: RefCell<Option<(Vec<OwnerSummary>, bool)>>,
     error: RefCell<Option<EngineError>>,
 }
 
-impl<'t, 'c> RowsProvider<'t, 'c> {
-    /// A provider that has served no call. Input: the read transaction. Output: it.
-    fn new(tx: &'t Transaction<'c>) -> Self {
+impl<'t, 'c, 'a> RowsProvider<'t, 'c, 'a> {
+    /// A provider that has served no call. Inputs: the read transaction and the id to read
+    /// past ("" for the first page) and the limit the engine asked for. Output: it.
+    fn new(tx: &'t Transaction<'c>, after: &'a str, limit: u16) -> Self {
         Self {
             tx,
+            after,
+            limit,
             calls: Cell::new(0),
             kept: RefCell::new(None),
             error: RefCell::new(None),
@@ -233,10 +243,12 @@ impl<'t, 'c> RowsProvider<'t, 'c> {
     }
 }
 
-impl project_rows::Provide for RowsProvider<'_, '_> {
-    /// Serves one page to the projects plugin; `None` reads from the first id, as `""`
-    /// does. Inputs: the caller, the id to read past and the limit. Output: the SDK rows,
-    /// `project_rows_caller` for another caller, or the engine error's code as a failure.
+impl project_rows::Provide for RowsProvider<'_, '_, '_> {
+    /// Serves one page to the projects plugin at the cursor and limit the engine asked for;
+    /// `None` reads from the first id, as `""` does. Inputs: the caller, the id to read past
+    /// and the limit. Output: the SDK rows, `project_rows_caller` for another caller,
+    /// `project_rows_request` for another cursor or limit, or the engine error's code as a
+    /// failure.
     fn page(
         &self,
         caller: &'static str,
@@ -248,8 +260,14 @@ impl project_rows::Provide for RowsProvider<'_, '_> {
                 code: CALLER_REFUSED.to_owned(),
             });
         }
+        let after = after.as_deref().unwrap_or("");
+        if after != self.after || limit != self.limit {
+            return Err(Refusal::Rejected {
+                code: REQUEST_REFUSED.to_owned(),
+            });
+        }
         self.calls.set(self.calls.get().saturating_add(1));
-        match rows(self.tx, after.as_deref().unwrap_or(""), limit) {
+        match rows(self.tx, after, limit) {
             Ok(Kept { items, page }) => {
                 *self.kept.borrow_mut() = Some((items, page.more));
                 Ok(page)
