@@ -471,3 +471,25 @@ fn wit_generation_p95() {
         "p95 {p95} us over {budget_us} us ({condition})"
     );
 }
+
+/// The TS and WIT targets read no tier shape: the prod TS and WIT outputs and every fixture
+/// WIT golden equal what capgen writes now, with no regeneration for plugin-served stems.
+#[test]
+fn ts_and_wit_output_is_unchanged() {
+    let loaded = load(&sdk("caps")).expect("the caps load");
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| (stem.as_str(), file.clone()))
+        .collect();
+    let ts_files = crate::ts(&borrowed).expect("the TS generates");
+    assert_eq!(
+        crate::drift(&sdk("ts/src/generated"), &ts_files),
+        Vec::<String>::new()
+    );
+    let wit_files = wit(&borrowed).expect("the WIT generates");
+    assert_eq!(crate::drift(&sdk("wit"), &wit_files), Vec::<String>::new());
+    for (folder, golden) in FIXTURES {
+        let golden = fs::read_to_string(sdk("capgen").join(golden)).expect("the golden reads");
+        assert_eq!(folder_wit(&format!("capgen/{folder}")), golden, "{folder}");
+    }
+}

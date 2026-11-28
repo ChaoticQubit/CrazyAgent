@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 /// Every mode that generates from a caps folder.
-const MODES: [&str; 8] = [
+const MODES: [&str; 10] = [
     "--write",
     "--check",
     "--write-ts",
@@ -13,26 +13,33 @@ const MODES: [&str; 8] = [
     "--check-wit",
     "--write-host",
     "--check-host",
+    "--write-test-host",
+    "--check-test-host",
 ];
 
 /// The usage line for every mode capgen takes.
 const USAGE: &str = "usage: capgen --write|--check|--write-ts|--check-ts|--write-wit|--check-wit\
-                     |--write-host|--check-host \
-                     <caps dir> <generated dir>, capgen --write-permissions|--check-permissions \
-                     <caps dir> <plugins dir> <generated dir>, or capgen --test-module <cap file> \
+                     |--write-host|--check-host|--write-test-host|--check-test-host \
+                     <caps dir> <generated dir>, capgen --write-permissions|--check-permissions\
+                     |--write-served|--check-served <caps dir> <plugins dir> <generated dir>, or capgen --test-module <cap file> \
                      <out file>";
 
 /// Runs capgen: `--write`/`--check` write or compare the Rust SDK files, `--write-ts`/
 /// `--check-ts` the TS ones, `--write-wit`/`--check-wit` the WIT one and `--write-host`/
-/// `--check-host` the SDK host crate's binding, from `<caps dir>`
-/// into `<generated dir>`; `--write-permissions`/`--check-permissions` plugin_host's
-/// permission table from `<caps dir>` and `<plugins dir>`; `--test-module <cap file> <out
+/// `--check-host` the SDK host crate's binding and `--write-test-host`/`--check-test-host`
+/// its test binding over the SDK's `fixture_served` modules, from `<caps dir>` into
+/// `<generated dir>`; `--write-permissions`/`--check-permissions` plugin_host's permission
+/// table and `--write-served`/`--check-served` the engine's served wiring, from
+/// `<caps dir>` and `<plugins dir>`; `--test-module <cap file> <out
 /// file>` writes one test module. Input: the command line. Output: 0 when written or
 /// equal, 1 with each differing path on drift, 2 on a refusal.
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [mode, caps, plugins, generated] = args.as_slice()
-        && (mode == "--write-permissions" || mode == "--check-permissions")
+        && matches!(
+            mode.as_str(),
+            "--write-permissions" | "--check-permissions" | "--write-served" | "--check-served"
+        )
     {
         return permissions(
             mode,
@@ -73,8 +80,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Writes or compares plugin_host's `permissions.rs`. Inputs: `--write-permissions` or
-/// `--check-permissions`, the caps folder, the plugins folder and the generated folder.
+/// Writes or compares plugin_host's `permissions.rs`, or the engine's `served.rs`. Inputs:
+/// a permissions or served mode, the caps folder, the plugins folder and the generated
+/// folder.
 /// Output: as [`write`] or [`check`], or 2 on a refusal.
 fn permissions(mode: &str, caps: &Path, plugins: &Path, generated: &Path) -> ExitCode {
     let files = match crazyagent_capgen::load(caps).and_then(|loaded| {
@@ -82,7 +90,11 @@ fn permissions(mode: &str, caps: &Path, plugins: &Path, generated: &Path) -> Exi
             .iter()
             .map(|(stem, file)| (stem.as_str(), file.clone()))
             .collect();
-        crazyagent_capgen::permissions(&borrowed, plugins)
+        if mode.ends_with("-served") {
+            crazyagent_capgen::served_wiring(&borrowed, plugins)
+        } else {
+            crazyagent_capgen::permissions(&borrowed, plugins)
+        }
     }) {
         Ok(files) => files,
         Err(error) => {
@@ -90,7 +102,7 @@ fn permissions(mode: &str, caps: &Path, plugins: &Path, generated: &Path) -> Exi
             return ExitCode::from(2);
         }
     };
-    if mode == "--write-permissions" {
+    if mode.starts_with("--write") {
         write(generated, &files)
     } else {
         check(generated, &files)
@@ -110,6 +122,7 @@ fn emit(
         "--write-ts" | "--check-ts" => crazyagent_capgen::ts(files),
         "--write-wit" | "--check-wit" => crazyagent_capgen::wit(files),
         "--write-host" | "--check-host" => crazyagent_capgen::binding(files),
+        "--write-test-host" | "--check-test-host" => crazyagent_capgen::test_binding(files),
         _ => unreachable!("{mode} is one of MODES"),
     }
 }

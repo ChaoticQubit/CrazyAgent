@@ -23,7 +23,43 @@ fn grant(tier: permission::Tier, permissions: &'static [&'static str]) -> [Bundl
         tier,
         permissions,
         essential: false,
+        capabilities: &[],
     }]
+}
+
+/// A table of one plugin-tier `echo.ping` at the given tier and one kernel `core.run`.
+/// Input: the tier of `echo.ping`. Output: the table.
+fn served_table(tier: permission::Tier) -> [Permission; 2] {
+    [
+        Permission {
+            name: "echo.ping",
+            tier,
+            needs: "echo.call",
+            emits: &[],
+        },
+        Permission {
+            name: "core.run",
+            tier: permission::Tier::Kernel,
+            needs: "core.run",
+            emits: &[],
+        },
+    ]
+}
+
+/// One bundled grant serving stems. Inputs: the plugin id, its tier and the stems.
+/// Output: the grant.
+fn serving(
+    plugin: &'static str,
+    tier: permission::Tier,
+    capabilities: &'static [&'static str],
+) -> BundledGrant {
+    BundledGrant {
+        plugin,
+        tier,
+        permissions: &[],
+        essential: false,
+        capabilities,
+    }
 }
 
 #[test]
@@ -151,4 +187,37 @@ fn the_unchecked_constructor_is_test_only() {
     assert!(source.contains(gate), "Grants::new carries the test gate");
     let own = include_str!("../Cargo.toml");
     assert!(own.contains("[features]\ntest-support = []\n"));
+}
+
+#[test]
+fn from_table_maps_each_served_stem_to_its_provider() {
+    let table = served_table(permission::Tier::T2);
+    let built = Grants::from_table(&[serving("p", permission::Tier::T1, &["echo"])], &table)
+        .expect("the served table builds");
+    assert_eq!(built.provider_of("echo"), Some("p"));
+    assert_eq!(built.provider_of("core"), None);
+    let none = Grants::from_table(&grant(permission::Tier::T2, &[]), &table)
+        .expect("a table that serves nothing builds");
+    assert_eq!(none.provider_of("echo"), None);
+}
+
+#[test]
+fn from_table_refuses_each_served_stem_fault() {
+    let table = served_table(permission::Tier::T1);
+    let t1 = permission::Tier::T1;
+    let cases: [(&[BundledGrant], &str); 4] = [
+        (
+            &[serving("p", t1, &["echo"]), serving("q", t1, &["echo"])],
+            "grants_served_twice",
+        ),
+        (&[serving("p", t1, &["ghost"])], "grants_serves_unknown"),
+        (&[serving("p", t1, &["core"])], "grants_serves_kernel"),
+        (
+            &[serving("p", permission::Tier::T2, &["echo"])],
+            "grants_provider_tier",
+        ),
+    ];
+    for (grants, code) in cases {
+        assert_eq!(Grants::from_table(grants, &table).map(|_| ()), Err(code));
+    }
 }

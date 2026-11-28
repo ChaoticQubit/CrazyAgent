@@ -958,3 +958,94 @@ fn write_restores_files_into_an_empty_expected_folder() {
     );
     fs::remove_dir_all(&folder).expect("the scratch folder is removed");
 }
+
+/// The generated module of one stem. Inputs: the generated files and the stem. Output: the
+/// module text; panics when it is missing.
+fn module_of(files: &[(String, String)], stem: &str) -> String {
+    files
+        .iter()
+        .find(|(path, _)| *path == format!("{stem}.rs"))
+        .map(|(_, text)| text.clone())
+        .unwrap_or_else(|| panic!("{stem}.rs is generated"))
+}
+
+#[test]
+fn a_plugin_tier_stem_writes_serve_with_the_host_first_and_no_caller() {
+    let files = rust(&parsed(&[(
+        "echo",
+        "capability echo.ping(n: u32) -> u32 tier: t1 needs: echo.call\n\
+         capability echo.loud(n: u32) -> u32 tier: t2 needs: echo.call",
+    )]))
+    .expect("generates");
+    let echo = module_of(&files, "echo");
+    assert!(echo.contains("pub trait Serve {\n"), "{echo}");
+    assert!(
+        echo.contains("    fn ping(&self, host: &dyn Host, n: u32) -> Result<u32, Refusal>;\n"),
+        "{echo}"
+    );
+    assert!(
+        echo.contains("    fn loud(&self, host: &dyn Host, n: u32) -> Result<u32, Refusal>;\n"),
+        "{echo}"
+    );
+    assert!(!echo.contains("trait Provide"), "{echo}");
+    assert!(!echo.contains("caller"), "{echo}");
+    assert!(echo.contains(
+        "pub fn ping(host: &dyn Host, n: u32) -> Result<u32, Refusal> {\n    host.echo_ping(n)\n}\n"
+    ));
+}
+
+#[test]
+fn a_kernel_stem_still_writes_provide_with_the_caller_first() {
+    let files = rust(&parsed(&[(
+        "clock",
+        "capability clock.now() -> u64 tier: kernel needs: clock.read",
+    )]))
+    .expect("generates");
+    let clock = module_of(&files, "clock");
+    assert!(clock.contains("pub trait Provide {\n"), "{clock}");
+    assert!(
+        clock.contains("    fn now(&self, caller: &'static str) -> Result<u64, Refusal>;\n"),
+        "{clock}"
+    );
+    assert!(!clock.contains("trait Serve"), "{clock}");
+}
+
+#[test]
+fn capgen_stem_mixed_tiers() {
+    let mixed = "capability mix.low() -> unit tier: t1 needs: mix.call\n\
+                 capability mix.core() -> unit tier: kernel needs: mix.call";
+    assert_eq!(refused(&[("mix", mixed)]), "capgen_stem_mixed_tiers");
+    let file = crazyagent_cap::parse_as("mix", mixed).expect("parses");
+    assert_eq!(
+        rust_test_module("mix", &file).map_err(|error| error.code),
+        Err("capgen_stem_mixed_tiers")
+    );
+}
+
+#[test]
+fn serve_is_a_reserved_name() {
+    assert_eq!(
+        refused(&[("s", "type Serve { a: u16 }")]),
+        "capgen_reserved_name"
+    );
+}
+
+#[test]
+fn fixture_served_generates_the_checked_in_rust() {
+    let loaded = load(&sdk("capgen/fixture_served")).expect("the fixture loads");
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| (stem.as_str(), file.clone()))
+        .collect();
+    let files = rust(&borrowed).expect("the fixture generates");
+    for stem in ["clock", "echo", "tick"] {
+        assert!(files.iter().any(|(path, _)| *path == format!("{stem}.rs")));
+    }
+    assert!(module_of(&files, "clock").contains("pub trait Provide {\n"));
+    assert!(module_of(&files, "echo").contains("pub trait Serve {\n"));
+    assert!(module_of(&files, "tick").contains("pub trait Serve {\n"));
+    assert_eq!(
+        drift(&sdk("rust/src/fixture_served"), &files),
+        Vec::<String>::new()
+    );
+}

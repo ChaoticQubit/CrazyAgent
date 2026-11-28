@@ -524,3 +524,129 @@ fn gateway_sandbox_save_settings_p95() {
     println!("gateway.sandbox_save_settings condition={condition} p95_ps={p95}");
     assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
 }
+
+/// The kernel clock of the served overhead rows: answers at once, so a timing holds only
+/// the call path.
+struct NoopClock;
+
+impl sdk::fixture_served::clock::Provide for NoopClock {
+    fn now(&self, caller: &'static str) -> Result<u64, Refusal> {
+        black_box(caller);
+        Ok(42)
+    }
+}
+
+/// A served echo plugin that makes no lower call, so a timing holds only the served hop.
+struct NoopEcho;
+
+impl sdk::fixture_served::echo::Serve for NoopEcho {
+    fn ping(&self, host: &dyn sdk::fixture_served::host::Host, n: u32) -> Result<u32, Refusal> {
+        black_box(host);
+        Ok(black_box(n))
+    }
+}
+
+/// A served echo plugin whose body times its own host's `clock.now` against a direct
+/// `Provide::now`, so the second hop is timed inside a served call under the provider's id.
+#[derive(Default)]
+struct TimedEcho {
+    overhead: std::cell::RefCell<Vec<u64>>,
+}
+
+impl sdk::fixture_served::echo::Serve for TimedEcho {
+    fn ping(&self, host: &dyn sdk::fixture_served::host::Host, n: u32) -> Result<u32, Refusal> {
+        use sdk::fixture_served::clock::{self, Provide};
+        let mut direct_call = || {
+            black_box(NoopClock.now(black_box(crate::served_tests::ECHO))).unwrap();
+        };
+        let mut sdk_call = || {
+            black_box(clock::now(host)).unwrap();
+        };
+        let mut overhead = self.overhead.borrow_mut();
+        for _ in 0..ROUNDS {
+            let plain = batch(&mut direct_call);
+            overhead.push(batch(&mut sdk_call).saturating_sub(plain));
+        }
+        Ok(n)
+    }
+}
+
+/// Times one served hop: `echo.ping` from a T2 caller through `Bound::serving` to a no-op
+/// `Serve` that makes no lower call, minus a direct `Serve::ping`. The direct call is the
+/// path of a plain function call between two engine modules.
+/// The gateway here uses `AllOn`; the engine's switch check reads its `RwLock` twice per
+/// served call (caller and provider), and that cost is not in these numbers.
+/// Run:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::served -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac).
+#[test]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
+fn served_hop_one_overhead_is_within_budget() {
+    use crate::fixture_served::{Bound, Providers, Served, Unserved};
+    use sdk::fixture_served::echo::{self, Serve};
+    let (budget, condition) = budget();
+    let grants = crate::served_tests::grants(&["echo.call"], &["clock.read"]);
+    let refusals = Unreached;
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
+    let providers = Providers { clock: &NoopClock };
+    let served = Served {
+        echo: &NoopEcho,
+        tick: &Unserved,
+    };
+    let bound = Bound::serving(
+        gateway.bind(crate::served_tests::CALLER),
+        &providers,
+        &served,
+    );
+    let mut direct_call = || {
+        black_box(NoopEcho.ping(&bound, black_box(5))).unwrap();
+    };
+    let mut sdk_call = || {
+        black_box(echo::ping(&bound, black_box(5))).unwrap();
+    };
+    let mut overhead = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let plain = batch(&mut direct_call);
+        overhead.push(batch(&mut sdk_call).saturating_sub(plain));
+    }
+    overhead.sort_unstable();
+    let p95 = report("hop1", &overhead);
+    println!("served.hop_one condition={condition} p95_ps={p95}");
+    assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
+}
+
+/// Times the second hop: inside one served `echo.ping`, the provider's own host calls the
+/// kernel `clock.now` under the provider's id, minus a direct `Provide::now`. No caller is
+/// built outside the gateway: the provider's host is the one the served call hands over.
+/// The gateway here uses `AllOn`; the engine's switch check reads its `RwLock` twice per
+/// served call (caller and provider), and that cost is not in these numbers.
+/// Run: `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::served -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac).
+#[test]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
+fn served_hop_two_overhead_is_within_budget() {
+    use crate::fixture_served::{Bound, Providers, Served, Unserved};
+    use sdk::fixture_served::echo;
+    let (budget, condition) = budget();
+    let grants = crate::served_tests::grants(&["echo.call"], &["clock.read"]);
+    let refusals = Unreached;
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
+    let providers = Providers { clock: &NoopClock };
+    let timed = TimedEcho::default();
+    let served = Served {
+        echo: &timed,
+        tick: &Unserved,
+    };
+    let bound = Bound::serving(
+        gateway.bind(crate::served_tests::CALLER),
+        &providers,
+        &served,
+    );
+    assert_eq!(echo::ping(&bound, 5), Ok(5));
+    let mut overhead = timed.overhead.into_inner();
+    assert_eq!(overhead.len(), ROUNDS);
+    overhead.sort_unstable();
+    let p95 = report("hop2", &overhead);
+    println!("served.hop_two condition={condition} p95_ps={p95}");
+    assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
+}

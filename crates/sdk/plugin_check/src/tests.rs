@@ -114,6 +114,7 @@ fn a_manifest_permission_list_is_read() {
             permissions: vec!["settings.write".to_owned()],
             net: None,
             essential: true,
+            capabilities: Vec::new(),
         })
     );
     assert_eq!(

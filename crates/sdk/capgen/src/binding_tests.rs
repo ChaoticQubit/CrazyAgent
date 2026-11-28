@@ -123,7 +123,7 @@ fn a_call_taking_a_foreign_handle_binds_its_inputs_as_one_tuple() {
     let flat = flat_binding(&[
         (
             "net",
-            "type Ring { keys: list<secrets.Secret> }\ncapability net.send(keys: list<secrets.Secret>, ring: Ring, s: secrets.Secret) -> unit tier: t1 needs: net.send",
+            "type Ring { keys: list<secrets.Secret> }\ncapability net.send(keys: list<secrets.Secret>, ring: Ring, s: secrets.Secret) -> unit tier: kernel needs: net.send",
         ),
         ("secrets", "handle Secret"),
     ]);
@@ -144,7 +144,7 @@ fn a_call_taking_a_foreign_handle_binds_its_inputs_as_one_tuple() {
 fn a_call_without_inputs_binds_the_unit_value() {
     let flat = flat_binding(&[(
         "clock",
-        "capability clock.now() -> u64 tier: t1 needs: clock.read",
+        "capability clock.now() -> u64 tier: kernel needs: clock.read",
     )]);
     assert!(flat.contains(
         "fnclock_now(&self)->Result<u64,Refusal>{self.caller.call(&clock::NOW,(),|_|clock::check_now_input(),|_|self.providers.clock.now(self.caller.plugin()),clock::check_now_output,)}"
@@ -158,4 +158,91 @@ fn a_binding_with_no_capability_is_refused() {
         crazyagent_cap::parse_as("secrets", "handle Secret").expect("parses"),
     )];
     assert_eq!(binding(&parsed).unwrap_err().code, "capgen_no_capability");
+}
+
+/// The fixture binding generated from `capgen/fixture_served`. Output: its one file.
+fn served_binding() -> Vec<(String, String)> {
+    let loaded = load(&sdk("capgen/fixture_served")).expect("the fixture loads");
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| (stem.as_str(), file.clone()))
+        .collect();
+    test_binding(&borrowed).expect("the fixture binding generates")
+}
+
+#[test]
+fn the_fixture_binding_equals_capgen_output() {
+    let files = served_binding();
+    assert_eq!(
+        files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        ["mod.rs"]
+    );
+    assert_eq!(
+        drift(&sdk("host/src/fixture_served"), &files),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn the_binding_writes_served_unserved_and_bound_serving_only_with_a_served_stem() {
+    let prod: String = binding_from_caps()[0].1.split_whitespace().collect();
+    for absent in ["Served", "Unserved", "fnserving(", "served:", "::Serve"] {
+        assert!(!prod.contains(absent), "{absent}");
+    }
+    let flat: String = served_binding()[0].1.split_whitespace().collect();
+    assert!(
+        flat.starts_with(
+            "usebus_gateway::Caller;usesdk::Refusal;usesdk::fixture_served::{clock,echo,tick};"
+        ),
+        "{flat}"
+    );
+    for part in [
+        "pubstructProviders<'p>{pubclock:&'pdynclock::Provide,}",
+        "pubstructServed<'p>{pubecho:&'pdynecho::Serve,pubtick:&'pdyntick::Serve,}",
+        "pubstructUnserved;",
+        "implecho::ServeforUnserved{fnping(&self,_host:&dynsdk::fixture_served::host::Host,_n:u32)->Result<u32,Refusal>{Err(Refusal::Failed{code:\"capability_unserved\".into(),})}}",
+        "impltick::ServeforUnserved{fncount(&self,_host:&dynsdk::fixture_served::host::Host)->Result<u32,Refusal>{Err(Refusal::Failed{code:\"capability_unserved\".into(),})}}",
+        "implServed<'static>{",
+        "pubconstNONE:Served<'static>=Served{echo:&Unserved,tick:&Unserved,};",
+        "pubstructBound<'g,'p>{caller:Caller<'g>,providers:&'pProviders<'p>,served:&'pServed<'p>,}",
+        "pubfnnew(caller:Caller<'g>,providers:&'pProviders<'p>)->Self{Self{caller,providers,served:&Served::NONE,}}",
+        "pubfnserving(caller:Caller<'g>,providers:&'pProviders<'p>,served:&'pServed<'p>,)->Self{Self{caller,providers,served,}}",
+        "implsdk::fixture_served::host::HostforBound<'_,'_>{",
+    ] {
+        assert!(flat.contains(part), "{part}\n{flat}");
+    }
+}
+
+#[test]
+fn a_served_method_calls_caller_serve_and_a_fresh_bound() {
+    let flat: String = served_binding()[0].1.split_whitespace().collect();
+    for part in [
+        "fnecho_ping(&self,n:u32)->Result<u32,Refusal>{self.caller.serve(&echo::PING,n,echo::check_ping_input,|provider,n|{lethost=Bound{caller:provider,providers:self.providers,served:self.served,};self.served.echo.ping(&host,n)},echo::check_ping_output,)}",
+        "fntick_count(&self)->Result<u32,Refusal>{self.caller.serve(&tick::COUNT,(),|_|tick::check_count_input(),|provider,_|{lethost=Bound{caller:provider,providers:self.providers,served:self.served,};self.served.tick.count(&host)},tick::check_count_output,)}",
+        "fnclock_now(&self)->Result<u64,Refusal>{self.caller.call(&clock::NOW,(),|_|clock::check_now_input(),|_|self.providers.clock.now(self.caller.plugin()),clock::check_now_output,)}",
+    ] {
+        assert!(flat.contains(part), "{part}\n{flat}");
+    }
+    assert_eq!(flat.matches("self.caller.serve(").count(), 2);
+    assert_eq!(flat.matches("self.caller.call(").count(), 1);
+    assert!(!flat.contains("self.caller.plugin(),"), "{flat}");
+}
+
+#[test]
+fn a_binding_with_no_kernel_stem_is_refused() {
+    let parsed = vec![(
+        "echo",
+        crazyagent_cap::parse_as(
+            "echo",
+            "capability echo.ping() -> unit tier: t1 needs: echo.call",
+        )
+        .expect("parses"),
+    )];
+    match test_binding(&parsed) {
+        Ok(files) => panic!("generated, expected a refusal: {files:?}"),
+        Err(error) => assert_eq!(error.code, "capgen_no_provided_stem"),
+    }
 }

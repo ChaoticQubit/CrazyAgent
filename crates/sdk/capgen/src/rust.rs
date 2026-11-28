@@ -20,12 +20,13 @@ const RESERVED: [&str; 63] = [
 
 /// Names the generated modules import or define, also refused as `.cap` names, and the
 /// caller parameter every `Provide` method takes first.
-const SDK_NAMES: [&str; 9] = [
+const SDK_NAMES: [&str; 10] = [
     "Host",
     "Refusal",
     "Tier",
     "Capability",
     "Provide",
+    "Serve",
     "Serialize",
     "Deserialize",
     "host",
@@ -235,7 +236,26 @@ fn check_names(stem: &str, file: &File) -> Result<(), CapgenError> {
             reserved(stem, &input.name)?;
         }
     }
+    let kernel = file
+        .capabilities
+        .iter()
+        .filter(|capability| capability.tier == Tier::Kernel)
+        .count();
+    if kernel != 0 && kernel != file.capabilities.len() {
+        return Err(refuse(stem, "capgen_stem_mixed_tiers", stem.to_owned()));
+    }
     Ok(())
+}
+
+/// Whether a file's capabilities are served by a plugin: it holds some, none of tier
+/// kernel; [`check_names`] has refused a file mixing the two. Input: the file. Output: true
+/// for a plugin-served stem.
+fn is_served(file: &File) -> bool {
+    !file.capabilities.is_empty()
+        && file
+            .capabilities
+            .iter()
+            .all(|capability| capability.tier != Tier::Kernel)
 }
 
 /// Refuses one reserved name. Inputs: the stem and the name. Output: nothing or the refusal.
@@ -303,13 +323,38 @@ fn modules(files: &[&(&str, File)], calls: &[Call<'_>]) -> String {
     text
 }
 
+/// Where a binding names the SDK: the module set its types and traits live in, and the
+/// path of its `Host` trait.
+pub(crate) struct Root {
+    modules: &'static str,
+    host: &'static str,
+}
+
+/// The SDK's own modules, which the prod binding names.
+pub(crate) const PROD: Root = Root {
+    modules: "sdk::generated",
+    host: "sdk::Host",
+};
+
+/// The SDK's `fixture_served` modules, which the test binding names.
+pub(crate) const FIXTURE: Root = Root {
+    modules: "sdk::fixture_served",
+    host: "sdk::fixture_served::host::Host",
+};
+
 /// Writes the SDK host crate's binding, `mod.rs`: `Providers` with one provider per
-/// namespace that has a capability, `Bound` holding the gateway's `Caller`, and
-/// `impl sdk::Host for Bound`, each method running `Caller::call` with the capability's facts,
-/// its generated checks and its namespace's provider. Input: stems with parsed files, after
-/// every check the Rust SDK runs. Output: the one file, or the first refusal, or
-/// `capgen_no_capability` when no file holds a capability.
-pub(crate) fn binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
+/// kernel namespace that has a capability, `Bound` holding the gateway's `Caller`, and
+/// `impl Host for Bound`, each method running `Caller::call` with the capability's facts,
+/// its generated checks and its namespace's provider. With a plugin-served namespace it
+/// also writes `Served`, `Unserved`, `Served::NONE` and `Bound::serving`, and that
+/// namespace's methods run `Caller::serve` with a fresh `Bound` on the provider's caller.
+/// Inputs: stems with parsed files, after every check the Rust SDK runs, and the SDK root.
+/// Output: the one file, or the first refusal, `capgen_no_capability` when no file holds a
+/// capability, or `capgen_no_provided_stem` when every namespace is plugin-served.
+pub(crate) fn binding(
+    files: &[(&str, File)],
+    root: &Root,
+) -> Result<Vec<(String, String)>, CapgenError> {
     self::files(files)?;
     let mut sorted: Vec<&(&str, File)> = files.iter().collect();
     sorted.sort_by_key(|(stem, _)| *stem);
@@ -322,13 +367,29 @@ pub(crate) fn binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, C
     if calls.is_empty() {
         return Err(refuse("", "capgen_no_capability", String::new()));
     }
-    let used: Vec<&str> = sorted
+    let with_calls: Vec<&(&str, File)> = sorted
         .iter()
-        .map(|(stem, _)| *stem)
-        .filter(|stem| calls.iter().any(|call| call.stem == *stem))
+        .copied()
+        .filter(|(stem, _)| calls.iter().any(|call| call.stem == *stem))
         .collect();
+    let used: Vec<&str> = with_calls.iter().map(|(stem, _)| *stem).collect();
+    let served: Vec<&str> = with_calls
+        .iter()
+        .filter(|(_, file)| is_served(file))
+        .map(|(stem, _)| *stem)
+        .collect();
+    let provided: Vec<&str> = used
+        .iter()
+        .copied()
+        .filter(|stem| !served.contains(stem))
+        .collect();
+    if provided.is_empty() {
+        return Err(refuse("", "capgen_no_provided_stem", String::new()));
+    }
+    assert_eq!(provided.len() + served.len(), used.len());
     let mut text = format!(
-        "use bus_gateway::Caller;\nuse sdk::Refusal;\nuse sdk::generated::{{{}}};\n\n",
+        "use bus_gateway::Caller;\nuse sdk::Refusal;\nuse {}::{{{}}};\n\n",
+        root.modules,
         used.join(", ")
     );
     text.push_str(
@@ -336,37 +397,122 @@ pub(crate) fn binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, C
          /// namespace's calls for the plugin the gateway bound.\n\
          pub struct Providers<'p> {\n",
     );
-    for stem in &used {
+    for stem in &provided {
         text.push_str(&format!("    pub {stem}: &'p dyn {stem}::Provide,\n"));
     }
-    text.push_str(
-        "}\n\n\
-         /// Generated by capgen: the host one plugin calls the SDK with. It holds the\n\
-         /// gateway's caller for that plugin and the providers; its fields are private, so a\n\
-         /// plugin can neither build one for another id nor reach a provider.\n\
-         pub struct Bound<'g, 'p> {\n    caller: Caller<'g>,\n    providers: &'p Providers<'p>,\n}\n\n\
-         impl<'g, 'p> Bound<'g, 'p> {\n\
-         /// Binds the providers to the caller the gateway bound. Inputs: the caller and the\n\
-         /// providers. Output: the host.\n\
-         pub fn new(caller: Caller<'g>, providers: &'p Providers<'p>) -> Self {\n\
-         Self { caller, providers }\n}\n}\n\n\
-         impl sdk::Host for Bound<'_, '_> {\n",
-    );
+    text.push_str("}\n\n");
+    if served.is_empty() {
+        text.push_str(
+            "/// Generated by capgen: the host one plugin calls the SDK with. It holds the\n\
+             /// gateway's caller for that plugin and the providers; its fields are private, so a\n\
+             /// plugin can neither build one for another id nor reach a provider.\n\
+             pub struct Bound<'g, 'p> {\n    caller: Caller<'g>,\n    providers: &'p Providers<'p>,\n}\n\n\
+             impl<'g, 'p> Bound<'g, 'p> {\n\
+             /// Binds the providers to the caller the gateway bound. Inputs: the caller and the\n\
+             /// providers. Output: the host.\n\
+             pub fn new(caller: Caller<'g>, providers: &'p Providers<'p>) -> Self {\n\
+             Self { caller, providers }\n}\n}\n\n",
+        );
+    } else {
+        served_items(&mut text, &calls, &served, root);
+    }
+    text.push_str(&format!("impl {} for Bound<'_, '_> {{\n", root.host));
     for (index, call) in calls.iter().enumerate() {
         if index > 0 {
             text.push('\n');
         }
-        bound_method(&mut text, call);
+        bound_method(&mut text, call, served.contains(&call.stem), root);
     }
     text.push_str("}\n");
     Ok(vec![("mod.rs".to_owned(), text)])
 }
 
+/// Writes the binding's served items: `Served` with one field per plugin-served
+/// namespace, `Unserved` answering every served call `capability_unserved`,
+/// `Served::NONE`, and `Bound` with its `served` field, `new` and `serving`. Inputs: the
+/// text, every call, the served stems and the SDK root. Output: the text grows.
+fn served_items(text: &mut String, calls: &[Call<'_>], served: &[&str], root: &Root) {
+    assert!(!served.is_empty());
+    text.push_str(
+        "/// Generated by capgen: the plugin code serving each plugin-served capability\n\
+         /// namespace, each answering its namespace's calls with a host bound to its own plugin.\n\
+         pub struct Served<'p> {\n",
+    );
+    for stem in served {
+        text.push_str(&format!("    pub {stem}: &'p dyn {stem}::Serve,\n"));
+    }
+    text.push_str(
+        "}\n\n\
+         /// Generated by capgen: the served code of a host built without any; every served\n\
+         /// call answers `capability_unserved`.\n\
+         pub struct Unserved;\n\n",
+    );
+    for stem in served {
+        text.push_str(&format!("impl {stem}::Serve for Unserved {{\n"));
+        let own: Vec<&Call<'_>> = calls.iter().filter(|call| call.stem == *stem).collect();
+        assert!(!own.is_empty());
+        for (index, call) in own.iter().enumerate() {
+            if index > 0 {
+                text.push('\n');
+            }
+            let params: Vec<String> =
+                ["&self".to_owned(), format!("_host: &dyn {}", root.host)]
+                    .into_iter()
+                    .chain(call.capability.inputs.iter().map(|input| {
+                        format!("_{}: {}", input.name, bound_type(&input.ty, stem, root))
+                    }))
+                    .collect();
+            let result = call
+                .capability
+                .output
+                .as_ref()
+                .map_or_else(|| "()".to_owned(), |ty| bound_type(ty, stem, root));
+            text.push_str(&list(
+                1,
+                &format!("fn {}(", call.function),
+                &params,
+                &format!(") -> Result<{result}, Refusal> {{"),
+            ));
+            text.push_str(
+                "        Err(Refusal::Failed { code: \"capability_unserved\".into() })\n    }\n",
+            );
+        }
+        text.push_str("}\n\n");
+    }
+    let none: Vec<String> = served
+        .iter()
+        .map(|stem| format!("{stem}: &Unserved"))
+        .collect();
+    text.push_str(&format!(
+        "impl Served<'static> {{\n\
+         /// No served code: every served call answers `capability_unserved`.\n\
+         pub const NONE: Served<'static> = Served {{ {} }};\n}}\n\n",
+        none.join(", ")
+    ));
+    text.push_str(
+        "/// Generated by capgen: the host one plugin calls the SDK with. It holds the\n\
+         /// gateway's caller for that plugin, the providers and the served code; its fields are\n\
+         /// private, so a plugin can neither build one for another id nor reach a provider.\n\
+         pub struct Bound<'g, 'p> {\n    caller: Caller<'g>,\n    providers: &'p Providers<'p>,\n    served: &'p Served<'p>,\n}\n\n\
+         impl<'g, 'p> Bound<'g, 'p> {\n\
+         /// Binds the providers to the caller the gateway bound, with no served code. Inputs:\n\
+         /// the caller and the providers. Output: the host.\n\
+         pub fn new(caller: Caller<'g>, providers: &'p Providers<'p>) -> Self {\n\
+         Self { caller, providers, served: &Served::NONE }\n}\n\n\
+         /// Binds the providers and the served code to the caller the gateway bound. Inputs:\n\
+         /// the caller, the providers and the served code. Output: the host.\n\
+         pub fn serving(caller: Caller<'g>, providers: &'p Providers<'p>, served: &'p Served<'p>) -> Self {\n\
+         Self { caller, providers, served }\n}\n}\n\n",
+    );
+}
+
 /// Writes one `Host` method of the binding: the capability's inputs as one value (a tuple
-/// for several, `()` for none), its input check, its provider call with the bound plugin's
-/// id first, and its output check, in `Caller::call`. Inputs: the text and the call.
+/// for several, `()` for none), its input check, and its output check. A provided call
+/// runs `Caller::call` with the bound plugin's id first; a served call runs
+/// `Caller::serve`, whose provider caller a fresh `Bound` wraps for the serving plugin's
+/// code. Inputs: the text, the call, whether its namespace is served, and the SDK root.
 /// Output: the text grows.
-fn bound_method(text: &mut String, call: &Call<'_>) {
+fn bound_method(text: &mut String, call: &Call<'_>, served: bool, root: &Root) {
     let stem = call.stem;
     let inputs: Vec<&str> = call
         .capability
@@ -379,14 +525,14 @@ fn bound_method(text: &mut String, call: &Call<'_>) {
             call.capability
                 .inputs
                 .iter()
-                .map(|input| format!("{}: {}", input.name, bound_type(&input.ty, stem))),
+                .map(|input| format!("{}: {}", input.name, bound_type(&input.ty, stem, root))),
         )
         .collect();
     let result = call
         .capability
         .output
         .as_ref()
-        .map_or_else(|| "()".to_owned(), |ty| bound_type(ty, stem));
+        .map_or_else(|| "()".to_owned(), |ty| bound_type(ty, stem, root));
     text.push_str(&format!(
         "    /// Calls {} ({stem}.cap) through the gateway.\n\
          \x20   /// Inputs: the call's inputs. Output: its result or the refusal.\n",
@@ -406,9 +552,6 @@ fn bound_method(text: &mut String, call: &Call<'_>) {
             format!("({})", many.join(", ")),
         ),
     };
-    let provided: Vec<&str> = std::iter::once("self.caller.plugin()")
-        .chain(inputs.iter().copied())
-        .collect();
     let constant = call.function.to_ascii_uppercase();
     let f = &call.function;
     let check_input = match call.capability.inputs.as_slice() {
@@ -419,10 +562,23 @@ fn bound_method(text: &mut String, call: &Call<'_>) {
         Some(ty) if !as_reference(ty) => format!("|output| {stem}::check_{f}_output(output)"),
         _ => format!("{stem}::check_{f}_output"),
     };
-    text.push_str(&format!(
-        "        self.caller.call(&{stem}::{constant}, {value}, {check_input}, |{pattern}| self.providers.{stem}.{f}({provided}), {check_output})\n    }}\n",
-        provided = provided.join(", "),
-    ));
+    if served {
+        let handed: Vec<&str> = std::iter::once("&host")
+            .chain(inputs.iter().copied())
+            .collect();
+        text.push_str(&format!(
+            "        self.caller.serve(&{stem}::{constant}, {value}, {check_input}, |provider, {pattern}| {{ let host = Bound {{ caller: provider, providers: self.providers, served: self.served }}; self.served.{stem}.{f}({handed}) }}, {check_output})\n    }}\n",
+            handed = handed.join(", "),
+        ));
+    } else {
+        let provided: Vec<&str> = std::iter::once("self.caller.plugin()")
+            .chain(inputs.iter().copied())
+            .collect();
+        text.push_str(&format!(
+            "        self.caller.call(&{stem}::{constant}, {value}, {check_input}, |{pattern}| self.providers.{stem}.{f}({provided}), {check_output})\n    }}\n",
+            provided = provided.join(", "),
+        ));
+    }
 }
 
 /// Whether a check takes a value of this type as a plain reference to the owned type, so
@@ -433,15 +589,17 @@ fn as_reference(ty: &TypeRef) -> bool {
 }
 
 /// The Rust type of a `.cap` type as the SDK host crate names it: a named type through
-/// `sdk::generated::<stem>`, a foreign one through `sdk::generated::<its stem>`, scalars as
-/// the SDK writes them, so no type depends on the SDK root re-exporting its module.
-/// Inputs: the type and the stem of the file it sits in. Output: the type text.
-fn bound_type(ty: &TypeRef, stem: &str) -> String {
+/// `<root>::<stem>`, a foreign one through `<root>::<its stem>`, scalars as the SDK writes
+/// them, so no type depends on the SDK root re-exporting its module. Inputs: the type, the
+/// stem of the file it sits in and the SDK root. Output: the type text.
+fn bound_type(ty: &TypeRef, stem: &str, root: &Root) -> String {
     match ty {
-        TypeRef::List(item) => format!("alloc::vec::Vec<{}>", bound_type(item, stem)),
-        TypeRef::Option(inner) => format!("core::option::Option<{}>", bound_type(inner, stem)),
-        TypeRef::Named(name) => format!("sdk::generated::{stem}::{name}"),
-        TypeRef::Foreign { stem, name } => format!("sdk::generated::{stem}::{name}"),
+        TypeRef::List(item) => format!("alloc::vec::Vec<{}>", bound_type(item, stem, root)),
+        TypeRef::Option(inner) => {
+            format!("core::option::Option<{}>", bound_type(inner, stem, root))
+        }
+        TypeRef::Named(name) => format!("{}::{stem}::{name}", root.modules),
+        TypeRef::Foreign { stem, name } => format!("{}::{stem}::{name}", root.modules),
         scalar => rust_type(scalar, None),
     }
 }
@@ -453,7 +611,19 @@ fn host(files: &[&(&str, File)], calls: &[Call<'_>]) -> String {
     let used: Vec<&str> = files
         .iter()
         .map(|(stem, _)| *stem)
-        .filter(|stem| calls.iter().any(|call| call.stem == *stem))
+        .filter(|stem| {
+            calls
+                .iter()
+                .filter(|call| call.stem == *stem)
+                .flat_map(|call| {
+                    call.capability
+                        .inputs
+                        .iter()
+                        .map(|input| &input.ty)
+                        .chain(call.capability.output.as_ref())
+                })
+                .any(names_local)
+        })
         .collect();
     match used.as_slice() {
         [] => {}
@@ -470,6 +640,17 @@ fn host(files: &[&(&str, File)], calls: &[Call<'_>]) -> String {
         calls.iter().map(|call| (call, Some(call.stem))).collect();
     host_trait(&mut text, &qualified);
     text
+}
+
+/// Whether a type names an item of its own file, so the `Host` trait writes it through
+/// that file's module. Input: the type. Output: true for a named type, also inside a list
+/// or an option.
+fn names_local(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Named(_) => true,
+        TypeRef::List(inner) | TypeRef::Option(inner) => names_local(inner),
+        _ => false,
+    }
 }
 
 /// Writes the `Host` trait with one typed method per capability, each type named through
@@ -570,7 +751,9 @@ fn module(
     for call in calls {
         facts(&mut text, stem, call);
     }
-    if !calls.is_empty() {
+    if is_served(file) {
+        serve(&mut text, stem, calls);
+    } else if !calls.is_empty() {
         provide(&mut text, stem, calls);
     }
     let mut taken: BTreeSet<String> = calls.iter().map(|call| call.function.clone()).collect();
@@ -1079,6 +1262,33 @@ fn provide(text: &mut String, stem: &str, calls: &[&Call<'_>]) {
             call.capability.name
         ));
         let params: Vec<String> = ["&self".to_owned(), "caller: &'static str".to_owned()]
+            .into_iter()
+            .chain(inputs(call.capability))
+            .collect();
+        let tail = format!(") -> Result<{}, Refusal>;", output(call.capability, None));
+        text.push_str(&list(1, &format!("fn {}(", call.function), &params, &tail));
+    }
+    text.push_str("}\n");
+}
+
+/// Writes the `Serve` trait the plugin serving the file's capabilities implements: each
+/// method takes a host bound to that plugin, never the caller's id. Inputs: the text, the
+/// stem and the calls. Output: the text grows.
+fn serve(text: &mut String, stem: &str, calls: &[&Call<'_>]) {
+    assert!(!calls.is_empty());
+    text.push_str(&format!(
+        "\n/// Generated by capgen from {stem}.cap: what the plugin serving its capabilities implements.\n"
+    ));
+    text.push_str("pub trait Serve {\n");
+    for (index, call) in calls.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        text.push_str(&format!(
+            "    /// Serves {}. Inputs: a host bound to the serving plugin, and the call's inputs.\n    /// Output: its result or the refusal.\n",
+            call.capability.name
+        ));
+        let params: Vec<String> = ["&self".to_owned(), "host: &dyn Host".to_owned()]
             .into_iter()
             .chain(inputs(call.capability))
             .collect();
