@@ -796,3 +796,70 @@ fn a_path_under_users_takes_the_fast_read_as_the_full_read() {
     assert!(walks_as_full(&home));
     assert!(walks_as_full(&home.join("ca-fast-read-row-no-such-folder")));
 }
+
+/// A canonical scratch folder holding a folder `x` with two folders `a` and `b` in it, and
+/// a secret home beside them. Output: the guard, the home, its secrets and the folder `x`.
+#[cfg(unix)]
+fn two_roots_under_one_folder() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>, PathBuf) {
+    let (folder, home, secrets) = secret_home();
+    let x = canonical(folder.path()).unwrap().join("x");
+    for leaf in ["a", "b"] {
+        std::fs::create_dir_all(x.join(leaf)).unwrap();
+    }
+    (folder, home, secrets, x)
+}
+
+/// A build's second grant under a folder its first grant walked reads only the new root's
+/// own entry, since one build shares its reads.
+#[cfg(unix)]
+#[test]
+fn a_second_grant_under_a_walked_folder_reads_only_its_own_entry() {
+    let (_folder, home, secrets, x) = two_roots_under_one_folder();
+    let mut kept = granted_build(&home, &secrets, &x.join("a"));
+    let before = entry_reads();
+    kept.grant(&x.join("b"), &secrets).unwrap();
+    assert_eq!(entry_reads() - before, 1);
+}
+
+/// A folder swapped for a new one between two grants of one build is judged from the
+/// build's first read until the install, which reads it again and refuses with
+/// [`GRANT_CHANGED`].
+#[cfg(unix)]
+#[test]
+fn a_folder_swapped_between_two_grants_of_one_build_refuses_the_install() {
+    let (folder, home, secrets, x) = two_roots_under_one_folder();
+    let mut kept = granted_build(&home, &secrets, &x.join("a"));
+    std::fs::rename(&x, folder.path().join("x-old")).unwrap();
+    for leaf in ["a", "b"] {
+        std::fs::create_dir_all(x.join(leaf)).unwrap();
+    }
+    kept.grant(&x.join("b"), &secrets).unwrap();
+    match kept.recheck() {
+        Err(SandboxError::Invalid(reason)) => assert_eq!(reason, GRANT_CHANGED),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A folder swapped for a link into a secret between two grants of one build is refused,
+/// by the second grant or else by the install, which reads it again.
+#[cfg(unix)]
+#[test]
+fn a_folder_swapped_for_a_link_into_a_secret_between_two_grants_is_refused() {
+    let (folder, home, secrets, x) = two_roots_under_one_folder();
+    let mut kept = granted_build(&home, &secrets, &x.join("a"));
+    std::fs::rename(&x, folder.path().join("x-old")).unwrap();
+    std::fs::create_dir_all(home.join(".claude").join("b")).unwrap();
+    std::os::unix::fs::symlink(home.join(".claude"), &x).unwrap();
+    let refused = match kept.grant(&x.join("b"), &secrets) {
+        Err(SandboxError::Invalid(reason)) => reason,
+        Err(other) => panic!("{other:?}"),
+        Ok(()) => match kept.recheck() {
+            Err(SandboxError::Invalid(reason)) => reason,
+            other => panic!("{other:?}"),
+        },
+    };
+    assert!(
+        refused == SECRET_ROOT_REFUSED || refused == GRANT_CHANGED,
+        "{refused}"
+    );
+}

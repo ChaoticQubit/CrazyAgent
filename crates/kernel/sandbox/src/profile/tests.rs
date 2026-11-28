@@ -728,3 +728,25 @@ fn a_build_walks_each_secret_once_for_its_three_roots() {
     let walked = crate::paths::walks() - before;
     assert_eq!(walked, secrets + harnesses.len() + 1 + 3, "{walked} walks");
 }
+
+/// An extra read-only folder the save-time screen passed and then swapped for a link to the
+/// owner home before the launch is skipped by that launch's own grant, which reads it again.
+#[test]
+fn an_extra_folder_saved_then_swapped_for_a_link_to_the_owner_home_is_skipped_at_launch() {
+    let (scratch, [project, home, tmp]) = folders();
+    let extra = canonical(scratch.path()).unwrap().join("extra");
+    fs::create_dir_all(&extra).unwrap();
+    let data = canonical(scratch.path()).unwrap().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let texts = [extra.display().to_string()];
+    assert_eq!(
+        crate::extra_paths::checked_all(&ACCESS, &texts, &data),
+        Ok(vec![extra.clone()])
+    );
+    fs::remove_dir(&extra).unwrap();
+    std::os::unix::fs::symlink(crate::paths::owner_home().unwrap(), &extra).unwrap();
+    let sandbox =
+        ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, SandboxNetwork::Open).unwrap();
+    let (_sandbox, skipped) = sandbox.allow_extra_reads(&[extra]).unwrap();
+    assert_eq!(skipped, 1);
+}

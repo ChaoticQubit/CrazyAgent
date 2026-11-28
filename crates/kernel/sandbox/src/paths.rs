@@ -325,6 +325,21 @@ pub(crate) fn walks() -> usize {
     WALKS.with(std::cell::Cell::get)
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    /// How many entries [`Reads::entry`] read from the disk on this thread, read through
+    /// [`entry_reads`].
+    static ENTRY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of entries [`Reads::entry`] read from the disk on this thread so far, a
+/// cached answer not counted, read by the shared-reads rows. Takes nothing. Returns the
+/// count.
+#[cfg(all(test, unix))]
+pub(crate) fn entry_reads() -> usize {
+    ENTRY_READS.with(std::cell::Cell::get)
+}
+
 /// The most links whose targets do not exist yet one walk follows from its first missing
 /// run before it refuses the path.
 const DANGLING_LINK_HOPS: usize = 16;
@@ -371,6 +386,8 @@ impl Reads {
         if let Some(found) = self.entries.get(path) {
             return Ok(*found);
         }
+        #[cfg(test)]
+        ENTRY_READS.with(|reads| reads.set(reads.get() + 1));
         let found = match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => Some(Entry::Link),
             Ok(meta) => Some(Entry::Plain((meta.dev(), meta.ino()))),
