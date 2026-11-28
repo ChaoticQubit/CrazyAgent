@@ -951,7 +951,8 @@ fn a_root_granted_again_with_a_respelled_secret_keeps_one_entry_for_it() {
 
 /// A secret one grant names with a doubled slash and another names plainly is judged at
 /// install for both: made a link to the second grant's root after the build, the install
-/// refuses. A build whose lists all have the same bytes rechecks with no [`Path`] compare.
+/// refuses. A build whose lists all have the same bytes rechecks with one [`Path`] compare
+/// per secret, its first sight in the install's fresh walks, and none in its filter.
 #[cfg(unix)]
 #[test]
 fn a_secret_respelled_in_a_second_grant_is_still_judged_at_install() {
@@ -959,7 +960,7 @@ fn a_secret_respelled_in_a_second_grant_is_still_judged_at_install() {
     let plain = granted_build(&home, &secrets, &x.join("a"));
     let before = path_fallbacks();
     assert!(plain.recheck().is_ok());
-    assert_eq!(path_fallbacks() - before, 0);
+    assert_eq!(path_fallbacks() - before, plain.checked[0].against.len());
     let secret = canonical(folder.path()).unwrap().join("s");
     std::fs::create_dir_all(&secret).unwrap();
     let mut first = secrets.clone();
