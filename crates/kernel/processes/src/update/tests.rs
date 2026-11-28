@@ -613,11 +613,12 @@ fn an_update_command_whose_watch_fails_is_killed_and_reaped() {
         started.elapsed()
     );
     let pid = pid.expect("the watch was forced to fail");
-    let alive = std::process::Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
+    let alive = crate::spawn_gate::status(
+        std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
     assert!(
         !alive.success(),
         "the command {pid} outlived its failed watch"
