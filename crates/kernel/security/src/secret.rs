@@ -181,41 +181,66 @@ pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
 }
 
 /// Serializes a value as compact JSON into one buffer of exactly its size, measured by a
-/// first pass and written by the second through a fixed slice that cannot grow, so no
-/// growth frees a partial copy of a secret the value holds; the caller wipes the result.
-/// Public in the kernel crate only because its callers stay in crazyagent. Input: the
-/// value. Output: the bytes, or serde_json's error when the value changed between passes.
-#[cfg(unix)]
+/// first pass and written by the second through [`Capped`], which never lets the buffer
+/// grow, so no growth frees a partial copy of a secret the value holds; the caller wipes the
+/// result. Input: the value. Output: the bytes, or serde_json's error when the value
+/// changed between passes.
 pub fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
     let mut counted = Counted(0);
     serde_json::to_writer(&mut counted, value)?;
-    let mut buffer = vec![0_u8; counted.0];
+    let mut buffer = Vec::with_capacity(counted.0);
     let capacity = buffer.capacity();
-    let mut room: &mut [u8] = &mut buffer;
-    let written = serde_json::to_writer(&mut room, value);
-    let left = room.len();
+    let written = serde_json::to_writer(
+        &mut Capped {
+            buffer: &mut buffer,
+            limit: counted.0,
+        },
+        value,
+    );
+    assert_eq!(buffer.capacity(), capacity);
     if let Err(problem) = written {
         wipe_owned(&mut buffer);
         return Err(problem);
     }
-    if left != 0 {
+    if buffer.len() != counted.0 {
         wipe_owned(&mut buffer);
-        let changed = std::io::Error::other("the value changed between the two passes");
-        return Err(serde_json::Error::io(changed));
+        return Err(serde_json::Error::io(std::io::Error::other(CHANGED)));
     }
-    assert_eq!(buffer.len(), counted.0);
-    assert_eq!(buffer.capacity(), capacity);
     Ok(buffer)
 }
 
+const CHANGED: &str = "the value changed between the two passes";
+
 /// A writer that only counts the bytes written to it, for [`sized_json`]'s first pass.
-#[cfg(unix)]
 struct Counted(usize);
 
-#[cfg(unix)]
 impl std::io::Write for Counted {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A writer that appends to a buffer up to a limit no larger than the buffer's capacity, for
+/// [`sized_json`]'s second pass. A write that would pass the limit wipes what was written and
+/// is refused before any byte of it is pushed, so the buffer never reallocates.
+struct Capped<'a> {
+    buffer: &'a mut Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for Capped<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        assert!(self.buffer.len() <= self.limit && self.limit <= self.buffer.capacity());
+        if bytes.len() > self.limit - self.buffer.len() {
+            wipe_owned(self.buffer);
+            return Err(std::io::Error::other(CHANGED));
+        }
+        self.buffer.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 

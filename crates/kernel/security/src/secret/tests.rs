@@ -80,14 +80,12 @@ fn sized_refuses_a_control_byte_in_an_escaped_piece() {
 
 /// A value whose JSON changes length between two serializations: a counter written as
 /// `first` on the first pass and `then` after it, next to a secret.
-#[cfg(unix)]
 struct Changing {
     first: u32,
     then: u32,
     passes: std::cell::Cell<u32>,
 }
 
-#[cfg(unix)]
 impl serde::Serialize for Changing {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let pass = self.passes.get();
@@ -97,7 +95,6 @@ impl serde::Serialize for Changing {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn sized_json_refuses_a_value_that_grows_between_passes() {
     let value = Changing {
@@ -109,7 +106,6 @@ fn sized_json_refuses_a_value_that_grows_between_passes() {
     assert_eq!(value.passes.get(), 2);
 }
 
-#[cfg(unix)]
 #[test]
 fn sized_json_refuses_a_value_that_shrinks_between_passes() {
     let value = Changing {
@@ -119,4 +115,38 @@ fn sized_json_refuses_a_value_that_shrinks_between_passes() {
     };
     assert!(super::sized_json(&value).is_err());
     assert_eq!(value.passes.get(), 2);
+}
+
+#[test]
+fn capped_writer_refuses_a_longer_value_without_growing_and_wipes_what_it_wrote() {
+    let limit = serde_json::to_vec(&(9, "secret-bytes")).unwrap().len();
+    let mut buffer = Vec::with_capacity(limit);
+    let capacity = buffer.capacity();
+    let refused = serde_json::to_writer(
+        &mut super::Capped {
+            buffer: &mut buffer,
+            limit,
+        },
+        &(10, "secret-bytes"),
+    );
+    assert!(refused.is_err());
+    assert_eq!(buffer.capacity(), capacity);
+    assert!(buffer.is_empty());
+}
+
+#[test]
+fn capped_writer_takes_a_value_of_its_limit_without_growing() {
+    let limit = serde_json::to_vec(&(9, "secret-bytes")).unwrap().len();
+    let mut buffer = Vec::with_capacity(limit);
+    let capacity = buffer.capacity();
+    serde_json::to_writer(
+        &mut super::Capped {
+            buffer: &mut buffer,
+            limit,
+        },
+        &(9, "secret-bytes"),
+    )
+    .unwrap();
+    assert_eq!(buffer.capacity(), capacity);
+    assert_eq!(buffer, br#"[9,"secret-bytes"]"#.to_vec());
 }
