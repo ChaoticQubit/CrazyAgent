@@ -11,6 +11,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(all(test, unix))]
 mod tests;
 
+#[cfg(test)]
+thread_local! {
+    static OWNER_CHECKS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Takes the backups entries this thread's listings owner-checked since the last take.
+/// Output: their paths, in the order checked.
+#[cfg(test)]
+pub(crate) fn take_owner_checks() -> Vec<PathBuf> {
+    OWNER_CHECKS.with(std::cell::RefCell::take)
+}
+
 /// The settings texts an upgrade backup keeps beside engine.db, read once after the
 /// database copy: each a plain file name and its bytes. The engine reads them from its
 /// settings sources; a database with none passes a list that is empty.
@@ -520,7 +532,10 @@ pub fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, StorageError> 
         let Some(time) = backup_time(&name).map(str::to_owned) else {
             continue;
         };
-        if own_folder(&folder.join(&name)) {
+        let path = folder.join(&name);
+        #[cfg(test)]
+        OWNER_CHECKS.with(|checks| checks.borrow_mut().push(path.clone()));
+        if own_folder(&path) {
             found.push((time, name));
         }
     }
@@ -792,6 +807,7 @@ mod windows_tests {
         }
         let database = data.join(super::DATABASE);
         let connection = rusqlite::Connection::open(&database).unwrap();
+        super::take_owner_checks();
         let made = super::backup(
             &connection,
             &database,
@@ -800,10 +816,22 @@ mod windows_tests {
             std::time::SystemTime::now(),
         )
         .unwrap();
+        let checked = super::take_owner_checks();
         assert!(made.join(super::DATABASE).is_file(), "{}", made.display());
+        let stamp_of = |folder: &Path| {
+            super::backup_time(folder.file_name().unwrap().to_str().unwrap())
+                .unwrap()
+                .to_owned()
+        };
+        for folder in &foreign {
+            assert!(stamp_of(folder) > stamp_of(&made), "{}", folder.display());
+        }
         for folder in foreign.iter().chain(&older) {
             assert!(folder.is_dir(), "{}", folder.display());
+            assert!(checked.contains(folder), "{}", folder.display());
         }
+        assert!(!checked.contains(&made), "{checked:?}");
+        assert_eq!(checked.len(), foreign.len() + older.len());
         drop(connection);
     }
 

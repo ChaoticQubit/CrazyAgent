@@ -168,3 +168,45 @@ fn a_settings_text_named_checked_is_refused() {
 fn a_settings_text_in_another_folder_is_refused() {
     backup_named("a/b");
 }
+
+#[test]
+fn a_backups_prune_checks_every_folder_it_may_remove_but_not_the_one_it_just_made() {
+    let (root, path, db) = database();
+    let folder = backups_folder(root.path()).unwrap();
+    let older: Vec<PathBuf> = (1..=BACKUPS_KEPT)
+        .map(|day| folder.join(format!("1-to-2-2000010{day}T000000000Z")))
+        .collect();
+    for backup in &older {
+        std::fs::create_dir(backup).unwrap();
+    }
+    let outside = tempfile::tempdir().unwrap();
+    let link = folder.join("1-to-2-99990101T000000000Z");
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    take_owner_checks();
+
+    let made = backup(&db, &path, &no_texts, (1, 2), SystemTime::now()).unwrap();
+
+    let checked = take_owner_checks();
+    assert!(!checked.contains(&made), "{checked:?}");
+    assert!(checked.contains(&link), "{checked:?}");
+    for backup in &older {
+        assert!(checked.contains(backup), "{}", backup.display());
+    }
+    assert_eq!(checked.len(), older.len() + 1);
+    assert!(
+        backup_time("1-to-2-99990101T000000000Z").unwrap()
+            > backup_time(made.file_name().unwrap().to_str().unwrap()).unwrap()
+    );
+    assert!(!older[0].exists());
+    for backup in &older[1..] {
+        assert!(backup.is_dir(), "{}", backup.display());
+    }
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(outside.path().is_dir());
+    assert!(made.join(CHECKED).is_file());
+}

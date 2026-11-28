@@ -520,3 +520,50 @@ fn a_bare_database_name_is_the_database_in_the_working_folder() {
         std::fs::canonicalize(".").unwrap().join(DATABASE)
     );
 }
+
+/// Backup-shaped entries beside the pinned backup [`upgraded`] took: older folders of this
+/// user and a link stamped later than any backup. Input: the engine root. Output: every
+/// backup-shaped entry of the backups folder, the pinned one included.
+fn backups_beside_the_pin(root: &Path) -> Vec<PathBuf> {
+    let folder = root.join(BACKUPS);
+    for day in 1..=4 {
+        std::fs::create_dir(folder.join(format!("9-to-10-2000010{day}T000000000Z"))).unwrap();
+    }
+    std::os::unix::fs::symlink(root, folder.join("11-to-12-99990101T000000000Z")).unwrap();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|entry| backup_time(entry.file_name().unwrap().to_str().unwrap()).is_some())
+        .collect();
+    entries.sort();
+    assert_eq!(entries.len(), 6);
+    entries
+}
+
+#[test]
+fn restorable_until_and_a_restore_owner_check_every_backup_the_pin_is_chosen_from() {
+    let (root, path) = upgraded(true);
+    let entries = backups_beside_the_pin(root.path());
+    crate::migrations::take_owner_checks();
+
+    assert!(restorable_until(root.path(), SystemTime::now()).is_some());
+    let mut until = crate::migrations::take_owner_checks();
+    let refused = restore_pinned(
+        &path,
+        &Hooks {
+            texts: &no_texts,
+            busy: &|_| Ok(true),
+            after_restore: &no_sweep,
+        },
+    )
+    .unwrap_err()
+    .0;
+    let mut restore = crate::migrations::take_owner_checks();
+
+    assert_eq!(refused, RESTORE_AGENTS_RUNNING);
+    until.sort();
+    restore.sort();
+    assert_eq!(until, entries);
+    assert_eq!(restore, entries);
+    assert!(entries.contains(&pinned_folder(root.path())));
+}
