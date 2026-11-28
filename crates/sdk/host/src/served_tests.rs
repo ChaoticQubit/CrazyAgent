@@ -9,10 +9,10 @@ use sdk::{Capability, Refusal, Tier};
 use crate::fixture_served::{Bound, Providers, Served};
 
 /// The plugin every row calls `echo.ping` from.
-const CALLER: &str = "app-plugin";
+pub(super) const CALLER: &str = "app-plugin";
 
 /// The plugin that serves the `echo` stem.
-const ECHO: &str = "echo-plugin";
+pub(super) const ECHO: &str = "echo-plugin";
 
 /// The plugin that serves the `tick` stem.
 const TICK: &str = "tick-plugin";
@@ -122,7 +122,7 @@ impl clock::Provide for ClockProvider {
 /// permissions, `tick-plugin` T1 holding `clock.read`; `echo-plugin` serves `echo` and
 /// `tick-plugin` serves `tick`. Inputs: the caller's and the echo plugin's permissions.
 /// Output: the table.
-fn grants(caller: &'static [&'static str], provider: &'static [&'static str]) -> Grants {
+pub(super) fn grants(caller: &'static [&'static str], provider: &'static [&'static str]) -> Grants {
     Grants::new_serving(
         &[
             (CALLER, Tier::T2, caller),
