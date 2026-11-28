@@ -36,12 +36,18 @@ pub const KEEP_AS_BYTES_MAX: usize = kernel_common::names::STORE_NAME_BYTES_MAX;
 /// The keys only an embedding plugin's `plugin.toml` holds; the embedding reader judges
 /// their values.
 pub const EMBEDDING_KEYS: [&str; 4] = ["title", "release", "description", "http"];
+/// The optional key listing the capability stems a plugin serves; an embedding plugin's
+/// list stays empty.
+const CAPABILITIES_KEY: &str = "capabilities";
+/// The most capability stems one plugin may serve.
+pub const CAPABILITIES_MAX: usize = 16;
 /// The optional key marking a code plugin the app relies on, so its switch stays locked
 /// on; an embedding plugin, the only kind a user adds, never holds it.
 const ESSENTIAL_KEY: &str = "essential";
 
 /// A plugin's `plugin.toml`: its id, tier word, kind, manifest version, the permissions it
-/// asks the kernel for, its `[net]` hosts and whether it is essential.
+/// asks the kernel for, its `[net]` hosts, whether it is essential and the capability stems
+/// it serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub plugin: String,
@@ -51,6 +57,7 @@ pub struct Manifest {
     pub permissions: Vec<String>,
     pub net: Option<Net>,
     pub essential: bool,
+    pub capabilities: Vec<String>,
 }
 
 /// A plugin's `[net]` section: the hosts `net.request` may reach, each a lowercase DNS
@@ -194,8 +201,9 @@ pub fn read(dir: &Path) -> Result<Manifest, Refused> {
 }
 
 /// Checks one `plugin.toml` text: exactly its five keys, plus [`EMBEDDING_KEYS`] when the
-/// kind is `embedding` and an optional bool `essential` when it is not, a tier word, a snake kind, a positive version and at most
-/// `PERMISSIONS_MAX` distinct dotted permissions. Input: the text. Output: the manifest, or
+/// kind is `embedding` and an optional bool `essential` when it is not, an optional list of
+/// at most [`CAPABILITIES_MAX`] distinct snake capability stems, a tier word, a snake kind, a
+/// positive version and at most `PERMISSIONS_MAX` distinct dotted permissions. Input: the text. Output: the manifest, or
 /// `plugin_manifest_invalid` or `plugin_id_invalid` with the line of the refused key.
 pub fn parse(text: &str) -> Result<Manifest, Refused> {
     let invalid = |needle: &str| Refused {
@@ -210,6 +218,7 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
     if let Some(key) = table.keys().find(|key| {
         !PLUGIN_KEYS.contains(&key.as_str())
             && key.as_str() != NET_KEY
+            && key.as_str() != CAPABILITIES_KEY
             && !(embedding && EMBEDDING_KEYS.contains(&key.as_str()))
             && !(!embedding && key.as_str() == ESSENTIAL_KEY)
     }) {
@@ -284,6 +293,24 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
         None => false,
         Some(value) => value.as_bool().ok_or_else(|| invalid(ESSENTIAL_KEY))?,
     };
+    let capabilities = match table.get(CAPABILITIES_KEY) {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .filter(|list| list.len() <= CAPABILITIES_MAX)
+            .and_then(|list| {
+                list.iter()
+                    .map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<String>>>()
+            })
+            .filter(|list| {
+                list.iter().enumerate().all(|(index, stem)| {
+                    stem.len() <= NAME_BYTES_MAX && is_snake(stem) && !list[..index].contains(stem)
+                })
+            })
+            .ok_or_else(|| invalid(CAPABILITIES_KEY))?,
+    };
+    assert!(capabilities.len() <= CAPABILITIES_MAX);
     Ok(Manifest {
         plugin,
         tier,
@@ -292,6 +319,7 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
         permissions,
         net,
         essential,
+        capabilities,
     })
 }
 

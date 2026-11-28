@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use crate::Refused;
-use crate::manifest::{self, Bounded, MANIFEST_BYTES_MAX, Manifest, PLUGIN_ID_MAX, read_bounded};
+use crate::manifest::{
+    self, Bounded, CAPABILITIES_MAX, MANIFEST_BYTES_MAX, Manifest, NAME_BYTES_MAX, PLUGIN_ID_MAX,
+    read_bounded,
+};
 
 /// Writes one `plugin.toml` into a fresh folder of its own. Inputs: a name unique per row
 /// and the text. Output: the folder.
@@ -33,6 +36,7 @@ fn a_valid_manifest_reads_its_five_keys() {
             permissions: vec!["settings.write".to_owned()],
             net: None,
             essential: false,
+            capabilities: Vec::new(),
         })
     );
 }
@@ -770,4 +774,86 @@ fn an_unknown_send_key_or_type_is_refused() {
     refused_net(&with_send(
         "access_token = { hosts = [\"api.github.com\"], keep_as = 1 }\n",
     ));
+}
+
+/// `capabilities` lists the capability stems a code plugin serves: absent reads empty, a
+/// list reads in order, and up to [`CAPABILITIES_MAX`] stems of up to [`NAME_BYTES_MAX`]
+/// bytes fit.
+#[test]
+fn the_capabilities_key_reads_the_served_stems_in_order() {
+    assert_eq!(
+        manifest::parse(&manifest_text("agent-quit")).map(|read| read.capabilities),
+        Ok(Vec::<String>::new())
+    );
+    let text = format!(
+        "{}capabilities = [\"projects\", \"model\"]\n",
+        manifest_text("agent-quit")
+    );
+    assert_eq!(
+        manifest::parse(&text).map(|read| read.capabilities),
+        Ok(vec!["projects".to_owned(), "model".to_owned()])
+    );
+    let most: Vec<String> = (0..CAPABILITIES_MAX)
+        .map(|index| format!("\"s{index}\""))
+        .collect();
+    let text = format!(
+        "{}capabilities = [{}]\n",
+        manifest_text("agent-quit"),
+        most.join(", ")
+    );
+    assert_eq!(
+        manifest::parse(&text).map(|read| read.capabilities.len()),
+        Ok(CAPABILITIES_MAX)
+    );
+    let longest = "s".repeat(NAME_BYTES_MAX);
+    let text = format!(
+        "{}capabilities = [\"{longest}\"]\n",
+        manifest_text("agent-quit")
+    );
+    assert_eq!(
+        manifest::parse(&text).map(|read| read.capabilities),
+        Ok(vec![longest])
+    );
+}
+
+/// A `capabilities` value that is not a list of distinct snake stems of at most
+/// [`NAME_BYTES_MAX`] bytes, or holds more than [`CAPABILITIES_MAX`], is refused at its line; a misspelt key is still an unknown key.
+#[test]
+fn the_capabilities_key_refuses_anything_but_distinct_snake_stems() {
+    let over: Vec<String> = (0..=CAPABILITIES_MAX)
+        .map(|index| format!("\"s{index}\""))
+        .collect();
+    let over = format!("[{}]", over.join(", "));
+    let long = format!("[\"{}\"]", "s".repeat(NAME_BYTES_MAX + 1));
+    for value in [
+        "\"projects\"",
+        "[1]",
+        "[\"Projects\"]",
+        "[\"projects.list\"]",
+        "[\"\"]",
+        "[\"projects\", \"projects\"]",
+        over.as_str(),
+        long.as_str(),
+    ] {
+        let text = format!("{}capabilities = {value}\n", manifest_text("agent-quit"));
+        assert_eq!(
+            manifest::parse(&text),
+            Err(Refused {
+                code: "plugin_manifest_invalid",
+                line: 6,
+            }),
+            "{value}"
+        );
+    }
+    let misspelt = format!(
+        "{}capability = [\"projects\"]\n",
+        manifest_text("agent-quit")
+    );
+    assert_eq!(
+        manifest::parse(&misspelt),
+        Err(Refused {
+            code: "plugin_manifest_invalid",
+            line: 6,
+        })
+    );
 }

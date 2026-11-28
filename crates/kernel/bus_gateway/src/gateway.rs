@@ -2,6 +2,10 @@ use sdk::{Capability, Refusal, Tier};
 
 use crate::Grants;
 
+/// The most served hops one call chain may take: a caller's served call is hop 1, and each
+/// served call its provider makes adds one.
+pub const HOPS_MAX: u8 = 4;
+
 /// Where the gateway reports every call it refused, once per refused call.
 pub trait Refusals {
     /// Records one refused call. Inputs: the caller's plugin id, the capability's static
@@ -53,6 +57,7 @@ impl<'p> Gateway<'p> {
         Caller {
             gateway: self,
             plugin,
+            depth: 0,
         }
     }
 
@@ -110,15 +115,88 @@ impl<'p> Gateway<'p> {
     }
 }
 
-/// A caller bound to one plugin id by the gateway; its fields are private, so code outside
-/// the gateway can neither build one nor change whose calls it makes.
+/// A caller bound to one plugin id by the gateway, at the served hop its call chain has
+/// reached; its fields are private, so code outside the gateway can neither build one nor
+/// change whose calls it makes.
 #[derive(Clone, Copy)]
 pub struct Caller<'g> {
     gateway: &'g Gateway<'g>,
     plugin: &'static str,
+    depth: u8,
 }
 
-impl Caller<'_> {
+impl<'g> Gateway<'g> {
+    /// Runs one served call: admits the caller and reports an admit refusal once; checks the
+    /// input; then finds the stem's provider in the table and hands it a caller bound to the
+    /// provider's own id one hop deeper; then checks the output. The hop cap, an unserved
+    /// stem and a switched-off provider fail with a gateway code and are never reported. A
+    /// grant, tier or switch refusal the provider returns becomes
+    /// `capability_provider_refused`; its rejection or failure passes unchanged. Inputs: the
+    /// caller's plugin id and hop, the capability, the input, its check, the provider call
+    /// and the output check. Output: the provider's result, or the refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn serve<I, T>(
+        &'g self,
+        plugin: &'static str,
+        depth: u8,
+        capability: &Capability,
+        input: I,
+        check_input: impl FnOnce(&I) -> Result<(), Refusal>,
+        provide: impl FnOnce(Caller<'g>, I) -> Result<T, Refusal>,
+        check_output: impl FnOnce(&T) -> Result<(), Refusal>,
+    ) -> Result<T, Refusal> {
+        assert!(
+            capability.tier != Tier::Kernel,
+            "serve runs only plugin-tier capabilities"
+        );
+        if let Err(refusal) = self.admit(plugin, capability) {
+            self.refusals.refused(plugin, capability, &refusal);
+            return Err(refusal);
+        }
+        check_input(&input)?;
+        if depth >= HOPS_MAX {
+            return Err(failed("capability_call_too_deep"));
+        }
+        let stem = capability.name.split_once('.').map(|(stem, _)| stem);
+        let stem = stem.expect("a capability name is dotted");
+        let Some(provider) = self.grants.provider_of(stem) else {
+            return Err(failed("capability_unserved"));
+        };
+        if !self.switches.is_on(provider) {
+            return Err(failed("capability_provider_off"));
+        }
+        let (provider_tier, _) = self
+            .grants
+            .of(provider)
+            .expect("a served stem's provider is in the table");
+        assert!(
+            *provider_tier <= capability.tier,
+            "a provider's tier is at or below the capability's"
+        );
+        let served = Caller {
+            gateway: self,
+            plugin: provider,
+            depth: depth + 1,
+        };
+        let output = provide(served, input).map_err(|refusal| match refusal {
+            Refusal::NotGranted { .. }
+            | Refusal::TierTooHigh { .. }
+            | Refusal::PluginOff { .. } => failed("capability_provider_refused"),
+            other => other,
+        })?;
+        check_output(&output)?;
+        Ok(output)
+    }
+}
+
+/// The `Failed` refusal of a gateway code. Input: the code. Output: the refusal.
+fn failed(code: &str) -> Refusal {
+    Refusal::Failed {
+        code: code.to_owned(),
+    }
+}
+
+impl<'g> Caller<'g> {
     /// The plugin id the gateway bound. Output: the id.
     pub fn plugin(&self) -> &'static str {
         self.plugin
@@ -138,6 +216,30 @@ impl Caller<'_> {
     ) -> Result<T, Refusal> {
         self.gateway.call(
             self.plugin,
+            capability,
+            input,
+            check_input,
+            provide,
+            check_output,
+        )
+    }
+
+    /// Runs one call of a plugin-served capability as the bound plugin: admit, the input
+    /// check, the provider the gateway's table names for the capability's stem, called with
+    /// a caller bound to that provider one hop deeper, and the output check. Inputs: the
+    /// capability, the input (several travel as one tuple), its check, the provider call
+    /// and the output check. Output: the provider's result, or the refusal.
+    pub fn serve<I, T>(
+        &self,
+        capability: &Capability,
+        input: I,
+        check_input: impl FnOnce(&I) -> Result<(), Refusal>,
+        provide: impl FnOnce(Caller<'g>, I) -> Result<T, Refusal>,
+        check_output: impl FnOnce(&T) -> Result<(), Refusal>,
+    ) -> Result<T, Refusal> {
+        self.gateway.serve(
+            self.plugin,
+            self.depth,
             capability,
             input,
             check_input,

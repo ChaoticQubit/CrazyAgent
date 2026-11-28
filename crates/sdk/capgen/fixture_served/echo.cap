@@ -1,0 +1,3 @@
+capability echo.ping(n: u32) -> u32
+  tier: t1
+  needs: echo.call

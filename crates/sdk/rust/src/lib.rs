@@ -3,6 +3,11 @@
 extern crate alloc;
 
 pub mod generated;
+
+/// The SDK modules capgen writes from `capgen/fixture_served`: a kernel stem and two
+/// plugin-served stems, for the host crate's served rows; never part of a release build.
+#[cfg(feature = "test-support")]
+pub mod fixture_served;
 pub mod wire;
 pub use generated::CAPABILITIES;
 pub use generated::host::Host;

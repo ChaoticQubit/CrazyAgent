@@ -32,11 +32,13 @@ pub struct Permission {
 }
 
 /// One bundled code plugin's grant from its `plugin.toml`: its id, its tier, the
-/// permissions it holds and whether it is essential, so its switch stays locked on.
+/// permissions it holds, whether it is essential, so its switch stays locked on, and the
+/// capability stems it serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BundledGrant {
     pub plugin: &'static str,
     pub tier: Tier,
     pub permissions: &'static [&'static str],
     pub essential: bool,
+    pub capabilities: &'static [&'static str],
 }
