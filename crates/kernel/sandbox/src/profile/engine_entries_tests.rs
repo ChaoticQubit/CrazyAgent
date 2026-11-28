@@ -106,3 +106,70 @@ fn a_full_engine_folder_names_its_own_code_and_the_owner_s_step() {
         "the agent sandbox could not be set up"
     );
 }
+
+/// A project folder, agent home and temp folder for a guarded build, beside an engine root
+/// holding its database. Input: the engine root. Output: the home and the temp folder.
+fn agent_folders(root: &Path) -> (PathBuf, PathBuf) {
+    fs::write(root.join("engine.db"), "engine secret\n").unwrap();
+    let agent = root.parent().unwrap().join("agent");
+    let (home, tmp) = (agent.join("home"), agent.join("tmp"));
+    for folder in [&home, &tmp] {
+        fs::create_dir_all(folder).unwrap();
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    (home, tmp)
+}
+
+/// The engine refusal code a guarded build of a project folder gets, or none when the
+/// build is accepted. Inputs: the project folder, the agent home and temp folder and the
+/// engine root. Output: the code.
+fn guarded_code(project: &Path, home: &Path, tmp: &Path, root: &Path) -> Option<&'static str> {
+    let network = super::SandboxNetwork::Only(Vec::new());
+    super::ProjectSandbox::new(&STAND_IN, project, home, tmp, network)
+        .and_then(|sandbox| sandbox.guard_engine(root))
+        .err()
+        .map(|error| crate::lines::invalid_code(&error))
+}
+
+/// A project folder that is one of the engine's record folders, or the engine root itself,
+/// is refused by its own code: either would let the agent write the engine's own state.
+#[test]
+fn a_project_folder_in_or_at_the_engine_root_is_refused_by_its_own_code() {
+    let (_scratch, root) = engine_root();
+    let (home, tmp) = agent_folders(&root);
+    let records = root.join(RECORDS);
+    filled(&records, 0o700, 1);
+    let deeper = records.join("project");
+    fs::create_dir(&deeper).unwrap();
+    for project in [&records, &deeper, &root] {
+        assert_eq!(
+            guarded_code(project, &home, &tmp, &root),
+            Some("project_in_engine_folder"),
+            "{}",
+            project.display()
+        );
+    }
+    let outside = root.parent().unwrap().join("project");
+    fs::create_dir(&outside).unwrap();
+    assert_eq!(guarded_code(&outside, &home, &tmp, &root), None);
+}
+
+/// A project folder named through a link into the engine root is refused: the link itself
+/// is no canonical root, and the folder it resolves to, which callers pass, gets the engine
+/// folder's code.
+#[test]
+fn a_project_folder_linked_into_the_engine_root_is_refused() {
+    let (_scratch, root) = engine_root();
+    let (home, tmp) = agent_folders(&root);
+    let records = root.join(RECORDS);
+    filled(&records, 0o700, 1);
+    let link = root.parent().unwrap().join("linked-project");
+    std::os::unix::fs::symlink(&records, &link).unwrap();
+    assert!(guarded_code(&link, &home, &tmp, &root).is_some());
+    let resolved = link.canonicalize().unwrap();
+    assert_eq!(resolved, records);
+    assert_eq!(
+        guarded_code(&resolved, &home, &tmp, &root),
+        Some("project_in_engine_folder")
+    );
+}

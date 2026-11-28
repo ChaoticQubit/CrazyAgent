@@ -716,3 +716,58 @@ fn a_build_walks_each_secret_once_for_its_three_roots() {
     let walked = crate::paths::walks() - before;
     assert_eq!(walked, secrets + harnesses.len() + 1 + 3, "{walked} walks");
 }
+
+/// No agent can make a Unix socket in any engine record folder, which the engine therefore
+/// never searches for sockets: inside the guarded sandbox each bind there fails and leaves no
+/// socket, while the same script run outside the sandbox binds in each folder, so the row sees
+/// a bind when one happens.
+#[test]
+fn an_agent_cannot_bind_a_unix_socket_in_an_engine_record_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let (scratch, [project, home, tmp]) = folders();
+    let root = canonical(scratch.path()).unwrap();
+    let runtime = root.join("runtime");
+    std::fs::create_dir(&runtime).unwrap();
+    std::fs::write(runtime.join("engine.db"), "engine secret\n").unwrap();
+    let kinds = [
+        "agent-skills",
+        "agent-instruction-files",
+        "agent-instructions-given",
+        "agent-home-levels",
+        "project-instructions-written",
+        "stand-in-records",
+    ];
+    for kind in kinds {
+        let folder = runtime.join(kind);
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let sandbox = ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, SandboxNetwork::Open)
+        .unwrap()
+        .guard_engine(&runtime)
+        .unwrap();
+    let profile = root.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let script = "/usr/bin/nc -U -l \"$1\" & p=$!; i=0; \
+        while [ $i -lt 30 ] && [ ! -S \"$1\" ] && kill -0 $p 2>/dev/null; do \
+        sleep 0.1; i=$((i + 1)); done; \
+        kill $p 2>/dev/null; wait $p 2>/dev/null; test -S \"$1\"";
+    let bound = |mut command: std::process::Command, socket: &Path| {
+        command.args(["-c", script, "sh"]).arg(socket);
+        kernel_processes::spawn_gate::collected(&mut command)
+            .unwrap()
+            .status
+            .success()
+    };
+    for kind in kinds {
+        let socket = runtime.join(kind).join("s.sock");
+        let inside = sandbox.command(&profile, Path::new("/bin/sh"));
+        assert!(!bound(inside, &socket), "{kind}");
+        assert!(std::fs::symlink_metadata(&socket).is_err(), "{kind}");
+        assert!(
+            bound(std::process::Command::new("/bin/sh"), &socket),
+            "{kind}"
+        );
+        std::fs::remove_file(&socket).unwrap();
+    }
+}
