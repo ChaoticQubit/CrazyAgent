@@ -200,15 +200,13 @@ impl OwnerClient {
             let mut stream = self
                 .connect_checked(|_| failure("questions_unavailable"))
                 .await?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
             stream
-                .write_all(&packet)
+                .write_all(&**packet)
                 .await
                 .map_err(|_| failure("questions_unavailable"))?;
             stream

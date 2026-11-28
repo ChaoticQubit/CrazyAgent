@@ -193,7 +193,6 @@ fn snapshot_one(
         asset_bytes_max: config.settings.knowledge.asset_bytes_max,
         records_max: config.settings.knowledge.records_max,
         frame_bytes_max: FRAME_BYTES_MAX,
-        same_files: crate::file_identity::same_files,
     };
     kernel::snapshot(&tx, &facts, id)?;
     let read = kernel::ReadFacts {

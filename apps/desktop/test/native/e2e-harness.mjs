@@ -332,12 +332,17 @@ export const INTERNALS = `(() => {
     throw "Command " + cmd + " not found";
   };
   const follow = async (id) => {
-    for (let index = 0; ; ) {
+    for (let index = 0, failures = 0; ; ) {
       let change;
       try {
         change = await forward("e2e_watch_next", {});
-      } catch {
-        return;
+        failures = 0;
+      } catch (failure) {
+        if (failure?.code === "watch_superseded") return;
+        failures += 1;
+        await new Promise((done) => setTimeout(done, Math.min(1000 * 2 ** (failures - 1), 5000)));
+        await forward("desktop_watch", { changes: "__CHANNEL__:" + id }).catch(() => null);
+        continue;
       }
       if (change.topics.length === 0) continue;
       callbacks.get(id)?.({ index, message: change });

@@ -166,9 +166,12 @@ mod tests {
     /// CodeRabbit CR-1149 (2), #734 L1: a held tree counts its sleeping child as active
     /// until the tree has ended, says `ended` only once its job counts no active process,
     /// and keeps saying so; the job's end is the child's exit, with the tree's exit code.
+    /// Fails naming the variable when SystemRoot is not set.
     #[test]
-    fn a_held_tree_with_a_sleeping_child_says_ended_only_once_none_runs() {
-        let system = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    fn a_held_tree_with_a_sleeping_child_says_ended_only_once_none_runs() -> Result<(), String> {
+        let system = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?,
+        );
         let mut child = Command::new(system.join("System32").join("PING.EXE"))
             .args(["-n", "60", "127.0.0.1"])
             .stdin(Stdio::null())
@@ -191,5 +194,6 @@ mod tests {
             child.wait().unwrap().code(),
             Some(super::ENDED_EXIT_CODE as i32)
         );
+        Ok(())
     }
 }

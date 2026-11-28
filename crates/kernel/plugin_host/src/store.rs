@@ -422,8 +422,9 @@ pub struct KeyStep {
 
 impl KeyStep {
     /// Moves the new key into the old key's file, then deletes the fresh file, which goes
-    /// on every exit. Output: Ok, or `app_plugin_key_store_unavailable` with the old key
-    /// still in its file.
+    /// on every exit. Output: Ok, or `app_plugin_key_store_unavailable`; the old key's file
+    /// then holds the old key, or the new key when the move got past its rename, and a
+    /// retry writes it again.
     pub fn commit(mut self) -> Result<(), Refused> {
         let Some(fresh) = self.fresh.take() else {
             return Ok(());

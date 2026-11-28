@@ -31,8 +31,6 @@ const REFRESH: Duration = Duration::from_secs(5);
 const JOB_READ: Duration = Duration::from_secs(1);
 const REPLY_WATCH: Duration = Duration::from_secs(1);
 const RECONNECT: Duration = Duration::from_secs(3);
-/// The most characters of one paste the TUI takes; the rest is dropped.
-pub(in crate::tui) const PASTE_CHARS_MAX: usize = 100_000;
 
 struct Extras;
 
@@ -185,7 +183,7 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
     let colors = prefs
         .as_deref()
         .map_or(Colors::default(), prefs::load_colors);
-    let appearance = if colors == Colors::FollowMacos {
+    let appearance = if colors == Colors::FollowSystem {
         theme::system_appearance()
     } else {
         Appearance::Dark
@@ -410,8 +408,7 @@ fn drive(
                 }
             }
             Event::Paste(text) => {
-                let text: String = text.chars().take(PASTE_CHARS_MAX).collect();
-                shell.key(Key::Paste(text));
+                shell.key(Key::paste(text));
                 dirty = true;
             }
             Event::Resize(width, height) => {
@@ -421,7 +418,7 @@ fn drive(
                     .map_err(|error| TuiError(error.to_string()))?;
                 dirty = true;
             }
-            Event::FocusGained if shell.ctx.colors == Colors::FollowMacos => {
+            Event::FocusGained if shell.ctx.colors == Colors::FollowSystem => {
                 let appearance = theme::system_appearance();
                 if appearance != shell.ctx.appearance {
                     let colors = shell.ctx.colors;

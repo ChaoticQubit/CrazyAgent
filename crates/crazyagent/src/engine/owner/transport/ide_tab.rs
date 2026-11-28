@@ -196,14 +196,12 @@ impl OwnerClient {
             self.root.verify()?;
             let unavailable = |_| failure("ide_tab_owner_unavailable");
             let mut stream = self.connect_checked(unavailable).await?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
-            stream.write_all(&packet).await.map_err(unavailable)?;
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
+            stream.write_all(&**packet).await.map_err(unavailable)?;
             stream.write_all(&frame).await.map_err(unavailable)?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
             match serde_json::from_slice(&frame[4..])

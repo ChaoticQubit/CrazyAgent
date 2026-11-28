@@ -1478,6 +1478,9 @@ pub(crate) fn installed(engine_root: &Path) -> Option<PathBuf> {
 pub mod test_seams;
 
 #[cfg(all(test, target_os = "macos"))]
+#[path = "tmux/old_version_tests.rs"]
+mod old_version_tests;
+#[cfg(all(test, target_os = "macos"))]
 #[path = "tmux/reattach_tests.rs"]
 mod reattach_tests;
 #[cfg(test)]

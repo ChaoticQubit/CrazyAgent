@@ -85,6 +85,23 @@ impl sdk::process::Provide for UnusedProcess {
     }
 }
 
+/// The projects read provider of rows that never reach it.
+struct UnusedProjectRows;
+
+/// The one `UnusedProjectRows` the rows pass.
+const UNUSED_PROJECT_ROWS: UnusedProjectRows = UnusedProjectRows;
+
+impl sdk::generated::project_rows::Provide for UnusedProjectRows {
+    fn page(
+        &self,
+        caller: &'static str,
+        _: Option<String>,
+        _: u16,
+    ) -> Result<sdk::generated::project_rows::RowsPage, Refusal> {
+        panic!("the projects read provider was reached by {caller}");
+    }
+}
+
 /// The sandbox provider of rows that never reach it.
 struct UnusedSandbox;
 
@@ -225,6 +242,7 @@ fn a_granted_call_reaches_the_provider_once() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
@@ -252,6 +270,7 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
@@ -285,6 +304,7 @@ fn an_unknown_plugin_is_refused() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
@@ -321,6 +341,7 @@ fn the_provider_rejection_comes_back_unchanged() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
@@ -347,6 +368,7 @@ fn the_settings_provider_gets_the_bound_plugin_as_caller() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
@@ -373,6 +395,7 @@ fn an_ungranted_secrets_call_never_reaches_the_provider() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
@@ -404,6 +427,7 @@ fn each_secrets_call_needs_its_own_grant() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
@@ -435,6 +459,7 @@ fn the_caller_passed_to_the_secrets_provider_is_the_bound_plugin() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
@@ -469,6 +494,7 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
         editor: &UNUSED_EDITOR,
         net: &UNUSED_NET,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &secrets,
         settings: &provider,
@@ -590,6 +616,7 @@ fn an_ungranted_net_request_never_reaches_egress_allows() {
         editor: &UNUSED_EDITOR,
         net: &fetch,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
@@ -629,6 +656,7 @@ fn net_inputs_over_their_bounds_are_refused() {
         editor: &UNUSED_EDITOR,
         net: &fetch,
         process: &UNUSED_PROCESS,
+        project_rows: &UNUSED_PROJECT_ROWS,
         sandbox: &UNUSED_SANDBOX,
         secrets: &UNUSED_SECRETS,
         settings: &provider,

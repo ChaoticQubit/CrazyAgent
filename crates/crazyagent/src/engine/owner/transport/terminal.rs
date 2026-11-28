@@ -219,14 +219,15 @@ impl OwnerClient {
             let frame = encode_frame(request).map_err(|_| failure("terminal_request_bounds"))?;
             self.root.verify()?;
             let mut stream = self.connect_checked(|_| unavailable()).await?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(MAGIC);
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
-            stream.write_all(&packet).await.map_err(|_| unavailable())?;
+            let packet = crate::engine::secret_frame::owner_packet(
+                MAGIC,
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
+            stream
+                .write_all(&**packet)
+                .await
+                .map_err(|_| unavailable())?;
             stream.write_all(&frame).await.map_err(|_| unavailable())?;
             let reply = read_frame(&mut stream)
                 .await
@@ -1102,7 +1103,7 @@ fn refused(error: &HostError) {
 /// Takes the connection, its `CAT1` packet, the engine, the authority and the attach deadline.
 pub(super) async fn serve(
     mut stream: Stream,
-    auth: [u8; 37],
+    auth: crate::engine::secret_frame::OwnerPacket,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     deadline: Instant,
@@ -1132,7 +1133,7 @@ pub(super) async fn serve(
 /// Takes the connection, its `CAT1` packet, the authority and the attach deadline.
 pub(super) async fn refuse(
     mut stream: Stream,
-    auth: [u8; 37],
+    auth: crate::engine::secret_frame::OwnerPacket,
     authority: Arc<Authority>,
     deadline: Instant,
 ) {

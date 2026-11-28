@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -195,12 +195,11 @@ const toolsRead = (tmux, uv, graphify, patch = {}) => ok({
 const found = { state: "found", version: "3.5a" };
 const toolsReady = toolsRead(found, { state: "installed", version: "0.9.2" }, found);
 
-test("Get set up stays until one account is ready and one pool exists; harnesses never block", () => {
+test("Get set up stays until one account is ready and one pool exists; harnesses never block", async () => {
   const harnesses = ok([harness("codex", "ready"), harness("claude-code", "ready"), harness("pi", "not_installed")]);
   const empty = setupSteps(ok([]), ok([]), harnesses, toolsReady);
   assert.equal(empty.visible, true);
   assert.deepEqual(empty.items.map((item) => [item.id, item.done]), [["accounts", false], ["pools", false], ["harnesses", false], ["tools", true]]);
-  assert.equal(empty.items[2].body, "2 of 3 harnesses ready on this Mac.");
   assert.equal(empty.items[0].href, "#/settings/accounts?action=add");
   assert.equal(empty.items[1].href, "#/settings/pools?action=new");
   assert.equal(setupSteps(ok([account({ status: "not_signed_in" })]), ok([]), harnesses, toolsReady).items[0].done, false);
@@ -209,7 +208,11 @@ test("Get set up stays until one account is ready and one pool exists; harnesses
   assert.equal(setupSteps(ok([account({})]), ok([pool]), harnesses, toolsReady).visible, false);
   const unknown = setupSteps({ kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" });
   assert.equal(unknown.visible, true);
-  assert.equal(unknown.items[2].body, "See which coding agents are installed on this Mac.");
+  await eachComputer("../src/screens/dashboard/index.tsx", (home, { os, computer }) => {
+    assert.equal(home.setupSteps(ok([]), ok([]), harnesses, toolsReady).items[2].body, `2 of 3 harnesses ready on ${computer}.`, os);
+    assert.equal(home.setupSteps({ kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" }).items[2].body,
+      `See which coding agents are installed on ${computer}.`, os);
+  });
 });
 
 test("Get set up stays hidden until every read it uses has settled, so Home never flashes it", () => {

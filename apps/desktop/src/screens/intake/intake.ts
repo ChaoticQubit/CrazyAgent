@@ -6,7 +6,7 @@ import type {
   MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, SkippedFolder, SkippedMore, ToolFix,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
-import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
+import { fileManager, formatRoute, thisComputer, type IconName, type SidebarProject, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, researchChoices, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
@@ -64,7 +64,7 @@ export function pendingFolders(folders: FoundProject[]): FoundProject[] {
 export function homeLine(home: ProjectsHome): string | null {
   if (!home.path) return null;
   const where = folderLabel(home.path);
-  return home.watching ? `Watching ${where}. Drop a project folder into it with Finder and it shows up here.`
+  return home.watching ? `Watching ${where}. Drop a project folder into it with ${fileManager()} and it shows up here.`
     : `${where} is checked when CrazyAgent starts. Live updates are off right now.`;
 }
 
@@ -998,7 +998,7 @@ const INSTALL_ALONE: ReadonlySet<DependencyName> = new Set<DependencyName>(["nod
  * Input: the state. Output: the fixed word, its tone and one line or null. */
 export function stateView(state: DependencyState): { word: string; tone: Tone; line: string | null } {
   switch (state.state) {
-    case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on this Mac.` };
+    case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on ${thisComputer()}.` };
     case "installed": return { word: "Installed", tone: "ok", line: `Version ${displayText(state.version)} installed.` };
     case "bundled": return { word: "Bundled", tone: "ok", line: `Bundled with CrazyAgent, version ${displayText(state.version)}.` };
     case "system": return { word: "Found", tone: "ok", line: displayText(state.note) };

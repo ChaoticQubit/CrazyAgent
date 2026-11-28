@@ -2,7 +2,9 @@ pub mod permission_fix;
 /// The methods of [`Places`]: how the places are built, which folders they keep and which
 /// paths agents can write.
 mod places;
+pub use places::{in_temp_of, npm_shims, temp_roots};
 pub mod probe;
+mod script;
 #[cfg(test)]
 pub(crate) mod stub;
 #[cfg(any(test, feature = "test-support"))]
@@ -268,6 +270,43 @@ pub const TMUX_MISSING: &str = "tmux is missing, so the live master's terminal c
 pub const TMUX_MISSING: &str =
     "The live master's terminal can't open on this computer. Try again in a moment.";
 
+/// How to install git on macOS, where the Command Line Tools carry it.
+#[cfg(target_os = "macos")]
+const GIT_HINT: &str = "Install git: run xcode-select --install in Terminal.";
+/// How to install git on Linux and the other Unix systems, from the system's packages.
+#[cfg(all(unix, not(target_os = "macos")))]
+const GIT_HINT: &str = "Install git with your package manager.";
+/// How to install git on Windows.
+#[cfg(not(unix))]
+const GIT_HINT: &str = "Install Git for Windows from git-scm.com.";
+
+/// How to install Node.js on macOS, from its site or with Homebrew in Terminal.
+#[cfg(target_os = "macos")]
+pub const NODE_HINT: &str =
+    "Install Node.js from nodejs.org, or run brew install node in Terminal.";
+/// How to install Node.js on Linux and the other Unix systems.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org or with your package manager.";
+/// How to install Node.js on Windows.
+#[cfg(not(unix))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org.";
+
+/// How to install Codex on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in Terminal.";
+/// How to install Codex on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in a terminal.";
+
+/// How to install Claude Code on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal.";
+/// How to install Claude Code on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in a terminal.";
+
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
@@ -387,12 +426,13 @@ pub fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
 }
 
 /// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
-/// then its npm harness prefix's `bin` ([`FindingHooks::harness_prefix`]). Input: the engine
-/// root and the hooks. Output: the two folders in that order.
+/// then the folder its npm harness prefix ([`FindingHooks::harness_prefix`]) keeps their
+/// entries in ([`npm_shims`]). Input: the engine root and the hooks. Output: the two folders
+/// in that order.
 fn engine_folders(hooks: &FindingHooks, root: &Path) -> [PathBuf; 2] {
     [
         root.join("setup").join("bin"),
-        (hooks.harness_prefix)(root).join("bin"),
+        npm_shims(&(hooks.harness_prefix)(root)),
     ]
 }
 
@@ -454,42 +494,11 @@ fn under_temp(hooks: &FindingHooks, path: &Path, temps: &[PathBuf]) -> bool {
         .any(|temp| path.starts_with(temp) || short.starts_with(temp))
 }
 
-/// The temp folders: the shared ones and this user's own, as given, with its links resolved
-/// and in the plain form [`FindingHooks::canonical`] gives (a Windows drive path without
-/// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
-/// dropped. Input: the hooks. Output: the absolute folders, each once.
-pub fn temp_roots(hooks: &FindingHooks) -> Vec<PathBuf> {
-    let owner = std::env::temp_dir();
-    let real = owner.canonicalize().ok();
-    let plain = (hooks.canonical)(&owner).ok();
-    let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
-    for root in std::iter::once(owner).chain(real).chain(plain) {
-        if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
-            roots.push(root);
-        }
-    }
-    assert!(roots.len() <= TEMP_FOLDERS.len() + 3);
-    roots
-}
-
 /// Whether a folder is in a temp folder, which other users, or agents with the temp folder
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Inputs: the hooks and the folder. Output: the answer.
 fn in_temp(hooks: &FindingHooks, folder: &Path) -> bool {
     in_temp_of(hooks, folder, &temp_roots(hooks))
-}
-
-/// Whether a folder is in one of the temp folders given, as written and with its links
-/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the hooks, the
-/// folder and the temp folders. Output: the answer.
-pub fn in_temp_of(hooks: &FindingHooks, folder: &Path, temps: &[PathBuf]) -> bool {
-    if temps.is_empty() {
-        return false;
-    }
-    let real = folder.canonicalize().ok();
-    std::iter::once(folder)
-        .chain(real.as_deref())
-        .any(|folder| under_temp(hooks, folder, temps))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
@@ -503,8 +512,14 @@ pub enum Kind {
         interpreter: Box<Resolved>,
         arguments: Vec<String>,
         by_name: bool,
+        word: ScriptWord,
     },
 }
+
+/// The word a script's interpreter is handed for it, made only by [`Resolved::script`], so no
+/// script holds a word its interpreter cannot start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptWord(OsString);
 
 /// One tool the resolver found: the entry as found, the real file it names and how it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -534,11 +549,12 @@ impl Resolved {
             Kind::Script {
                 interpreter,
                 arguments,
+                word,
                 ..
             } => {
                 let mut words = interpreter.argv();
                 words.extend(arguments.iter().map(OsString::from));
-                words.push(self.program.clone().into_os_string());
+                words.push(word.0.clone());
                 words
             }
         };
@@ -593,8 +609,9 @@ impl Reason {
 /// with no real install found behind it, or a file in a temp folder the engine's places
 /// refuse or reached through a link into one, which agents with the owner's temp folder
 /// grant or other users write, a script whose first line the resolver cannot read the
-/// way the system and `/usr/bin/env` run it, or a Windows batch file that is neither an npm
-/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe.
+/// way the system and `/usr/bin/env` run it, a Windows batch file that is neither an npm
+/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe, or a Windows
+/// script whose real file only a verbatim `\\?\` path names, which Node cannot start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
@@ -603,6 +620,7 @@ pub enum Refusal {
     InTemp,
     FirstLine,
     Batch,
+    Verbatim,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -959,15 +977,16 @@ pub(crate) fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Re
     if real_name.is_some_and(launches_by_name) || launches_by_name(&interpreter_name) {
         return Err(refused(program.as_path(), Refusal::FirstLine));
     }
-    Ok(Resolved {
-        entry: entry.to_path_buf(),
-        program,
-        kind: Kind::Script {
-            interpreter: Box::new(interpreter),
-            arguments: shebang.arguments,
-            by_name: shebang.by_name.is_some() || through_shim,
-        },
-    })
+    let by_name = shebang.by_name.is_some() || through_shim;
+    let entry = entry.to_path_buf();
+    Resolved::script(
+        entry,
+        program.clone(),
+        interpreter,
+        shebang.arguments,
+        by_name,
+    )
+    .map_err(|why| refused(program.as_path(), why))
 }
 
 /// A step a row runs once in `entry_at` between reading an entry's real file and checking
@@ -1153,8 +1172,9 @@ struct Unreadable;
 /// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
 /// it cannot read, which the system still runs, a line holding `#`, where the system
 /// ends it, and an `-S` line with a word holding `$`, `\`, `"` or `'`, which `env` splits
-/// otherwise, are [`Unreadable`]. Input: the real file. Output: the line, none for a file
-/// that is not a script, or [`Unreadable`] for any other first line.
+/// otherwise, are [`Unreadable`]. On Windows one carriage return right before the newline
+/// that ends the line is read away, as Windows Node ships npm's scripts. Input: the real file.
+/// Output: the line, none for a file that is not a script, or [`Unreadable`] otherwise.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
     let mut head = Vec::with_capacity(SCRIPT_HEAD_BYTES_MAX);
@@ -1174,7 +1194,13 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     if end.is_none() && head.len() == SCRIPT_HEAD_BYTES_MAX {
         return Err(Unreadable);
     }
-    let line = std::str::from_utf8(&line[..end.unwrap_or(line.len())]).map_err(|_| Unreadable)?;
+    let text = &line[..end.unwrap_or(line.len())];
+    #[cfg(windows)]
+    let text = match end {
+        Some(at) if line[at] == b'\n' => text.strip_suffix(b"\r").unwrap_or(text),
+        _ => text,
+    };
+    let line = std::str::from_utf8(text).map_err(|_| Unreadable)?;
     if line
         .chars()
         .any(|c| (c.is_control() && c != '\t') || c == '#')
@@ -1346,7 +1372,10 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
         ),
         Refusal::Batch => format!(
-            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npm.cmd or npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+        ),
+        Refusal::Verbatim => format!(
+            "{tool} can't start: {file} is not used because only a long-form Windows path can name it (a network share, a name such as CON or AUX, a name ending in a dot or a space, or a path that is too long), which Node.js can't start. Install it in a folder with a short, plain path, then try again."
         ),
     }
 }
@@ -1355,12 +1384,10 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
 /// sentence.
 fn install_hint(tool: &str) -> &'static str {
     match tool {
-        "node" | "npm" => "Install Node.js from nodejs.org, or run brew install node in Terminal.",
-        "codex" => "Install Codex: run npm install -g @openai/codex in Terminal.",
-        "claude" => {
-            "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal."
-        }
-        "git" => "Install git: run xcode-select --install in Terminal.",
+        "node" | "npm" => NODE_HINT,
+        "codex" => CODEX_HINT,
+        "claude" => CLAUDE_HINT,
+        "git" => GIT_HINT,
         _ => "Install it, or run setup again from Settings.",
     }
 }

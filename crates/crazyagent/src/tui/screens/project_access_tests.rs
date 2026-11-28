@@ -801,11 +801,7 @@ fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
 #[test]
 fn every_narrowing_stop_reads_the_same_sentence_in_both_uis() {
     use kernel_sandbox::policy::Narrowing;
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../apps/desktop/src/api.ts"
-    ))
-    .unwrap();
+    let source = include_str!("../../../../../apps/desktop/src/api.ts");
     let start = source
         .find("const COPY: Record<string, string> = {")
         .unwrap();

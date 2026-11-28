@@ -1,32 +1,36 @@
-import "./load-source.mjs";
+import { COMPUTERS, eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const model = await import("../src/screens/first-run/harnesses.ts");
-const api = await import("../src/api-harness-updates.ts");
 
 /** Every string literal in one TUI source file, in source order, unescaped, so a desktop word
- * can be found in the TUI whatever way rustfmt splits the lines. Input: the file under the
- * TUI screens folder. Output: the literals. */
-function rustLiterals(file) {
-  const source = readFileSync(new URL(`../../../crates/crazyagent/src/tui/screens/${file}`, import.meta.url), "utf8");
+ * can be found in the TUI whatever way rustfmt splits the lines. A sentence joined around the
+ * computer's name reads as one literal with the given computer's words. Inputs: the file under
+ * the TUI screens folder and the computer's words. Output: the literals. */
+function rustLiterals(file, computer) {
+  const source = readFileSync(new URL(`../../../crates/crazyagent/src/tui/screens/${file}`, import.meta.url), "utf8")
+    .replace(/on_this_computer!\(\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)",?\s*\)/g, (_, before, after) => `"${before}${computer}${after}"`);
   return [...source.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1].replace(/\\(["\\])/g, "$1"));
 }
 
-const STEP = rustLiterals("harness_setup.rs");
+const STEP = rustLiterals("harness_setup.rs", COMPUTERS[2].computer);
 
-test("the TUI Harnesses step uses the desktop step's words", () => {
-  const single = [
-    model.HARNESS_STEP.label, model.HARNESS_STEP.title, model.HARNESS_STEP.intro,
-    ...model.OFFERED.map((harness) => harness.id), ...model.OFFERED.map((harness) => harness.name),
-    ...Object.values(model.HARNESS_WORDS),
-  ];
-  for (const word of single) assert.ok(STEP.includes(word), word);
-  for (const kind of ["bundled", "installed", "offer", "refused", "reading", "waiting", "installing", "done", "failed", "blocked"]) {
-    const badge = model.rowBadge({ kind, version: null, line: "", reason: "", guide: null });
-    assert.ok(STEP.includes(badge.word), `${kind}: ${badge.word}`);
-  }
+test("the TUI Harnesses step uses the desktop step's words", async () => {
+  await eachComputer("../src/screens/first-run/harnesses.ts", (step, { os, computer }) => {
+    const words = rustLiterals("harness_setup.rs", computer);
+    const single = [
+      step.HARNESS_STEP.label, step.HARNESS_STEP.title, step.HARNESS_STEP.intro,
+      ...step.OFFERED.map((harness) => harness.id), ...step.OFFERED.map((harness) => harness.name),
+      ...Object.values(step.HARNESS_WORDS),
+    ];
+    for (const word of single) assert.ok(words.includes(word), `${os}: ${word}`);
+    for (const kind of ["bundled", "installed", "offer", "refused", "reading", "waiting", "installing", "done", "failed", "blocked"]) {
+      const badge = step.rowBadge({ kind, version: null, line: "", reason: "", guide: null });
+      assert.ok(words.includes(badge.word), `${os} ${kind}: ${badge.word}`);
+    }
+  });
 });
 
 test("the TUI progress sentences are the desktop's, with the same counts filled in", () => {
@@ -40,13 +44,15 @@ test("the TUI progress sentences are the desktop's, with the same counts filled 
   }
 });
 
-test("the TUI says needs Node and a bad list in the desktop's words", () => {
-  const copy = rustLiterals("settings_harnesses.rs");
-  for (const code of ["harness_install_needs_node", "harness_install_list_invalid"]) {
-    const at = copy.indexOf(code);
-    assert.ok(at >= 0, code);
-    assert.equal(copy[at + 1], api.updateCopy(code), code);
-  }
+test("the TUI says needs Node and a bad list in the desktop's words", async () => {
+  await eachComputer("../src/api-harness-updates.ts", (updates, { os, computer }) => {
+    const copy = rustLiterals("settings_harnesses/words.rs", computer);
+    for (const code of ["harness_install_needs_node", "harness_install_list_invalid"]) {
+      const at = copy.indexOf(code);
+      assert.ok(at >= 0, `${os} ${code}`);
+      assert.equal(copy[at + 1], updates.updateCopy(code), `${os} ${code}`);
+    }
+  });
 });
 
 test("Task 21 (Q3): every Limited control reason the bundled manifests give reads word for word in Settings, Harnesses and in the pickers' team notes", async () => {

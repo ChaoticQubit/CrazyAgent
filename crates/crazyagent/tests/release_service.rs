@@ -443,12 +443,19 @@ fn scripted_service(tag: &str, temp: &Path, root: &Path, beside: &Path, body: &s
     }
 }
 
+/// A temporary folder beside the test binary, where a login service may run a script, since a
+/// service may not run anything under `/tmp`. Output: the folder, removed when dropped.
+#[cfg(target_os = "macos")]
+fn beside_binary() -> tempfile::TempDir {
+    tempfile::tempdir_in(Path::new(BIN).parent().unwrap()).unwrap()
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_service_engine_slow_to_start_is_waited_for_while_launchd_still_runs_it() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
     let built = Path::new(BIN).parent().unwrap();
-    let beside = tempfile::tempdir_in(built).unwrap();
+    let beside = beside_binary();
     for name in ["crazyagent", "crazyagent-runner", "crazyagent-landlock"] {
         if built.join(name).is_file() {
             std::fs::copy(built.join(name), beside.path().join(name)).unwrap();
@@ -500,7 +507,7 @@ fn a_service_engine_slow_to_start_is_waited_for_while_launchd_still_runs_it() {
 #[test]
 fn a_start_while_a_restore_still_copies_refuses_and_leaves_the_engine_process_running() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
-    let beside = tempfile::tempdir_in("/tmp").unwrap();
+    let beside = beside_binary();
     let layout = Layout::new(temp.path().join("engine")).unwrap();
     layout.prepare().unwrap();
     let service = scripted_service(
@@ -553,7 +560,7 @@ fn a_start_while_a_restore_still_copies_refuses_and_leaves_the_engine_process_ru
 #[test]
 fn a_service_engine_that_exits_while_starting_is_reported_at_once_not_waited_for() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
-    let beside = tempfile::tempdir_in(Path::new(BIN).parent().unwrap()).unwrap();
+    let beside = beside_binary();
     let layout = Layout::new(temp.path().join("engine")).unwrap();
     let service = scripted_service(
         "exits",

@@ -165,8 +165,8 @@ fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
 /// secrets folder carry the medium label with no-write-up, no-read-up and no-execute-up; the
 /// data root itself, its logs and the plugin store carry none, so a root the engine makes
 /// there for an AppContainer starts unlabelled.
-#[tokio::test]
-async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_label() {
+#[test]
+fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_label() {
     use super::plugins;
     const MEDIUM_FULL: Option<(u32, u32)> = Some((0x2000, 0x7));
     let root = tempfile::tempdir().unwrap();
@@ -175,28 +175,34 @@ async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_labe
     let data = layout.root().to_path_buf();
     let config =
         crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
-    let storage = Storage::open(&data.join("engine.db"), config, false)
-        .await
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .unwrap();
-    let secrets = plugins::store_folder(&data, &[plugins::SECRETS]).unwrap();
-    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
-        let file = private::file(&data.join(name), false).unwrap();
-        assert_eq!(own_label(&file), MEDIUM_FULL, "{name}");
-    }
-    assert_eq!(own_label(&private::dir(&secrets).unwrap()), MEDIUM_FULL);
-    for folder in [data.clone(), layout.logs(), data.join(plugins::STORE)] {
-        let held = private::dir(&folder).unwrap();
-        assert_eq!(own_label(&held), None, "{}", folder.display());
-    }
-    drop(storage);
+    runtime.block_on(async {
+        let storage = Storage::open(&data.join("engine.db"), config, false)
+            .await
+            .unwrap();
+        let secrets = plugins::store_folder(&data, &[plugins::SECRETS]).unwrap();
+        for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+            let file = private::file(&data.join(name), false).unwrap();
+            assert_eq!(own_label(&file), MEDIUM_FULL, "{name}");
+        }
+        assert_eq!(own_label(&private::dir(&secrets).unwrap()), MEDIUM_FULL);
+        for folder in [data.clone(), layout.logs(), data.join(plugins::STORE)] {
+            let held = private::dir(&folder).unwrap();
+            assert_eq!(own_label(&held), None, "{}", folder.display());
+        }
+        drop(storage);
+    });
 }
 
 /// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW), V244-WIN-STORE-LABEL-NX:
 /// a data root the update channel save made before the first `Layout::prepare` still hands
 /// the full medium label to engine.db and its side files, as `prepare` labels the root
 /// whatever made it.
-#[tokio::test]
-async fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
+#[test]
+fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
     const MEDIUM_FULL: Option<(u32, u32)> = Some((0x2000, 0x7));
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
@@ -205,14 +211,20 @@ async fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
     layout.prepare().unwrap();
     let config =
         crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
-    let storage = Storage::open(&data.join("engine.db"), config, false)
-        .await
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .unwrap();
-    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
-        let file = private::file(&data.join(name), false).unwrap();
-        assert_eq!(own_label(&file), MEDIUM_FULL, "{name}");
-    }
-    drop(storage);
+    runtime.block_on(async {
+        let storage = Storage::open(&data.join("engine.db"), config, false)
+            .await
+            .unwrap();
+        for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+            let file = private::file(&data.join(name), false).unwrap();
+            assert_eq!(own_label(&file), MEDIUM_FULL, "{name}");
+        }
+        drop(storage);
+    });
 }
 
 /// W1c D5: an MCP server secret round-trips through the Windows plugin key store as a W1

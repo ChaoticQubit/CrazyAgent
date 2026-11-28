@@ -234,9 +234,7 @@ impl ChannelCase {
 
     fn admission(&self) -> Admission {
         let client = self.client(OwnerClientKind::Tui);
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAO1");
-        packet[5..].copy_from_slice(&client.token);
+        let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &client.token);
         self.host.authority.authenticate(&packet).unwrap()
     }
 
@@ -297,7 +295,7 @@ impl ChannelCase {
         (fact, launch)
     }
 
-    fn token(&self) -> [u8; 32] {
+    fn token(&self) -> crate::engine::secret_frame::OwnerToken {
         self.host
             .authority
             .native_auth
@@ -306,13 +304,11 @@ impl ChannelCase {
             .as_ref()
             .unwrap()
             .token
+            .clone()
     }
 
-    fn packet(&self) -> [u8; 37] {
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAN1");
-        packet[5..].copy_from_slice(&self.token());
-        packet
+    fn packet(&self) -> crate::engine::secret_frame::OwnerPacket {
+        crate::engine::secret_frame::owner_packet(b"CAN1", 0, &self.token())
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -588,7 +584,7 @@ async fn native_auth_channel_rejects_owner_runner_and_reserved_capability_roles(
                     } else {
                         OwnerClientKind::Desktop
                     };
-                    packet[5..].copy_from_slice(&case.client(kind).token);
+                    packet[5..].copy_from_slice(&**case.client(kind).token);
                 }
                 "as-tui" | "as-desktop" => {
                     packet[..4].copy_from_slice(b"CAO1");
@@ -1251,4 +1247,31 @@ async fn native_auth_channel_logout_no_child_retirement_preserves_real_action_an
         drop((channel, launch));
     })
     .await;
+}
+
+/// Returns the size of the value an `Authority` field may hold. Input: a function that picks
+/// the field. Output: the held value's size in bytes.
+fn payload<T>(_: for<'a> fn(&'a Authority) -> &'a Mutex<Option<T>>) -> usize {
+    size_of::<T>()
+}
+
+/// The custody slot is held behind a pointer, so taking it moves only the pointer and leaves
+/// no copy of its owner token in the authority's memory.
+#[test]
+fn the_custody_slot_is_held_behind_a_pointer() {
+    let held = payload(|authority| &authority.native_auth);
+    assert_eq!(held, size_of::<usize>());
+}
+
+/// Returns the size of one `Slot` field. Input: a function that picks the field. Output:
+/// the field's size in bytes.
+fn slot_field<T>(_: for<'a> fn(&'a Slot) -> &'a T) -> usize {
+    size_of::<T>()
+}
+
+/// An owner slot's token is held behind a pointer from birth, so moving the slot into the
+/// authority leaves no copy of the token on the stack or in a freed list.
+#[test]
+fn an_owner_slot_token_is_held_behind_a_pointer() {
+    assert_eq!(slot_field(|slot| &slot.token), size_of::<usize>());
 }

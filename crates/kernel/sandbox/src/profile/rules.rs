@@ -636,6 +636,7 @@ impl ProjectSandbox {
                 "profile must live outside the sandbox's writable roots",
             ));
         }
+        self.secrets_still_clear()?;
         if !self.owner_config && self.engine_home != Some(false) {
             make_config_parents(self.hooks, &self.agent_home, self.engine_home == Some(true))?;
         }

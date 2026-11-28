@@ -292,5 +292,18 @@
       "    \"handed\": \"https://api.anthropic.com/v1\","
     ],
     "capture": []
+  },
+  {
+    "scenario": "provider/request-local-models",
+    "at": 4,
+    "commit": "5f80d2ec8a",
+    "reason": "the row now lists the models of a real Ollama, which names each with its tag; the engine keeps the tag in 2.4.2 and 2.5 alike (2.5 crates/crazyagent/src/accounts/probe.rs:227 item.name and model_names :177-191, ':' allowed, no strip, at 0202af5335; 2.4.4 master 856102cfa9 probe.rs:176), while the 2.4.2 fake answered the bare name, so this is a test-input change, not a product change",
+    "security": false,
+    "golden": [
+      "      \"snapshot-model\""
+    ],
+    "capture": [
+      "      \"snapshot-model:latest\""
+    ]
   }
 ]

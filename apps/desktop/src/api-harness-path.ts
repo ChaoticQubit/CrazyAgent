@@ -1,4 +1,5 @@
 import { call, type Result } from "./api";
+import { thisComputer } from "./ui/keys";
 
 export type ChoosableHarness = "codex" | "claude-code";
 export type Found =
@@ -17,12 +18,12 @@ const COPY: Record<string, string> = {
   harness_path_unknown_harness: "You can only choose the file for Codex and Claude Code.",
   harness_path_invalid: "That isn't a full path to one file.",
   harness_path_not_found: "There's no file there.",
-  harness_path_not_executable: "That file isn't a program this Mac can run.",
+  harness_path_not_executable: `That file isn't a program ${thisComputer()} can run.`,
   harness_path_agent_space: "That file is in CrazyAgent's own folders, where agents work, so CrazyAgent won't run it.",
   harness_path_shim: "That file is a Volta, asdf or mise shim, which starts another program. Choose the real file instead.",
-  harness_path_changeable: "Another user on this Mac can change that file or a folder above it, so CrazyAgent won't run it.",
+  harness_path_changeable: `Another user on ${thisComputer()} can change that file or a folder above it, so CrazyAgent won't run it.`,
   harness_path_unreadable: "CrazyAgent couldn't read or save the chosen file. Try again.",
-  native_auth_host_executable_unsafe: "Another user on this Mac can change that file, or it isn't a plain program file, so CrazyAgent won't run it.",
+  native_auth_host_executable_unsafe: `Another user on ${thisComputer()} can change that file, or it isn't a plain program file, so CrazyAgent won't run it.`,
   native_auth_host_executable_changed: "That file changed while CrazyAgent checked it. Try again.",
   native_auth_host_unavailable: "The engine can't add a harness right now. Restart the engine, then try again.",
   native_auth_host_registration_frozen: "The engine is stopping, so it can't add a harness now. Try again once it has restarted.",

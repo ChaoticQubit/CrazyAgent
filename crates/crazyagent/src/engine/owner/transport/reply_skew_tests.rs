@@ -96,8 +96,8 @@ async fn serve(listener: Listener, replies: Vec<Vec<u8>>) {
     let mut replies: VecDeque<Vec<u8>> = replies.into();
     while let Some(reply) = replies.pop_front() {
         let mut stream = crate::ipc::owner_accept(&listener).await.unwrap();
-        let mut auth = [0; 37];
-        stream.read_exact(&mut auth).await.unwrap();
+        let mut auth = crate::engine::secret_frame::owner_packet_buffer();
+        stream.read_exact(&mut **auth).await.unwrap();
         read_frame(&mut stream).await.unwrap();
         let length = u32::try_from(reply.len()).unwrap();
         stream.write_all(&length.to_be_bytes()).await.unwrap();

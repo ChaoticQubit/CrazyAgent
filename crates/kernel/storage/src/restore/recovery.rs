@@ -10,8 +10,10 @@ use crate::migrations::{
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::collections::BTreeSet;
+use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 #[cfg(test)]
@@ -89,27 +91,76 @@ pub fn copy_name(word: &str) -> bool {
         .is_some_and(|time| !time.is_empty() && time.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
+/// The restore locks this process holds now, by the lock file's device and inode. Every
+/// lock of one file shares one descriptor, so this set is what refuses a second thread.
+static HOLDING: Mutex<BTreeSet<(rustix::fs::Dev, u64)>> = Mutex::new(BTreeSet::new());
+
+/// The restore lock held for one recovery action, on the descriptor this process keeps for
+/// the lock file for its whole life. Dropping it unlocks that descriptor's open file, which
+/// a process spawned meanwhile may share until its exec, then always frees the key: a lock
+/// an unlock left held is on that same open file, so the next lock here takes it again.
+struct RestoreLock {
+    file: Arc<std::fs::File>,
+    key: (rustix::fs::Dev, u64),
+}
+
+impl Drop for RestoreLock {
+    fn drop(&mut self) {
+        while rustix::fs::flock(&*self.file, rustix::fs::FlockOperation::Unlock)
+            == Err(rustix::io::Errno::INTR)
+        {}
+        let mut holding = HOLDING.lock().unwrap_or_else(PoisonError::into_inner);
+        let freed = holding.remove(&self.key);
+        assert!(freed, "a held restore lock has its key in the set");
+    }
+}
+
+/// The refusal for a restore lock that could not be taken: busy only when another holds
+/// it, the cause itself for any other failure. Input: the flock's error. Output: the error.
+fn lock_refusal(cause: rustix::io::Errno) -> StorageError {
+    match cause == rustix::io::Errno::WOULDBLOCK {
+        true => error(PUTBACK_BUSY),
+        false => restore_failed(cause),
+    }
+}
+
 /// Takes the restore lock beside engine.db without waiting: a private file this user owns,
-/// opened without following a link. Input: the engine root. Output: the held file, or
-/// `storage_putback_busy` while another holds it.
-fn locked(root: &Path) -> Result<std::fs::File, StorageError> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(root.join(RESTORE_LOCK_FILE))
-        .map_err(restore_failed)?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| error(PUTBACK_BUSY))?;
-    Ok(file)
+/// made without following a link, then held through the descriptor this process keeps for
+/// it. Input: the engine root. Output: the held lock, `storage_putback_busy` while another
+/// process or thread holds it, or `storage_restore_failed` with the cause of any other error.
+fn locked(root: &Path) -> Result<RestoreLock, StorageError> {
+    let name = root.join(RESTORE_LOCK_FILE);
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            .open(&name)
+            .map_err(restore_failed)?,
+    );
+    let file = crate::held_files::held_file(rustix::fs::CWD, &name).map_err(restore_failed)?;
+    let stat = rustix::fs::fstat(&*file).map_err(restore_failed)?;
+    let key = (stat.st_dev, stat.st_ino);
+    let mut holding = HOLDING.lock().unwrap_or_else(PoisonError::into_inner);
+    if !holding.insert(key) {
+        return Err(error(PUTBACK_BUSY));
+    }
+    if let Err(cause) =
+        rustix::fs::flock(&*file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+    {
+        let freed = holding.remove(&key);
+        assert!(freed);
+        return Err(lock_refusal(cause));
+    }
+    Ok(RestoreLock { file, key })
 }
 
 /// Holds the restore lock and engine.db alone for one recovery action. Input: the database
 /// path. Output: both, or `storage_putback_busy` while anything else holds either.
-fn held(path: &Path) -> Result<(std::fs::File, Connection), StorageError> {
+fn held(path: &Path) -> Result<(RestoreLock, Connection), StorageError> {
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
@@ -226,10 +277,12 @@ pub fn put_back(path: &Path) -> Result<PathBuf, StorageError> {
 
 /// Puts the copy back under the restore lock, with engine.db held alone: the record is read
 /// under the lock, the copy it names passes its check before any write, engine.db is kept as
-/// it is in a new `replaced-<time>` folder, the copy is restored over it on the held
-/// connection and checked against it with `check`, and only then is the record removed.
-/// Inputs: the database path, the check and a step run on the root before the lock.
-/// Output: the folder that keeps the replaced data, or the refusal with the record as it was.
+/// it is in a new `replaced-<time>` folder through the file this process holds open for
+/// good, which must still be the named engine.db once held, the copy is restored over it on
+/// the held connection and checked against it with `check`, and only then is the record
+/// removed; no path closes a descriptor of engine.db. Inputs: the
+/// database path, the check and a step run on the root before the lock. Output: the folder
+/// that keeps the replaced data, or the refusal with the record as it was.
 pub(super) fn put_back_with(
     path: &Path,
     check: CopyCheck,
@@ -239,12 +292,14 @@ pub(super) fn put_back_with(
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
     before_lock(root);
+    let live = crate::held_files::held_file(rustix::fs::CWD, path).map_err(restore_failed)?;
     let (_lock, mut db) = held(path)?;
+    same_file(&live, path)?;
     let name = broken_record(root)
         .and_then(|broken| broken.copy().map(str::to_owned))
         .ok_or_else(|| error(PUTBACK_COPY_MISSING))?;
     let (source, found, rows) = usable(root, &name)?;
-    let saved = keep_live(&db, path, root, SystemTime::now())?;
+    let saved = keep_live(&live, &db, root, SystemTime::now())?;
     restore(&mut db, &source, found, &rows).map_err(|cause| check_failed(cause.0))?;
     check(&db, &source.join(DATABASE)).map_err(|cause| check_failed(cause.0))?;
     clear(root)?;
@@ -252,14 +307,31 @@ pub(super) fn put_back_with(
     Ok(saved)
 }
 
+/// Refuses a live file that is no longer engine.db: the name must still be the same
+/// device and inode as the held file taken before the hold. Inputs: the held file and the
+/// database path. Output: Ok, or `storage_restore_failed`.
+fn same_file(live: &std::fs::File, path: &Path) -> Result<(), StorageError> {
+    let opened = rustix::fs::fstat(live).map_err(restore_failed)?;
+    let named = rustix::fs::statat(rustix::fs::CWD, path, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(restore_failed)?;
+    let regular =
+        rustix::fs::FileType::from_raw_mode(named.st_mode) == rustix::fs::FileType::RegularFile;
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) || !regular {
+        return Err(restore_failed("engine.db was replaced before it was held"));
+    }
+    Ok(())
+}
+
 /// Keeps engine.db's bytes as they are in a new 0700 `replaced-<UTC time>` folder before a
-/// put-back writes, so it can be undone by hand: the WAL is moved into the file first, and a
-/// barrier orders the copy and its folder before the put-back's first write. The copy is not
-/// checked, since the data may fail any check, so it gets no `checked` marker. Inputs: the
-/// held connection, the database path, the root and the time. Output: the folder.
+/// put-back writes, so it can be undone by hand: the WAL is moved into the file first, then
+/// the bytes are read by position through the file this process holds open for good, so no
+/// descriptor of engine.db is closed and no shared file offset moves, and a barrier orders
+/// the copy and its folder before the put-back's first write. The copy is not checked, since
+/// the data may fail any check, so it gets no `checked` marker. Inputs: that file, the held
+/// connection, the root and the time. Output: the folder.
 fn keep_live(
+    live: &std::fs::File,
     db: &Connection,
-    path: &Path,
     root: &Path,
     now: SystemTime,
 ) -> Result<PathBuf, StorageError> {
@@ -271,9 +343,28 @@ fn keep_live(
         .create(&target)
         .map_err(restore_failed)?;
     let copy = target.join(DATABASE);
-    let made = std::fs::copy(path, &copy)
-        .and_then(|_| std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600)))
-        .and_then(|()| flush(&std::fs::File::open(&copy)?, Flush::Barrier))
+    let made = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&copy)
+        .and_then(|mut kept| {
+            let mut buffer = vec![0_u8; 64 * 1024];
+            let mut offset = 0_u64;
+            loop {
+                let read = match live.read_at(&mut buffer, offset) {
+                    Ok(read) => read,
+                    Err(cause) if cause.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(cause) => return Err(cause),
+                };
+                if read == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut kept, &buffer[..read])?;
+                offset += read as u64;
+            }
+            flush(&kept, Flush::Barrier)
+        })
         .and_then(|()| flush(&std::fs::File::open(&target)?, Flush::Barrier));
     if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);

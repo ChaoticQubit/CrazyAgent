@@ -906,9 +906,8 @@ async fn cli_owner_transport_rejects_wrong_authentication() {
     let mut stream = kernel_processes::spawn_gate::connect_unix(path)
         .await
         .unwrap();
-    let mut packet = [0; 37];
-    packet[..4].copy_from_slice(b"CAO1");
-    stream.write_all(&packet).await.unwrap();
+    let packet = crazyagent::engine::secret_frame::owner_packet(b"CAO1", 0, &[0; 32]);
+    stream.write_all(&**packet).await.unwrap();
     let mut byte = [0; 1];
     let result = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
         .await

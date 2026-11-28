@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 
 const notify = await import("../src/notify.ts");
 
@@ -68,10 +68,8 @@ test("Settings says plainly how to allow notifications on macOS, and that other 
   const mac = notify.systemNotificationsLine(available);
   assert.equal(mac, notify.AVAILABLE_LINE);
   assert.match(mac, /in the background/);
-  assert.match(mac, /If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications\.$/);
   assert.equal(notify.systemNotificationsLine(unavailable), "System notifications are unavailable on this system.");
   assert.equal(notify.systemNotificationsLine({ kind: "error", code: "x", message: "" }), "System notifications are unavailable on this system.");
-  assert.match(notify.FAILED_LINE, /^Couldn't show a macOS notification\. .*System Settings, Notifications\.$/);
 });
 
 test("the window names only the project and the question; the app writes the notification text", () => {
@@ -98,3 +96,27 @@ test("one question-counts read per team change feeds the sidebar flags, the badg
   assert.doesNotMatch(source, /setTimeout|setInterval|QUESTION_READ_MS/, "the watch has no timer of its own");
   assert.doesNotMatch(app, /useQuestionNotifications/);
 });
+
+test("the notification lines name each computer's own notification settings, and macOS keeps its words", async () => {
+  const words = {
+    mac: [
+      "When a question waits for you while CrazyAgent is in the background, macOS shows a notification. If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications.",
+      "Couldn't show a macOS notification. Check that CrazyAgent is allowed in System Settings, Notifications.",
+    ],
+    windows: [
+      "When a question waits for you while CrazyAgent is in the background, Windows shows a notification. If none appear, Windows is blocking them: allow CrazyAgent in Settings, System, Notifications.",
+      "Couldn't show a Windows notification. Check that CrazyAgent is allowed in Settings, System, Notifications.",
+    ],
+    linux: [
+      "When a question waits for you while CrazyAgent is in the background, your desktop shows a notification. If none appear, your desktop is blocking them: allow CrazyAgent in your desktop's notification settings.",
+      "Couldn't show a desktop notification. Check that CrazyAgent is allowed in your desktop's notification settings.",
+    ],
+  };
+  await eachComputer("../src/notify.ts", (shown, { os }) => {
+    const [available, failed] = words[os];
+    assert.equal(shown.systemNotificationsLine({ kind: "ok", value: "available" }), available, os);
+    assert.equal(shown.failureLine({ kind: "error", code: "notifications_failed", message: "" }), failed, os);
+    assert.equal(shown.systemNotificationsLine({ kind: "ok", value: "unavailable" }), "System notifications are unavailable on this system.", os);
+  });
+});
+

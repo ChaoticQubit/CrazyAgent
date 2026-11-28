@@ -68,7 +68,7 @@ test("a tool line has its name on the left, what it is for under it and its stat
   const [tmux, uv, graphify] = tools.rows;
   assert.deepEqual([tmux.label, tmux.control], ["tmux", "Found"]);
   assert.ok(tmux.controlLeft > tmux.labelRight, JSON.stringify(tmux));
-  for (const part of ["Runs each agent in a live terminal.", "Version 3.5a on this Mac."]) assert.ok(tmux.help.includes(part), `${part} in ${tmux.help}`);
+  for (const part of ["Runs each agent in a live terminal.", `Version 3.5a on ${process.platform === "darwin" ? "this Mac" : "this computer"}.`]) assert.ok(tmux.help.includes(part), `${part} in ${tmux.help}`);
   assert.deepEqual([uv.label, uv.control], ["uv", "Installed"]);
   assert.deepEqual([graphify.label, graphify.control], ["Graphify command", "Found"]);
 });

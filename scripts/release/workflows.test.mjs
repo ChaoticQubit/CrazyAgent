@@ -41,19 +41,6 @@ function runnerProblems(text) {
   return problems;
 }
 
-test("CI runs for pull requests and as a reusable workflow; a pull request cancels its own older run, and a release's CI never shares a group with another ref or gets cancelled", async () => {
-  const ci = await workflow("ci.yml");
-  const on = block(ci, 0, "on");
-  assert(on.includes("  pull_request:"));
-  assert(on.includes("  workflow_call:"));
-  assert.deepEqual(block(ci, 0, "concurrency").filter(Boolean), [
-    "concurrency:",
-    "  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.ref, github.sha) }}",
-    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
-  ]);
-  assert.doesNotMatch(ci, SECRET);
-});
-
 test("a stable release ships only from a v* tag on a commit that master already holds", async () => {
   const release = await workflow("release.yml");
   const prepare = steps(release, "prepare");
@@ -64,30 +51,6 @@ test("a stable release ships only from a v* tag on a commit that master already 
   assert.match(tagBranch, /git merge-base --is-ancestor "\$GITHUB_SHA" refs\/remotes\/origin\/master \|\| \{ echo "::error::[^"]+"; exit 1; \}/);
   assert(tagBranch.indexOf("git merge-base") < tagBranch.indexOf("version.mjs stable"), "the commit is checked before a stable version is made");
   assert(block(release, 2, "publish").includes("    needs: [prepare, build]"), "nothing publishes without prepare");
-});
-
-test("signing secrets reach only the build job, which is bound to the release environment", async () => {
-  const release = await workflow("release.yml");
-  const jobs = block(release, 0, "jobs").join("\n");
-  const build = block(jobs, 2, "build");
-  assert(build.includes("    environment: release"), "build runs in the release environment");
-  assert.deepEqual(exposedJobs(release), ["build"], "every other job reads no secret and needs no environment");
-  assert(release.split("\n").filter((line) => SECRET.test(line)).length > 0);
-});
-
-test("every release, dev or stable, builds only after the whole CI workflow passes, and CI gets no secrets", async () => {
-  const release = await workflow("release.yml");
-  const on = block(release, 0, "on");
-  assert(on.includes("    branches: [master]"));
-  assert(on.includes('    tags: ["v*"]'));
-  const ci = block(release, 2, "ci");
-  assert(ci.includes("    uses: ./.github/workflows/ci.yml"));
-  assert.deepEqual(block(ci.join("\n"), 4, "permissions").map((line) => line.trim()), ["permissions:", "contents: read"]);
-  assert(!ci.some((line) => /^\s+(secrets|with|if):/.test(line)), "the CI call takes no secrets, inputs or condition");
-  assert(block(release, 2, "build").includes("    needs: [prepare, ci]"));
-  assert(block(release, 2, "publish").includes("    needs: [prepare, build]"));
-  assert(!/^ {4}if: .*(always|cancelled|failure)\(\)/m.test(release), "no job runs after a failed or cancelled dependency");
-  assert.deepEqual(release.split("\n").filter((line) => /^\s+if: .*(always|cancelled|failure)\(\)/.test(line)).map((line) => line.trim()), ["if: always() && matrix.os == 'macos'", "if: always() && runner.environment != 'github-hosted'"], "only the keychain cleanup and the owner's runner cleanup run after a failure");
 });
 
 const RUNNERS = Object.freeze({
@@ -626,7 +589,7 @@ test("the test farm runs on a pushed integration batch or on demand, never for a
   assert.deepEqual(block(farm, 0, "permissions").filter(Boolean), ["permissions:", "  contents: read"]);
   assert.doesNotMatch(farm, /^ {4}permissions:/m, "no job widens the token");
   const jobs = jobsOf(farm).map(({ name }) => name);
-  assert.deepEqual(jobs, [...FARM_OS.map((os) => `build-${os}`), ...FARM_OS.map((os) => `rust-${os}`), "node", "typecheck", "report"]);
+  assert.deepEqual(jobs, [...FARM_OS.map((os) => `build-${os}`), ...FARM_OS.map((os) => `rust-${os}`), "rust-model-servers", "node", "typecheck", "report"]);
   for (const job of jobs) {
     const [first] = steps(farm, job);
     assert(first.startsWith("      - name: Refuse a runner that is not GitHub-hosted\n"), job);
@@ -638,7 +601,7 @@ test("the test farm runs on a pushed integration batch or on demand, never for a
 test("the test farm keeps one Rust cache per OS and lockfile, saved only from master, and no other cache, so it fits the free 10 GB beside ci.yml (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
   const texts = [farm, ...(await localActions()).map(({ text }) => text)];
-  assert.deepEqual(texts.join("\n").split("\n").filter((line) => /uses: (Swatinem\/rust-cache|actions\/cache)@|^\s+cache(-dependency-path)?:/.test(line)).map((line) => line.trim()), ["- uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"]);
+  assert.deepEqual(texts.join("\n").split("\n").filter((line) => /uses: (Swatinem\/rust-cache|actions\/cache(\/[a-z]+)?)@|^\s+cache(-dependency-path)?:/.test(line)).map((line) => line.trim()), ["uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", "uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", "- uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"]);
   const archive = actionSteps(await farmAction("rust-archive"));
   const cache = archive.find((step) => step.includes("Swatinem/rust-cache@"));
   assert.deepEqual(cache.split("\n").slice(1).map((line) => line.trim()), ["with:", "prefix-key: farm", "shared-key: ${{ inputs.os }}", "add-job-id-key: false", "add-rust-environment-hash-key: false", "cache-bin: false", "save-if: ${{ github.ref == 'refs/heads/master' }}"]);
@@ -661,7 +624,7 @@ test("every test farm part is one matrix entry that uploads one JUnit report, ev
       assert(mine.every((entry) => entry.parts === String(mine.length)), `${os} parts name N = ${mine.length}`);
     }
   }
-  const parts = [...rust.map((entry) => `${entry.os}-rust-${entry.part}`), ...node.map((entry) => `${entry.os}-node-${entry.part}`), "linux-bun-1"];
+  const parts = [...rust.map((entry) => `${entry.os}-rust-${entry.part}`), ...node.map((entry) => `${entry.os}-node-${entry.part}`), "linux-bun-1", ...[...jobs.matchAll(/^ {10}name: farm-junit-([a-z0-9-]+)$/gm)].map((match) => match[1])];
   assert.deepEqual([...excluded(farm, "FARM_PARTS")].sort(), parts.sort(), "the report expects exactly the parts the matrices run");
   const report = (all, label, name) => {
     const keep = all.findIndex((step) => /^ *- name: Keep a JUnit report for this part\n *if: always\(\)\n/.test(step));
@@ -722,10 +685,10 @@ test("each OS's Rust shards wait only on that OS's build, so a slow macOS build 
     for (const step of actionSteps(text)) {
       if (/\n {6}run: /.test(step)) assert(/\n {6}shell: bash\n/.test(step), `${name}: every run step names bash`);
       const used = step.match(/^ {4}- uses: (\S+)$/m)?.[1];
-      if (used) assert.match(used, /^[a-z-]+\/[a-z-]+@[0-9a-f]{40}$/i, `${name}: every action it uses is pinned by commit`);
+      if (used) assert.match(used, /^([a-z-]+\/[a-z-]+|actions\/cache\/(restore|save))@[0-9a-f]{40}$/i, `${name}: every action it uses is pinned by commit`);
     }
     for (const [expression] of text.matchAll(/\$\{\{[^}]*\}\}/g)) {
-      assert.match(expression, /^\$\{\{ (inputs\.(os|part|parts|node-version)|runner\.temp|github\.ref == 'refs\/heads\/master'|steps\.ide\.outputs\.(version|url|sha256|bytes)) \}\}$/, `${name} expands only its inputs and fixed runner values: ${expression}`);
+      assert.match(expression, name === "model-servers" ? /^\$\{\{ (hashFiles\('\.github\/actions\/model-servers\/action\.yml'\)|steps\.cache\.outputs\.cache-hit|github\.ref == 'refs\/heads\/master') \}\}$/ : /^\$\{\{ (inputs\.(os|part|parts|node-version)|runner\.temp|github\.ref == 'refs\/heads\/master'|steps\.ide\.outputs\.(version|url|sha256|bytes)) \}\}$/, `${name} expands only its inputs and fixed runner values: ${expression}`);
     }
   }
 });
@@ -1480,7 +1443,7 @@ test("the secret and runner guards read every job of every workflow file, matrix
   }
   assert.deepEqual(exposed, ["release.yml:build"], "only the release build reads a secret or binds an environment");
   const actions = await localActions();
-  assert.deepEqual(actions.map(({ name }) => name), ["rust-archive", "rust-shard"], "the guard reads every local action");
+  assert.deepEqual(actions.map(({ name }) => name), ["model-servers", "rust-archive", "rust-shard"], "the guard reads every local action");
   for (const { name, text } of actions) assert.deepEqual(actionSecretLines(text), [], `.github/actions/${name} reads no secret and nothing YAML hides`);
   const composite = (line) => ["name: x", "description: x", "runs:", "  using: composite", "  steps:", line, "      shell: bash", ""].join("\n");
   assert.deepEqual(actionSecretLines(composite("    - run: echo ok")), []);

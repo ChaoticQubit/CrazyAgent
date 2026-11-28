@@ -211,7 +211,7 @@ fn a_missing_tool_gives_its_typed_reason_and_how_to_install_it() {
     assert_eq!(codex.looked, places.folders());
     assert_eq!(
         codex.line(),
-        "codex is missing. Install Codex: run npm install -g @openai/codex in Terminal. Then try again."
+        format!("codex is missing. {CODEX_HINT} Then try again.")
     );
 
     let tmux = resolve("tmux", &places).unwrap_err();
@@ -230,7 +230,7 @@ fn a_script_whose_interpreter_is_missing_says_it_needs_that_interpreter() {
     assert_eq!(missing.needs.as_deref(), Some("node"));
     assert_eq!(
         missing.line(),
-        "codex needs node, which is missing. Install Node.js from nodejs.org, or run brew install node in Terminal. Then try again."
+        format!("codex needs node, which is missing. {NODE_HINT} Then try again.")
     );
 }
 

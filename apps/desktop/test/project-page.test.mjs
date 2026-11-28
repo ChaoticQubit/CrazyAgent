@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 
 const research = await import("../src/screens/project/research.ts");
 const api = await import("../src/api-projects.ts");
@@ -546,20 +546,20 @@ test("Stop targets the master turn that is still replying", () => {
   assert.equal(research.replyingTurn([]), null);
 });
 
-test("the master's harness that is not installed gets the design's line", () => {
+test("the master's harness that is not installed gets the design's line", async () => {
   const entry = (id, name, kind) => ({ id, name, status: { kind }, status_label: "", executable: null, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [], aliases: [] });
   const catalog = [entry("codex", "Codex", "not_installed"), entry("claude", "Claude Code", "ready")];
-  assert.equal(research.masterMissingLine(catalog, "codex"), "Codex isn't installed on this Mac.");
+  await eachComputer("../src/screens/project/research.ts", (page, { os, computer }) => assert.equal(page.masterMissingLine(catalog, "codex"), `Codex isn't installed on ${computer}.`, os));
   assert.equal(research.masterMissingLine(catalog, "claude"), null);
   assert.equal(research.masterMissingLine(catalog, "unknown"), null);
   assert.equal(research.masterMissingLine(null, "codex"), null);
 });
 
-test("the master's harness the engine lists as Can't run gets the words New Project and the team pickers use", () => {
+test("the master's harness the engine lists as Can't run gets the words New Project and the team pickers use", async () => {
   const entry = (id, name, status, executable) => ({ id, name, status, status_label: "", executable, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [], aliases: [] });
   const reason = "codex needs node, which is missing. Install Node.js from Settings > Harnesses. Then try again.";
   const catalog = [entry("codex", "Codex", { kind: "cant_run", reason }, "/opt/homebrew/bin/codex"), entry("claude", "Claude Code", { kind: "ready" }, "/opt/homebrew/bin/claude")];
-  assert.equal(research.masterMissingLine(catalog, "codex"), "Codex can't run on this Mac. Pick another harness.");
+  await eachComputer("../src/screens/project/research.ts", (page, { os, computer }) => assert.equal(page.masterMissingLine(catalog, "codex"), `Codex can't run on ${computer}. Pick another harness.`, os));
   assert.equal(research.masterMissingLine(catalog, "claude"), null);
 });
 

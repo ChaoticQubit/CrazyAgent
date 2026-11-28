@@ -95,10 +95,6 @@ fn failed(value: impl std::fmt::Display) -> Failure {
     Failure::Failed(value.to_string())
 }
 
-/// The engine's rule for whether pinned (device, inode) pairs still name the live files,
-/// given in pairs of the same order and length. Inputs: pinned and live. Output: a match.
-pub type SameFiles = fn(&[(u64, u64)], &[(u64, u64)]) -> bool;
-
 /// The most sources a project's snapshot selects, and so the most an admission may allow.
 const ASSET_SOURCES_MAX: usize = 128;
 
@@ -112,7 +108,7 @@ pub struct AdmitFacts {
 }
 
 /// Engine facts a snapshot needs: the principal's project, the policy config id and its
-/// limits, the frame bound and the engine's rule for matching pinned file identities.
+/// limits, and the frame bound.
 #[derive(Debug, Clone, Copy)]
 pub struct SnapshotFacts<'a> {
     pub project_id: &'a str,
@@ -120,7 +116,6 @@ pub struct SnapshotFacts<'a> {
     pub asset_bytes_max: usize,
     pub records_max: usize,
     pub frame_bytes_max: usize,
-    pub same_files: SameFiles,
 }
 
 /// Engine facts a read needs: the principal's project and its task's config id.
@@ -403,28 +398,32 @@ fn content(
     })
 }
 
-/// Opens every selected source and checks all their identities in one call to the
-/// engine's rule, so one volume renumbered at mount is accepted while files spread over
-/// other volumes are not. Inputs: the sources and the rule. Output: each source's open
-/// file and its metadata, `asset_source_replaced`, or the open refusal.
-fn opened(
-    sources: &[Admitted],
-    same_files: SameFiles,
-) -> Result<Vec<(std::fs::File, std::fs::Metadata)>, String> {
+/// Opens every selected source and refuses the set when any was `replaced`. Input: the
+/// sources. Output: each source's open file and its metadata, `asset_source_replaced`, or
+/// the open refusal.
+fn opened(sources: &[Admitted]) -> Result<Vec<(std::fs::File, std::fs::Metadata)>, String> {
     let mut files = Vec::with_capacity(sources.len());
     for source in sources {
         let file = open_regular(&source.source.path)?;
         let metadata = file.metadata().map_err(|e| e.to_string())?;
         files.push((file, metadata));
     }
-    let pinned: Vec<(u64, u64)> = sources.iter().map(|s| (s.device, s.inode)).collect();
     let live: Vec<(u64, u64)> = files.iter().map(|(_, m)| file_identity(m)).collect();
-    if !same_files(&pinned, &live) {
+    if replaced(sources, &live) {
         return Err("asset_source_replaced".into());
     }
     assert_eq!(files.len(), sources.len());
     assert!(files.len() <= ASSET_SOURCES_MAX);
     Ok(files)
+}
+
+/// Checks every source's pinned identity against its live one in one call to the file
+/// identity rule, so one volume renumbered at mount is accepted while files spread over
+/// other volumes are not. Inputs: the sources and their live (device, inode) pairs, in the
+/// same order. Output: true when any source no longer names its pinned file.
+fn replaced(sources: &[Admitted], live: &[(u64, u64)]) -> bool {
+    let pinned: Vec<(u64, u64)> = sources.iter().map(|s| (s.device, s.inode)).collect();
+    !kernel_common::file_identity::same_files(&pinned, live)
 }
 
 /// Takes a snapshot of the assets a project sees under a config and stores it. Inputs:
@@ -440,7 +439,7 @@ pub fn snapshot(
         "a frame holds a snapshot's envelope"
     );
     let sources = selected_sources(tx, facts.project_id).map_err(Failure::Refused)?;
-    let files = opened(&sources, facts.same_files).map_err(Failure::Refused)?;
+    let files = opened(&sources).map_err(Failure::Refused)?;
     let mut assets = Vec::with_capacity(sources.len());
     for (source, (file, before)) in sources.iter().zip(&files) {
         assets

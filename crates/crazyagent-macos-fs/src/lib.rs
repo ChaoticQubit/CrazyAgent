@@ -787,6 +787,17 @@ fn volume_keeps_lists(reply: &[u8], device: u64, root: Option<(u64, u64)>) -> bo
         && set & valid & libc::VOL_CAP_INT_EXTENDED_SECURITY != 0
 }
 
+/// Reads of entries through open folder handles, one `getattrlist` per entry for its type,
+/// owner, group, mode, identity and access list, so a walk down a path never looks a name
+/// up twice.
+#[cfg(target_os = "macos")]
+mod held;
+#[cfg(target_os = "macos")]
+pub use held::{
+    HeldEntry, held_entry, held_entry_at, held_volume_keeps_lists, held_volume_keeps_lists_at,
+    open_search,
+};
+
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 unsafe extern "C" {
@@ -831,9 +842,42 @@ mod tests {
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    /// A fresh folder under the system temp folder, removed by the caller. Input: a tag.
-    /// Output: the folder.
-    fn scratch(tag: &str) -> std::path::PathBuf {
+    /// A fresh folder under the system temp folder that removes itself, with everything in
+    /// it, when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        /// The folder's path. Input: none. Output: the path.
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        /// Gives the owner every right on each entry without following a link, takes every
+        /// access list off, then removes the folder; each step must succeed unless the row is
+        /// already failing. Input: none. Output: none.
+        fn drop(&mut self) {
+            let restored = ["u+rwx", "-N"].map(|change| {
+                std::process::Command::new("/bin/chmod")
+                    .args(["-R", "-P", change])
+                    .arg(&self.0)
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+            let removed = std::fs::remove_dir_all(&self.0);
+            if !std::thread::panicking() {
+                assert_eq!(restored, [true, true], "restore {:?}", self.0);
+                removed.unwrap();
+            }
+        }
+    }
+
+    /// A fresh folder under the system temp folder, held from its creation so it is removed
+    /// whether the row passes or fails. Input: a tag. Output: the folder.
+    fn scratch(tag: &str) -> Scratch {
         let folder = std::env::temp_dir().join(format!(
             "macos-fs-{tag}-{}-{}",
             std::process::id(),
@@ -843,7 +887,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&folder).unwrap();
-        folder
+        Scratch(folder)
     }
 
     /// The path as a C string. Input: the path. Output: the string.
@@ -905,9 +949,7 @@ mod tests {
         std::fs::write(shut.join("inside"), "x").unwrap();
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
         let unread = super::access_list(&c_path(&shut.join("inside")));
-        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::remove_dir_all(&folder).unwrap();
+        drop(folder);
         assert_eq!(
             unread.map_err(|error| error.raw_os_error()),
             Err(Some(libc::EACCES))
@@ -938,9 +980,7 @@ mod tests {
         chmod(&["+a", &format!("user:{user} deny readsecurity")], &case);
         let read = super::access_list(&c_path(&control));
         let denied = super::access_list(&c_path(&case));
-        chmod(&["-N"], &case);
-        chmod(&["-N"], &control);
-        std::fs::remove_dir_all(&folder).unwrap();
+        drop(folder);
         assert_eq!(
             read.unwrap().entries,
             vec![super::AccessEntry {
@@ -982,7 +1022,42 @@ mod tests {
         );
         let target_read = super::access_list(&c_path(&target)).unwrap();
         assert_eq!(target_read.entries[0].rights, 1 << 2);
-        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// A scratch folder whose setup fails part way, with a shut folder inside and a file whose
+    /// list denies reading it, is gone once the failure unwinds. Input: none. Output: none; it
+    /// panics when the setup broke before its planned panic, or when the folder is left
+    /// behind, after removing it itself.
+    #[test]
+    fn a_scratch_folder_is_gone_after_a_failed_setup() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut made = None;
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let folder = scratch("leak");
+            made = Some(folder.to_path_buf());
+            let shut = folder.join("shut");
+            std::fs::create_dir(&shut).unwrap();
+            std::fs::write(shut.join("inside"), "x").unwrap();
+            let file = folder.join("file");
+            std::fs::write(&file, "x").unwrap();
+            chmod(&["+a", "group:everyone deny readsecurity"], &file);
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+            panic!("the setup fails");
+        }));
+        let payload = failed.expect_err("the setup panics");
+        let made = made.expect("the scratch folder was made before the setup failed");
+        let left = made.exists();
+        if left {
+            chmod(&["-R", "-P", "u+rwx"], &made);
+            chmod(&["-R", "-P", "-N"], &made);
+            std::fs::remove_dir_all(&made).unwrap();
+        }
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"the setup fails"),
+            "the setup failed before its planned panic"
+        );
+        assert!(!left, "the failed setup left {made:?} behind");
     }
 
     /// A `kauth_filesec` with the magic number, a 44-byte head and the given count field,
@@ -1271,15 +1346,7 @@ int main(void) {
     /// crate's, so an SDK that moves a field fails here and never reads a wrong one.
     #[test]
     fn the_socket_record_layout_and_constants_are_the_sdk_headers() {
-        let folder = std::env::temp_dir().join(format!(
-            "crazyagent-macos-fs-probe-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&folder).unwrap();
+        let folder = scratch("probe");
         let source = folder.join("probe.c");
         let binary = folder.join("probe");
         std::fs::write(&source, PROBE).unwrap();
@@ -1295,7 +1362,7 @@ int main(void) {
             String::from_utf8_lossy(&built.stderr)
         );
         let ran = std::process::Command::new(&binary).output().unwrap();
-        std::fs::remove_dir_all(&folder).unwrap();
+        drop(folder);
         assert!(ran.status.success(), "the probe runs");
         let printed = String::from_utf8(ran.stdout).unwrap();
         let ours = [

@@ -601,17 +601,18 @@ fn forget_admissions(db: &Connection, project: &str) -> Result<(), EngineError> 
 /// whose owner runtime never started or is not active.
 pub(crate) fn store_fence(tx: &Transaction<'_>) -> Result<Fence, EngineError> {
     let host = tx
-        .query_row(
+        .prepare_cached(
             "SELECT db_instance, engine_epoch FROM owner_meta
              WHERE singleton=1 AND runtime_state='active'",
-            [],
-            |row| {
+        )
+        .and_then(|mut statement| {
+            statement.query_row([], |row| {
                 Ok(HostStamp {
                     db_instance: row.get(0)?,
                     engine_epoch: row.get(1)?,
                 })
-            },
-        )
+            })
+        })
         .optional()
         .map_err(|failed| {
             if owner_table_missing(&failed) {
@@ -682,7 +683,7 @@ pub(crate) fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Resul
 
 /// Tombstones every logged admission of a project, for a removal or Create demo's clear of
 /// an earlier id (rv-sec2 #345 N4), so its repository paths leave the log's events; snapshot
-/// runs keep theirs until compaction (L1b), and only a removal checkpoints the WAL after
+/// runs keep theirs until compaction (L1b), and the caller checkpoints the WAL after
 /// commit. Inputs: the transaction, the project, the removal's own `seq` (none for a clear,
 /// which logs none; seqs start at 1) and the fence. Output: the count, or the refusal.
 pub(crate) fn forget_project(

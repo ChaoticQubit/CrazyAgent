@@ -923,6 +923,7 @@ pub struct TeamRuntime {
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     unread: BTreeMap<ProjectId, (i64, Instant)>,
     resuming: Option<(i64, Resume)>,
+    named: BTreeMap<i64, Resume>,
     settled: bool,
     naming: Option<i64>,
     fresh_start: Option<i64>,
@@ -1278,6 +1279,7 @@ impl TeamRuntime {
             live_starts: BTreeMap::new(),
             unread: BTreeMap::new(),
             resuming: None,
+            named: BTreeMap::new(),
             settled: false,
             naming: None,
             fresh_start: None,
@@ -4646,7 +4648,9 @@ impl TeamRuntime {
     /// installed is found, and the automatic start count clears, so the owner's own press
     /// is never refused by [`LIVE_STARTS_MAX`]; a Try again with the switch already on also
     /// stops a master that has not read keys [`MASTER_OVERDUE`] after its start, to start
-    /// again as the first counted start. Takes the setup, live access and paused accounts.
+    /// again as the first counted start. A master the switch started before any master
+    /// session takes the first session the owner opens, while it is empty, without a
+    /// restart. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4665,7 +4669,7 @@ impl TeamRuntime {
         if self.master_settling(project) || self.master_held(project) {
             return Ok(());
         }
-        let session = crate::master_sessions::live_session(&self.connection, project)?;
+        let session = self.live_session_once(project, on)?;
         if let Some(id) = self.master(project) {
             let chosen_off = !on
                 && self.workers[&id].live
@@ -5154,35 +5158,6 @@ impl TeamRuntime {
             launch,
             &|kept| super::resumes_on(&pool, account, kept),
         )
-    }
-
-    /// Binds a live master that just started to the session it runs, with the seed its
-    /// briefing carries: the earlier turns for a fresh conversation, or the turns a kept
-    /// conversation does not hold for one that continues. A master that did not start live
-    /// and unbriefed is stopped and its start refused, so a start that read the switch off
-    /// never ends the team thread (RV-DS241-121). Takes the agent, the session, the seed and
-    /// the note of the start. Returns the agent and the note, or the refusal.
-    fn seat_session(
-        &mut self,
-        id: i64,
-        session: Option<&SessionId>,
-        seed: Option<String>,
-        note: Option<String>,
-    ) -> Start<(i64, Option<String>)> {
-        let Some(worker) = self
-            .workers
-            .get_mut(&id)
-            .filter(|worker| worker.live && !worker.briefed)
-        else {
-            if let Some(worker) = self.workers.get_mut(&id) {
-                worker.stop_for("engine_stop:not_live");
-                let _ = worker.orders.send(Order::Stop);
-            }
-            return Start::Refused(MASTER_NOT_LIVE.to_owned());
-        };
-        worker.session = session.map(|session| session.as_str().to_owned());
-        worker.seed = seed;
-        Start::Started((id, note))
     }
 
     /// Turns a project's live master off after it could not keep running, so the runtime
@@ -8007,6 +7982,7 @@ impl TeamRuntime {
             .map_err(error)?
             .flatten();
         self.hooks_checked.remove(&id);
+        self.named.remove(&id);
         self.workers.insert(
             id,
             Worker {
@@ -10194,6 +10170,8 @@ impl TeamRuntime {
                         session,
                         &kept,
                     )?;
+                } else if worker.live && worker.role == AgentRole::Master {
+                    self.named.insert(id, resume);
                 }
                 Ok(false)
             }
@@ -13408,8 +13386,8 @@ fn mates_home_problem(error: &EngineError) -> String {
 
 /// The owner's line for an agent whose harness could not start: a command that would hold
 /// an MCP secret names its server and secret, skills left in a Codex home or a home reset
-/// past its walk budget say so, and any other refusal names its plain code. Input: the
-/// launch error. Output: the line.
+/// past its walk budget say so, a terminal refusal gives its plain sentence, and every one
+/// names its plain code. Input: the launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
@@ -13420,7 +13398,7 @@ fn start_problem(problem: &LaunchError) -> String {
         None if problem.0 == crate::team::cleanup::WALK_TOO_LONG => {
             with_code(WALK_TOO_LONG_PROBLEM, Some(&problem.0))
         }
-        None => with_code("The agent could not start", Some(&problem.0)),
+        None => crate::terminal::start_refused(&problem.0),
     }
 }
 
@@ -14635,6 +14613,7 @@ mod task_prompt_lines;
 #[path = "runtime/turn_end.rs"]
 mod turn_end;
 
+mod live_adopt;
 mod teammates;
 
 /// The team loop's side of a wake: the count read before a tick, and the wait that ends at

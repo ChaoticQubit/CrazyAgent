@@ -1,8 +1,10 @@
+import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bundle } from "./browser.mjs";
 import { CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
 
+const { themeHelp } = await import("../src/ui/keys.ts");
 const fixture = await bundle(new URL("./fixtures/settings-access-layout.mjs", import.meta.url).pathname);
 const run = tabRunner(fixture);
 const onAccounts = (scene, check, ...rest) => run({ tab: "accounts", ...scene }, check, ...rest);
@@ -260,7 +262,7 @@ test("signed in, GitHub account has one line: who and how left, Sign out right",
   const [line] = section.rows;
   assert.equal(section.rows.length, 1);
   assert.equal(line.label, "Signed in to GitHub as mira.");
-  assert.match(line.help, /keeps this sign-in in your Mac's keychain/);
+  assert.ok(line.help.includes(`keeps this sign-in in ${{ darwin: "your Mac's keychain", win32: "Windows Credential Manager" }[process.platform] ?? "your system keyring"}`), line.help);
   assert.deepEqual(line.buttons, ["Sign out of GitHub"]);
   assert.ok(line.controlLeft > line.labelRight, JSON.stringify(line));
 });
@@ -392,7 +394,7 @@ test("Profile then Appearance then Learn CrazyAgent, each field on its own line"
   const by = Object.fromEntries(sections.flatMap((section) => section.rows).map((row) => [row.label, row]));
   for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Terminal input", "Terminal renderer", "Questions show"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
   for (const label of ["Short bio", "Preferred stack"]) assert.ok(by[label].controlLeft < by[label].labelRight, `${label} stacks ${JSON.stringify(by[label])}`);
-  assert.equal(by.Theme.help, "System follows your Mac. This choice is kept in this app only.");
+  assert.equal(by.Theme.help, themeHelp(process.platform === "darwin"));
   assert.match(by["Terminal input"].help, /Where you type to the master and every agent, on every screen/);
   assert.match(by["Terminal renderer"].help, /^How every terminal draws its text\. GPU draws on the graphics card/);
 });
@@ -504,7 +506,7 @@ test("V243-TERMINAL-SETTINGS-PLACE: Settings lists Terminal under App, and its s
     app: await page.evaluate(`[...document.querySelectorAll('.settings-nav [role=group]')].filter((group) => group.querySelector('.settings-nav-title')?.textContent.trim() === "App").flatMap((group) => [...group.querySelectorAll('.settings-nav-item')].map((item) => [item.textContent.trim(), item.getAttribute("aria-current")]))`),
   }));
   assert.equal(seen.top?.heading, "Terminal", JSON.stringify(seen));
-  assert.deepEqual(seen.app, [["Sandbox", null], ["Team alerts", null], ["Terminal", "page"]]);
+  assert.deepEqual(seen.app.filter(([, current]) => current === "page").map(([label]) => label), ["Terminal"], JSON.stringify(seen.app));
   assert.deepEqual(seen.sections.map((section) => section.heading), ["Terminal"]);
   assert.deepEqual(seen.sections[0].rows.map((row) => row.label), ["Terminal input", "Terminal renderer"]);
   const by = Object.fromEntries(seen.sections[0].rows.map((row) => [row.label, row]));

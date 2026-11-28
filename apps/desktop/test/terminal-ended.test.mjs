@@ -42,3 +42,18 @@ test("a native view the GPU stopped drawing says so, that opening it again bring
   assert.equal(line, "The GPU stopped drawing this terminal, so the view closed. Open it again to bring it back. If it stops again, restart CrazyAgent.");
   assert.notEqual(line, io.endCopy("not_a_code"));
 });
+
+test("on Linux a terminal with no tmux says to install it with the package manager, then run setup again, since setup there installs tmux only through Linux Homebrew or as root", () => {
+  assert.equal(io.endCopy("terminal_unavailable", true),
+    "Terminals need tmux, and it isn't ready on this computer. Install tmux with your package manager, then run setup again from Settings.");
+});
+
+test("on macOS a terminal with no tmux keeps the sentence that sends the owner to setup", () => {
+  assert.equal(io.endCopy("terminal_unavailable", false, false),
+    "Terminals need tmux, and it isn't ready on this Mac. Run setup again from Settings.");
+});
+
+test("on Windows an unavailable terminal says the engine couldn't open it, since Windows terminals need no tmux", () => {
+  assert.equal(io.endCopy("terminal_unavailable", false, true), "The engine couldn't open this terminal.");
+  assert.equal(io.endCopy("terminal_unavailable", false, true), io.endCopy("terminal_attach_failed", false, true));
+});

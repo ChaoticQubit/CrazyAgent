@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 
+#[cfg(all(test, unix))]
+#[path = "account_key_sync_tests.rs"]
+mod account_key_sync_tests;
+
 #[cfg(unix)]
 const KEYS: &str = crate::storage::accounts::ACCOUNT_KEYS;
 const SECRET_MAX: usize = 8192;
@@ -210,15 +214,13 @@ impl OwnerClient {
             let mut stream = self
                 .connect_checked(|_| failure("accounts_owner_unavailable"))
                 .await?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
             stream
-                .write_all(&packet)
+                .write_all(&**packet)
                 .await
                 .map_err(|_| failure("accounts_owner_unavailable"))?;
             stream
@@ -226,13 +228,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("accounts_owner_unavailable"))?;
             if let Some(key) = key {
-                let mut bytes = key.into_bytes();
-                let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
-                framed.extend_from_slice(&bytes);
-                kernel_security::secret::wipe(&mut bytes);
-                let sent = stream.write_all(&framed).await;
-                kernel_security::secret::wipe(&mut framed);
-                sent.map_err(|_| failure("accounts_owner_unavailable"))?;
+                crate::engine::secret_frame::write_secret_frame(&mut stream, Some(key))
+                    .await
+                    .map_err(|_| failure("accounts_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
             match serde_json::from_slice(&frame[4..])
@@ -473,15 +471,10 @@ async fn authenticate(
 async fn receive_key(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("accounts_key_frame_invalid");
-        let size = stream.read_u32().await.map_err(|_| invalid())? as usize;
-        if size == 0 || size > SECRET_MAX {
-            return Err(invalid());
-        }
-        let mut bytes = vec![0; size];
-        if stream.read_exact(&mut bytes).await.is_err() {
-            kernel_security::secret::wipe(&mut bytes);
-            return Err(invalid());
-        }
+        let bytes = crate::engine::secret_frame::read_secret_frame(stream, SECRET_MAX)
+            .await
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(invalid)?;
         AccountSecret::new(bytes).map_err(|_| failure("account_key_invalid"))
     })
     .await
@@ -561,6 +554,11 @@ fn keys_directory(root: &Root, create: bool) -> Result<Option<File>, EngineError
     Ok(Some(directory))
 }
 
+/// Saves an account key as a new owner-only file in the key directory beside the owner
+/// root. Inputs: owner root, credential reference and the key, which is zeroed after the
+/// write. Output: the directory synced, or `account_key_store_unavailable`; a failed write
+/// or directory sync removes the new file again, and a file it cannot remove stays, named
+/// by no account.
 #[cfg(unix)]
 fn store_key(
     root: &Root,
@@ -569,10 +567,12 @@ fn store_key(
 ) -> Result<(), EngineError> {
     let directory =
         keys_directory(root, true)?.ok_or_else(|| failure("account_key_store_unavailable"))?;
-    write_key(&directory, key_name(credential)?, key)?;
-    directory
-        .sync_all()
-        .map_err(|_| failure("account_key_store_unavailable"))?;
+    let name = key_name(credential)?;
+    write_key(&directory, name, key)?;
+    if crate::storage::accounts::synced(&directory).is_err() {
+        let _ = rustix::fs::unlinkat(&directory, name, rustix::fs::AtFlags::empty());
+        return Err(failure("account_key_store_unavailable"));
+    }
     Ok(())
 }
 
@@ -602,7 +602,8 @@ fn write_key(directory: &File, name: &str, key: AccountSecret) -> Result<(), Eng
 /// Swaps the saved key of one credential for a new one: the new key is written to a
 /// staged file, then renamed over the old file, so the old key is unlinked and the file
 /// never holds a partial key. Inputs: owner root, credential reference and the new key.
-/// Output: the key directory synced; on failure the old key stays and nothing is staged.
+/// Output: the key directory synced, or a refusal with nothing staged: before the rename the
+/// old key stays; after it the new key may be in place, and a retry writes it again.
 #[cfg(unix)]
 pub(super) fn replace_key(
     root: &Root,
@@ -618,10 +619,7 @@ pub(super) fn replace_key(
         let _ = rustix::fs::unlinkat(&directory, staged.as_str(), rustix::fs::AtFlags::empty());
         return Err(failure("account_key_store_unavailable"));
     }
-    directory
-        .sync_all()
-        .map_err(|_| failure("account_key_store_unavailable"))?;
-    Ok(())
+    crate::storage::accounts::synced(&directory)
 }
 
 /// Saves an account key on Windows as a new W1 secret file in the engine root's key folder,
@@ -672,8 +670,8 @@ fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, Eng
 
 /// Swaps the saved key of one credential for a new one on Windows: storage writes a staged
 /// W1 secret file and renames it over the old one. Inputs: owner root, credential reference
-/// and the new key, which is zeroed after the write. Output: Ok, or the refusal; on a
-/// refusal the old key stays.
+/// and the new key, which is zeroed after the write. Output: Ok, or the refusal; after a
+/// refusal the old key stays, or the new key may be in place and a retry writes it again.
 #[cfg(windows)]
 pub(super) fn replace_key(
     root: &Root,
@@ -930,7 +928,9 @@ async fn check(
     };
     crate::accounts::account_url(url.as_str())?;
     let key = match &listed.connection.auth {
-        ModelAuthentication::ApiKey { credential_ref } => read_key(root, credential_ref)?,
+        ModelAuthentication::ApiKey { credential_ref } => {
+            read_key(root, credential_ref)?.map(kernel_security::secret::Zeroizing::new)
+        }
         _ => None,
     };
     if url.scheme() != "http" {
@@ -941,11 +941,8 @@ async fn check(
         };
         return Ok((view(&listed, status), Vec::new()));
     }
-    let checked = probe::check(&url, key.as_deref(), CHECK_PROBE).await;
-    let mut key = key;
-    if let Some(bytes) = key.as_mut() {
-        kernel_security::secret::wipe(bytes);
-    }
+    let checked = probe::check(&url, key.as_ref().map(|key| key.as_slice()), CHECK_PROBE).await;
+    drop(key);
     Ok(match checked {
         Err(_) => (view(&listed, AccountStatus::Unreachable), Vec::new()),
         Ok((401 | 403, _)) => (view(&listed, AccountStatus::NotSignedIn), Vec::new()),

@@ -796,14 +796,13 @@ fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_
     stand_in_cargo(
         &case,
         "",
-        &format!("/usr/bin/perl -e 'sleep 60' {token}"),
+        &format!(
+            "/usr/bin/perl -e 'open(my $f, \">\", \".tool-started\") or die; close($f); sleep 60' {token}"
+        ),
         Duration::from_secs(90),
     );
     let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while survivors(&token).is_empty() {
-        assert!(Instant::now() < deadline, "the stand-in tool never started");
-    }
+    tool_started(&case, &id, ".tool-started");
     crate::sandbox::access_store::hidden::save(
         &case.db,
         case.workspace.project.as_str(),
@@ -817,6 +816,10 @@ fn a_folder_hidden_while_a_lockfile_tool_runs_stops_it_and_the_set_goes_back_to_
         set.state,
         ChangeState::Updating,
         "the hide stops the tool and the agent fixes the clash"
+    );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set, "hidden")]
     );
     assert!(!regenerated(&case, &set), "nothing was committed");
     assert_eq!(survivors(&token), Vec::<String>::new());
@@ -835,30 +838,14 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
     let token = token(&case);
     stand_in_cargo(
         &case,
-        &format!("/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; sleep 60' {token}"),
+        &format!(
+            "/usr/bin/perl -e '$SIG{{USR1}}=sub{{exit 0}}; open(my $f, \">\", \".version-started\") or die; close($f); sleep 60' {token}"
+        ),
         "",
         Duration::from_secs(90),
     );
-    let running = |token: &str| {
-        kernel_processes::spawn_gate::output(
-            Command::new("/usr/bin/pgrep")
-                .args(["-f", token])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap()
-        .status
-        .success()
-    };
     let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !running(&token) {
-        assert!(
-            Instant::now() < deadline,
-            "the stand-in version probe never started"
-        );
-    }
+    tool_started(&case, &id, ".version-started");
     crate::sandbox::access_store::hidden::save(
         &case.db,
         case.workspace.project.as_str(),
@@ -889,6 +876,120 @@ fn a_folder_hidden_during_a_lockfile_run_that_then_exits_on_its_own_still_refuse
         ChangeState::Updating,
         "the late hide refuses the set and the agent fixes the clash"
     );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set, "hidden")]
+    );
     assert_eq!(survivors(&token), Vec::<String>::new());
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
+
+/// What the owner reads once a set they heard waits in Changes went back to its agent, with
+/// the sentence on why cargo did not rewrite its Cargo.lock. Inputs: the set and that reason.
+#[cfg(target_os = "macos")]
+pub(super) fn went_back_note(set: &ChangeSetView, why: &str) -> String {
+    format!(
+        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet. {}",
+        set.agent.label,
+        cargo_lock_because(why, set)
+    )
+}
+
+/// The sentence the owner reads after the went-back note when the engine did not rewrite a
+/// set's Cargo.lock with cargo: `tool` when cargo failed or ran out of time, `hidden` when a
+/// folder was hidden during the run and `outside` when cargo changed other files. Inputs:
+/// the reason and the set. Output: the sentence.
+#[cfg(target_os = "macos")]
+pub(super) fn cargo_lock_because(why: &str, set: &ChangeSetView) -> String {
+    let agent = &set.agent.label;
+    match why {
+        "tool" => format!(
+            "Cargo.lock could not be updated automatically because cargo failed or took too long, so {agent} will fix it itself."
+        ),
+        "hidden" => "Cargo.lock was not updated automatically because you hid a folder while cargo was running, so nothing it wrote was kept.".to_owned(),
+        "outside" => "Cargo.lock was not updated automatically because cargo also changed other files, so nothing it wrote was kept.".to_owned(),
+        other => panic!("no owner sentence for {other}"),
+    }
+}
+
+/// A lockfile tool that also writes a file other than the lockfiles lands nothing: the set
+/// goes back to its agent and the owner reads that cargo changed other files.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lockfile_tool_that_writes_another_file_tells_the_owner_why_the_set_went_back() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", ": > stray.txt", Duration::from_secs(60));
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating
+    });
+    assert_eq!(
+        set.state,
+        ChangeState::Updating,
+        "a tool that changes another file lands nothing and the agent fixes the clash"
+    );
+    assert!(!regenerated(&case, &set), "nothing was committed");
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set, "outside")]
+    );
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// Asserts the last regeneration on this thread refused for `why` on macOS, the one OS that
+/// regenerates lockfiles, and for `Why::Other` on every other OS. Input: the reason. Output:
+/// none.
+pub(super) fn assert_refused(why: went_back::Why) {
+    let expected = if cfg!(target_os = "macos") {
+        why
+    } else {
+        went_back::Why::Other
+    };
+    assert_eq!(lockfiles::REFUSED.get(), Some(expected));
+}
+
+/// A lockfile folder name with a control character reads with U+FFFD in the owner's note,
+/// and sixteen long paths with the longest agent label still fit the note's bound, naming
+/// how many more there are.
+#[test]
+fn a_control_character_in_a_lockfile_folder_reads_replaced_and_the_note_stays_bounded() {
+    let mut files = vec!["sub\u{7}dir/Cargo.lock".to_owned()];
+    files.extend((1..16).map(|n| format!("{}{n}/Cargo.lock", "d".repeat(300))));
+    let refusal = went_back::Refusal {
+        why: went_back::Why::Tool,
+        tool: "cargo",
+        files,
+    };
+    let agent = "a".repeat(crate::agents::LABEL_BYTES_MAX);
+    let note = went_back::went_back_note(&agent, Some(&refusal));
+    assert!(note.contains("sub\u{fffd}dir/Cargo.lock, "), "{note}");
+    assert!(!note.contains(char::is_control), "{note}");
+    assert!(note.contains(" more could not be updated automatically because cargo failed"));
+    assert!(note.len() <= crate::team::NOTE_BYTES_MAX, "{}", note.len());
+}
+
+/// Waits until a set's stand-in tool has written its start mark in the regeneration's
+/// worktree, for at most `REGENERATED_WITHIN`. A regeneration that ends before the mark
+/// fails the row at once, naming the set's state, since its tool can no longer start.
+/// Inputs: the case, the set and the mark's file name. Output: none; panics on either.
+#[cfg(target_os = "macos")]
+pub(super) fn tool_started(case: &Case, id: &ChangeSetId, mark: &str) {
+    let started = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{}", id.as_str()))
+        .join(mark);
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while !started.exists() {
+        assert!(
+            lockfiles::is_running(id) || started.exists(),
+            "the regeneration ended before its tool wrote {mark}: the set is {:?}",
+            case.view(id).state
+        );
+        assert!(Instant::now() < deadline, "the tool never wrote {mark}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[path = "prune_rows.rs"]
+mod prune_rows;

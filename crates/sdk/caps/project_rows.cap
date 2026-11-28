@@ -1,0 +1,5 @@
+type ProjectRow { id: text, name: text, repository_count: u16 }
+type RowsPage { rows: list<ProjectRow>, more: bool }
+capability project_rows.page(after: option<text>, limit: u16) -> RowsPage
+  tier: kernel
+  needs: project_rows.read

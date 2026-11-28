@@ -3,6 +3,8 @@
 /// The watch's event log in the engine store: the bodies after a cursor, read in bounded
 /// pages, and the write that logs one revision's body and prunes the old ones.
 pub mod events;
+#[cfg(unix)]
+pub mod held_files;
 pub mod migrations;
 /// One private key-value namespace per plugin on the state log, rebuilt by replay. A
 /// namespace is not secret custody: its values sit in the log, snapshots and backups, so

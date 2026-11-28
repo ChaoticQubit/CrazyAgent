@@ -397,7 +397,7 @@ pub(crate) fn forget_rows(db: &Connection, project: &ProjectId) -> Result<(), En
 
 /// Tombstones every logged ide event of a project, of each of [`KINDS`], for a removal or
 /// Create demo's clear of an earlier id (rv-sec2 #309 N1, L7 r2 N1); snapshot runs keep theirs
-/// until compaction (L1b), and only a removal checkpoints the WAL after commit. Inputs: the
+/// until compaction (L1b), and the caller checkpoints the WAL after commit. Inputs: the
 /// transaction, the project, the removal's own `seq` (none for a clear, which logs none; seqs
 /// start at 1) and the fence. Output: how many were tombstoned, or the refusal.
 pub(crate) fn forget_project(

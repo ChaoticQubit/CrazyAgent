@@ -839,7 +839,7 @@ impl Wizard {
                     let problem = match state {
                         HarnessState::NotInstalled => "is not installed",
                         HarnessState::CantStart => "can't run team agents yet",
-                        HarnessState::CantRun => "can't run on this Mac",
+                        HarnessState::CantRun => on_this_computer!("can't run on ", ""),
                         HarnessState::MasterOnly if !master => "runs only as the master",
                         HarnessState::MasterOnly | HarnessState::Ready | HarnessState::Unknown => {
                             return None;

@@ -612,7 +612,7 @@ fn the_first_run_carries_a_change_set_as_its_row_digest() {
     let live = change_set_rows(&db);
     assert!(first_run(&db));
     let logged = events(&db);
-    assert_eq!(logged.len(), 9, "a chunk per table and the closing event");
+    assert_eq!(logged.len(), 12, "a chunk per table and the closing event");
     assert!(
         logged
             .iter()

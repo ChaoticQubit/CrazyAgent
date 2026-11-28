@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ const client = await import("../src/engine-client.ts");
 const research = await import("../src/screens/project/research.ts");
 const { updateMessage } = await import("../src/screens/settings/updates-state.ts");
 const { signInFailure } = await import("../src/screens/settings/sign-in.tsx");
-const { isMac, thisComputer } = await import("../src/ui/keys.ts");
+const { isMac, thisComputer, signInStore } = await import("../src/ui/keys.ts");
 
 const ENGINE = new URL("../../../crates/crazyagent/src/", import.meta.url).pathname;
 const FALLBACK = "Something went wrong. Try again.";
@@ -255,21 +255,48 @@ test("the app names the computer as the TUI does: this Mac on macOS, this comput
     `Claude Code changed on ${thisComputer()} after CrazyAgent checked it, perhaps from an update. Try again.`);
 });
 
-const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";
+test("the GitHub sign-in names the store each system keeps it in", () => {
+  assert.equal(signInStore(true, false), "your Mac's keychain");
+  assert.equal(signInStore(false, true), "Windows Credential Manager");
+  assert.equal(signInStore(false, false), "your system keyring");
+  assert.equal(thisComputer(true), "this Mac");
+  assert.equal(thisComputer(false), "this computer");
+});
+
+test("account and server refusals name this Mac on macOS and this computer on Windows and Linux", async () => {
+  await eachComputer("../src/api.ts", (plain, { os, computer }) => {
+    const url = `Enter a full URL that starts with https://, or http://127.0.0.1 for ${computer}.`;
+    for (const [code, line] of [["account_url_required", url], ["account_url_invalid", url],
+      ["account_local_url_required", `Enter a URL on ${computer}, such as http://127.0.0.1:11434.`],
+      ["account_probe_https_unsupported", `CrazyAgent can only check http URLs on ${computer}. The account is saved.`],
+      ["native_auth_host_unavailable", `Sign-in isn't available on ${computer} right now. Check that the harness is installed.`]]) {
+      assert.equal(plain.plainError(code), line, `${os} ${code}`);
+    }
+  });
+  await eachComputer("../src/engine-client.ts", (engine, { os, computer }) =>
+    assert.equal(engine.errorMessage({ code: "server_url_invalid" }),
+      `Use an https address. Plain http works only for ${computer}, and the address can't hold a password.`, os));
+});
+
+const TUI_SIGN_IN = "tui/screens/settings_add_account/words.rs";
 const TUI_SCREENS = "tui/screens/mod.rs";
+const ENGINE_LIB = "lib.rs";
 const TUI_OWN = new Set(["native_auth_recovery_required"]);
 const TUI_COMPUTER = [
-  [true, /#\[cfg\(target_os = "macos"\)\]\s*const THIS_COMPUTER: &str = "([^"]*)";/],
-  [false, /#\[cfg\(not\(target_os = "macos"\)\)\]\s*const THIS_COMPUTER: &str = "([^"]*)";/],
+  [true, /#\[cfg\(target_os = "macos"\)\]\s*macro_rules! on_this_computer \{[^}]*concat!\(\$before, "([^"]*)", \$after\)/],
+  [false, /#\[cfg\(not\(target_os = "macos"\)\)\]\s*macro_rules! on_this_computer \{[^}]*concat!\(\$before, "([^"]*)", \$after\)/],
 ];
 
-/** Reads the TUI's word for the computer on each system from its screens and checks it against
- * the app's word for the same system. Output: the words, macOS first. */
+/** Reads the TUI's word for the computer on each system from the engine's on_this_computer
+ * macro, which the screens' THIS_COMPUTER takes, and checks it against the app's word for the
+ * same system. Output: the words, macOS first. */
 function tuiComputers() {
   const screens = readFileSync(join(ENGINE, TUI_SCREENS), "utf8");
+  assert.match(screens, /^const THIS_COMPUTER: &str = on_this_computer!\("", ""\);$/m, `${TUI_SCREENS} takes THIS_COMPUTER from on_this_computer`);
+  const engine = readFileSync(join(ENGINE, ENGINE_LIB), "utf8");
   return TUI_COMPUTER.map(([mac, pattern]) => {
-    const word = screens.match(pattern)?.[1];
-    assert.equal(word, thisComputer(mac), `${TUI_SCREENS} names the computer as the app does on ${mac ? "macOS" : "Windows and Linux"}`);
+    const word = engine.match(pattern)?.[1];
+    assert.equal(word, thisComputer(mac), `${ENGINE_LIB} names the computer as the app does on ${mac ? "macOS" : "Windows and Linux"}`);
     return word;
   });
 }

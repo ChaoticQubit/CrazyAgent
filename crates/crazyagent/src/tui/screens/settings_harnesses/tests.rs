@@ -5,8 +5,7 @@ use crate::setup::{Dependency, DependencyState, DependencyStatus, SetupStatus};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::screens::settings_accounts::tests::{dataset, fixture, list_ctx, render};
-use crate::tui::seam::Request;
-use crate::tui::shell::Shell;
+use crate::tui::{seam::Request, shell::Shell};
 use kernel_processes::run::Version;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -595,18 +594,6 @@ fn u_shows_the_exact_command_and_updates_only_after_y() {
 }
 
 #[test]
-fn u_shows_the_line_the_engine_has_now_not_the_one_read_when_the_page_opened() {
-    let found = found();
-    let mut shell = on_claude(&found);
-    deliver(&mut shell, newer());
-    press(&mut shell, 'u', with_npm());
-    let shown = frame(&mut shell);
-    assert!(shown.contains(NPM_LINE), "{shown}");
-    assert!(shown.contains("Installed with npm (@anthropic-ai/claude-code)."));
-    assert!(!shown.contains(BREW_LINE), "{shown}");
-}
-
-#[test]
 fn a_confirm_closes_when_its_line_is_gone_or_changed_and_y_then_starts_nothing() {
     let found = found();
     let mut shell = on_claude(&found);
@@ -935,17 +922,11 @@ fn the_version_line_has_the_desktop_sentences() {
 
 #[test]
 fn every_update_sentence_is_the_desktop_sentence_and_no_two_are_alike() {
-    let desktop = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../apps/desktop/src/api-harness-updates.ts"
-    ))
-    .unwrap();
+    let desktop = include_str!("../../../../../../apps/desktop/src/api-harness-updates.ts");
     let mut seen = std::collections::BTreeSet::new();
     for (code, sentence) in COPY {
-        assert!(
-            desktop.contains(&format!("{code}: \"{sentence}\",")),
-            "{code}"
-        );
+        let shown = super::super::desktop_entry(desktop, code);
+        assert_eq!(shown.as_deref(), Some(sentence), "{code}");
         assert!(seen.insert(sentence), "{code}");
         assert_eq!(update_copy(code), sentence);
     }
@@ -1906,3 +1887,5 @@ fn a_listed_research_harness_says_which_research_it_runs_and_which_harnesses_run
     assert!(shown.contains(&format!("Research {words}")), "{shown}");
     assert!(!native.contains(words), "{native}");
 }
+
+mod engine_line;

@@ -12,6 +12,8 @@ use crate::launch_context::{AgentContext, Installed};
 use kernel_processes::group::Ending;
 use kernel_processes::terminal::buffer::Chunk;
 use kernel_processes::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
+#[cfg(target_os = "macos")]
+use kernel_sandbox::profile::command::{SANDBOX_EXEC, kept_pane};
 use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
@@ -444,7 +446,7 @@ impl TerminalSession {
         if let Some(code) = agent_pane_unavailable(std::env::consts::OS) {
             return Err(failure(code));
         }
-        let (request, relay) = route(request)?;
+        let (request, relay, _launching) = route(request)?;
         let home = request.account.home().to_path_buf();
         let key = write_key_file(&request)?;
         let cwd = request
@@ -499,18 +501,12 @@ impl TerminalSession {
         let kept_freeze = false;
         #[cfg(target_os = "macos")]
         let command = if request.boundary.is_unconfined() {
-            assert_ne!(
-                command.argv[0],
-                kernel_sandbox::profile::command::SANDBOX_EXEC
-            );
+            assert_ne!(command.argv[0], SANDBOX_EXEC);
             command
         } else {
             interactive::InteractiveCommand {
-                argv: kernel_sandbox::profile::command::kept_pane(
-                    command.argv,
-                    freeze_record.filter(|_| kept_freeze),
-                )
-                .ok_or_else(|| failure("launch_sandbox_required"))?,
+                argv: kept_pane(command.argv, freeze_record.filter(|_| kept_freeze))
+                    .ok_or_else(|| failure("launch_sandbox_required"))?,
                 ..command
             }
         };

@@ -35,7 +35,7 @@ test("the changed mark shows on Dev and never on Stable, the engine's default", 
   assert.equal(channelRow(onStable)?.mark, null, JSON.stringify(onStable.sections));
   const onDev = await onTab("updates", { channel: "dev" }, shown);
   assert.equal(channelRow(onDev)?.mark, "changed", JSON.stringify(onDev.sections));
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/update.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/processes/src/update.rs", import.meta.url), "utf8");
   assert.match(engine, /None => Ok\(Channel::Stable\)/, "the mark's default is the engine's default");
   assert.match(engine, /ErrorKind::NotFound => return Ok\(Channel::Stable\)/);
   const source = readFileSync(new URL("../src/screens/settings/updates.tsx", import.meta.url), "utf8");
