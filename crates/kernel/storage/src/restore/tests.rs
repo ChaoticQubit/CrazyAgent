@@ -1008,3 +1008,19 @@ fn a_flushed_write_after_a_failed_folder_flush_flushes_the_folder_before_it_retu
         Some("restored replaced-x")
     );
 }
+
+#[test]
+fn the_set_of_flushed_record_files_never_holds_more_than_its_cap() {
+    let mut set = std::collections::BTreeSet::new();
+    for inode in 0..record::ROOTS_MAX as u64 {
+        record::remembered(&mut set, (1, inode));
+    }
+    assert_eq!(set.len(), record::ROOTS_MAX);
+    record::remembered(&mut set, (1, 0));
+    assert_eq!(set.len(), record::ROOTS_MAX);
+
+    record::remembered(&mut set, (1, record::ROOTS_MAX as u64));
+
+    assert_eq!(set.len(), 1);
+    assert!(set.contains(&(1, record::ROOTS_MAX as u64)));
+}

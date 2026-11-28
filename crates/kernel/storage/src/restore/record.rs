@@ -4,10 +4,12 @@ use crate::migrations::{Flush, created, flush};
 use rustix::fs::{FlockOperation, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The bytes of one slot: one 4 KiB block, so a torn block write breaks at most one slot.
@@ -38,6 +40,15 @@ const LOCK_POLL: Duration = Duration::from_millis(10);
 pub(super) const LOCK_HELD: &str = "the restore record lock is held by another write";
 /// The cause a read or write of a record that cannot be read gives.
 pub(super) const UNREADABLE: &str = "the restore record cannot be read";
+
+/// The most record files this process remembers as having their folder entry on disk: an
+/// engine has one root, and a test process makes about a hundred. Past it the set starts over,
+/// which costs each root one more folder flush, never a lost one.
+pub(super) const ROOTS_MAX: usize = 256;
+
+/// The record files, by device and inode, whose folder entry this process fully flushed
+/// after the rename that named them, so a later write knows its name is on disk.
+static FOLDER_FLUSHED: Mutex<BTreeSet<(u64, u64)>> = Mutex::new(BTreeSet::new());
 
 /// The step that writes one slot's bytes at its offset, so a row can tear it.
 pub(super) type Place = fn(&File, u64, &[u8]) -> std::io::Result<()>;
@@ -291,6 +302,7 @@ pub(super) fn write(
             .map_err(restore_failed)?;
             if flushed {
                 flush(&file, Flush::Full).map_err(restore_failed)?;
+                named_on_disk(root, &file)?;
             }
             flushed
         }
@@ -329,18 +341,81 @@ fn first(root: &Path, line: &str) -> Result<(), StorageError> {
     let made = created(&temp)
         .and_then(|mut file| {
             file.write_all(&bytes).map_err(failed)?;
-            flush(&file, Flush::Full).map_err(failed)
+            flush(&file, Flush::Full).map_err(failed)?;
+            key(&file).map_err(failed)
         })
-        .and_then(|()| std::fs::rename(&temp, &record).map_err(failed));
-    if let Err(cause) = made {
-        let _ = std::fs::remove_file(&temp);
-        return Err(restore_failed(cause.0));
-    }
+        .and_then(|key| {
+            std::fs::rename(&temp, &record).map_err(failed)?;
+            Ok(key)
+        });
+    let key = match made {
+        Ok(key) => key,
+        Err(cause) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(restore_failed(cause.0));
+        }
+    };
+    forget_flushed(key);
     #[cfg(test)]
     if FAIL_FOLDER_FLUSH.with(|fail| fail.replace(false)) {
         return Err(restore_failed("the record folder flush failed"));
     }
     File::open(root)
         .and_then(|folder| flush(&folder, Flush::Full))
-        .map_err(restore_failed)
+        .map_err(restore_failed)?;
+    remember_flushed(key);
+    Ok(())
+}
+
+/// The device and inode of a record file, the key of [`FOLDER_FLUSHED`]. Input: the open
+/// file. Output: the key, or the failure to read its metadata.
+fn key(file: &File) -> std::io::Result<(u64, u64)> {
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// Makes sure the folder entry naming the record file is on disk before a flushed write
+/// returns: unless this process already fully flushed it, the root folder is fully flushed
+/// now, with the set's lock dropped across the flush. Inputs: the root and the open record
+/// file. Output: Ok once the name is on disk, or `storage_restore_failed`.
+fn named_on_disk(root: &Path, file: &File) -> Result<(), StorageError> {
+    let key = key(file).map_err(restore_failed)?;
+    if flushed_set().contains(&key) {
+        return Ok(());
+    }
+    File::open(root)
+        .and_then(|folder| flush(&folder, Flush::Full))
+        .map_err(restore_failed)?;
+    remember_flushed(key);
+    Ok(())
+}
+
+/// The set of record files whose folder entry is on disk, locked; a poisoned lock is taken
+/// as it is, since the set only ever saves a flush. Output: the guard.
+fn flushed_set() -> std::sync::MutexGuard<'static, BTreeSet<(u64, u64)>> {
+    FOLDER_FLUSHED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records that a record file's folder entry is on disk. Input: the file's key. Output: none.
+fn remember_flushed(key: (u64, u64)) {
+    remembered(&mut flushed_set(), key);
+}
+
+/// Adds a key to a set of flushed record files, starting the set over when it already holds
+/// [`ROOTS_MAX`] other keys, so it never grows past the cap. Inputs: the set and the key.
+/// Output: none.
+pub(super) fn remembered(set: &mut BTreeSet<(u64, u64)>, key: (u64, u64)) {
+    if set.len() >= ROOTS_MAX && !set.contains(&key) {
+        set.clear();
+    }
+    set.insert(key);
+    assert!(set.len() <= ROOTS_MAX);
+}
+
+/// Drops a record file from the set before its folder flush, so an inode reused from a file
+/// gone earlier never counts as flushed. Input: the file's key. Output: none.
+fn forget_flushed(key: (u64, u64)) {
+    flushed_set().remove(&key);
 }
