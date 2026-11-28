@@ -1,4 +1,4 @@
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout, System, handle_alloc_error};
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("freed_bytes_support reads freed blocks with x86_64 or aarch64 loads only");
@@ -16,12 +16,14 @@ pub struct Copied {
 impl Copied {
     /// Copies `len` bytes of `block` into a new scratch block, word by word, then the tail
     /// byte by byte. Inputs: the block and its size. Output: the copy; a failed scratch
-    /// allocation panics. Safety: `block` must be valid for reads of `len` bytes, as a block
+    /// allocation aborts. Safety: `block` must be valid for reads of `len` bytes, as a block
     /// handed to `GlobalAlloc::dealloc` is for its layout's size.
     pub unsafe fn new(block: *const u8, len: usize) -> Self {
         let layout = Layout::from_size_align(len.max(1), 8).unwrap();
         let scratch = unsafe { System.alloc(layout) };
-        assert!(!scratch.is_null(), "the scratch block for a freed copy");
+        if scratch.is_null() {
+            handle_alloc_error(layout)
+        }
         let mut at = 0;
         while at + 8 <= len {
             let word = unsafe { load_word(block.add(at)) };
