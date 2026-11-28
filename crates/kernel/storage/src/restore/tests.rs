@@ -544,7 +544,7 @@ fn backups_beside_the_pin(root: &Path) -> Vec<PathBuf> {
 fn restorable_until_and_a_restore_owner_check_every_backup_the_pin_is_chosen_from() {
     let (root, path) = upgraded(true);
     let entries = backups_beside_the_pin(root.path());
-    crate::migrations::take_owner_checks();
+    crate::migrations::record_owner_checks();
 
     assert!(restorable_until(root.path(), SystemTime::now()).is_some());
     let mut until = crate::migrations::take_owner_checks();

@@ -13,14 +13,46 @@ mod tests;
 
 #[cfg(test)]
 thread_local! {
-    static OWNER_CHECKS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    static OWNER_CHECKS: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Takes the backups entries this thread's listings owner-checked since the last take.
-/// Output: their paths, in the order checked.
+/// The most owner checks one recording holds before a listing panics.
+#[cfg(test)]
+const OWNER_CHECKS_MAX: usize = 1024;
+
+/// Starts recording the backups entries this thread's listings owner-check, with an empty
+/// record. A thread that never calls it records nothing. Input: none. Output: none.
+#[cfg(test)]
+pub(crate) fn record_owner_checks() {
+    OWNER_CHECKS.with(|checks| *checks.borrow_mut() = Some(Vec::new()));
+}
+
+/// Takes the entries owner-checked since the last record or take, recording on. Output:
+/// their paths in the order checked; empty on a thread that is not recording.
 #[cfg(test)]
 pub(crate) fn take_owner_checks() -> Vec<PathBuf> {
-    OWNER_CHECKS.with(std::cell::RefCell::take)
+    OWNER_CHECKS.with(|checks| {
+        checks
+            .borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    })
+}
+
+/// Notes one owner-checked entry when this thread records; a record past
+/// [`OWNER_CHECKS_MAX`] entries panics. Input: the entry's path. Output: none.
+#[cfg(test)]
+fn note_owner_check(path: &Path) {
+    OWNER_CHECKS.with(|checks| {
+        if let Some(checks) = checks.borrow_mut().as_mut() {
+            assert!(
+                checks.len() < OWNER_CHECKS_MAX,
+                "owner checks record is full"
+            );
+            checks.push(path.to_path_buf());
+        }
+    });
 }
 
 /// The settings texts an upgrade backup keeps beside engine.db, read once after the
@@ -549,7 +581,7 @@ fn backups_listed(
             continue;
         }
         #[cfg(test)]
-        OWNER_CHECKS.with(|checks| checks.borrow_mut().push(path.clone()));
+        note_owner_check(&path);
         if own_folder(&path) {
             found.push((time, name));
         }
@@ -822,7 +854,7 @@ mod windows_tests {
         }
         let database = data.join(super::DATABASE);
         let connection = rusqlite::Connection::open(&database).unwrap();
-        super::take_owner_checks();
+        super::record_owner_checks();
         let made = super::backup(
             &connection,
             &database,

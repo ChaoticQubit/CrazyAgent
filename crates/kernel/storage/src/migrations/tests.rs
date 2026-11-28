@@ -53,6 +53,21 @@ fn a_listing_on_a_thread_that_records_nothing_keeps_no_owner_check() {
 }
 
 #[test]
+fn a_recording_thread_keeps_each_owner_check_and_a_full_record_panics() {
+    record_owner_checks();
+    for index in 0..OWNER_CHECKS_MAX {
+        note_owner_check(Path::new(&format!("/b/{index}")));
+    }
+    assert_eq!(take_owner_checks().len(), OWNER_CHECKS_MAX);
+    for index in 0..OWNER_CHECKS_MAX {
+        note_owner_check(Path::new(&format!("/b/{index}")));
+    }
+    let full = std::panic::catch_unwind(|| note_owner_check(Path::new("/b/over")));
+    assert!(full.is_err());
+    assert_eq!(take_owner_checks().len(), OWNER_CHECKS_MAX);
+}
+
+#[test]
 fn backup_names_use_a_sortable_utc_stamp() {
     assert_eq!(stamp(UNIX_EPOCH).unwrap(), "19700101T000000000Z");
     assert_eq!(
@@ -199,7 +214,7 @@ fn a_backups_prune_checks_every_folder_it_may_remove_but_not_the_one_it_just_mad
     let outside = tempfile::tempdir().unwrap();
     let link = folder.join("1-to-2-99990101T000000000Z");
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-    take_owner_checks();
+    record_owner_checks();
 
     let made = backup(&db, &path, &no_texts, (1, 2), SystemTime::now()).unwrap();
 
