@@ -812,14 +812,16 @@ mod owner_git_rows {
     struct Made {
         _temp: tempfile::TempDir,
         root: PathBuf,
+        engine: PathBuf,
         project: PathBuf,
         folder: PathBuf,
         git: PathBuf,
         grants: PathBuf,
     }
 
-    /// A project, an owner-git folder, a grants folder and a stand-in for Git for Windows'
-    /// `cmd\git.exe` beside its `mingw64\bin\git.exe`, all in one temp folder. Output: the folders.
+    /// A project, an engine folder beside it, an owner-git folder, a grants folder and a
+    /// stand-in for Git for Windows' `cmd\git.exe` beside its `mingw64\bin\git.exe`, all in
+    /// one temp folder. Output: the folders.
     fn made() -> Made {
         let temp = tempfile::tempdir().unwrap();
         let root = canonical(temp.path()).unwrap();
@@ -829,8 +831,10 @@ mod owner_git_rows {
             root.join(GRANTS_FOLDER),
         );
         let platform = root.join("Git").join("mingw64").join("bin").join("git.exe");
+        let engine = root.join("engine-root");
         for made in [
             &project,
+            &engine,
             git.parent().unwrap(),
             &grants,
             platform.parent().unwrap(),
@@ -842,6 +846,7 @@ mod owner_git_rows {
         Made {
             _temp: temp,
             root,
+            engine,
             project,
             folder,
             git,
@@ -853,7 +858,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         OwnerGit::install(
             &crate::test_hooks::STAND_IN,
-            &made.root,
+            &made.engine,
             &made.folder,
             project,
             &made.git,
@@ -957,7 +962,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         let owner = OwnerGit::install(
             &crate::test_hooks::STAND_IN,
-            &made.root,
+            &made.engine,
             &made.folder,
             &made.project,
             &verbatim,
@@ -997,7 +1002,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         match OwnerGit::install(
             &crate::test_hooks::STAND_IN,
-            &made.root,
+            &made.engine,
             &made.folder,
             &made.project,
             &loose,
@@ -1014,8 +1019,8 @@ mod owner_git_rows {
     }
 
     /// Owner git for a project folder that is the engine root itself, as after the owner moves
-    /// the engine's data folder onto a project, is refused before any profile, since the
-    /// boundary would grant git write over the engine's files.
+    /// the engine's data folder onto a project, is refused as a project in the engine folder
+    /// before any profile, since the boundary would grant git write over the engine's files.
     #[test]
     fn owner_git_refuses_a_project_that_is_the_engine_root_before_any_profile() {
         let made = made();
@@ -1030,9 +1035,10 @@ mod owner_git_rows {
             &helper,
             &made.grants,
         ) {
-            Err(SandboxError::Invalid(reason)) => {
-                assert_eq!(reason, crate::paths::SECRET_ROOT_REFUSED)
-            }
+            Err(error) => assert_eq!(
+                crate::lines::invalid_code(&error),
+                crate::lines::PROJECT_IN_ENGINE_FOLDER
+            ),
             other => panic!("expected the engine root refusal, got {other:?}"),
         }
         let folder = canonical(&made.folder).unwrap();
@@ -1065,7 +1071,7 @@ mod owner_git_rows {
         let helper = std::env::current_exe().unwrap();
         match OwnerGit::install(
             &crate::test_hooks::STAND_IN,
-            &made.root,
+            &made.engine,
             folder,
             project,
             git,
@@ -1109,7 +1115,7 @@ mod owner_git_rows {
             let helper = std::env::current_exe().unwrap();
             let owner = OwnerGit::install(
                 &crate::test_hooks::STAND_IN,
-                &made.root,
+                &made.engine,
                 &made.folder,
                 &project,
                 &git,
