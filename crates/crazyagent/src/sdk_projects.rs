@@ -80,7 +80,7 @@ pub(crate) fn rows(tx: &Transaction<'_>, after: &str, limit: u16) -> Result<Kept
     if !(1..=LIMIT_MAX).contains(&limit) {
         return Err(error("owner_page_limit"));
     }
-    let mut stmt = tx.prepare(SQL).map_err(error)?;
+    let mut stmt = tx.prepare_cached(SQL).map_err(error)?;
     let mut found = stmt
         .query(params![after, i64::from(limit) + 1])
         .map_err(error)?;
