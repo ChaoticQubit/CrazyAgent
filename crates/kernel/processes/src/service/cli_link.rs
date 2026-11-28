@@ -54,7 +54,8 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
 
 /// Whether the link already at the name may stay as it is: read without following it, it
 /// names the executable by the same bytes, and `lstat` found it this user's own with no
-/// access list that lets another user change it ([`keeps`]). Any read that fails says no,
+/// access list that lets another user change it ([`keeps`]). The bytes are compared first,
+/// so a link naming another executable is swapped with no access list read. Any read that fails says no,
 /// so the link is swapped as before. Inputs: the link, what `lstat` read of it, and the
 /// executable. Output: the answer.
 #[cfg(unix)]
@@ -62,6 +63,12 @@ fn kept_link(link: &Path, metadata: &std::fs::Metadata, executable: &Path) -> bo
     use std::os::unix::fs::MetadataExt;
     assert!(metadata.file_type().is_symlink());
     let named = std::fs::read_link(link).ok();
+    if !named
+        .as_deref()
+        .is_some_and(|named| named.as_os_str() == executable.as_os_str())
+    {
+        return false;
+    }
     keeps(
         metadata.uid(),
         current_uid(),
