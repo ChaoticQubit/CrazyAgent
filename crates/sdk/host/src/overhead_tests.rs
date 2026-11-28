@@ -72,6 +72,20 @@ impl sdk::process::Provide for NoProcess {
     }
 }
 
+/// The projects read provider of the overhead rows, which never call it.
+struct NoProjectRows;
+
+impl sdk::generated::project_rows::Provide for NoProjectRows {
+    fn page(
+        &self,
+        _: &'static str,
+        _: Option<String>,
+        _: u16,
+    ) -> Result<sdk::generated::project_rows::RowsPage, Refusal> {
+        unreachable!("the overhead rows call no projects read")
+    }
+}
+
 impl sdk::net::Provide for NoNet {
     fn request(&self, _: &'static str, _: sdk::net::Request) -> Result<sdk::net::Reply, Refusal> {
         unreachable!("the overhead row calls only settings.save_quit")
@@ -202,6 +216,7 @@ fn overhead_per_sdk_call() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        project_rows: &NoProjectRows,
         sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &provider,
@@ -285,6 +300,7 @@ fn gateway_secrets_call_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        project_rows: &NoProjectRows,
         sandbox: &NoSandbox,
         secrets: &Found,
         settings: &Noop,
@@ -339,6 +355,7 @@ fn gateway_update_set_channel_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        project_rows: &NoProjectRows,
         sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &Noop,
@@ -408,6 +425,7 @@ fn gateway_service_status_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        project_rows: &NoProjectRows,
         sandbox: &NoSandbox,
         secrets: &NoSecrets,
         settings: &Noop,
@@ -472,6 +490,7 @@ fn gateway_sandbox_save_settings_p95() {
         editor: &NoEditor,
         net: &NoNet,
         process: &NoProcess,
+        project_rows: &NoProjectRows,
         sandbox: &SavedSandbox,
         secrets: &NoSecrets,
         settings: &Noop,

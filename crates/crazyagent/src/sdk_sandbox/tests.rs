@@ -110,6 +110,7 @@ fn as_plugin<T>(
         editor: &Absent,
         net: &Absent,
         process: &Absent,
+        project_rows: &Absent,
         sandbox: &provider,
         secrets: &Absent,
         settings: &Absent,

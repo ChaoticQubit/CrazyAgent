@@ -108,6 +108,9 @@ mod sdk_install;
 /// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
 /// gateway's grant check and the bundled agent-quit plugin.
 pub mod sdk_processes;
+/// The `project_rows.page` read: the engine's projects page, bounded, checked and parsed in
+/// the caller's transaction, kept as engine items and as SDK rows.
+mod sdk_projects;
 /// The `sandbox.*` provider: the owner's sandbox settings read and saved through the same
 /// owner read and settings log save the Settings screens use.
 pub mod sdk_sandbox;
