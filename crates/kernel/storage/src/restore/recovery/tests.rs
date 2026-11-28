@@ -153,8 +153,8 @@ fn put_back_refuses_while_another_holds_the_restore_lock_and_writes_nothing() {
 
 /// A second descriptor of the restore lock, as a process spawned while the lock is held
 /// carries until its exec. Input: the held lock. Output: the copy.
-fn spawned_copy(lock: &std::fs::File) -> std::fs::File {
-    lock.try_clone().unwrap()
+fn spawned_copy(lock: &RestoreLock) -> std::fs::File {
+    lock.file.try_clone().unwrap()
 }
 
 #[test]
@@ -205,6 +205,37 @@ fn a_held_restore_lock_is_busy_to_another_thread_until_it_is_dropped() {
             .unwrap()
     })
     .unwrap();
+}
+
+#[test]
+fn a_restore_lock_that_fails_for_another_cause_says_so_and_is_not_busy() {
+    let busy = lock_refusal(rustix::io::Errno::WOULDBLOCK).0;
+    let failed = lock_refusal(rustix::io::Errno::NOLCK).0;
+
+    assert_eq!(busy, PUTBACK_BUSY);
+    assert!(
+        failed.starts_with(crate::restore::RESTORE_FAILED),
+        "{failed}"
+    );
+    assert!(!failed.contains(PUTBACK_BUSY), "{failed}");
+}
+
+#[test]
+fn a_restore_lock_name_that_is_a_link_is_refused_as_a_failure_not_busy() {
+    let root = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("elsewhere"),
+        root.path().join(RESTORE_LOCK_FILE),
+    )
+    .unwrap();
+
+    let refused = locked(root.path()).map(drop).unwrap_err().0;
+
+    assert!(
+        refused.starts_with(crate::restore::RESTORE_FAILED),
+        "{refused}"
+    );
+    assert!(!root.path().join("elsewhere").exists());
 }
 
 #[test]
