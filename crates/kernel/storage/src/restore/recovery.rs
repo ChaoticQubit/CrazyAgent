@@ -97,7 +97,8 @@ static HOLDING: Mutex<BTreeSet<(rustix::fs::Dev, u64)>> = Mutex::new(BTreeSet::n
 
 /// The restore lock held for one recovery action, on the descriptor this process keeps for
 /// the lock file for its whole life. Dropping it unlocks that descriptor's open file, which
-/// a process spawned meanwhile may share until its exec, then frees the key.
+/// a process spawned meanwhile may share until its exec, then always frees the key: a lock
+/// an unlock left held is on that same open file, so the next lock here takes it again.
 struct RestoreLock {
     file: Arc<std::fs::File>,
     key: (rustix::fs::Dev, u64),
@@ -105,9 +106,9 @@ struct RestoreLock {
 
 impl Drop for RestoreLock {
     fn drop(&mut self) {
-        if rustix::fs::flock(&*self.file, rustix::fs::FlockOperation::Unlock).is_err() {
-            return;
-        }
+        while rustix::fs::flock(&*self.file, rustix::fs::FlockOperation::Unlock)
+            == Err(rustix::io::Errno::INTR)
+        {}
         let mut holding = HOLDING.lock().unwrap_or_else(PoisonError::into_inner);
         let freed = holding.remove(&self.key);
         assert!(freed, "a held restore lock has its key in the set");
