@@ -67,6 +67,26 @@ fn guarded_tcp_ports_refuse_the_stream_sockets_that_are_not_plain_tcp() {
     );
 }
 
+/// Every socket filter the helper installs refuses a Unix-domain socket, whatever the network
+/// switches, so on any launch the filter is the first layer that keeps an agent's sockets
+/// out of the engine folder, Landlock's file rules the second.
+#[test]
+fn every_socket_filter_refuses_a_unix_domain_socket() {
+    use seccompiler::{SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompRule};
+    let unix = SeccompCondition::new(
+        0,
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::Eq,
+        libc::AF_UNIX as u64,
+    )
+    .unwrap();
+    let unix = SeccompRule::new(vec![unix]).unwrap();
+    for (tcp_only, plain_tcp) in [(false, false), (false, true), (true, false), (true, true)] {
+        let rules = refused_sockets(tcp_only, plain_tcp).unwrap();
+        assert!(rules.contains(&unix), "{tcp_only} {plain_tcp}");
+    }
+}
+
 #[test]
 fn the_socket_filter_request_takes_no_policy_and_names_the_harness() {
     let parse = |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
