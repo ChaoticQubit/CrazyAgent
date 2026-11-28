@@ -2369,7 +2369,7 @@ impl NativeAuthCustodyChannel {
         }
         let packet = crate::engine::secret_frame::owner_packet(b"CAN1", 0, &token);
         drop(token);
-        stream.write_all(&*packet).await.map_err(io_error)?;
+        stream.write_all(&**packet).await.map_err(io_error)?;
         let frame = encode_frame(&Attach {
             protocol_version: PROTOCOL_VERSION,
             kind: AttachKind::Attach,

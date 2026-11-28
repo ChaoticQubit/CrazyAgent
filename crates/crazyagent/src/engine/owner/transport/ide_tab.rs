@@ -201,7 +201,7 @@ impl OwnerClient {
                 crate::engine::secret_frame::client_tag(self.kind),
                 &self.token,
             );
-            stream.write_all(&*packet).await.map_err(unavailable)?;
+            stream.write_all(&**packet).await.map_err(unavailable)?;
             stream.write_all(&frame).await.map_err(unavailable)?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
             match serde_json::from_slice(&frame[4..])

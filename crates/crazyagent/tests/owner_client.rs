@@ -800,7 +800,7 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
         .await
         .unwrap();
     let packet = owner_packet(b"CAO1", 0, &[0; 32]);
-    wrong.write_all(&*packet).await.unwrap();
+    wrong.write_all(&**packet).await.unwrap();
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(1), wrong.read(&mut byte)).await,
         Ok(Ok(0)) | Ok(Err(_))
@@ -814,7 +814,7 @@ async fn owner_missing_wrong_partial_and_oversized_frames_never_gain_authority()
         let mut stream = kernel_processes::spawn_gate::connect_unix(root.path().join("owner.sock"))
             .await
             .unwrap();
-        stream.write_all(&*packet).await.unwrap();
+        stream.write_all(&**packet).await.unwrap();
         stream.write_all(&bytes).await.unwrap();
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte)).await,
