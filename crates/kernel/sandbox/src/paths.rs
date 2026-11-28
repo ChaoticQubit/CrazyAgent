@@ -385,15 +385,35 @@ impl Walk {
         Self::read(path, &mut Reads::default())
     }
 
+    /// Walks a path through `reads`: by [`Walk::read_fast`] when it answers, else by
+    /// [`Walk::read_full`], which gives the same walk for every path. Inputs: the path and
+    /// the reads of its list. Output: the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`].
+    fn read(path: &Path, reads: &mut Reads) -> Result<Walk, SandboxError> {
+        #[cfg(all(test, target_os = "macos"))]
+        WALKS.with(|walks| walks.set(walks.get() + 1));
+        #[cfg(unix)]
+        if let Some(walk) = Self::read_fast(path, reads)? {
+            return Ok(walk);
+        }
+        Self::read_full(path, reads)
+    }
+
+    /// Walks an absolute path with no link, `.` or `..` part by one entry read per run,
+    /// links not followed. Inputs: the path and the reads of its list. Output: the walk,
+    /// None when the path is not one this read can answer, or `Invalid` with
+    /// [`SECRET_ROOT_REFUSED`] when a read fails other than not found.
+    #[cfg(unix)]
+    fn read_fast(_path: &Path, _reads: &mut Reads) -> Result<Option<Walk>, SandboxError> {
+        Ok(None)
+    }
+
     /// Reads the identities of a path's leading runs, of every folder above the deepest
     /// existing run once its links are resolved, and of every folder above where its first
     /// missing run leads when that run is a link, through `reads`. Inputs: the path and the
     /// reads of its list. Output: the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`] when a
     /// read or a resolve fails other than not found, or a missing run leads through more
     /// than [`DANGLING_LINK_HOPS`] links.
-    fn read(path: &Path, reads: &mut Reads) -> Result<Walk, SandboxError> {
-        #[cfg(all(test, target_os = "macos"))]
-        WALKS.with(|walks| walks.set(walks.get() + 1));
+    fn read_full(path: &Path, reads: &mut Reads) -> Result<Walk, SandboxError> {
         let refused = |_| invalid(SECRET_ROOT_REFUSED);
         let parts: Vec<Component<'_>> = path.components().collect();
         let mut ids = Vec::with_capacity(parts.len());

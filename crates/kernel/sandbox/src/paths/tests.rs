@@ -686,3 +686,113 @@ fn a_grant_against_a_list_without_a_harness_home_trips_the_build() {
         .collect();
     let _ = granted_build(&home, &without, &root);
 }
+
+/// A canonical scratch folder, so no run above it is a link. Output: the folder guard and
+/// the folder.
+#[cfg(unix)]
+fn plain_scratch() -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::tempdir().unwrap();
+    let real = folder.path().canonicalize().unwrap();
+    (folder, real)
+}
+
+/// Asserts that [`Walk::read`] and, when it answers, [`Walk::read_fast`] give the same whole
+/// walk as [`Walk::read_full`]: path, run identities and reached identities in order. Input:
+/// the path. Output: true when the fast read answered.
+#[cfg(unix)]
+fn walks_as_full(path: &Path) -> bool {
+    let full = Walk::read_full(path, &mut Reads::default()).unwrap();
+    let fast = Walk::read_fast(path, &mut Reads::default()).unwrap();
+    let read = Walk::read(path, &mut Reads::default()).unwrap();
+    for walk in std::iter::once(&read).chain(fast.as_ref()) {
+        assert_eq!(walk.path, full.path, "{}", path.display());
+        assert_eq!(walk.ids, full.ids, "{}", path.display());
+        assert_eq!(walk.reached, full.reached, "{}", path.display());
+    }
+    fast.is_some()
+}
+
+/// A path with a link in a run walks as the full read, through the fallback, and so does
+/// a `..` part; the same path through the link's target takes the fast read. A list that
+/// walked the link first still reads the link's run as its target, not as the link.
+#[cfg(unix)]
+#[test]
+fn a_link_in_a_run_walks_as_the_full_read() {
+    let (_folder, root) = plain_scratch();
+    std::fs::create_dir_all(root.join("real").join("inner")).unwrap();
+    std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+    assert!(!walks_as_full(&root.join("link").join("inner").join("new")));
+    assert!(!walks_as_full(&root.join("real").join("..").join("real")));
+    assert!(walks_as_full(&root.join("real").join("inner").join("new")));
+    let mut shared = Reads::default();
+    let through = root.join("link").join("inner");
+    Walk::read(&root.join("link"), &mut shared).unwrap();
+    let again = Walk::read(&through, &mut shared).unwrap();
+    let full = Walk::read_full(&through, &mut Reads::default()).unwrap();
+    assert_eq!(again.ids, full.ids);
+    assert_eq!(again.reached, full.reached);
+}
+
+/// A dangling link in the middle of a path walks as the full read, through the fallback.
+#[cfg(unix)]
+#[test]
+fn a_mid_path_dangling_link_walks_as_the_full_read() {
+    let (_folder, root) = plain_scratch();
+    std::os::unix::fs::symlink(root.join("nowhere"), root.join("gone")).unwrap();
+    assert!(!walks_as_full(
+        &root.join("gone").join("child").join("leaf")
+    ));
+}
+
+/// A dangling link as the last part of a path walks as the full read, through the fallback.
+#[cfg(unix)]
+#[test]
+fn a_last_part_dangling_link_walks_as_the_full_read() {
+    let (_folder, root) = plain_scratch();
+    std::os::unix::fs::symlink(root.join("nowhere"), root.join("gone")).unwrap();
+    assert!(!walks_as_full(&root.join("gone")));
+}
+
+/// A link to a secret folder walks as the full read and still reaches the secret's identity.
+#[cfg(unix)]
+#[test]
+fn a_link_to_a_secret_walks_as_the_full_read_and_reaches_the_secret() {
+    let (_folder, root) = plain_scratch();
+    let secret = root.join("secret");
+    std::fs::create_dir(&secret).unwrap();
+    std::os::unix::fs::symlink(&secret, root.join("alias")).unwrap();
+    assert!(!walks_as_full(&root.join("alias")));
+    let walk = Walk::read(&root.join("alias"), &mut Reads::default()).unwrap();
+    let secret_id = Walk::of(&secret)
+        .unwrap()
+        .ids
+        .last()
+        .copied()
+        .flatten()
+        .unwrap();
+    assert!(walk.reached.contains(&secret_id));
+}
+
+/// A root spelled in another case than on disk under a home takes the fast read and walks
+/// as the full read: the walk keeps the spelled text and the same identities.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_wrong_case_root_under_a_home_takes_the_fast_read_as_the_full_read() {
+    let (_folder, root) = plain_scratch();
+    std::fs::create_dir_all(root.join("home").join("Work")).unwrap();
+    let spelled = root.join("home").join("WORK").join("new");
+    let full = Walk::read_full(&spelled, &mut Reads::default()).unwrap();
+    assert!(full.ids[full.ids.len() - 2].is_some(), "volume folds names");
+    assert!(walks_as_full(&spelled));
+}
+
+/// The owner home under the `/Users` firmlink and a new path below it take the fast read
+/// and walk as the full read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_path_under_users_takes_the_fast_read_as_the_full_read() {
+    let home = owner_home().unwrap();
+    assert!(home.starts_with("/Users"));
+    assert!(walks_as_full(&home));
+    assert!(walks_as_full(&home.join("ca-fast-read-row-no-such-folder")));
+}
