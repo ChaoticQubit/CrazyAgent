@@ -72,7 +72,7 @@ const LINK_NAME: &str = "crazyagent";
 #[cfg(unix)]
 fn link_stat(folder: &std::os::fd::OwnedFd, name: &str) -> Option<Result<rustix::fs::Stat, ()>> {
     let stat = rustix::fs::statat(folder, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).ok()?;
-    let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode.into());
+    let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode);
     Some(if kind == rustix::fs::FileType::Symlink {
         Ok(stat)
     } else {
