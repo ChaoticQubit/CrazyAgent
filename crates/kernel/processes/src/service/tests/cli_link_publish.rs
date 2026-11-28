@@ -187,7 +187,7 @@ fn a_link_naming_the_executable_by_another_spelling_is_swapped() -> TestResult {
 fn a_link_whose_name_turns_into_a_file_before_the_read_is_refused_and_kept() -> TestResult {
     let (_temp, executable, bin) = setup()?;
     let link = link_cli(&executable, &bin).unwrap();
-    before_publish(|name| {
+    cli_link::before_publish(|name| {
         std::fs::remove_file(name).unwrap();
         std::fs::write(name, "another installer\n").unwrap();
     });
