@@ -585,3 +585,52 @@ fn on_windows_a_root_holding_where_a_dangling_secret_link_or_junction_leads_is_r
         assert_eq!(granted_refusal(&other, &home, &secrets), None, "{case}");
     }
 }
+
+/// A build that grants `root` against the owner home, `.claude` and every owner secret,
+/// as a sandbox build keeps it. Inputs: the owner home, its secrets and the root. Output:
+/// the kept build.
+#[cfg(unix)]
+fn granted_build(home: &Path, secrets: &[PathBuf], root: &Path) -> Kept {
+    let mut kept = Kept::of(home, &harness_homes(home, &[".claude"]), secrets).unwrap();
+    kept.grant(root, secrets).unwrap();
+    kept
+}
+
+/// A harness home replaced by a link to a root after the build granted that root is
+/// refused at install: the harness home is one of the secrets every grant is checked
+/// against, so the install's fresh walk of it reaches the root.
+#[cfg(unix)]
+#[test]
+fn a_harness_home_made_a_link_to_a_granted_root_after_the_build_is_refused_at_install() {
+    let (folder, home, secrets) = secret_home();
+    let root = canonical(folder.path()).unwrap().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let kept = granted_build(&home, &secrets, &root);
+    assert!(kept.recheck().is_ok());
+    std::fs::remove_dir(home.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&root, home.join(".claude")).unwrap();
+    match kept.recheck() {
+        Err(SandboxError::Invalid(reason)) => assert_eq!(reason, SECRET_ROOT_REFUSED),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// An owner home moved into a granted root after the build, its old path now a link to
+/// it, is refused at install: every owner secret sits under the owner home, so the
+/// install's fresh walks of them reach the root.
+#[cfg(unix)]
+#[test]
+fn an_owner_home_moved_into_a_granted_root_after_the_build_is_refused_at_install() {
+    let (folder, home, secrets) = secret_home();
+    let root = canonical(folder.path()).unwrap().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let kept = granted_build(&home, &secrets, &root);
+    assert!(kept.recheck().is_ok());
+    let moved = root.join("home");
+    std::fs::rename(&home, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &home).unwrap();
+    match kept.recheck() {
+        Err(SandboxError::Invalid(reason)) => assert_eq!(reason, SECRET_ROOT_REFUSED),
+        other => panic!("{other:?}"),
+    }
+}
