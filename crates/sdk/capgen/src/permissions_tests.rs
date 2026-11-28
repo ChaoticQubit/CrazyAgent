@@ -339,8 +339,8 @@ fn capgen_served_emits() {
     assert_eq!(code, "capgen_served_emits");
 }
 
-/// A stem mixing a kernel and a plugin-tier capability: claimed, it is refused as serving
-/// a kernel capability; unclaimed, its plugin-tier capability is refused as unserved.
+/// A stem mixing a kernel and a plugin-tier capability is refused by the Rust checks the
+/// permissions mode runs first, whether a plugin claims it or not.
 #[test]
 fn a_stem_mixing_kernel_and_plugin_tiers_is_refused_claimed_or_not() {
     let mixed = "capability mix.low(word: text) -> text\n  tier: t1\n  needs: mix.call\n\
@@ -351,7 +351,7 @@ fn a_stem_mixing_kernel_and_plugin_tiers_is_refused_claimed_or_not() {
             &[("mix", mixed)],
             &[("t1", "p", &serving("p", "t1", "[\"mix\"]"))],
         ),
-        "capgen_serves_kernel"
+        "capgen_stem_mixed_tiers"
     );
     assert_eq!(
         served_code(
@@ -359,6 +359,148 @@ fn a_stem_mixing_kernel_and_plugin_tiers_is_refused_claimed_or_not() {
             &[("mix", mixed)],
             &[("t1", "p", &manifest("p", "t1", "[]"))],
         ),
-        "capgen_unserved"
+        "capgen_stem_mixed_tiers"
     );
+}
+
+/// The `.cap` sources of the served wiring rows: kernel `clock` and the served `echo` and
+/// `tick`, as in `capgen/fixture_served`.
+const WIRING_CAPS: [(&str, &str); 3] = [
+    (
+        "clock",
+        "capability clock.now() -> u64\n  tier: kernel\n  needs: clock.read\n",
+    ),
+    (
+        "echo",
+        "capability echo.ping(n: u32) -> u32\n  tier: t1\n  needs: echo.call\n",
+    ),
+    (
+        "tick",
+        "capability tick.count() -> u32\n  tier: t1\n  needs: tick.read\n",
+    ),
+];
+
+/// Runs the served wiring emitter over [`WIRING_CAPS`] and a plugins folder whose plugin
+/// folders each hold a `Cargo.toml` with the given package name. Inputs: a name unique to
+/// the row and (plugin id, served stems list text, package name) triples, every plugin t1.
+/// Output: the result.
+fn wiring(
+    name: &str,
+    plugins_in: &[(&str, &str, &str)],
+) -> Result<Vec<(String, String)>, CapgenError> {
+    let files: Vec<(&str, File)> = WIRING_CAPS
+        .iter()
+        .map(|(stem, source)| {
+            (
+                *stem,
+                crazyagent_cap::parse_as(stem, source).expect("parses"),
+            )
+        })
+        .collect();
+    let texts: Vec<String> = plugins_in
+        .iter()
+        .map(|(plugin, stems, _)| serving(plugin, "t1", stems))
+        .collect();
+    let manifests: Vec<(&str, &str, &str)> = plugins_in
+        .iter()
+        .zip(&texts)
+        .map(|((plugin, _, _), text)| ("t1", *plugin, text.as_str()))
+        .collect();
+    let root = plugins(&format!("wiring-{name}"), &manifests);
+    for (plugin, _, package) in plugins_in {
+        fs::write(
+            root.join("t1").join(plugin).join("Cargo.toml"),
+            format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
+        )
+        .expect("the Cargo.toml writes");
+    }
+    let result = served_wiring(&files, &root);
+    fs::remove_dir_all(&root).expect("the folder is removed");
+    result
+}
+
+#[test]
+fn a_fixture_plugins_folder_writes_one_field_per_served_stem_from_its_provider_crate() {
+    let files = wiring(
+        "fields",
+        &[
+            ("echo-plugin", "[\"echo\"]", "crazyagent-plugin-echo-plugin"),
+            ("tick-plugin", "[\"tick\"]", "crazyagent-plugin-tick-plugin"),
+        ],
+    )
+    .expect("the wiring generates");
+    assert_eq!(
+        files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        ["served.rs"]
+    );
+    let flat: String = files[0].1.split_whitespace().collect();
+    assert!(
+        flat.contains(
+            "pubfnserved()->sdk_host::generated::Served<'static>{sdk_host::generated::Served{echo:&crazyagent_plugin_echo_plugin::ECHO,tick:&crazyagent_plugin_tick_plugin::TICK,}}"
+        ),
+        "{flat}"
+    );
+    assert_eq!(flat.matches(":&crazyagent_plugin_").count(), 2);
+}
+
+#[test]
+fn capgen_provider_crate() {
+    for package in [
+        "crazyagent-plugin-other",
+        "echo-plugin",
+        "crazyagent-plugin-echo-plugin-extra",
+    ] {
+        let error = wiring(
+            "crate",
+            &[
+                ("echo-plugin", "[\"echo\"]", package),
+                ("tick-plugin", "[\"tick\"]", "crazyagent-plugin-tick-plugin"),
+            ],
+        )
+        .expect_err("a provider crate named unlike its plugin is refused");
+        assert_eq!(error.code, "capgen_provider_crate", "{package}");
+        assert!(
+            Path::new(&error.file).ends_with("t1/echo-plugin/Cargo.toml"),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn the_prod_folders_write_no_served_file() {
+    let loaded = caps();
+    let files = served_wiring(&borrowed(&loaded), &repo("plugins")).expect("the wiring generates");
+    assert_eq!(files, Vec::<(String, String)>::new());
+    let folder = repo("crates/crazyagent/src/generated_served");
+    assert!(
+        !folder.exists() || drift(&folder, &files).is_empty(),
+        "{}",
+        folder.display()
+    );
+}
+
+/// Every stem a bundled grant serves has exactly one field in the generated wiring, taken
+/// from the crate of the plugin the grant names, and no field comes from anywhere else.
+#[test]
+fn every_bundled_served_stem_has_one_field_from_its_provider_crate() {
+    use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
+    let loaded = caps();
+    let files = served_wiring(&borrowed(&loaded), &repo("plugins")).expect("the wiring generates");
+    let flat: String = files
+        .iter()
+        .map(|(_, text)| text.split_whitespace().collect::<String>())
+        .collect();
+    let mut stems = 0;
+    for grant in &BUNDLED_GRANTS {
+        let krate = format!("crazyagent_plugin_{}", grant.plugin.replace('-', "_"));
+        for stem in grant.capabilities {
+            let field = format!("{stem}:&{krate}::{},", stem.to_ascii_uppercase());
+            assert_eq!(flat.matches(&field).count(), 1, "{field}");
+            stems += 1;
+        }
+    }
+    assert_eq!(flat.matches(":&crazyagent_plugin_").count(), stems);
 }

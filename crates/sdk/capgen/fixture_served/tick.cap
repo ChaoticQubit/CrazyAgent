@@ -1,0 +1,3 @@
+capability tick.count() -> u32
+  tier: t1
+  needs: tick.read

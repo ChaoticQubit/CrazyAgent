@@ -1,0 +1,3 @@
+capability clock.now() -> u64
+  tier: kernel
+  needs: clock.read

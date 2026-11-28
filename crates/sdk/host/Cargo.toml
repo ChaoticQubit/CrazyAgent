@@ -15,3 +15,5 @@ crazyagent-sdk = { path = "../rust" }
 
 [dev-dependencies]
 crazyagent-bus-gateway = { path = "../../kernel/bus_gateway", features = ["test-support"] }
+crazyagent-kernel-plugin-host = { path = "../../kernel/plugin_host", default-features = false }
+crazyagent-sdk = { path = "../rust", features = ["test-support"] }
