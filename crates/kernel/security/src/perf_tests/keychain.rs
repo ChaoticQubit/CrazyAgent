@@ -114,7 +114,8 @@ impl Drop for Scratch {
 /// Runs one bare `security -h`, which reads no keychain, the way the store runs `security`:
 /// the spawn gate, a reader thread on its output of at most 4096 bytes and a `try_wait` poll
 /// every 10 ms, so its row times the spawn, reader and poll alone. Panics when the child
-/// fails or outlives its 10 s deadline.
+/// fails, or kills and reaps it and joins the reader, then panics, when it outlives its
+/// 10 s deadline.
 fn security_spawn() {
     let mut command = Command::new(SECURITY);
     command
@@ -131,15 +132,17 @@ fn security_spawn() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
-            break status;
+            break Some(status);
         }
-        assert!(
-            Instant::now() < deadline,
-            "security -h outlived its deadline"
-        );
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
         std::thread::sleep(Duration::from_millis(10));
     };
     let (read, bytes) = reader.join().unwrap();
+    let status = status.expect("security -h outlived its deadline");
     assert!(status.success() && read.is_ok(), "security -h failed");
     black_box(bytes);
 }
