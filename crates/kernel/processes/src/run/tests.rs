@@ -94,6 +94,66 @@ fn a_setup_command_keeps_its_report_fails_plainly_and_stops_at_its_limit() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
+/// A setup command that exits is heard through one watch armed on the calling thread, not
+/// found by a poll, and its report is kept.
+#[test]
+fn a_setup_command_that_exits_is_heard_through_one_watch() {
+    let before = crate::exit_wait::tests::hooks::arms();
+    #[cfg(unix)]
+    let mut command = Command::new("/bin/echo");
+    #[cfg(unix)]
+    command.arg("tmux 3.4");
+    #[cfg(windows)]
+    let mut command = Command::new(powershell());
+    #[cfg(windows)]
+    command.args(["-NoProfile", "-Command", "'tmux 3.4'"]);
+    let report = run_bounded(&mut command, Duration::from_secs(30), true).unwrap();
+    assert!(report.starts_with(b"tmux 3.4"));
+    assert_eq!(crate::exit_wait::tests::hooks::arms() - before, 1);
+}
+
+/// A setup command past its limit is killed, then reaped once through its watch, after its
+/// waiter answers that it exited, even with that waiter held back from its wait until the
+/// reap releases it. Linux takes the waiter thread too, with process descriptors refused.
+#[cfg(unix)]
+#[test]
+fn a_setup_command_past_its_limit_is_received_then_reaped_once() {
+    use crate::exit_wait::{Heard, tests::hooks};
+    #[cfg(target_os = "linux")]
+    hooks::refuse_pidfd(Some(rustix::io::Errno::NOSYS));
+    hooks::hold(true);
+    let (before, _) = hooks::reaps();
+    let stopped = run_bounded(
+        Command::new("/bin/sleep").arg("5"),
+        Duration::from_millis(200),
+        false,
+    );
+    hooks::hold(false);
+    #[cfg(target_os = "linux")]
+    hooks::refuse_pidfd(None);
+    assert_eq!(stopped, Err(InstallError("setup_timeout")));
+    let (after, heard) = hooks::reaps();
+    assert_eq!(after - before, 1);
+    assert_eq!(heard, Some(Heard::Exited));
+}
+
+/// With process descriptors refused, a setup command's exit is still heard, through the
+/// waiter thread, and the command succeeds.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refused_pidfd_still_hears_the_exit() {
+    use crate::exit_wait::{Heard, tests::hooks};
+    hooks::refuse_pidfd(Some(rustix::io::Errno::NOSYS));
+    let ran = run_bounded(
+        &mut Command::new("/bin/true"),
+        Duration::from_secs(30),
+        false,
+    );
+    hooks::refuse_pidfd(None);
+    assert_eq!(ran, Ok(Vec::new()));
+    assert_eq!(hooks::reaps().1, Some(Heard::Exited));
+}
+
 /// A setup command that exits at once while a process it left behind still
 /// holds its standard output is stopped at the limit, not held until that process ends.
 #[cfg(unix)]
@@ -201,6 +261,28 @@ fn powershell() -> std::path::PathBuf {
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe")
+}
+
+/// On Windows, a setup command past its limit with no report kept is ended at the limit and
+/// reaped once through its watch, not waited on until its own exit 5 s later.
+#[cfg(windows)]
+#[test]
+fn a_setup_command_past_its_limit_is_ended_and_reaped_once_on_windows() {
+    use crate::exit_wait::tests::hooks;
+    let root = std::env::var_os("SystemRoot").expect("the SystemRoot variable is set");
+    let ping = std::path::PathBuf::from(root)
+        .join("System32")
+        .join("PING.EXE");
+    let (before, _) = hooks::reaps();
+    let started = Instant::now();
+    let stopped = run_bounded(
+        Command::new(ping).args(["-n", "6", "127.0.0.1"]),
+        Duration::from_millis(200),
+        false,
+    );
+    assert_eq!(stopped, Err(InstallError("setup_timeout")));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(hooks::reaps().0 - before, 1);
 }
 
 /// On Windows, a process a setup command starts that holds the report past the limit is

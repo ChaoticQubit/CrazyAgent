@@ -43,10 +43,10 @@ pub mod terminal;
 pub mod update;
 pub mod version;
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 #[path = "../../common/src/perf_kit.rs"]
 mod perf_kit;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod perf_tests;
 #[cfg(test)]
 mod tests;

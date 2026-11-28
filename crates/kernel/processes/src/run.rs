@@ -18,6 +18,7 @@ const VERSION_BYTES_MAX: usize = 32;
 #[cfg(unix)]
 pub const OUTPUT_BYTES_MAX: usize = 64 * 1024;
 const BOUNDED_BYTES_MAX: u64 = 4096;
+#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(50);
 #[cfg(unix)]
 const PAUSE_MIN: Duration = Duration::from_millis(1);
