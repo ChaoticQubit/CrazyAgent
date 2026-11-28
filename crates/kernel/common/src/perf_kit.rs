@@ -68,24 +68,27 @@ fn shaped(row: &Row, sorted: &[u64]) -> (String, usize, u64, u64) {
     (head, sorted.len(), rank(sorted, 50), rank(sorted, 95))
 }
 
-/// The PERF line of one row from its per-call times in ns, ascending: whole microseconds
-/// for a median of 10 us or more, else nanoseconds with the batch. Inputs: the row and
-/// the samples. Output: the line; a row out of shape panics.
+/// The PERF line of one row from its per-call times in ns, ascending: nanoseconds with the
+/// batch at any median, so no row floors to whole microseconds. Inputs: the row and the
+/// samples. Output: the line; a row out of shape panics.
 pub fn line(row: &Row, sorted: &[u64]) -> String {
-    if rank(sorted, 50) < 10_000 {
-        return line_ns(row, sorted);
-    }
-    let (head, n, p50, p95) = shaped(row, sorted);
-    if row.batch == 1 {
-        format!("{head} p50={} p95={} n={n}", p50 / 1000, p95 / 1000)
-    } else {
-        format!(
-            "{head} p50={} p95={} n={n} batch={}",
-            p50 / 1000,
-            p95 / 1000,
-            row.batch
-        )
-    }
+    line_ns(row, sorted)
+}
+
+/// Checks that a median of 25431 ns, above the old 10 us switch to whole microseconds,
+/// prints as 25431 ns with the batch. Output: none; a floored line fails the row.
+#[test]
+fn a_median_of_25431_ns_prints_25431_ns() {
+    let row = Row {
+        layer: 1,
+        module: "common",
+        name: "hash",
+        batch: 1,
+    };
+    assert_eq!(
+        line(&row, &[25_431_u64; SAMPLES_MIN]),
+        format!("PERF 1 common hash p50_ns=25431 p95_ns=25431 n={SAMPLES_MIN} batch=1")
+    );
 }
 
 /// The PERF line of one row in nanoseconds with the batch at any median, for a row whose

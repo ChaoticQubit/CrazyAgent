@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{at, row};
 use crate::migrations::{
@@ -11,10 +11,20 @@ use crate::perf_kit::{SAMPLES, time};
 use crate::restore::{read_restore_record, restorable_until, write_restore_record};
 
 const READ_BATCH: usize = 10;
+const PLANTED_SPIN: Duration = Duration::from_nanos(0);
 const WRITE_BATCH: usize = 1;
 const RECORD: &str = "restored replaced-20261124T082500123Z";
 const OLDER: [&str; 4] = ["7-to-8", "8-to-9", "9-to-10", "10-to-11"];
 const PINNED_VERSIONS: &str = "11-to-12";
+
+/// Waits on the clock for a span without yielding, so a row carries a known extra cost.
+/// Input: the span; zero returns at once. Output: none, once the span has passed.
+fn spin(span: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < span {
+        std::hint::spin_loop();
+    }
+}
 
 /// Makes a private folder. Input: the path. Output: none; a failure panics.
 fn private_folder(path: &Path) {
@@ -78,6 +88,10 @@ fn storage_root_file_calls() {
             black_box(backup_failure(black_box(&root)));
         },
     );
+    time(&row("migrations.planted", READ_BATCH), SAMPLES, || {
+        black_box(backup_failure(black_box(&root)));
+        spin(PLANTED_SPIN);
+    });
     time(&row("migrations.backups_in", READ_BATCH), SAMPLES, || {
         let _ = black_box(backups_in(black_box(&backups)));
     });

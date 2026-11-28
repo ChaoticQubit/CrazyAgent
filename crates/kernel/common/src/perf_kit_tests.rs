@@ -31,17 +31,17 @@ fn a_median_under_ten_microseconds_prints_nanoseconds_and_the_batch() {
 }
 
 #[test]
-fn a_median_of_ten_microseconds_or_more_prints_whole_microseconds() {
+fn a_median_of_ten_microseconds_or_more_prints_nanoseconds_and_the_batch() {
     let mut sorted = vec![10_000_u64; SAMPLES_MIN];
     sorted[SAMPLES_MIN - 1] = 25_999;
     assert_eq!(
         line(&row("hash", 1), &sorted),
-        format!("PERF 1 common hash p50=10 p95=10 n={SAMPLES_MIN}")
+        format!("PERF 1 common hash p50_ns=10000 p95_ns=10000 n={SAMPLES_MIN} batch=1")
     );
     let slow = vec![1_234_567_u64; SAMPLES_MIN];
     assert_eq!(
         line(&row("hash", 4), &slow),
-        format!("PERF 1 common hash p50=1234 p95=1234 n={SAMPLES_MIN} batch=4")
+        format!("PERF 1 common hash p50_ns=1234567 p95_ns=1234567 n={SAMPLES_MIN} batch=4")
     );
 }
 
