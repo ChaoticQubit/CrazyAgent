@@ -355,7 +355,7 @@ impl Manifest {
 
 pub(crate) struct NativeProfileCustody {
     anchor: Anchor,
-    database: File,
+    database: std::sync::Arc<File>,
     database_name: OsString,
     database_identity: Identity,
     root_hash: Option<String>,
@@ -558,15 +558,9 @@ impl NativeProfileCustody {
             .file_name()
             .ok_or_else(|| failure("native_profile_custody_unsafe"))?
             .to_owned();
-        let database = File::from(
-            rustix::fs::openat(
-                &anchor.directory,
-                &database_name,
-                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-                Mode::empty(),
-            )
-            .map_err(unsafe_custody)?,
-        );
+        let database =
+            kernel_storage::held_files::held_file(&anchor.directory, Path::new(&database_name))
+                .map_err(unsafe_custody)?;
         let custody = Self {
             anchor,
             database,
@@ -612,7 +606,7 @@ impl NativeProfileCustody {
                 directory: self.anchor.directory.try_clone().map_err(unsafe_custody)?,
                 identity: self.anchor.identity,
             },
-            database: self.database.try_clone().map_err(unsafe_custody)?,
+            database: std::sync::Arc::clone(&self.database),
             database_name: self.database_name.clone(),
             database_identity: self.database_identity,
             root_hash: self.root_hash.clone(),
@@ -1244,3 +1238,6 @@ mod use_tests;
 
 #[cfg(test)]
 mod configured_rcli_tests;
+
+#[cfg(test)]
+mod engine_fd_tests;
