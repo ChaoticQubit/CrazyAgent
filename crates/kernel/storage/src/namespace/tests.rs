@@ -394,14 +394,30 @@ fn the_namespace_walk_panics_naming_a_folder_link() {
 }
 
 /// Whether a source file may name a plugin's namespace without the gateway's grant check.
-/// Input: the path from the repo root. Output: true for the bus gateway's source and for
-/// the storage crate's own test-only files that make a namespace (its namespace tests and
-/// its perf rows), false for every other file.
+/// Input: the path from the repo root. Output: true for the bus gateway's source, the
+/// storage crate's own test-only files that make a namespace (its namespace tests and its
+/// perf rows) and the one engine budget row that times a plugin write through the engine's
+/// own appender; false for every other file.
 fn exempt(path: &Path) -> bool {
     path.starts_with("crates/kernel/bus_gateway/src")
         || path == Path::new("crates/kernel/storage/src/namespace/tests.rs")
         || path == Path::new("crates/kernel/storage/src/perf_tests.rs")
         || path.starts_with("crates/kernel/storage/src/perf_tests")
+        || path == Path::new("crates/crazyagent/src/storage/migrations/tests/pins/budget.rs")
+}
+
+/// Whether a path names test-only source: a `tests` folder, a `tests.rs` or `*_tests.rs`
+/// file, or a `perf_tests` folder or `perf_tests.rs` file, each matched as a whole name.
+/// Input: the path from the repo root. Output: the answer.
+fn test_only(path: &Path) -> bool {
+    let named = |part: &str| {
+        part == "tests"
+            || part == "tests.rs"
+            || part.ends_with("_tests.rs")
+            || part == "perf_tests"
+            || part == "perf_tests.rs"
+    };
+    path.iter().any(|part| part.to_str().is_some_and(named))
 }
 
 #[test]
@@ -409,16 +425,32 @@ fn a_storage_perf_row_is_exempt_and_product_code_is_not() {
     for path in [
         "crates/kernel/storage/src/perf_tests.rs",
         "crates/kernel/storage/src/perf_tests/store.rs",
+        "crates/crazyagent/src/storage/migrations/tests/pins/budget.rs",
     ] {
         assert!(exempt(Path::new(path)), "{path}");
+        assert!(test_only(Path::new(path)), "{path}");
     }
     for path in [
         "crates/kernel/storage/src/namespace.rs",
         "crates/kernel/storage/src/lib.rs",
         "crates/crazyagent/src/lib.rs",
         "crates/kernel/processes/src/perf_tests/update.rs",
+        "crates/crazyagent/src/storage/migrations.rs",
+        "crates/crazyagent/src/storage/migrations/tests/pins/restore.rs",
+        "crates/crazyagent/src/storage/migrations/tests/pins",
     ] {
         assert!(!exempt(Path::new(path)), "{path}");
+    }
+    for path in [
+        "crates/kernel/storage/src/namespace.rs",
+        "crates/crazyagent/src/storage/migrations.rs",
+        "crates/kernel/bus_gateway/src/lib.rs",
+        "crates/x/src/contests.rs",
+        "crates/x/src/latests.rs",
+        "crates/x/src/perf_testsx.rs",
+        "crates/x/src/perf_testsx/a.rs",
+    ] {
+        assert!(!test_only(Path::new(path)), "{path}");
     }
 }
 
@@ -450,6 +482,20 @@ fn namespace_is_made_only_by_the_bus_gateway() {
             .iter()
             .any(|path| path.ends_with("storage/src/perf_tests.rs"))
     );
+    assert!(
+        walked
+            .iter()
+            .any(|path| path.ends_with("migrations/tests/pins/budget.rs"))
+    );
+    for path in &walked {
+        let path = path.strip_prefix(&repo).unwrap();
+        if exempt(path) && !path.starts_with("crates/kernel/bus_gateway/src") {
+            assert!(
+                test_only(path),
+                "an exempt file outside the gateway is not test code: {path:?}"
+            );
+        }
+    }
 
     let callers: Vec<&PathBuf> = walked
         .iter()
