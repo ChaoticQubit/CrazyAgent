@@ -825,3 +825,30 @@ fn a_windows_device_name_is_no_plugin_name() {
         assert!(valid_name(name), "{name}");
     }
 }
+
+/// An added embedding plugin cannot declare served capability stems: a non-empty
+/// `capabilities` is refused at that field, and an empty one reads as before.
+#[test]
+fn an_embedding_plugin_that_declares_capabilities_is_refused() {
+    let declares = HTTP.replacen(
+        "permissions = []\n",
+        "permissions = []\ncapabilities = [\"projects\"]\n",
+        1,
+    );
+    assert_ne!(declares, HTTP);
+    assert_eq!(
+        refused(&declares),
+        (
+            "app_plugin_field_invalid".into(),
+            Some("capabilities".into())
+        )
+    );
+    let empty = HTTP.replacen(
+        "permissions = []\n",
+        "permissions = []\ncapabilities = []\n",
+        1,
+    );
+    assert_ne!(empty, HTTP);
+    assert!(parse(&empty).is_ok());
+    assert!(parse(HTTP).is_ok());
+}

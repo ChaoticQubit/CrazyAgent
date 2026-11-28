@@ -197,3 +197,168 @@ fn every_essential_plugin_is_marked_in_its_plugin_file() {
         assert_eq!(read.essential, grant.essential, "{}", grant.plugin);
     }
 }
+
+/// A plugin-tier `echo` stem with one capability of the given tier. Input: the tier word.
+/// Output: the `.cap` source.
+fn echo(tier: &str) -> String {
+    format!("capability echo.ping(word: text) -> text\n  tier: {tier}\n  needs: echo.call\n")
+}
+
+/// A plugin.toml text that serves capability stems. Inputs: the id, the tier word and the
+/// stems list text. Output: the text.
+fn serving(plugin: &str, tier: &str, capabilities: &str) -> String {
+    format!(
+        "{}capabilities = {capabilities}\n",
+        manifest(plugin, tier, "[]")
+    )
+}
+
+/// Runs the permission emitter over in-test `.cap` sources and a plugins folder. Inputs: a
+/// name unique to the row, the stems with sources and the manifests. Output: the result.
+fn served(
+    name: &str,
+    sources: &[(&str, &str)],
+    manifests: &[(&str, &str, &str)],
+) -> Result<Vec<(String, String)>, CapgenError> {
+    let files: Vec<(&str, File)> = sources
+        .iter()
+        .map(|(stem, source)| {
+            (
+                *stem,
+                crazyagent_cap::parse_as(stem, source).expect("parses"),
+            )
+        })
+        .collect();
+    let root = plugins(name, manifests);
+    let result = permissions(&files, &root);
+    fs::remove_dir_all(&root).expect("the folder is removed");
+    result
+}
+
+/// The code a served-stem fault is refused with. Inputs: as [`served`]. Output: the code;
+/// panics when the tables generate.
+fn served_code(
+    name: &str,
+    sources: &[(&str, &str)],
+    manifests: &[(&str, &str, &str)],
+) -> &'static str {
+    match served(name, sources, manifests) {
+        Ok(files) => panic!("generated, expected a refusal: {files:?}"),
+        Err(error) => error.code,
+    }
+}
+
+#[test]
+fn a_served_stem_is_written_into_its_providers_grant() {
+    let echo = echo("t1");
+    let files = served(
+        "serves",
+        &[("echo", &echo)],
+        &[(
+            "t1",
+            "echo-plugin",
+            &serving("echo-plugin", "t1", "[\"echo\"]"),
+        )],
+    )
+    .expect("the tables generate");
+    let flat: String = files[0].1.split_whitespace().collect();
+    assert!(
+        flat.contains(
+            "plugin:\"echo-plugin\",tier:Tier::T1,permissions:&[],essential:false,capabilities:&[\"echo\"],"
+        ),
+        "{flat}"
+    );
+}
+
+#[test]
+fn capgen_serves_unknown() {
+    let echo = echo("t1");
+    let code = served_code(
+        "unknown",
+        &[("echo", &echo)],
+        &[("t1", "p", &serving("p", "t1", "[\"echo\", \"ghost\"]"))],
+    );
+    assert_eq!(code, "capgen_serves_unknown");
+}
+
+#[test]
+fn capgen_served_twice() {
+    let echo = echo("t1");
+    let code = served_code(
+        "twice",
+        &[("echo", &echo)],
+        &[
+            ("t1", "p", &serving("p", "t1", "[\"echo\"]")),
+            ("t1", "q", &serving("q", "t1", "[\"echo\"]")),
+        ],
+    );
+    assert_eq!(code, "capgen_served_twice");
+}
+
+#[test]
+fn capgen_serves_kernel() {
+    let kernel = echo("kernel");
+    let code = served_code(
+        "kernel",
+        &[("echo", &kernel)],
+        &[("t1", "p", &serving("p", "t1", "[\"echo\"]"))],
+    );
+    assert_eq!(code, "capgen_serves_kernel");
+}
+
+#[test]
+fn capgen_provider_tier() {
+    let echo = echo("t1");
+    let code = served_code(
+        "tier",
+        &[("echo", &echo)],
+        &[("t2", "p", &serving("p", "t2", "[\"echo\"]"))],
+    );
+    assert_eq!(code, "capgen_provider_tier");
+}
+
+#[test]
+fn capgen_unserved() {
+    let echo = echo("t1");
+    let code = served_code(
+        "unserved",
+        &[("echo", &echo)],
+        &[("t1", "p", &manifest("p", "t1", "[]"))],
+    );
+    assert_eq!(code, "capgen_unserved");
+}
+
+#[test]
+fn capgen_served_emits() {
+    let echo = "capability echo.ping(word: text) -> text\n  tier: t1\n  needs: echo.call\n  emits: EchoPinged { word: text }\n";
+    let code = served_code(
+        "emits",
+        &[("echo", echo)],
+        &[("t1", "p", &serving("p", "t1", "[\"echo\"]"))],
+    );
+    assert_eq!(code, "capgen_served_emits");
+}
+
+/// A stem mixing a kernel and a plugin-tier capability: claimed, it is refused as serving
+/// a kernel capability; unclaimed, its plugin-tier capability is refused as unserved.
+#[test]
+fn a_stem_mixing_kernel_and_plugin_tiers_is_refused_claimed_or_not() {
+    let mixed = "capability mix.low(word: text) -> text\n  tier: t1\n  needs: mix.call\n\
+                 capability mix.core(word: text) -> text\n  tier: kernel\n  needs: mix.call\n";
+    assert_eq!(
+        served_code(
+            "mixed-claimed",
+            &[("mix", mixed)],
+            &[("t1", "p", &serving("p", "t1", "[\"mix\"]"))],
+        ),
+        "capgen_serves_kernel"
+    );
+    assert_eq!(
+        served_code(
+            "mixed-unclaimed",
+            &[("mix", mixed)],
+            &[("t1", "p", &manifest("p", "t1", "[]"))],
+        ),
+        "capgen_unserved"
+    );
+}

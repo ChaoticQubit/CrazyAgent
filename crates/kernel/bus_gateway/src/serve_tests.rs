@@ -498,3 +498,16 @@ fn serve_with_a_capability_tier_below_the_provider_panics() {
         .bind("caller-p")
         .serve(&PING, (), pass, |_, ()| Ok(()), pass);
 }
+
+#[test]
+fn grants_too_many_served_pairs() {
+    let pairs = PLUGINS_MAX * SERVED_STEMS_MAX + 1;
+    let served: Vec<(&'static str, &'static str)> = (0..pairs)
+        .map(|index| (&*Box::leak(format!("s{index}").into_boxed_str()), "one-p"))
+        .collect();
+    assert_eq!(served.len(), 16_385);
+    assert_eq!(
+        Grants::new_serving(&[("one-p", Tier::T1, &[])], &served, &[]),
+        Err("grants_too_many")
+    );
+}
