@@ -206,14 +206,15 @@ fn a_link_whose_name_turns_into_a_file_before_the_read_is_refused_and_kept() -> 
 fn a_link_with_an_access_list_for_others_is_swapped_for_a_new_one() -> TestResult {
     let (_temp, executable, bin) = setup()?;
     let link = link_cli(&executable, &bin).unwrap();
-    let status = std::process::Command::new("/bin/chmod")
-        .args([
-            "-h",
-            "+a",
-            "group:staff allow writeattr,writeextattr,delete",
-        ])
-        .arg(&link)
-        .status();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .args([
+                "-h",
+                "+a",
+                "group:staff allow writeattr,writeextattr,delete",
+            ])
+            .arg(&link),
+    );
     assert!(at(&link, status)?.success());
     let before = stamp_of(&link)?;
     assert_eq!(link_cli(&executable, &bin).unwrap(), link);
@@ -291,10 +292,11 @@ fn a_link_another_user_owns_is_swapped_for_a_new_one() -> TestResult {
     use std::os::unix::fs::MetadataExt;
     let (_temp, executable, bin) = setup()?;
     let link = link_cli(&executable, &bin).unwrap();
-    let status = std::process::Command::new("/usr/bin/sudo")
-        .args(["-n", "/usr/sbin/chown", "-h", "nobody"])
-        .arg(&link)
-        .status();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/sudo")
+            .args(["-n", "/usr/sbin/chown", "-h", "nobody"])
+            .arg(&link),
+    );
     assert!(at(&link, status)?.success());
     let owner = at(&link, std::fs::symlink_metadata(&link))?.uid();
     assert_ne!(owner, rustix::process::getuid().as_raw());
