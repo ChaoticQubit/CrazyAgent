@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod perf_kit;
 #[cfg(test)]
+mod perf_kit_tests;
+#[cfg(test)]
 mod perf_tests;
 pub mod accounts;
 pub mod activity;
