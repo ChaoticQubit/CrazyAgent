@@ -1388,3 +1388,6 @@ fn read_claude_config(path: &Path) -> Result<Option<Vec<u8>>, LaunchError> {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;

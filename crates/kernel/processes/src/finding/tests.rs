@@ -97,6 +97,10 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     let places = home_only(&home);
     let lines: Vec<(&str, Vec<u8>)> = vec![
         ("crlf", b"#!/bin/sh\r\n".to_vec()),
+        (
+            "env-node-crlf",
+            b"#!/usr/bin/env node\r\nrequire('../lib/cli.js')(process)\r\n".to_vec(),
+        ),
         ("wordy", b"#!/bin/sh a b c d e f g h\n".to_vec()),
         ("dollar", b"#!/usr/bin/env -S no$de\n".to_vec()),
         ("assigned", b"#!/usr/bin/env PATH=/tmp/x node\n".to_vec()),

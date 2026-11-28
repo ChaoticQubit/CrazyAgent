@@ -264,22 +264,24 @@ pub fn write_if(
     let at_ms = crate::team::now_ms();
     let stored = writer_text(writer);
     let changed = match expected {
-        0 => tx.execute(
-            "INSERT INTO versioned_items(item, version, writer, written_ms) VALUES (?1, 1, ?2, ?3)
+        0 => tx
+            .prepare_cached(
+                "INSERT INTO versioned_items(item, version, writer, written_ms) VALUES (?1, 1, ?2, ?3)
              ON CONFLICT(item) DO NOTHING",
-            params![item.as_str(), stored, at_ms],
-        ),
-        _ => tx.execute(
-            "UPDATE versioned_items SET version = ?3, writer = ?4, written_ms = ?5
+            )
+            .and_then(|mut statement| statement.execute(params![item.as_str(), stored, at_ms])),
+        _ => tx
+            .prepare_cached(
+                "UPDATE versioned_items SET version = ?3, writer = ?4, written_ms = ?5
              WHERE item = ?1 AND version = ?2",
-            params![
+            )
+            .and_then(|mut statement| statement.execute(params![
                 item.as_str(),
                 to_column(expected),
                 to_column(version),
                 stored,
                 at_ms
-            ],
-        ),
+            ])),
     }
     .map_err(|_| Refusal::Failed(failure("versioned_unavailable")))?;
     if changed != 1 {
@@ -314,11 +316,12 @@ pub fn current(tx: &Connection, item: &Item) -> Result<Current, EngineError> {
         });
     }
     let row = tx
-        .query_row(
-            "SELECT version, writer FROM versioned_items WHERE item = ?1",
-            [item.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )
+        .prepare_cached("SELECT version, writer FROM versioned_items WHERE item = ?1")
+        .and_then(|mut statement| {
+            statement.query_row([item.as_str()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+        })
         .optional()
         .map_err(|_| failure("versioned_unavailable"))?;
     let Some((version, writer)) = row else {
@@ -468,12 +471,11 @@ fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
 }
 
 fn exists(tx: &Connection) -> Result<bool, EngineError> {
-    tx.query_row(
+    tx.prepare_cached(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
          AND name IN ('versioned_items', 'versioned_forces')",
-        [],
-        |row| row.get::<_, i64>(0),
     )
+    .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
     .map(|tables| tables == 2)
     .map_err(|_| failure("versioned_unavailable"))
 }

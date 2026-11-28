@@ -1,9 +1,16 @@
 use kernel_common::Platform;
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::Path;
 
-pub(super) fn xml(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
+/// Escapes the five characters XML reserves as their entities, and borrows a text that holds
+/// none of them, which a definition's names and paths almost always are. Input: the text.
+/// Output: the text as an XML string's content.
+pub(super) fn xml(text: &str) -> Cow<'_, str> {
+    if !text.contains(['&', '<', '>', '"', '\'']) {
+        return Cow::Borrowed(text);
+    }
+    let mut escaped = String::with_capacity(text.len() + 8);
     for character in text.chars() {
         match character {
             '&' => escaped.push_str("&amp;"),
@@ -14,7 +21,8 @@ pub(super) fn xml(text: &str) -> String {
             other => escaped.push(other),
         }
     }
-    escaped
+    assert!(escaped.len() > text.len());
+    Cow::Owned(escaped)
 }
 
 pub(super) fn systemd_specifiers(text: &str) -> String {

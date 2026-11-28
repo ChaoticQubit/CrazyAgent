@@ -30,19 +30,19 @@ fn an_interpreter_in_a_toolchain_folder_is_still_granted_on_linux() {
         "{:?}",
         sandbox.tool_roots()
     );
-    let resolved = Resolved {
-        entry: project.join("missing-entry"),
-        program: tmp.join("script"),
-        kind: Kind::Script {
-            interpreter: Box::new(Resolved {
-                entry: interpreter.clone(),
-                program: interpreter.clone(),
-                kind: Kind::Native,
-            }),
-            arguments: Vec::new(),
-            by_name: false,
-        },
+    let node = Resolved {
+        entry: interpreter.clone(),
+        program: interpreter.clone(),
+        kind: Kind::Native,
     };
+    let resolved = Resolved::script(
+        project.join("missing-entry"),
+        tmp.join("script"),
+        node,
+        Vec::new(),
+        false,
+    )
+    .unwrap();
     let granted = sandbox.allow_interpreters(&resolved).unwrap();
     let folder: PathBuf = tools.join("bin");
     assert!(

@@ -458,7 +458,7 @@ impl OwnerClient {
                 crate::engine::secret_frame::client_tag(self.kind),
                 &self.token,
             );
-            stream.write_all(&*packet).await.map_err(io_error)?;
+            stream.write_all(&**packet).await.map_err(io_error)?;
             stream
                 .write_all(
                     &encode_frame(&InputEnvelope {

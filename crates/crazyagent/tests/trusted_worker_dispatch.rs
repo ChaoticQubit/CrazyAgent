@@ -331,7 +331,7 @@ async fn exchange<T: Serialize>(
         let mut stream = kernel_processes::spawn_gate::connect_unix(socket).await?;
         if let Some((principal, slot, token)) = auth {
             let prelude = crazyagent::engine::secret_frame::owner_packet(principal, slot, token);
-            if let Err(error) = stream.write_all(&*prelude).await {
+            if let Err(error) = stream.write_all(&**prelude).await {
                 return if closed(&error) { Ok(None) } else { Err(error) };
             }
         }

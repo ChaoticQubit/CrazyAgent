@@ -584,7 +584,7 @@ async fn native_auth_channel_rejects_owner_runner_and_reserved_capability_roles(
                     } else {
                         OwnerClientKind::Desktop
                     };
-                    packet[5..].copy_from_slice(&*case.client(kind).token);
+                    packet[5..].copy_from_slice(&**case.client(kind).token);
                 }
                 "as-tui" | "as-desktop" => {
                     packet[..4].copy_from_slice(b"CAO1");
