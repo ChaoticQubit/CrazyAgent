@@ -309,3 +309,43 @@ fn a_link_another_user_owns_is_swapped_for_a_new_one() -> TestResult {
     assert_eq!(names(&bin)?, vec!["crazyagent".to_string()]);
     Ok(())
 }
+
+/// A link that names another executable is swapped without its access list read: the
+/// names differ, so the keep rule says no before any list is read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_naming_another_executable_is_swapped_with_no_access_list_read() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let other = temp.path().join("app/other");
+    at(&other, std::fs::write(&other, "#!/bin/sh\n"))?;
+    let link = bin.join("crazyagent");
+    at(&link, std::os::unix::fs::symlink(&other, &link))?;
+    let before = cli_link::acl_reads();
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(cli_link::acl_reads(), before);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    Ok(())
+}
+
+/// A bin folder replaced by a link after the publish began is never followed: the link
+/// lands in the folder first opened, and the folder the new link names stays empty.
+#[test]
+fn a_bin_folder_replaced_by_a_link_after_the_open_is_not_followed() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let held = temp.path().join("home/.local/bin-held");
+    let decoy = temp.path().join("decoy");
+    at(&decoy, std::fs::create_dir_all(&decoy))?;
+    let (moved, aside, planted) = (bin.clone(), held.clone(), decoy.clone());
+    cli_link::before_publish(move |_| {
+        std::fs::rename(&moved, &aside).unwrap();
+        std::os::unix::fs::symlink(&planted, &moved).unwrap();
+    });
+    let _ = link_cli(&executable, &bin);
+    assert_eq!(names(&decoy)?, Vec::<String>::new());
+    assert_eq!(names(&held)?, vec!["crazyagent".to_string()]);
+    assert_eq!(
+        at(&held, std::fs::read_link(held.join("crazyagent")))?,
+        executable
+    );
+    Ok(())
+}
