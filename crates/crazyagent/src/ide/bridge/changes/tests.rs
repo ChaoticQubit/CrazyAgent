@@ -157,10 +157,10 @@ impl Case {
         )
     }
 
-    /// The case with its change set made by `agent` in the store of an engine root, or
-    /// of a new root in the case's own folder, with extra base files and agent edits.
-    /// Inputs: the engine root or None, the agent, the base files and the edits. Output:
-    /// the case.
+    /// The case with its change set made by `agent` in the store of an engine root, or of a
+    /// new root in the case's own folder, whose owner host runs in this process so landing
+    /// writes pass the fence, with extra base files and agent edits. Inputs: the engine root
+    /// or None, the agent, the base files and the edits. Output: the case.
     fn made(
         engine: Option<&Path>,
         agent: ChangeAgent,
@@ -211,6 +211,7 @@ impl Case {
             }
             AgentKind::Master => master_lease(&db, &engine, &project, &repo),
         };
+        crate::landing_log::seed(&db);
         let workspace = Workspace {
             project: project.clone(),
             agent,

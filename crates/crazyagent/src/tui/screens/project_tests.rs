@@ -4393,11 +4393,11 @@ fn a_failed_move_read_says_the_move_downloads_everything_and_sends_it() {
         screen.move_read_failed();
         let drawn = project_screen(&mut screen, 80, 30, &Look::plain());
         let shown = text(&drawn.rows);
-        assert!(
-            shown.contains("CrazyAgent couldn't read this folder."),
-            "{shown}"
-        );
-        assert!(shown.contains("rebuildable folders too"), "{shown}");
+        let read = "CrazyAgent couldn't read this folder.";
+        assert!(shown.contains(read), "{shown}");
+        let mac = cfg!(target_os = "macos");
+        assert_eq!(shown.contains("rebuildable folders too"), mac, "{shown}");
+        assert!(mac || !shown.contains("iCloud"), "{shown}");
         assert!(!shown.contains("Download everything (slow)"), "{shown}");
         assert!(!drawn.help.iter().any(|(key, _)| *key == "Space"));
         assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);

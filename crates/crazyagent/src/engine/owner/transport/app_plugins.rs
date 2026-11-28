@@ -14,8 +14,10 @@ const FOLDER_BYTES_MAX: usize = 4096;
 const ACTION_TIME: Duration = Duration::from_secs(30);
 
 /// Every code an App plugins request can answer an owner client with: the plugin store's
-/// refusals, this protocol's own, and the owner connection's.
+/// refusals, this protocol's own, the owner connection's, and storage's change that waits
+/// its turn.
 pub const APP_PLUGINS_CODES: &[&str] = &[
+    "access_change_pending",
     "app_plugin_account_has_no_key",
     "app_plugin_account_not_found",
     "app_plugin_bundled",
@@ -26,6 +28,7 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "app_plugin_key_invalid",
     "app_plugin_key_store_unavailable",
     "app_plugin_name_taken",
+    "app_plugin_name_used",
     "app_plugin_needs_review",
     "app_plugin_not_found",
     "app_plugin_outcome_unknown",
@@ -40,11 +43,13 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "app_plugin_setting_unsafe",
     "app_plugins_readonly",
     "app_plugins_unavailable",
+    "owner_actor_stopped_outcome_unknown",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
     "owner_entropy_unavailable",
     "owner_grant_stale_or_revoked",
+    "owner_outcome_unknown_reconcile_same_identity",
     "owner_request_failed",
     "owner_root_replaced_or_unsafe",
     "owner_root_unavailable",
@@ -62,7 +67,7 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
-    List,
+    List {},
     Preview {
         folder: PathBuf,
     },
@@ -187,7 +192,7 @@ impl OwnerClient {
     /// Reads the App plugins page: bundled plugins, then the owner's, with the permission
     /// words and the change notices not yet shown. Output: the page.
     pub async fn app_plugins(&self) -> Result<AppPluginsPage, EngineError> {
-        self.app_plugins_page(Action::List, None).await
+        self.app_plugins_page(Action::List {}, None).await
     }
 
     /// Reads the trust screen of a folder the owner picked, saving nothing; the engine reads
@@ -346,22 +351,16 @@ impl OwnerClient {
             })
             .map_err(|_| failure("app_plugin_request_bounds"))?;
             self.root.verify()?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
-            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
-                .await
-                .map_err(|_| failure("app_plugins_unavailable"))?;
-            verify_server(&stream)?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
+            let mut stream = self
+                .connect_checked(|_| failure("app_plugins_unavailable"))
+                .await?;
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
             stream
-                .write_all(&packet)
+                .write_all(&**packet)
                 .await
                 .map_err(|_| failure("app_plugins_unavailable"))?;
             stream
@@ -369,13 +368,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("app_plugins_unavailable"))?;
             if let Some(key) = key {
-                let mut bytes = key.into_bytes();
-                let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
-                framed.extend_from_slice(&bytes);
-                kernel_security::secret::wipe(&mut bytes);
-                let sent = stream.write_all(&framed).await;
-                kernel_security::secret::wipe(&mut framed);
-                sent.map_err(|_| failure("app_plugins_unavailable"))?;
+                crate::engine::secret_frame::write_secret_frame(&mut stream, Some(key))
+                    .await
+                    .map_err(|_| failure("app_plugins_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
             match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
@@ -437,16 +432,15 @@ async fn handle(
     } else {
         None
     };
-    {
-        let _barrier = engine.owner_egress.write().await;
-        if &authority.authenticate(packet)? != admission {
-            return Err(failure("owner_grant_stale_or_revoked"));
-        }
+    let barrier = engine.owner_egress.write().await;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
     }
     let command = command(action, key.map(AccountSecret::into_bytes));
     let done = engine
         .owner_job(|reply| Job::AppPlugins(command, reply))
         .await?;
+    drop(barrier);
     Ok(match done {
         Done::Page {
             listing,
@@ -489,7 +483,7 @@ async fn handle(
 /// came with a `set_key`. Output: the command.
 fn command(action: Action, key: Option<Vec<u8>>) -> Command {
     match action {
-        Action::List => Command::List,
+        Action::List {} => Command::List,
         Action::Preview { folder } => Command::Preview { folder },
         Action::Review { name } => Command::Review { name },
         Action::Add {
@@ -557,9 +551,10 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         Action::BindAccount { name, secret, .. }
         | Action::SetKey { name, secret }
         | Action::Unbind { name, secret } => vec![name, secret],
-        Action::List | Action::Preview { .. } | Action::Add { .. } | Action::SetWhenOff { .. } => {
-            Vec::new()
-        }
+        Action::List {}
+        | Action::Preview { .. }
+        | Action::Add { .. }
+        | Action::SetWhenOff { .. } => Vec::new(),
     };
     let folder_invalid =
         |folder: &PathBuf| !folder.is_absolute() || folder.as_os_str().len() > FOLDER_BYTES_MAX;
@@ -582,15 +577,10 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
 async fn receive_key(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("app_plugin_key_invalid");
-        let size = stream.read_u32().await.map_err(|_| invalid())? as usize;
-        if size == 0 || size > KEY_BYTES_MAX {
-            return Err(invalid());
-        }
-        let mut bytes = vec![0; size];
-        if stream.read_exact(&mut bytes).await.is_err() {
-            kernel_security::secret::wipe(&mut bytes);
-            return Err(invalid());
-        }
+        let bytes = crate::engine::secret_frame::read_secret_frame(stream, KEY_BYTES_MAX)
+            .await
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(invalid)?;
         AccountSecret::new(bytes).map_err(|_| invalid())
     })
     .await

@@ -1,7 +1,7 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use {kernel_processes::finding::NODE_HINT, std::time::Duration};
 
 mod parallel;
 mod runner;
@@ -888,12 +888,6 @@ fn shown_output_hides_credential_shapes_and_the_home_folder() {
 fn shown_output_drops_terminal_control_sequences() {
     let text = masked(b"\x1b[32mUpdated\x1b[0m\r\n", Path::new("/Users/owner"));
     assert_eq!(text.trim(), "Updated");
-}
-
-#[test]
-fn the_root_user_is_refused() {
-    assert_eq!(refused_user(0), Some("harness_update_as_root"));
-    assert_eq!(refused_user(501), None);
 }
 
 fn serve_once(reply: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
@@ -1864,9 +1858,7 @@ fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_i
         case.versions(false).needs,
         Some(HarnessNeeds {
             program: Some("node".into()),
-            line: "codex needs node, which is missing. Install Node.js from nodejs.org, or run \
-                   brew install node in Terminal. Then try again."
-                .into(),
+            line: format!("codex needs node, which is missing. {NODE_HINT} Then try again."),
         }),
         "a found Codex that cannot run is never read as installed and ready"
     );

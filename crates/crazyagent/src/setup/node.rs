@@ -6,6 +6,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+pub use super::node_usable::{Usable, usable};
+
 /// The Node.js LTS release setup installs when no usable Node is found (DEC-157).
 pub const NODE_VERSION: &str = "26.13.1";
 
@@ -74,15 +76,6 @@ impl NodeRuntime {
     }
 }
 
-/// A Node the tool resolver finds whole in one folder: the `node` entry and the `npm` entry
-/// beside it, whose own interpreter resolves too, as found on the places before any link is
-/// followed, so a link to `node` keeps following the owner's own link, such as Homebrew's.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Usable {
-    pub node: PathBuf,
-    pub npm: PathBuf,
-}
-
 /// The bounds an unpacked archive must stay within: how many entries, how many file bytes
 /// and how many folders deep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,29 +137,6 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
         && private(&prefix.join("lib"))
         && private(&prefix.join("lib").join("node_modules"));
     (own_file && inside && prefix_ready).then_some(NodeRuntime { node, npm, prefix })
-}
-
-/// The one test of whether this machine has Node, for the setup row, the setup run and npm
-/// harness installs: the first folder on the places where the tool resolver accepts both
-/// `node` and `npm` (npm with its interpreter), so npm never pairs with another install's
-/// node; the engine's own is found through its `setup/bin` links. Nothing is run.
-/// Input: the places. Output: the Node, or none when no folder holds both.
-pub fn usable(places: &kernel_processes::finding::Places) -> Option<Usable> {
-    let found = places.folders().iter().find_map(|folder| {
-        let node = kernel_processes::finding::resolve_entry(&folder.join("node"), places).ok()?;
-        let npm = kernel_processes::finding::resolve_entry(&folder.join("npm"), places).ok()?;
-        Some((node, npm))
-    });
-    let Some((node, npm)) = found else {
-        kernel_processes::finding::probe::missed(crate::tools::finding_seed);
-        return None;
-    };
-    assert_eq!(node.entry.parent(), npm.entry.parent());
-    assert!(node.entry.is_absolute() && node.program.is_absolute());
-    Some(Usable {
-        node: node.entry,
-        npm: npm.entry,
-    })
 }
 
 /// Makes the engine npm prefix private and ready for `npm install -g`: its `bin` and

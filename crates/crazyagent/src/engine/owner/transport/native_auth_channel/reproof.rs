@@ -324,7 +324,7 @@ impl Authority {
     fn native_auth_idle(&self) -> bool {
         self.native_auth
             .lock()
-            .is_ok_and(|current| current.as_ref().is_none_or(NativeAuthSlot::cached))
+            .is_ok_and(|current| current.as_deref().is_none_or(NativeAuthSlot::cached))
     }
 
     /// The admission of the first owner registration this engine run holds active: the

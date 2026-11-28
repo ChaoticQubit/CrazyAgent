@@ -11,6 +11,9 @@ use crate::engine::EngineError;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
+#[path = "uncommitted.rs"]
+pub(crate) mod uncommitted;
+
 const REMOVE_OUTPUT_BYTES_MAX: usize = 4096;
 const TIP_LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 
@@ -355,7 +358,22 @@ fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<boo
 /// first one that differs or is missing, true when all match, so git then hashes at most
 /// the tip's own bytes, else `changes_too_large` past `TREE_BOUNDS`.
 fn sizes_match(repo: &Repo, worktree: &Path, tip: &str) -> Result<bool, EngineError> {
+    Ok(size_mismatches(repo, worktree, tip, 1)?.1 == 0)
+}
+
+/// Lists the files and symlinks of a tip that differ from the clone's work tree by kind or
+/// size, or are missing, as `sizes_match` compares them. Inputs: the owner repository's git,
+/// the clone, the tip and how many differences end the scan. Output: the first
+/// `DIRTY_FILES_MAX` paths and how many differ, else `changes_too_large` past `TREE_BOUNDS`.
+fn size_mismatches(
+    repo: &Repo,
+    worktree: &Path,
+    tip: &str,
+    stop_at: usize,
+) -> Result<(Vec<Vec<u8>>, usize), EngineError> {
     use std::os::unix::ffi::OsStrExt;
+    assert!(stop_at > 0);
+    let mut differing = (Vec::new(), 0_usize);
     let listed = repo.capture(&["ls-tree", "-r", "-z", "-l", tip], TIP_LISTING_BYTES_MAX)?;
     let bounds = &crate::worktrees::TREE_BOUNDS;
     let (mut files, mut bytes) = (0_usize, 0_u64);
@@ -382,20 +400,29 @@ fn sizes_match(repo: &Repo, worktree: &Path, tip: &str) -> Result<bool, EngineEr
         if files > bounds.files || bytes > bounds.bytes {
             return Err(failure("changes_too_large"));
         }
-        let path = worktree.join(std::ffi::OsStr::from_bytes(&entry[tab + 1..]));
-        let Ok(found) = std::fs::symlink_metadata(&path) else {
-            return Ok(false);
-        };
-        let same_kind = if mode == "120000" {
-            found.file_type().is_symlink()
-        } else {
-            found.is_file()
-        };
-        if !same_kind || found.len() != size {
-            return Ok(false);
+        let name = &entry[tab + 1..];
+        let found = std::fs::symlink_metadata(worktree.join(std::ffi::OsStr::from_bytes(name)));
+        let same = found.is_ok_and(|found| {
+            let same_kind = if mode == "120000" {
+                found.file_type().is_symlink()
+            } else {
+                found.is_file()
+            };
+            same_kind && found.len() == size
+        });
+        if same {
+            continue;
+        }
+        if differing.0.len() < super::DIRTY_FILES_MAX {
+            differing.0.push(name.to_vec());
+        }
+        differing.1 += 1;
+        if differing.1 == stop_at {
+            break;
         }
     }
-    Ok(true)
+    assert!(differing.0.len() <= differing.1.min(super::DIRTY_FILES_MAX));
+    Ok(differing)
 }
 
 /// Says why an agent worktree cannot be removed now, as a plain code, checking the store
@@ -716,3 +743,6 @@ pub(super) fn remove(
     }
     Ok(Ok(()))
 }
+
+#[path = "ignored.rs"]
+pub(crate) mod ignored;

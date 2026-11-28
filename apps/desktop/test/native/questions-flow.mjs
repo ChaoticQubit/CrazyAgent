@@ -8,6 +8,8 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
+import { gitRepo } from "./questions-flow-repo.mjs";
+import { shownField, shownText, terminalSettled } from "./shown-text.mjs";
 import { INTERNALS, bridgeCall, owner, serveApp, start, stop } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -27,7 +29,6 @@ const SETUP_MS = 180000;
 const LAUNCH_MS = 120000;
 const CALL_MS = 150000;
 const ASK_SHOWN_MS = 10000;
-const TOAST_MS = 30000;
 const VIEW_MS = 30000;
 const DELIVERY_MS = 90000;
 const QUIET_MS = 20000;
@@ -37,6 +38,8 @@ const JOB_MS = 30000;
 const PLAN_REAL_MS = 30 * 60 * 1000;
 const CONTROL_DEPTH_MAX = 10;
 const TABS_MAX = 12;
+const HOME_BADGE = /\b[1-9]\d* new team notifications?\./;
+const OPEN_HINT = /\bEnter Open(?= {2}|\s*$)/m;
 const OPEN_POINTS_MAX = 8;
 const TMUX_SEARCH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const SHIFT_RIGHT = ["1b", "5b", "31", "3b", "32", "43"];
@@ -67,7 +70,7 @@ const ASKS = {
 const POPUP = "section.qp-popup";
 const POPUP_QUIET_MS = 12000;
 const CHAT_ANSWER = "Use Stripe for checkout.";
-const TUI_ANSWER = "Europe, close to the owner.";
+const TUI_ANSWER = { comment: "close to the owner.", stored: "Europe\nComment: close to the owner." };
 const RESTART_NOTE = "The engine restarted. Carry on.";
 const CLEAR = "\x1b[2J\x1b[H";
 const PERMISSION = " Bash command\n   cargo test\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for cargo test commands\n   3. No, and tell Claude what to do differently (esc)\n";
@@ -142,26 +145,6 @@ function realProfile() {
   if (!root || !pool) return { problem: "real_profile_incomplete: set QUESTIONS_FLOW_REAL_RUNTIME and QUESTIONS_FLOW_REAL_POOL" };
   if (!isAbsolute(root) || !existsSync(join(root, "engine.db"))) return { problem: "real_profile_runtime_without_engine_db" };
   return { socket: join(root, "engine.sock"), database: join(root, "engine.db"), pool, clone: process.env.QUESTIONS_FLOW_CLONE ?? null };
-}
-
-/** Runs git in a folder and stops the run when it fails. Inputs: the folder, the home git
- * reads and the git arguments. Output: git's standard output. */
-function git(cwd, home, ...args) {
-  const run = spawnSync("git", ["-c", "user.name=Questions Flow", "-c", "user.email=owner@example.invalid", "-c", "commit.gpgsign=false", ...args],
-    { cwd, encoding: "utf8", env: { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
-  if (run.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${run.stderr.trim()}`);
-  return run.stdout;
-}
-
-/** Makes one of the owner's existing projects: a git repository with one commit.
- * Inputs: the folder, its readme title and the git home. Output: none. */
-function gitRepo(folder, title, home) {
-  mkdirSync(join(folder, "src"), { recursive: true, mode: 0o700 });
-  writeFileSync(join(folder, "README.md"), `# ${title}\n\nSells house plants.\n`);
-  writeFileSync(join(folder, "src", "main.rs"), "fn main() {\n    println!(\"plants\");\n}\n");
-  git(folder, home, "init", "-q", "-b", "main");
-  git(folder, home, "add", ".");
-  git(folder, home, "commit", "-q", "-m", "Start the plant shop");
 }
 
 /** Thrown when a step's check fails; carries the code the summary prints. */
@@ -526,7 +509,7 @@ async function main() {
     applied("save_owner_profile", await value("desktop_save_owner_profile", { profile: { name: "Questions Flow" }, generation: generation() }));
     applied("set_projects_home", await value("desktop_set_projects_home", { path: projects, generation: generation() }));
 
-    await step("0", "a project with a live Claude master whose launch names the engine's team tool server", [], async () => {
+    await step("0", "a project with a live Claude master, opened as the app's Live switch opens it, whose launch names the engine's team tool server", [], async () => {
       state.account = await signIn("Questions Claude");
       const page = await value("desktop_model_access_page", { collection: "pools", next: false });
       const pool = "pool-questionsflow000000";
@@ -536,6 +519,14 @@ async function main() {
       await assignPool(project, pool);
       await saveSetup(project, { about: ABOUT, research: [], pool, team: { master: "claude-code", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 } });
       state.project = project;
+      const opened = await value("desktop_open_project", { id: project });
+      if (opened.project_id !== project) throw new Refused("master_project_mismatch", opened.project_id);
+      const phase = (await value("desktop_master_state", { ticket: opened.ticket })).session?.phase;
+      if ([undefined, "parked", "closed"].includes(phase)) applied("open_master", await value("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
+      const master = await until("master_open_before_live", VIEW_MS, async () => {
+        const session = (await value("desktop_master_state", { ticket: opened.ticket })).session;
+        return session?.phase === "configured" ? session : null;
+      });
       const team = await value("desktop_team_status", { id: project });
       applied("team_live_master", await value("desktop_team_live_master", { id: project, on: true, version: team.settings_version, generation: generation() }));
       const control = await until("live_master_launch", LAUNCH_MS, () => findControl(crazyHome) ?? findControl(userHome));
@@ -545,7 +536,7 @@ async function main() {
       });
       if (!launch.server) throw new Refused("live_master_without_team_server", "the launch named no crazyagent-team server in --mcp-config");
       state.control = control;
-      return `project ${project}; live master pid ${launch.pid}, session ${launch.session}`;
+      return `project ${project}; master session ${master.session_id} open before the live switch; live master pid ${launch.pid}, session ${launch.session}`;
     });
 
     const desktop = async (page) => {
@@ -562,11 +553,8 @@ async function main() {
         await me.waitFor("Home with the project", (text) => text.includes(REPO) && !/No projects yet/.test(text));
         await me.capture("home");
       }
-      let toast = null;
 
       await step("1", "an agent's ask is logged at once: the engine log, an owner notification and .crazyagent/questions.md", ["QL-1"], async () => {
-        const toastText = `The master: ${ASKS.view.question}`;
-        toast = me ? me.waitFor("the question toast", (text) => text.includes(toastText), TOAST_MS).then(() => null, (error) => error) : null;
         const began = Date.now();
         const id = await ask("view");
         const page = join(repo, ".crazyagent", "questions.md");
@@ -585,15 +573,15 @@ async function main() {
         return `question ${id} logged, notified and on questions.md in ${Date.now() - began} ms`;
       });
 
-      await step("2", "the desktop shows it: the bridge list and counts, a toast, and the Questions tab card with the recommendation", ["QL-1", "QL-2"], async () => {
+      await step("2", "the desktop shows it: the bridge list and counts, the Home badge, and the Questions tab card with the recommendation", ["QL-1", "QL-2"], async () => {
         const id = needs(state.asked.view, "1");
         const listed = (await value("desktop_questions", { projectId: state.project, after: null })).items.find((item) => item.id === id);
         if (!listed || listed.status !== "pending" || listed.version !== 0 || listed.recommended !== "Postgres") throw new Refused("desktop_questions_mismatch", JSON.stringify(listed ?? null));
         const counted = (await value("desktop_question_counts")).find((item) => item.project_id === state.project);
         if (!counted || counted.pending < 1) throw new Refused("desktop_question_counts_without_project", JSON.stringify(counted ?? null));
         const view = onPage();
-        const missed = await toast;
-        if (missed) throw new Refused("no_question_toast", missed.message.slice(0, 300));
+        const missed = await view.waitFor("the question badge on Home", (text) => HOME_BADGE.test(text), VIEW_MS).then(() => null, (error) => error);
+        if (missed) throw new Refused("no_question_badge", missed.message.slice(0, 300));
         await view.follow(`.cards a[href*="/projects/"]`);
         await view.waitFor("the project page", (text) => text.includes(REPO) && /Questions/.test(text));
         await view.click("Questions", "a, button, [role=tab]");
@@ -602,14 +590,14 @@ async function main() {
         for (const word of ["Waiting for you", "Recommended", "Postgres", "SQLite", "MySQL", "Answer", "Dismiss"]) {
           if (!card.includes(word)) throw new Refused("question_card_without", word);
         }
-        return `listed version ${listed.version}; ${counted.pending} pending; toast and card shown`;
+        return `listed version ${listed.version}; ${counted.pending} pending; badge and card shown`;
       });
 
       await step("3", "answer once in the Questions view: the master gets the answer once and a second answer is stale", ["QL-1", "QL-2"], async () => {
         const id = needs(state.asked.view, "1");
         const view = onPage();
         await view.follow(".qs-list .qs-card .qs-option input[type=radio]");
-        await view.click("Answer");
+        await view.click("Answer", ".qs-list button");
         await view.waitFor("the answered note", (text) => text.includes("Answered. The agent that asked gets your answer once."), VIEW_MS);
         await view.capture("questions-answered");
         const row = question(id);
@@ -641,7 +629,7 @@ async function main() {
         const id = await ask("dismiss");
         const view = onPage();
         await view.waitFor("the second question", (text) => text.includes(ASKS.dismiss.question), VIEW_MS);
-        await view.click("Dismiss");
+        await view.click("Dismiss", ".qs-list button");
         await view.waitFor("the dismiss confirmation", (text) => text.includes("Dismiss this question?"));
         await view.click("Dismiss", "dialog button");
         await view.waitFor("the dismissed note", (text) => text.includes("Dismissed. The agent that asked is told once."), VIEW_MS);
@@ -688,7 +676,7 @@ async function main() {
         await view.capture("questions-withdrawn");
         await pause(QUIET_MS);
         const back = typedCount(control, delivered(id, "dismissed")) + deliveredRows(id, "dismissed").length;
-        if (back !== 0) throw new Refused("withdrawal_delivered_back", `${back} deliveries`);
+        if (back !== 0 || !typedCount(control, "")) throw new Refused(back ? "withdrawal_delivered_back" : "no_master_turn_read", `${back} deliveries`);
         return `withdrawn; second withdrawal refused: ${again.text.slice(0, 80)}`;
       });
 
@@ -713,7 +701,7 @@ async function main() {
         return `dismissed ${ids.join(", ")} with one confirm; each told once; a repeat is stale`;
       });
 
-      const popupText = () => page.evaluate(`document.querySelector(${JSON.stringify(POPUP)})?.innerText ?? ""`);
+      const popupText = () => page.evaluate(shownText(POPUP));
       const projectTab = async (tab) => {
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(state.project)}/${tab}` });
         await until(`project_tab_${tab}`, VIEW_MS, async () => (await page.evaluate("location.hash")).endsWith(`/${tab}`)
@@ -736,7 +724,7 @@ async function main() {
         const view = onPage();
         noneWaiting();
         await projectTab("conversation");
-        const field = await page.evaluate(`(() => { const field = document.querySelector("#pj-tab-panel .xterm-helper-textarea, #pj-tab-panel textarea"); field?.focus(); return field && document.activeElement === field ? field.className || field.tagName : null; })()`);
+        const field = await until("terminal_settled", VIEW_MS, () => page.evaluate(terminalSettled("#pj-tab-panel"))).then(() => page.evaluate(shownField("#pj-tab-panel .xterm-helper-textarea, #pj-tab-panel textarea")));
         const id = await ask("popup");
         await until("popup_shows_question", VIEW_MS, async () => (await popupText()).includes(ASKS.popup.question));
         await view.capture("questions-popup-conversation");
@@ -761,7 +749,7 @@ async function main() {
           return text.includes("Answered") && !text.includes("Waiting for you") ? text : null;
         });
         await view.capture("questions-popup-answered-in-tab");
-        return `pop-up above the tab, ${field === null ? "no tab field held the keyboard" : `keyboard kept in ${field}`}; answered in the pop-up, ${card.includes("Answer: Yes") ? "shown answered" : "answered"} in the Questions tab; delivered once: ${typed.split("\n")[0].slice(0, 80)}`;
+        return `pop-up above the tab, ${field === null ? "keyboard check NOT RUN, no field the owner can see in the tab" : `keyboard kept in ${field}`}; answered in the pop-up, ${card.includes("Answer: Yes") ? "shown answered" : "answered"} in the Questions tab; delivered once: ${typed.split("\n")[0].slice(0, 80)}`;
       });
 
       await step("6c", "Questions show, Pop-up on every tab: a master question pops up on Overview, and Dismiss there is the Questions tab's dismissal", ["QL-1", "OB-9"], async () => {
@@ -832,7 +820,8 @@ async function main() {
     await step("7", "the TUI shows the footer badge on every screen and the Questions page, and an answer there reaches the master once", ["QL-1", "QL-3"], async () => {
       if (!tmux) throw new Blocked("tmux_missing");
       const id = await ask("tui");
-      const pending = Number(rows(database, "SELECT COUNT(*) AS n FROM questions_log WHERE status = 'pending'")[0].n);
+      const waiting = rows(database, "SELECT id FROM questions_log WHERE status = 'pending'").map((row) => String(row.id));
+      if (waiting.join() !== String(id)) throw new Refused("tui_other_questions_waiting", JSON.stringify(waiting));
       const pty = tuiPty(tmux, join(root, "tui.sock"), `'${engineBinary}' tui '${socket}'`, { ...env, TERM: "xterm-256color" });
       try {
         let home = null;
@@ -843,10 +832,10 @@ async function main() {
           await pause(POLL_MS);
         }
         if (!home) throw new Refused("tui_never_reached_home");
-        const atHome = await pty.until("badge_on_home", (screen) => badge(screen) === pending).catch(() => {
-          throw new Refused("tui_home_without_badge", `wanted ${pending} questions: ${pty.screen().split("\n").slice(-3).join(" | ")}`);
+        const atHome = await pty.until("badge_on_home", (screen) => badge(screen) === waiting.length).catch(() => {
+          throw new Refused("tui_home_without_badge", `wanted ${waiting.length} questions: ${pty.screen().split("\n").slice(-3).join(" | ")}`);
         });
-        for (let pressed = 0; pressed < TABS_MAX && !pty.screen().includes("Open"); pressed += 1) {
+        for (let pressed = 0; pressed < TABS_MAX && !OPEN_HINT.test(pty.screen()); pressed += 1) {
           pty.keys("Tab");
           await pause(POLL_MS);
         }
@@ -859,19 +848,18 @@ async function main() {
           await pty.until("next_tab", (screen) => tabShown(screen, REPO) !== before);
         }
         const listed = await pty.until("question_on_page", (screen) => screen.includes(ASKS.tui.question));
-        if (badge(listed) !== pending) throw new Refused("tui_project_screen_without_badge", `wanted ${pending}`);
+        if (badge(listed) !== waiting.length) throw new Refused("tui_project_screen_without_badge", `wanted ${waiting.length}`);
         const key = hintKey(listed, "Answer");
         if (!key) throw new Refused("tui_questions_page_without_answer_hint", listed.split("\n").slice(-3).join(" | "));
         pty.keys(key);
         await pause(POLL_MS * 2);
-        pty.text(TUI_ANSWER);
-        pty.keys("Enter");
+        pty.keys("Space", "c", TUI_ANSWER.comment, "Enter");
         await until("tui_answer_recorded", VIEW_MS, () => question(id)?.status === "answered");
-        if (question(id).answer !== TUI_ANSWER) throw new Refused("tui_answer_mismatch", JSON.stringify(question(id)));
-        await deliveredOnce(id, "answered", TUI_ANSWER);
+        if (question(id).answer !== TUI_ANSWER.stored) throw new Refused("tui_answer_mismatch", JSON.stringify(question(id)));
+        await deliveredOnce(id, "answered", TUI_ANSWER.stored);
         writeFileSync(join(evidence, "tui-home.txt"), atHome);
         writeFileSync(join(evidence, "tui-questions.txt"), listed);
-        return `badge ${pending} on Home and the project screen; answered with key ${key}; delivered once`;
+        return `badge ${waiting.length} on Home and the project screen; answered with key ${key}; delivered once`;
       } finally {
         pty.close();
       }
@@ -958,7 +946,7 @@ async function main() {
       if (!roadmap.startsWith("# Roadmap") || !roadmap.includes("Written by the CrazyAgent engine")) throw new Refused("roadmap_md_shape", roadmap.slice(0, 120));
       if (!release.startsWith("# Release process") || !release.includes("Written by the CrazyAgent engine")) throw new Refused("release_process_md_shape", release.slice(0, 120));
       const asked = (await value("desktop_questions", { projectId: project, after: null }, via)).items.filter((item) => item.asker === "engine:planning");
-      if (asked.length > OPEN_POINTS_MAX) throw new Refused("too_many_open_points", String(asked.length));
+      if (asked.length < 1 || asked.length > OPEN_POINTS_MAX) throw new Refused(asked.length ? "too_many_open_points" : "no_open_points_asked", String(asked.length));
       applied("remove_project", await value("desktop_remove_project", { id: project, generation: next() }, via), real.database);
       return `roadmap.md ${roadmap.length} B, release-process.md ${release.length} B, ${asked.length} open points asked`;
     };

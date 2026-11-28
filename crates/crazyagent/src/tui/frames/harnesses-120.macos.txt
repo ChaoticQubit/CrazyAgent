@@ -1,0 +1,36 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Harnesses                                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  @ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile          
+───────────────────────────────━━━━━━━━━━━━━━━━━━───────────────────────────────────────────────────────────────────────
+  Harnesses                                                                                           2 of 9 installed  
+  Agents run inside these tools. CrazyAgent finds them on this Mac. It can install one with Homebrew or npm and update  
+  one with that harness's own updater, each only when you choose it.                                                    
+                                                                                                                        
+    Harness         Status           Control            Works with                                                      
+  > Codex           ✓ Ready          Full control       ChatGPT, OpenAI API                                             
+    Claude Code     ✓ Ready          Full control       Claude, Anthropic API                                           
+    OpenCode        ⊘ Not installed  ? Unknown          Any API key or URL                                              
+    Gemini CLI      ⊘ Not installed  ? Unknown          Google, Gemini API key                                          
+    fx by Vercel    ⊘ Not installed  ◧ Limited control  Any API key or URL                                              
+    OpenClaw        ⊘ Not installed  ◧ Limited control  Subscription, API key, Local model                              
+    Pi              ⊘ Not installed  ? Unknown          Any account                                                     
+    RCLI            ⊘ Not installed  ◧ Limited control  Any API key or URL                                              
+    Goose           ⊘ Not installed  ? Unknown          Any API key or URL                                              
+                                                                                                                        
+  Codex                                                                                                                 
+  Found at     /opt/homebrew/bin/codex                                                                                  
+  Version      0.163.0                                                                                                  
+  Control      Full control. Runs without a window, streams progress, and tools can be turned off.                      
+  Can be       Master, sub-agent, research agent                                                                        
+  Accounts     7 ChatGPT accounts signed in                                                                             
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ↑↓ Move   r Check again   c Check for updates   u Update   Shift-←→ Sections   Esc Home                         ? Help 

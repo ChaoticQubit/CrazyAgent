@@ -1,7 +1,9 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
-import { isWindows } from "./ui/keys";
+import { isWindows, thisComputer } from "./ui/keys";
+import type { RoleSkills, TerminalDisplay, TaskStart, HeavyLane, SharedResource, UncommittedReminder } from "./coord-types";
+export type { SkillRole, RoleSkills, TerminalDisplay, TaskStart, HeavyLane, SharedResource, UncommittedReminder } from "./coord-types";
 
 /** Storage's own answers to a request, one sentence each, the same on every page and in the
  * terminal: a full queue, a database still starting and a request withdrawn unrun changed
@@ -324,7 +326,7 @@ export function errorMessage(error: unknown): string {
     server_not_found: "This MCP server was removed.",
     server_command_invalid: commandPathCopy(isWindows()),
     server_args_invalid: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
-    server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
+    server_url_invalid: `Use an https address. Plain http works only for ${thisComputer()}, and the address can't hold a password.`,
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
     server_secret_limit: "A server can have up to 16 secrets.",
     server_secret_duplicate: "Each secret needs its own name.",
@@ -484,7 +486,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "provider_retry" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "fix_tool_permissions" | "refused_tool" | "restore_pinned" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "provider_retry" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "fix_tool_permissions" | "refused_tool" | "restore_pinned" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap" | "log_compaction";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -960,37 +962,6 @@ export type Overlaps = (typeof OVERLAP_CHOICES)[number];
  * minutes of work, or with one hook reminder on its first edit before any code-graph query. */
 export type Nudges = "off" | "ten_minutes" | "first_edit";
 
-/** A team role whose skills the owner chooses: the master, a lead or a worker. */
-export type SkillRole = "master" | "lead" | "worker";
-
-/** Which approved skills each team role gets: null is All approved skills, a list is Chosen
- * skills, and an empty list gives that role no skills. */
-export interface RoleSkills {
-  master: string[] | null;
-  lead: string[] | null;
-  worker: string[] | null;
-}
-
-/** How every agent terminal of a project draws, whatever harness runs in it (DEC-141): Classic
- * on the normal screen, so the app's view scrolls with the wheel and a plain drag selects, or
- * Fullscreen, the harness's own view, which takes the mouse, the default. */
-export type TerminalDisplay = "classic" | "fullscreen";
-
-/** Whether the first turn of each task of a team agent carries the Task-start reminder: the
- * context-mode tools to load and the approved skills to check for the task. */
-export type TaskStart = "on" | "off";
-
-/** How many heavy commands of a project run at once through its heavy lane (F28): 1, 2, 3 or
- * 4 at a time, or No limit. */
-export type HeavyLane = "one" | "two" | "three" | "four" | "no_limit";
-
-/** A named thing a project's heavy commands share, such as a local model or a database, and
- * how many commands may use it at once, 1 to 8. */
-export interface SharedResource {
-  name: string;
-  slots: number;
-}
-
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
  * tool names the adoption counts include, the skills each team role gets, the terminal
  * display of every harness, the Task-start reminder, the heavy lane size and the shared
@@ -1005,6 +976,7 @@ export interface CoordSettings {
   task_start: TaskStart;
   heavy_lane: HeavyLane;
   shared_resources: SharedResource[];
+  uncommitted_reminder: UncommittedReminder;
 }
 
 /** One heavy command in a project's lane: the agent that runs it, its label (never its

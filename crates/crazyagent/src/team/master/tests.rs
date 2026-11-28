@@ -727,27 +727,6 @@ fn owner_keys_leave_a_draft_until_enter_ctrl_c_or_ctrl_u_and_arrows_change_nothi
 }
 
 #[test]
-fn only_a_views_focus_and_mouse_reports_are_not_pressed_keys() {
-    assert!(!pressed(b""));
-    assert!(!pressed(b"\x1b[I"));
-    assert!(!pressed(b"\x1b[O\x1b[I"));
-    assert!(!pressed(b"\x1b[<65;10;5M\x1b[<0;3;4m"));
-    assert!(!pressed(b"\x1b[M`!!"));
-    assert!(pressed(b"\x1b[A"), "an arrow key is the owner's");
-    assert!(pressed(b"\x1bOB"));
-    assert!(pressed(b"\x1b[Ix"), "a key beside a report counts");
-    assert!(pressed(b"\x1b[<65;10;5"), "a cut report is not one");
-    assert!(pressed(b"\x1b[M`"), "a cut X10 report is not one");
-    assert!(
-        pressed(b"\x1b[Mab\r"),
-        "an X10 report holds no control byte, so Enter after ESC [ M a b counts"
-    );
-    assert!(pressed(b"\x1b[M\r\r\r"));
-    assert!(pressed(b"\r"));
-    assert!(pressed(b"\x1b"));
-}
-
-#[test]
 fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() {
     let mut fixture = Fixture::new();
     let host = fixture.host();
@@ -4579,37 +4558,6 @@ fn lead_delegate_is_refused_at_max_teammates() {
     assert_eq!(tasks(&fixture).len(), 1);
 }
 
-/// A lead's `merge` reaches only its own workers: a worker of another lead is not one of
-/// its sub-agents, whatever it is called (feat/coord-spawn 372ee630).
-#[test]
-fn merge_refuses_a_worker_of_another_lead() {
-    let mut fixture = Fixture::new();
-    let access = codex_pool();
-    let agents = fixture.base.join("team/agents");
-    team_agent(&fixture, LEAD, "claude-code", "working", None);
-    team_agent(&fixture, 61, "claude-code", "working", None);
-    team_agent(&fixture, WORKER, "codex", "idle", Some(LEAD));
-    let answer = lead_call(
-        &mut fixture,
-        &access,
-        &agents,
-        61,
-        Call::Merge {
-            agent: WORKER.to_string(),
-        },
-    );
-    assert_eq!(
-        answer,
-        (
-            format!(
-                "Not merged: none of your own sub-agents is called {WORKER}. Call {}() for their names.",
-                tool::INSPECT_WORK_TOOL
-            ),
-            true
-        )
-    );
-}
-
 /// Makes the fixture's project folder a real git repository with one commit on `main`, the
 /// engine's state folder excluded and its worktrees folder made. Takes the fixture.
 /// Returns the git home and the project folder.
@@ -6956,3 +6904,8 @@ fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
             .is_empty()
     );
 }
+
+#[path = "tests/other_lead.rs"]
+mod other_lead;
+#[path = "tests/view_keys.rs"]
+mod view_keys;

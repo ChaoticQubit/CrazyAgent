@@ -290,6 +290,7 @@ pub struct Asset {
     pub signature: String,
 }
 
+#[inline]
 fn version(text: &str) -> Result<semver::Version, UpdateError> {
     semver::Version::parse(text.trim_start_matches('v')).map_err(|_| {
         fail(
@@ -593,14 +594,15 @@ fn decode_text(base64: &str) -> Option<String> {
 /// release asset check refuses it, so both read the same version. Inputs: the file, the hex
 /// SHA-256, the Tauri-format signature and public key, and the manifest version. Output: Ok, or
 /// `update_checksum_mismatch`, `update_signature_invalid`, `update_signature_ambiguous`,
-/// `update_signature_unversioned`, `update_signed_version_mismatch` or `update_key_missing`.
+/// `update_signature_unversioned`, `update_signed_version_mismatch` or `update_key_missing`;
+/// on Ok, the [`Verified`] archive, the only way to [`unpack`] one.
 pub fn verify_file(
     path: &Path,
     sha256: &str,
     signature: &str,
     public_key: &str,
     version: &str,
-) -> Result<(), UpdateError> {
+) -> Result<Verified, UpdateError> {
     if public_key.trim().is_empty() || public_key == KEY_PLACEHOLDER {
         return Err(key_missing());
     }
@@ -669,7 +671,30 @@ pub fn verify_file(
             format!("The download was signed as {signed}, not {version}, so it was not installed."),
         ));
     }
-    Ok(())
+    Ok(Verified {
+        archive: path.to_path_buf(),
+    })
+}
+
+/// A release archive that passed [`verify_file`], which alone makes one, so [`unpack`] never
+/// reads bytes no release signature covers, whatever a caller imports.
+#[derive(Debug)]
+pub struct Verified {
+    archive: PathBuf,
+}
+
+/// A folder [`unpack`] made from a [`Verified`] archive, which alone makes one, so [`swap`]
+/// never installs a folder no release signature covers.
+#[derive(Debug)]
+pub struct Unpacked {
+    folder: PathBuf,
+}
+
+impl Unpacked {
+    /// The folder holding the unpacked `crazyagent`. Output: the folder.
+    pub fn path(&self) -> &Path {
+        &self.folder
+    }
 }
 
 /// Reads the update public key from a Tauri config. Input: the config JSON.
@@ -752,10 +777,11 @@ fn run_bounded(
 }
 
 /// Unpacks a verified release archive with the system tar (which also reads `.zip` on
-/// Windows) into a new folder. Inputs: the archive and a folder that must not exist yet.
-/// Output: the folder holding `crazyagent`, at the archive root or in its one top folder,
-/// or `update_archive_invalid`.
-pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
+/// Windows) into a new folder. Inputs: the archive [`verify_file`] passed and a folder that
+/// must not exist yet. Output: the folder holding `crazyagent`, at the archive root or in its
+/// one top folder, or `update_archive_invalid`.
+pub fn unpack(archive: &Verified, into: &Path) -> Result<Unpacked, UpdateError> {
+    let archive = archive.archive.as_path();
     let unpackable = || {
         fail(
             "update_archive_invalid",
@@ -779,7 +805,9 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
     }
     let main = format!("crazyagent{EXE_SUFFIX}");
     if regular_file(&into.join(&main)) {
-        return Ok(into.to_path_buf());
+        return Ok(Unpacked {
+            folder: into.to_path_buf(),
+        });
     }
     let folders: Vec<PathBuf> = std::fs::read_dir(into)
         .map_err(|error| io_failure("Can't read the unpacked release", error))?
@@ -788,7 +816,9 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
         .filter(|path| path.is_dir())
         .collect();
     match folders.as_slice() {
-        [only] if regular_file(&only.join(&main)) => Ok(only.clone()),
+        [only] if regular_file(&only.join(&main)) => Ok(Unpacked {
+            folder: only.clone(),
+        }),
         _ => Err(fail(
             "update_archive_invalid",
             "The release archive has no crazyagent.",
@@ -870,9 +900,10 @@ fn restore(install: &Path, moved: &[(String, bool)]) {
 /// same folder. The new `crazyagent` must answer `--version` with the release version before
 /// and after the swap; each old file stays as `<name>.old` until then, and any failure puts
 /// every old file back. Only the known CrazyAgent executables are moved.
-/// Inputs: the install folder, the unpacked folder and the release version.
+/// Inputs: the install folder, the folder [`unpack`] made and the release version.
 /// Output: Ok, or the failure after the old files are restored.
-pub fn swap(install: &Path, staged: &Path, version: &str) -> Result<(), UpdateError> {
+pub fn swap(install: &Path, staged: &Unpacked, version: &str) -> Result<(), UpdateError> {
+    let staged = staged.folder.as_path();
     let main = format!("crazyagent{EXE_SUFFIX}");
     let names: Vec<String> = BINARIES
         .iter()

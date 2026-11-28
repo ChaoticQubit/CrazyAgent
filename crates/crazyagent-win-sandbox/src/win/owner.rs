@@ -18,7 +18,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation, IsValidSid,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_ELEVATION, TOKEN_QUERY,
+    TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
@@ -88,6 +89,40 @@ pub fn owner_only(program: &Path) -> Result<(), BoundaryError> {
     }
     assert!(checked <= FOLDERS_MAX);
     Ok(())
+}
+
+/// Refuses a program the engine would start with its own rights to install or update a
+/// harness unless its real file, opened without following a link, passes
+/// [`crate::private::judge_program`] and [`owner_only`] passes it both as written and at its
+/// real place. Input: the absolute program path. Output: Ok, or the refusal with its reason
+/// or the failed step.
+pub fn program_trusted(program: &Path) -> Result<(), BoundaryError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    if !program.is_absolute() {
+        return Err(BoundaryError::Refused("a program path is not absolute"));
+    }
+    let failed = |step: &'static str| {
+        move |error: std::io::Error| BoundaryError::Windows {
+            step,
+            code: error.raw_os_error().map_or(0, i32::cast_unsigned),
+        }
+    };
+    let real = std::fs::canonicalize(program).map_err(failed("resolve a program"))?;
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&real)
+        .map_err(failed("open a program"))?;
+    if !held.metadata().map_err(failed("read a program"))?.is_file() {
+        return Err(BoundaryError::Refused("a program is not a file"));
+    }
+    let facts = super::private::facts(&held).map_err(failed("read a program's owner and lists"))?;
+    let user = user_sid().map_err(windows("read the engine's user"))?;
+    crate::private::judge_program(&facts, &user).map_err(BoundaryError::Refused)?;
+    drop(held);
+    owner_only(program)?;
+    owner_only(&real)
 }
 
 /// Refuses a file or folder unless one of the trusted owners owns it and no other SID holds
@@ -305,6 +340,34 @@ pub(super) fn user_sid() -> Result<Vec<u8>, u32> {
     }
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
     token_user(&token)
+}
+
+/// Tells whether the engine runs with an elevated token, as an administrator who accepted
+/// the elevation prompt does, so a harness install or update can be refused as the Windows
+/// twin of running as root. Output: the answer, or the failed step with its Windows error.
+pub fn elevated() -> Result<bool, BoundaryError> {
+    const ELEVATION_BYTES: u32 = size_of::<TOKEN_ELEVATION>() as u32;
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(windows("open the engine's token")(last_error()));
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut written = 0_u32;
+    let read = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            ELEVATION_BYTES,
+            &mut written,
+        )
+    };
+    if read == 0 {
+        return Err(windows("read the engine's token elevation")(last_error()));
+    }
+    assert_eq!(written, ELEVATION_BYTES);
+    Ok(elevation.TokenIsElevated != 0)
 }
 
 /// The user SID a token names. Relies on the buffer, aligned for `TOKEN_USER` and as long

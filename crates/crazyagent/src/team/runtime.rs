@@ -923,6 +923,7 @@ pub struct TeamRuntime {
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     unread: BTreeMap<ProjectId, (i64, Instant)>,
     resuming: Option<(i64, Resume)>,
+    named: BTreeMap<i64, Resume>,
     settled: bool,
     naming: Option<i64>,
     fresh_start: Option<i64>,
@@ -1278,6 +1279,7 @@ impl TeamRuntime {
             live_starts: BTreeMap::new(),
             unread: BTreeMap::new(),
             resuming: None,
+            named: BTreeMap::new(),
             settled: false,
             naming: None,
             fresh_start: None,
@@ -1454,7 +1456,7 @@ impl TeamRuntime {
 
     /// Replaces what the runtime runs to look for tools again when the owner switches a live
     /// master on, for a row that counts those looks. Takes the function. Returns the runtime.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, unix))]
     fn with_tools_refresh(mut self, refresh: fn()) -> Self {
         self.tools_refresh = refresh;
         self
@@ -4432,9 +4434,7 @@ impl TeamRuntime {
         if super::master::live(&self.connection, project)? {
             return self.feed_live(project);
         }
-        let settling = self.workers.values().any(|w| {
-            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
-        });
+        let settling = self.master_settling(project);
         let master = self.master(project);
         if settling
             || master.is_some_and(|id| self.workers[&id].live || self.workers[&id].busy.is_some())
@@ -4648,7 +4648,9 @@ impl TeamRuntime {
     /// installed is found, and the automatic start count clears, so the owner's own press
     /// is never refused by [`LIVE_STARTS_MAX`]; a Try again with the switch already on also
     /// stops a master that has not read keys [`MASTER_OVERDUE`] after its start, to start
-    /// again as the first counted start. Takes the setup, live access and paused accounts.
+    /// again as the first counted start. A master the switch started before any master
+    /// session takes the first session the owner opens, while it is empty, without a
+    /// restart. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4664,12 +4666,10 @@ impl TeamRuntime {
             self.live_starts.remove(project);
             (self.tools_refresh)();
         }
-        if self.workers.values().any(|w| {
-            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
-        }) {
+        if self.master_settling(project) || self.master_held(project) {
             return Ok(());
         }
-        let session = crate::master_sessions::live_session(&self.connection, project)?;
+        let session = self.live_session_once(project, on)?;
         if let Some(id) = self.master(project) {
             let chosen_off = !on
                 && self.workers[&id].live
@@ -5158,35 +5158,6 @@ impl TeamRuntime {
             launch,
             &|kept| super::resumes_on(&pool, account, kept),
         )
-    }
-
-    /// Binds a live master that just started to the session it runs, with the seed its
-    /// briefing carries: the earlier turns for a fresh conversation, or the turns a kept
-    /// conversation does not hold for one that continues. A master that did not start live
-    /// and unbriefed is stopped and its start refused, so a start that read the switch off
-    /// never ends the team thread (RV-DS241-121). Takes the agent, the session, the seed and
-    /// the note of the start. Returns the agent and the note, or the refusal.
-    fn seat_session(
-        &mut self,
-        id: i64,
-        session: Option<&SessionId>,
-        seed: Option<String>,
-        note: Option<String>,
-    ) -> Start<(i64, Option<String>)> {
-        let Some(worker) = self
-            .workers
-            .get_mut(&id)
-            .filter(|worker| worker.live && !worker.briefed)
-        else {
-            if let Some(worker) = self.workers.get_mut(&id) {
-                worker.stop_for("engine_stop:not_live");
-                let _ = worker.orders.send(Order::Stop);
-            }
-            return Start::Refused(MASTER_NOT_LIVE.to_owned());
-        };
-        worker.session = session.map(|session| session.as_str().to_owned());
-        worker.seed = seed;
-        Start::Started((id, note))
     }
 
     /// Turns a project's live master off after it could not keep running, so the runtime
@@ -6963,6 +6934,7 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
+            prompt.push_str(&self.uncommitted_line(project, agent));
             let wake_only = matches!(
                 task_text,
                 super::master::WAKE_TASK | super::master::WAKE_DELIVERED
@@ -8010,6 +7982,7 @@ impl TeamRuntime {
             .map_err(error)?
             .flatten();
         self.hooks_checked.remove(&id);
+        self.named.remove(&id);
         self.workers.insert(
             id,
             Worker {
@@ -8956,64 +8929,6 @@ impl TeamRuntime {
         (HarnessKind::from_harness(&harness).map(native_sub_agents)
             == Some(NativeSubAgents::Threads))
         .then_some(tools)
-    }
-
-    /// What a harness reads about its git branch with each task (DEC-100): its task branch,
-    /// and for a native lead in its own clone (DEC-111 Q10) where its sub-agents work: each
-    /// teammate in `.worktrees/<name>` on `<task branch>--<name>`, merged before it reports
-    /// done, or, for a Codex lead with tools, its sub-agents in its own worktree (PA-7).
-    /// Takes the project and the agent. Returns the line, empty with no task branch.
-    fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
-        let row: Option<(String, String)> = self
-            .connection
-            .query_row(
-                "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
-                params![agent, project.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .ok()
-            .flatten();
-        let Some((worktree, git_dir)) = row else {
-            return String::new();
-        };
-        let branch = crate::landing::open(&self.root)
-            .and_then(|db| {
-                crate::landing::agent_branch(&db, Path::new(&worktree), Path::new(&git_dir))
-            })
-            .ok()
-            .flatten();
-        let Some(branch) = branch.filter(|branch| crate::agent_git::is_agent_branch(branch)) else {
-            return String::new();
-        };
-        if recorded_layout(&worktree, &git_dir) == Layout::Linked {
-            return format!("\nYour branch is {branch}; the engine commits your edits there.");
-        }
-        if self.has_lead(agent) {
-            return format!(
-                "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {finish}().",
-                finish = super::tool::FINISH_WORK_TOOL
-            );
-        }
-        let plain = format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
-        );
-        if !matches!(
-            super::lead_mode(&self.connection, project, agent),
-            Ok(crate::coord::settings::SubagentMode::Native)
-        ) {
-            return plain;
-        }
-        match self.threads_lead_tools(agent) {
-            Some(false) => plain,
-            Some(true) => format!(
-                "{plain} Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
-            ),
-            None => format!(
-                "{plain} Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
-                folder = crate::agent_git::TEAMMATES_FOLDER
-            ),
-        }
     }
 
     /// The branch a new sub-agent of a lead works on (DEC-104 K5b, Q32): `<the lead's task
@@ -10255,6 +10170,8 @@ impl TeamRuntime {
                         session,
                         &kept,
                     )?;
+                } else if worker.live && worker.role == AgentRole::Master {
+                    self.named.insert(id, resume);
                 }
                 Ok(false)
             }
@@ -10880,6 +10797,7 @@ impl TeamRuntime {
         let kept = landed.is_ok();
         let note = match landed {
             Ok((_, false)) => {
+                self.note_uncommitted(whole, project, &workspace, (lead, lands), &what)?;
                 return Ok(true);
             }
             Ok((_, true)) => {
@@ -12900,45 +12818,6 @@ fn quoted_lines(names: &[String], max: usize) -> String {
     text
 }
 
-/// Keeps the harness conversation a sub-agent's pane records, replacing the one kept
-/// before, so waking the agent continues it (DEC-102). A record path that is not plain text
-/// or too long, or an id out of bounds, is not kept. Takes the database, the agent, its
-/// project, launch harness and account, and the conversation. Returns any SQLite failure.
-fn keep_agent_conversation(
-    connection: &Connection,
-    agent: i64,
-    project: &ProjectId,
-    harness: &str,
-    account: &CredentialRef,
-    resume: &Resume,
-) -> Result<(), EngineError> {
-    let Some(record) = resume
-        .record
-        .to_str()
-        .filter(|record| !record.is_empty() && record.len() <= 4096)
-    else {
-        return Ok(());
-    };
-    if resume.id.is_empty() || resume.id.len() > 128 {
-        return Ok(());
-    }
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                agent,
-                project.as_str(),
-                harness,
-                account.as_str(),
-                resume.id,
-                record
-            ],
-        )
-        .map_err(error)?;
-    Ok(())
-}
-
 /// The newest result a sub-agent reported for a task, on one line and bounded, the handoff a
 /// woken agent gets when its harness conversation cannot continue. Takes the database and
 /// the agent. Returns the result, or none before its first.
@@ -13507,8 +13386,8 @@ fn mates_home_problem(error: &EngineError) -> String {
 
 /// The owner's line for an agent whose harness could not start: a command that would hold
 /// an MCP secret names its server and secret, skills left in a Codex home or a home reset
-/// past its walk budget say so, and any other refusal names its plain code. Input: the
-/// launch error. Output: the line.
+/// past its walk budget say so, a terminal refusal gives its plain sentence, and every one
+/// names its plain code. Input: the launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
@@ -13519,7 +13398,7 @@ fn start_problem(problem: &LaunchError) -> String {
         None if problem.0 == crate::team::cleanup::WALK_TOO_LONG => {
             with_code(WALK_TOO_LONG_PROBLEM, Some(&problem.0))
         }
-        None => with_code("The agent could not start", Some(&problem.0)),
+        None => crate::terminal::start_refused(&problem.0),
     }
 }
 
@@ -13931,23 +13810,6 @@ pub(crate) fn wake_loops() {
     let mut wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
     *wakes = wakes.wrapping_add(1);
     WOKEN.notify_all();
-}
-
-/// The count of team loop wakes so far, read before a tick so a wake during it is not
-/// missed. Output: the count.
-fn wakes_seen() -> u64 {
-    *WAKES.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Waits until a wake newer than `seen` or `tick` has passed. Inputs: the count read before
-/// the tick and the tick. Output: the count now.
-fn wait_for_wake(seen: u64, tick: Duration) -> u64 {
-    let wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
-    let (wakes, waited) = WOKEN
-        .wait_timeout_while(wakes, tick, |wakes| *wakes == seen)
-        .unwrap_or_else(PoisonError::into_inner);
-    assert!(waited.timed_out() || *wakes != seen);
-    *wakes
 }
 
 /// Background loop that keeps every project's team moving.
@@ -14747,10 +14609,17 @@ mod narrowing;
 #[path = "runtime/spawn_ledger.rs"]
 mod spawn_ledger;
 
+mod task_prompt_lines;
 #[path = "runtime/turn_end.rs"]
 mod turn_end;
 
+mod live_adopt;
 mod teammates;
+
+/// The team loop's side of a wake: the count read before a tick, and the wait that ends at
+/// a newer wake or the tick. Inputs: the count and the tick. Outputs: the count.
+mod wake;
+use wake::{wait_for_wake, wakes_seen};
 
 /// Who a test's agent is to a leftover hold: no project, so a hold it leaves ends its
 /// processes by the default setting and no owner view lists it. Output: the label.
@@ -14834,3 +14703,6 @@ mod live_stop_hook_tests;
 /// Where Git keeps a new agent worktree's metadata, read before any agent runs in it.
 mod worktree_git_dir;
 use worktree_git_dir::agent_git_dir;
+
+mod agent_conversation;
+use agent_conversation::keep_agent_conversation;

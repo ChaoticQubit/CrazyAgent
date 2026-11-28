@@ -61,12 +61,15 @@ fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_is_recorded_as_fai
 /// the record's temp file is a folder, and no backups folder is ever made.
 #[cfg(unix)]
 #[test]
-fn a_restore_whose_restoring_line_cannot_be_written_never_starts() {
+fn a_restore_whose_restoring_line_cannot_be_written_never_starts() -> Result<(), String> {
+    let tmp = std::fs::canonicalize("/tmp").map_err(|error| format!("resolve /tmp: {error}"))?;
     let root = tempfile::Builder::new()
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::create_dir(root.path().join("restore-record.new")).unwrap();
-    std::fs::create_dir(root.path().join("restore-record.new").join("held")).unwrap();
+        .tempdir_in(&tmp)
+        .map_err(|error| format!("make a temporary folder in {tmp:?}: {error}"))?;
+    let temp = root.path().join("restore-record.new");
+    for folder in [temp.clone(), temp.join("held")] {
+        std::fs::create_dir(&folder).map_err(|error| format!("create {folder:?}: {error}"))?;
+    }
 
     let refused = restore_after_stop(
         root.path(),
@@ -87,4 +90,5 @@ fn a_restore_whose_restoring_line_cannot_be_written_never_starts() {
         kernel_storage::restore::read_restore_record(root.path()),
         None
     );
+    Ok(())
 }

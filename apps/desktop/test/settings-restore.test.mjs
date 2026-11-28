@@ -76,3 +76,16 @@ test("restore page shows the compaction row only in a dev build", () => {
   assert.ok(engine.includes(`"${restore.COMPACTION_LABEL}"`), "the TUI and engine say the same label");
   assert.ok(engine.includes(`"${restore.COMPACTION_HELP}"`), "the TUI and engine say the same help");
 });
+
+test("a save that ends after the page closed changes nothing on it, and both saves wait through the helper", async () => {
+  const seen = [];
+  await restore.settleAfter(Promise.resolve("saved"), { current: false }, (result) => seen.push(result));
+  assert.deepEqual(seen, [], "a closed page is left alone");
+  await restore.settleAfter(Promise.resolve("saved"), { current: true }, (result) => seen.push(result));
+  assert.deepEqual(seen, ["saved"], "an open page takes the result once");
+  const page = read("../src/screens/settings/restore.tsx");
+  assert.match(page, /settleAfter\(saveLogCompaction\(/, "the compaction save settles through the helper");
+  assert.match(page, /settleAfter\(restorePinned\(\)/, "the restore confirm settles through the helper");
+  assert.equal(page.match(/useEffect\(\(\) => \{\n {4}alive\.current = true;\n {4}return \(\) => \{ alive\.current = false; \};\n {2}\}, \[\]\);/g)?.length, 2, "both pages track their lifetime");
+});
+

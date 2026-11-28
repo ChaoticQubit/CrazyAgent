@@ -51,7 +51,7 @@ impl Store for FakeStore {
         let bytes = self.items.lock().unwrap().get(found).cloned();
         bytes.map_or_else(
             || Err(StoreError::code("credential_missing")),
-            SecretString::new,
+            SecretString::stored,
         )
     }
 
@@ -182,6 +182,7 @@ fn the_quit_gateway_never_opens_the_store() {
         editor: &Absent,
         net: &Absent,
         process: &Absent,
+        project_rows: &Absent,
         sandbox: &Absent,
         secrets: &Absent,
         settings: &Absent,

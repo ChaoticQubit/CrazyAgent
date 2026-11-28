@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { HOST } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -85,7 +85,7 @@ const present = { state: "found", version: "3.5a" };
 test("Settings, Pack lists tmux, uv and graphify after the pack and offers Install tools while one is missing", () => {
   const skipped = html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, { state: "missing" }, { state: "failed", reason: "Checksum didn't match." }) }))));
   assert.match(skipped, /<h3[^>]*>Code graph[\s\S]*<h3[^>]*>Tools<\/h3>/);
-  assert.match(rowOf(skipped, "tmux"), /Version 3\.5a on this Mac\.[\s\S]*Found/);
+  assert.match(rowOf(skipped, "tmux"), new RegExp(`Version 3\\.5a on ${HOST.computer}\\.[\\s\\S]*Found`));
   assert.match(rowOf(skipped, "uv"), /Not installed/);
   assert.match(rowOf(skipped, "graphify"), /Checksum didn&#x27;t match\./);
   assert.match(skipped, /<button type="button" class="btn primary small"[^>]*>(<svg[\s\S]*?<\/svg>)?Install tools<\/button>/);
@@ -192,7 +192,7 @@ test("Settings, GitHub shows the account with Sign out, or the three sign-in way
   };
   const account = html(GitHubSettingsView, { ...panels, status: ok(signedIn) });
   assert.match(account, /Signed in to GitHub as mira\./);
-  assert.match(account, /keychain[\s\S]*Agents never get it\./);
+  assert.ok(account.replaceAll("&#x27;", "'").includes(`keeps this sign-in in ${{ darwin: "your Mac's keychain", win32: "Windows Credential Manager" }[process.platform] ?? "your system keyring"} and uses it to list, clone and publish your repositories and set their rules. Agents never get it.`), account);
   assert.match(account, />Sign out of GitHub<\/button>/);
   assert.doesNotMatch(account, /Sign in with GitHub/);
   const cli = html(GitHubAccountView, { status: { ...signedIn, login: null, method: "cli" }, busy: false, problem: "", onSignOut: forbidden });

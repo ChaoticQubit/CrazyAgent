@@ -22,14 +22,7 @@ use crate::tui::widgets::{TextField, buttons, radio};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-
-const COMMAND_HINT: &str = if cfg!(target_os = "windows") {
-    "Use the full path of the command, such as C:\\Users\\you\\.local\\bin\\uvx.exe."
-} else if cfg!(target_os = "linux") {
-    "Use the full path of the command, such as /usr/local/bin/uvx."
-} else {
-    "Use the full path of the command, such as /opt/homebrew/bin/uvx."
-};
+use words::{COMMAND_HINT, URL_HINT};
 
 const NAME_WIDTH: usize = 22;
 const SKILL_STATE_WIDTH: usize = 5;
@@ -133,7 +126,7 @@ pub fn plugin_plain(code: &str) -> &'static str {
         }
         "server_command_invalid" => COMMAND_HINT,
         "server_args_invalid" => "An argument is too long or has control characters.",
-        "server_url_invalid" => "Use an https address. Plain http works only for this Mac.",
+        "server_url_invalid" => URL_HINT,
         "server_name_invalid" => {
             "Use 1 to 64 lowercase letters, digits, - or _, starting with a letter or digit."
         }
@@ -143,7 +136,7 @@ pub fn plugin_plain(code: &str) -> &'static str {
         "server_secret_invalid" => "This secret cannot be saved. Paste it on one line.",
         "server_secret_not_found" | "plugin_not_found" => "It was removed already.",
         "server_command_not_found" | "server_command_not_runnable" => {
-            "That command is not on this Mac or cannot run."
+            on_this_computer!("That command is not on ", " or cannot run.")
         }
         "server_cant_start"
         | "server_exited"
@@ -160,135 +153,6 @@ pub fn plugin_plain(code: &str) -> &'static str {
         | "plugin_store_unsafe"
         | "skill_store_unavailable" => "The engine cannot save plugins right now.",
         other => crate::plugins::plain_problem(other).unwrap_or_else(|| plain(other)),
-    }
-}
-
-/// What a hook runs, as the list shows it: its event, the tools it matches and its command.
-/// Input: the hook. Output: one line for the list.
-pub fn hook_runs(hook: &HookView) -> String {
-    match &hook.matcher {
-        Some(matcher) => format!("{} {matcher}: {}", hook.event, hook.command),
-        None => format!("{}: {}", hook.event, hook.command),
-    }
-}
-
-/// One plugin's hooks as the Hooks list groups them: the plugin, where it applies, how many
-/// distinct events it runs on, the skills or servers it runs with and the indexes of its
-/// hooks in the engine's list, in that list's order.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HookGroup {
-    pub plugin: String,
-    pub scope: Scope,
-    pub events: usize,
-    pub follows: Vec<String>,
-    pub hooks: Vec<usize>,
-}
-
-/// Whether a plugin's hooks are all on, all off or some of each.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HookGroupState {
-    On,
-    Off,
-    Partly,
-}
-
-impl HookGroupState {
-    /// The word the list shows for the state. Output: On, Off or Partly on.
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::On => "On",
-            Self::Off => "Off",
-            Self::Partly => "Partly on",
-        }
-    }
-}
-
-/// Groups hooks per plugin and scope in the order the engine lists them, so a plugin with
-/// several events reads as one plugin and not as several installs. Input: the hooks. Output:
-/// the groups, each holding at least one hook and together every hook exactly once.
-pub fn hook_groups(hooks: &[HookView]) -> Vec<HookGroup> {
-    let mut groups: Vec<HookGroup> = Vec::new();
-    for (index, hook) in hooks.iter().enumerate() {
-        let at = match groups
-            .iter()
-            .position(|group| group.plugin == hook.plugin && group.scope == hook.scope)
-        {
-            Some(at) => at,
-            None => {
-                groups.push(HookGroup {
-                    plugin: hook.plugin.clone(),
-                    scope: hook.scope.clone(),
-                    events: 0,
-                    follows: Vec::new(),
-                    hooks: Vec::new(),
-                });
-                groups.len() - 1
-            }
-        };
-        let group = &mut groups[at];
-        if !group
-            .hooks
-            .iter()
-            .any(|&seen| hooks[seen].event == hook.event)
-        {
-            group.events += 1;
-        }
-        if let Some(follows) = &hook.follows
-            && !group.follows.contains(follows)
-        {
-            group.follows.push(follows.clone());
-        }
-        group.hooks.push(index);
-    }
-    assert_eq!(
-        groups.iter().map(|group| group.hooks.len()).sum::<usize>(),
-        hooks.len()
-    );
-    groups
-}
-
-/// Reads whether a plugin's hooks are on, off or partly on. Inputs: the hooks, the group
-/// and what counts as on for one hook where the list is shown. Output: the state.
-pub fn hook_group_state(
-    hooks: &[HookView],
-    group: &HookGroup,
-    on: impl Fn(&HookView) -> bool,
-) -> HookGroupState {
-    assert!(!group.hooks.is_empty());
-    let count = group
-        .hooks
-        .iter()
-        .filter(|&&index| on(&hooks[index]))
-        .count();
-    if count == 0 {
-        HookGroupState::Off
-    } else if count == group.hooks.len() {
-        HookGroupState::On
-    } else {
-        HookGroupState::Partly
-    }
-}
-
-/// What a plugin's hooks row says: how many events it runs on and, when it came with a
-/// skill or MCP server, that it runs only while that item is on. Input: the group. Output:
-/// the line.
-pub fn hook_group_line(group: &HookGroup) -> String {
-    let events = match group.events {
-        1 => "1 event".to_owned(),
-        count => format!("{count} events"),
-    };
-    match group.follows.as_slice() {
-        [] => events,
-        follows => format!("{events}, runs while {} is on", follows.join(", ")),
-    }
-}
-
-/// What one event row under a plugin says it runs: the tools it matches, when set, and
-/// its command. Input: the hook. Output: the line.
-pub fn hook_event_runs(hook: &HookView) -> String {
-    match &hook.matcher {
-        Some(matcher) => format!("{matcher}: {}", hook.command),
-        None => hook.command.clone(),
     }
 }
 
@@ -418,6 +282,12 @@ impl Plugins {
 
     fn count(&self) -> usize {
         self.skills.len() + self.servers.len() + self.hook_rows().len()
+    }
+
+    /// Whether the App plugins row, the one row after every list once they are read, is
+    /// selected. Output: the answer.
+    fn on_app_plugins(&self) -> bool {
+        matches!(self.load, Load::Ready(())) && self.selected == self.count()
     }
 
     /// The Hooks list's rows: each plugin's row, followed by its hooks when it is the one
@@ -599,8 +469,10 @@ impl Plugins {
     }
 
     fn windows(&self, ctx: &Ctx, subtitle_rows: usize) -> (usize, usize, usize) {
-        let content = (ctx.height as usize).saturating_sub(4 + 1 + ctx.extra_hint_rows());
-        let avail = content.saturating_sub(1 + subtitle_rows + 1 + 3 + 2).max(3);
+        let content = (ctx.height as usize).saturating_sub(4 + 1 + usize::from(ctx.hint_rows));
+        let avail = content
+            .saturating_sub(1 + subtitle_rows + 1 + 3 + 2 + 1)
+            .max(3);
         let hooks = self.hook_rows().len().max(1).min((avail / 3).max(1));
         let avail = avail.saturating_sub(hooks).max(2);
         let servers_wanted = self.servers.len().max(1);
@@ -905,6 +777,14 @@ impl Plugins {
                 ctx,
             ));
         }
+        lines.push(list_row(
+            Line::raw("App plugins"),
+            limit,
+            self.on_app_plugins(),
+            focused,
+            theme,
+            glyphs,
+        ));
         lines
     }
 
@@ -1172,7 +1052,7 @@ impl Screen for Plugins {
         if !matches!(self.open, Open::None) {
             return self.modal_key(key, ctx);
         }
-        let count = self.count();
+        let count = self.count() + 1;
         match key {
             Key::Char('a') => return Flow::Replace(Box::new(AddPlugin::skill())),
             Key::Char('i') => return Flow::Replace(Box::new(ImportSkillsPage::new())),
@@ -1192,6 +1072,9 @@ impl Screen for Plugins {
             }
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char(' ') if self.changing.is_none() => self.toggle(ctx),
+            Key::Enter if self.changing.is_none() && self.on_app_plugins() => {
+                return Flow::Open(Place::AppPlugins);
+            }
             Key::Enter if self.changing.is_none() => match self.picked() {
                 Some(Picked::Skill(index)) => {
                     let skill = &self.skills[index];
@@ -1252,7 +1135,7 @@ impl Screen for Plugins {
                         self.skills = skills.clone();
                         self.servers = servers.clone();
                         self.load = Load::Ready(());
-                        self.selected = self.selected.min(self.count().saturating_sub(1));
+                        self.selected = self.selected.min(self.count());
                     }
                     Err(code) if self.count() == 0 => self.load = Load::Failed(code.clone()),
                     Err(code) if asked => ctx.say(Message::error(
@@ -1267,7 +1150,7 @@ impl Screen for Plugins {
                 match result {
                     Ok(hooks) => {
                         self.hooks = hooks.clone();
-                        self.selected = self.selected.min(self.count().saturating_sub(1));
+                        self.selected = self.selected.min(self.count());
                     }
                     Err(code) => {
                         ctx.say(Message::error("Could not read hooks.", plugin_plain(code)))
@@ -1717,7 +1600,7 @@ impl AddPlugin {
                 place(&mut lines, &self.name, self.focus == Focus::Name);
                 let kinds = format!(
                     "{}   {}",
-                    radio(!self.url, "Command on this Mac"),
+                    radio(!self.url, on_this_computer!("Command on ", "")),
                     radio(self.url, "URL")
                 );
                 let kinds = if self.focus == Focus::Type {
@@ -2343,9 +2226,15 @@ impl Screen for EditServer {
     }
 }
 
+mod hook_groups;
 mod import_page;
 mod skill_detail;
 mod tool_page;
+mod words;
+pub use hook_groups::{
+    HookGroup, HookGroupState, hook_event_runs, hook_group_line, hook_group_state, hook_groups,
+    hook_runs,
+};
 pub use import_page::ImportSkillsPage;
 pub use skill_detail::SkillDetailPage;
 pub use tool_page::ToolsPage;

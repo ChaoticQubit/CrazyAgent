@@ -14,6 +14,7 @@ use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::{self, ACCOUNT_KEYS, PLUGIN_KEYS};
 
+pub mod log;
 pub mod words;
 pub mod yaml;
 
@@ -58,14 +59,8 @@ fn read(
     accounts::read_key_in(root, folder(key_folder), &credential(reference)).map_err(|_| ())
 }
 
-#[cfg(unix)]
 fn sweep(root: &Path, key_folder: KeyFolder) -> Result<(), ()> {
     accounts::remove_staged_in(root, folder(key_folder)).map_err(|_| ())
-}
-
-#[cfg(not(unix))]
-fn sweep(_root: &Path, _key_folder: KeyFolder) -> Result<(), ()> {
-    Ok(())
 }
 
 fn new_ref() -> Result<String, &'static str> {
@@ -141,8 +136,8 @@ impl OffSet {
         *self.off.write().unwrap_or_else(PoisonError::into_inner) = loaded;
     }
 
-    /// Switches a bundled code plugin and, once the switch has committed, loads the set
-    /// again. A connection inside an open transaction is refused before anything is
+    /// Switches a plugin, the change logged in its own transaction, and, once the switch
+    /// has committed, loads the set again. A connection inside an open transaction is refused before anything is
     /// written, so the set never shows a switch that could still roll back. Inputs: the
     /// engine connection, the engine facts, the plugin id and the switch. Output: Ok, the
     /// plugin host's refusal code, or `app_plugins_unavailable`.
@@ -156,7 +151,9 @@ impl OffSet {
         if !db.is_autocommit() {
             return Err(EngineError("app_plugins_unavailable".into()));
         }
-        kernel_plugin_host::registry::set_enabled(db, engine, plugin, switch).map_err(error)?;
+        log::logged(db, engine.root, |db| {
+            kernel_plugin_host::registry::set_enabled(db, engine, plugin, switch).map_err(error)
+        })?;
         assert!(db.is_autocommit());
         self.load(db);
         Ok(())
@@ -228,6 +225,18 @@ pub(crate) enum Command {
     },
 }
 
+impl Command {
+    /// Tells whether losing this command would leave more access than the owner asked for:
+    /// a plugin turned off, removed, or unbound from a secret. Input: the command. Output:
+    /// the answer.
+    pub(crate) fn narrows_access(&self) -> bool {
+        matches!(
+            self,
+            Self::SetEnabled { enabled: false, .. } | Self::Remove { .. } | Self::Unbind { .. }
+        )
+    }
+}
+
 /// What one App plugins request answers: the listing with the change notices drained after
 /// it and the turn-off choice in force, a trust screen, or the runs holding a plugin.
 #[derive(Debug)]
@@ -249,18 +258,53 @@ pub(crate) fn usage() -> &'static Usage {
     &USAGE
 }
 
-/// Runs one App plugins request on the engine connection outside a transaction. A change
-/// answers with the listing after it. Turning a plugin off follows the owner's setting for
-/// runs holding it unless the request picks a choice for this one call. Inputs: the engine
-/// connection, the resolved settings and the command; saving the choice itself is the
+/// Runs one App plugins request on the engine connection, each change logged in the
+/// transaction that writes it: a switch in its own, through the engine's off set, then the
+/// listing; any other request with its listing in one. A change answers with the listing
+/// after it. Turning a plugin off follows the owner's setting for runs holding it unless
+/// the request picks a choice for this one call. Inputs: the engine connection, outside any
+/// transaction, the resolved settings and the command; saving the choice itself is the
 /// storage worker's. Output: the answer, or the plugin store's refusal code.
 pub(crate) fn execute(
     db: &Connection,
     config: &EffectiveConfig,
     command: Command,
 ) -> Result<Done, EngineError> {
-    let policy = &config.settings.plugins;
     let root = crate::storage::trash::engine_root(db)?;
+    let command = match command {
+        Command::SetEnabled {
+            name,
+            enabled,
+            when_off,
+        } => {
+            let policy = &config.settings.plugins;
+            let switch = if enabled {
+                Switch::On
+            } else {
+                Switch::Off {
+                    usage: usage(),
+                    when_off: when_off.unwrap_or(policy.when_turned_off),
+                    essential_unlocked: policy.essential_unlocked,
+                }
+            };
+            switches().switch(db, &engine(root), &name, switch)?;
+            Command::List
+        }
+        other => other,
+    };
+    log::logged(db, root, |db| run(db, root, config, command))
+}
+
+/// Runs one App plugins request other than a switch inside the logged transaction.
+/// Inputs: the transaction's connection, the engine root, the resolved settings and the
+/// command. Output: the answer, or the plugin store's refusal code.
+fn run(
+    db: &Connection,
+    root: &Path,
+    config: &EffectiveConfig,
+    command: Command,
+) -> Result<Done, EngineError> {
+    let policy = &config.settings.plugins;
     let engine = engine(root);
     let now = crate::team::now_ms();
     match command {
@@ -285,21 +329,8 @@ pub(crate) fn execute(
             kernel_plugin_host::trust::trust_file(db, &engine, &name, &sha256, now)
                 .map_err(error)?;
         }
-        Command::SetEnabled {
-            name,
-            enabled,
-            when_off,
-        } => {
-            let switch = if enabled {
-                Switch::On
-            } else {
-                Switch::Off {
-                    usage: usage(),
-                    when_off: when_off.unwrap_or(policy.when_turned_off),
-                    essential_unlocked: policy.essential_unlocked,
-                }
-            };
-            switches().switch(db, &engine, &name, switch)?;
+        Command::SetEnabled { .. } => {
+            unreachable!("a switch runs through the off set in its own transaction")
         }
         Command::Remove { name } => registry::remove(db, &engine, &name).map_err(error)?,
         Command::BindAccount {
@@ -337,44 +368,84 @@ pub(crate) fn sweep_staged(root: &Path) {
 }
 
 /// The owner read of every plugin with the capabilities it is granted, for the engine root
-/// the database sits in. Input: the engine connection. Output: the listing as owner data,
-/// or the plugin host's refusal code, or `file_trash_root_unknown` for an in-memory database.
-pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData, EngineError> {
-    let root = crate::storage::trash::engine_root(db)?;
-    let plugins = kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)?;
+/// the database sits in; a change the plugin store's start pass makes is logged in the
+/// read's transaction. Input: the owner read's transaction. Output: the listing as owner
+/// data, or the plugin host's refusal code, or `file_trash_root_unknown` for an in-memory
+/// database.
+pub(crate) fn grants(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<crate::engine::owner::OwnerData, EngineError> {
+    let root = crate::storage::trash::engine_root(tx)?;
+    let (plugins, captured, _) = log::logged_in(tx, |db| {
+        kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)
+    })?;
+    assert!(captured.folders.is_empty());
+    assert!(captured.keys.is_empty());
     assert!(plugins.len() <= kernel_plugin_host::grants::GRANTS_MAX);
     Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
 
-/// Runs the plugin store's start sweeps: what a crash left staged, then on Unix every
-/// entered plugin key file in `plugin-keys` that no binding row names, as a committed
-/// removal or a crash between a binding change and its file delete leaves it. Off Unix no
-/// plugin key file is ever saved. Inputs: the engine connection and root. Output: none.
+/// Runs the plugin store's start sweeps: what a crash left staged, then each older folder a
+/// replace left beside the live one, settled by the trust row, then each folder a removal
+/// moved aside, settled by the plugin's rows, then every entered plugin key file in
+/// `plugin-keys` that no binding row names, as a committed removal or a crash between a
+/// binding change and its file delete leaves it. Inputs: the engine connection and root.
+/// Output: none.
 pub(crate) fn sweep_at_start(db: &Connection, root: &Path) {
     sweep_staged(root);
-    #[cfg(unix)]
+    let _ = registry::sweep_replaced(db, root);
+    let _ = registry::sweep_removals(db, &engine(root));
     sweep_unnamed_keys(db, root);
-    #[cfg(not(unix))]
-    let _ = db;
 }
 
 /// Deletes every entered plugin key file in `plugin-keys` that no binding row names. A name
 /// that is no entered plugin key and the account key folder are never touched, and when the
-/// binding rows do not read, no key is deleted. Inputs: the engine connection and root.
-/// Output: none.
-#[cfg(unix)]
+/// binding rows do not read, no key is deleted. On unix a key a kept copy of replaced 2.5
+/// data names also stays, as a restore whose key settle stopped early leaves it; those
+/// copies are read only when some key is unnamed, and when they do not read, no key is
+/// deleted. Inputs: the engine connection and root. Output: none.
 fn sweep_unnamed_keys(db: &Connection, root: &Path) {
     let Ok(named) = kernel_plugin_host::store::named_keys(db) else {
         return;
     };
-    let kept =
-        |name: &str| Ok(!kernel_plugin_host::store::is_entered_key(name) || named.contains(name));
-    let _ = accounts::settle_unkept_in(root, PLUGIN_KEYS, root, kept, |_| Ok(false));
+    let bound =
+        |name: &str| !kernel_plugin_host::store::is_entered_key(name) || named.contains(name);
+    #[cfg(unix)]
+    {
+        let replaced = std::cell::OnceCell::new();
+        let kept = |name: &str| {
+            if bound(name) {
+                return Ok(true);
+            }
+            match replaced.get_or_init(|| {
+                crate::storage::migrations::replaced_key_names(root, copy_key_names)
+            }) {
+                Ok(names) => Ok(names.contains(name)),
+                Err(cause) => Err(cause.clone()),
+            }
+        };
+        let _ = accounts::settle_unkept_in(root, PLUGIN_KEYS, root, kept, |_| Ok(false));
+    }
+    #[cfg(windows)]
+    let _ = accounts::remove_unkept_in(root, PLUGIN_KEYS, |name: &str| Ok(bound(name)));
+}
+
+/// The key names the binding rows of a kept replaced copy name, read by the plugin store.
+/// Input: the copy's database. Output: the names, or the store's refusal.
+#[cfg(unix)]
+pub(crate) fn copy_key_names(
+    copy: &Connection,
+) -> Result<std::collections::BTreeSet<String>, EngineError> {
+    kernel_plugin_host::store::named_keys(copy).map_err(error)
 }
 
 #[cfg(all(test, unix))]
 #[path = "app_plugins/host_tests.rs"]
 mod host_tests;
+
+#[cfg(all(test, unix))]
+#[path = "app_plugins/log_tests.rs"]
+mod log_tests;
 
 #[cfg(test)]
 #[path = "app_plugins/switch_tests.rs"]

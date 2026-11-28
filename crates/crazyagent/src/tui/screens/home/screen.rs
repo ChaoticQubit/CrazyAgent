@@ -306,7 +306,7 @@ impl Home {
         let harness = match &ctx.store.harnesses {
             Load::Ready((ready, all)) => vec![
                 format!("{ready} of {all} harnesses ready"),
-                "on this Mac.".into(),
+                HARNESSES_HERE.into(),
             ],
             _ => vec!["Harness checks are not".into(), "ready yet.".into()],
         };

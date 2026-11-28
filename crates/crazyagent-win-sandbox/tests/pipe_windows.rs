@@ -475,10 +475,11 @@ fn start_low(command: &str) -> io::Result<(OwnedHandle, u32)> {
 
 /// W2 P2 (probe for row 2): a child process starts from a copy of this process's token
 /// lowered to low integrity through CreateProcessAsUserW without any extra privilege, which
-/// the rogue-server rows rely on, and runs to its exit code.
+/// the rogue-server rows rely on, and runs to its exit code. Fails naming the variable
+/// when SystemRoot is not set.
 #[test]
-fn a_low_integrity_child_starts_from_a_lowered_primary_token() {
-    let root = std::env::var("SystemRoot").unwrap();
+fn a_low_integrity_child_starts_from_a_lowered_primary_token() -> Result<(), String> {
+    let root = std::env::var("SystemRoot").map_err(|_| "SystemRoot is not set")?;
     let child = start_low(&format!(r"{root}\System32\cmd.exe /c exit 7"));
     println!(
         "P2 low-il child through CreateProcessAsUserW: {}",
@@ -498,6 +499,7 @@ fn a_low_integrity_child_starts_from_a_lowered_primary_token() {
         0
     );
     assert_eq!(code, 7);
+    Ok(())
 }
 
 /// W2 D9 (DESIGN-0140 D9, NOTE-0145 A2): after the first bytes are read, the server's peer

@@ -138,7 +138,7 @@ test("one events read per look gives every project its count, and no read is add
     const second = await evaluate(`Fixture.look(${JSON.stringify(events([{ project_id: "a", agents: 1 }]))})`);
     assert.deepEqual(second.shown.working, [["a", 1]]);
     assert.equal(count(second.asked, "desktop_team_events"), 2);
-    const appWide = ["desktop_question_counts", "desktop_system_notifications", "desktop_team_attention", "desktop_team_events"];
+    const appWide = ["desktop_question_counts", "desktop_system_notifications", "desktop_team_attention", "desktop_team_events", "desktop_watch"];
     assert.deepEqual([...new Set(second.asked)].filter((item) => !appWide.includes(item)), [], "every read is app-wide, none is per project");
   });
 });

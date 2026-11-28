@@ -7,7 +7,7 @@
                                                                                 
   Name                                                                          
   [ postgres-local                                               ]              
-  Type          (*) Command on this Mac   ( ) URL                               
+  Type          (*) Command on this computer   ( ) URL                          
   Command and arguments                                                         
   [ uvx mcp-server-postgres                                      ]              
                                                                                 

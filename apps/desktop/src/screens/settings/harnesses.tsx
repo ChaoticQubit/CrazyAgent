@@ -11,8 +11,9 @@ import { displayText } from "../conversation";
 import { HARNESS_WORDS, nodeNeeded, nodeOffer, nodeReadsAgain, nodeRow, rowBadge, type NodeOffer } from "../first-run/harnesses";
 import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode, pathCopy, pickHarnessFile, LOOKED_MAX, type ChoosableHarness, type Found } from "../../api-harness-path";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
+import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, thisComputer } from "../../ui";
 import { SettingRow } from "../../ui/setting";
+import { isWindows } from "../../ui/keys";
 import { ProviderRetrySettings } from "./provider-retry";
 import "../project/projects.css";
 
@@ -47,9 +48,13 @@ const INSTALLS: { value: InstallFromApp; label: string }[] = [
   { value: "on", label: "Offer Install for harnesses that are not installed" },
   { value: "off", label: "Don't offer Install" },
 ];
-const INSTALL_HELP = "Install runs Homebrew when it is on this Mac, else npm. It never uses sudo or a script from a website.";
+const INSTALL_HELP = isWindows()
+  ? "Install runs npm with the Node CrazyAgent sets up. It never runs as an administrator or a script from a website."
+  : `Install runs Homebrew when it is on ${thisComputer()}, else npm. It never uses sudo or a script from a website.`;
 const LOOKUP_HELP = "Claude Code's own installer and Codex's standalone installer have no check command, so CrazyAgent reads one small public file from downloads.claude.ai or releases.openai.com. It sends no account, project or file details. It never downloads or runs anything from there.";
-const PURPOSE = "CrazyAgent finds harnesses installed on this Mac. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.";
+const PURPOSE = isWindows()
+  ? `Agents run inside these tools. CrazyAgent finds them on ${thisComputer()}. It can install one with npm and update one with that harness's own updater, each only when you choose it.`
+  : `CrazyAgent finds harnesses installed on ${thisComputer()}. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.`;
 
 type Save = (settings: UpdateSettings) => Promise<Result<void>>;
 type Reads = Readonly<Record<string, HarnessVersions | null>>;
@@ -217,7 +222,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
       <pre className="mono">{read.last.output}</pre>
     </details>}
     {open && <dl className="details-grid">
-      <dt>Found at</dt><dd className="mono">{entry.executable ? homePath(entry.executable) : "Not found on this Mac"}</dd>
+      <dt>Found at</dt><dd className="mono">{entry.executable ? homePath(entry.executable) : `Not found on ${thisComputer()}`}</dd>
       <dt>Runs in the background with</dt><dd className="mono">{entry.headless}</dd>
       <dt>Model</dt><dd>{entry.model_selection ? "You can choose the model" : "Chosen inside the harness"}</dd>
     </dl>}

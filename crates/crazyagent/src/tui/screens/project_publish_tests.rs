@@ -521,11 +521,7 @@ fn a_discarded_publish_says_what_it_left_on_github() {
 /// both apps, and New project keeps its own sign-in wait in both.
 #[test]
 fn the_overview_publish_form_says_the_desktop_sign_in_words() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../apps/desktop/src/screens/new-project/publish.ts"
-    ))
-    .unwrap();
+    let source = include_str!("../../../../../apps/desktop/src/screens/new-project/publish.ts");
     let desktop = |name: &str| -> Option<String> {
         let key = format!("export const {name} = \"");
         let start = source.find(&key)? + key.len();

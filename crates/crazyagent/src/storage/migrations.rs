@@ -420,7 +420,9 @@ fn with_hooks<T>(
 /// the live settings name, as the start sweep judges ([`super::trash::referenced`]). One a
 /// row of the dated copy of the replaced 2.5 data names moves into the same folder of that
 /// copy (DEC-192), where it stays with the data that names it; one no row of it names, left
-/// by a removal, is deleted as removals delete it. No settings, settings that cannot be read,
+/// by a removal, is deleted as removals delete it. A key no row of it names but an older
+/// kept copy names ([`replaced_copies`]) stays in place, and a failed read of those copies
+/// keeps every key of that folder. No settings, settings that cannot be read,
 /// or a copy that cannot be opened keep every account's files in place. A failure is logged
 /// by what it swept and its code and never fails the checked restore. Inputs: the restored
 /// connection, still held alone, the engine root, the settings sources and the copy's folder.
@@ -437,27 +439,56 @@ fn sweep_unbound_keys(
         Ok(replaced) => replaced,
         Err(cause) => return sweep_failed(REPLACED_DATABASE, &cause),
     };
+    let older_names = std::cell::OnceCell::new();
+    let plugin_kept = |name: &str| {
+        if plugin_key_bound(db, name)? {
+            return Ok(true);
+        }
+        if plugin_key_bound(&replaced, name)? {
+            return Ok(false);
+        }
+        match older_names
+            .get_or_init(|| replaced_key_names(root, crate::app_plugins::copy_key_names))
+        {
+            Ok(names) => Ok(names.contains(name)),
+            Err(cause) => Err(cause.clone()),
+        }
+    };
     let mut swept = vec![(
         PLUGIN_KEYS,
-        settle_unkept_in(
-            root,
-            PLUGIN_KEYS,
-            copy,
-            |name| plugin_key_bound(db, name),
-            |name| plugin_key_bound(&replaced, name),
-        ),
+        settle_unkept_in(root, PLUGIN_KEYS, copy, plugin_kept, |name| {
+            plugin_key_bound(&replaced, name)
+        }),
     )];
     match settings.map(SettingsSources::config) {
         Some(Ok(config)) => {
             let catalog = config.settings.model_access.as_ref();
             let named = |kind: &str, name: &str| referenced(db, catalog, kind, name);
-            let keys = settle_unkept_in(
-                root,
-                ACCOUNT_KEYS,
-                copy,
-                |name| named(ACCOUNT_KEY, name),
-                |name| referenced(&replaced, None, ACCOUNT_KEY, name),
-            );
+            let older_copies = std::cell::OnceCell::new();
+            let account_kept = |name: &str| {
+                if named(ACCOUNT_KEY, name)? {
+                    return Ok(true);
+                }
+                if referenced(&replaced, None, ACCOUNT_KEY, name)? {
+                    return Ok(false);
+                }
+                let opened = older_copies.get_or_init(|| {
+                    replaced_copies(root)?
+                        .into_iter()
+                        .map(|older| replaced_database(&older))
+                        .collect::<Result<Vec<_>, _>>()
+                });
+                let older = opened.as_ref().map_err(Clone::clone)?;
+                for kept_copy in older {
+                    if referenced(kept_copy, None, ACCOUNT_KEY, name)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
+            let keys = settle_unkept_in(root, ACCOUNT_KEYS, copy, account_kept, |name| {
+                referenced(&replaced, None, ACCOUNT_KEY, name)
+            });
             swept.push((ACCOUNT_KEYS, keys));
             let profiles = sweep_replaced_profiles(root, copy, &replaced, named);
             swept.push((PROFILES, profiles));
@@ -484,20 +515,92 @@ fn sweep_failed(folder: &str, cause: &EngineError) {
 #[cfg(unix)]
 const REPLACED_DATABASE: &str = "replaced-database";
 
+/// The most kept copies of replaced 2.5 data the start sweep reads for the plugin key
+/// names they hold; with more, every plugin key stays.
+#[cfg(unix)]
+pub(crate) const REPLACED_SCAN_MAX: usize = 64;
+
 /// Opens the database of the dated copy of the replaced 2.5 data without following a link:
 /// read-write like `shape`, so a WAL copy with no -wal or -shm file opens on Apple's SQLite,
-/// then `query_only`, so the sweep can never write the kept copy. Input: the copy's folder.
-/// Output: the connection, or the failure.
+/// with no checkpoint on close and `query_only`, so engine.db's bytes and a leftover -wal stay
+/// as they are; -wal and -shm files may be made beside it. Input: the copy's folder. Output:
+/// the connection, or the failure.
 #[cfg(unix)]
 fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let opened = Connection::open_with_flags(copy.join(DATABASE), flags).map_err(error)?;
+    let kept = opened
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map_err(error)?;
+    if !kept {
+        return Err(error("replaced_database_checkpoint_on_close"));
+    }
     opened
         .execute_batch("PRAGMA query_only = ON")
         .map_err(error)?;
     Ok(opened)
+}
+
+/// Every kept copy of replaced 2.5 data under the engine root's backups: each
+/// `backups/replaced-<time>` folder this user owns, read as itself; a link, another
+/// account's folder or any other name is skipped. A folder that does not list or more than
+/// [`REPLACED_SCAN_MAX`] copies is a failure. Input: the engine root. Output: the folders.
+#[cfg(unix)]
+pub(crate) fn replaced_copies(root: &Path) -> Result<Vec<std::path::PathBuf>, EngineError> {
+    use std::os::unix::fs::MetadataExt;
+    let folder = root.join(kernel_storage::migrations::BACKUPS);
+    let entries = match std::fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(cause) => return Err(error(cause)),
+    };
+    let user = rustix::process::geteuid().as_raw();
+    let mut copies = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(error)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !kernel_storage::restore::recovery::copy_name(&name) {
+            continue;
+        }
+        let copy = folder.join(&name);
+        let found = std::fs::symlink_metadata(&copy).map_err(error)?;
+        if !found.is_dir() || found.uid() != user {
+            continue;
+        }
+        if copies.len() == REPLACED_SCAN_MAX {
+            return Err(error("app_plugins_replaced_copies_over_cap"));
+        }
+        copies.push(copy);
+    }
+    assert!(copies.len() <= REPLACED_SCAN_MAX);
+    Ok(copies)
+}
+
+/// Every key name the binding rows of each kept copy of replaced 2.5 data name
+/// ([`replaced_copies`]), for the start sweep to keep what a restore whose key settle
+/// stopped early left in place. A copy whose database does not open or read, or a failed
+/// listing, is a failure, on which the sweep keeps every key. Inputs: the engine root and
+/// the plugin store's reader of a copy's key names. Output: the names.
+#[cfg(unix)]
+pub(crate) fn replaced_key_names(
+    root: &Path,
+    named: fn(&Connection) -> Result<std::collections::BTreeSet<String>, EngineError>,
+) -> Result<std::collections::BTreeSet<String>, EngineError> {
+    let mut names = std::collections::BTreeSet::new();
+    for copy in replaced_copies(root)? {
+        let replaced = replaced_database(&copy)?;
+        if has_table(&replaced, "app_plugin_secrets")? {
+            names.extend(named(&replaced)?);
+        }
+    }
+    Ok(names)
 }
 
 /// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.

@@ -311,14 +311,20 @@ fn self_update_runs_todays_argument_vector() {
 }
 
 /// An installer program whose name is not the variant's installer is refused, so an npm
-/// recipe never runs another program.
+/// recipe never runs another program, and Windows Node's `npm.cmd` is not npm here.
 #[test]
 fn a_program_that_is_not_the_variants_installer_is_refused() {
-    let paths = InstallPaths {
-        program: at("/e/setup/bin/node"),
-        ..npm_paths()
-    };
-    assert_eq!(steps(&npm("", &[]), &paths), Err(TEMPLATE_MISMATCH));
+    for name in ["/e/setup/bin/node", "/e/setup/bin/npm.cmd"] {
+        let paths = InstallPaths {
+            program: at(name),
+            ..npm_paths()
+        };
+        assert_eq!(
+            steps(&npm("", &[]), &paths),
+            Err(TEMPLATE_MISMATCH),
+            "{name}"
+        );
+    }
     let recipe = InstallRecipe::SelfUpdate {
         program: "codex".to_owned(),
         args: vec!["update".to_owned()],
@@ -474,6 +480,26 @@ fn a_step_past_its_limit_is_asked_to_stop_before_it_is_killed() {
     let ran = shell(line, marker.to_str().unwrap(), Duration::from_secs(1));
     assert_eq!(ran, Err("setup_timeout"));
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "stopped");
+}
+
+/// A step whose leader ends at once on TERM still gives the rest of its group the grace: a
+/// member that cleans up for a second on TERM writes its marker before the group is killed.
+#[test]
+fn a_step_whose_leader_ends_on_the_stop_request_leaves_its_group_the_grace() {
+    let folder = tempfile::tempdir().unwrap();
+    let marker = folder.path().join("cleaned");
+    let member = "trap '/bin/sleep 1; printf cleaned > \"$0\"; exit 0' TERM; /bin/sleep 30 & wait";
+    let line = format!("( {member} ) & /bin/sleep 30");
+    let started = std::time::Instant::now();
+    let ran = shell(&line, marker.to_str().unwrap(), Duration::from_secs(1));
+    let took = started.elapsed();
+    assert_eq!(ran, Err("setup_timeout"));
+    assert_eq!(
+        std::fs::read_to_string(&marker).ok().as_deref(),
+        Some("cleaned"),
+        "the member's cleanup ran within the grace"
+    );
+    assert!(took < Duration::from_secs(10), "{took:?}");
 }
 
 /// A step that ignores TERM is killed with its group once the grace after its bound has

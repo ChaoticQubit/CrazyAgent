@@ -64,60 +64,13 @@ pub(crate) const PLUGIN_KEYS: &str = "plugin-keys";
 /// account keys and app plugin keys.
 pub(crate) const KEY_FOLDERS: [&str; 2] = [ACCOUNT_KEYS, PLUGIN_KEYS];
 
-/// Deletes one account key file from the engine root's W1 private key folder on Windows, for
-/// the start sweep of keys a committed removal left behind; the folder is held while the
-/// file goes. Inputs: the engine root and the key's credential reference. Output: Ok when the
-/// file is gone, including when it or the folder was already missing;
-/// `account_key_store_unsafe` for a folder W1's check refuses.
 #[cfg(windows)]
-pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
-    let Some((_held, folder)) = key_folder(root, name, false)? else {
-        return Ok(());
-    };
-    match std::fs::remove_file(folder.join(name)) {
-        Ok(()) => Ok(()),
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(error("account_key_store_unavailable")),
-    }
-}
-
-/// Opens the engine root's key folder on Windows as a W1 secret store folder for one key
-/// name, refusing a name that is not a plain credential reference or holds a colon, which
-/// Windows reads as a stream of another file; a trailing dot or space and a device name are
-/// never a reference (`protocol::single_component`). Inputs: the engine root, the key name
-/// and whether to make a missing folder, with the store's label. Output: the held folder and
-/// its path, none when it does not exist and `create` is false,
-/// `account_key_reference_invalid`, or `account_key_store_unsafe` for a folder W1 refuses.
+mod windows_keys;
 #[cfg(windows)]
-fn key_folder(
-    root: &Path,
-    name: &str,
-    create: bool,
-) -> Result<Option<(std::fs::File, std::path::PathBuf)>, EngineError> {
-    if CredentialRef::new(name).is_err() || name.starts_with('.') || name.contains(':') {
-        return Err(error("account_key_reference_invalid"));
-    }
-    assert!(crate::protocol::single_component(name));
-    let path = root.join(ACCOUNT_KEYS);
-    match std::fs::symlink_metadata(&path) {
-        Ok(_) => {}
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound && !create => {
-            return Ok(None);
-        }
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(error("account_key_store_unavailable")),
-    }
-    match crazyagent_win_sandbox::private::store_dir(
-        &path,
-        crazyagent_win_sandbox::private::Store::Secret,
-    ) {
-        Ok(held) => Ok(Some((held, path))),
-        Err(problem) if problem.kind() == std::io::ErrorKind::PermissionDenied => {
-            Err(error("account_key_store_unsafe"))
-        }
-        Err(_) => Err(error("account_key_store_unavailable")),
-    }
-}
+pub(crate) use windows_keys::{
+    key_saved_in, open_key_file, read_key_file, read_key_in, remove_key_file, remove_key_in,
+    remove_staged_in, remove_unkept_in, replace_key_file, replace_key_in, store_key_file,
+};
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
 /// sweep of keys a committed removal left behind. Inputs: the engine root and the key's
@@ -212,23 +165,6 @@ fn key_text(
     kernel_security::secret::SecretString::new(bytes).map_err(|_| error("account_key_store_unsafe"))
 }
 
-/// Reads one saved account key on Windows so the engine can hand it to its key relay, never
-/// to an agent (DEC-141 PA-4), as a W1 private file read without delete sharing, so it is not
-/// renamed or replaced while read. Inputs: the engine root and the key's credential
-/// reference. Output: the key, none when it was never saved, or `account_key_store_unsafe`
-/// for a key file or folder W1's check refuses.
-#[cfg(windows)]
-pub(crate) fn read_key_file(
-    root: &Path,
-    credential: &CredentialRef,
-) -> Result<Option<kernel_security::secret::SecretString>, EngineError> {
-    let Some(file) = open_key_file(root, credential)? else {
-        return Ok(None);
-    };
-    let len = file.metadata().map_err(error)?.len();
-    key_text(file, len).map(Some)
-}
-
 /// Reads one saved account key so the engine can hand it to its key relay, never to an agent
 /// (DEC-141 PA-4). Inputs: the engine root and the key's credential reference. Output: the
 /// key, none when it was never saved, or `account_key_store_unsafe` for a key file that is not
@@ -309,7 +245,8 @@ pub(crate) fn key_saved_in(
 /// the 0700 folder when missing. The key goes to a staged 0600 file renamed over the old
 /// one, so no file ever holds a partial key. Inputs: the engine root, a folder from
 /// [`KEY_FOLDERS`], the key's reference and the key bytes, which are wiped. Output: Ok with
-/// the folder synced; on failure the old key stays and nothing is staged.
+/// the folder synced, or a refusal with nothing staged: before the rename the old key stays;
+/// after it the new key may be in place, and a retry writes it again.
 #[cfg(unix)]
 pub(crate) fn replace_key_in(
     root: &Path,
@@ -325,7 +262,8 @@ pub(crate) fn replace_key_in(
 /// The disk work of [`replace_key_in`]: checks the key's length, makes the folder, writes
 /// and syncs a staged file and renames it over the key. Inputs: as there, with the key
 /// borrowed. Output: Ok once the folder is synced; a failed write or rename removes the
-/// staged file and is `account_key_store_unavailable`.
+/// staged file and is `account_key_store_unavailable`, as is a failed folder sync after the
+/// rename, which leaves the new key in place.
 #[cfg(unix)]
 fn replace_staged(
     root: &Path,
@@ -362,6 +300,37 @@ fn replace_staged(
         let _ = rustix::fs::unlinkat(&directory, staged.as_str(), AtFlags::empty());
         return Err(error("account_key_store_unavailable"));
     }
+    synced(&directory)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether the next key folder sync on this thread fails, as a lost disk makes it; the
+    /// sync that reads it sets it back to false.
+    static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes a test's next key folder sync on this thread fail. Input: none. Output: none.
+#[cfg(test)]
+pub(crate) fn fail_next_sync() {
+    FAIL_SYNC.with(|fail| fail.set(true));
+}
+
+/// Whether a test asked this sync to fail, which clears the ask. Input: none. Output: true
+/// once per [`fail_next_sync`].
+#[cfg(test)]
+fn sync_refused() -> bool {
+    FAIL_SYNC.with(|fail| fail.replace(false))
+}
+
+/// Syncs one owner-only key folder so a rename or removal in it reaches the disk. Input:
+/// the open folder. Output: Ok, or `account_key_store_unavailable`.
+#[cfg(unix)]
+pub(crate) fn synced(directory: &std::fs::File) -> Result<(), EngineError> {
+    #[cfg(test)]
+    if sync_refused() {
+        return Err(error("account_key_store_unavailable"));
+    }
     directory
         .sync_all()
         .map_err(|_| error("account_key_store_unavailable"))
@@ -369,12 +338,10 @@ fn replace_staged(
 
 /// The name prefix of a key copy a replace stages before renaming it over its key; the
 /// account key writer stages under the same prefix.
-#[cfg(unix)]
 const STAGED_KEY: &str = ".replace-";
 
 /// The most staged key copies one engine start deletes from one key folder; any more wait
 /// for the next start.
-#[cfg(unix)]
 const STAGED_SWEEP_MAX: usize = 64;
 
 /// Deletes the staged key copies a crash between a replace's write and its rename left in
@@ -417,7 +384,6 @@ pub(crate) fn remove_staged_in(root: &Path, folder: &str) -> Result<(), EngineEr
 
 /// The most entries one restore reads from one key folder; any more stay, and the restore
 /// logs `restore_key_sweep_bounded`.
-#[cfg(unix)]
 const KEY_SWEEP_MAX: usize = 10_000;
 
 /// Settles, after a restore to a 2.4 copy (V250-L5-N5), every key in one of the engine
@@ -518,147 +484,6 @@ fn copy_key_folder(copy: &Path, folder: &str) -> Result<std::fs::File, EngineErr
         .and_then(|parent| parent.sync_all())
         .map_err(|_| error("account_key_store_unavailable"))?;
     Ok(made)
-}
-
-/// Saves an account key on Windows as a new W1 secret file in the engine root's key folder,
-/// made with its store label when missing, the twin of the Unix 0600 `O_EXCL` write.
-/// Inputs: the engine root, the key's credential reference and the key, 1 to
-/// `KEY_BYTES_MAX` bytes. Output: the folder synced; `account_key_store_unavailable` when a
-/// key is already saved under that reference or the write fails, which leaves no file.
-#[cfg(windows)]
-pub(crate) fn store_key_file(
-    root: &Path,
-    credential: &CredentialRef,
-    key: &[u8],
-) -> Result<(), EngineError> {
-    let (_held, folder) = key_folder(root, credential.as_str(), true)?
-        .ok_or_else(|| error("account_key_store_unavailable"))?;
-    write_secret(&folder.join(credential.as_str()), key)?;
-    crazyagent_win_sandbox::private::sync_folder(&folder)
-        .map_err(|_| error("account_key_store_unavailable"))
-}
-
-/// Swaps the saved key of one credential for a new one on Windows: the new key is written to
-/// a staged W1 secret file in the held key folder, then renamed over the old file, so the
-/// file never holds a partial key and keeps the secret file's own list and label. A reader
-/// holding the old key shares no delete, so the rename then fails. Inputs: the engine root,
-/// the credential reference and the new key, 1 to `KEY_BYTES_MAX` bytes. Output: the folder
-/// synced; on `account_key_store_unavailable` the old key stays and nothing is staged.
-#[cfg(windows)]
-pub(crate) fn replace_key_file(
-    root: &Path,
-    credential: &CredentialRef,
-    key: &[u8],
-) -> Result<(), EngineError> {
-    let (_held, folder) = key_folder(root, credential.as_str(), true)?
-        .ok_or_else(|| error("account_key_store_unavailable"))?;
-    let mut nonce = [0_u8; 8];
-    getrandom::fill(&mut nonce).map_err(|_| error("account_key_store_unavailable"))?;
-    let staged = folder.join(format!(".replace-{:016x}", u64::from_le_bytes(nonce)));
-    write_secret(&staged, key)?;
-    if std::fs::rename(&staged, folder.join(credential.as_str())).is_err() {
-        let _ = std::fs::remove_file(&staged);
-        return Err(error("account_key_store_unavailable"));
-    }
-    crazyagent_win_sandbox::private::sync_folder(&folder)
-        .map_err(|_| error("account_key_store_unavailable"))
-}
-
-/// Writes a key into a new W1 secret file, which carries the medium no-read-up label from
-/// creation, syncs it and closes it; on a failed write the file is closed, then removed.
-/// Inputs: a path in the held key folder that must not exist, and the key. Output: Ok, or
-/// `account_key_store_unavailable`.
-#[cfg(windows)]
-fn write_secret(path: &Path, key: &[u8]) -> Result<(), EngineError> {
-    assert!(!key.is_empty());
-    assert!(key.len() as u64 <= KEY_BYTES_MAX);
-    let mut file = crazyagent_win_sandbox::private::secret_file(path)
-        .map_err(|_| error("account_key_store_unavailable"))?;
-    let written = std::io::Write::write_all(&mut file, key)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| file.metadata());
-    match written {
-        Ok(metadata) => {
-            assert_eq!(metadata.len(), key.len() as u64);
-            Ok(())
-        }
-        Err(_) => {
-            drop(file);
-            let _ = std::fs::remove_file(path);
-            Err(error("account_key_store_unavailable"))
-        }
-    }
-}
-
-/// Opens one saved account key on Windows as a W1 private file read without delete sharing,
-/// so it is not renamed or replaced while read, for the key relay and the owner transport.
-/// Inputs: the engine root and the key's credential reference. Output: the open file, none
-/// when it was never saved, or `account_key_store_unsafe` for a key file or folder W1
-/// refuses or a file longer than `KEY_BYTES_MAX`.
-#[cfg(windows)]
-pub(crate) fn open_key_file(
-    root: &Path,
-    credential: &CredentialRef,
-) -> Result<Option<std::fs::File>, EngineError> {
-    let Some((_held, folder)) = key_folder(root, credential.as_str(), false)? else {
-        return Ok(None);
-    };
-    let file = match crazyagent_win_sandbox::private::read_only(&folder.join(credential.as_str())) {
-        Ok(file) => file,
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(problem) if problem.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Err(error("account_key_store_unsafe"));
-        }
-        Err(_) => return Err(error("account_key_store_unavailable")),
-    };
-    let metadata = file.metadata().map_err(error)?;
-    if !metadata.is_file() || metadata.len() > KEY_BYTES_MAX {
-        return Err(error("account_key_store_unsafe"));
-    }
-    Ok(Some(file))
-}
-
-/// Refuses to read a key where the Unix owner-only key folders do not exist. Inputs: the
-/// engine root, folder and reference, all unused. Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn read_key_in(
-    _root: &Path,
-    _folder: &str,
-    _credential: &CredentialRef,
-) -> Result<Option<kernel_security::secret::SecretString>, EngineError> {
-    Err(error("account_key_store_unavailable"))
-}
-
-/// Refuses to check for a key where the Unix owner-only key folders do not exist. Inputs:
-/// the engine root, folder and reference, all unused. Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn key_saved_in(
-    _root: &Path,
-    _folder: &str,
-    _credential: &CredentialRef,
-) -> Result<bool, EngineError> {
-    Err(error("account_key_store_unavailable"))
-}
-
-/// Refuses to save a key where the Unix owner-only key folders do not exist; the key is
-/// wiped. Inputs: the engine root, folder and reference, unused, and the key. Output:
-/// `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn replace_key_in(
-    _root: &Path,
-    _folder: &str,
-    _credential: &CredentialRef,
-    mut key: Vec<u8>,
-) -> Result<(), EngineError> {
-    kernel_security::secret::wipe(&mut key);
-    Err(error("account_key_store_unavailable"))
-}
-
-/// Refuses to delete a key where the Unix owner-only key folders do not exist. Inputs: the
-/// engine root, folder and key name, all unused. Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn remove_key_in(_root: &Path, _folder: &str, _name: &str) -> Result<(), EngineError> {
-    Err(error("account_key_store_unavailable"))
 }
 
 /// The display name and API-key reference of one saved account, for an app plugin secret

@@ -44,9 +44,14 @@ pub enum Next {
     Reconnect,
 }
 
-/// The recovery screen's state: the last read, the last refusal and the job in flight.
+/// The engine a recovery job acts on: the layout and login service the TUI started with.
+pub type Engine = (crate::paths::Layout, kernel_processes::service::Service);
+
+/// The recovery screen's state: the engine it acts on, the last read, the last refusal and
+/// the job in flight.
 #[derive(Default)]
 pub struct Recovering {
+    engine: Option<Engine>,
     read: Option<Result<Read, String>>,
     problem: Option<String>,
     pending: Option<Receiver<Done>>,
@@ -58,16 +63,33 @@ impl Recovering {
         self.pending.is_some()
     }
 
-    /// Starts the first read, once. Output: none.
-    pub fn start(&mut self) {
+    /// Starts the first read, once, on the engine the TUI started with. Input: that engine,
+    /// none when the TUI starts no engine. Output: none.
+    pub fn start(&mut self, engine: Option<&Engine>) {
+        if self.engine.is_none() {
+            self.engine = engine.cloned();
+        }
         if self.read.is_none() && self.pending.is_none() {
             self.spawn(Step::Read);
         }
     }
 
+    /// A screen whose read has just come back, as the poll finds it. Input: the read.
+    /// Output: the screen.
+    #[cfg(test)]
+    pub(crate) fn answered(read: Result<Read, String>) -> Self {
+        let (send, receive) = channel();
+        send.send(Done::Read(read)).unwrap();
+        Self {
+            pending: Some(receive),
+            ..Self::default()
+        }
+    }
+
     /// Takes a finished job: a read that found a restore whose 2.4 data is written runs the
-    /// finish, and a read with nothing to recover or an action that ended well asks for the
-    /// engine. Output: what the screen does next.
+    /// finish, a read with nothing to recover reconnects to show how the engine stands, and
+    /// a put-back or continue that ended well asks for the engine. Output: what the screen
+    /// does next.
     pub fn poll(&mut self) -> Next {
         let Some(receive) = &self.pending else {
             return Next::Stay;
@@ -79,7 +101,7 @@ impl Recovering {
         };
         self.pending = None;
         match done {
-            Done::Read(Ok(Read { offer: None, .. })) => Next::Start,
+            Done::Read(Ok(Read { offer: None, .. })) => Next::Reconnect,
             Done::Read(read) => {
                 let finished = matches!(
                     read,
@@ -147,8 +169,9 @@ impl Recovering {
     fn spawn(&mut self, step: Step) {
         assert!(self.pending.is_none(), "one recovery job at a time");
         let (send, receive) = channel();
+        let engine = self.engine.clone();
         std::thread::spawn(move || {
-            let _ = send.send(run(step));
+            let _ = send.send(job(step, engine));
         });
         self.pending = Some(receive);
     }
@@ -203,13 +226,24 @@ pub fn actions(read: &Result<Read, String>) -> Vec<(char, &'static str)> {
     }
 }
 
-/// Runs one job on the default engine's root, refusing while its login service still runs a
-/// process. Input: the step. Output: how it ended, a refusal as its code.
-fn run(step: Step) -> Done {
-    let engine = engine();
+/// Runs one job on the engine the TUI started with, weighing whether its login service still
+/// runs a process. Inputs: the step and that engine. Output: how it ended, `not_configured`
+/// without an engine.
+fn job(step: Step, engine: Option<Engine>) -> Done {
+    match engine {
+        Some((layout, service)) => run(step, &layout, crate::restore::service_running(&service)),
+        None if step == Step::Read => Done::Read(Err("not_configured".into())),
+        None => Done::Acted(step, Err("not_configured".into())),
+    }
+}
+
+/// Runs one job on an engine's root, refusing while its login service still runs a process.
+/// Inputs: the step, the engine's layout and whether its service runs. Output: how it ended,
+/// a refusal as its code.
+fn run(step: Step, layout: &crate::paths::Layout, running: bool) -> Done {
     let code = |text: String| crate::restore::recovery_code(&text).to_owned();
-    match (step, engine) {
-        (Step::Read, Ok((layout, running))) => Done::Read(
+    match step {
+        Step::Read => Done::Read(
             crate::restore::recovery(layout.root(), running)
                 .map(|offer| Read {
                     offer,
@@ -217,17 +251,15 @@ fn run(step: Step) -> Done {
                 })
                 .map_err(code),
         ),
-        (Step::Read, Err(problem)) => Done::Read(Err(problem)),
-        (step, Err(problem)) => Done::Acted(step, Err(problem)),
-        (Step::PutBack, Ok((layout, running))) => Done::Acted(
+        Step::PutBack => Done::Acted(
             step,
             crate::restore::put_back(layout.root(), running).map_err(code),
         ),
-        (Step::Continue, Ok((layout, running))) => Done::Acted(
+        Step::Continue => Done::Acted(
             step,
             crate::restore::continue_2_5(layout.root(), running).map_err(code),
         ),
-        (Step::Finish, Ok((layout, running))) => Done::Acted(
+        Step::Finish => Done::Acted(
             step,
             crate::restore::finish(
                 layout.root(),
@@ -238,20 +270,6 @@ fn run(step: Step) -> Done {
             .map_err(code),
         ),
     }
-}
-
-/// The default engine's layout and whether its login service still runs a process.
-/// Output: them, or `not_configured` when there is no default engine.
-fn engine() -> Result<(crate::paths::Layout, bool), String> {
-    let layout = crate::paths::Layout::current().map_err(|_| "not_configured".to_owned())?;
-    let executable = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|_| "not_configured".to_owned())?;
-    let service =
-        crate::service::current_user(kernel_common::Platform::CURRENT, executable, &layout)
-            .map_err(|_| "not_configured".to_owned())?;
-    let running = crate::restore::service_running(&service);
-    Ok((layout, running))
 }
 
 #[cfg(test)]

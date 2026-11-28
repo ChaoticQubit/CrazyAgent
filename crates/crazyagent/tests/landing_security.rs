@@ -16,6 +16,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+mod owner_support;
 
 /// Runs git with no ambient configuration and with hooks and fsmonitor off, as the test's
 /// own setup, never as the engine: the fixture never runs the hooks, filters or fsmonitor
@@ -62,6 +63,7 @@ fn tmp(prefix: &str) -> tempfile::TempDir {
 
 /// A real owner repository and the surrounding engine state a landing test needs.
 struct Fixture {
+    _owner: owner_support::Owner,
     _root: tempfile::TempDir,
     engine: PathBuf,
     repo: PathBuf,
@@ -94,6 +96,7 @@ impl Fixture {
         git(&repo, &["add", "tracked.txt"]);
         git(&repo, &["commit", "-m", "base"]);
         Self {
+            _owner: owner_support::owner_on(root.path(), &engine),
             engine,
             repo,
             owner_home,

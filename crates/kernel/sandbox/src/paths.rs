@@ -244,6 +244,11 @@ pub const SYSTEM_SECRET_PATHS: &[&str] = &[
 /// cannot carve the secret back out of a granted root.
 pub const SECRET_ROOT_REFUSED: &str = "sandbox roots must not hold or sit in a secret path";
 
+/// Why an install is refused when a path its build granted reads with other identities at
+/// install, such as a root renamed away and replaced by a link or a new folder: the profile
+/// grants by path, so it would grant what no check saw.
+pub const GRANT_CHANGED: &str = "a granted path changed between the sandbox build and its install";
+
 /// The owner's secret names relative to the home, in order: the fixed ones before the
 /// harness folders, the harness folders as given, then the fixed ones after. Input: the
 /// harness folders, relative to the home. Output: the names.
@@ -273,14 +278,13 @@ pub fn owner_secrets(owner: &Path, harnesses: &[&'static str]) -> impl Iterator<
 /// [`SECRET_ROOT_REFUSED`], also when a metadata read on either path fails other than not
 /// found.
 pub fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
-    let root = Walk::of(root)?;
-    for secret in secrets {
-        let secret = Walk::of(secret)?;
-        if root.sits_in(&secret) || secret.sits_in(&root) {
-            return Err(invalid(SECRET_ROOT_REFUSED));
-        }
-    }
-    Ok(())
+    let mut reads = Reads::default();
+    let root = Walk::read(root, &mut reads)?;
+    let secrets = secrets
+        .iter()
+        .map(|secret| Walk::read(secret, &mut reads))
+        .collect::<Result<Vec<_>, _>>()?;
+    clear_of_walked(&root, &secrets)
 }
 
 /// The identity of one entry on its volume: device and inode on unix, volume serial number
@@ -340,30 +344,74 @@ pub(crate) fn walks() -> usize {
 /// run before it refuses the path.
 const DANGLING_LINK_HOPS: usize = 16;
 
+/// The reads one walk of a list takes, kept by exact path, so a folder several walks of that
+/// list pass through, such as the owner home above most secrets, is read once. It is built
+/// and dropped inside one [`Walked::of`], one [`clear_of_secrets`] call or one extension or
+/// re-walk of a [`Kept`] list, so no read outlives the moment its answer is used, and only a
+/// read that succeeded is kept.
+#[derive(Default)]
+struct Reads {
+    identities: std::collections::HashMap<PathBuf, Option<Identity>>,
+    canonical: std::collections::HashMap<PathBuf, PathBuf>,
+}
+
+impl Reads {
+    /// The identity of the entry a path names, as [`identity`] reads it, read once per
+    /// path. Input: the path. Output: the identity, None when it does not exist, or the
+    /// I/O error, which is not kept.
+    fn identity(&mut self, path: &Path) -> io::Result<Option<Identity>> {
+        if let Some(found) = self.identities.get(path) {
+            return Ok(*found);
+        }
+        let found = identity(path)?;
+        self.identities.insert(path.to_path_buf(), found);
+        Ok(found)
+    }
+
+    /// The canonical form of a path, read once per path. Input: the path. Output: the
+    /// resolved path, or the I/O error, which is not kept.
+    fn canonical(&mut self, path: &Path) -> io::Result<PathBuf> {
+        if let Some(found) = self.canonical.get(path) {
+            return Ok(found.clone());
+        }
+        let found = path.canonicalize()?;
+        assert!(found.is_absolute());
+        self.canonical.insert(path.to_path_buf(), found.clone());
+        Ok(found)
+    }
+}
+
 /// A path's parts with the identity of each leading run of them, top down: None from the
 /// first run that does not exist on, and None for a Windows drive prefix alone, which names
 /// the drive's current folder. `reached` holds the identities of the folders the deepest
 /// existing run resolves through once its links are followed, and of the folders above
 /// where a first missing run that is a link leads ([`dangling_reach`]), so a run that leads
 /// into a protected folder by a link, made or still to be made, is told too.
-struct Walk<'a> {
-    path: &'a Path,
-    parts: Vec<Component<'a>>,
+#[derive(Debug, Clone)]
+struct Walk {
+    path: PathBuf,
     ids: Vec<Option<Identity>>,
     reached: Vec<Identity>,
 }
 
-impl<'a> Walk<'a> {
+impl Walk {
+    /// Walks a path with reads of its own, as [`Walk::read`] does. Input: the path. Output:
+    /// the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`].
+    fn of(path: &Path) -> Result<Walk, SandboxError> {
+        Self::read(path, &mut Reads::default())
+    }
+
     /// Reads the identities of a path's leading runs, of every folder above the deepest
     /// existing run once its links are resolved, and of every folder above where its first
-    /// missing run leads when that run is a link. Input: the path. Output: the walk, or
-    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read or a resolve fails other than not
-    /// found, or a missing run leads through more than [`DANGLING_LINK_HOPS`] links.
-    fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
+    /// missing run leads when that run is a link, through `reads`. Inputs: the path and the
+    /// reads of its list. Output: the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`] when a
+    /// read or a resolve fails other than not found, or a missing run leads through more
+    /// than [`DANGLING_LINK_HOPS`] links.
+    fn read(path: &Path, reads: &mut Reads) -> Result<Walk, SandboxError> {
         #[cfg(all(test, target_os = "macos"))]
         WALKS.with(|walks| walks.set(walks.get() + 1));
         let refused = |_| invalid(SECRET_ROOT_REFUSED);
-        let parts: Vec<Component<'a>> = path.components().collect();
+        let parts: Vec<Component<'_>> = path.components().collect();
         let mut ids = Vec::with_capacity(parts.len());
         let mut run = PathBuf::new();
         let mut existing = None;
@@ -375,7 +423,7 @@ impl<'a> Walk<'a> {
             let found = if gone || prefix {
                 None
             } else {
-                identity(&run).map_err(refused)?
+                reads.identity(&run).map_err(refused)?
             };
             if found.is_some() {
                 existing = Some(run.clone());
@@ -387,16 +435,16 @@ impl<'a> Walk<'a> {
         }
         let mut reals = Vec::with_capacity(2);
         if let Some(existing) = existing {
-            reals.push(existing.canonicalize().map_err(refused)?);
+            reals.push(reads.canonical(&existing).map_err(refused)?);
         }
         if let Some(at) = missing {
             let run: PathBuf = parts[..=at].iter().collect();
-            reals.extend(dangling_reach(&run, &parts[at + 1..])?);
+            reals.extend(dangling_reach(&run, &parts[at + 1..], reads)?);
         }
         let mut reached = Vec::new();
         for real in &reals {
             for above in real.ancestors() {
-                if let Some(found) = identity(above).map_err(refused)? {
+                if let Some(found) = reads.identity(above).map_err(refused)? {
                     reached.push(found);
                 }
             }
@@ -404,19 +452,19 @@ impl<'a> Walk<'a> {
         assert_eq!(ids.len(), parts.len());
         assert!(reals.len() <= 2);
         Ok(Walk {
-            path,
-            parts,
+            path: path.to_path_buf(),
             ids,
             reached,
         })
     }
 
     /// Tells whether this path equals or lies under `outer`: by text; or by entry, when
-    /// `outer` exists and one of this path's existing runs is that entry; or, on a volume
-    /// that folds names, when this path's new parts start under the same folder as
-    /// `outer`'s ([`Walk::folds_into`]). Input: the outer walk. Output: true when it does.
+    /// `outer` exists and one of this path's existing runs is that entry; or when this path's
+    /// new parts start under the same folder as `outer`'s and name it, folded on a volume
+    /// that folds names and exactly elsewhere ([`Walk::new_parts_in`]). Input: the outer
+    /// walk. Output: true when it does.
     fn sits_in(&self, outer: &Walk) -> bool {
-        if self.path.starts_with(outer.path) {
+        if self.path.starts_with(&outer.path) {
             return true;
         }
         if let Some(Some(entry)) = outer.ids.last()
@@ -424,45 +472,60 @@ impl<'a> Walk<'a> {
         {
             return true;
         }
-        cfg!(any(target_os = "macos", windows)) && self.folds_into(outer)
+        self.new_parts_in(outer, cfg!(any(target_os = "macos", windows)))
     }
 
-    /// Compares the parts of this path that do not exist yet, on a volume that folds names.
-    /// When this path's deepest existing run is `outer` or one of `outer`'s existing runs,
-    /// a new part that folds to no ASCII name, or is not a plain name, may name anything
-    /// there and counts as inside; else the new parts sit in `outer` when they are at least
-    /// as many as `outer`'s parts below that run and each is the [`same_name`] as its match.
-    /// Input: the outer walk. Output: true when this path may sit in `outer`.
-    fn folds_into(&self, outer: &Walk) -> bool {
+    /// Compares this path's new parts below its deepest existing run when that run is one of
+    /// `outer`'s: a part that is no plain name, or with `fold` folds to no ASCII name, counts
+    /// as inside; else they sit in `outer` when at least as many as its parts below and each
+    /// matches, the [`same_name`] with `fold` and the same text without. Inputs: the outer
+    /// walk and whether the volume folds names. Output: true when this path may sit in it.
+    fn new_parts_in(&self, outer: &Walk, fold: bool) -> bool {
         let Some(deepest) = self.ids.iter().rposition(Option::is_some) else {
             return false;
         };
         let Some(level) = outer.ids.iter().position(|id| *id == self.ids[deepest]) else {
             return false;
         };
-        let Some(new) = self.parts[deepest + 1..]
+        let parts: Vec<Component<'_>> = self.path.components().collect();
+        let outer_parts: Vec<Component<'_>> = outer.path.components().collect();
+        assert_eq!(parts.len(), self.ids.len());
+        assert_eq!(outer_parts.len(), outer.ids.len());
+        let Some(new) = parts[deepest + 1..]
             .iter()
-            .map(|part| plain_name(*part).filter(|name| ascii_fold(name).is_some()))
+            .map(|part| plain_name(*part).filter(|name| !fold || ascii_fold(name).is_some()))
             .collect::<Option<Vec<&str>>>()
         else {
             return true;
         };
-        let below = &outer.parts[level + 1..];
+        let below = &outer_parts[level + 1..];
+        let named = |part: &str, step: &str| {
+            if fold {
+                same_name(part, step)
+            } else {
+                part == step
+            }
+        };
         new.len() >= below.len()
             && new
                 .iter()
                 .zip(below)
-                .all(|(part, step)| plain_name(*step).is_some_and(|step| same_name(part, step)))
+                .all(|(part, step)| plain_name(*step).is_some_and(|step| named(part, step)))
     }
 }
 
 /// Where a run that does not exist leads when it is a link whose target does not exist yet:
 /// the target, read against the link's own folder, with the parts after the run, walked top
 /// down again, and on through each further such link it meets, at most
-/// [`DANGLING_LINK_HOPS`] of them. Inputs: the missing run and the parts after it. Output:
-/// the canonical deepest existing folder of where it leads, None when the run is no link,
-/// or `Invalid` with [`SECRET_ROOT_REFUSED`] past the bound or when a read fails.
-fn dangling_reach(run: &Path, rest: &[Component<'_>]) -> Result<Option<PathBuf>, SandboxError> {
+/// [`DANGLING_LINK_HOPS`] of them. Inputs: the missing run, the parts after it and the reads
+/// of its walk's list. Output: the canonical deepest existing folder of where it leads, None
+/// when the run is no link, or `Invalid` with [`SECRET_ROOT_REFUSED`] past the bound or when
+/// a read fails.
+fn dangling_reach(
+    run: &Path,
+    rest: &[Component<'_>],
+    reads: &mut Reads,
+) -> Result<Option<PathBuf>, SandboxError> {
     let refused = |_| invalid(SECRET_ROOT_REFUSED);
     let mut link = run.to_path_buf();
     let mut after: PathBuf = rest.iter().collect();
@@ -491,7 +554,7 @@ fn dangling_reach(run: &Path, rest: &[Component<'_>]) -> Result<Option<PathBuf>,
             if matches!(part, Component::Prefix(_)) {
                 continue;
             }
-            if identity(&walked).map_err(refused)?.is_none() {
+            if reads.identity(&walked).map_err(refused)?.is_none() {
                 next = Some(at);
                 break;
             }
@@ -504,7 +567,7 @@ fn dangling_reach(run: &Path, rest: &[Component<'_>]) -> Result<Option<PathBuf>,
         link = walked;
     }
     deepest
-        .map(|found| found.canonicalize().map_err(refused))
+        .map(|found| reads.canonical(&found).map_err(refused))
         .transpose()
 }
 
@@ -540,45 +603,80 @@ pub(crate) fn harness_homes(owner: &Path, harnesses: &[&'static str]) -> Vec<Pat
         .collect()
 }
 
-/// The walks of the owner home, of its harness homes and of the secret paths, taken once for
-/// the roots one check or one sandbox build compares against them, and dropped with it, so
-/// no walk outlives the moment its answer is used. Built by [`Walked::of`].
-pub(crate) struct Walked<'a> {
-    owner: Walk<'a>,
-    harnesses: Vec<Walk<'a>>,
-    secrets: Vec<Walk<'a>>,
+/// The walks of the owner home, of its harness homes and of the secret paths, each taken
+/// once with one set of [`Reads`] for the roots one check compares against them. Built by
+/// [`Walked::of`]; a sandbox build keeps its own in a [`Kept`].
+#[derive(Debug, Clone)]
+pub(crate) struct Walked {
+    owner: Walk,
+    harnesses: Vec<Walk>,
+    secrets: Vec<Walk>,
 }
 
-impl<'a> Walked<'a> {
-    /// Walks the owner home, each harness home and each secret path once. Inputs: the owner
-    /// home, the harness homes ([`harness_homes`]) and the secret paths. Output: the walks,
-    /// or `Invalid` with [`SECRET_ROOT_REFUSED`] when a read fails other than not found.
+impl Walked {
+    /// Walks the owner home, each harness home and each secret path once, sharing their
+    /// reads. Inputs: the owner home, the harness homes ([`harness_homes`]) and the secret
+    /// paths. Output: the walks, or `Invalid` with [`SECRET_ROOT_REFUSED`] when a read fails
+    /// other than not found.
     pub(crate) fn of(
-        owner: &'a Path,
-        harnesses: &'a [PathBuf],
-        secrets: &'a [PathBuf],
-    ) -> Result<Walked<'a>, SandboxError> {
+        owner: &Path,
+        harnesses: &[PathBuf],
+        secrets: &[PathBuf],
+    ) -> Result<Walked, SandboxError> {
+        let mut reads = Reads::default();
         let walked = Walked {
-            owner: Walk::of(owner)?,
+            owner: Walk::read(owner, &mut reads)?,
             harnesses: harnesses
                 .iter()
-                .map(|home| Walk::of(home.as_path()))
+                .map(|home| Walk::read(home, &mut reads))
                 .collect::<Result<_, _>>()?,
             secrets: secrets
                 .iter()
-                .map(|secret| Walk::of(secret.as_path()))
+                .map(|secret| Walk::read(secret, &mut reads))
                 .collect::<Result<_, _>>()?,
         };
         assert_eq!(walked.harnesses.len(), harnesses.len());
         assert_eq!(walked.secrets.len(), secrets.len());
         Ok(walked)
     }
+
+    /// Walks a root once and refuses it when it holds or sits in one of this list's secrets,
+    /// the first rule an extra read-only folder is judged by. Input: the root. Output: its
+    /// walk for [`Walked::grant_walked`], or `Invalid` with [`SECRET_ROOT_REFUSED`].
+    pub(crate) fn walk_clear(&self, root: &Path) -> Result<WalkedRoot, SandboxError> {
+        let walk = Walk::of(root)?;
+        clear_of_walked(&walk, &self.secrets)?;
+        Ok(WalkedRoot(walk))
+    }
+
+    /// Judges a root [`Walked::walk_clear`] walked by the rest of [`granted_root`]'s rules,
+    /// with no second walk. Inputs: the root and its walk. Output: unit, or `Invalid` naming
+    /// the rule.
+    pub(crate) fn grant_walked(
+        &self,
+        root: &Path,
+        walked: &WalkedRoot,
+    ) -> Result<(), SandboxError> {
+        assert_eq!(walked.0.path, root);
+        deep_plain(root)?;
+        granted_walk(root, &walked.0, self, &self.secrets)
+    }
+
+    /// The walks of those of `secrets` this list holds, in its order. Input: the secret
+    /// paths. Output: their walks.
+    fn secrets_of<'w>(&'w self, secrets: &'w [PathBuf]) -> impl Iterator<Item = &'w Walk> {
+        self.secrets
+            .iter()
+            .filter(|walk| secrets.contains(&walk.path))
+    }
 }
 
-/// Checks a root as [`granted_root`] does, against the owner home, harness homes and secrets
-/// one [`Walked`] holds, walking only the root itself, once. Inputs: the root and the walks.
-/// Output: unit, or `Invalid` naming the rule.
-pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), SandboxError> {
+/// One root's walk from [`Walked::walk_clear`], judged once more by [`Walked::grant_walked`].
+pub(crate) struct WalkedRoot(Walk);
+
+/// Refuses a root that is not absolute, plain and at least two folders deep, before any
+/// read of it. Input: the root. Output: unit, or `Invalid` naming the rule.
+fn deep_plain(root: &Path) -> Result<(), SandboxError> {
     let depth = root
         .components()
         .filter(|component| matches!(component, Component::Normal(_)))
@@ -586,8 +684,28 @@ pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), Sandbox
     if !clean_absolute(root) || depth < 2 {
         return Err(invalid("sandbox roots must be absolute, deep and plain"));
     }
-    let walk = Walk::of(root)?;
-    if walked.owner.sits_in(&walk) {
+    Ok(())
+}
+
+/// Checks a root as [`granted_root`] does, against the owner home, harness homes and secrets
+/// one [`Walked`] holds, walking only the root itself, once. Inputs: the root and the walks.
+/// Output: unit, or `Invalid` naming the rule.
+pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), SandboxError> {
+    deep_plain(root)?;
+    granted_walk(root, &Walk::of(root)?, walked, walked.secrets.iter())
+}
+
+/// The rules of [`granted_root`] after the plain-path rule, on a root already walked: not
+/// holding the owner home, not inside a harness home, clear of the given secret walks and
+/// an existing canonical directory. Inputs: the root, its walk, the walked owner and
+/// harness homes and the secret walks. Output: unit, or `Invalid` naming the rule.
+fn granted_walk<'w>(
+    root: &Path,
+    walk: &Walk,
+    walked: &Walked,
+    secrets: impl IntoIterator<Item = &'w Walk>,
+) -> Result<(), SandboxError> {
+    if walked.owner.sits_in(walk) {
         return Err(invalid("sandbox roots must not contain the owner home"));
     }
     for home in &walked.harnesses {
@@ -595,7 +713,7 @@ pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), Sandbox
             return Err(invalid("sandbox roots must not be owner harness homes"));
         }
     }
-    clear_of_walked(&walk, &walked.secrets)?;
+    clear_of_walked(walk, secrets)?;
     if !root.is_dir() || canonical(root)? != root {
         return Err(invalid(
             "sandbox roots must be existing canonical directories",
@@ -607,13 +725,161 @@ pub(crate) fn granted_walked(root: &Path, walked: &Walked) -> Result<(), Sandbox
 /// Refuses a walked root that equals, holds or sits inside one of the walked secrets, as
 /// [`clear_of_secrets`] does. Inputs: the root's walk and the secrets' walks. Output: unit,
 /// or `Invalid` with [`SECRET_ROOT_REFUSED`].
-fn clear_of_walked(root: &Walk, secrets: &[Walk]) -> Result<(), SandboxError> {
+fn clear_of_walked<'w>(
+    root: &Walk,
+    secrets: impl IntoIterator<Item = &'w Walk>,
+) -> Result<(), SandboxError> {
     for secret in secrets {
         if root.sits_in(secret) || secret.sits_in(root) {
             return Err(invalid(SECRET_ROOT_REFUSED));
         }
     }
     Ok(())
+}
+
+/// One path a sandbox build granted, with its walk from that check and every secret path
+/// it was checked against.
+#[derive(Debug, Clone)]
+struct Checked {
+    walk: Walk,
+    against: Vec<PathBuf>,
+}
+
+/// What one sandbox build keeps from its start until its install: the walks of the owner
+/// home, the harness homes and each secret path, each taken once, and each path it granted
+/// with that path's walk and the secrets it was checked against. A build never shares it
+/// with another, so no walk serves two launches; its install walks every secret and every
+/// granted path again ([`Kept::recheck`]), so a secret or a root that moved, appeared or was
+/// swapped after the build is judged as it is then.
+#[derive(Debug, Clone)]
+pub(crate) struct Kept {
+    walked: Walked,
+    checked: Vec<Checked>,
+}
+
+impl Kept {
+    /// Walks the owner home, the harness homes and the secret paths once, as [`Walked::of`]
+    /// does. Inputs: those paths. Output: the kept walks, with no path granted yet, or
+    /// `Invalid` with [`SECRET_ROOT_REFUSED`].
+    pub(crate) fn of(
+        owner: &Path,
+        harnesses: &[PathBuf],
+        secrets: &[PathBuf],
+    ) -> Result<Kept, SandboxError> {
+        Ok(Kept {
+            walked: Walked::of(owner, harnesses, secrets)?,
+            checked: Vec::new(),
+        })
+    }
+
+    /// Checks a root by the rules of [`granted_root`] against `secrets`, walking only the
+    /// root, or reusing its walk when this build checked it already, and any of `secrets`
+    /// not walked yet, then keeps the root. Inputs: the root and the secret paths. Output:
+    /// unit, or `Invalid` naming the rule, keeping nothing.
+    pub(crate) fn grant(&mut self, root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+        deep_plain(root)?;
+        self.walk_secrets(secrets)?;
+        let walk = self.walk_of(root)?;
+        granted_walk(root, &walk, &self.walked, self.walked.secrets_of(secrets))?;
+        self.keep(walk, secrets);
+        Ok(())
+    }
+
+    /// Checks a path as [`clear_of_secrets`] does against `secrets`, walking only the path,
+    /// or reusing its walk when this build checked it already, and any of `secrets` not
+    /// walked yet, then keeps the path. Inputs: the path and the secret paths. Output: unit,
+    /// or `Invalid` with [`SECRET_ROOT_REFUSED`], keeping nothing.
+    pub(crate) fn clear(&mut self, path: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+        self.walk_secrets(secrets)?;
+        let walk = self.walk_of(path)?;
+        clear_of_walked(&walk, self.walked.secrets_of(secrets))?;
+        self.keep(walk, secrets);
+        Ok(())
+    }
+
+    /// Walks again every kept path and every secret one was checked against, each once,
+    /// sharing the reads; a kept path must read with the identities its grant kept, then its
+    /// new walk is checked against the secrets' new walks. Output: unit, `Invalid` with
+    /// [`GRANT_CHANGED`] for a kept path that changed, or with [`SECRET_ROOT_REFUSED`] when a
+    /// kept path now holds or sits in a secret.
+    pub(crate) fn recheck(&self) -> Result<(), SandboxError> {
+        let mut reads = Reads::default();
+        let mut fresh: Vec<Walk> = Vec::new();
+        for checked in &self.checked {
+            for secret in &checked.against {
+                if !fresh.iter().any(|walk| walk.path == *secret) {
+                    fresh.push(Walk::read(secret, &mut reads)?);
+                }
+            }
+        }
+        for checked in &self.checked {
+            let now = Walk::read(&checked.walk.path, &mut reads)?;
+            if now.ids != checked.walk.ids || now.reached != checked.walk.reached {
+                return Err(invalid(GRANT_CHANGED));
+            }
+            let against = fresh
+                .iter()
+                .filter(|walk| checked.against.contains(&walk.path));
+            clear_of_walked(&now, against)?;
+        }
+        Ok(())
+    }
+
+    /// Walks each of `secrets` this list does not hold yet, sharing their reads, and adds
+    /// them. Input: the secret paths. Output: unit, or `Invalid` with [`SECRET_ROOT_REFUSED`].
+    fn walk_secrets(&mut self, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+        let mut reads = Reads::default();
+        for secret in secrets {
+            if !self.walked.secrets.iter().any(|walk| walk.path == *secret) {
+                let walk = Walk::read(secret, &mut reads)?;
+                self.walked.secrets.push(walk);
+            }
+        }
+        assert!(
+            secrets.iter().all(|secret| self
+                .walked
+                .secrets
+                .iter()
+                .any(|walk| walk.path == *secret))
+        );
+        Ok(())
+    }
+
+    /// The walk of a path this build checked already, else a new walk of it. Input: the
+    /// path. Output: the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`].
+    fn walk_of(&self, path: &Path) -> Result<Walk, SandboxError> {
+        match self
+            .checked
+            .iter()
+            .find(|checked| checked.walk.path == path)
+        {
+            Some(checked) => Ok(checked.walk.clone()),
+            None => Walk::of(path),
+        }
+    }
+
+    /// Keeps a path that passed a check, with the secrets it was checked against, adding
+    /// them to its entry when the build checked it before. Inputs: its walk and the secret
+    /// paths.
+    fn keep(&mut self, walk: Walk, secrets: &[PathBuf]) {
+        match self
+            .checked
+            .iter_mut()
+            .find(|checked| checked.walk.path == walk.path)
+        {
+            Some(checked) => {
+                for secret in secrets {
+                    if !checked.against.contains(secret) {
+                        checked.against.push(secret.clone());
+                    }
+                }
+            }
+            None => self.checked.push(Checked {
+                walk,
+                against: secrets.to_vec(),
+            }),
+        }
+    }
 }
 
 /// The code points a case-insensitive HFS+ volume ignores in names (git's

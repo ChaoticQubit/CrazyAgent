@@ -2,7 +2,9 @@ pub mod permission_fix;
 /// The methods of [`Places`]: how the places are built, which folders they keep and which
 /// paths agents can write.
 mod places;
+pub use places::{in_temp_of, npm_shims, temp_roots};
 pub mod probe;
+mod script;
 #[cfg(test)]
 pub(crate) mod stub;
 #[cfg(any(test, feature = "test-support"))]
@@ -36,6 +38,7 @@ pub struct FindingHooks {
     pub in_agent_tmp: fn(&Path) -> bool,
     pub harness_prefix: fn(&Path) -> PathBuf,
     pub gate_root: fn() -> Option<PathBuf>,
+    pub folder_probes: bool,
 }
 
 impl std::fmt::Debug for FindingHooks {
@@ -148,6 +151,52 @@ const INSTALL_ROOTS: [&str; 8] = [
     "/run/current-system/sw",
     "/nix/var/nix/profiles/default",
 ];
+/// The Homebrew prefixes ([`INSTALL_ROOTS`] holds `/usr/local` through `/usr`). Below one,
+/// only [`HOMEBREW_FILLED`] counts as installed, whichever install root the path lies under,
+/// since the owner can write a prefix and may keep repositories there.
+const HOMEBREW_PREFIXES: [&str; 3] = ["/usr/local", "/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
+/// The folders in a Homebrew prefix that hold the tools it installs: links, kegs and their
+/// frameworks, casks and Homebrew's own code, plus npm's global packages ([`HOMEBREW_NPM`]).
+/// `share`, `etc`, `include`, `var`, the rest of `lib` and every other folder are left out,
+/// so a tool there counts as agents' while the set-up projects cannot be read.
+const HOMEBREW_FILLED: [&str; 8] = [
+    "bin",
+    "sbin",
+    "Cellar",
+    "opt",
+    "Caskroom",
+    "Homebrew",
+    "Library",
+    "Frameworks",
+];
+/// npm's global packages in a Homebrew prefix, the one installed folder below its `lib`.
+const HOMEBREW_NPM: [&str; 2] = ["lib", "node_modules"];
+
+/// Whether a path below a Homebrew prefix, in the form given or the prefix's macOS data
+/// volume name ([`FindingHooks::data_twin`]), lies in a folder that holds Homebrew's tools
+/// ([`HOMEBREW_FILLED`] or [`HOMEBREW_NPM`]); a path below no prefix passes. Inputs: the
+/// hooks and the path. Output: the answer.
+fn homebrew_filled(hooks: &FindingHooks, path: &Path) -> bool {
+    for prefix in HOMEBREW_PREFIXES.iter().map(Path::new) {
+        let twin = (hooks.data_twin)(prefix);
+        let below = std::iter::once(prefix)
+            .chain(twin.as_deref())
+            .find_map(|form| path.strip_prefix(form).ok());
+        if let Some(rest) = below {
+            let mut names = rest.components().map(|part| match part {
+                std::path::Component::Normal(name) => Some(name),
+                _ => None,
+            });
+            let first = names.next().flatten();
+            if first.is_some_and(|name| name == HOMEBREW_NPM[0]) {
+                return names.next().flatten() == Some(std::ffi::OsStr::new(HOMEBREW_NPM[1]));
+            }
+            return first.is_some_and(|name| HOMEBREW_FILLED.iter().any(|filled| name == *filled));
+        }
+    }
+    true
+}
+
 /// The file name of the tmux the app ships beside the engine, which the name `tmux` finds
 /// before every folder ([`Places::bundled`]).
 pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
@@ -221,6 +270,43 @@ pub const TMUX_MISSING: &str = "tmux is missing, so the live master's terminal c
 pub const TMUX_MISSING: &str =
     "The live master's terminal can't open on this computer. Try again in a moment.";
 
+/// How to install git on macOS, where the Command Line Tools carry it.
+#[cfg(target_os = "macos")]
+const GIT_HINT: &str = "Install git: run xcode-select --install in Terminal.";
+/// How to install git on Linux and the other Unix systems, from the system's packages.
+#[cfg(all(unix, not(target_os = "macos")))]
+const GIT_HINT: &str = "Install git with your package manager.";
+/// How to install git on Windows.
+#[cfg(not(unix))]
+const GIT_HINT: &str = "Install Git for Windows from git-scm.com.";
+
+/// How to install Node.js on macOS, from its site or with Homebrew in Terminal.
+#[cfg(target_os = "macos")]
+pub const NODE_HINT: &str =
+    "Install Node.js from nodejs.org, or run brew install node in Terminal.";
+/// How to install Node.js on Linux and the other Unix systems.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org or with your package manager.";
+/// How to install Node.js on Windows.
+#[cfg(not(unix))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org.";
+
+/// How to install Codex on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in Terminal.";
+/// How to install Codex on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in a terminal.";
+
+/// How to install Claude Code on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal.";
+/// How to install Claude Code on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in a terminal.";
+
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
@@ -279,10 +365,11 @@ impl Eq for Places {}
 
 /// The Windows folders whose tools stay usable while the set-up projects cannot be read: the
 /// engine's own `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)` and `ProgramW6432`, each
-/// kept only when it names an absolute folder, as given and in the verbatim spelling
-/// `canonicalize` gives, so every form of a tool under one meets a root in its own spelling
-/// ([`Places::agent_writable`]). Output: the folders, at most 8.
-fn windows_install_roots() -> Vec<PathBuf> {
+/// kept only when it names an absolute folder, as given, in the verbatim spelling
+/// `canonicalize` gives and in the canonical hook's spelling, as [`engine_roots`] keeps the
+/// data folder, so every form of a tool under one meets a root in its own spelling
+/// ([`Places::agent_writable`]). Input: the hooks. Output: the folders, at most 12.
+fn windows_install_roots(hooks: &FindingHooks) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     for root in [
         "SystemRoot",
@@ -295,14 +382,14 @@ fn windows_install_roots() -> Vec<PathBuf> {
     .map(PathBuf::from)
     .filter(|root| root.is_absolute())
     {
-        let resolved = root.canonicalize().ok();
-        for name in std::iter::once(root).chain(resolved) {
+        let resolved = [root.canonicalize().ok(), (hooks.canonical)(&root).ok()];
+        for name in std::iter::once(root).chain(resolved.into_iter().flatten()) {
             if !roots.contains(&name) {
                 roots.push(name);
             }
         }
     }
-    assert!(roots.len() <= 8);
+    assert!(roots.len() <= 12);
     roots
 }
 
@@ -339,12 +426,13 @@ pub fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
 }
 
 /// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
-/// then its npm harness prefix's `bin` ([`FindingHooks::harness_prefix`]). Input: the engine
-/// root and the hooks. Output: the two folders in that order.
+/// then the folder its npm harness prefix ([`FindingHooks::harness_prefix`]) keeps their
+/// entries in ([`npm_shims`]). Input: the engine root and the hooks. Output: the two folders
+/// in that order.
 fn engine_folders(hooks: &FindingHooks, root: &Path) -> [PathBuf; 2] {
     [
         root.join("setup").join("bin"),
-        (hooks.harness_prefix)(root).join("bin"),
+        npm_shims(&(hooks.harness_prefix)(root)),
     ]
 }
 
@@ -406,42 +494,11 @@ fn under_temp(hooks: &FindingHooks, path: &Path, temps: &[PathBuf]) -> bool {
         .any(|temp| path.starts_with(temp) || short.starts_with(temp))
 }
 
-/// The temp folders: the shared ones and this user's own, as given, with its links resolved
-/// and in the plain form [`FindingHooks::canonical`] gives (a Windows drive path without
-/// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
-/// dropped. Input: the hooks. Output: the absolute folders, each once.
-pub fn temp_roots(hooks: &FindingHooks) -> Vec<PathBuf> {
-    let owner = std::env::temp_dir();
-    let real = owner.canonicalize().ok();
-    let plain = (hooks.canonical)(&owner).ok();
-    let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
-    for root in std::iter::once(owner).chain(real).chain(plain) {
-        if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
-            roots.push(root);
-        }
-    }
-    assert!(roots.len() <= TEMP_FOLDERS.len() + 3);
-    roots
-}
-
 /// Whether a folder is in a temp folder, which other users, or agents with the temp folder
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Inputs: the hooks and the folder. Output: the answer.
 fn in_temp(hooks: &FindingHooks, folder: &Path) -> bool {
     in_temp_of(hooks, folder, &temp_roots(hooks))
-}
-
-/// Whether a folder is in one of the temp folders given, as written and with its links
-/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the hooks, the
-/// folder and the temp folders. Output: the answer.
-pub fn in_temp_of(hooks: &FindingHooks, folder: &Path, temps: &[PathBuf]) -> bool {
-    if temps.is_empty() {
-        return false;
-    }
-    let real = folder.canonicalize().ok();
-    std::iter::once(folder)
-        .chain(real.as_deref())
-        .any(|folder| under_temp(hooks, folder, temps))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
@@ -455,8 +512,14 @@ pub enum Kind {
         interpreter: Box<Resolved>,
         arguments: Vec<String>,
         by_name: bool,
+        word: ScriptWord,
     },
 }
+
+/// The word a script's interpreter is handed for it, made only by [`Resolved::script`], so no
+/// script holds a word its interpreter cannot start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptWord(OsString);
 
 /// One tool the resolver found: the entry as found, the real file it names and how it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -486,11 +549,12 @@ impl Resolved {
             Kind::Script {
                 interpreter,
                 arguments,
+                word,
                 ..
             } => {
                 let mut words = interpreter.argv();
                 words.extend(arguments.iter().map(OsString::from));
-                words.push(self.program.clone().into_os_string());
+                words.push(word.0.clone());
                 words
             }
         };
@@ -545,8 +609,9 @@ impl Reason {
 /// with no real install found behind it, or a file in a temp folder the engine's places
 /// refuse or reached through a link into one, which agents with the owner's temp folder
 /// grant or other users write, a script whose first line the resolver cannot read the
-/// way the system and `/usr/bin/env` run it, or a Windows batch file that is neither an npm
-/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe.
+/// way the system and `/usr/bin/env` run it, a Windows batch file that is neither an npm
+/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe, or a Windows
+/// script whose real file only a verbatim `\\?\` path names, which Node cannot start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
@@ -555,6 +620,7 @@ pub enum Refusal {
     InTemp,
     FirstLine,
     Batch,
+    Verbatim,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -655,15 +721,24 @@ impl BundleNote {
 /// Finds the tmux the engine uses, the one answer for setup, the terminal and the sandbox
 /// grant: the bundled copy when it passes the entry checks and `runs`, else the usual
 /// order with the reason the bundled one was not used; with no other tmux, the usual
-/// search's own miss. Inputs: the places, whether this build ships tmux and the check that
-/// the bundled copy runs. Output: the tmux and its note, or why none can run.
+/// search's own miss. A tmux of the usual order that fails `runs` gives way to a bundled
+/// copy that runs; with none, one too old for agent terminals is a [`Reason::WrongVersion`]
+/// miss naming its version, and one that cannot run is still returned. Inputs: the places,
+/// whether this build ships tmux and the check that a tmux runs: none when it cannot run,
+/// its version when it is too old. Output: the tmux and its note, or why none can run.
 pub fn resolve_tmux(
     places: &Places,
     ships_bundle: bool,
-    runs: impl Fn(&Resolved) -> bool,
+    runs: impl Fn(&Resolved) -> Result<(), Option<String>>,
 ) -> Result<(Resolved, Option<BundleNote>), Missing> {
+    let settled = |found: Resolved, note: Option<BundleNote>, failed: Option<String>| match failed {
+        Some(version) => Err(too_old_tmux(&found, version)),
+        None => Ok((found, note)),
+    };
     let Some(bundled) = places.bundled("tmux") else {
-        return resolve("tmux", places).map(|found| (found, None));
+        let found = resolve("tmux", places)?;
+        let failed = runs(&found).err().flatten();
+        return settled(found, None, failed);
     };
     let note = if std::fs::symlink_metadata(&bundled).is_ok() {
         Some(BundleNote::CannotRun)
@@ -673,12 +748,44 @@ pub fn resolve_tmux(
         None
     };
     match resolve("tmux", places) {
-        Ok(found) if found.entry == bundled && runs(&found) => Ok((found, None)),
-        Ok(found) if found.entry != bundled => Ok((found, note)),
-        _ => resolve("tmux", &places.without_bundled()).map(|found| {
+        Ok(found) if found.entry == bundled && runs(&found).is_ok() => Ok((found, None)),
+        Ok(found) if found.entry != bundled => match runs(&found) {
+            Ok(()) => Ok((found, note)),
+            Err(failed) => match resolve_entry(&bundled, places) {
+                Ok(copy) if runs(&copy).is_ok() => Ok((copy, None)),
+                _ => settled(found, note, failed),
+            },
+        },
+        _ => {
+            let found = resolve("tmux", &places.without_bundled())?;
             assert_ne!(found.entry, bundled);
-            (found, note)
-        }),
+            let failed = runs(&found).err().flatten();
+            settled(found, note, failed)
+        }
+    }
+}
+
+/// The miss for a tmux too old for agent terminals: its version, the oldest one they
+/// support where the terminal host builds, and its folder. Inputs: the tmux and its
+/// version. Output: the miss.
+fn too_old_tmux(found: &Resolved, version: String) -> Missing {
+    assert!(!version.is_empty());
+    #[cfg(unix)]
+    let needs = Some(crate::terminal::tmux::version_needed());
+    #[cfg(not(unix))]
+    let needs = None;
+    Missing {
+        tool: "tmux".to_owned(),
+        reason: Reason::WrongVersion,
+        needs,
+        found: Some(version),
+        looked: found
+            .entry
+            .parent()
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect(),
+        refused: None,
     }
 }
 
@@ -870,15 +977,16 @@ pub(crate) fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Re
     if real_name.is_some_and(launches_by_name) || launches_by_name(&interpreter_name) {
         return Err(refused(program.as_path(), Refusal::FirstLine));
     }
-    Ok(Resolved {
-        entry: entry.to_path_buf(),
-        program,
-        kind: Kind::Script {
-            interpreter: Box::new(interpreter),
-            arguments: shebang.arguments,
-            by_name: shebang.by_name.is_some() || through_shim,
-        },
-    })
+    let by_name = shebang.by_name.is_some() || through_shim;
+    let entry = entry.to_path_buf();
+    Resolved::script(
+        entry,
+        program.clone(),
+        interpreter,
+        shebang.arguments,
+        by_name,
+    )
+    .map_err(|why| refused(program.as_path(), why))
 }
 
 /// A step a row runs once in `entry_at` between reading an entry's real file and checking
@@ -1064,8 +1172,9 @@ struct Unreadable;
 /// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
 /// it cannot read, which the system still runs, a line holding `#`, where the system
 /// ends it, and an `-S` line with a word holding `$`, `\`, `"` or `'`, which `env` splits
-/// otherwise, are [`Unreadable`]. Input: the real file. Output: the line, none for a file
-/// that is not a script, or [`Unreadable`] for any other first line.
+/// otherwise, are [`Unreadable`]. On Windows one carriage return right before the newline
+/// that ends the line is read away, as Windows Node ships npm's scripts. Input: the real file.
+/// Output: the line, none for a file that is not a script, or [`Unreadable`] otherwise.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
     let mut head = Vec::with_capacity(SCRIPT_HEAD_BYTES_MAX);
@@ -1085,7 +1194,13 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     if end.is_none() && head.len() == SCRIPT_HEAD_BYTES_MAX {
         return Err(Unreadable);
     }
-    let line = std::str::from_utf8(&line[..end.unwrap_or(line.len())]).map_err(|_| Unreadable)?;
+    let text = &line[..end.unwrap_or(line.len())];
+    #[cfg(windows)]
+    let text = match end {
+        Some(at) if line[at] == b'\n' => text.strip_suffix(b"\r").unwrap_or(text),
+        _ => text,
+    };
+    let line = std::str::from_utf8(text).map_err(|_| Unreadable)?;
     if line
         .chars()
         .any(|c| (c.is_control() && c != '\t') || c == '#')
@@ -1257,7 +1372,10 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
         ),
         Refusal::Batch => format!(
-            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npm.cmd or npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+        ),
+        Refusal::Verbatim => format!(
+            "{tool} can't start: {file} is not used because only a long-form Windows path can name it (a network share, a name such as CON or AUX, a name ending in a dot or a space, or a path that is too long), which Node.js can't start. Install it in a folder with a short, plain path, then try again."
         ),
     }
 }
@@ -1266,12 +1384,10 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
 /// sentence.
 fn install_hint(tool: &str) -> &'static str {
     match tool {
-        "node" | "npm" => "Install Node.js from nodejs.org, or run brew install node in Terminal.",
-        "codex" => "Install Codex: run npm install -g @openai/codex in Terminal.",
-        "claude" => {
-            "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal."
-        }
-        "git" => "Install git: run xcode-select --install in Terminal.",
+        "node" | "npm" => NODE_HINT,
+        "codex" => CODEX_HINT,
+        "claude" => CLAUDE_HINT,
+        "git" => GIT_HINT,
         _ => "Install it, or run setup again from Settings.",
     }
 }

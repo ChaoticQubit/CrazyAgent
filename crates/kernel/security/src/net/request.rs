@@ -145,10 +145,10 @@ pub trait Egress {
         port: u16,
     ) -> Result<(), StoreError>;
 
-    /// Resolves a host name once for one request. Inputs: the host and port. Output: every
-    /// address it resolved to; the kernel checks each with [`super::address_allowed`] and
-    /// pins the config's `resolve` line to the first, so `send` must connect only to the
-    /// address that line names and never look the name up again.
+    /// Resolves a host name once for one request, within a bound. Inputs: the host and port.
+    /// Output: every address it resolved to; the kernel checks each with
+    /// [`super::address_allowed`] and pins the config's `resolve` line to all of them, so
+    /// `send` must connect only to the addresses that line names and never look the name up again.
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<IpAddr>, StoreError>;
 
     /// Sends one sealed request. Input: the request. Output: the reply, or the failure.

@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
+import { LIB, ROUTES, commands, nativeSources, plan, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, owner, required, serveApp, silentProvider, start as launch, stop, value } from "./e2e-harness.mjs";
 import { answering } from "./codex-task-engine.mjs";
 
@@ -81,7 +81,7 @@ async function until(runtime, project, what, check, ms) {
 test("Roadmap status: each Refresh option decides when a check runs, after a landed change set, on Refresh only, or never", { timeout: 1500000 }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
-  assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
+  assert.equal(readFileSync(ROUTES, "utf8"), render(nativeSources()), "routes.rs is stale: run node test/native/bridge-routes.mjs");
   process.umask(0o077);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ca-rs-")));
   const runtime = join(root, "engine");

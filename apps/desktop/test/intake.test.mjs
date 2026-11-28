@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { HOST, eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -57,9 +57,9 @@ test("Home lists found, then setting up, then missing folders by name; ready one
   assert.deepEqual(list.map((item) => item.name), ["a", "b", "z", "c", "d"]);
 });
 
-test("the projects folder line says whether new folders show up live", () => {
+test("the projects folder line says whether new folders show up live", async () => {
   assert.equal(intake.homeLine({ path: null, watching: false }), null);
-  assert.equal(intake.homeLine({ path: "/Users/mira/Projects", watching: true }), "Watching ~/Projects. Drop a project folder into it with Finder and it shows up here.");
+  await eachComputer("../src/screens/intake/intake.ts", (each, { os }) => assert.equal(each.homeLine({ path: "/Users/mira/Projects", watching: true }), `Watching ~/Projects. Drop a project folder into it with ${os === "mac" ? "Finder" : "your file manager"} and it shows up here.`, os));
   assert.equal(intake.homeLine({ path: "/Users/mira/Projects", watching: false }), "~/Projects is checked when CrazyAgent starts. Live updates are off right now.");
 });
 
@@ -147,7 +147,7 @@ test("each folder chooser names what the folder is for, and adding a project nev
   assert.match(lib, /async fn desktop_pick_folder\(\s*webview: Webview,\s*purpose: FolderPurpose,\s*\)/);
   assert.match(lib, /bridge::picker::choose\(purpose\.script\(\)\)/);
   const picker = source("../src-tauri/src/bridge/picker.rs");
-  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*Memory,\s*Plugin,\s*\}/,
+  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*Memory,\s*Plugin,\s*AppPlugin,\s*\}/,
     "the web view's purpose names are the engine's");
 });
 
@@ -357,9 +357,9 @@ test("a started onboarding opens only with a project id from an applied receipt"
 
 const dep = (name, state, label = name) => ({ name, label, state });
 
-test("setup lists each tool's state in plain words", () => {
-  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "found", version: "3.5a" })),
-    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Found", tone: "ok", line: "Version 3.5a on this Mac." });
+test("setup lists each tool's state in plain words", async () => {
+  await eachComputer("../src/screens/intake/intake.ts", (setup, { os, computer }) => assert.deepEqual(setup.dependencyView(dep("tmux", { state: "found", version: "3.5a" })),
+    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Found", tone: "ok", line: `Version 3.5a on ${computer}.` }, os));
   assert.deepEqual(intake.dependencyView(dep("uv", { state: "installed", version: "0.9.2" })),
     { title: "uv", about: "Installs graphify.", word: "Installed", tone: "ok", line: "Version 0.9.2 installed." });
   assert.deepEqual(intake.dependencyView(dep("graphify", { state: "installing" })),
@@ -481,7 +481,7 @@ test("the projects folder chooser shows each state", () => {
   assert.match(picked, /~\/Projects/);
   assert.match(picked, />Use this folder<\/button>/);
   const set = html(HomeFolderView, { home: ok({ path: "/Users/mira/Projects", watching: true }), picked: null, busy: false, problem: "", onChoose: noop, onSave: noop, onContinue: noop });
-  assert.match(set, /Your projects folder is/);
+  assert.ok(set.includes("Your projects folder is") && set.includes(`with ${HOST.os === "mac" ? "Finder" : "your file manager"} and it shows up on Home.`), set);
   assert.match(set, />Continue<\/button>/);
   const moved = html(HomeFolderView, { home: ok({ path: "/Users/mira/Projects", watching: true }), picked: "/Users/mira/Work", busy: false, problem: "Nope.", onChoose: noop, onSave: noop });
   assert.match(moved, /Projects already in the old folder stay there\./);
@@ -953,7 +953,7 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   const markup = html(ToolsSetupView, base);
   const rows = markup.split('<li class="in-row">');
   const rowWith = (text) => { const found = rows.filter((row) => row.includes(text)); assert.equal(found.length, 1, text); return found[0]; };
-  assert.match(markup, /tmux[\s\S]*Version 3\.5a on this Mac\.[\s\S]*Found/);
+  assert.match(markup, new RegExp(`tmux[\\s\\S]*Version 3\\.5a on ${HOST.computer}\\.[\\s\\S]*Found`));
   assert.match(rowWith("Graphify command"), /Not installed/);
   assert.match(markup, /<legend>Code graph<\/legend>[\s\S]*Graphify skill for agents/);
   assert.doesNotMatch(markup, /always on/i);

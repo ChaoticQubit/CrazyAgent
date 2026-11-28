@@ -12635,16 +12635,6 @@ fn owner_notes_within(case: &Case, within: Duration) -> Vec<String> {
     }
 }
 
-/// What the owner reads once a set they heard waits in Changes went back to its agent.
-/// Input: the set. Output: the note.
-#[cfg(target_os = "macos")]
-fn went_back_note(set: &ChangeSetView) -> String {
-    format!(
-        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
-        set.agent.label
-    )
-}
-
 /// The agent adds a dev-dependency of `app` and the owner then adds a dependency of `app` on
 /// crate `a` on main, each with its own Cargo.lock, so the lockfile alone clashes. Inputs:
 /// the case, the agent's manifest line and the name it locks. Output: the agent's change
@@ -12785,6 +12775,7 @@ fn a_lockfile_its_tool_cannot_rewrite_changes_nothing_and_leaves_nothing_behind(
         lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap(),
         None
     );
+    polish::assert_refused(went_back::Why::Tool);
     assert_eq!(
         (record.head.clone(), record.base.clone(), record.state),
         before
@@ -12815,6 +12806,7 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
         lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap(),
         None
     );
+    polish::assert_refused(went_back::Why::NotLockfileOnly);
     assert_eq!(record.head, head);
     assert_eq!(store::load(&case.db, &id).unwrap().head, head);
     assert!(engine_notes(&case).is_empty());
@@ -12861,6 +12853,7 @@ fn a_lockfile_tool_never_listens_on_a_configured_model_port_and_unread_settings_
         None,
         "settings that do not read refuse the regeneration"
     );
+    polish::assert_refused(went_back::Why::Setup);
     assert_eq!(record.head, head);
     assert_eq!(store::load(&case.db, &id).unwrap().head, head);
     assert!(engine_notes(&case).is_empty());
@@ -13238,7 +13231,7 @@ fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_e
     );
     assert_eq!(
         owner_notes_within(&case, OWNER_NOTE_WITHIN),
-        vec![went_back_note(&set)],
+        vec![polish::went_back_note(&set, "tool")],
         "the owner, told the edits wait in Changes, hears they went back"
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
@@ -13430,7 +13423,7 @@ fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
     );
     assert_eq!(
         owner_notes_within(&case, OWNER_NOTE_WITHIN),
-        vec![went_back_note(&set)]
+        vec![polish::went_back_note(&set, "tool")]
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
@@ -13739,15 +13732,7 @@ fn clash_during_a_slow_tool<T>(
     );
     let (id, _) = lockfile_clash_at_turn_end(case, "b = { path = \"../b\" }", "b");
     let head = case.view(&id).head;
-    let started = crate::projects_home::state_folder(&case.repo)
-        .join("worktrees")
-        .join(format!("regenerate-{}", id.as_str()))
-        .join(".tool-started");
-    let deadline = Instant::now() + REGENERATED_WITHIN;
-    while !started.exists() {
-        assert!(Instant::now() < deadline, "the tool never started");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    polish::tool_started(case, &id, ".tool-started");
     let done = during(case);
     (id, head, done)
 }
@@ -14026,6 +14011,7 @@ fn a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to_never_runs_in_a_r
     let mut record = store::load(&case.db, &id).unwrap();
     let regenerated =
         lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap();
+    polish::assert_refused(went_back::Why::MergeSettings);
     assert!(
         !marker.exists(),
         "the owner's merge driver ran at the path main renamed the agent's file to"

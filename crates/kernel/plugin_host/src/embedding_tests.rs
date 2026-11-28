@@ -810,3 +810,18 @@ fn the_declared_kind_of_a_text_over_the_bound_is_none() {
     assert_eq!(declared_kind(&fits), Some(PluginKind::Embedding));
     assert_eq!(declared_kind(&format!("{fits} ")), None);
 }
+
+/// A name Windows opens as a device is no plugin name on any system, so no plugin folder
+/// and no left-over `.yaml` file is ever listed under one, while longer names that only
+/// start like a device stay valid.
+#[test]
+fn a_windows_device_name_is_no_plugin_name() {
+    for name in ["con", "nul", "aux", "prn", "com1", "lpt9"] {
+        assert!(!valid_name(name), "{name}");
+    }
+    let legacy = "con.yaml".strip_suffix(".yaml").unwrap();
+    assert!(!valid_name(legacy));
+    for name in ["console", "com10", "nul-check", "auxiliary"] {
+        assert!(valid_name(name), "{name}");
+    }
+}

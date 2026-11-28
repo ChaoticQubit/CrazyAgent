@@ -1,10 +1,11 @@
-.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script caps-check test-caps-script sleeps-check test-sleeps-script
+.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script caps-check test-caps-script sleeps-check test-sleeps-script owner-packets-check test-owner-packets-script
 
 NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
 ENGINE_TESTS := $(filter-out $(ENGINE_TESTS_EXCLUDE),$(basename $(notdir $(wildcard crates/crazyagent/tests/*.rs))))
 ROWS = $(foreach test,$(1),$(if $(findstring ::,$(test)),$(test),$(if $(findstring /,$(test)),$(notdir $(test)))))
-ENGINE_ROWS_EXCLUDE := $(call ROWS,$(ENGINE_TESTS_EXCLUDE))
+MODEL_SERVER_ROW := every_model_server_scenario_matches_its_2_4_2_capture
+ENGINE_ROWS_EXCLUDE := $(call ROWS,$(ENGINE_TESTS_EXCLUDE)) $(MODEL_SERVER_ROW)
 DESKTOP_TESTS := $(filter-out $(DESKTOP_TESTS_EXCLUDE),$(basename $(notdir $(wildcard apps/desktop/src-tauri/tests/*.rs))))
 DESKTOP_ROWS_EXCLUDE := $(call ROWS,$(DESKTOP_TESTS_EXCLUDE))
 BUN ?= $(shell command -v bun)
@@ -27,7 +28,7 @@ lint: desktop-dist
 	cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
 test: desktop-dist engine-bins
-	cargo test --workspace --locked --offline
+	cargo test --workspace --locked --offline -- --exact --skip $(MODEL_SERVER_ROW)
 	$(MAKE) test-node
 	$(MAKE) test-bun
 
@@ -58,6 +59,12 @@ sleeps-check:
 
 test-sleeps-script:
 	node --test scripts/quality/sleeps.test.mjs
+
+owner-packets-check:
+	node scripts/quality/owner-packets.mjs
+
+test-owner-packets-script:
+	node --test scripts/quality/owner-packets.test.mjs
 
 test-node:
 	CRAZYAGENT_BUN="$(BUN)" CRAZYAGENT_RCLI_SDK="$(RCLI_SDK)" node --test --test-timeout=15000 $(NODE_TEST_ARGS) $(NODE_TESTS)

@@ -212,22 +212,27 @@ fn uncrashed() -> BTreeMap<String, Vec<String>> {
 fn stable_rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
     let done: Vec<i64> = db
         .prepare("SELECT seq FROM state_log WHERE kind = 'SnapshotDone'")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap_or_else(|error| panic!("read the state_log SnapshotDone rows: {error}"));
     assert!(!done.is_empty(), "the upgrade puts snapshots on the log");
     for seq in done {
-        kernel_storage::state_log::verify_snapshot(db, u64::try_from(seq).unwrap()).unwrap();
+        let at = u64::try_from(seq)
+            .unwrap_or_else(|error| panic!("state_log snapshot seq {seq}: {error}"));
+        kernel_storage::state_log::verify_snapshot(db, at)
+            .unwrap_or_else(|error| panic!("verify state_log snapshot seq {seq}: {error:?}"));
     }
     let mut kept: Vec<(String, Vec<u8>)> = db
         .prepare("SELECT digest, text FROM kept_texts")
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap_or_else(|error| panic!("read the kept_texts rows: {error}"));
     assert!(!kept.is_empty(), "the upgrade keeps texts");
     kept.sort_by(|left, right| left.1.cmp(&right.1));
     let named = |text: &str| {
@@ -242,7 +247,9 @@ fn stable_rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
     tables
         .into_iter()
         .map(|table| {
-            let mut statement = db.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+            let mut statement = db
+                .prepare(&format!("SELECT * FROM \"{table}\""))
+                .unwrap_or_else(|error| panic!("read the {table} rows: {error}"));
             let columns: Vec<String> = statement
                 .column_names()
                 .into_iter()
@@ -262,9 +269,8 @@ fn stable_rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
                     }
                     Ok(cells.join("|"))
                 })
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap();
+                .and_then(|rows| rows.collect::<Result<_, _>>())
+                .unwrap_or_else(|error| panic!("read the {table} rows: {error}"));
             values.sort();
             (table, values)
         })
@@ -287,7 +293,9 @@ fn stable_cell(
         ("kept_text_key", _, Value::Blob(_)) => "Blob(<kept text key>)".to_owned(),
         ("state_log", "at_ms", Value::Integer(_)) => "Integer(<at_ms>)".to_owned(),
         ("state_log", "body", Value::Blob(body)) => {
-            let body = named(std::str::from_utf8(&body).unwrap());
+            let body = std::str::from_utf8(&body)
+                .unwrap_or_else(|error| panic!("{table} {kind:?} body is not UTF-8: {error}"));
+            let body = named(body);
             if kind == Some("SnapshotDone") {
                 format!("Body({})", checked_sha256(&body))
             } else {
@@ -307,7 +315,9 @@ fn checked_sha256(body: &str) -> String {
     let mut rest = body;
     while let Some(at) = rest.find(KEY) {
         let (head, tail) = rest.split_at(at + KEY.len());
-        let hex = tail.get(..64).unwrap();
+        let hex = tail
+            .get(..64)
+            .unwrap_or_else(|| panic!("a state_log SnapshotDone sha256 is cut short: {body}"));
         assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit()), "{body}");
         out.push_str(head);
         out.push_str("<checked sha256>");
@@ -629,7 +639,9 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy() {
     let crashed = names(&root);
     assert_eq!(crashed.len(), 1);
     assert!(root.backups()[0].join(CHECKED).is_file());
-    let crashed_copy = std::fs::read(root.backups()[0].join(DATABASE)).unwrap();
+    let crashed_path = root.backups()[0].join(DATABASE);
+    let crashed_copy = std::fs::read(&crashed_path)
+        .unwrap_or_else(|error| panic!("read the backup {crashed_path:?}: {error}"));
 
     let sources = sources(&root);
     upgrade_at(
@@ -648,7 +660,9 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy() {
     assert_eq!(kept.len(), 2);
     let rerun = kept.iter().find(|name| **name != crashed[0]).unwrap();
     assert_eq!(pinned_name(&root, SystemTime::now()).as_ref(), Some(rerun));
-    let rerun_copy = std::fs::read(root.path().join(BACKUPS).join(rerun).join(DATABASE)).unwrap();
+    let rerun_path = root.path().join(BACKUPS).join(rerun).join(DATABASE);
+    let rerun_copy = std::fs::read(&rerun_path)
+        .unwrap_or_else(|error| panic!("read the backup {rerun_path:?}: {error}"));
     assert_eq!(
         differences(&rerun_copy, &crashed_copy),
         Vec::<usize>::new(),

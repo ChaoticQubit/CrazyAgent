@@ -1,5 +1,8 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, STORAGE_COPY, withCode } from "./engine-client";
+import { GRANT_COPY } from "./grant-copy";
+import { RESTORE_COPY } from "./restore-copy";
+import { thisComputer } from "./ui/keys";
 import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, HarnessSubAgents, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 import type { AccountCheck, AccountDraft, AccountView, ProviderEntry } from "./api-account-types";
@@ -36,15 +39,10 @@ const COPY: Record<string, string> = {
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
   engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
-  engine_restoring: "CrazyAgent is bringing back your 2.4 data, so its engine stays stopped. Wait a minute, then reconnect.",
-  engine_restore_broken: "Restore did not finish. Your data is safe in a backup.",
-  engine_restored: "Your 2.4 data is back. Install CrazyAgent 2.4.2 to use it. Restart engine goes back to 2.5, which updates that data again.",
-  storage_restore_unavailable: "There's no 2.4 backup to bring back. CrazyAgent keeps it for 30 days after the update to 2.5.",
-  storage_restore_agents_running: "Agents are running. Stop every agent and research run, then bring back your 2.4 data.",
-  storage_restore_busy: "Something else had CrazyAgent's data open, so your 2.4 data wasn't brought back. Close other CrazyAgent windows, then try again.",
-  storage_restore_failed: "Your 2.4 data wasn't brought back, and CrazyAgent went on with your 2.5 data. Try again.",
+  ...RESTORE_COPY,
   git_safe_unavailable: "CrazyAgent's engine didn't start: Windows is installed in a folder whose name CrazyAgent can't use to keep git from running other programs, so it runs no git on this computer.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
+  owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
   engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
@@ -98,14 +96,13 @@ const COPY: Record<string, string> = {
   account_key_required: "Enter an API key.",
   account_key_invalid: "This API key can't be saved. Check it and try again.",
   account_key_not_allowed: "This sign-in method doesn't use an API key.",
-  account_url_required: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
-  account_url_invalid: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
-  account_url_port_refused:
-    "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there.",
-  account_local_url_required: "Enter a URL on this Mac, such as http://127.0.0.1:11434.",
+  account_url_required: `Enter a full URL that starts with https://, or http://127.0.0.1 for ${thisComputer()}.`,
+  account_url_invalid: `Enter a full URL that starts with https://, or http://127.0.0.1 for ${thisComputer()}.`,
+  account_url_port_refused: "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there.",
+  account_local_url_required: `Enter a URL on ${thisComputer()}, such as http://127.0.0.1:11434.`,
   account_url_not_allowed: "This sign-in method doesn't use a URL.",
   account_url_unreachable: "Can't reach this URL. Check the address and that the server is running.",
-  account_probe_https_unsupported: "CrazyAgent can only check http URLs on this Mac. The account is saved.",
+  account_probe_https_unsupported: `CrazyAgent can only check http URLs on ${thisComputer()}. The account is saved.`,
   account_model_required: "Choose a model.",
   account_model_invalid: "Use a model name without spaces.",
   account_model_not_allowed: "This sign-in method doesn't use a model name.",
@@ -117,7 +114,7 @@ const COPY: Record<string, string> = {
   native_auth_cancel_pending: "The sign-in is still stopping. Try again in a moment.",
   account_not_found: "This account no longer exists.",
   native_profile_not_managed: "This account doesn't use a subscription sign-in.",
-  native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
+  native_auth_host_unavailable: `Sign-in isn't available on ${thisComputer()} right now. Check that the harness is installed.`,
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
   native_auth_sign_in_running: "A sign-in is still running. Wait for it to finish or cancel it, then try again.",
@@ -193,23 +190,8 @@ const COPY: Record<string, string> = {
   project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
   temp_folder_shared: "Your temp folder is shared with other users on this computer, so it is never given to agents.",
   temp_folder_needs_macos: "Your temp folder can be given to agents only on macOS in this version.",
-  grant_socket_needs_macos: "A socket can be allowed only on macOS in this version.",
-  grant_socket_not_plain: "The socket path must be a full path of letters, digits, slashes, dots, dashes and underscores, at most 103 bytes, in a folder that exists.",
-  grant_socket_secret: "That socket sits with your keys or credentials, so it is never allowed.",
-  grant_socket_engine: "That socket belongs to CrazyAgent itself, so it is never allowed.",
-  grant_socket_agent: "That socket controls a terminal, an editor or an SSH connection (tmux, screen, dtach, Zellij, kitty, WezTerm, Alacritty, iTerm2, Emacs, Neovim, Kakoune, VS Code, Cursor and the like) or hands out your SSH keys, which can run anything as you, so it is never allowed.",
-  grant_socket_host: "That socket controls containers or virtual machines (Docker, containerd, Podman, Colima, Lima, OrbStack and the like), which can reach your whole computer, so it is never allowed.",
-  grant_socket_keys: "That socket belongs to a key or password agent (gpg-agent, 1Password, SSH or another agent), so it is never allowed.",
-  grant_socket_owner: "That socket belongs to the system or another user, has a second name, or sits in a folder other users can change, so it is never allowed.",
-  grant_socket_missing: "There is no socket at that path now. Start the program that makes it, then allow it again.",
-  grant_socket_refused: "That socket cannot be allowed. A socket can be allowed only when it is there now, belongs to the owner with one name, sits in a folder only the owner can change, and is no socket of CrazyAgent itself, of keys or credentials, of containers or virtual machines, or of a terminal, editor, SSH connection or key agent. Check the path and that the program making it runs, then ask again.",
-  grant_port_reserved: "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a debugger (Node, Java, Python or Go), so it is never allowed.",
-  grant_port_dynamic: "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152.",
-  agent_grants_invalid: "A project allows at most 2 sockets, 4 ports and your temp folder, each once.",
-  grant_full: "This project already allows as many extras of that kind as it can.",
-  grant_requests_full: "Four access requests of this project are still waiting for the owner.",
-  grant_reason_invalid: "Give a reason in plain words.",
-  agent_grant_revoked: "An allowed extra this agent held (a socket, a port or your temp folder) was removed, so the agent was stopped. Its next start goes without it.",
+  ...GRANT_COPY,
+  harness_launch_updating: "This harness is updating. Try again when it's done.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -860,12 +842,7 @@ export function setAccountSchedule(scheduleChange: ScheduleChange, version: numb
   return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
-/** Makes the id of a new pool, so the page can select the pool it creates. Output: the id. */
-export function newPoolId(): string {
-  const bytes = new Uint8Array(10);
-  crypto.getRandomValues(bytes);
-  return "pool-" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
+export { newPoolId } from "./pool-id";
 
 /** Validates a pool before saving. Inputs: name and member ids. Output: the trimmed name
  * and members, or a plain error. */

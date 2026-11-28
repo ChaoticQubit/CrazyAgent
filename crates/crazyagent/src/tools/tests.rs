@@ -211,7 +211,7 @@ fn a_missing_tool_gives_its_typed_reason_and_how_to_install_it() {
     assert_eq!(codex.looked, places.folders());
     assert_eq!(
         codex.line(),
-        "codex is missing. Install Codex: run npm install -g @openai/codex in Terminal. Then try again."
+        format!("codex is missing. {CODEX_HINT} Then try again.")
     );
 
     let tmux = resolve("tmux", &places).unwrap_err();
@@ -230,7 +230,7 @@ fn a_script_whose_interpreter_is_missing_says_it_needs_that_interpreter() {
     assert_eq!(missing.needs.as_deref(), Some("node"));
     assert_eq!(
         missing.line(),
-        "codex needs node, which is missing. Install Node.js from nodejs.org, or run brew install node in Terminal. Then try again."
+        format!("codex needs node, which is missing. {NODE_HINT} Then try again.")
     );
 }
 
@@ -1185,7 +1185,7 @@ fn a_refused_bundled_tmux_says_it_cannot_run() {
     let (places, sidecar, brew) = bundled_layout(&home);
     for mode in [0o757, 0o644] {
         std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(mode)).unwrap();
-        let (found, note) = resolve_tmux(&places, false, |_| true).unwrap();
+        let (found, note) = resolve_tmux(&places, false, |_| Ok(())).unwrap();
         assert_eq!(found.entry, brew, "mode {mode:o}");
         assert_eq!(note, Some(BundleNote::CannotRun), "mode {mode:o}");
     }
@@ -1198,13 +1198,13 @@ fn with_no_other_tmux_a_bundled_one_that_cannot_run_ends_in_the_install_offer() 
     let (_folder, home) = scratch();
     let (places, sidecar, brew) = bundled_layout(&home);
     std::fs::remove_file(&brew).unwrap();
-    let missing = resolve_tmux(&places, true, |_| false).unwrap_err();
+    let missing = resolve_tmux(&places, true, |_| Err(None)).unwrap_err();
     assert_eq!(
         (missing.reason, missing.line()),
         (Reason::NotFound, TMUX_MISSING.to_owned())
     );
     std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o757)).unwrap();
-    let missing = resolve_tmux(&places, true, |_| true).unwrap_err();
+    let missing = resolve_tmux(&places, true, |_| Ok(())).unwrap_err();
     assert_eq!(
         (missing.reason, missing.line()),
         (Reason::NotFound, TMUX_MISSING.to_owned())

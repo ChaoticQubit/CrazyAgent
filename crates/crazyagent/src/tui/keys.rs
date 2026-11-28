@@ -55,6 +55,16 @@ impl std::fmt::Debug for Key {
     }
 }
 
+/// Wipes a paste's text over its whole allocation when the key goes away, on every path
+/// the key takes through the shell, so a pasted secret is not freed as readable bytes.
+impl Drop for Key {
+    fn drop(&mut self) {
+        if let Self::Paste(text) = self {
+            crate::tui::widgets::wipe(text);
+        }
+    }
+}
+
 /// An action every screen shares, resolved before the screen sees the key.
 /// Input: a key and whether a text field has focus, through `global`.
 /// Output: the shared action.
@@ -100,7 +110,23 @@ impl ShiftEnter {
     pub const ALL: [(ShiftEnter, &'static str); 2] = [(Self::Auto, "Auto"), (Self::Off, "Off")];
 }
 
+/// The most characters of one paste the TUI takes; the rest is dropped.
+pub const PASTE_CHARS_MAX: usize = 100_000;
+
 impl Key {
+    /// Makes the paste key from the text a terminal paste event carries, cut in place to at
+    /// most [`PASTE_CHARS_MAX`] characters, so the text is never copied and the cut tail
+    /// stays in the one buffer the key wipes when dropped. Input: the pasted text. Output:
+    /// the paste key.
+    pub fn paste(mut text: String) -> Self {
+        let end = text
+            .char_indices()
+            .nth(PASTE_CHARS_MAX)
+            .map_or(text.len(), |(at, _)| at);
+        text.truncate(end);
+        Self::Paste(text)
+    }
+
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
     /// does not use (function keys, Alt and Super chords). Terminals send Ctrl-]

@@ -3872,18 +3872,6 @@ pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
     })
 }
 
-fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamMessage> {
-    let author: String = row.get(1)?;
-    let state: String = row.get(3)?;
-    Ok(TeamMessage {
-        id: row.get(0)?,
-        author: MessageAuthor::parse(&author).ok_or_else(|| invalid_row("author"))?,
-        text: row.get(2)?,
-        state: MessageState::parse(&state).ok_or_else(|| invalid_row("state"))?,
-        created_ms: row.get(4)?,
-    })
-}
-
 /// Tells whether the owner asked to keep the minimum agents warm.
 /// Takes a connection and the project.
 /// Returns false until the owner turns it on.
@@ -5745,7 +5733,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     for agent in &mut agents {
         agent.owner_stopped = stopped.contains(&agent.id);
         agent.instructions_changed = changed.contains(&agent.id) && agent.status.live();
-        agent.sees_hidden = seers.contains(&agent.id) && agent.status.live();
+        agent.sees_hidden = seers.contains(&agent.id);
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
@@ -5861,3 +5849,6 @@ mod tests;
 
 #[cfg(test)]
 mod reach_tests;
+
+mod message_row;
+use message_row::message_row;

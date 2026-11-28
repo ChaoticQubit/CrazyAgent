@@ -91,11 +91,7 @@ impl Case {
 
 /// The 37-byte handshake: four magic bytes, a slot byte and a 32-byte token.
 pub(in crate::ide::bridge) fn packet(magic: &[u8; 4], slot: u8, token: &[u8; 32]) -> [u8; 37] {
-    let mut packet = [0; 37];
-    packet[..4].copy_from_slice(magic);
-    packet[4] = slot;
-    packet[5..].copy_from_slice(token);
-    packet
+    **crate::engine::secret_frame::owner_packet(magic, slot, token)
 }
 
 /// Decodes lowercase hexadecimal text.
@@ -115,7 +111,7 @@ fn token(path: &Path) -> [u8; 32] {
         text.bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
-    unhex(&text).try_into().unwrap()
+    unhex(&text).try_into().expect("a 32-byte fixture token")
 }
 
 /// Swaps a capability file's token for its session token, as the extension does first,
@@ -591,9 +587,8 @@ fn ide_frames_match_the_extension_fixture() {
         "../../../../../apps/ide-extension/test/frames.json"
     ))
     .unwrap();
-    let token: [u8; 32] = unhex(fixture["token"].as_str().unwrap())
-        .try_into()
-        .unwrap();
+    let digits = fixture["token"].as_str().unwrap();
+    let token = owner_token_copy(&unhex(digits).try_into().expect("a 32-byte fixture token"));
     assert_eq!(
         hex(&packet(MAGIC, 0, &token)),
         fixture["handshake"].as_str().unwrap()
@@ -625,11 +620,10 @@ fn ide_frames_match_the_extension_fixture() {
         session["request"]["value"]
     );
     assert_eq!(encode_frame(&request).unwrap(), frame);
-    let token: [u8; 32] = unhex(session["token"].as_str().unwrap())
-        .try_into()
-        .unwrap();
+    let digits = session["token"].as_str().unwrap();
+    let token = owner_token_copy(&unhex(digits).try_into().expect("a 32-byte fixture token"));
     let reply = IdeReply::Ok {
-        data: json!({ "token": hex(&token) }),
+        data: json!({ "token": hex(&**token) }),
     };
     assert_eq!(
         encode_frame(&reply).unwrap(),
@@ -1292,7 +1286,7 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
     let server = Stream::from_std(server).unwrap();
     let serving = tokio::spawn(serve_within(
         server,
-        ide,
+        crate::engine::secret_frame::owner_packet_copy(&ide),
         case.runtime.clone(),
         Instant::now() + handshake,
         Duration::from_millis(300),

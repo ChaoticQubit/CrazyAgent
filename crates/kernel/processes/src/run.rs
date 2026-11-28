@@ -346,8 +346,9 @@ pub struct Tails {
 
 #[cfg(unix)]
 /// Runs one program like [`run`], keeping the last bytes of both its streams. Past its bound
-/// its whole group is asked to stop with TERM, given [`STOP_GRACE`] to end, then killed; on
-/// every return the group is killed, so nothing the program started outlives the run.
+/// its whole group is asked to stop with TERM and given [`STOP_GRACE`] for every member to
+/// end, even after the program itself ended, then killed; on every return the group is
+/// killed, so nothing the program started outlives the run.
 /// Inputs: the absolute program, its arguments, the environment pairs, the working folder
 /// and the bound. Output: the exit and both tails, or `setup_timeout` or
 /// `setup_install_failed`.
@@ -379,8 +380,10 @@ pub fn run_tails(
     let success = match waited(&mut child, limit) {
         Some(status) => Some(status.success()),
         None => {
+            let deadline = Instant::now() + STOP_GRACE;
             signal_group(pid, rustix::process::Signal::TERM);
             let _ = waited(&mut child, STOP_GRACE);
+            group_ended(pid, deadline);
             None
         }
     };
@@ -396,6 +399,28 @@ pub fn run_tails(
         stdout,
         stderr,
     })
+}
+
+/// Waits until a run's process group has no member left or a deadline passes, polling from a
+/// short pause up to [`POLL`], so members still cleaning up on TERM keep the grace after the
+/// group leader ended. A group the run may not signal counts as still there. Inputs: the
+/// group leader's id and the deadline.
+#[cfg(unix)]
+fn group_ended(pid: u32, deadline: Instant) {
+    let group = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .expect("a child's id is a process id");
+    assert!(group.as_raw_nonzero().get() > 1);
+    let mut pause = PAUSE_MIN;
+    while rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(pause.min(left));
+        pause = (pause * 2).min(POLL);
+    }
 }
 
 /// Waits for a child to end, polling from a short pause up to [`POLL`], for at most a time

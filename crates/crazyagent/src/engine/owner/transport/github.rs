@@ -396,22 +396,16 @@ impl OwnerClient {
             };
             let frame = encode_frame(&envelope).map_err(|_| failure("github_request_bounds"))?;
             self.root.verify()?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
-            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
-                .await
-                .map_err(|_| failure("github_owner_unavailable"))?;
-            verify_server(&stream)?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
+            let mut stream = self
+                .connect_checked(|_| failure("github_owner_unavailable"))
+                .await?;
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
             stream
-                .write_all(&packet)
+                .write_all(&**packet)
                 .await
                 .map_err(|_| failure("github_owner_unavailable"))?;
             stream
@@ -419,13 +413,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("github_owner_unavailable"))?;
             if let Some(token) = token {
-                let mut bytes = token.into_bytes();
-                let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
-                framed.extend_from_slice(&bytes);
-                kernel_security::secret::wipe(&mut bytes);
-                let sent = stream.write_all(&framed).await;
-                kernel_security::secret::wipe(&mut framed);
-                sent.map_err(|_| failure("github_owner_unavailable"))?;
+                crate::engine::secret_frame::write_secret_frame(&mut stream, Some(token))
+                    .await
+                    .map_err(|_| failure("github_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
             match serde_json::from_slice(&frame[4..])
@@ -712,15 +702,10 @@ async fn authenticate(
 async fn receive_token(stream: &mut Stream) -> Result<SecretString, EngineError> {
     tokio::time::timeout(TOKEN_FRAME_TIME, async {
         let invalid = || failure("github_token_frame_invalid");
-        let size = stream.read_u32().await.map_err(|_| invalid())? as usize;
-        if size == 0 || size > SECRET_BYTES_MAX {
-            return Err(invalid());
-        }
-        let mut bytes = vec![0; size];
-        if stream.read_exact(&mut bytes).await.is_err() {
-            kernel_security::secret::wipe(&mut bytes);
-            return Err(invalid());
-        }
+        let bytes = crate::engine::secret_frame::read_secret_frame(stream, SECRET_BYTES_MAX)
+            .await
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(invalid)?;
         SecretString::new(bytes).map_err(|_| failure("github_token_invalid"))
     })
     .await

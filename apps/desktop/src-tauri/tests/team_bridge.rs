@@ -668,6 +668,7 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
             name: "ollama".into(),
             slots: 1,
         }],
+        uncommitted_reminder: crazyagent::coord::settings::UncommittedReminder::Off,
     };
     for receipt in [
         bridge.team_coordination(&id, chosen.clone(), 2).await?,

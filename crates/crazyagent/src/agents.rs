@@ -91,14 +91,6 @@ fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn clip(text: &str, bytes: usize) -> String {
-    let mut end = text.len().min(bytes);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
-}
-
 /// Which part of a project's team an agent plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1896,3 +1888,6 @@ impl Stored {
 #[cfg(all(test, unix))]
 #[path = "agents/tests.rs"]
 pub(crate) mod tests;
+
+mod clip;
+use clip::clip;

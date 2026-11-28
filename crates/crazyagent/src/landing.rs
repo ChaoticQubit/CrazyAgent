@@ -7,6 +7,7 @@ use std::time::Duration;
 
 #[cfg(unix)]
 mod ancestry;
+mod change_set_id;
 #[cfg(unix)]
 mod clone;
 #[cfg(unix)]
@@ -31,7 +32,9 @@ mod merges;
 mod owner;
 pub mod owner_edit;
 #[cfg(unix)]
-mod retire;
+pub(crate) mod prune;
+#[cfg(unix)]
+pub(crate) mod retire;
 #[cfg(all(test, unix))]
 pub(crate) mod signature_tests;
 #[cfg(unix)]
@@ -40,6 +43,7 @@ mod store;
 mod subagent;
 #[cfg(all(test, unix))]
 mod tests;
+pub(crate) mod went_back;
 
 /// How long a discarded change set stays restorable before its ref is deleted.
 pub const RESTORE_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -233,19 +237,6 @@ impl ChangeSetId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl TryFrom<String> for ChangeSetId {
-    type Error = EngineError;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<ChangeSetId> for String {
-    fn from(id: ChangeSetId) -> Self {
-        id.0
     }
 }
 
@@ -1835,11 +1826,10 @@ pub(crate) fn conflicts_with_main(
 }
 
 /// What runs after a lockfile regeneration that landed nothing, on its own thread with its
-/// own store: the set, whether another regeneration may start, which is false once one
-/// refused the clash and true when the set or main moved meanwhile, and the owner's
-/// settings files the regeneration was given.
+/// own store: the set, the refusal that hands the clash to the agent or None when the set or
+/// main moved and another may start, and the owner's settings files it was given.
 pub(crate) type AfterRegeneration =
-    fn(&Connection, &ChangeSetId, bool, Option<&(PathBuf, PathBuf)>);
+    fn(&Connection, &ChangeSetId, Option<&went_back::Refusal>, Option<&(PathBuf, PathBuf)>);
 
 /// Moves a sub-agent whose turn just ended and left nothing pending onto the tip of its
 /// Land on branch when its linked worktree carries only landed work (DEC-147.6); a step
@@ -2392,7 +2382,7 @@ pub fn retire_worktree(
 /// Inputs: the store and the time now. Output: how many were deleted.
 pub fn prune(db: &Connection, now_ms: u64) -> Result<usize, EngineError> {
     #[cfg(unix)]
-    return flow::prune(db, now_ms);
+    return prune::prune(db, now_ms);
     #[cfg(not(unix))]
     {
         let _ = (db, now_ms);

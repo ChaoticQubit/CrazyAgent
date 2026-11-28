@@ -241,12 +241,12 @@ fn follow_without_a_running_host_writes_nothing() {
     let file = workspace_file(&case);
     let text = std::fs::read_to_string(&file).unwrap();
     let logged = events(&case.db).len();
+    let second = case.agent("sub", "working");
     let offline = case
         .db
         .execute("UPDATE owner_meta SET runtime_state='offline'", [])
         .unwrap();
     assert_eq!(offline, 1);
-    let second = case.agent("sub", "working");
     follow(&case.db, &case.root).unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
     assert_eq!(cached(&case), Some((false, text.clone())));

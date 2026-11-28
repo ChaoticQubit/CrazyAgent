@@ -920,44 +920,6 @@ async fn paste_chunks_reach_the_host_once_after_the_last_filtered() {
     );
 }
 
-/// Slice C: a paste chunk that is empty or over `INPUT_BYTES_MAX`, chunks past
-/// `PASTE_BYTES_MAX` or a paste that is not UTF-8 are refused whole, so the view ends; a
-/// paste of exactly `PASTE_BYTES_MAX` is taken.
-#[test]
-fn a_paste_out_of_bounds_is_refused_whole() {
-    let full = [b'a'; INPUT_BYTES_MAX];
-    assert_eq!(Pasting::default().add(&[], true), Err(()));
-    assert_eq!(
-        Pasting::default().add(&[b'a'; INPUT_BYTES_MAX + 1], true),
-        Err(())
-    );
-    assert_eq!(
-        Pasting::default().add(&[0xc3], true),
-        Err(()),
-        "half a UTF-8 character"
-    );
-    let mut over = Pasting::default();
-    for _ in 0..PASTE_BYTES_MAX / INPUT_BYTES_MAX {
-        assert_eq!(over.add(&full, false), Ok(None));
-    }
-    assert_eq!(
-        over.add(b"a", true),
-        Err(()),
-        "one byte past PASTE_BYTES_MAX"
-    );
-    let mut whole = Pasting::default();
-    for _ in 1..PASTE_BYTES_MAX / INPUT_BYTES_MAX {
-        assert_eq!(whole.add(&full, false), Ok(None));
-    }
-    assert_eq!(
-        whole
-            .add(&full, true)
-            .map(|keys| keys.map(|keys| keys.len())),
-        Ok(Some(PASTE_BYTES_MAX))
-    );
-    assert!(!whole.open());
-}
-
 /// Slice C: inside an open paste any other request ends the view as an invalid request, and
 /// nothing is pasted or typed; a grant revoked after a paste's first chunk ends the view as
 /// stale and nothing is pasted.
@@ -1052,7 +1014,8 @@ async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone
 
 /// Slice C (DEC-203): an input-only view opens at the size it asked for and sends no output,
 /// and its typed keys and its paste reach the agent's pane, as a full view of the same agent
-/// then shows; a size out of bounds is refused at the handshake.
+/// then shows; a size out of bounds is refused at the handshake. The full view holds its control
+/// open until the line is read, so no detach can end its output first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_input_only_view_types_and_pastes_without_sending_output() {
     let tmp = tempfile::Builder::new()
@@ -1146,6 +1109,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         cols,
         rows,
         output: mut full,
+        control: full_control,
         ..
     } = owner.terminal_attach(agent).await.unwrap();
     assert_eq!(
@@ -1171,6 +1135,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
     .unwrap_or_else(|_| "the pane never showed the typed and pasted line".into());
     assert_eq!(shown, "typed and pasted");
 
+    drop(full_control);
     drop(control);
     drop(owner);
     tokio::time::timeout(WAIT, service.shutdown())
@@ -1645,95 +1610,6 @@ async fn a_pinned_input_only_view_is_gone_once_its_agents_own_pane_is_another() 
     }
 }
 
-/// V243-NATIVE-INPUT-PIN: a pinned input-only view types, pastes and sizes only its pane,
-/// never by name, and ends as `terminal_ended` at its first send once that pane is no longer
-/// its agent's own. Its prompt has its own row.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot() {
-    let agent = AgentId::team(1).unwrap();
-    let at = PaneAt {
-        pane: "%3".into(),
-        serial: 7,
-    };
-    let recording = Recording::new(vec![agent.clone()]);
-    recording.own_is(Ok(at.clone()));
-    let (queue, mut asked) = tokio::sync::mpsc::channel(8);
-    let running = {
-        let host: Arc<dyn Host> = recording.clone();
-        let (agent, pinned) = (agent.clone(), Some(at.clone()));
-        tokio::spawn(async move {
-            let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
-            let view = View {
-                seat: seated(&host, &agent, pinned.clone()),
-                agent,
-                cols: 80,
-                rows: 24,
-                viewer: None,
-                pinned,
-            };
-            let viewing = Counted::allowing(usize::MAX);
-            pump(&mut ours, view, &mut asked, host, &viewing).await
-        })
-    };
-    for request in [
-        TerminalRequest::Input {
-            bytes: b"a".to_vec(),
-        },
-        TerminalRequest::Paste {
-            bytes: b"p".to_vec(),
-            last: true,
-        },
-        TerminalRequest::Resize { cols: 90, rows: 30 },
-    ] {
-        queue.send(request).await.unwrap();
-    }
-    let landed = tokio::time::timeout(WAIT, async {
-        loop {
-            let count = recording.at_pane.lock().unwrap().len();
-            if count >= 3 {
-                return count;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    assert_eq!(
-        landed,
-        Ok(3),
-        "the key, paste and resize reached the pinned pane"
-    );
-    assert_eq!(
-        *recording.at_pane.lock().unwrap(),
-        vec![b"a".to_vec(), b"p".to_vec(), b"90x30".to_vec()]
-    );
-
-    recording.own_is(Ok(PaneAt {
-        pane: "%4".into(),
-        serial: 7,
-    }));
-    queue
-        .send(TerminalRequest::Input {
-            bytes: b"b".to_vec(),
-        })
-        .await
-        .unwrap();
-    let reason = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
-    assert_eq!(reason, "terminal_ended");
-    assert!(
-        recording.typed.lock().unwrap().is_empty(),
-        "nothing was typed by name"
-    );
-    assert!(
-        recording.pasted.lock().unwrap().is_empty(),
-        "nothing was pasted by name"
-    );
-    assert_eq!(
-        recording.at_pane.lock().unwrap().len(),
-        3,
-        "the key after the move never landed"
-    );
-}
-
 /// V243-NATIVE-INPUT-PIN: a pin that is no pane id, or a prompt pin with no control serial, is
 /// a programmer error, so a pinned paste, send, prompt or liveness check stops at once instead
 /// of handing the host a name-like target.
@@ -1946,3 +1822,6 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
         .unwrap()
         .unwrap();
 }
+
+mod paste_bounds;
+mod pinned_input_view;

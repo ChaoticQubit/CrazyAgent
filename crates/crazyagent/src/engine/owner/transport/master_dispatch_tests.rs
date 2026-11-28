@@ -191,10 +191,7 @@ impl DispatchFixture {
 
     async fn commit(&self, request: &OwnerRequest) -> OwnerReply {
         let runtime = self.runtime();
-        let mut auth = [0; 37];
-        auth[..4].copy_from_slice(b"CAO1");
-        auth[4] = 0;
-        auth[5..].copy_from_slice(&self.owner.token);
+        let auth = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &self.owner.token);
         let admission = runtime.authority.authenticate(&auth).unwrap();
         let _barrier = runtime.engine.owner_egress.write().await;
         runtime

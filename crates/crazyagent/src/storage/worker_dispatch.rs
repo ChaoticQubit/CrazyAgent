@@ -250,7 +250,7 @@ pub(crate) fn snapshot(
         || stored.lease.native_descendant.is_some()
         || stored.lease.state != LeaseState::Ready
         || stored.admission.repository != admission.repository
-        || !crate::file_identity::same_files(
+        || !kernel_common::file_identity::same_files(
             &[
                 (admission.root.device, admission.root.inode),
                 (admission.metadata.device, admission.metadata.inode),

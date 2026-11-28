@@ -101,6 +101,7 @@ impl Case {
         };
         let project = ProjectId::new("project-1").unwrap();
         let db = landing::open(&engine).unwrap();
+        crate::landing_log::seed(&db);
         crate::team::initialize(&db).unwrap();
         if clone {
             landing::record_worktree_start(&db, &repo, &worktree, &git_dir).unwrap();

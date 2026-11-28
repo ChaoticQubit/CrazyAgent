@@ -137,32 +137,41 @@ pub fn cmd_shim_real(cmd: &Path) -> Option<PathBuf> {
         .filter(|real| !batch_file(real))
 }
 
-/// npm's own `npx.cmd` by where it sits: named `npx.cmd`, with `node.exe` beside it and the
-/// `node_modules\npm\bin\npx-cli.js` npm ships below that same folder. Inputs: the real
-/// `.cmd` file and its folder. Output: node and the script, none for any other file.
+/// npm's own `npm.cmd` and `npx.cmd` by where they sit: `node.exe` beside the file and, below
+/// that same folder, the script npm ships for that name, `node_modules\npm\bin\npm-cli.js`
+/// or `npx-cli.js`. Inputs: the real `.cmd` file and its folder. Output: node and the script,
+/// none for any other name or a missing file.
 #[cfg(windows)]
-pub fn npx_layout(cmd: &Path, folder: &Path) -> Option<(PathBuf, PathBuf)> {
-    let named = cmd
-        .file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd"));
+pub fn npm_layout(cmd: &Path, folder: &Path) -> Option<(PathBuf, PathBuf)> {
+    let name = cmd.file_name().and_then(OsStr::to_str)?;
+    let script = [("npm.cmd", "npm-cli.js"), ("npx.cmd", "npx-cli.js")]
+        .into_iter()
+        .find(|(command, _)| name.eq_ignore_ascii_case(command))?
+        .1;
     let node = folder.join("node.exe");
     let cli = folder
         .join("node_modules")
         .join("npm")
         .join("bin")
-        .join("npx-cli.js");
-    (named && node.is_file() && cli.is_file()).then_some((node, cli))
+        .join(script);
+    (node.is_file() && cli.is_file()).then_some((node, cli))
 }
 
 /// npm's own `npx.cmd` as the real `node.exe` and `npx-cli.js` its layout names
-/// ([`npx_layout`]), so a caller can tell the resolver mapped a batch file by that layout and
+/// ([`npm_layout`]), so a caller can tell the resolver mapped a batch file by that layout and
 /// by no shim text. Input: the batch file as written. Output: both real files, none for any
-/// other file.
+/// other file, `npm.cmd` included.
 #[cfg(windows)]
 pub fn npx_real(cmd: &Path) -> Option<(PathBuf, PathBuf)> {
     let cmd = cmd.canonicalize().ok()?;
-    let (node, cli) = npx_layout(&cmd, cmd.parent()?)?;
+    let npx = cmd
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd"));
+    if !npx {
+        return None;
+    }
+    let (node, cli) = npm_layout(&cmd, cmd.parent()?)?;
     Some((node.canonicalize().ok()?, cli.canonicalize().ok()?))
 }
 
@@ -193,11 +202,11 @@ use crate::finding::{INTERPRETER_DEPTH_MAX, Kind, Missing, Places, Refusal, Reso
 /// cmd.exe: an npm cmd-shim as the target it names, which is then its program and pin, run
 /// by the `<program>.exe` beside the shim when one is there, as the shim's text prefers it,
 /// and a refused one is refused, never passed over for one on PATH;
-/// npm's own `npx.cmd` as the `node.exe` and `npx-cli.js` beside it, read by where they sit
-/// and never by its text; any other `.cmd` or `.bat` refused. A shim's
-/// target and npx's files pass every check an entry passes ([`entry_at`]), one level
-/// deeper, so a batch file leading to another stays bounded; `npx-cli.js` looks its `node`
-/// up beside npx.cmd only, so npx runs off the engine's PATH too. Inputs: the entry,
+/// npm's own `npm.cmd` and `npx.cmd` as the `node.exe` and npm script beside them, read by
+/// where they sit and never by their text; any other `.cmd` or `.bat` refused. A shim's
+/// target and npm's files pass every check an entry passes ([`entry_at`]), one level
+/// deeper, so a batch file leading to another stays bounded; npm's scripts look their
+/// `node` up beside the `.cmd` only, so npm and npx run off the engine's PATH too. Inputs: the entry,
 /// its checked real file, the places, the depth and how a refusal reads. Output: none when
 /// the real file is no batch file, else the tool or why it cannot run.
 #[cfg(windows)]
@@ -215,21 +224,22 @@ pub(crate) fn entry(
     let Some(folder) = program.parent().filter(|_| depth < INTERPRETER_DEPTH_MAX) else {
         return refuse();
     };
-    if let Some((node, cli)) = crate::batch::npx_layout(program, folder) {
+    if let Some((node, cli)) = crate::batch::npm_layout(program, folder) {
         let node = match entry_at(&node, places, depth + 1) {
             Ok(node) if node.kind == Kind::Native => node,
             Ok(_) => return refuse(),
             Err(missing) => return Some(Err(missing)),
         };
         let beside = places.only_in(folder);
-        return Some(entry_at(&cli, &beside, depth + 1).map(|script| Resolved {
-            entry: entry.to_path_buf(),
-            program: script.program,
-            kind: Kind::Script {
-                interpreter: Box::new(node),
-                arguments: Vec::new(),
-                by_name: false,
-            },
+        return Some(entry_at(&cli, &beside, depth + 1).and_then(|script| {
+            Resolved::script(
+                entry.to_path_buf(),
+                script.program.clone(),
+                node,
+                Vec::new(),
+                false,
+            )
+            .map_err(|why| refused(&script.program, why))
         }));
     }
     let Some((beside, target)) = crate::batch::shim_parts(program) else {
@@ -243,14 +253,16 @@ pub(crate) fn entry(
         };
         let only_beside = places.only_in(folder);
         return Some(
-            entry_at(&target, &only_beside, depth + 1).map(|script| Resolved {
-                entry: entry.to_path_buf(),
-                program: script.program,
-                kind: Kind::Script {
-                    interpreter: Box::new(interpreter),
-                    arguments: Vec::new(),
-                    by_name: false,
-                },
+            entry_at(&target, &only_beside, depth + 1).and_then(|script| {
+                let program = script.program.clone();
+                Resolved::script(
+                    entry.to_path_buf(),
+                    script.program,
+                    interpreter,
+                    Vec::new(),
+                    false,
+                )
+                .map_err(|why| refused(&program, why))
             }),
         );
     }

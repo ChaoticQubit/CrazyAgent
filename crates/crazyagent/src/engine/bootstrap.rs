@@ -38,6 +38,7 @@ mod native_profiles;
 #[cfg(not(unix))]
 #[path = "bootstrap/native_profiles_unavailable.rs"]
 mod native_profiles;
+mod service_drop;
 #[cfg(all(test, unix))]
 pub(crate) use native_profiles::MAX_PROFILES;
 pub(crate) use native_profiles::{
@@ -1751,25 +1752,6 @@ fn remove_locator(anchor: &Anchor) -> Result<(), EngineError> {
 #[cfg(not(unix))]
 fn remove_locator(_anchor: &Anchor) -> Result<(), EngineError> {
     Err(fail("owner_anchor_unavailable"))
-}
-
-impl Drop for EngineService {
-    /// Stops native sign-in dispatch and reaps its custodian child when the service is
-    /// dropped without a completed shutdown, so no custodian outlives its engine.
-    /// Inputs: the service being dropped. Output: none; an unconfirmed cleanup is logged.
-    fn drop(&mut self) {
-        if let Some(owner) = self.owner_runtime.as_ref() {
-            owner.abort_narrowing_drain();
-        }
-        if let Some(owner) = self.owner_runtime.as_ref()
-            && let Err(error) = owner.invalidate_native_auth_dispatch()
-        {
-            eprintln!(
-                "native_auth_dispatch_drop_cleanup_uncertain cause={}",
-                error.0
-            );
-        }
-    }
 }
 
 #[cfg(all(test, windows))]

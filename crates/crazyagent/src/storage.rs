@@ -39,6 +39,8 @@ pub(crate) use events::{Changes, changes};
 use events::{events, persist_event, persist_event_ids};
 mod owner_fence;
 pub(crate) use owner_fence::{check_owner_admission, check_owner_host};
+mod owner_page;
+use owner_page::page_next;
 pub(crate) mod plugins;
 pub(crate) mod reinstall;
 pub(crate) mod setup;
@@ -646,10 +648,9 @@ pub(crate) fn not_submitted(code: &str) -> bool {
 }
 
 impl Job {
-    /// Tells whether losing this job would leave more access than the owner asked for:
-    /// a revocation, a sign-out or sign-in cancel, an account or secret removal, a replaced
-    /// key storage deletes, a grant narrowed, or an access level that may be lowered. Such a
-    /// job is never withdrawn. Input: the job. Output: the answer.
+    /// Tells whether losing this job leaves more access than the owner asked for: a revocation,
+    /// a sign-out or cancel, a removal, turn off or unbind, a replaced key, a narrowed grant or a
+    /// lowered access level; such a job is never withdrawn. Input: the job. Output: the answer.
     pub(crate) fn narrows_access(&self) -> bool {
         match self {
             Self::OwnerControl(_, control, _, _) => control.decision == OwnerDecision::Revoke,
@@ -662,6 +663,7 @@ impl Job {
                 accounts::Command::Remove(_) | accounts::Command::KeyReplaced(..)
             ),
             Self::Plugins(command, _) => plugin_narrows_access(command),
+            Self::AppPlugins(command, _) => command.narrows_access(),
             Self::OwnerApply(_, request, _) => match &request.operation {
                 OwnerOperation::Apply { mutation } => mutation_narrows_access(mutation),
                 _ => false,
@@ -1917,7 +1919,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
     crate::app_plugins::initialize(connection)?;
-    kernel_storage::namespace::initialize(connection)?;
+    crate::state_log::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
     setup::initialize(connection)?;
@@ -2194,12 +2196,6 @@ pub fn engine_lock_released(root: &Path) -> bool {
         Ok(lock) => private::free(&lock).unwrap_or(false),
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
-}
-
-/// Releases the engine database lock and reports whether the unlock succeeded.
-/// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
-fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
-    unlock_database(&lock.file)
 }
 
 /// Unlocks the engine database lock file on Windows over the range `private::lock` took.
@@ -3373,9 +3369,7 @@ fn owner_apply_request(
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
     assert!(redacted == 0 || changed, "only an applied removal redacts");
-    if redacted > 0 && !kernel_storage::state_log::replay::checkpoint(db) {
-        eprintln!("state_log_redact_checkpoint_busy");
-    }
+    crate::project_setup::removed::checkpoint_after(db, redacted, changed, &request.operation);
     if changed
         && let OwnerOperation::Apply {
             mutation: OwnerMutation::CreateDemo { project_id, .. },
@@ -4167,7 +4161,14 @@ fn read_owner_page(
     let after = cursor.map_or("", |c| c.after_id.as_str());
     let sql = match view {
         OwnerView::Projects => {
-            "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM projects WHERE id>?1 ORDER BY id LIMIT ?2"
+            let kept = crate::sdk_projects::rows(tx, after, u16::from(limit))?;
+            let last = kept.page.rows.last().map(|row| row.id.clone());
+            let next = page_next(config, a, view, revision, kept.page.more, last)?;
+            assert!(kept.items.len() <= usize::from(limit));
+            return Ok(OwnerData::Page {
+                items: kept.items,
+                next,
+            });
         }
         OwnerView::Tasks => {
             "SELECT CASE WHEN length(id)<=128 THEN id END,CASE WHEN length(CAST(body AS BLOB))<=65536 THEN body END FROM tasks WHERE id>?1 ORDER BY id LIMIT ?2"
@@ -4204,20 +4205,7 @@ fn read_owner_page(
             .ok_or_else(|| error("owner_row_bounds"))?;
         RequestId::new(id.clone()).map_err(error)?;
         let item = match view {
-            OwnerView::Projects => {
-                let p: StoredProject = serde_json::from_str(&body).map_err(error)?;
-                if p.project_id.as_str() != id
-                    || p.spec.name.len() > 256
-                    || p.spec.repositories.len() > 64
-                {
-                    return Err(error("owner_row_invalid"));
-                }
-                OwnerSummary::Project {
-                    project_id: p.project_id,
-                    name: p.spec.name,
-                    repository_count: p.spec.repositories.len(),
-                }
-            }
+            OwnerView::Projects => unreachable!("the projects page returns before this loop"),
             OwnerView::Tasks => {
                 let t: ExecutionContext = serde_json::from_str(&body).map_err(error)?;
                 if t.task_id.as_str() != id {
@@ -4276,20 +4264,7 @@ fn read_owner_page(
         }
         last = Some(id);
     }
-    let next = if more {
-        Some(OwnerPageCursor {
-            db_instance: a.db_instance.clone(),
-            owner_id: a.owner_id.clone(),
-            engine_epoch: a.engine_epoch.clone(),
-            owner_epoch: a.owner_epoch,
-            config_id: config.id.clone(),
-            at_revision: Cursor::new(revision),
-            view,
-            after_id: last.ok_or_else(|| error("owner_page_progress"))?,
-        })
-    } else {
-        None
-    };
+    let next = page_next(config, a, view, revision, more, last)?;
     assert!(items.len() <= usize::from(limit));
     Ok(OwnerData::Page { items, next })
 }
@@ -4321,3 +4296,6 @@ mod configured_conversation_fixture;
 /// frame.
 mod state_snapshot;
 use state_snapshot::{enforce_snapshot_bound, snapshot};
+
+mod database_lock;
+use database_lock::release_database_lock;

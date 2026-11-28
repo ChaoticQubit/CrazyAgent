@@ -254,7 +254,7 @@ impl Authority {
 
     fn claude_input_slot<'a>(
         &self,
-        current: &'a mut Option<NativeAuthSlot>,
+        current: &'a mut Option<Box<NativeAuthSlot>>,
         request: &ClaudeAuthInput,
         fact: &NativeAuthFact,
     ) -> Result<&'a mut ClaudeInputSlot, EngineError> {
@@ -453,15 +453,12 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
-            stream.write_all(&packet).await.map_err(io_error)?;
-            kernel_security::secret::wipe(&mut packet);
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
+            stream.write_all(&**packet).await.map_err(io_error)?;
             stream
                 .write_all(
                     &encode_frame(&InputEnvelope {

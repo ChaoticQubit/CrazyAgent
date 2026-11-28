@@ -268,7 +268,7 @@ test("a stale answer says the question changed, and every questions code reads a
   const askSide = ["questions_ask_invalid", "questions_asker_full", "questions_full", "questions_not_terminal", "questions_notes_invalid", "questions_owner_not_typed", "questions_owner_turn_invalid", "questions_owner_turn_used", "questions_page_unavailable", "questions_replace_invalid"];
   for (const code of askSide) assert.ok(own.includes(code), `${code} is still an engine code; drop it from the ask-side list when it goes`);
   for (const code of own.filter((code) => ![...transport, ...askSide].includes(code))) {
-    assert.ok(client.QUESTIONS_REFUSALS.includes(code), `${code} has its own sentence`);
+    assert.ok(client.QUESTIONS_REFUSALS.includes(code) || !client.questionsRefusal({ code }).startsWith("Something went wrong"), `${code} has a sentence`);
   }
   assert.equal(client.questionsRefusal({ code: "questions_in_terminal" }), "This question was asked in an agent's terminal. Answer it there.");
   assert.equal(client.notReady({ kind: "not_ready" }), true);

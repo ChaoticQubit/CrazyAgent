@@ -889,15 +889,16 @@ async fn discarded_real_socket_ack_reconciles_one_atomic_effect_and_event() {
     let before = counts(root.path());
     let key = std::fs::read(service.owner_path.join("owner-tui.cap")).unwrap();
     assert_eq!(key.len(), 32);
-    let mut auth = [0; 37];
-    auth[..4].copy_from_slice(b"CAO1");
-    auth[4] = 0;
-    auth[5..].copy_from_slice(&key);
+    let auth = crazyagent::engine::secret_frame::owner_packet(
+        b"CAO1",
+        0,
+        &key.as_slice().try_into().unwrap(),
+    );
     let mut stream =
         kernel_processes::spawn_gate::connect_unix(service.owner_path.join("owner.sock"))
             .await
             .unwrap();
-    stream.write_all(&auth).await.unwrap();
+    stream.write_all(&**auth).await.unwrap();
     stream
         .write_all(&encode_frame(&exact).unwrap())
         .await

@@ -16,6 +16,10 @@ pub const SOURCE_BYTES_MAX: usize = 2048;
 pub const MEMBER_BYTES_MAX: usize = 256;
 
 const UV: &str = if cfg!(windows) { "uv.exe" } else { "uv" };
+/// The file name of npm's installer program: the `npm.cmd` every Windows Node ships, and
+/// `npm` elsewhere. Every npm command the engine builds names npm by it, so the engine and
+/// this template never disagree.
+pub const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
 const UV_RELEASE_PROGRAM: &str = "uv";
 const WINGET: &str = "winget.exe";
 
@@ -117,7 +121,7 @@ pub fn steps(recipe: &InstallRecipe, paths: &InstallPaths) -> Result<Vec<Step>, 
             flags,
             ..
         } => {
-            let npm = installer(paths, "npm")?;
+            let npm = installer(paths, NPM)?;
             let spec = if version.is_empty() {
                 package.clone()
             } else {
@@ -303,9 +307,13 @@ fn brew(
 }
 
 /// The curl download into the archive file, then the tar unpack into the out folder, with
-/// the member last when one is named. Inputs: the paths and the member. Output: the two
-/// steps, or `install_template_mismatch` for a source that fails today's pin check.
+/// the member last when one is named. Windows names no curl or tar yet, so there it is
+/// refused. Inputs: the paths and the member. Output: the two steps, or
+/// `install_template_mismatch` on Windows or for a source that fails today's pin check.
 fn fetched(paths: &InstallPaths, member: Option<&str>) -> Result<Vec<Step>, &'static str> {
+    if cfg!(windows) {
+        return Err(TEMPLATE_MISMATCH);
+    }
     let source = paths.source.as_deref().unwrap_or_default();
     if !plain_source(source) {
         return Err(TEMPLATE_MISMATCH);
@@ -366,3 +374,6 @@ fn plain_member(member: &str) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;

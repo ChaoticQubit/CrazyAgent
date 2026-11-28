@@ -375,37 +375,69 @@ fn replay_sets_put_seq_from_the_event() {
     );
 }
 
-/// Every Rust source under a folder, recursively. Input: the folder. Output: the paths.
-fn sources(folder: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return found;
-    };
-    for entry in entries.map(Result::unwrap) {
-        let path = entry.path();
-        if path.is_dir() {
-            if path
-                .file_name()
-                .is_some_and(|name| name == "target" || name == "node_modules")
-            {
-                continue;
-            }
-            found.extend(sources(&path));
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            found.push(path);
-        }
+#[cfg(unix)]
+#[test]
+fn the_namespace_walk_panics_naming_a_folder_link() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/a.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
+
+    let cause = std::panic::catch_unwind(|| crate::tests::files(root.path(), ".rs"))
+        .expect_err("the walk panics");
+    let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
+
+    assert!(
+        said.contains(&format!("{:?}", root.path().join("linked"))),
+        "{said}"
+    );
+}
+
+/// Whether a source file may name a plugin's namespace without the gateway's grant check.
+/// Input: the path from the repo root. Output: true for the bus gateway's source and for
+/// the storage crate's own test-only files that make a namespace (its namespace tests and
+/// its perf rows), false for every other file.
+fn exempt(path: &Path) -> bool {
+    path.starts_with("crates/kernel/bus_gateway/src")
+        || path == Path::new("crates/kernel/storage/src/namespace/tests.rs")
+        || path == Path::new("crates/kernel/storage/src/perf_tests.rs")
+        || path.starts_with("crates/kernel/storage/src/perf_tests")
+}
+
+#[test]
+fn a_storage_perf_row_is_exempt_and_product_code_is_not() {
+    for path in [
+        "crates/kernel/storage/src/perf_tests.rs",
+        "crates/kernel/storage/src/perf_tests/store.rs",
+    ] {
+        assert!(exempt(Path::new(path)), "{path}");
     }
-    found
+    for path in [
+        "crates/kernel/storage/src/namespace.rs",
+        "crates/kernel/storage/src/lib.rs",
+        "crates/crazyagent/src/lib.rs",
+        "crates/kernel/processes/src/perf_tests/update.rs",
+    ] {
+        assert!(!exempt(Path::new(path)), "{path}");
+    }
 }
 
 #[test]
 fn namespace_is_made_only_by_the_bus_gateway() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let gateway = repo.join("crates/kernel/bus_gateway/src");
-    let own_tests = repo.join("crates/kernel/storage/src/namespace/tests.rs");
-    let walked: Vec<PathBuf> = ["crates", "apps"]
+    let lib = std::fs::read_to_string(repo.join("crates/kernel/storage/src/lib.rs")).unwrap();
+    let lines: Vec<&str> = lib.lines().map(str::trim).collect();
+    let at = lines
         .iter()
-        .flat_map(|top| sources(&repo.join(top)))
+        .position(|line| *line == "mod perf_tests;")
+        .expect("lib.rs declares perf_tests");
+    assert!(
+        at > 0 && lines[at - 1] == "#[cfg(test)]",
+        "perf_tests stays test code"
+    );
+    let walked: Vec<PathBuf> = ["crates", "apps", "plugins"]
+        .iter()
+        .flat_map(|top| crate::tests::files(&repo.join(top), ".rs"))
         .collect();
     assert!(walked.len() > 100, "the walk reads the workspace");
     assert!(
@@ -413,12 +445,19 @@ fn namespace_is_made_only_by_the_bus_gateway() {
             .iter()
             .any(|path| path.ends_with("namespace/tests.rs"))
     );
+    assert!(
+        walked
+            .iter()
+            .any(|path| path.ends_with("storage/src/perf_tests.rs"))
+    );
 
     let callers: Vec<&PathBuf> = walked
         .iter()
-        .filter(|path| !path.starts_with(&gateway) && **path != own_tests)
+        .filter(|path| !exempt(path.strip_prefix(&repo).unwrap()))
         .filter(|path| {
-            std::fs::read_to_string(path).is_ok_and(|code| code.contains("Namespace::for_plugin"))
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path:?}: {error}"))
+                .contains("Namespace::for_plugin")
         })
         .collect();
 

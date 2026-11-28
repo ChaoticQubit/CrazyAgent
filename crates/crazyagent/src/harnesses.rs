@@ -459,13 +459,14 @@ impl Search {
         self
     }
 
-    /// Sets the `bin` folder of the engine's own npm prefix
-    /// ([`crate::setup::harness_prefix`]), where an npm harness the engine installed lives, as
-    /// the last folder looked in, after every folder of the owner, even before the first
-    /// install makes it; a folder others can change is left out. Input: the engine root.
-    /// Output: the search.
+    /// Sets the shim folder of the engine's own npm prefix ([`crate::setup::harness_prefix`],
+    /// [`kernel_processes::finding::npm_shims`]), where an npm harness the engine installed
+    /// lives, as the last folder looked in, after every folder of the owner, even before the
+    /// first install makes it; a folder others can change is left out. Input: the engine
+    /// root. Output: the search.
     pub fn with_engine(mut self, engine_root: &Path) -> Self {
-        let folder = crate::setup::harness_prefix(engine_root).join("bin");
+        let folder =
+            kernel_processes::finding::npm_shims(&crate::setup::harness_prefix(engine_root));
         let kept = usable_path(&folder)
             && kernel_processes::service::changeable_by_others(&folder).is_none();
         self.engine = kept.then_some(folder);

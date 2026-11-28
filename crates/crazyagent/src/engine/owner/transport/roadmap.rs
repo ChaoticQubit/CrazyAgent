@@ -171,22 +171,16 @@ impl OwnerClient {
             let frame = encode_frame(&Envelope { roadmap: action })
                 .map_err(|_| failure("roadmap_status_request_bounds"))?;
             self.root.verify()?;
-            if self.root.socket_identity()? != self.socket {
-                return Err(failure("owner_socket_replaced"));
-            }
-            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
-                .await
-                .map_err(|_| failure("roadmap_status_unavailable"))?;
-            verify_server(&stream)?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
+            let mut stream = self
+                .connect_checked(|_| failure("roadmap_status_unavailable"))
+                .await?;
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
             stream
-                .write_all(&packet)
+                .write_all(&**packet)
                 .await
                 .map_err(|_| failure("roadmap_status_unavailable"))?;
             stream

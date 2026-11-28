@@ -15,6 +15,7 @@ test-support = ["dep:tempfile"]
 [dependencies]
 base64 = "=0.22.1"
 crazyagent-kernel-common = { path = "../common" }
+dunce = "=1.0.5"
 minisign-verify = "=0.3.0"
 semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -30,6 +31,9 @@ getrandom = "=0.4.3"
 nix = { version = "=0.28.0", default-features = false, features = ["net", "socket", "user"] }
 rustix = { version = "=1.1.5", features = ["event", "fs", "process"] }
 sha2 = "=0.10.9"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crazyagent-macos-fs = { path = "../../crazyagent-macos-fs" }
 
 [target.'cfg(windows)'.dependencies]
 crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }

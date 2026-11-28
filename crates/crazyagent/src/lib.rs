@@ -1,5 +1,25 @@
 #![forbid(unsafe_code)]
 
+/// Joins two sentence pieces around the words for the computer CrazyAgent runs on, "this Mac"
+/// on macOS, so the sentence stays one literal. Inputs: the literal text before and after the
+/// words. Output: the joined literal.
+#[cfg(target_os = "macos")]
+macro_rules! on_this_computer {
+    ($before:literal, $after:literal) => {
+        concat!($before, "this Mac", $after)
+    };
+}
+
+/// Joins two sentence pieces around the words for the computer CrazyAgent runs on, "this
+/// computer" on Windows and Linux, so the sentence stays one literal. Inputs: the literal text
+/// before and after the words. Output: the joined literal.
+#[cfg(not(target_os = "macos"))]
+macro_rules! on_this_computer {
+    ($before:literal, $after:literal) => {
+        concat!($before, "this computer", $after)
+    };
+}
+
 pub mod accounts;
 pub mod activity;
 pub mod adapters;
@@ -18,7 +38,6 @@ pub mod coordination;
 pub mod credentials;
 pub mod demo;
 pub mod engine;
-pub mod file_identity;
 #[cfg(unix)]
 pub mod file_lock;
 pub mod github;
@@ -89,6 +108,9 @@ mod sdk_install;
 /// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
 /// gateway's grant check and the bundled agent-quit plugin.
 pub mod sdk_processes;
+/// The `project_rows.page` read: the engine's projects page, bounded, checked and parsed in
+/// the caller's transaction, kept as engine items and as SDK rows.
+mod sdk_projects;
 /// The `sandbox.*` provider: the owner's sandbox settings read and saved through the same
 /// owner read and settings log save the Settings screens use.
 pub mod sdk_sandbox;

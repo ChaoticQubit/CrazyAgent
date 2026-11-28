@@ -3799,17 +3799,6 @@ fn secret_key(word: &str) -> Option<KeyValue> {
     None
 }
 
-/// Whether a word at a line's start can be the wrapped tail of a token masked at the end of
-/// the line before: at least `WRAPPED_TAIL_MIN` bytes of the token and base64 alphabets,
-/// holding a digit. Takes the word.
-fn wrapped_tail(word: &str) -> bool {
-    word.len() >= WRAPPED_TAIL_MIN
-        && word.bytes().any(|b| b.is_ascii_digit())
-        && word
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
-}
-
 /// Appends a word with the user part of each URL in it, `scheme://user:password@host`,
 /// replaced by the hidden mark, keeping the scheme, host and path. Takes the text to extend
 /// and the word.
@@ -3925,3 +3914,6 @@ pub(crate) mod removed;
 mod retry;
 #[cfg(all(test, unix))]
 mod tests;
+
+mod wrapped_tail;
+use wrapped_tail::wrapped_tail;
