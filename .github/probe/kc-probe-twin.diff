@@ -1,0 +1,52 @@
+diff --git a/crates/crazyagent/src/perf_tests/security_keychain.rs b/crates/crazyagent/src/perf_tests/security_keychain.rs
+index 05e02a80f2..ab7a494b3b 100644
+--- a/crates/crazyagent/src/perf_tests/security_keychain.rs
++++ b/crates/crazyagent/src/perf_tests/security_keychain.rs
+@@ -65,6 +65,39 @@ fn security_spawn() {
+     black_box(bytes);
+ }
+ 
++/// Probe: copies the fresh scratch keychain to `PROBE_KEYCHAIN_SAVE`, or deletes it and puts
++/// the file at `PROBE_KEYCHAIN_FROM` in its place as the home's default and only search-list
++/// keychain, unlocked with the empty password. Input: the keychain path, three levels under
++/// its home. Output: none; panics on a failed step.
++fn probe_swap(path: &std::path::Path) {
++    let home = path.ancestors().nth(3).unwrap();
++    let text = path.to_str().unwrap();
++    eprintln!("PROBE-KEYCHAIN {text}");
++    let security = |args: &[&str]| {
++        let ran = Command::new(SECURITY)
++            .args(args)
++            .env_clear()
++            .env("HOME", home)
++            .env("PATH", "/usr/bin:/bin")
++            .stdin(Stdio::null())
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .status()
++            .unwrap();
++        assert!(ran.success(), "probe security {:?} failed", args.first());
++    };
++    if let Some(to) = std::env::var_os("PROBE_KEYCHAIN_SAVE") {
++        std::fs::copy(path, to).unwrap();
++    }
++    if let Some(from) = std::env::var_os("PROBE_KEYCHAIN_FROM") {
++        security(&["delete-keychain", text]);
++        std::fs::copy(from, path).unwrap();
++        security(&["list-keychains", "-d", "user", "-s", text]);
++        security(&["default-keychain", "-d", "user", "-s", text]);
++        security(&["unlock-keychain", "-p", "", text]);
++    }
++}
++
+ /// Times the 2.4.4 path of every 2.5 macOS keychain row, under the 2.5 row names, on the
+ /// lib tests' own temporary keychains: `Keychain::new` on a namespace that keychain serves
+ /// stands for `in_home`, and `keychain_text` for `path`. Prints one PERF line per call and
+@@ -79,6 +112,7 @@ fn security_keychain_calls() {
+     std::fs::create_dir(&agent_home).unwrap();
+     std::fs::set_permissions(&agent_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+     let agent = TestKeychain::create_named(&agent_home, AGENT_KEYCHAIN);
++    probe_swap(scratch.path());
+     let store = Keychain::at(NAMESPACE, scratch.path()).unwrap();
+     let secret = SecretString::new(SECRET.to_vec()).unwrap();
+     let found = store.put(SERVICE, "token", &secret).unwrap();
