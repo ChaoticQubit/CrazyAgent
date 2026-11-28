@@ -10,8 +10,10 @@ use crate::migrations::{
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
+use std::collections::BTreeSet;
 use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 #[cfg(test)]
@@ -89,27 +91,76 @@ pub fn copy_name(word: &str) -> bool {
         .is_some_and(|time| !time.is_empty() && time.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
+/// The restore locks this process holds now, by the lock file's device and inode. Every
+/// lock of one file shares one descriptor, so this set is what refuses a second thread.
+static HOLDING: Mutex<BTreeSet<(rustix::fs::Dev, u64)>> = Mutex::new(BTreeSet::new());
+
+/// The restore lock held for one recovery action, on the descriptor this process keeps for
+/// the lock file for its whole life. Dropping it unlocks that descriptor's open file, which
+/// a process spawned meanwhile may share until its exec, then always frees the key: a lock
+/// an unlock left held is on that same open file, so the next lock here takes it again.
+struct RestoreLock {
+    file: Arc<std::fs::File>,
+    key: (rustix::fs::Dev, u64),
+}
+
+impl Drop for RestoreLock {
+    fn drop(&mut self) {
+        while rustix::fs::flock(&*self.file, rustix::fs::FlockOperation::Unlock)
+            == Err(rustix::io::Errno::INTR)
+        {}
+        let mut holding = HOLDING.lock().unwrap_or_else(PoisonError::into_inner);
+        let freed = holding.remove(&self.key);
+        assert!(freed, "a held restore lock has its key in the set");
+    }
+}
+
+/// The refusal for a restore lock that could not be taken: busy only when another holds
+/// it, the cause itself for any other failure. Input: the flock's error. Output: the error.
+fn lock_refusal(cause: rustix::io::Errno) -> StorageError {
+    match cause == rustix::io::Errno::WOULDBLOCK {
+        true => error(PUTBACK_BUSY),
+        false => restore_failed(cause),
+    }
+}
+
 /// Takes the restore lock beside engine.db without waiting: a private file this user owns,
-/// opened without following a link. Input: the engine root. Output: the held file, or
-/// `storage_putback_busy` while another holds it.
-fn locked(root: &Path) -> Result<std::fs::File, StorageError> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(root.join(RESTORE_LOCK_FILE))
-        .map_err(restore_failed)?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| error(PUTBACK_BUSY))?;
-    Ok(file)
+/// made without following a link, then held through the descriptor this process keeps for
+/// it. Input: the engine root. Output: the held lock, `storage_putback_busy` while another
+/// process or thread holds it, or `storage_restore_failed` with the cause of any other error.
+fn locked(root: &Path) -> Result<RestoreLock, StorageError> {
+    let name = root.join(RESTORE_LOCK_FILE);
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            .open(&name)
+            .map_err(restore_failed)?,
+    );
+    let file = crate::held_files::held_file(rustix::fs::CWD, &name).map_err(restore_failed)?;
+    let stat = rustix::fs::fstat(&*file).map_err(restore_failed)?;
+    let key = (stat.st_dev, stat.st_ino);
+    let mut holding = HOLDING.lock().unwrap_or_else(PoisonError::into_inner);
+    if !holding.insert(key) {
+        return Err(error(PUTBACK_BUSY));
+    }
+    if let Err(cause) =
+        rustix::fs::flock(&*file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+    {
+        let freed = holding.remove(&key);
+        assert!(freed);
+        return Err(lock_refusal(cause));
+    }
+    Ok(RestoreLock { file, key })
 }
 
 /// Holds the restore lock and engine.db alone for one recovery action. Input: the database
 /// path. Output: both, or `storage_putback_busy` while anything else holds either.
-fn held(path: &Path) -> Result<(std::fs::File, Connection), StorageError> {
+fn held(path: &Path) -> Result<(RestoreLock, Connection), StorageError> {
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
