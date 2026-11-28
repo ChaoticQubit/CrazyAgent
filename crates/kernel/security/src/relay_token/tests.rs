@@ -28,3 +28,36 @@ fn matches_is_true_only_for_the_same_token() {
     assert!(!token.matches(&format!("{}0", token.as_str())));
     assert!(!token.matches(LOCAL_PLACEHOLDER));
 }
+
+/// The encoding before the hex table: one `format!` per byte, kept here as the oracle the
+/// table must match byte for byte. Input: the random bytes. Output: the token text.
+fn formatted(bytes: &[u8; TOKEN_HEX / 2]) -> String {
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{TOKEN_PREFIX}{hex}")
+}
+
+#[test]
+fn encoded_matches_the_formatted_token_for_every_byte_value() {
+    for value in 0..=u8::MAX {
+        let bytes = [value; TOKEN_HEX / 2];
+        assert_eq!(encoded(&bytes), formatted(&bytes), "byte {value:#04x}");
+    }
+}
+
+#[test]
+fn encoded_matches_the_formatted_token_for_a_thousand_random_tokens() {
+    for _ in 0..1000 {
+        let mut bytes = [0_u8; TOKEN_HEX / 2];
+        getrandom::fill(&mut bytes).unwrap();
+        assert_eq!(encoded(&bytes), formatted(&bytes));
+    }
+}
+
+#[test]
+fn encoded_fills_its_first_capacity_exactly_and_is_a_relay_token() {
+    let bytes = [0xa5; TOKEN_HEX / 2];
+    let token = encoded(&bytes);
+    assert_eq!(token.len(), TOKEN_PREFIX.len() + TOKEN_HEX);
+    assert_eq!(token.capacity(), token.len());
+    assert!(is_relay_token(&token));
+}
