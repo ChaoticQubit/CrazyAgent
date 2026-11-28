@@ -3,8 +3,9 @@
 /// it, is left out of a launch, by name in `batch_files` and `left_out`, while a server whose
 /// command is a program runs as approved. One whose npx.cmd is missing is left out by name in
 /// `commands_not_found`, never as a batch file (V243-MCP-NPX-LAUNCH-LINE).
+/// Fails naming the variable when SystemRoot is not set.
 #[test]
-fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
+fn a_batch_file_server_is_left_out_of_a_launch_by_name() -> Result<(), String> {
     use super::{Command, ResultValue, execute};
     use crate::plugins::{Scope, ServerSpec};
     let directory = tempfile::tempdir().unwrap();
@@ -28,9 +29,10 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     for name in ["run.bat", "tool.cmd", "tool.v2.cmd"] {
         std::fs::write(root.join(name), "@ECHO off\r\n").unwrap();
     }
-    let program = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-        .join("System32")
-        .join("where.exe");
+    let program =
+        std::path::PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?)
+            .join("System32")
+            .join("where.exe");
     let servers = [
         ("notes", root.join("run.bat")),
         ("bare", root.join("tool")),
@@ -84,6 +86,7 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     assert_eq!(launch.context_mode_off, None);
     let names: Vec<&str> = launch.servers.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["lookup"]);
+    Ok(())
 }
 
 #[test]

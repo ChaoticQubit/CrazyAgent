@@ -36,7 +36,7 @@ fn printing() -> Command {
 /// The `cmd.exe` Windows ships, by its full path. Output: the path.
 #[cfg(windows)]
 fn system_shell() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+    std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is not set"))
         .join("System32")
         .join("cmd.exe")
 }

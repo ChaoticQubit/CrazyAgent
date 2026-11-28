@@ -36,7 +36,9 @@ impl Write for Stall {
 /// A pane command that keeps a cmd.exe prompt open. Input: the folder it starts in.
 /// Output: the command.
 fn shell(cwd: &Path) -> PaneCommand {
-    let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap();
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .expect("SystemRoot is not set");
     PaneCommand {
         argv: vec![
             root.join("System32").join("cmd.exe").display().to_string(),
