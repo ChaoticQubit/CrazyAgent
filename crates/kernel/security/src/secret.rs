@@ -197,16 +197,32 @@ pub fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> 
         },
         value,
     );
-    assert!(buffer.len() <= counted.0 && buffer.capacity() == capacity);
+    settle(&mut buffer, written, counted.0, capacity)?;
+    Ok(buffer)
+}
+
+/// Checks [`sized_json`]'s second pass: the buffer holds at most `counted` bytes in its
+/// first capacity, and it is wiped when the pass failed or wrote other than `counted` bytes.
+/// Inputs: the buffer, the pass result, the first pass's count and the buffer's capacity.
+/// Output: Ok when the buffer holds exactly `counted` bytes, else the error.
+#[inline]
+fn settle(
+    buffer: &mut Vec<u8>,
+    written: serde_json::Result<()>,
+    counted: usize,
+    capacity: usize,
+) -> serde_json::Result<()> {
+    assert!(buffer.len() <= counted);
+    assert_eq!(buffer.capacity(), capacity);
     if let Err(problem) = written {
-        wipe_owned(&mut buffer);
+        wipe_owned(buffer);
         return Err(problem);
     }
-    if buffer.len() != counted.0 {
-        wipe_owned(&mut buffer);
+    if buffer.len() != counted {
+        wipe_owned(buffer);
         return Err(serde_json::Error::io(std::io::Error::other(CHANGED)));
     }
-    Ok(buffer)
+    Ok(())
 }
 
 const CHANGED: &str = "the value changed between the two passes";

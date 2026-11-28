@@ -131,7 +131,45 @@ fn capped_writer_refuses_a_longer_value_without_growing_or_passing_its_limit() {
     );
     assert!(refused.is_err());
     assert_eq!(buffer.capacity(), capacity);
-    assert!(buffer.len() < limit);
+    assert!(buffer.len() <= limit);
+    assert!(buffer.ends_with(b"\""));
+    assert!(!buffer.contains(&b']'));
+}
+
+#[test]
+fn settle_wipes_the_buffer_on_a_refused_pass_and_keeps_its_capacity() {
+    let mut buffer = Vec::with_capacity(16);
+    buffer.extend_from_slice(b"[10,\"secret");
+    let capacity = buffer.capacity();
+    let refused = std::io::Error::other("refused");
+    let settled = super::settle(
+        &mut buffer,
+        Err(serde_json::Error::io(refused)),
+        16,
+        capacity,
+    );
+    assert!(settled.is_err());
+    assert!(buffer.is_empty());
+    assert_eq!(buffer.capacity(), capacity);
+}
+
+#[test]
+fn settle_wipes_the_buffer_when_the_pass_wrote_fewer_bytes_than_counted() {
+    let mut buffer = Vec::with_capacity(16);
+    buffer.extend_from_slice(b"[9,\"secret\"]");
+    let capacity = buffer.capacity();
+    let settled = super::settle(&mut buffer, Ok(()), 16, capacity);
+    assert!(settled.is_err());
+    assert!(buffer.is_empty());
+}
+
+#[test]
+fn settle_keeps_the_bytes_of_a_pass_that_wrote_its_count() {
+    let mut buffer = Vec::with_capacity(12);
+    buffer.extend_from_slice(b"[9,\"secret\"]");
+    let capacity = buffer.capacity();
+    super::settle(&mut buffer, Ok(()), 12, capacity).unwrap();
+    assert_eq!(buffer, br#"[9,"secret"]"#.to_vec());
 }
 
 #[test]
