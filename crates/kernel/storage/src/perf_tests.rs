@@ -44,10 +44,38 @@ pub(crate) fn nanos(started: Instant) -> u64 {
 
 /// Times a call whose fixture each sample sets up again: `one` sets it up, times one call
 /// and returns that span, a tenth of the samples running first as warm-up. Prints the PERF
-/// line in nanoseconds, so a pair near 10 us prints in one unit on both builds. Inputs: the row (batch 1), the samples and the sample. Output: none.
+/// line in nanoseconds, so a pair near 10 us prints in one unit on both builds. With the
+/// flame mode set, a row it does not name prints nothing and the row it names runs alone,
+/// its FLAME-END time the sum of the timed spans. Inputs: the row (batch 1), the samples
+/// and the sample. Output: none.
 pub(crate) fn sampled(row: &Row, samples: usize, mut one: impl FnMut() -> u64) {
     assert!(samples >= SAMPLES_MIN);
     assert_eq!(row.batch, 1);
+    let setting = |key: &str| std::env::var(key).ok();
+    match crate::perf_kit::plan(
+        setting("CRAZYAGENT_PERF_FLAME").as_deref(),
+        setting("CRAZYAGENT_PERF_FLAME_CALLS").as_deref(),
+        setting("CRAZYAGENT_PERF_FLAME_SECS").as_deref(),
+        row.name,
+    ) {
+        crate::perf_kit::Plan::Time => {}
+        crate::perf_kit::Plan::Skip => return,
+        crate::perf_kit::Plan::Flame { calls, secs } => {
+            let head = format!("{} {} {}", row.layer, row.module, row.name);
+            println!("FLAME-START {head}");
+            let limit = Duration::from_secs(secs);
+            let started = Instant::now();
+            let mut made = 0_u64;
+            let mut ns = 0_u64;
+            while calls.map_or_else(|| started.elapsed() < limit, |calls| made < calls) {
+                ns += one();
+                made += 1;
+            }
+            assert!(calls.is_none_or(|calls| made == calls));
+            println!("FLAME-END {head} calls={made} ns={ns}");
+            return;
+        }
+    }
     for _ in 0..samples / 10 {
         one();
     }
