@@ -806,10 +806,14 @@ fn clear_of_walked<'w>(
     Ok(())
 }
 
-/// Whether `paths` holds `path` by [`Path`] equality, so a spelling that differs only by a
-/// doubled slash, a `.` part or a trailing slash still matches. Inputs: the paths and the
-/// path. Output: the answer.
+/// Whether `paths` holds `path`: by its bytes first, then by [`Path`] equality only when no
+/// entry has the same bytes, so a spelling that differs only by a doubled slash, a `.` part
+/// or a trailing slash still matches. Inputs: the paths and the path. Output: the answer.
 fn holds_path<'p>(paths: impl Iterator<Item = &'p Path> + Clone, path: &Path) -> bool {
+    let bytes = path.as_os_str();
+    if paths.clone().any(|held| held.as_os_str() == bytes) {
+        return true;
+    }
     #[cfg(test)]
     PATH_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
     paths.into_iter().any(|held| held == path)
