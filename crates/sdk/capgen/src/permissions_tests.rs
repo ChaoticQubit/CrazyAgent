@@ -98,7 +98,7 @@ fn the_permission_table_lists_every_capability() {
     assert!(flat.contains(
         "name:\"settings.save_quit\",tier:Tier::Kernel,needs:\"settings.write\",emits:&[\"AgentQuitSaved\"],"
     ));
-    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;1]"));
+    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;2]"));
     assert!(flat.contains(
         "plugin:\"agent-quit\",tier:Tier::T2,permissions:&[\"settings.write\"],essential:true,"
     ));
