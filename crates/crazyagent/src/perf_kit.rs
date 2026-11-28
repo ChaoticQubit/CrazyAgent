@@ -161,23 +161,43 @@ pub fn flame(row: &Row, calls: Option<u64>, secs: u64, mut step: impl FnMut()) -
     ended
 }
 
-/// Times one row: a warm-up of a tenth of the samples, then each sample runs the step
-/// `batch` times and keeps the time per call. Prints the PERF line. With the flame mode
-/// set ([`plan`]) a row it does not name is skipped and prints nothing, and the row it
-/// names runs alone through [`flame`]. Inputs: the row, the samples and the step. Output:
-/// the printed line, empty for a skipped row.
-pub fn time(row: &Row, samples: usize, mut step: impl FnMut()) -> String {
+/// Runs a row the flame mode skips: its step is called, untimed, as many times as timing
+/// it would call it, so a bench whose later steps rely on what this row did still runs.
+/// Inputs: the row, the samples and the step. Output: an empty line; nothing is printed.
+pub fn skip(row: &Row, samples: usize, mut step: impl FnMut()) -> String {
     assert!(samples >= SAMPLES_MIN);
     assert!((1..=BATCH_MAX).contains(&row.batch));
+    for _ in 0..(samples / 10 + samples) * row.batch {
+        step();
+    }
+    String::new()
+}
+
+/// Times one row as the flame mode's settings say ([`plan`]): timed as usual when the mode
+/// is unset, untimed through [`skip`] when it names another row, alone through [`flame`]
+/// when it names this one. Inputs: the row, the samples and the step. Output: the printed
+/// line, empty for a skipped row.
+pub fn time(row: &Row, samples: usize, step: impl FnMut()) -> String {
     let setting = |key: &str| std::env::var(key).ok();
-    match plan(
+    let planned = plan(
         setting("CRAZYAGENT_PERF_FLAME").as_deref(),
         setting("CRAZYAGENT_PERF_FLAME_CALLS").as_deref(),
         setting("CRAZYAGENT_PERF_FLAME_SECS").as_deref(),
         row.name,
-    ) {
+    );
+    run(planned, row, samples, step)
+}
+
+/// Runs one row by its plan. Timed, it takes a warm-up of a tenth of the samples, then each
+/// sample runs the step `batch` times and keeps the time per call, and prints the PERF
+/// line. Inputs: the plan, the row, the samples and the step. Output: the printed line,
+/// empty for a skipped row.
+pub fn run(planned: Plan, row: &Row, samples: usize, mut step: impl FnMut()) -> String {
+    assert!(samples >= SAMPLES_MIN);
+    assert!((1..=BATCH_MAX).contains(&row.batch));
+    match planned {
         Plan::Time => {}
-        Plan::Skip => return String::new(),
+        Plan::Skip => return skip(row, samples, step),
         Plan::Flame { calls, secs } => return flame(row, calls, secs, step),
     }
     let batch = u64::try_from(row.batch).expect("batch fits u64");
