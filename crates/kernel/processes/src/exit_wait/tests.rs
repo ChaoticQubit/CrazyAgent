@@ -15,6 +15,8 @@ pub(crate) mod hooks {
 
     thread_local! {
         static ARMS: Cell<usize> = const { Cell::new(0) };
+        static REAPS: Cell<usize> = const { Cell::new(0) };
+        static HEARD: Cell<Option<super::super::HeardAnswer>> = const { Cell::new(None) };
         #[cfg(unix)]
         static HOLD: Cell<bool> = const { Cell::new(false) };
         #[cfg(unix)]
@@ -31,6 +33,19 @@ pub(crate) mod hooks {
     /// How many watches this thread armed. Output: the count.
     pub(crate) fn arms() -> usize {
         ARMS.with(Cell::get)
+    }
+
+    /// Counts one reap through a watch on this thread and keeps what its waiter answered.
+    /// Input: the answer, none when no thread waited. Output: none.
+    pub(crate) fn reaped(heard: Option<super::super::HeardAnswer>) {
+        REAPS.with(|reaps| reaps.set(reaps.get() + 1));
+        HEARD.with(|last| last.set(heard));
+    }
+
+    /// How many reaps this thread made through a watch, and what the last one's waiter
+    /// answered. Output: the count and the answer.
+    pub(crate) fn reaps() -> (usize, Option<super::super::HeardAnswer>) {
+        (REAPS.with(Cell::get), HEARD.with(Cell::get))
     }
 
     /// Makes this thread's next waiters hold before their `waitid` until the reap releases

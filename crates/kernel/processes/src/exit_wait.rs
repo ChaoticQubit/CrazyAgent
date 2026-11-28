@@ -293,6 +293,8 @@ impl ExitWatch {
         child: &mut Child,
     ) -> (Option<HeardAnswer>, io::Result<ExitStatus>) {
         let heard = self.settle();
+        #[cfg(test)]
+        tests::hooks::reaped(heard);
         (heard, child.wait())
     }
 
