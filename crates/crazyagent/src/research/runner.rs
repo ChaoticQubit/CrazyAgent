@@ -1166,7 +1166,6 @@ impl ResearchRunner {
         let id = ProjectId::new(project.id).map_err(|_| RunError::Invalid("project id".into()))?;
         let context = jobs.project_context(&id).map_err(RunError::Context)?;
         let (name, worktree) = self.free_run(&root, job)?;
-        jobs.placed(job, &name)?;
         Ok(JobPlace {
             root,
             project: id,
@@ -1240,6 +1239,7 @@ impl ResearchRunner {
             agent,
         } = place;
         private_directory(&agent)?;
+        jobs.placed(job, &name)?;
         let home = agent.join("home");
         private_directory(&home)?;
         self.register_usage(
