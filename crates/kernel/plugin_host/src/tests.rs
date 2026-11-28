@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use crate::Refused;
 use crate::manifest::{
-    self, Bounded, CAPABILITIES_MAX, MANIFEST_BYTES_MAX, Manifest, PLUGIN_ID_MAX, read_bounded,
+    self, Bounded, CAPABILITIES_MAX, MANIFEST_BYTES_MAX, Manifest, NAME_BYTES_MAX, PLUGIN_ID_MAX,
+    read_bounded,
 };
 
 /// Writes one `plugin.toml` into a fresh folder of its own. Inputs: a name unique per row
@@ -776,7 +777,8 @@ fn an_unknown_send_key_or_type_is_refused() {
 }
 
 /// `capabilities` lists the capability stems a code plugin serves: absent reads empty, a
-/// list reads in order, and up to [`CAPABILITIES_MAX`] stems fit.
+/// list reads in order, and up to [`CAPABILITIES_MAX`] stems of up to [`NAME_BYTES_MAX`]
+/// bytes fit.
 #[test]
 fn the_capabilities_key_reads_the_served_stems_in_order() {
     assert_eq!(
@@ -803,16 +805,26 @@ fn the_capabilities_key_reads_the_served_stems_in_order() {
         manifest::parse(&text).map(|read| read.capabilities.len()),
         Ok(CAPABILITIES_MAX)
     );
+    let longest = "s".repeat(NAME_BYTES_MAX);
+    let text = format!(
+        "{}capabilities = [\"{longest}\"]\n",
+        manifest_text("agent-quit")
+    );
+    assert_eq!(
+        manifest::parse(&text).map(|read| read.capabilities),
+        Ok(vec![longest])
+    );
 }
 
-/// A `capabilities` value that is not a list of distinct snake stems, or holds more than
-/// [`CAPABILITIES_MAX`], is refused at its line; a misspelt key is still an unknown key.
+/// A `capabilities` value that is not a list of distinct snake stems of at most
+/// [`NAME_BYTES_MAX`] bytes, or holds more than [`CAPABILITIES_MAX`], is refused at its line; a misspelt key is still an unknown key.
 #[test]
 fn the_capabilities_key_refuses_anything_but_distinct_snake_stems() {
     let over: Vec<String> = (0..=CAPABILITIES_MAX)
         .map(|index| format!("\"s{index}\""))
         .collect();
     let over = format!("[{}]", over.join(", "));
+    let long = format!("[\"{}\"]", "s".repeat(NAME_BYTES_MAX + 1));
     for value in [
         "\"projects\"",
         "[1]",
@@ -821,6 +833,7 @@ fn the_capabilities_key_refuses_anything_but_distinct_snake_stems() {
         "[\"\"]",
         "[\"projects\", \"projects\"]",
         over.as_str(),
+        long.as_str(),
     ] {
         let text = format!("{}capabilities = {value}\n", manifest_text("agent-quit"));
         assert_eq!(

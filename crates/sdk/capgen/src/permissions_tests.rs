@@ -229,7 +229,7 @@ fn served(
             )
         })
         .collect();
-    let root = plugins(name, manifests);
+    let root = plugins(&format!("served-{name}"), manifests);
     let result = permissions(&files, &root);
     fs::remove_dir_all(&root).expect("the folder is removed");
     result
