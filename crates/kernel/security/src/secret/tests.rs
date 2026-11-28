@@ -118,7 +118,7 @@ fn sized_json_refuses_a_value_that_shrinks_between_passes() {
 }
 
 #[test]
-fn capped_writer_refuses_a_longer_value_without_growing_and_wipes_what_it_wrote() {
+fn capped_writer_refuses_a_longer_value_without_growing_or_passing_its_limit() {
     let limit = serde_json::to_vec(&(9, "secret-bytes")).unwrap().len();
     let mut buffer = Vec::with_capacity(limit);
     let capacity = buffer.capacity();
@@ -131,7 +131,24 @@ fn capped_writer_refuses_a_longer_value_without_growing_and_wipes_what_it_wrote(
     );
     assert!(refused.is_err());
     assert_eq!(buffer.capacity(), capacity);
-    assert!(buffer.is_empty());
+    assert!(buffer.len() < limit);
+}
+
+#[test]
+fn capped_write_all_refuses_a_chunk_past_its_limit_before_pushing_any_byte_of_it() {
+    use std::io::Write;
+    let mut buffer = Vec::with_capacity(8);
+    let capacity = buffer.capacity();
+    let mut capped = super::Capped {
+        buffer: &mut buffer,
+        limit: 8,
+    };
+    capped.write_all(b"abc").unwrap();
+    assert!(capped.write_all(b"secret").is_err());
+    capped.write_all(b"defgh").unwrap();
+    assert!(capped.write_all(b"i").is_err());
+    assert_eq!(buffer.capacity(), capacity);
+    assert_eq!(buffer, b"abcdefgh".to_vec());
 }
 
 #[test]
