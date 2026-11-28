@@ -36,6 +36,23 @@ fn only_a_real_folder_of_this_user_counts_as_a_backup() {
 }
 
 #[test]
+fn a_listing_on_a_thread_that_records_nothing_keeps_no_owner_check() {
+    let folder = tempfile::tempdir().unwrap();
+    for day in 1..=2 {
+        std::fs::create_dir(
+            folder
+                .path()
+                .join(format!("1-to-2-2000010{day}T000000000Z")),
+        )
+        .unwrap();
+    }
+    for _ in 0..3 {
+        assert_eq!(backups_in(folder.path()).unwrap().len(), 2);
+    }
+    assert_eq!(take_owner_checks(), Vec::<PathBuf>::new());
+}
+
+#[test]
 fn backup_names_use_a_sortable_utc_stamp() {
     assert_eq!(stamp(UNIX_EPOCH).unwrap(), "19700101T000000000Z");
     assert_eq!(
