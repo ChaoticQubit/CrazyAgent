@@ -99,7 +99,7 @@ pub(super) fn take_writes() -> Vec<bool> {
 enum Found {
     Missing,
     Old(String),
-    Slots(File, [Option<(u64, String)>; 2]),
+    Slots(File, Result<(usize, u64, String), ()>),
 }
 
 /// Writes one slot's bytes at its offset in one pwrite; a short write is an error and is
@@ -158,6 +158,51 @@ fn decoded(slot: &[u8]) -> Option<(u64, String)> {
     Some((seq, line))
 }
 
+/// A slot's seq when its header reads: the magic and a line length within the limit, the
+/// two checks `decoded` makes before the digest. Input: the slot's bytes. Output: the seq, or
+/// none for a header that does not read.
+fn header(slot: &[u8]) -> Option<u64> {
+    assert_eq!(slot.len(), SLOT_BYTES);
+    if slot[..MAGIC.len()] != MAGIC[..] {
+        return None;
+    }
+    let length = usize::from(u16::from_le_bytes([slot[13], slot[14]]));
+    if length > LINE_BYTES_MAX {
+        return None;
+    }
+    Some(u64::from_le_bytes(slot[5..13].try_into().ok()?))
+}
+
+/// The newest valid slot of a two-slot record, fully checking the slot whose header is newer
+/// and the other only when that one fails; two headers of one seq check both, so the verdict
+/// is the one `newest` gives on both decoded slots. Input: the record's bytes. Output: its
+/// index, seq and line, or Err when neither is valid or both hold one seq.
+fn chosen(bytes: &[u8]) -> Result<(usize, u64, String), ()> {
+    assert_eq!(bytes.len(), RECORD_BYTES);
+    let slots = [&bytes[..SLOT_BYTES], &bytes[SLOT_BYTES..]];
+    let heads = [header(slots[0]), header(slots[1])];
+    let first = match heads {
+        [Some(a), Some(b)] if a == b => {
+            let both = [decoded(slots[0]), decoded(slots[1])];
+            return newest(&both).map(|(index, seq, line)| (index, seq, line.to_owned()));
+        }
+        [Some(a), Some(b)] => usize::from(b.wrapping_sub(a) < 1 << 63),
+        [Some(_), None] => 0,
+        [None, Some(_)] => 1,
+        [None, None] => return Err(()),
+    };
+    for index in [first, 1 - first] {
+        if heads[index].is_none() {
+            continue;
+        }
+        if let Some((seq, line)) = decoded(slots[index]) {
+            assert_eq!(Some(seq), heads[index]);
+            return Ok((index, seq, line));
+        }
+    }
+    Err(())
+}
+
 /// The newer of the two slots: the one valid slot, or of two the one ahead by serial-number
 /// order, so the seq wraps at u64::MAX. Input: the decoded slots. Output: its index, seq and
 /// line, or Err when neither is valid or both hold one seq.
@@ -205,8 +250,7 @@ fn found(root: &Path, write: bool) -> Result<Found, ()> {
     if size == RECORD_BYTES as u64 {
         let mut bytes = vec![0; RECORD_BYTES];
         file.read_exact_at(&mut bytes, 0).map_err(|_| ())?;
-        let slots = [decoded(&bytes[..SLOT_BYTES]), decoded(&bytes[SLOT_BYTES..])];
-        return Ok(Found::Slots(file, slots));
+        return Ok(Found::Slots(file, chosen(&bytes)));
     }
     if !(1..=OLD_BYTES_MAX).contains(&size) {
         return Err(());
@@ -229,9 +273,9 @@ pub(super) fn read(root: &Path) -> Result<Option<String>, ()> {
     match found(root, false)? {
         Found::Missing => Ok(None),
         Found::Old(text) => Ok(Some(text)),
-        Found::Slots(_, slots) => {
-            let (_, _, line) = newest(&slots)?;
-            Ok((!line.is_empty()).then(|| line.to_owned()))
+        Found::Slots(_, slot) => {
+            let (_, _, line) = slot?;
+            Ok((!line.is_empty()).then_some(line))
         }
     }
 }
@@ -307,8 +351,8 @@ pub(super) fn write(
     assert!(line.len() <= LINE_BYTES_MAX);
     let _lock = locked(root)?;
     let written = match found(root, true).map_err(|()| restore_failed(UNREADABLE))? {
-        Found::Slots(file, slots) => {
-            let (index, seq, _) = newest(&slots).map_err(|()| restore_failed(UNREADABLE))?;
+        Found::Slots(file, slot) => {
+            let (index, seq, _) = slot.map_err(|()| restore_failed(UNREADABLE))?;
             let older = 1 - index;
             put(
                 &file,
