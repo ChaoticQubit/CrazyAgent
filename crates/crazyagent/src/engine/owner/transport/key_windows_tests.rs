@@ -81,8 +81,8 @@ fn a_cap_file_round_trips_while_the_engine_holds_it() {
     assert!(seen == identity);
     client.verify_key("owner-tui.cap", &read, seen).unwrap();
     let mut token = crate::engine::secret_frame::owner_token();
-    read.read_exact_at(&mut *token, 0).unwrap();
-    assert_eq!(*token, [9; 32]);
+    read.read_exact_at(&mut **token, 0).unwrap();
+    assert_eq!(**token, [9; 32]);
     assert!(
         std::fs::rename(path.join("owner-tui.cap"), path.join("moved.cap")).is_err(),
         "a held cap file is never renamed"

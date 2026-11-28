@@ -74,7 +74,7 @@ async fn connected(client: &OwnerClient) -> Stream {
 async fn admitted(client: &OwnerClient) -> Stream {
     let mut stream = connected(client).await;
     let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &client.token);
-    stream.write_all(&*packet).await.unwrap();
+    stream.write_all(&**packet).await.unwrap();
     stream
 }
 
@@ -159,7 +159,7 @@ async fn awaiting_a_token(client: &OwnerClient) -> Stream {
 async fn terminal_waiting(client: &OwnerClient) -> Stream {
     let mut stream = connected(client).await;
     let packet = crate::engine::secret_frame::owner_packet(terminal::MAGIC, 0, &client.token);
-    stream.write_all(&*packet).await.unwrap();
+    stream.write_all(&**packet).await.unwrap();
     stream
 }
 
