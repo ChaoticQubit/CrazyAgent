@@ -58,7 +58,38 @@ pub fn wit(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError>
 /// SDK runs, laid out by rustfmt. Input: stems with parsed files, any order. Output: the one
 /// file, or the first refusal (`capgen_no_capability`, ...).
 pub fn binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
-    rust::binding(files)?
+    rust::binding(files, &rust::PROD)?
+        .into_iter()
+        .map(|(path, text)| {
+            let formatted = rustfmt(&path, &text)?;
+            Ok((path, formatted))
+        })
+        .collect()
+}
+
+/// Writes the SDK host crate's test binding, `mod.rs`, over the SDK's `fixture_served`
+/// modules, laid out by rustfmt. Input: stems with parsed files. Output: the one file, or
+/// the first refusal of [`binding`].
+pub fn test_binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
+    rust::binding(files, &rust::FIXTURE)?
+        .into_iter()
+        .map(|(path, text)| {
+            let formatted = rustfmt(&path, &text)?;
+            Ok((path, formatted))
+        })
+        .collect()
+}
+
+/// Writes the engine's served wiring, `served.rs`, laid out by rustfmt: one `Served` field
+/// per plugin-served stem, taken from the crate of the bundled plugin that serves it.
+/// Inputs: stems with parsed files and the plugins folder. Output: the one file, no file
+/// when no stem is served, or the first refusal of [`permissions`] or
+/// `capgen_provider_crate`.
+pub fn served_wiring(
+    files: &[(&str, File)],
+    plugins: &Path,
+) -> Result<Vec<(String, String)>, CapgenError> {
+    permissions::served_wiring(files, plugins)?
         .into_iter()
         .map(|(path, text)| {
             let formatted = rustfmt(&path, &text)?;

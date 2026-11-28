@@ -1144,6 +1144,7 @@ name = "crazyagent-sdk-host"
 version = "2.4.4"
 dependencies = [
  "crazyagent-bus-gateway",
+ "crazyagent-kernel-plugin-host",
  "crazyagent-sdk",
 ]
 
